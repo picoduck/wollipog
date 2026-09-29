@@ -5,6 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { DescendantBlockedChildView, DescendantRequestsView, SessionHoldView } from "@wollipog/protocol";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -108,7 +109,7 @@ test("held children list each child's link, hold reason, recovery action, and he
     assert.doesNotMatch(text, /not listed here/, "the summary omits unlisted blocked children when every one is held");
     assert.equal(section.querySelectorAll("button, input, select, textarea").length, 0,
       "a hold offers no answer or approve control");
-    assert.equal(view.container.querySelector('[aria-label="Pending Requests"]'), null);
+    assertNoDomNode(view.container.querySelector('[aria-label="Pending Requests"]'));
 
     await act(async () => fireDomEvent.click(link!, { ctrlKey: true }));
     assert.deepEqual(opened, [], "a modified click is left to the browser so the child can open in a new tab");
@@ -125,7 +126,7 @@ test("held children list each child's link, hold reason, recovery action, and he
 
     // The projection drops the child once its hold clears, and the entry goes with it.
     await view.render(list([], 0));
-    assert.equal(view.container.querySelector("section.campaign-held-children"), null);
+    assertNoDomNode(view.container.querySelector("section.campaign-held-children"));
   } finally {
     await view.dispose();
   }

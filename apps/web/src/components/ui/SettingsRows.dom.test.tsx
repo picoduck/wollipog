@@ -19,6 +19,7 @@ import {
   type Density,
   type ThemePreference,
 } from "../../theme.js";
+import { assertNoDomNode } from "../../dom-test-assertions.js";
 
 /** WCAG 2.1 relative luminance and contrast ratio, on hex colours. */
 function luminance(hex: string): number {
@@ -146,12 +147,12 @@ test("the row kinds are distinguishable in their inert state", async () => {
     assert.ok(nav!.querySelector(".ui-row-chevron"), "a navigation row shows a chevron");
 
     // And they are not each other.
-    assert.equal(segmented!.querySelector(".ui-switch"), null);
-    assert.equal(segmented!.querySelector(".ui-select-trigger"), null);
-    assert.equal(select!.querySelector(".seg"), null);
-    assert.equal(sw!.querySelector(".seg"), null);
-    assert.equal(nav!.querySelector(".seg"), null);
-    assert.equal(nav!.querySelector(".ui-switch"), null);
+    assertNoDomNode(segmented!.querySelector(".ui-switch"));
+    assertNoDomNode(segmented!.querySelector(".ui-select-trigger"));
+    assertNoDomNode(select!.querySelector(".seg"));
+    assertNoDomNode(sw!.querySelector(".seg"));
+    assertNoDomNode(nav!.querySelector(".seg"));
+    assertNoDomNode(nav!.querySelector(".ui-switch"));
 
     // The roles remain honest. A row that CONTAINS a control is not itself one: giving the row a
     // role would announce a radiogroup wrapping a radiogroup, and make the label a second target.
@@ -425,7 +426,7 @@ test("browsing the picker previews, and choosing an option commits it", async ()
     await key(list, "Enter");
     assert.deepEqual(commits, ["github"], "Enter commits the highlighted option");
     assert.equal(seen.at(-1), null, "and the preview stops, so the committed value is what renders");
-    assert.equal(container.ownerDocument.querySelector('[role="listbox"]'), null, "committing closes the list");
+    assertNoDomNode(container.ownerDocument.querySelector('[role="listbox"]'), "committing closes the list");
   } finally {
     await cleanup();
   }
@@ -444,7 +445,7 @@ test("Escape closes the picker without committing, and puts the palette back", a
     await key(list, "Escape");
     assert.deepEqual(commits, [], "Escape is a cancellation, so nothing may be chosen");
     assert.equal(seen.at(-1), null, "and the preview must be withdrawn, or the app keeps the palette");
-    assert.equal(container.ownerDocument.querySelector('[role="listbox"]'), null);
+    assertNoDomNode(container.ownerDocument.querySelector('[role="listbox"]'));
     // The trigger still says what it always said, which is the visible half of "nothing happened".
     assert.match(container.querySelector(".ui-select-trigger")!.getAttribute("aria-label") ?? "",
       /Colour Scheme: Wollipog/);
@@ -480,14 +481,14 @@ test("Space commits the highlighted option, and so does a click on it", async ()
     await key(list, " ");
     assert.deepEqual(commits, ["github"], "Space commits, as the listbox contract says it does");
     assert.equal(seen.at(-1), null, "and the preview stops with it");
-    assert.equal(container.ownerDocument.querySelector('[role="listbox"]'), null);
+    assertNoDomNode(container.ownerDocument.querySelector('[role="listbox"]'));
 
     const reopened = await openList(container);
     const options = [...reopened.querySelectorAll('[role="option"]')] as unknown as HTMLButtonElement[];
     await act(async () => { options[2]!.click(); });
     assert.deepEqual(commits, ["github", "dracula"], "a click commits the option it lands on");
     assert.equal(seen.at(-1), null);
-    assert.equal(container.ownerDocument.querySelector('[role="listbox"]'), null);
+    assertNoDomNode(container.ownerDocument.querySelector('[role="listbox"]'));
   } finally {
     await cleanup();
   }
@@ -507,7 +508,7 @@ test("a pointer outside the list, and a second click on the trigger, both end th
     await act(async () => {
       domWindow.document.body.dispatchEvent(new domWindow.Event("pointerdown", { bubbles: true }) as never);
     });
-    assert.equal(container.ownerDocument.querySelector('[role="listbox"]'), null, "an outside pointer closes it");
+    assertNoDomNode(container.ownerDocument.querySelector('[role="listbox"]'), "an outside pointer closes it");
     assert.equal(seen.at(-1), null);
     assert.deepEqual(commits, [], "clicking away is not a choice");
 
@@ -516,7 +517,7 @@ test("a pointer outside the list, and a second click on the trigger, both end th
     assert.equal(seen.at(-1), "github");
     const trigger = container.querySelector(".ui-select-trigger") as unknown as HTMLButtonElement;
     await act(async () => { trigger.click(); });
-    assert.equal(container.ownerDocument.querySelector('[role="listbox"]'), null, "the trigger toggles it shut");
+    assertNoDomNode(container.ownerDocument.querySelector('[role="listbox"]'), "the trigger toggles it shut");
     assert.equal(seen.at(-1), null);
     assert.deepEqual(commits, []);
   } finally {
@@ -626,7 +627,7 @@ for (const [name, leave] of [
       assert.equal(applied(), "github");
 
       await leave(list);
-      assert.equal(container.ownerDocument.querySelector('[role="listbox"]'), null, "the list has to close");
+      assertNoDomNode(container.ownerDocument.querySelector('[role="listbox"]'), "the list has to close");
       assert.equal(seen.at(-1), null, "and withdraw its preview");
       assert.equal(applied(), "wollipog", "so the document is the palette the user actually chose");
       assert.deepEqual(schemeWrites(), ["wollipog"], "leaving is not choosing");
@@ -1309,7 +1310,7 @@ test("a switch remounted mid-request still reports its confirmed value", async (
     assert.equal(row()!.getAttribute("aria-checked"), "true", "must not flip before the server confirms");
 
     await show(false, "busy");                     // Settings closes mid-request
-    assert.equal(row(), null);
+    assertNoDomNode(row());
 
     await show(true, "busy");                      // and reopens before it resolves
     assert.equal(row()!.getAttribute("aria-checked"), "true",

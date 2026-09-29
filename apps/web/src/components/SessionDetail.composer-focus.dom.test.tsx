@@ -37,6 +37,7 @@ import {
 } from "../queued-edit-recovery.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { clearSessionDetailComposerRuntimeForInstance, SessionDetail } from "./SessionDetail.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withCapturedAnimationFrames, withScopedClockOverrides } from "./test-clock-overrides.js";
 
@@ -456,7 +457,7 @@ test("a failed account switch notice can be dismissed to edit and retry the curr
       button.getAttribute("aria-label") === "Dismiss Notice");
     assert.ok(dismiss);
     await act(async () => { dismiss.click(); });
-    assert.equal(fixture.container.querySelector('[aria-label="Account Switch Failed"]'), null);
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Account Switch Failed"]'));
     assert.equal(fixture.composer.disabled, false);
     await act(async () => fireDomEvent.change(fixture.composer, { target: { value: "Continue" } }));
     assert.equal(fixture.composer.value, "Continue");
@@ -902,7 +903,7 @@ test("queued message editing loads exact content and Cancel Edit restores the di
     await flushAsyncWork(450);
     assert.equal(fixture.composer.value, "Unsent local draft");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -1074,7 +1075,7 @@ test("a queued edit that fails after navigation restores its exact retry and kee
 
     await fixture.rerenderSessionWithDraftLoader(fixture.alternateSessionId, async () => null);
     await flushAsyncWork();
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
       "the in-flight edit must not leak into another Session");
 
     const pending = await fixture.remountWithDraftLoader(loadComposerDraft);
@@ -1092,7 +1093,7 @@ test("a queued edit that fails after navigation restores its exact retry and kee
     const recovered = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
     assert.equal(recovered.value, "Revised content awaiting confirmation");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
-    assert.equal(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'), null);
+    assertNoDomNode(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'));
     assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "",
       /edit was not confirmed.*changed before/i);
     assert.equal(edits.length, 1);
@@ -1111,12 +1112,12 @@ test("a queued edit that fails after navigation restores its exact retry and kee
     await flushAsyncWork();
     assert.equal(recovered.value, "Displaced local draft");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
 
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "Displaced local draft");
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
       "explicit cancellation must retire the failed edit recovery");
   } finally {
     await unmountFixture(fixture);
@@ -1236,7 +1237,7 @@ test("a live queue revision change disables recovered retry while preserving con
       await act(async () => { frames.flush(); });
       assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
     });
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
     assert.equal(fixture.composer.value, "Recovered revision for reuse");
     assert.ok(exportedArtifacts.includes(materializedImageReference.artifactId));
 
@@ -1321,7 +1322,7 @@ test("Use as New Message preserves workspace references while materializing reco
     exportFailure = null;
     await act(async () => { reuse.click(); });
     await flushAsyncWork(450);
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
     assert.ok(exportedArtifacts.every((artifactId) => artifactId === materializedImageReference.artifactId));
     assert.deepEqual((await loadComposerDraft(fixture.sessionId, fixture.instanceScope))?.images,
       [workspaceReference, submittedImage],
@@ -1427,7 +1428,7 @@ test("mount hydration cannot restore a recovery cleared while its displaced draf
     await flushAsyncWork();
 
     assert.equal(loadDurableQueuedEditRecovery(recoveryScope), undefined);
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
       "a delayed mount result must not restore recovery cleared elsewhere");
     const currentComposer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
     assert.equal(currentComposer.value, "Hydrated ordinary draft",
@@ -1571,7 +1572,7 @@ test("recovery cleanup cannot resurrect an ordinary draft reserved by an in-flig
 
     assert.equal(remounted.value, "",
       "cleanup must not reveal an ordinary draft still owned by an in-flight send");
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -1965,7 +1966,7 @@ test("identity hydration preserves an ordinary draft typed before durable recove
 
     const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
     await act(async () => {
       reloaded.value = "New ordinary draft typed during sign-in";
       fireDomEvent.change(reloaded);
@@ -2053,7 +2054,7 @@ test("late queued-edit recovery exits Answer Mode and reveals the recovered edit
     await flushAsyncWork();
     await act(async () => { flushFrames(); });
 
-    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    assertNoDomNode(fixture.container.querySelector(".composer-answer-input"));
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
     assert.equal(ordinary?.value, "Recovered queued edit");
     assert.equal(ordinary?.ownerDocument.activeElement, ordinary);
@@ -2327,7 +2328,7 @@ test("a clear that wins during delayed displaced-draft hydration is not resurrec
     await flushAsyncWork();
 
     assert.equal(loadDurableQueuedEditRecovery(recoveryScope), undefined);
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
       "a delayed hydration result must not restore a recovery cleared elsewhere");
   } finally {
     await unmountFixture(fixture);
@@ -2439,7 +2440,7 @@ test("a recovered edit completed after delayed hydration restores the latest ord
     await flushAsyncWork();
     assert.equal(fixture.composer.value, "Latest ordinary draft before recovery completion");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
 
     const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
@@ -2495,7 +2496,7 @@ test("a queued edit interrupted by runtime reload returns as unconfirmed recover
     editResult.reject(new Error("The reloaded page interrupted the request."));
     await flushAsyncWork();
     assert.equal(reloaded.value, "Indeterminate submission");
-    assert.equal(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'), null);
+    assertNoDomNode(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'));
     assert.match(
       fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "",
       /outcome was not recorded/i,
@@ -2563,14 +2564,14 @@ test("a queued edit accepted after navigation restores only the displaced draft"
     });
     await flushAsyncWork();
     assert.equal(pending.value, "Displaced local draft");
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
-    assert.equal(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)"));
 
     clearSessionDetailComposerRuntimeForInstance(fixture.instanceScope);
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "Displaced local draft");
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
       "a successful edit must never resurrect as failed recovery");
   } finally {
     await unmountFixture(fixture);
@@ -2632,13 +2633,13 @@ test("a queued edit accepted after navigation clears the composer when its displ
     });
     await flushAsyncWork();
     assert.equal(pending.value, "");
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
 
     clearSessionDetailComposerRuntimeForInstance(fixture.instanceScope);
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "");
-    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -2848,7 +2849,7 @@ test("cleanup throwing after provider acceptance cannot recover the accepted dra
     await act(async () => { sendButton(fixture).click(); });
     await flushAsyncWork();
 
-    assert.equal(fixture.container.querySelector('[role="alert"]'), null, "cleanup is not reported as a send rejection");
+    assertNoDomNode(fixture.container.querySelector('[role="alert"]'), "cleanup is not reported as a send rejection");
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "");
@@ -2954,7 +2955,7 @@ test("cleanup throwing after accepted steering cannot recover the accepted draft
       ["steer once"],
       fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "steering was not invoked",
     );
-    assert.equal(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)"), null);
+    assertNoDomNode(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)"));
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "");
@@ -3585,7 +3586,7 @@ test("a stopped Session replaces Send with an accessible restart action until re
     assert.ok(restart, "a stopped Session exposes Restart Session in the composer action slot");
     assert.equal(restart.tagName, "BUTTON", "the restart action keeps native keyboard activation");
     assert.equal(restart.disabled, false);
-    assert.equal(fixture.container.querySelector('button[aria-label="Send"]'), null);
+    assertNoDomNode(fixture.container.querySelector('button[aria-label="Send"]'));
 
     await act(async () => { restart.click(); });
     assert.equal(restarted.length, 1);
@@ -3596,7 +3597,7 @@ test("a stopped Session replaces Send with an accessible restart action until re
     await flushAsyncWork();
     assert.ok(fixture.container.querySelector('button[aria-label="Send"]'),
       "the restart response immediately restores the ordinary Send action");
-    assert.equal(fixture.container.querySelector('button[aria-label="Restart Session"]'), null);
+    assertNoDomNode(fixture.container.querySelector('button[aria-label="Restart Session"]'));
   } finally {
     await unmountFixture(fixture);
   }
@@ -3766,7 +3767,7 @@ test("a stopped Session with a failed Stop does not offer Restart in the compose
   });
   try {
     await resolveDraft(draft, "");
-    assert.equal(fixture.container.querySelector('button[aria-label="Restart Session"]'), null,
+    assertNoDomNode(fixture.container.querySelector('button[aria-label="Restart Session"]'),
       "the composer mirrors the Runtime menu's failed-Stop restart fence");
   } finally {
     await unmountFixture(fixture);
@@ -4222,7 +4223,7 @@ test("inserting a side-chat response exits Answer Mode and reveals the ordinary 
     });
     await act(async () => { flushFrames(); });
 
-    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    assertNoDomNode(fixture.container.querySelector(".composer-answer-input"));
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
     assert.equal(ordinary?.value, "side-chat answer");
     assert.equal(ordinary?.ownerDocument.activeElement, ordinary);
@@ -4333,7 +4334,7 @@ test("SessionDetail prepares Edit & Resend text with accessible focus and an end
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    assert.equal(fixture.container.querySelector(".message-action-input"), null);
+    assertNoDomNode(fixture.container.querySelector(".message-action-input"));
     assert.equal(fixture.composer.value, "edited prompt");
     assert.equal(
       fixture.composer.ownerDocument.activeElement,
@@ -4398,7 +4399,7 @@ test("Load into Composer exits Answer Mode and reveals the prepared message", { 
     await flushAsyncWork();
     await act(async () => { flushFrames(); });
 
-    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    assertNoDomNode(fixture.container.querySelector(".composer-answer-input"));
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
     assert.equal(ordinary?.value, "prepared new turn");
     assert.equal(ordinary?.ownerDocument.activeElement, ordinary);
@@ -4437,7 +4438,7 @@ test("a pending Composer Response preserves an ordinary draft and R enters and e
     assert.ok(ordinary);
     assert.equal(ordinary.value, "ordinary message draft");
     assert.match(fixture.container.querySelector(".composer-question-waiting")?.textContent ?? "", /Question Waiting/);
-    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    assertNoDomNode(fixture.container.querySelector(".composer-answer-input"));
 
     const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
     assert.ok(reader);
@@ -4450,7 +4451,7 @@ test("a pending Composer Response preserves an ordinary draft and R enters and e
     assert.ok(answer);
     assert.equal(answer.ownerDocument.activeElement, answer);
     assert.match(fixture.container.querySelector(".composer-answer")?.textContent ?? "", /Answering Question 1 of 1/);
-    assert.equal(fixture.container.querySelector(".composer-input"), null);
+    assertNoDomNode(fixture.container.querySelector(".composer-input"));
 
     await act(async () => {
       answer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
@@ -4485,7 +4486,7 @@ test("an empty pending question payload never blanks the ordinary composer", { t
 
     assert.ok(fixture.container.querySelector(".composer-input"),
       "an unanswerable approval keeps ordinary message composition available");
-    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    assertNoDomNode(fixture.container.querySelector(".composer-answer-input"));
   } finally {
     await unmountFixture(fixture);
     setQuestionResponseStyle("interactive", domWindow as never);
@@ -4956,7 +4957,7 @@ test("editing a queued message exits Answer Mode before loading the editor", { t
     await act(async () => { edit.click(); });
     await flushAsyncWork();
 
-    assert.equal(fixture.container.querySelector(".composer-answer-input"), null);
+    assertNoDomNode(fixture.container.querySelector(".composer-answer-input"));
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
     assert.equal(ordinary?.value, "Exact queued content");
     assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Editing Queued Message/);

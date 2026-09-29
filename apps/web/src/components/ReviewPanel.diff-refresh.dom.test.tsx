@@ -15,6 +15,7 @@ import type {
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ReviewPanel } from "./ReviewPanel.js";
 import { clearPanelScratch } from "../right-panel-scratch.js";
@@ -597,7 +598,7 @@ test("collapse and show-all survive a refresh that only touches the other file",
 
     assert.equal(card(harness.container, "src/b.ts").querySelectorAll(".diff-hunk").length, 5,
       "B's show-all toggle must outlive a refresh caused by A");
-    assert.equal(card(harness.container, "src/b.ts").querySelector("button.diff-more"), null);
+    assertNoDomNode(card(harness.container, "src/b.ts").querySelector("button.diff-more"));
   } finally {
     await harness.unmount();
   }
@@ -735,7 +736,7 @@ test("Cancel keeps the whole draft for the next open, while submitting it starts
     await act(async () => {
       fireDomEvent.click(editorButton(harness.container, "src/b.ts", "Cancel"));
     });
-    assert.equal(editorIn(harness.container, "src/b.ts"), null, "cancel closed the editor");
+    assertNoDomNode(editorIn(harness.container, "src/b.ts"), "cancel closed the editor");
     await open();
     assert.deepEqual(editorState(), { body: "not finished yet", severity: "nit", required: false },
       "cancel only closed the editor; the draft was still there to reopen");
@@ -743,7 +744,7 @@ test("Cancel keeps the whole draft for the next open, while submitting it starts
     await act(async () => {
       fireDomEvent.click(editorButton(harness.container, "src/b.ts", "Add Finding"));
     });
-    assert.equal(editorIn(harness.container, "src/b.ts"), null, "submitting closed the editor");
+    assertNoDomNode(editorIn(harness.container, "src/b.ts"), "submitting closed the editor");
     await open();
     assert.deepEqual(editorState(), { body: "", severity: "major", required: true },
       "the submitted draft became a finding, so the next one on this line starts from the defaults");
@@ -878,7 +879,7 @@ test("a submitted draft leaves no caret behind for the next finding written on i
     await act(async () => {
       fireDomEvent.click(editorButton(harness.container, "src/b.ts", "Add Finding"));
     });
-    assert.equal(editorIn(harness.container, "src/b.ts"), null, "submitting closed the editor");
+    assertNoDomNode(editorIn(harness.container, "src/b.ts"), "submitting closed the editor");
 
     await act(async () => {
       fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
@@ -908,7 +909,7 @@ test("a draft that was cancelled reopens with its caret intact", async () => {
     await act(async () => {
       fireDomEvent.click(editorButton(harness.container, "src/b.ts", "Cancel"));
     });
-    assert.equal(editorIn(harness.container, "src/b.ts"), null, "cancel closed the editor");
+    assertNoDomNode(editorIn(harness.container, "src/b.ts"), "cancel closed the editor");
 
     await act(async () => {
       fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
@@ -1309,7 +1310,7 @@ test("a failed background reload keeps the diff on screen and offers a manual re
 
     assert.deepEqual(harness.diffCalls, ["uncommitted", "uncommitted"]);
     assert.ok(harness.container.querySelector(".diff-file"), "the diff the reviewer was reading is still there");
-    assert.equal(harness.container.querySelector(".composer-error"), null,
+    assertNoDomNode(harness.container.querySelector(".composer-error"),
       "a background failure does not hijack the error surface");
     assert.ok(
       harness.container.textContent?.includes("The last automatic refresh of this diff did not land"),

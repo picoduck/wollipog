@@ -9,6 +9,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 domWindow.requestAnimationFrame = ((callback: FrameRequestCallback) => {
@@ -192,7 +193,7 @@ test("Composer Answer Mode renders rich question text and compact plain links", 
     const link = container.querySelector<HTMLAnchorElement>(".composer-answer-context a");
     assert.equal(link?.textContent, "evidence.example/capture.png");
     assert.equal(link?.href, signed);
-    assert.equal(container.querySelector("img, video"), null);
+    assertNoDomNode(container.querySelector("img, video"));
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -320,7 +321,7 @@ test("multiple questions advance in sequence while a masked secret survives mode
       .find((button) => button.textContent === "Exit Answer Mode");
     assert.ok(exit);
     await act(async () => exit.click());
-    assert.equal(container.querySelector(".composer-answer-input"), null);
+    assertNoDomNode(container.querySelector(".composer-answer-input"));
     const respond = [...container.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Respond");
     assert.ok(respond);

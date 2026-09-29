@@ -8,6 +8,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionHeader } from "./SessionHeader.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/session/session-stop-failed" });
 for (const [name, value] of Object.entries({
@@ -142,13 +143,13 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
   assert.equal(page().textContent?.includes("Export Markdown"), false,
     "operational actions must not retain sharing or export commands");
   await act(async () => { button(page(), "Share").click(); await tick(); });
-  assert.equal(page().querySelector('[role="menu"][aria-label="Session Actions"]'), null,
+  assertNoDomNode(page().querySelector('[role="menu"][aria-label="Session Actions"]'),
     "opening Share must dismiss More Actions");
   assert.match(page().textContent ?? "", /Share Transcript…/);
   assert.match(page().textContent ?? "", /Export Markdown/);
   assert.match(page().textContent ?? "", /Export JSON/);
   await act(async () => { button(page(), "More Actions").click(); await tick(); });
-  assert.equal(page().querySelector('[role="menu"][aria-label="Session Sharing"]'), null,
+  assertNoDomNode(page().querySelector('[role="menu"][aria-label="Session Sharing"]'),
     "opening More Actions must dismiss Share");
   await act(async () => { button(page(), "Unarchive").click(); await tick(); await tick(); });
 

@@ -12,6 +12,7 @@ import {
   backgroundJobCurrentState,
   backgroundJobDeliveryStage,
 } from "./BackgroundWorkPanel.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
@@ -336,7 +337,7 @@ test("missing-result feedback stays with its session across same-id rerenders an
     assert.equal(button().disabled, true,
       "session A's late settlement must not clear session B's newer request");
     assert.equal(button().textContent, "Acknowledging…");
-    assert.equal(container.querySelector('[role="alert"]'), null,
+    assertNoDomNode(container.querySelector('[role="alert"]'),
       "session A's late error must not appear in session B");
 
     await act(async () => {
@@ -350,7 +351,7 @@ test("missing-result feedback stays with its session across same-id rerenders an
     await act(async () => renderSession("session-c", 30_000));
     assert.match(container.textContent ?? "", /Missing Result Acknowledged/,
       "a durable server acknowledgement remains authoritative without local state");
-    assert.equal(container.querySelector<HTMLButtonElement>("button"), null);
+    assertNoDomNode(container.querySelector<HTMLButtonElement>("button"));
 
     await act(async () => renderSession("session-a"));
     assert.equal(container.querySelector('[role="alert"]')?.textContent,
@@ -361,9 +362,9 @@ test("missing-result feedback stays with its session across same-id rerenders an
     await act(async () => renderSession("session-a", 30_000));
     assert.match(container.textContent ?? "", /Missing Result Acknowledged/,
       "durable acknowledgement supersedes the same session's transient failure");
-    assert.equal(container.querySelector('[role="alert"]'), null,
+    assertNoDomNode(container.querySelector('[role="alert"]'),
       "durable acknowledgement clears the stale local error from view");
-    assert.equal(container.querySelector<HTMLButtonElement>("button"), null);
+    assertNoDomNode(container.querySelector<HTMLButtonElement>("button"));
   } finally {
     for (const request of requests) request.resolve({} as SessionView);
     await act(async () => root.unmount());
@@ -919,7 +920,7 @@ test("Result Blocked offers Stop Job, which stops only the unfinished job after 
     assert.match(confirm?.textContent ?? "", /Only this job ends, and it is recorded as killed\. The session, its conversation, and its other jobs keep running\./);
     const keep = [...confirm!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Keep Running")!;
     await act(async () => keep.click());
-    assert.equal(container.querySelector("[aria-label^='Confirm Stopping Monitor Job']"), null);
+    assertNoDomNode(container.querySelector("[aria-label^='Confirm Stopping Monitor Job']"));
     assert.deepEqual(stops, []);
 
     await act(async () => stopJobButton(container, "Monitor Job")!.click());
@@ -945,7 +946,7 @@ test("Result Blocked offers Stop Job, which stops only the unfinished job after 
       ],
       backgroundDeliveries: [],
     }));
-    assert.equal(stopJobButton(container, "Monitor Job"), null);
+    assertNoDomNode(stopJobButton(container, "Monitor Job"));
     assert.match(container.textContent ?? "", /Killed/);
   } finally {
     await act(async () => root.unmount());
@@ -985,7 +986,7 @@ test("Stop Job reports a refusal and a job that had already ended without claimi
     assert.equal(retry.disabled, false, "a refused stop can be tried again");
     await confirmAndStop();
     assert.match(container.textContent ?? "", /This job had already ended, so nothing was changed\./);
-    assert.equal(container.querySelector("[role='alert']"), null);
+    assertNoDomNode(container.querySelector("[role='alert']"));
   } finally {
     await act(async () => root.unmount());
     happyContainer.remove();
@@ -1019,7 +1020,7 @@ test("Stop Job is shown as unavailable on an older runner, and Result Blocked sa
 
     // Another harness has no managed jobs to stop, so nothing is offered or promised.
     await render(resultBlockedSession({ driver: "codex" } as Partial<SessionView>), PROTOCOL_VERSION);
-    assert.equal(stopJobButton(container, "Monitor Job"), null);
+    assertNoDomNode(stopJobButton(container, "Monitor Job"));
     assert.match(container.querySelector(".background-delivery-summary")?.textContent ?? "", /Ask the session to stop the unfinished job/);
   } finally {
     await act(async () => root.unmount());
@@ -1058,7 +1059,7 @@ test("Stop Job is unavailable to a person the server would refuse, and Result Bl
     assert.doesNotMatch(summary, /Use Stop Job/, "Result Blocked does not direct this person to Stop Job");
     assert.ok(summary.includes(`Stop Job is unavailable: ${reason} Ask the session to stop the unfinished job`), summary);
     await act(async () => button.click());
-    assert.equal(container.querySelector(".background-work-job-confirm"), null, "no confirmation opens");
+    assertNoDomNode(container.querySelector(".background-work-job-confirm"), "no confirmation opens");
     assert.equal(called, false, "no request is sent");
 
     // The session owner keeps Stop Job exactly as before.
@@ -1093,7 +1094,7 @@ test("Result Blocked in a view focused on the finished sibling says where Stop J
     assert.match(summary?.textContent ?? "", /Result Blocked/);
     assert.match(summary?.textContent ?? "", /Use Stop Job on the unfinished job from the same turn, listed in Background Work: only that job ends/);
     assert.doesNotMatch(summary?.textContent ?? "", /job below/);
-    assert.equal(stopJobButton(container, "Monitor Job"), null);
+    assertNoDomNode(stopJobButton(container, "Monitor Job"));
   } finally {
     await act(async () => root.unmount());
     happyContainer.remove();

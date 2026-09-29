@@ -7,6 +7,7 @@ import type { SessionView } from "@wollipog/protocol";
 import type { TimelineItem } from "../timeline.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { SubagentsPanel, subagentEmptyMessage, subagentOutputLabel } from "./SubagentsPanel.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const VIEWPORT_HEIGHT = 1200;
@@ -257,8 +258,8 @@ test("an unresolved requested id is explicit and never selects a different descr
     ));
     const unavailable = container.querySelector<HTMLElement>(".subagent-selection-unavailable")!;
     assert.match(unavailable.textContent ?? "", /requested subagent is no longer available/);
-    assert.equal(container.querySelector(".subagent-detail"), null);
-    assert.equal(container.querySelector("[aria-current='true']"), null);
+    assertNoDomNode(container.querySelector(".subagent-detail"));
+    assertNoDomNode(container.querySelector("[aria-current='true']"));
     assert.equal(domWindow.document.activeElement, unavailable);
     assert.deepEqual(handled, [9]);
   } finally {
@@ -289,7 +290,7 @@ test("a duplicate provider identity is reported as ambiguous instead of unavaila
     const warning = container.querySelector<HTMLElement>(".subagent-selection-unavailable")!;
     assert.match(warning.textContent ?? "", /Multiple recorded subagents share this provider identity/);
     assert.doesNotMatch(warning.textContent ?? "", /no longer available/);
-    assert.equal(container.querySelector(".subagent-detail"), null);
+    assertNoDomNode(container.querySelector(".subagent-detail"));
   } finally {
     await act(async () => root.unmount());
     container.remove();

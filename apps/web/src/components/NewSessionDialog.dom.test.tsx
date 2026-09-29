@@ -21,6 +21,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { NewSessionDialog, type NewSessionPreset } from "./NewSessionDialog.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { fireDomEvent } from "./test-dom-events.js";
 
@@ -358,7 +359,7 @@ test("touch Project selection opens a non-editable list without summoning a keyb
   try {
     const fixture = await mountFixture();
     try {
-      assert.equal(fixture.container.querySelector('input[aria-label="Project"]'), null,
+      assertNoDomNode(fixture.container.querySelector('input[aria-label="Project"]'),
         "touch layouts do not render an editable Project input");
 
       const trigger = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Project:"]');
@@ -395,7 +396,7 @@ test("modified Enter validates and focuses the first actionable problem", async 
     assert.equal((domWindow.document.activeElement as unknown) === projectInput, true,
       "validation moves focus to the first control that can fix the form");
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(fixture.container.querySelector('.form-error[role="alert"]'), null,
+    assertNoDomNode(fixture.container.querySelector('.form-error[role="alert"]'),
       "correcting the reported problem clears its stale validation message");
   } finally {
     await unmountFixture(fixture);
@@ -562,8 +563,8 @@ test("primary, Advanced, and unavailable Agents share one searchable flow", asyn
     await act(async () => { await selectProject(fixture.container, project.id); });
     const input = combobox(fixture.container, "Agent");
     assert.equal(input.value, "Claude Code", "the recommended primary Agent is selected initially");
-    assert.equal(fixture.container.querySelector('select[aria-label="Agent"]'), null);
-    assert.equal(fixture.container.querySelector('[aria-label="Advanced Agents"]'), null);
+    assertNoDomNode(fixture.container.querySelector('select[aria-label="Agent"]'));
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Advanced Agents"]'));
 
     await act(async () => { input.focus(); });
     assert.equal(input.getAttribute("aria-expanded"), "true");
@@ -706,7 +707,7 @@ test("native orchestrator selection is sent at creation", async () => {
   const fixture = await mountFixture({ runners: [enabledRunner] });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(labelledNumberInput(fixture.container, "Maximum Concurrent Children"), null,
+    assertNoDomNode(labelledNumberInput(fixture.container, "Maximum Concurrent Children"),
       "ordinary creation does not show an orchestration-only guardrail");
     await choosePermissionPreset(fixture.container, "Orchestrator");
     const limit = labelledNumberInput(fixture.container, "Maximum Concurrent Children");
@@ -773,7 +774,7 @@ test("Decision Delegation is Orchestrator-only and shows effective sources", asy
   }));
   try {
     await act(async () => { selectProject(fixture.container, project.id); });
-    assert.equal(fixture.container.querySelector('[aria-label^="Descendant Requests:"]'), null);
+    assertNoDomNode(fixture.container.querySelector('[aria-label^="Descendant Requests:"]'));
     assert.match(fixture.container.textContent ?? "", /Delegate implementation by default/);
     await choosePermissionPreset(fixture.container, "Orchestrator");
     const descendant = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Descendant Requests:"]');
@@ -1260,7 +1261,7 @@ test("a late saved-default failure replaces stale loading validation", async () 
     );
 
     await act(async () => { reject(new ApiError("Unavailable", 503)); });
-    assert.equal(fixture.container.querySelector('.form-error[role="alert"]'), null,
+    assertNoDomNode(fixture.container.querySelector('.form-error[role="alert"]'),
       "feedback for the superseded loading state is removed when loading becomes retryable");
     assert.match(fixture.container.textContent!, /Retry Defaults/);
   } finally {
@@ -1372,7 +1373,7 @@ test("New Session drops an override when its account disappears", async () => {
         providerAccounts: accountRunner.providerAccounts?.filter((account) => account.id !== "work"),
       }] }));
     });
-    assert.equal(fixture.container.querySelector('[aria-label^="Account:"]'), null);
+    assertNoDomNode(fixture.container.querySelector('[aria-label^="Account:"]'));
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.providerAccountId, undefined,
       "an automatic replacement must not become an explicit override");
@@ -1417,7 +1418,7 @@ test("a WSL agent does not submit an implicit runner-host provider account", asy
   };
   const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
   try {
-    assert.equal(fixture.container.querySelector('[aria-label^="Account:"]'), null);
+    assertNoDomNode(fixture.container.querySelector('[aria-label^="Account:"]'));
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests.length, 1);
     assert.equal(fixture.requests[0]?.providerAccountId, undefined);
@@ -1465,7 +1466,7 @@ test("container targets hide and omit runner-local provider accounts", async () 
   try {
     await chooseSelectOption(fixture.container, "Account", "Personal");
     await chooseSelectOption(fixture.container, "Execution Target", "Offline Container");
-    assert.equal(fixture.container.querySelector('[aria-label^="Account:"]'), null);
+    assertNoDomNode(fixture.container.querySelector('[aria-label^="Account:"]'));
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.executionTargetId, "container");
     assert.equal(fixture.requests[0]?.providerAccountId, undefined);
@@ -1860,11 +1861,11 @@ test("both permission presets are on screen without opening anything", async () 
     assert.equal(cards.length, 2, "both presets are rendered");
     // No trigger, so nothing can be behind one. This is the assertion that would have failed
     // before the migration, when the group was a closed listbox with a single visible button.
-    assert.equal(
-      fixture.container.querySelector('button[aria-label^="Session Role:"]'), null,
+    assertNoDomNode(
+      fixture.container.querySelector('button[aria-label^="Session Role:"]'),
       "the preset no longer hides behind a popover trigger",
     );
-    assert.equal(fixture.container.querySelector(".menu.listbox"), null, "and opens no list");
+    assertNoDomNode(fixture.container.querySelector(".menu.listbox"), "and opens no list");
 
     assert.ok(permissionPresetCard(fixture.container, "Orchestrator"));
     assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-disabled"), null,
@@ -1988,8 +1989,8 @@ test("the Location groups and Harness share one control family", async () => {
       assert.ok(group.querySelector(".ui-choice-card"), `${label} uses the shared Choice Card`);
     }
     // And nothing bespoke is left from the families this PR retired.
-    assert.equal(fixture.container.querySelector(".loc-pick"), null);
-    assert.equal(fixture.container.querySelector(".workflow-preset"), null);
+    assertNoDomNode(fixture.container.querySelector(".loc-pick"));
+    assertNoDomNode(fixture.container.querySelector(".workflow-preset"));
   } finally {
     await unmountFixture(fixture);
   }

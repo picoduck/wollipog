@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import { recordSessionActivity } from "../activity.js";
 import { InboxList } from "./InboxList.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
 for (const [name, value] of Object.entries({
@@ -130,7 +131,7 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
   assert.equal(pinned.getAttribute("title"), "Pinned Session");
   assert.equal(rows[0]!.children.length, 1,
     "selection must not expand a session row with embedded shortcut actions");
-  assert.equal(container.querySelector(".inbox-row-actions"), null);
+  assertNoDomNode(container.querySelector(".inbox-row-actions"));
   assert.equal(grid.getAttribute("aria-activedescendant"), rows[0]!.id,
     "the active descendant must reference the actual row");
 
@@ -280,7 +281,7 @@ test("inbox zero uses contextual Project copy and lets search-empty copy take pr
     }} />);
   });
   assert.match(container.textContent ?? "", /No Sessions Without a Project/);
-  assert.equal(container.querySelector("button"), null);
+  assertNoDomNode(container.querySelector("button"));
 
   await act(async () => {
     root.render(<InboxList {...props} filtered emptyState={{
@@ -292,7 +293,7 @@ test("inbox zero uses contextual Project copy and lets search-empty copy take pr
   assert.match(container.textContent ?? "", /No Matching Sessions/);
   assert.match(container.textContent ?? "", /Try a different search/);
   assert.doesNotMatch(container.textContent ?? "", /No Sessions Yet/);
-  assert.equal(container.querySelector("button"), null);
+  assertNoDomNode(container.querySelector("button"));
 
   await act(async () => { root.unmount(); });
   container.remove();

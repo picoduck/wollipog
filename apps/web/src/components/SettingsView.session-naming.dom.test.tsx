@@ -10,6 +10,7 @@ import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { SessionNamingPanel } from "./SettingsView.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/settings/behavior" });
 const previous = new Map<string, unknown>();
@@ -164,24 +165,24 @@ test("Session Naming is compact, progressively discloses a capability-backed tar
   const { container, root } = await renderPanel(transport);
   try {
     assert.match(container.textContent ?? "", /Prompt Text Only/);
-    assert.equal(container.querySelector("#session-naming-editor"), null);
+    assertNoDomNode(container.querySelector("#session-naming-editor"));
     const row = buttonNamed(container, "Session Naming");
     assert.equal(row.getAttribute("aria-expanded"), "false");
     await act(async () => row.click());
     assert.equal(row.getAttribute("aria-expanded"), "true");
     assert.ok(container.querySelector('[aria-label^="Naming Mode:"]'));
-    assert.equal(container.querySelector('[aria-label^="Machine:"]'), null);
+    assertNoDomNode(container.querySelector('[aria-label^="Machine:"]'));
 
     await selectOption(container, "Naming Mode", "Agent Harness");
     assert.ok(container.querySelector('[aria-label^="Machine:"]'));
-    assert.equal(container.querySelector('[aria-label^="Agent Harness:"]'), null);
+    assertNoDomNode(container.querySelector('[aria-label^="Agent Harness:"]'));
     await selectOption(container, "Machine", "Build Machine");
     await selectOption(container, "Agent Harness", "Codex App Server", /Codex · API/);
     await selectOption(container, "Model", "Luna");
     await selectOption(container, "Reasoning Effort", "Low");
     await act(async () => buttonNamed(container, "Save Configuration").click());
 
-    assert.equal(container.querySelector("#session-naming-editor"), null);
+    assertNoDomNode(container.querySelector("#session-naming-editor"));
     assert.match(container.textContent ?? "", /Codex App Server · Luna · Low/);
     assert.equal(calls.some((call) => call.path === "/api/session-naming/harness" && call.method === "PUT"), true);
     assert.equal(domWindow.document.activeElement, row);
@@ -291,12 +292,12 @@ test("Session Naming row toggles closed, drops its draft, and exposes controls o
     await act(async () => row.click());
     assert.equal(row.getAttribute("aria-expanded"), "false");
     assert.equal(row.getAttribute("aria-controls"), null);
-    assert.equal(container.querySelector("#session-naming-editor"), null);
+    assertNoDomNode(container.querySelector("#session-naming-editor"));
 
     await act(async () => row.click());
     assert.equal(row.getAttribute("aria-expanded"), "true");
     assert.equal(row.getAttribute("aria-controls"), "session-naming-editor");
-    assert.equal(container.querySelector('[aria-label^="Machine:"]'), null, "the unsaved mode and Machine draft were reset");
+    assertNoDomNode(container.querySelector('[aria-label^="Machine:"]'), "the unsaved mode and Machine draft were reset");
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -326,7 +327,7 @@ test("legacy Follow Session Agent can be selected again without an explicit v95 
   try {
     await act(async () => buttonNamed(container, "Session Naming").click());
     await selectOption(container, "Naming Mode", "Agent Harness");
-    assert.equal(container.querySelector('[aria-label^="Machine:"]'), null);
+    assertNoDomNode(container.querySelector('[aria-label^="Machine:"]'));
     assert.match(container.textContent ?? "", /Each session will use its own Machine/);
     const save = buttonNamed(container, "Save Configuration");
     assert.equal(save.disabled, false);
@@ -413,10 +414,10 @@ test("changing an earlier harness choice clears downstream selections and Cancel
     await selectOption(container, "Agent Harness", "Codex App Server");
     await selectOption(container, "Machine", "Review Machine");
     assert.match(container.querySelector<HTMLButtonElement>('[aria-label^="Agent Harness:"]')?.getAttribute("aria-label") ?? "", /Select/);
-    assert.equal(container.querySelector('[aria-label^="Model:"]'), null);
-    assert.equal(container.querySelector('[aria-label^="Reasoning Effort:"]'), null);
+    assertNoDomNode(container.querySelector('[aria-label^="Model:"]'));
+    assertNoDomNode(container.querySelector('[aria-label^="Reasoning Effort:"]'));
     await act(async () => buttonNamed(container, "Cancel").click());
-    assert.equal(container.querySelector("#session-naming-editor"), null);
+    assertNoDomNode(container.querySelector("#session-naming-editor"));
     assert.deepEqual(calls, ["GET /api/session-naming"]);
     assert.equal(domWindow.document.activeElement, row);
   } finally {
@@ -456,9 +457,9 @@ test("Custom Model Endpoint fields stay hidden until selected and API keys remai
   };
   const { container, root } = await renderPanel(transport);
   try {
-    assert.equal(container.querySelector('[aria-label="Endpoint"]'), null);
+    assertNoDomNode(container.querySelector('[aria-label="Endpoint"]'));
     await act(async () => buttonNamed(container, "Session Naming").click());
-    assert.equal(container.querySelector('[aria-label="Endpoint"]'), null);
+    assertNoDomNode(container.querySelector('[aria-label="Endpoint"]'));
     await selectOption(container, "Naming Mode", "Custom Model Endpoint");
     const setInput = async (label: string, value: string) => {
       const input = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`);
@@ -471,7 +472,7 @@ test("Custom Model Endpoint fields stay hidden until selected and API keys remai
     await setInput("Timeout", "900");
     await setInput("API Key", "write-only-secret");
     await act(async () => buttonNamed(container, "Save Configuration").click());
-    assert.equal(container.querySelector('[aria-label="Endpoint"]'), null);
+    assertNoDomNode(container.querySelector('[aria-label="Endpoint"]'));
     assert.match(container.textContent ?? "", /Custom Model Endpoint · https:\/\/models.example/);
     assert.equal(JSON.stringify(current).includes("write-only-secret"), false);
     assert.equal(bodies.some((body) => body.includes("write-only-secret")), true);
@@ -541,7 +542,7 @@ test("editing a saved custom endpoint requires the complete URL and excludes com
       resolveSave(new Response(JSON.stringify(current), { headers: { "content-type": "application/json" } }));
       await pendingSave;
     });
-    assert.equal(container.querySelector("#session-naming-editor"), null);
+    assertNoDomNode(container.querySelector("#session-naming-editor"));
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -589,12 +590,12 @@ test("Delete API Key asks in the in-app confirmation dialog, and only Delete API
     assert.equal(dialogButton("Delete API Key").className, "btn danger");
 
     await act(async () => dialogButton("Cancel").click());
-    assert.equal(dialog(), null);
+    assertNoDomNode(dialog());
     assert.deepEqual(deletes, [], "Cancel deletes nothing");
 
     await act(async () => buttonNamed(container, "Delete API Key").click());
     await act(async () => dialogButton("Delete API Key").click());
-    assert.equal(dialog(), null);
+    assertNoDomNode(dialog());
     assert.deepEqual(deletes, ["/api/session-naming/custom-model/api-key"]);
   } finally {
     await act(async () => root.unmount());

@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { LocalRunnerSetupButton, OnboardingRecommendedSkills } from "./OnboardRunnerDialog.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -99,7 +100,7 @@ test("onboarding points to built-in skills that are neither assigned nor dismiss
     { id: "d", name: "dismissed", builtIn, recommendation: { dismissed: true }, assignmentCount: 0 },
   ]);
   try {
-    assert.equal(hidden.container.querySelector('section[aria-label="Recommended Skills"]'), null);
+    assertNoDomNode(hidden.container.querySelector('section[aria-label="Recommended Skills"]'));
   } finally {
     await hidden.unmount();
   }

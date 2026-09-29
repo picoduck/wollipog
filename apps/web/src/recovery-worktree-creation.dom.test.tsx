@@ -10,6 +10,7 @@ import type {
   SessionWorktreeCreateOperationView,
 } from "@wollipog/protocol";
 import { ApiError } from "./api.js";
+import { assertNoDomNode } from "./dom-test-assertions.js";
 import { installDomTestCleanup } from "./dom-test-cleanup.js";
 import { WorktreeRecoveryCard } from "./components/WorktreeRecoveryCard.js";
 import { useRecoveryWorktreeCreation } from "./recovery-worktree-creation.js";
@@ -192,7 +193,7 @@ test("a progress-aware create reports each phase, then settles the recovered ses
 
     await clock.tick();
     assert.equal(view.status(), "idle", "completion loads the session the control plane settled");
-    assert.equal(view.card(), null, "a confirmed recovery removes the card");
+    assertNoDomNode(view.card(), "a confirmed recovery removes the card");
     assert.deepEqual(calls.posts, [{ branch: "fix/missing-recovery", baseRef: "origin/main" }],
       "observation never repeats the create");
   } finally {
@@ -258,7 +259,7 @@ test("a reloaded page rejoins a running create and keeps it non-actionable", asy
     await clock.tick();
     assert.equal(view.progress(), "Activating WorktreeStep 4 of 4");
     await clock.tick();
-    assert.equal(view.card(), null);
+    assertNoDomNode(view.card());
     assert.equal(calls.posts.length, 0, "rejoining never issues a create");
   } finally {
     await act(async () => view.root.unmount());
@@ -304,7 +305,7 @@ test("an older control plane without progress keeps the plain Creating… state"
       release();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.equal(view.card(), null);
+    assertNoDomNode(view.card());
     assert.equal(calls.posts.length, 1);
   } finally {
     await act(async () => view.root.unmount());
@@ -330,7 +331,7 @@ test("a progress-aware control plane without the operations route is followed by
     await clock.tick();
     assert.equal(view.progress(), "Fetching RemoteStep 1 of 4");
     await clock.tick();
-    assert.equal(view.card(), null);
+    assertNoDomNode(view.card());
     assert.equal(calls.posts.length, 3);
     assert.ok(calls.posts.every((input) => input.branch === "fix/missing-recovery"), "joins repeat exact coordinates");
   } finally {
@@ -425,7 +426,7 @@ test("a create that completed while the page was away settles the session", asyn
   try {
     await flushAct();
     assert.equal(calls.sessions, 1);
-    assert.equal(view.card(), null);
+    assertNoDomNode(view.card());
     assert.equal(calls.posts.length, 0);
   } finally {
     await act(async () => view.root.unmount());

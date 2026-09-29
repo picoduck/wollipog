@@ -22,6 +22,7 @@ import { INBOX_COLLAPSED_THREADS_KEY, type InboxSplit } from "../inbox.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, saveSeen } from "../sessions-seen.js";
 import type { RightPanelState } from "./RightPanel.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -620,7 +621,7 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   await act(async () => { (container.querySelector('[title="Active"]') as HTMLButtonElement).click(); });
   await renderView("board");
   assert.deepEqual([...container.querySelectorAll(".card")].map((card) => card.textContent?.includes("Session unsnoozed")), [true]);
-  assert.equal(container.querySelector('.card [aria-label="Reminder: Snoozed"]'), null);
+  assertNoDomNode(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
 
   await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")));
@@ -636,7 +637,7 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")),
     "clearing attention must leave the pending reminder in Snoozed");
-  assert.equal(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'), null);
+  assertNoDomNode(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'));
   assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 1 Session");
 
   await act(async () => {
@@ -707,7 +708,7 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   // row, so the preview text below is store state the row deliberately no longer prints.
   // Attention outranks lifecycle (§11.1), so the question's pill is the whole proof.
   assert.match(container.textContent ?? "", /Answer Required/);
-  assert.equal(container.querySelector(".inbox-order-update"), null,
+  assertNoDomNode(container.querySelector(".inbox-order-update"),
     "the desktop manual-order affordance does not crowd the mobile Inbox toolbar");
 
   await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
@@ -818,7 +819,7 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
     /Session B/,
     "manual reordering preserves selection by session identity",
   );
-  assert.equal(container.querySelector(".inbox-order-update"), null, "the indicator clears after adoption");
+  assertNoDomNode(container.querySelector(".inbox-order-update"), "the indicator clears after adoption");
   assert.equal(domWindow.document.activeElement, container.querySelector(".inbox-list"),
     "keyboard activation returns focus to the list without scrolling it");
 
@@ -832,7 +833,7 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   // Leaving the window is the safe boundary: canonical recency ordering is applied there.
   await act(async () => { domWindow.dispatchEvent(new domWindow.Event("blur")); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
-  assert.equal(container.querySelector(".inbox-order-update"), null,
+  assertNoDomNode(container.querySelector(".inbox-order-update"),
     "an automatic safe boundary clears the pending-order indicator");
   await act(async () => { socket.push({ type: "session_upsert", session: session("C", 80) }); });
   assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
@@ -926,7 +927,7 @@ test("InboxView does not offer a reorder when only a removed selected id remains
 
   await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
   assert.deepEqual(rowTitles(container), ["Session B"]);
-  assert.equal(container.querySelector(".inbox-order-update"), null,
+  assertNoDomNode(container.querySelector(".inbox-order-update"),
     "a stale selected-id placeholder is not a visible order difference");
   assert.doesNotMatch(container.textContent ?? "", /A newer Inbox order is available/);
 
@@ -1064,7 +1065,7 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
   await act(async () => { snooze.click(); });
   assert.equal(container.querySelector<HTMLInputElement>("#snooze-expression")?.value, "");
   assert.equal(container.querySelector<HTMLInputElement>("#snooze-exact")?.value, "2099-05-06T07:45");
-  assert.equal(container.querySelector('[role="alert"]'), null, "closing still discards the local draft normally");
+  assertNoDomNode(container.querySelector('[role="alert"]'), "closing still discards the local draft normally");
 
 });
 
@@ -1274,7 +1275,7 @@ test("desktop search Enter focuses the exact filtered result set without activat
   await filter("does not exist");
   await pressSearchEnter();
   assert.equal(domWindow.document.activeElement, search);
-  assert.equal(container.querySelector(".inbox-list"), null);
+  assertNoDomNode(container.querySelector(".inbox-list"));
   assert.match(container.querySelector(".inbox-zero")?.textContent ?? "", /No Matching Sessions/);
 
   // Modified and composing Enter remain input-owned even when results exist.
@@ -1331,8 +1332,8 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   assert.ok(container.querySelector(".board-wrap"), "board mode renders the kanban canvas");
   assert.equal(container.querySelector(".board-wrap")?.getAttribute("tabindex"), "-1",
     "the canvas is programmatically focusable so the F6 list zone still has a landing spot");
-  assert.equal(container.querySelector(".inbox-list"), null, "and not the list");
-  assert.equal(container.querySelector(".inbox-splitter"), null, "the preview split belongs to list mode");
+  assertNoDomNode(container.querySelector(".inbox-list"), "and not the list");
+  assertNoDomNode(container.querySelector(".inbox-splitter"), "the preview split belongs to list mode");
   assert.ok(container.querySelector(".inbox-tabs"), "the shared split tabs stay above the board");
   assert.equal(container.querySelectorAll(".board .card").length, 2,
     "archived sessions never reach the board columns");
@@ -1423,7 +1424,7 @@ test("row and card context menus share one surface, act on their target, and nev
   });
   await act(async () => { await Promise.resolve(); });
   assert.deepEqual(archived, [["B", true]]);
-  assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "acting closes the menu");
+  assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "acting closes the menu");
   assert.deepEqual(pushed, [], "and still never navigates");
 
   // The platform keyboard interaction opens for the ACTIVE row.
@@ -1440,7 +1441,7 @@ test("row and card context menus share one surface, act on their target, and nev
   await act(async () => {
     menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
   });
-  assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+  assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
 
   // Board mode: the card wires through the same opener.
   await mountView("board");
@@ -1456,7 +1457,7 @@ test("row and card context menus share one surface, act on their target, and nev
   await act(async () => {
     (domWindow.document.querySelector(".menu-backdrop") as unknown as HTMLElement).click();
   });
-  assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+  assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
   assert.deepEqual(pushed, [], "board-card menus never navigate either");
 
 });
@@ -1543,7 +1544,7 @@ test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing 
     item("Archive").click();
   });
   await act(async () => { await Promise.resolve(); });
-  assert.equal(domWindow.document.querySelector('[role="dialog"]'), null, "no rename dialog or confirmation opens");
+  assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'), "no rename dialog or confirmation opens");
   assert.deepEqual(calls, [], "no archive, decision or rename request is sent");
 
   // Board mode: the card's inline approval options are refused the same way.
@@ -1615,7 +1616,7 @@ test("row and card context menus pin their exact target, reorder immediately, pe
   const pin = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
     .find((item) => item.textContent === "Pin Session")!;
   await act(async () => { pin.click(); });
-  assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "pinning dismisses the menu");
+  assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "pinning dismisses the menu");
   assert.deepEqual(rowTitles(container), ["Session B", "Session A"], "the targeted session moves immediately");
   assert.equal(selectedRowTitle(container), "Session A", "right-click pinning never selects its target");
   assert.deepEqual([...loadKeySet(SESSION_PIN_KEY)], ["B"], "pinning uses the existing browser persistence");
@@ -1663,7 +1664,7 @@ test("row and card context menus pin their exact target, reorder immediately, pe
     ["Session B", "Session A"],
   );
   assert.deepEqual([...loadKeySet(SESSION_PIN_KEY)], ["B"]);
-  assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+  assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
   assert.deepEqual(pushed, []);
 });
 
@@ -1814,7 +1815,7 @@ test("a quick tap after a dismissed long-press still selects, and an archived ta
       rowButton.dispatchEvent(new domWindow.PointerEvent("pointerup", { bubbles: true, pointerId: 3, pointerType: "touch" } as never) as never);
       menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
     });
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
 
     // Immediately (inside the old 700ms grace): a fresh short tap must act normally.
     await act(async () => {
@@ -1835,7 +1836,7 @@ test("a quick tap after a dismissed long-press still selects, and an archived ta
     await act(async () => {
       socket.push({ type: "session_upsert", session: { ...session("B", 20), archived: true } });
     });
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null,
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'),
       "an archived target is off the surface, so its menu closes");
     assert.notEqual(domWindow.document.activeElement, domWindow.document.body,
       "and dismissal hands focus to a durable surface, not <body>");
@@ -1887,7 +1888,7 @@ test("a cancelled press and a source-landed release click both leave the next ba
       rowButton.dispatchEvent(new domWindow.PointerEvent("pointercancel", { bubbles: true, pointerId: 11, pointerType: "touch" } as never) as never);
     });
     await act(async () => { backdrop()!.click(); });
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null,
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'),
       "the first dismissal tap after a cancelled press must close the menu");
 
     // Case 2: the release click lands on the pressed element and is consumed THERE.
@@ -1898,7 +1899,7 @@ test("a cancelled press and a source-landed release click both leave the next ba
     });
     assert.ok(domWindow.document.querySelector('[role="menu"]'), "the source-landed click did not act");
     await act(async () => { backdrop()!.click(); });
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null,
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'),
       "the singleton was spent on the source click, so the backdrop tap closes");
   } finally {
     mobileViewport = true;
@@ -1963,7 +1964,7 @@ test("InboxView threads a family under its parent and t, Shift+T, p, and the arr
   assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-expanded"), "false");
   assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input",
     "the rollup still says a child is waiting while the thread is collapsed");
-  assert.equal(container.querySelector(".inbox-order-update"), null, "hidden children are not a pending reorder");
+  assertNoDomNode(container.querySelector(".inbox-order-update"), "hidden children are not a pending reorder");
   await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 45) }); });
   assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"], "collapse survives a live update");
   await press("t");

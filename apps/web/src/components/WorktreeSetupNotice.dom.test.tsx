@@ -3,6 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
 
@@ -23,7 +24,7 @@ test("setup notice uses Title Case actions, an external help link, and no nested
     assert.deepEqual([...container.querySelectorAll("button")].map((button) => button.textContent || button.getAttribute("aria-label")),
       ["Generate", "Dismiss Setup Notice"]);
     assert.equal(container.querySelector("a")?.textContent, "Learn More");
-    assert.equal(container.querySelector("button button, button a, a button"), null);
+    assertNoDomNode(container.querySelector("button button, button a, a button"));
     assert.match(container.textContent ?? "", /Nothing runs, stages, or commits/u);
   } finally {
     await act(async () => root.unmount());

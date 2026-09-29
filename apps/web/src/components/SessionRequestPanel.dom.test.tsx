@@ -7,6 +7,7 @@ import { Window } from "happy-dom";
 import type { DescendantRequestView, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { loadEvidenceReviewDraft, saveEvidenceReviewDraft } from "../evidence-review-drafts.js";
 import { clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
@@ -146,7 +147,7 @@ test("eight-item evidence review stays bounded, persists acknowledgement drafts,
     await act(async () => render());
     assert.equal(container.querySelectorAll(".evidence-review-item").length, 8);
     assert.equal(container.querySelectorAll(".evidence-review-list").length, 1);
-    assert.equal(container.querySelector(".request-panel-list"), null,
+    assertNoDomNode(container.querySelector(".request-panel-list"),
       "a direct evidence review has one natural scrolling surface");
     assert.doesNotMatch(container.textContent ?? "", /signature=secret|https:\/\/evidence/);
     assert.equal(container.querySelector("details")?.hasAttribute("open"), false);
@@ -251,7 +252,7 @@ test("standalone approval review keeps request context collapsed and submits thr
         />
       </ApiProvider>,
     ));
-    assert.equal(container.querySelector(".approval-bar"), null);
+    assertNoDomNode(container.querySelector(".approval-bar"));
     assert.ok(container.querySelector(".approval-review-surface"));
     assert.match(container.querySelector(".approval-selector-context")?.textContent ?? "", /wollipog\.worktree_setup/);
     assert.match(container.querySelector(".approval-selector-context")?.textContent ?? "", /fix\/example/);
@@ -327,8 +328,8 @@ test("worker-owned approval stays in its canonical worker request surface", asyn
         />
       </ApiProvider>,
     ));
-    assert.equal(container.querySelector(".approval-bar"), null);
-    assert.equal(container.querySelector(".approval-review-surface"), null);
+    assertNoDomNode(container.querySelector(".approval-bar"));
+    assertNoDomNode(container.querySelector(".approval-review-surface"));
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -363,7 +364,7 @@ test("empty descendant inbox distinguishes loading, unavailable, and authoritati
     await act(async () => render("unavailable"));
     assert.match(container.textContent ?? "", /Requests Unavailable/);
     assert.match(container.textContent ?? "", /retry automatically/);
-    assert.equal(container.querySelector("button"), null, "unverified request controls fail closed");
+    assertNoDomNode(container.querySelector("button"), "unverified request controls fail closed");
 
     await act(async () => render("ready"));
     assert.match(container.textContent ?? "", /No Pending Requests/);
@@ -467,7 +468,7 @@ test("descendant inbox exposes count, ownership, keyboard selection, and canonic
     });
     assert.equal(rows[1]!.getAttribute("aria-current"), "true");
     assert.match(container.querySelector(".request-owner")?.textContent ?? "", /Assigned to Orchestrator/);
-    assert.equal(container.querySelector(".request-readonly .approval-actions"), null,
+    assertNoDomNode(container.querySelector(".request-readonly .approval-actions"),
       "the human dashboard does not expose controls for an Orchestrator-owned decision");
     assert.match(container.querySelector(".request-structured-summary")?.textContent ?? "", /Pull Request#44/);
     const open = [...container.querySelectorAll<HTMLButtonElement>("button")]

@@ -14,6 +14,7 @@ import { StoreProvider } from "../store.js";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const connection: UiConnectionRuntime = {
@@ -225,7 +226,7 @@ test("RightPanel drops unmounted-generation focus intent and renders honest offl
     assert.equal(state.subagentTarget?.sessionId, "session-1");
     assert.equal(state.subagentTarget?.focusRequest, undefined,
       "a request is consumed when its session generation is not the mounted panel");
-    assert.equal(container.querySelector(".subagent-detail"), null,
+    assertNoDomNode(container.querySelector(".subagent-detail"),
       "a stale target does not select a different session's worker");
     await act(async () => {
       const history = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Worker Filter"] button')]
@@ -294,13 +295,13 @@ test("Governance History renders only its list, empty state, and paging control"
       assert.doesNotMatch(body.textContent ?? "", /Coming soon/, `${name} must not render a placeholder hint`);
       if (name === "populated") {
         assert.match(body.textContent ?? "", /Allowed by Policy/);
-        assert.equal(body.querySelector(".governance-history-more"), null, "no paging control without more pages");
+        assertNoDomNode(body.querySelector(".governance-history-more"), "no paging control without more pages");
       } else if (name === "empty page with more available") {
         assert.match(body.textContent ?? "", /No governance decisions are visible in this page yet\./);
         assert.equal(body.querySelector(".governance-history-more")?.textContent, "Load Older Decisions");
       } else {
         assert.match(body.textContent ?? "", /No governance decisions have been recorded for this session\./);
-        assert.equal(body.querySelector(".governance-history-more"), null);
+        assertNoDomNode(body.querySelector(".governance-history-more"));
       }
     } finally {
       await panel.dispose();
@@ -318,7 +319,7 @@ test("a persisted terminal mode restores the launcher instead of an empty panel"
   try {
     assert.equal(state.mode, "launcher");
     assert.equal(panel.container.querySelector(".rp-launcher") != null, true, "the launcher list is restored");
-    assert.equal(panel.container.querySelector(".rp-body"), null, "no mode body renders for a retired mode");
+    assertNoDomNode(panel.container.querySelector(".rp-body"), "no mode body renders for a retired mode");
     assert.doesNotMatch(panel.container.querySelector(".right-panel")?.textContent ?? "", /Coming soon/);
     assert.equal(panel.container.querySelector(".rp-title")?.textContent, "Panel");
   } finally {

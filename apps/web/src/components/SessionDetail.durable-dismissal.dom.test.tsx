@@ -16,6 +16,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { SessionDetail } from "./SessionDetail.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -317,9 +318,8 @@ for (const { state, label } of [
       eventPayloads: [{ kind: "user_message", text: TEXT, images: [] }],
     });
     try {
-      assert.equal(
+      assertNoDomNode(
         fixture.container.querySelector(`[data-testid="pending-prompt-${COMMAND_ID}"]`),
-        null,
         "the transcript recovery card is suppressed once the command has a transcript event",
       );
       const row = fixture.container.querySelector(`[data-testid="queued-prompt-${COMMAND_ID}"]`);
@@ -332,8 +332,8 @@ for (const { state, label } of [
 
       // A disabled cancellation control must never stand in as the only removal action, and the
       // two accessible names stay distinct so a terminal entry is never mistaken for a live one.
-      assert.equal(button(fixture, "Queued Message Cancellation Unavailable"), null);
-      assert.equal(button(fixture, "Cancel Queued Message"), null);
+      assertNoDomNode(button(fixture, "Queued Message Cancellation Unavailable"));
+      assertNoDomNode(button(fixture, "Cancel Queued Message"));
 
       await act(async () => fireDomEvent.click(dismiss));
       assert.deepEqual(fixture.calls.resolvePendingPrompt, [
@@ -395,8 +395,8 @@ test("dismissing a terminal delivery entry removes only the receipt and survives
 
     // The control plane clears the receipt from both projections; the transcript event is untouched.
     await fixture.pushSession({ queued: undefined, pendingPrompts: undefined });
-    assert.equal(fixture.container.querySelector(`[data-testid="queued-prompt-${COMMAND_ID}"]`), null);
-    assert.equal(button(fixture, "Dismiss Failed Message"), null);
+    assertNoDomNode(fixture.container.querySelector(`[data-testid="queued-prompt-${COMMAND_ID}"]`));
+    assertNoDomNode(button(fixture, "Dismiss Failed Message"));
     assert.equal(
       [...fixture.container.querySelectorAll(".bubble-text")].filter((n) => n.textContent === TEXT).length,
       1,
@@ -405,7 +405,7 @@ test("dismissing a terminal delivery entry removes only the receipt and survives
 
     // A later session update — a reconnect snapshot, a status change — cannot resurrect the row.
     await fixture.pushSession({ status: "running" });
-    assert.equal(fixture.container.querySelector(`[data-testid="queued-prompt-${COMMAND_ID}"]`), null);
+    assertNoDomNode(fixture.container.querySelector(`[data-testid="queued-prompt-${COMMAND_ID}"]`));
     assert.deepEqual(fixture.calls.cancelQueuedPrompt, []);
   } finally {
     await unmountFixture(fixture);
@@ -466,9 +466,8 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
     eventPayloads: [{ kind: "user_message", text: TEXT, images: [] }],
   });
   try {
-    assert.equal(
+    assertNoDomNode(
       fixture.container.querySelector(`[data-testid="pending-prompt-${COMMAND_ID}"]`),
-      null,
       "the recovery card is suppressed, so the composer row is the receipt's only dismissal surface",
     );
 
@@ -499,7 +498,7 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
     const dismiss = receiptRow.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Failed Message"]');
     assert.ok(dismiss);
     assert.equal(dismiss.disabled, false);
-    assert.equal(receiptRow.querySelector('button[aria-label="Cancel Queued Message"]'), null);
+    assertNoDomNode(receiptRow.querySelector('button[aria-label="Cancel Queued Message"]'));
 
     const liveRow = fixture.container.querySelector<HTMLElement>('[data-testid="queued-prompt-queue-live"]');
     assert.ok(liveRow);
@@ -515,7 +514,7 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
     const cancel = liveRow.querySelector<HTMLButtonElement>('button[aria-label="Cancel Queued Message"]');
     assert.ok(cancel, "the live entry keeps its cancellation control");
     assert.equal(cancel.disabled, false);
-    assert.equal(liveRow.querySelector(".queued-dismiss"), null);
+    assertNoDomNode(liveRow.querySelector(".queued-dismiss"));
 
     await act(async () => fireDomEvent.click(dismiss));
     assert.deepEqual(fixture.calls.resolvePendingPrompt, [
@@ -588,8 +587,8 @@ test("a nonterminal durable entry keeps the existing pre-admission cancellation 
     },
   });
   try {
-    assert.equal(button(fixture, "Dismiss Failed Message"), null);
-    assert.equal(button(fixture, "Dismiss Uncertain Message"), null);
+    assertNoDomNode(button(fixture, "Dismiss Failed Message"));
+    assertNoDomNode(button(fixture, "Dismiss Uncertain Message"));
     const cancel = button(fixture, "Queued Message Cancellation Unavailable");
     assert.ok(cancel, "delivery that may still run keeps its disabled cancellation control");
     assert.equal(cancel.disabled, true);
@@ -609,7 +608,7 @@ test("a live runner queue entry keeps its enabled Cancel Queued Message control"
     },
   });
   try {
-    assert.equal(button(fixture, "Dismiss Failed Message"), null);
+    assertNoDomNode(button(fixture, "Dismiss Failed Message"));
     const cancel = button(fixture, "Cancel Queued Message");
     assert.ok(cancel);
     assert.equal(cancel.disabled, false);
@@ -677,7 +676,7 @@ test("a Viewer's per-turn Rewind, Fork and Hand Off are unavailable and say why 
   });
   try {
     for (const label of ["Rewind Files to Before This Turn", "Fork Conversation After This Turn", "Hand Off After This Turn"]) {
-      assert.equal(button(fixture, label), null, `${label} is not offered as a button`);
+      assertNoDomNode(button(fixture, label), `${label} is not offered as a button`);
       const summary = fixture.container.querySelector(`summary[aria-label="${label} Unavailable"]`);
       assert.ok(summary, `${label} is shown as unavailable`);
       const description = fixture.container.querySelector(`[id="${summary.getAttribute("aria-describedby")}"]`);
@@ -747,7 +746,7 @@ test("an Edit in Fork that applies but is blocked stays visible and says why, an
   const describedBy = (summary: Element) =>
     fixture.container.querySelector(`[id="${summary.getAttribute("aria-describedby")}"]`)?.textContent ?? "";
   try {
-    assert.equal(button(fixture, edit), null, "a Viewer gets no Edit in Fork button");
+    assertNoDomNode(button(fixture, edit), "a Viewer gets no Edit in Fork button");
     assert.equal(unavailable().length, 1, "only the message with an earlier checkpoint shows it");
     assert.match(describedBy(unavailable()[0]!), /Your Viewer role is read-only\./u);
 
@@ -758,7 +757,7 @@ test("an Edit in Fork that applies but is blocked stays visible and says why, an
     assert.ok(button(fixture, edit), "an allowed person gets the working button back");
 
     await fixture.pushSession({ status: "running" });
-    assert.equal(button(fixture, edit), null);
+    assertNoDomNode(button(fixture, edit));
     assert.equal(unavailable().length, 1);
     assert.match(describedBy(unavailable()[0]!), /Wait for the current turn or approval before creating a fork\./u);
 
@@ -766,7 +765,7 @@ test("an Edit in Fork that applies but is blocked stays visible and says why, an
       stop: { allowed: false, reason }, restart: { allowed: false, reason }, stopBackgroundJob: { allowed: false, reason },
       fork: { allowed: false, reason },
     } });
-    assert.equal(button(fixture, edit), null);
+    assertNoDomNode(button(fixture, edit));
     assert.equal(unavailable().length, 0, "a provider that cannot edit history never offers it, even to a Viewer");
   } finally {
     await unmountFixture(fixture);
@@ -798,11 +797,11 @@ test("Edit & Resend stays visible and says why while the composer cannot send, a
   const loadIntoComposer = () => [...document.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent === "Load into Composer");
   try {
-    assert.equal(button(fixture, edit), null, "a Viewer gets no working Edit & Resend");
+    assertNoDomNode(button(fixture, edit), "a Viewer gets no working Edit & Resend");
     assert.equal(unavailable().length, 2, "every user message keeps the control");
     assert.match(describedBy(unavailable()[0]!), /Your Viewer role is read-only\./u);
     await act(async () => { unavailable()[0]!.click(); });
-    assert.equal(dialog(), null, "the unavailable control opens no dialog");
+    assertNoDomNode(dialog(), "the unavailable control opens no dialog");
 
     await fixture.pushSession({ commandPermissions: {
       stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true }, prompt: { allowed: true },
@@ -819,7 +818,7 @@ test("Edit & Resend stays visible and says why while the composer cannot send, a
     assert.equal(loadIntoComposer()?.disabled, true);
     assert.match(dialog()?.textContent ?? "", /Session is stopped\./u, "the dialog names the specific reason");
     assert.doesNotMatch(dialog()?.textContent ?? "", /cannot accept a new turn right now/u);
-    assert.equal(button(fixture, edit), null);
+    assertNoDomNode(button(fixture, edit));
     assert.match(describedBy(unavailable()[0]!), /Session is stopped\./u);
   } finally {
     await unmountFixture(fixture);

@@ -14,6 +14,7 @@ import { InstanceSelector } from "./InstanceSelector.js";
 import { InstancesPanel } from "./InstancesPanel.js";
 import { Rail } from "./Rail.js";
 import { RemoteInstanceDialog } from "./RemoteInstanceDialog.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/connections/instances" });
 for (const [name, value] of Object.entries({
@@ -123,7 +124,7 @@ test("instance selector remains keyboard-managed and exposes switching plus mana
       (domWindow.document.querySelector(".menu-backdrop") as unknown as HTMLElement).click();
       await tick();
     });
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
     // Identity, not assert.equal: a failed diff of two DOM nodes serialises the whole tree.
     assert.ok(domWindow.document.activeElement === (trigger as never), "focus returns to the trigger, not <body>");
   } finally {

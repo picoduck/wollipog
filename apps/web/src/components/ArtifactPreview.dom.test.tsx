@@ -9,6 +9,7 @@ import { api } from "../api.js";
 import { DEVICE_TOKEN_CHANGED_EVENT } from "../device-token.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -242,7 +243,7 @@ test("a mismatched transcript image is never cached and can load on a later moun
     await render(true);
     await waitForPreview(() => !!container.querySelector('[role="alert"]'), "the digest mismatch error");
     assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /digest does not match/);
-    assert.equal(container.querySelector("img"), null);
+    assertNoDomNode(container.querySelector("img"));
     assert.equal(created, 0);
     await render(false);
     await render(true);

@@ -11,6 +11,7 @@ import {
   type PermissionModeDetails,
 } from "./ComposerControls.js";
 import { handleMenuKeyDown } from "./interactions.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
@@ -150,7 +151,7 @@ test("Model Settings close control dismisses without selecting and restores trig
     });
 
     assert.equal(selectionCount, 0, "closing does not activate the selected setting");
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
     assert.equal(domWindow.document.activeElement, trigger, "focus returns to the Model Settings trigger");
   } finally {
     await act(async () => { root.unmount(); });
@@ -302,7 +303,7 @@ test("the Context Window group offers provider-stated variants and switches only
       "an unset effort stays unset so the new model's own default applies");
 
     await render(null);
-    assert.equal(container.querySelector('[role="group"][aria-label="Context Window"]'), null,
+    assertNoDomNode(container.querySelector('[role="group"][aria-label="Context Window"]'),
       "no group without a real provider-listed choice");
     assert.ok(container.querySelector('[role="group"][aria-label="Model"]'));
   } finally {
@@ -338,7 +339,7 @@ test("a refused person's composer setting is disabled with the reason and never 
       trigger.click();
       trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
     });
-    assert.equal(container.querySelector('[role="menu"]'), null, "the menu never opens");
+    assertNoDomNode(container.querySelector('[role="menu"]'), "the menu never opens");
     assert.equal(selectionCount, 0);
   } finally {
     await act(async () => { root.unmount(); });

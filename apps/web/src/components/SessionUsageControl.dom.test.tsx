@@ -7,6 +7,7 @@ import type { SessionUsageResponse, SessionView, UsageAmount, UsageCostSource } 
 import type { ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
 for (const [name, value] of Object.entries({
@@ -149,7 +150,7 @@ test("Escape dismisses the popover and the control keeps its own accessible name
     view.button()!.dispatchEvent(escape as never);
   });
   domWindow.removeEventListener("keydown", onViewKey);
-  assert.equal(view.popover(), null);
+  assertNoDomNode(view.popover());
   assert.equal(view.button()!.getAttribute("aria-expanded"), "false");
   assert.equal(escape.defaultPrevented, true);
   assert.equal(reachedView, false, "a view-level Escape handler never sees the key that closed the popover");
@@ -173,7 +174,7 @@ test("a modal opened over the popover keeps the first Escape", async () => {
   await act(async () => {
     view.button()!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never);
   });
-  assert.equal(view.popover(), null);
+  assertNoDomNode(view.popover());
   await view.cleanup();
 });
 
@@ -221,7 +222,7 @@ test("a field that focus has moved on to keeps its own Escape while the popover 
   await act(async () => {
     field.dispatchEvent(escape);
   });
-  assert.equal(view.popover(), null);
+  assertNoDomNode(view.popover());
   assert.equal(escape.defaultPrevented, false, "the composer's own Escape (closing its suggestions, blurring) still runs");
   assert.equal(domWindow.document.activeElement, field as never, "focus is not pulled back to the chip");
   field.remove();
@@ -246,14 +247,14 @@ test("Escape passes through once the open control has stopped rendering", async 
   await view.open();
   assert.ok(view.popover());
   await view.rerender(session({ tokensIn: 0, tokensOut: 0, costUsd: 0 }));
-  assert.equal(view.button(), null);
+  assertNoDomNode(view.button());
   const escape = new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
   await act(async () => {
     domWindow.document.body.dispatchEvent(escape);
   });
   assert.equal(escape.defaultPrevented, false, "no visible popover, so the session's own Escape still runs");
   await view.rerender(session());
-  assert.equal(view.popover(), null, "the stale open state was cleared rather than reappearing");
+  assertNoDomNode(view.popover(), "the stale open state was cleared rather than reappearing");
   await view.cleanup();
 });
 
@@ -266,7 +267,7 @@ test("Escape from inside the popover returns focus to the cost chip", async () =
   await act(async () => {
     info.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never);
   });
-  assert.equal(view.popover(), null);
+  assertNoDomNode(view.popover());
   assert.equal(domWindow.document.activeElement, view.button() as never);
   await view.cleanup();
 });
@@ -377,7 +378,7 @@ test("a lagging ledger drives nothing in the panel, not just the token rows", as
   assert.equal(view.button()!.textContent, "$—");
   // The rest of the rejected response is rejected too, so nothing on screen disagrees.
   assert.match(popover.querySelector(".session-usage-head")!.textContent ?? "", /Not Priced/);
-  assert.equal(popover.querySelector(".session-usage-models"), null);
+  assertNoDomNode(popover.querySelector(".session-usage-models"));
   assert.doesNotMatch(popover.textContent ?? "", /stale-model|rate table|reported by the provider/);
   await view.cleanup();
 });
@@ -456,7 +457,7 @@ test("cached and unavailable URL sources keep their provenance state", async () 
   });
   await unavailable.open();
   assert.equal(unavailable.popover()!.querySelector(".session-usage-note")!.textContent, "No rate table is loaded, so cost is not estimated.");
-  assert.equal(unavailable.popover()!.querySelector(".session-usage-note a"), null);
+  assertNoDomNode(unavailable.popover()!.querySelector(".session-usage-note a"));
   await unavailable.cleanup();
 });
 
@@ -513,7 +514,7 @@ test("a mixed-model session splits by model and names the unpriced one", async (
 
 test("a session that has processed nothing renders no control", async () => {
   const view = await mount(session({ tokensIn: 0, tokensOut: 0, costUsd: 0 }), null);
-  assert.equal(view.button(), null);
+  assertNoDomNode(view.button());
   await view.cleanup();
 });
 

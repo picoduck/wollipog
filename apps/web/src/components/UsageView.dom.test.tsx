@@ -7,6 +7,7 @@ import { Window } from "happy-dom";
 import type { SubscriptionUsageResponse, UsageAggregationGranularity, UsageAggregationResponse } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { bucketLabel } from "../usage-view-model.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
@@ -304,7 +305,7 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
   assert.equal(option("Usage Breakdown", "Day").getAttribute("aria-checked"), "true");
   assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
   assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
-  assert.equal(container.querySelector('[role="alert"]'), null);
+  assertNoDomNode(container.querySelector('[role="alert"]'));
 
   await act(async () => root.unmount());
   container.remove();
@@ -365,7 +366,7 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
   await act(async () => { await settleLoad(); });
   assert.equal(option("Usage Aggregation", "Day").getAttribute("aria-checked"), "true");
   assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
-  assert.equal(container.querySelector('[role="alert"]'), null);
+  assertNoDomNode(container.querySelector('[role="alert"]'));
   assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
 
   await act(async () => root.unmount());
@@ -450,7 +451,7 @@ test("an unavailable Hour response cannot replace a newer Week selection during 
   assert.equal(option("Usage Aggregation", "Week").getAttribute("aria-checked"), "true");
   assert.equal(option("Usage Breakdown", "Week").getAttribute("aria-checked"), "true");
   assert.equal(calls.at(-1), "week");
-  assert.equal(container.querySelector('[role="alert"]'), null);
+  assertNoDomNode(container.querySelector('[role="alert"]'));
 
   await act(async () => root.unmount());
   container.remove();
@@ -539,12 +540,12 @@ test("shortening retention asks in the in-app confirmation dialog, and only Shor
   assert.equal(dialogButton("Shorten Retention").className, "btn danger");
 
   await act(async () => { dialogButton("Cancel").click(); await drain(); });
-  assert.equal(dialog(), null);
+  assertNoDomNode(dialog());
   assert.deepEqual(writes, [], "Cancel keeps the current retention");
 
   await act(async () => { save.click(); await Promise.resolve(); });
   await act(async () => { dialogButton("Shorten Retention").click(); await settleLoad(); });
-  assert.equal(dialog(), null);
+  assertNoDomNode(dialog());
   assert.deepEqual(writes, [{ hourlyDays: 7, dailyDays: 365 }]);
 
   await act(async () => root.unmount());
@@ -592,7 +593,7 @@ test("aggregation switches ignore stale responses and show request failures with
   failWeek = true;
   await act(async () => { option("Week").click(); await settleLoad(); await Promise.resolve(); });
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Weekly usage is temporarily unavailable/);
-  assert.equal(container.querySelector(".usage-chart-section"), null,
+  assertNoDomNode(container.querySelector(".usage-chart-section"),
     "a failed aggregation request never leaves the previous chart under the new selected label");
 
   await act(async () => root.unmount());
@@ -839,7 +840,7 @@ test("a window the provider never measured is marked absent, not shown as a valu
   assert.match(unmeasured?.querySelector("dd strong")?.textContent ?? "", /Resets in 2 hours/);
   // A measured window is untouched: the percentage keeps the prominent slot.
   assert.equal(measured?.querySelector("dd strong")?.textContent, "60% Remaining");
-  assert.equal(measured?.querySelector(".sr-only"), null);
+  assertNoDomNode(measured?.querySelector(".sr-only"));
 
   await act(async () => root.unmount());
   container.remove();
@@ -888,7 +889,7 @@ test("an unsplit response from an older plane is shown honestly and the window c
     /before protocol v127 include only the final model response and are incomplete.*v127\+ records complete turn usage/s,
   );
   assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /not split by driver/);
-  assert.equal(container.querySelector(".usage-legend"), null, "no legend claims a split that does not exist");
+  assertNoDomNode(container.querySelector(".usage-legend"), "no legend claims a split that does not exist");
   const dayTable = container.querySelector(".usage-breakdown-section table")!;
   const driverCells = [...dayTable.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td[data-driver]")].slice(0, 2));
   assert.ok(driverCells.length >= 4);
@@ -950,7 +951,7 @@ test("a pre-v103 response without seriesByDriver still renders", async () => {
   });
 
   assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 1 day/);
-  assert.equal(container.querySelector('[role="alert"]'), null);
+  assertNoDomNode(container.querySelector('[role="alert"]'));
   assert.doesNotMatch(container.textContent ?? "", /Codex App Server records/);
   await act(async () => root.unmount());
   container.remove();

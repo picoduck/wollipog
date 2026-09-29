@@ -8,6 +8,7 @@ import { saveSessionsViewMode } from "../sessions-view-mode.js";
 import { moveRailView, resetRailPreferencesForTest, setRailViewHidden } from "../rail-preferences.js";
 import type { View } from "../navigation.js";
 import { withCapturedAnimationFrames } from "./test-clock-overrides.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
 const priorWindow = globalThis.window;
@@ -176,10 +177,10 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
       "the bar takes the first four visible destinations in configured order");
 
     // Nothing that owns its own overlay may live in the bar or the sheet.
-    assert.equal(container.querySelector(".rail-instance"), null);
-    assert.equal(container.querySelector(".rail-settings"), null);
-    assert.equal(container.querySelector(".rail-action"), null);
-    assert.equal(container.querySelector(".rail-fab"), null,
+    assertNoDomNode(container.querySelector(".rail-instance"));
+    assertNoDomNode(container.querySelector(".rail-settings"));
+    assertNoDomNode(container.querySelector(".rail-action"));
+    assertNoDomNode(container.querySelector(".rail-fab"),
       "no floating button: that band is occupied by the shell dock and the toast stack");
     assert.equal(container.querySelectorAll(".rail-number").length, 0);
 
@@ -198,7 +199,7 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
       .find((row) => row.querySelector(".menu-text")?.textContent === "Connections")!;
     assert.equal(connectionsRow.querySelector(".rail-more-count")?.textContent, "1");
     assert.match(connectionsRow.getAttribute("aria-label") ?? "", /1 Online/);
-    assert.equal(sheet.querySelector(".rail-more-control"), null,
+    assertNoDomNode(sheet.querySelector(".rail-more-control"),
       "the sheet must contain no nested dialog or menu content");
     // Every child of a role=menu must be a menu item, or roving navigation silently skips it. The
     // sheet's grabber and title row are decorative, and the separator is not focusable.
@@ -257,9 +258,9 @@ test("More closes when the viewport leaves the phone breakpoint", async () => {
     await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
     await render();
 
-    assert.equal((domWindow.document as unknown as Document).querySelector(MORE_SHEET), null,
+    assertNoDomNode((domWindow.document as unknown as Document).querySelector(MORE_SHEET),
       "returning to phone width must not resurrect the sheet");
-    assert.equal(domWindow.document.querySelector(".menu-backdrop"), null,
+    assertNoDomNode(domWindow.document.querySelector(".menu-backdrop"),
       "a stranded backdrop would swallow every tap");
   } finally {
     await act(async () => { root.unmount(); });
@@ -377,7 +378,7 @@ test("the phone More trigger reads as current on the Settings route and the row 
       row.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: " ", bubbles: true }) as never);
     });
     assert.deepEqual(navigated, [{ name: "settings" }]);
-    assert.equal((domWindow.document as unknown as Document).querySelector(MORE_SHEET), null, "activating a row closes the sheet");
+    assertNoDomNode((domWindow.document as unknown as Document).querySelector(MORE_SHEET), "activating a row closes the sheet");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

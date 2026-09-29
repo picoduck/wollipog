@@ -8,6 +8,7 @@ import type { SessionReminderView, SetSessionReminderRequest } from "@wollipog/p
 import { ApiError } from "../api.js";
 import { parseReminderExpression } from "../reminder-schedule.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
 for (const [name, value] of Object.entries({
@@ -76,7 +77,7 @@ test("Snooze Again requires a newly selected future schedule and replaces the ex
   assert.equal(saved?.expectedRevision, 2);
   assert.equal(saved?.expectedReminderId, "reminder-1");
   assert.equal(saved?.rescheduleFired, true);
-  assert.equal(container.querySelector(".form-error"), null);
+  assertNoDomNode(container.querySelector(".form-error"));
 
   await act(async () => { root.unmount(); });
   mountPoint.remove();
@@ -251,7 +252,7 @@ test("live reminder changes preserve the complete draft and require an explicit 
   reload.focus();
   assert.equal(domWindow.document.activeElement, reload);
   await act(async () => { reload.click(); });
-  assert.equal(container.querySelector('[role="alert"]'), null);
+  assertNoDomNode(container.querySelector('[role="alert"]'));
   assert.equal(domWindow.document.activeElement, expression, "reloading must restore focus inside the dialog");
   assert.equal(expression.value, "");
   assert.equal(exact.value, "2099-05-06T07:45");
@@ -302,7 +303,7 @@ test("the server echo from the dialog's own save is not announced as a remote co
   await act(async () => {
     root.render(<SnoozeDialog reminder={{ ...original, revision: 2, updatedAt: 2 }} {...props} />);
   });
-  assert.equal(container.querySelector('[role="alert"]'), null);
+  assertNoDomNode(container.querySelector('[role="alert"]'));
 
   await act(async () => {
     resolveSave();

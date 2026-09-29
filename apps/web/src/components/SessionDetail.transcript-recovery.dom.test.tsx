@@ -18,6 +18,7 @@ import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { SessionDetail } from "./SessionDetail.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -461,7 +462,7 @@ test("SessionDetail keeps the temporary question fallback until a virtual row is
     assert.ok(liveQuestion);
     assert.equal(fixture.scroller.contains(liveQuestion), false,
       "the fallback stays authoritative because this hydration harness mounts no virtual rows");
-    assert.equal(fixture.container.querySelector("[data-virtual-row]"), null);
+    assertNoDomNode(fixture.container.querySelector("[data-virtual-row]"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -507,7 +508,7 @@ test("recovery over a long cached transcript announces at the reader's lower edg
   const fixture = await mountFixture(pages);
   try {
     // The cached timeline (not a loading skeleton) is showing, and the reader follows the tail.
-    assert.equal(fixture.container.querySelector(".transcript-skeleton"), null);
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"));
     assert.equal(followChipState(fixture), "following");
 
     const slot = recoverySlot(fixture);
@@ -534,7 +535,7 @@ test("recovery over a long cached transcript announces at the reader's lower edg
     assert.ok(echo.textContent!.includes("Checking for Missed Activity…"));
 
     // The sticky-top pill no longer renders for active recovery.
-    assert.equal(fixture.container.querySelector(".transcript-load-notice"), null);
+    assertNoDomNode(fixture.container.querySelector(".transcript-load-notice"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -559,7 +560,7 @@ test("successful recovery removes the notice promptly without disturbing a follo
     assert.equal(recoveryStripEcho(fixture).classList.contains("active"), false);
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
     assert.equal(followChipState(fixture), "following");
-    assert.equal(fixture.container.querySelector(".transcript-load-notice"), null);
+    assertNoDomNode(fixture.container.querySelector(".transcript-load-notice"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -714,7 +715,7 @@ test("an underfilled partial opening automatically reaches a complete scrollable
       "opening recovery prepends without waiting for reader navigation");
     assert.deepEqual(pages.tailCalls.map((call) => call.alignToTurn), [true, true],
       "both the initial window and automatic opening fill request a semantic turn boundary");
-    assert.equal(fixture.container.querySelector(".transcript-earlier-activity"), null,
+    assertNoDomNode(fixture.container.querySelector(".transcript-earlier-activity"),
       "the manual fallback stays out of the underfilled opening while recovery is active");
     const announcement = fixture.container.querySelector(
       "[data-earlier-activity-announcement]",
@@ -769,7 +770,7 @@ test("a desktop preview fills its opening window once and expansion preserves it
       "an underfilled preview prepends history without waiting for expansion");
     assert.equal(pages.tailCalls[1]!.alignToTurn, true,
       "preview fill recovers a semantic turn boundary");
-    assert.equal(fixture.container.querySelector(".transcript-earlier-activity"), null,
+    assertNoDomNode(fixture.container.querySelector(".transcript-earlier-activity"),
       "the underfilled manual control stays hidden while preview fill runs");
 
     const earlierPage = fixture.events.slice(-15, -7);

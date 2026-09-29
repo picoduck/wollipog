@@ -7,6 +7,7 @@ import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { saveEvidenceReviewDraft } from "../evidence-review-drafts.js";
 import { EvidenceArtifactView, type EvidenceArtifactStatus } from "./EvidenceArtifactView.js";
@@ -159,7 +160,7 @@ test("artifact-backed evidence is shown in place, verified against the decision 
     assert.ok(image, "the verified artifact is rendered inside the card");
     assert.equal(image.getAttribute("alt"), "Evidence: desktop-after");
     assert.match(image.getAttribute("src") ?? "", /^blob:/u, "bytes stay in memory behind an object URL");
-    assert.equal(view.container.querySelector('a[href^="https://evidence.example"]'), null,
+    assertNoDomNode(view.container.querySelector('a[href^="https://evidence.example"]'),
       "an artifact-backed item never sends the reviewer to the external copy");
     assert.doesNotMatch(view.container.innerHTML, /signature=secret/u);
     assert.equal(view.container.querySelector(".evidence-artifact-thumb")?.getAttribute("aria-label"),
@@ -179,7 +180,7 @@ test("artifact-only evidence can be reviewed without creating an external link",
     assert.deepEqual(view.requests, ["art_desktop"]);
     await view.decode("load");
     assert.equal(view.container.querySelector(".evidence-artifact img")?.getAttribute("alt"), "Evidence: desktop-after");
-    assert.equal(view.container.querySelector(".evidence-review-item a"), null);
+    assertNoDomNode(view.container.querySelector(".evidence-review-item a"));
     assert.equal(view.checkbox("desktop-after").disabled, false);
     await act(async () => view.checkbox("desktop-after").click());
     assert.equal(view.button("Approve").disabled, false);
@@ -207,7 +208,7 @@ test("artifact-backed video is reviewable only after a picture frame loads", asy
     assert.equal(video.hasAttribute("controls"), true);
     assert.equal(video.hasAttribute("playsinline"), true);
     assert.equal(view.checkbox("clip").disabled, false);
-    assert.equal(view.container.querySelector(".evidence-review-item a"), null);
+    assertNoDomNode(view.container.querySelector(".evidence-review-item a"));
     await act(async () => view.checkbox("clip").click());
     assert.equal(view.button("Approve").disabled, false);
   } finally { await view.unmount(); }
@@ -236,7 +237,7 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
   saveEvidenceReviewDraft("local", "session-artifact-evidence", "occurrence-1", RESOURCE_DIGEST, ["desktop-after"]);
   const swapped = await mount(sessionWith([artifactItem()]), async () => new Blob([Buffer.from("substituted")]));
   try {
-    assert.equal(swapped.container.querySelector(".evidence-artifact img"), null, "mismatched bytes are never displayed");
+    assertNoDomNode(swapped.container.querySelector(".evidence-artifact img"), "mismatched bytes are never displayed");
     assert.match(swapped.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
       /does not match the digest recorded in the request/u);
     assert.equal(swapped.checkbox("desktop-after").disabled, true);
@@ -252,9 +253,9 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
     const alert = gone.container.querySelector('.evidence-artifact [role="alert"]');
     assert.match(alert?.textContent ?? "", /no longer available, or you do not have access/u,
       "a missing or forbidden artifact reads differently from a bad capture");
-    assert.equal(alert?.querySelector("button"), null, "access and absence do not change on a retry");
+    assertNoDomNode(alert?.querySelector("button"), "access and absence do not change on a retry");
     assert.equal(gone.checkbox("desktop-after").disabled, true);
-    assert.equal(gone.container.querySelector('a[href^="https://evidence.example"]'), null,
+    assertNoDomNode(gone.container.querySelector('a[href^="https://evidence.example"]'),
       "the card does not fall back to the external copy");
   } finally {
     await gone.unmount();
@@ -268,8 +269,8 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
     await undrawable.decode("error");
     assert.match(undrawable.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
       /matches its recorded digest but could not be displayed\.$/u);
-    assert.equal(undrawable.container.querySelector(".evidence-artifact img"), null, "no broken image is left on screen");
-    assert.equal(undrawable.container.querySelector('.evidence-artifact [role="alert"] button'), null,
+    assertNoDomNode(undrawable.container.querySelector(".evidence-artifact img"), "no broken image is left on screen");
+    assertNoDomNode(undrawable.container.querySelector('.evidence-artifact [role="alert"] button'),
       "the same bytes will not decode on a retry");
     assert.equal(undrawable.checkbox("desktop-after").disabled, true);
     assert.equal(undrawable.button("Approve").disabled, true);
@@ -286,7 +287,7 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
     await act(async () => regressed.checkbox("desktop-after").click());
     assert.equal(regressed.button("Approve").disabled, false, "a shown and marked item enables approval");
     await regressed.decode("error");
-    assert.equal(regressed.container.querySelector(".evidence-artifact img"), null);
+    assertNoDomNode(regressed.container.querySelector(".evidence-artifact img"));
     assert.equal(regressed.checkbox("desktop-after").disabled, true);
     assert.equal(regressed.checkbox("desktop-after").checked, false, "the earlier mark no longer reads as a review");
     assert.equal(regressed.button("Approve").disabled, true, "approval is withdrawn with the image");
@@ -393,10 +394,10 @@ for (const [label, withUri] of [["artifact-only", false], ["artifact-plus-URI", 
       const view = await mount(sessionWith([withUri ? artifactItem() : artifactOnly]), async () => new Blob([PNG]));
       try {
         assert.deepEqual(view.requests, [], "bytes nobody can check are not downloaded");
-        assert.equal(view.container.querySelector(".evidence-artifact img"), null, "unchecked bytes are not displayed");
+        assertNoDomNode(view.container.querySelector(".evidence-artifact img"), "unchecked bytes are not displayed");
         assert.match(view.container.querySelector(".evidence-artifact")?.textContent ?? "",
           /^Not shown: this browser can check the artifact against the request's digest only over HTTPS or on localhost\.$/u);
-        assert.equal(view.container.querySelector(".evidence-review-item a"), null,
+        assertNoDomNode(view.container.querySelector(".evidence-review-item a"),
           "an artifact-backed item never falls back to its external copy");
         assert.doesNotMatch(view.container.innerHTML, /signature=secret/u);
         assert.doesNotMatch(view.container.textContent ?? "", /Checked by this browser/u);
@@ -440,8 +441,8 @@ test("a secure page shows no HTTPS notice and says who checked each shown artifa
   domWindow.localStorage.clear();
   const view = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG]));
   try {
-    assert.equal(view.container.querySelector(".evidence-secure-context-notice"), null);
-    assert.equal(view.container.querySelector(".evidence-artifact-check"), null, "nothing is claimed before the draw");
+    assertNoDomNode(view.container.querySelector(".evidence-secure-context-notice"));
+    assertNoDomNode(view.container.querySelector(".evidence-artifact-check"), "nothing is claimed before the draw");
     await view.decode("load");
     assert.equal(view.container.querySelector(".evidence-artifact-check")?.textContent,
       "Checked by this browser against the request's digest.");
@@ -482,7 +483,7 @@ test("a failed image is reported to the card inside the error event, before any 
     });
     assert.equal(duringEvent, "unavailable", "the card is told in the event, not by a later effect");
     assert.equal(reports.at(-1), "unavailable");
-    assert.equal(container.querySelector(".evidence-artifact img"), null);
+    assertNoDomNode(container.querySelector(".evidence-artifact img"));
 
     // An error with nothing to fail is ignored by the component and must not be reported either.
     const before = reports.length;

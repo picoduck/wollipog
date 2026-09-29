@@ -13,6 +13,7 @@ import type { RunnerSkillsResponse } from "../skills.js";
 import { SkillsView } from "./SkillsView.js";
 import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -242,13 +243,13 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   runnerSkills.removalReporting = "future-value" as never;
   await act(async () => { sync!.click(); });
   await act(settle);
-  assert.equal(container.querySelector(".skills-removals"), null,
+  assertNoDomNode(container.querySelector(".skills-removals"),
     "an unknown future capability value degrades to the explicit unknown state");
 
   delete runnerSkills.removalReporting;
   await act(async () => { sync!.click(); });
   await act(settle);
-  assert.equal(container.querySelector(".skills-removals"), null,
+  assertNoDomNode(container.querySelector(".skills-removals"),
     "an older control plane that omits capability state never becomes a false empty-history claim");
   assert.deepEqual(syncedRunnerIds, ["runner-1", "runner-1", "runner-1", "runner-1"]);
 
@@ -378,7 +379,7 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
   assert.equal(importButton!.disabled, false);
   await act(async () => { importButton!.click(); });
   await act(settle);
-  assert.equal(container.querySelector('[role="dialog"]'), null);
+  assertNoDomNode(container.querySelector('[role="dialog"]'));
   assert.doesNotMatch(container.querySelector(".skills-machine")?.textContent ?? "", /Edited Copies/);
 
   current = drifted;
@@ -518,7 +519,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   assert.equal(importButton?.disabled, false, "a new skill needs no diff acceptance");
   await act(async () => { importButton!.click(); });
   await act(settle);
-  assert.equal(container.querySelector('[role="dialog"]'), null);
+  assertNoDomNode(container.querySelector('[role="dialog"]'));
   assert.equal(container.querySelectorAll(".skills-orphans li").length, 2);
 
   await act(async () => { button("Discard Copy")[0]!.click(); });
@@ -575,7 +576,7 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
   const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-list .row")]
     .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
   assert.ok(entry, "an older runner's unreported copies are not hidden behind an empty list");
-  assert.equal(entry!.querySelector(".status"), null, "no count is claimed");
+  assertNoDomNode(entry!.querySelector(".status"), "no count is claimed");
   await act(async () => { entry!.click(); });
   await act(settle);
   assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "",
@@ -832,8 +833,8 @@ test("SkillsView offers a same-name skill the built-in version and adopts it aft
   assert.equal(acceptButton.disabled, false);
   await view.click(acceptButton);
   assert.deepEqual(accepted, [{ id: "skill-mine", body: { digest: "r1", expectedLatestVersionId: "v1" } }]);
-  assert.equal(view.container.querySelector('[role="dialog"]'), null);
-  assert.equal(view.container.querySelector('[aria-label="Built-In Version Available"]'), null);
+  assertNoDomNode(view.container.querySelector('[role="dialog"]'));
+  assertNoDomNode(view.container.querySelector('[aria-label="Built-In Version Available"]'));
   assert.ok(view.container.querySelector('[aria-label="Built-In Skill"]'));
   await view.unmount();
 });
@@ -886,7 +887,7 @@ test("SkillsView follows the route's selected skill, including back to no select
   assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review", "the deep link selects its skill");
   await act(async () => { route(undefined); });
   await act(settle);
-  assert.equal(container.querySelector(".skills-detail-head"), null, "the bare Skills route clears the selection");
+  assertNoDomNode(container.querySelector(".skills-detail-head"), "the bare Skills route clears the selection");
   assert.match(container.querySelector(".skills-empty")?.textContent ?? "", /Select a skill/);
 
   // A detail load still pending when the route clears never repopulates the pane.
@@ -896,7 +897,7 @@ test("SkillsView follows the route's selected skill, including back to no select
   await act(async () => { route(undefined); });
   await act(async () => { release(); await hold; });
   await act(settle);
-  assert.equal(container.querySelector(".skills-detail-head"), null, "a stale detail load is discarded");
+  assertNoDomNode(container.querySelector(".skills-detail-head"), "a stale detail load is discarded");
   await act(async () => root.unmount());
   mountPoint.remove();
 });

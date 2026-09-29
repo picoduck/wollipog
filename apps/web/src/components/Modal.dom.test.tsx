@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import { FeedbackProvider, useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { Modal } from "./Modal.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 /** The query results the stub answers `true` for. Everything else, including `(pointer: fine)`, is false. */
@@ -76,7 +77,7 @@ test("a dialog is portalled to <body> with the shared anatomy, out of a transfor
   );
   const backdrop = document.querySelector(".modal-backdrop");
   assert.equal(backdrop?.parentElement, document.body, "the backdrop is a direct child of <body>");
-  assert.equal(view.container.querySelector(".modal-backdrop"), null, "nothing renders under the opener's ancestors");
+  assertNoDomNode(view.container.querySelector(".modal-backdrop"), "nothing renders under the opener's ancestors");
   const dialog = document.querySelector('[role="dialog"]')!;
   assert.equal(dialog.getAttribute("aria-modal"), "true");
   assert.equal(dialog.querySelector("h2.modal-title")?.textContent, "Rename Project");
@@ -86,7 +87,7 @@ test("a dialog is portalled to <body> with the shared anatomy, out of a transfor
   assert.equal(document.querySelector(".modal")?.className, "modal", "a form dialog is the default 560px size");
   assert.ok(document.querySelector(".modal > .sheet-grabber[aria-hidden='true']"), "the grabber is decorative");
   await view.unmount();
-  assert.equal(document.querySelector(".modal-backdrop"), null);
+  assertNoDomNode(document.querySelector(".modal-backdrop"));
 });
 
 test("sizes are classes on the surface, and the panel carries the caller's class", async () => {
@@ -169,7 +170,7 @@ test("on a phone a confirmation takes over the open sheet, and Back returns to i
   document.querySelector<HTMLInputElement>('input[aria-label="Members"]')!.value = "Ada, Grace";
   const tertiary = document.querySelector(".modal-body > .modal-tertiary > .btn.ghost.danger");
   assert.ok(tertiary, "a phone sheet moves the destructive tertiary to the body's end");
-  assert.equal(document.querySelector(".modal-foot .modal-tertiary"), null);
+  assertNoDomNode(document.querySelector(".modal-foot .modal-tertiary"));
   await act(async () => { click(tertiary); await tick(); });
 
   assert.equal(document.querySelectorAll(".modal").length, 1, "only one sheet exists in the DOM");
@@ -182,8 +183,8 @@ test("on a phone a confirmation takes over the open sheet, and Back returns to i
   assert.equal(confirmation?.querySelector("h2")?.textContent, "Delete Team");
   const back = confirmation?.querySelector<HTMLButtonElement>(".modal-back");
   assert.equal(back?.getAttribute("aria-label"), "Back to Manage Platform");
-  assert.equal(confirmation?.querySelector(".modal-tone-icon"), null, "Back takes the tone icon's place");
-  assert.equal(confirmation?.querySelector(".modal-close"), null);
+  assertNoDomNode(confirmation?.querySelector(".modal-tone-icon"), "Back takes the tone icon's place");
+  assertNoDomNode(confirmation?.querySelector(".modal-close"));
 
   await act(async () => { click(back!); await tick(); });
   assert.equal(answer, false, "Back resolves the confirmation as cancelled");
@@ -227,8 +228,8 @@ test("long forms open as a full-height phone sheet with a back arrow and no grab
   let closed = false;
   const view = await mount(<Modal title="New Session" phoneSheet="full" onClose={() => { closed = true; }}>Form</Modal>);
   assert.equal(document.querySelector(".modal")?.classList.contains("sheet-full"), true);
-  assert.equal(document.querySelector(".sheet-grabber"), null);
-  assert.equal(document.querySelector(".modal-close"), null);
+  assertNoDomNode(document.querySelector(".sheet-grabber"));
+  assertNoDomNode(document.querySelector(".modal-close"));
   const back = document.querySelector<HTMLButtonElement>(".modal-back");
   assert.equal(back?.getAttribute("aria-label"), "Back");
   await act(async () => { click(back); });
@@ -248,7 +249,7 @@ test("a desktop footer keeps the destructive tertiary far left", async () => {
   const foot = document.querySelector(".modal-foot")!;
   assert.equal(foot.firstElementChild?.className, "modal-tertiary");
   assert.deepEqual([...foot.querySelectorAll("button")].map((button) => button.textContent), ["Delete Team", "Cancel", "Save Members"]);
-  assert.equal(document.querySelector(".modal-body .modal-tertiary"), null);
+  assertNoDomNode(document.querySelector(".modal-body .modal-tertiary"));
   await view.unmount();
 });
 
@@ -267,7 +268,7 @@ test("a destructive confirmation is small, has the warning icon and no close but
   assert.equal(document.querySelector(".modal")?.className, "modal sm");
   const dialog = document.querySelector('[role="dialog"]')!;
   assert.ok(dialog.querySelector(".modal-head > .modal-tone-icon svg"), "the red warning icon precedes the title");
-  assert.equal(dialog.querySelector(".modal-close"), null);
+  assertNoDomNode(dialog.querySelector(".modal-close"));
   assert.deepEqual([...dialog.querySelectorAll(".modal-foot button")].map((button) => [button.className, button.textContent]), [
     ["btn", "Cancel"],
     ["btn danger", "Stop Session"],
@@ -285,7 +286,7 @@ test("a non-destructive confirmation uses a primary button and no tone icon", as
   const view = await mount(<FeedbackProvider><Ask /></FeedbackProvider>);
   await act(async () => { click(view.container.querySelector('[data-testid="ask"]')); await tick(); });
   const dialog = document.querySelector('[role="dialog"]')!;
-  assert.equal(dialog.querySelector(".modal-tone-icon"), null);
+  assertNoDomNode(dialog.querySelector(".modal-tone-icon"));
   assert.equal(dialog.querySelector(".modal-foot .btn.primary")?.textContent, "Recover Session");
   await view.unmount();
 });
@@ -304,7 +305,7 @@ test("a confirmation without a confirm label never opens and resolves as cancell
   const view = await mount(<FeedbackProvider><Ask /></FeedbackProvider>);
   await act(async () => { click(view.container.querySelector('[data-testid="ask"]')); await tick(); });
   assert.equal(answer, false);
-  assert.equal(document.querySelector('[role="dialog"]'), null);
+  assertNoDomNode(document.querySelector('[role="dialog"]'));
   await view.unmount();
 });
 
@@ -344,7 +345,7 @@ test("crossing the phone breakpoint re-hosts open dialogs without losing their v
   assert.equal(document.querySelectorAll(".modal").length, 2, "desktop stacks the child on its parent");
   assert.notEqual(child?.closest(".modal"), parent?.closest(".modal"));
   assert.equal(parent?.hasAttribute("hidden"), false, "the parent is visible under the child");
-  assert.equal(child?.querySelector(".modal-back"), null, "a stacked desktop child has a close button, not Back");
+  assertNoDomNode(child?.querySelector(".modal-back"), "a stacked desktop child has a close button, not Back");
   assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="Team Name"]')?.value, "Platform Core");
 
   matchingMedia = new Set([PHONE]);

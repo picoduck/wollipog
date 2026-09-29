@@ -11,6 +11,7 @@ import {
   queuedPromptsWithControls,
   shouldShowOptimisticPrompt,
 } from "./PendingPromptBubbles.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -229,7 +230,7 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
       />);
     });
     assert.equal(container.querySelectorAll(".pending-prompt-bubble").length, 4);
-    assert.equal(container.querySelector("[data-testid='pending-prompt-delivered']"), null);
+    assertNoDomNode(container.querySelector("[data-testid='pending-prompt-delivered']"));
     assert.deepEqual(
       [...container.querySelectorAll(".pending-prompt-state")].map((node) => node.textContent),
       ["Pending", "Queued", "Cancelled", "Delivery Failed"],
@@ -331,7 +332,7 @@ test("started prompts retire from partial transcripts using durable user-event e
     assert.match(container.textContent ?? "", /287 Delivery Attempts/);
 
     await render([afterCapacityRelease, recoverable]);
-    assert.equal(container.querySelector('[data-testid="pending-prompt-admission-queued"]'), null,
+    assertNoDomNode(container.querySelector('[data-testid="pending-prompt-admission-queued"]'),
       "the receipt's sequence is authoritative even without its event in the loaded page");
     assert.ok(container.querySelector('[data-testid="pending-prompt-uncertain"]'),
       "an uncertain receipt without durable user-event evidence remains recoverable");
@@ -339,7 +340,7 @@ test("started prompts retire from partial transcripts using durable user-event e
     await act(async () => { root.unmount(); });
     root = createRoot(container as unknown as HTMLDivElement);
     await render([afterCapacityRelease, recoverable]);
-    assert.equal(container.querySelector('[data-testid="pending-prompt-admission-queued"]'), null,
+    assertNoDomNode(container.querySelector('[data-testid="pending-prompt-admission-queued"]'),
       "refresh/reconnect cannot resurrect a durable delivered prompt");
     assert.ok(container.querySelector('[data-testid="pending-prompt-uncertain"]'));
   } finally {
@@ -394,7 +395,7 @@ test("retained-prompt Retry and Dismiss are described by the message and the rec
     assert.deepEqual(described(button("Retry")), [
       "Durable messageThe selected worktree could not be verified; this message was not sent.",
     ], "the recovery reason is withdrawn once the worktree is recovered");
-    assert.equal(container.querySelector("#pending-prompt-recovery-retained"), null);
+    assertNoDomNode(container.querySelector("#pending-prompt-recovery-retained"));
   } finally {
     await act(async () => root.unmount());
     container.remove();

@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import { Markdown } from "./Markdown.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -262,11 +263,11 @@ test("streaming URL changes mount no media until the final settled URL", async (
   const final = "https://evidence.example/review.png?signature=valid";
   const { container, root } = await renderMarkdown(first, true, false);
   try {
-    assert.equal(container.querySelector(".md-media-embed"), null);
+    assertNoDomNode(container.querySelector(".md-media-embed"));
     await act(async () => {
       root.render(<Markdown highlightEligible={false} inlineMedia mediaSettled={false}>{second}</Markdown>);
     });
-    assert.equal(container.querySelector(".md-media-embed"), null);
+    assertNoDomNode(container.querySelector(".md-media-embed"));
 
     await act(async () => {
       root.render(<Markdown highlightEligible={false} inlineMedia mediaSettled>{final}</Markdown>);
@@ -329,7 +330,7 @@ test("a completed signed media URL retries after its streamed unsigned prefix fa
     await act(async () => {
       container.querySelector("img.md-media-image")!.dispatchEvent(new domWindow.Event("error") as unknown as Event);
     });
-    assert.equal(container.querySelector("img.md-media-image"), null);
+    assertNoDomNode(container.querySelector("img.md-media-image"));
 
     await act(async () => {
       root.render(<Markdown highlightEligible={false} inlineMedia>{signed}</Markdown>);

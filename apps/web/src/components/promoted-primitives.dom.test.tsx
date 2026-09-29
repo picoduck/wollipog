@@ -12,6 +12,7 @@ import { ListFoot } from "./ListFoot.js";
 import { SaveBar } from "./SaveBar.js";
 import { StaleContent } from "./StaleContent.js";
 import { Steps } from "./Steps.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 /*
  * The shared components that carry the promoted classes of docs/design-system.md §19.4 before any
@@ -80,7 +81,7 @@ test("StaleContent dims last-known content without hiding it (§12.5)", async ()
     assert.match(rule(".is-stale"), /--text:\s*var\(--text-dim\);/);
     assert.doesNotMatch(rule(".is-stale"), /opacity/);
     await view.rerender(<StaleContent stale={false}><button type="button">Open Session</button></StaleContent>);
-    assert.equal(view.container.querySelector(".is-stale"), null, "live content is not dimmed");
+    assertNoDomNode(view.container.querySelector(".is-stale"), "live content is not dimmed");
   } finally {
     await view.unmount();
   }
@@ -121,7 +122,7 @@ test("SaveBar shows only while there is something to save, and a failed save off
   );
   const view = await render(bar({ dirty: false }));
   try {
-    assert.equal(view.container.querySelector(".save-bar"), null, "a clean editor has no bar");
+    assertNoDomNode(view.container.querySelector(".save-bar"), "a clean editor has no bar");
 
     await view.rerender(bar({ dirty: true }));
     const dirty = view.container.querySelector<HTMLElement>(".save-bar")!;

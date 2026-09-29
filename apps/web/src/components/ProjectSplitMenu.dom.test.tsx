@@ -11,6 +11,7 @@ import type { InboxSplit } from "../inbox.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
 for (const [name, value] of Object.entries({
@@ -140,7 +141,7 @@ test("project split menu is fixed, keyboard-managed, and restores trigger focus"
     );
     await tick();
   });
-  assert.equal(body.querySelector('[role="menu"]'), null);
+  assertNoDomNode(body.querySelector('[role="menu"]'));
   assert.equal(domWindow.document.activeElement, trigger);
 
   await act(async () => { root.unmount(); });

@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { useConnectionLostFor } from "../connection-lost.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import type { UiConnectionRuntime, UiSocket } from "../ui-transport.js";
@@ -224,13 +225,13 @@ test("the banner appears only after 2s of disconnection and clears when back onl
     await view.online();
     await view.fail();
     await advance(1500);
-    assert.equal(view.banner(), null, "a blip shorter than 2s shows nothing");
+    assertNoDomNode(view.banner(), "a blip shorter than 2s shows nothing");
     await view.fail();
     await advance(600);
     assert.ok(view.banner(), "disconnection across the store's retry counts from the first loss");
     await view.click();
     await view.online();
-    assert.equal(view.banner(), null);
+    assertNoDomNode(view.banner());
   } finally {
     await view.dispose();
   }
@@ -256,7 +257,7 @@ test("any other build shows neither the address nor pnpm dev anywhere in the ban
   try {
     await view.goOffline();
     const banner = view.banner()!;
-    assert.equal(banner.querySelector("details"), null, "no Show Details");
+    assertNoDomNode(banner.querySelector("details"), "no Show Details");
     assert.doesNotMatch(banner.textContent!, /pnpm dev/);
     assert.doesNotMatch(banner.textContent!, /127\.0\.0\.1|4317/);
     assert.equal(banner.textContent, "Can't reach Wollipog on this machine. Reconnecting…Retry Now");

@@ -4,6 +4,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { PersonalIdentifier, PersonalIdentifierRevealButton, usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
@@ -127,7 +128,7 @@ test("aliases stay readable and provenance can force masking of any value", asyn
   const alias = await mount(<PersonalIdentifier value="Work" label="Account Email" />);
   try {
     assert.equal(alias.container.textContent, "Work");
-    assert.equal(alias.container.querySelector("button"), null);
+    assertNoDomNode(alias.container.querySelector("button"));
   } finally {
     await unmount(alias);
   }

@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionCommandPermission, SessionReminderView, SessionView } from "@wollipog/protocol";
 import { InboxRow } from "./InboxRow.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ApiProvider } from "../api-context.js";
 
@@ -36,8 +37,8 @@ test("a multi-request row shows one attention pill per kind with its count and n
     await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
       selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
       threeRow={false} onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
-    assert.equal(container.querySelector(".attention-requests"), null, "the request disclosure is gone (#896)");
-    assert.equal(container.querySelector("button button"), null);
+    assertNoDomNode(container.querySelector(".attention-requests"), "the request disclosure is gone (#896)");
+    assertNoDomNode(container.querySelector("button button"));
     const pills = [...container.querySelectorAll<HTMLElement>(".inbox-row-signals .status.t-warning")];
     assert.deepEqual(pills.map((pill) => pill.getAttribute("aria-label")),
       ["Attention: Answer Required", "Attention: Approval Required, 2 Requests"],
@@ -84,7 +85,7 @@ test("a parent row carries the chevron and family chip, and a child row its thre
     assert.equal(chevron.getAttribute("aria-label"), "Collapse Thread");
     assert.equal(chevron.getAttribute("aria-expanded"), "true");
     assert.equal(chevron.getAttribute("tabindex"), "-1", "the grid owns the keyboard; T toggles");
-    assert.equal(container.querySelector("button button"), null, "the chevron is not nested in the row button");
+    assertNoDomNode(container.querySelector("button button"), "the chevron is not nested in the row button");
     const chip = container.querySelector<HTMLElement>(".inbox-thread-family")!;
     assert.match(chip.className, /waiting/);
     assert.equal(chip.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input");
@@ -103,7 +104,7 @@ test("a parent row carries the chevron and family chip, and a child row its thre
     assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input",
       "the rollup reads the same while collapsed");
     assert.ok(container.querySelector('[aria-label="Contains Pinned Session"] svg'));
-    assert.equal(container.querySelector('[aria-label="Pinned Session"]'), null,
+    assertNoDomNode(container.querySelector('[aria-label="Pinned Session"]'),
       "the promoted parent never claims the descendant's direct pin");
 
     const child = { ...parent, id: "c1", title: "Child One", parentSessionId: "parent" } as SessionView;
@@ -112,8 +113,8 @@ test("a parent row carries the chevron and family chip, and a child row its thre
       threeRow={false} threadDepth={1} threadLast
       onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
     assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-last/);
-    assert.equal(container.querySelector(".inbox-thread-toggle"), null);
-    assert.equal(container.querySelector(".inbox-thread-family"), null);
+    assertNoDomNode(container.querySelector(".inbox-thread-toggle"));
+    assertNoDomNode(container.querySelector(".inbox-thread-family"));
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -343,8 +344,8 @@ test("idle Inbox rows retain authoritative background work alongside attention",
         assert.equal(badge?.querySelector('span[aria-hidden="true"]:last-child')?.textContent, visible);
         assert.equal(badge?.getAttribute("role"), null, "rows must not create hundreds of live regions");
       } else {
-        assert.equal(badge, null);
-        assert.equal(container.querySelector(".inbox-row-background-work"), null);
+        assertNoDomNode(badge);
+        assertNoDomNode(container.querySelector(".inbox-row-background-work"));
       }
     });
   }
@@ -359,7 +360,7 @@ test("a session with a worktree gets a third line, and a default base ref is lef
     (container) => {
       const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
       assert.equal(line.querySelector(".inbox-row-branch")?.textContent, "fix/issue-664");
-      assert.equal(line.querySelector(".inbox-row-base"), null, "origin/main is what every reader assumes");
+      assertNoDomNode(line.querySelector(".inbox-row-base"), "origin/main is what every reader assumes");
       assert.equal(line.querySelector(".inbox-row-pr-pill")?.textContent, "Open PR");
       assert.equal(line.querySelector(".inbox-row-pr-pill")?.getAttribute("aria-label"), "Pull Request: Open");
     },
@@ -385,7 +386,7 @@ test("a base ref that is not the default is spelled out on the worktree line", a
 test("Inbox rows no longer render the message preview, and every row keeps its Git line", async () => {
   await withRow(worktreeSession(null), (container) => {
     assert.doesNotMatch(container.textContent ?? "", /first line of the last message/);
-    assert.equal(container.querySelector(".inbox-row-snippet"), null);
+    assertNoDomNode(container.querySelector(".inbox-row-snippet"));
     // #782: line three is unconditional, so a session with no worktree says so instead of vanishing.
     assert.notEqual(container.querySelector(".inbox-row-meta"), null);
     assert.equal(container.querySelector(".inbox-row-branch-state")?.textContent, "No Branch");
@@ -421,9 +422,9 @@ test("a session's Git line names its branch, admits to none, or admits to not kn
       if (stateClass) {
         assert.equal(state?.textContent, label);
         assert.ok(state!.classList.contains(stateClass), `${label} carries its own state class`);
-        assert.equal(line.querySelector(".inbox-row-branch"), null);
+        assertNoDomNode(line.querySelector(".inbox-row-branch"));
       } else {
-        assert.equal(state, null);
+        assertNoDomNode(state);
         assert.equal(line.querySelector(".inbox-row-branch")?.textContent, label);
       }
       // The accessible name says which of the three it is, not just what the text happens to read.
@@ -488,7 +489,7 @@ test("a desktop card carries background work on the title line, left of the acti
         assert.deepEqual(titleLineOrder(copy), ["title", "background-work", "activity"]);
         // Still exactly one badge: it MOVED between lines, it was not duplicated and hidden.
         assert.equal(container.querySelectorAll(".inbox-row-background-work").length, 1);
-        assert.equal(container.querySelector(".inbox-row-meta .inbox-row-background-work"), null);
+        assertNoDomNode(container.querySelector(".inbox-row-meta .inbox-row-background-work"));
         // The Git state itself does not move out of its own element; only its line does, in CSS.
         assert.notEqual(container.querySelector(".inbox-row-meta .inbox-row-git"), null);
       },
@@ -504,7 +505,7 @@ test("a desktop card with background work but no activity strip keeps the badge 
     { ...worktreeSession(null), status: "idle", backgroundWorkState: "continuation_pending" } as SessionView,
     (container) => {
       const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
-      assert.equal(copy.querySelector(".inbox-row-activity"), null, "an idle session draws no strip");
+      assertNoDomNode(copy.querySelector(".inbox-row-activity"), "an idle session draws no strip");
       assert.deepEqual(titleLineOrder(copy), ["title", "background-work"]);
       assert.equal(
         copy.querySelector('.status[data-group="background-work"]')?.getAttribute("aria-label"),

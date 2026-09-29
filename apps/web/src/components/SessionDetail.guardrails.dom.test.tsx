@@ -12,6 +12,7 @@ import type {
   WorkflowDecisionAuthority,
   WorkflowDecisionCategory,
 } from "@wollipog/protocol";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -342,7 +343,7 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
     await act(async () => fireDomEvent.click(
       page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!,
     ));
-    assert.equal(page().querySelector('[aria-label^="Parent Control:"]'), null);
+    assertNoDomNode(page().querySelector('[aria-label^="Parent Control:"]'));
 
     await act(async () => render("orchestrator"));
     const select = page().querySelector<HTMLButtonElement>('[aria-label="Parent Control: Human"]');

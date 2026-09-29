@@ -10,6 +10,7 @@ import { ApiProvider } from "../api-context.js";
 import { claimQuestionResponseOperation, clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
 import { SessionApprovalBanner, SessionQuestionBanner } from "./SessionApproval.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -307,7 +308,7 @@ test("unsupported multi-select Other responses are deactivated while Dismiss rem
 
   try {
     await renderBanner(root, questions, true, client);
-    assert.equal(container.querySelector(".question-input"), null);
+    assertNoDomNode(container.querySelector(".question-input"));
     const choice = container.querySelector<HTMLButtonElement>('[role="checkbox"]');
     assert.ok(choice);
     assert.equal(choice.disabled, true);
@@ -367,7 +368,7 @@ test("constrained free text exposes its shared validation reason and accessible 
     assert.equal(submitButton(container).disabled, true);
 
     await act(async () => { setInputValue(input, "3"); });
-    assert.equal(container.querySelector(".question-field-error"), null);
+    assertNoDomNode(container.querySelector(".question-field-error"));
     assert.equal(input.getAttribute("aria-invalid"), null);
     assert.equal(submitButton(container).disabled, false);
   } finally {
@@ -502,7 +503,7 @@ test("Composer Response keeps the transcript card as context without card-owned 
   try {
     setQuestionResponseStyle("composer", domWindow as never);
     await renderBanner(root, questions, true);
-    assert.equal(container.querySelector(".question-input"), null);
+    assertNoDomNode(container.querySelector(".question-input"));
     assert.equal(container.querySelector(".approval-actions button")?.textContent?.trim(), "Dismiss D");
     assert.match(container.textContent ?? "", /Respond through Answer Mode in the Session composer/);
     assert.deepEqual([...container.querySelectorAll(".question-text-options li")].map((item) => item.textContent?.trim()), [
@@ -614,7 +615,7 @@ test("Interactive Other intent survives an exact option prefix while fixed click
     for (const value of ["Prod", "Production", "Production west region"]) {
       await act(async () => { setInputValue(input, value); });
       assert.equal(input.value, value);
-      assert.equal(container.querySelector('[role="radio"][aria-checked="true"]'), null);
+      assertNoDomNode(container.querySelector('[role="radio"][aria-checked="true"]'));
     }
     await act(async () => {
       submitButton(container).click();
@@ -673,7 +674,7 @@ test("Interactive numeric Other submits prose without applying hidden ordinal sy
     const input = container.querySelector<HTMLInputElement>('.question-input[type="number"]');
     assert.ok(input);
     await act(async () => { setInputValue(input, "2"); });
-    assert.equal(container.querySelector('[role="radio"][aria-checked="true"]'), null);
+    assertNoDomNode(container.querySelector('[role="radio"][aria-checked="true"]'));
     await act(async () => {
       submitButton(container).click();
       await tick();
@@ -718,7 +719,7 @@ test("Composer Response never renders secret entry controls in the transcript ca
   try {
     setQuestionResponseStyle("composer", domWindow as never);
     await renderBanner(root, questions, true, api, "question-virtualized");
-    assert.equal(container.querySelector("input"), null);
+    assertNoDomNode(container.querySelector("input"));
     assert.match(container.textContent ?? "", /Respond through Answer Mode/);
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
@@ -836,7 +837,7 @@ test("a Viewer sees a permission request's options disabled with the reason, and
             `${presentation}: the visible reason describes the option`);
         } else {
           assert.equal(approve.disabled, false, `${presentation}: Approve is offered as before`);
-          assert.equal(container.querySelector(".approval-refusal"), null);
+          assertNoDomNode(container.querySelector(".approval-refusal"));
         }
         await act(async () => { approve.click(); await tick(); });
         assert.deepEqual(decisions, respond?.allowed === false ? [] : ["approve"],

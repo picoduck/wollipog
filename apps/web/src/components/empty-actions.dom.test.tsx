@@ -17,6 +17,7 @@ import { AutomationsView } from "./AutomationsView.js";
 import { Board } from "./Board.js";
 import { RunnersView } from "./RunnersView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 /**
@@ -253,7 +254,7 @@ test("deleting the automation being edited closes the editor", async () => {
   await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
   await act(async () => { await Promise.resolve(); });
 
-  assert.equal(container.querySelector(".automation-editor"), null,
+  assertNoDomNode(container.querySelector(".automation-editor"),
     "an editor pointed at a deleted automation has nothing left to save");
   assert.deepEqual(updated, []);
   await unmount();
@@ -267,14 +268,14 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
   const { container, socket, unmount } = await mount({}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [session] })); });
 
-  assert.equal(container.querySelector(".state"), null, "one unfiltered session is not an empty board");
+  assertNoDomNode(container.querySelector(".state"), "one unfiltered session is not an empty board");
 
   const machine = container.querySelector("select") as unknown as HTMLSelectElement;
   await act(async () => {
     machine.value = "runner-1";
     fireDomEvent.change(machine as never, { target: { value: "runner-1" } as never });
   });
-  assert.equal(container.querySelector(".state"), null, "the filter that matches is not empty either");
+  assertNoDomNode(container.querySelector(".state"), "the filter that matches is not empty either");
 
   // A Machine with no sessions on it.
   await act(async () => { socket.push(snapshot({ runners: [runner, { ...runner, runnerId: "runner-2", hostname: "other" }], sessions: [session] })); });
@@ -291,7 +292,7 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
 
   await act(async () => { fireDomEvent.click(action as never); });
   assert.equal(created, 0, "clearing a filter is not creating a session");
-  assert.equal(container.querySelector(".state"), null, "and it has to actually put the sessions back");
+  assertNoDomNode(container.querySelector(".state"), "and it has to actually put the sessions back");
   await unmount();
 });
 
@@ -405,7 +406,7 @@ test("a workflow-definition failure cannot keep a deleted automation on screen",
   await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
   await act(async () => { await Promise.resolve(); });
 
-  assert.equal(container.querySelector(".automation-editor"), null,
+  assertNoDomNode(container.querySelector(".automation-editor"),
     "an unrelated service being down must not keep an editor open on a deleted automation");
   assert.deepEqual(updated, []);
   await unmount();
@@ -435,7 +436,7 @@ test("deleting the edited automation leaves the others alone", async () => {
   await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
   await act(async () => { await Promise.resolve(); });
 
-  assert.equal(container.querySelector(".automation-editor"), null, "the edited automation is gone");
+  assertNoDomNode(container.querySelector(".automation-editor"), "the edited automation is gone");
   assert.equal(container.querySelectorAll(".automation-card").length, 1, "the other one is not");
   await unmount();
 });

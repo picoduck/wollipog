@@ -14,6 +14,7 @@ import { setQuestionResponseStyle } from "../question-response-style.js";
 import { api } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { withScopedClockOverrides } from "./test-clock-overrides.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -82,7 +83,7 @@ test("accessible menus focus selected enabled items, navigate, and restore their
     domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await tick();
   });
-  assert.equal(container.querySelector('[role="menu"]'), null);
+  assertNoDomNode(container.querySelector('[role="menu"]'));
   assert.equal(domWindow.document.activeElement, trigger);
   await act(async () => { root.unmount(); });
   container.remove();
@@ -126,7 +127,7 @@ test("collection-owned menus skip disabled rows and restore on Escape", async ()
     domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await tick();
   });
-  assert.equal(container.querySelector('[data-testid="collection-menu"]'), null);
+  assertNoDomNode(container.querySelector('[data-testid="collection-menu"]'));
   assert.equal(domWindow.document.activeElement, trigger);
   await act(async () => { root.unmount(); });
   container.remove();
@@ -230,7 +231,7 @@ async function openFirstAndCommit(container: HTMLDivElement) {
   const restore = await withCapturedZeroDelayTimers(async () => {
     await act(async () => { beta.click(); });
   });
-  assert.equal(container.querySelector('[role="listbox"][aria-label="First"]'), null,
+  assertNoDomNode(container.querySelector('[role="listbox"][aria-label="First"]'),
     "committing an option closes the list it was chosen from");
   return { first, restore };
 }
@@ -614,7 +615,7 @@ test("the inline evidence card blocks an artifact it cannot show instead of link
     });
     const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
       .find((candidate) => candidate.textContent?.includes(name))!;
-    assert.equal(container.querySelector('[href="https://evidence.example/vector.svg"]'), null);
+    assertNoDomNode(container.querySelector('[href="https://evidence.example/vector.svg"]'));
     assert.ok(container.querySelector('[href="https://evidence.example/legacy.png"]'), "URI-only evidence keeps its link");
     assert.match(container.querySelector('.evidence-artifact[data-status="unsupported"]')?.textContent ?? "",
       /This artifact is image\/svg\+xml, which the review card cannot show/u);
@@ -711,12 +712,12 @@ test("question focus and draft survive transcript hydration without exposing a s
   assert.equal(container.querySelector<HTMLElement>('[role="radio"]')?.getAttribute("aria-checked"), "true");
   assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
   assert.equal(container.querySelectorAll('[role="radio"]').length, 2);
-  assert.equal(container.querySelector(".tl-question"), null,
+  assertNoDomNode(container.querySelector(".tl-question"),
     "the live inline form replaces the hydrated historical card");
   await act(async () => { root.render(<QuestionPresentationHarness hydrated={false} />); });
   assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1,
     "unmounting the inline timeline restores the reachable fallback");
-  assert.equal(container.querySelector(".tl-question"), null);
+  assertNoDomNode(container.querySelector(".tl-question"));
   await act(async () => { root.unmount(); });
   clearQuestionDrafts("session-1", "ask-a");
   container.remove();

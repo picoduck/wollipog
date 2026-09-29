@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { DetailBar, PageChromeProvider, PageHeader } from "./PageHeader.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
 const priorWindow = globalThis.window;
@@ -163,7 +164,7 @@ test("⋯ lists exactly the secondaries whose buttons the header hid, plus its o
 
   const none = await mount(<PageHeader title="Settings" />);
   try {
-    assert.equal(none.container.querySelector(".page-actions"), null, "a title-only header has no action row");
+    assertNoDomNode(none.container.querySelector(".page-actions"), "a title-only header has no action row");
   } finally {
     await none.unmount();
   }

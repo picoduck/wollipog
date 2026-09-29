@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { InboxCreateMenu } from "./InboxCreateMenu.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
 const priorWindow = globalThis.window;
@@ -62,7 +63,7 @@ test("Inbox creation offers both workflows with menu-button keyboard and focus b
     await act(async () => { items[0]!.click(); });
     assert.equal(sessions, 1);
     assert.equal(projects, 0);
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
     assert.equal(domWindow.document.activeElement, trigger, "choosing a workflow restores focus before opening its layer");
 
     await act(async () => {

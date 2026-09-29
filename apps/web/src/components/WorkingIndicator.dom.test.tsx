@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { ActiveTurnProgress } from "../turn-progress.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
@@ -92,9 +93,9 @@ test("without derived progress the row stays the plain Working indicator", async
   try {
     await act(async () => root.render(<WorkingIndicator label="Read config.ts" />));
     assert.match(container.textContent ?? "", /Read config\.ts/);
-    assert.equal(container.querySelector(".tl-working-metric"), null,
+    assertNoDomNode(container.querySelector(".tl-working-metric"),
       "no metric slots render before any turn facts are observable");
-    assert.equal(container.querySelector(".tl-working-operation"), null,
+    assertNoDomNode(container.querySelector(".tl-working-operation"),
       "without an event id there is nothing to deep-link");
   } finally {
     await act(async () => root.unmount());

@@ -17,6 +17,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import {
   PANEL_SCRATCH_SESSION_LIMIT,
@@ -305,7 +306,7 @@ test("Review drafts and view choices survive a mode switch and a panel close", a
     await act(async () => fireDomEvent.click(choice(panel, "Diff Layout", "Side by Side")));
 
     await panel.show("files");
-    assert.equal(field(panel, "PR Description"), null, "the Review body is unmounted, not hidden");
+    assertNoDomNode(field(panel, "PR Description"), "the Review body is unmounted, not hidden");
 
     await panel.show("review");
     assert.equal(commitInput(panel).value, "fix: keep the panel's drafts");
@@ -316,7 +317,7 @@ test("Review drafts and view choices survive a mode switch and a panel close", a
     assert.equal(choice(panel, "Diff Layout", "Side by Side").getAttribute("aria-checked"), "true");
 
     await act(async () => panel.state.close());
-    assert.equal(panel.container.querySelector(".right-panel"), null, "a closed panel renders nothing");
+    assertNoDomNode(panel.container.querySelector(".right-panel"), "a closed panel renders nothing");
     await panel.show("review");
     assert.equal(field(panel, "PR Description")!.value, "Round-tripping the whole body.",
       "closing and reopening the panel is the same unmount");
@@ -361,7 +362,7 @@ test("a remembered directory that no longer exists falls back to the root listin
       await panel.show("files");
       assert.deepEqual(listed, ["apps", ""], "it resumes the remembered directory, then falls back");
       assert.equal(crumbs(panel), "root", "a gone directory cannot strand the browser on an error");
-      assert.equal(panel.container.querySelector(".composer-error"), null);
+      assertNoDomNode(panel.container.querySelector(".composer-error"));
       assert.equal(panel.container.querySelector(".files-list .row-title")?.textContent, "apps");
     } finally {
       tree.apps = [{ name: "web", path: "apps/web", isDir: true }];

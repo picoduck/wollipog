@@ -10,6 +10,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { EditorSelect } from "./EditorSelect.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -198,7 +199,7 @@ test("destination menu launches immediately, persists the primary action, and re
     }], "choosing a destination launches it immediately");
     assert.equal(domWindow.localStorage.getItem("wollipog.editor.lastUsed"), "cursor");
     assert.equal(domWindow.localStorage.getItem("wollipog.openDestination.lastUsed"), "editor:cursor");
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "selection closes the menu");
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "selection closes the menu");
     assert.equal(domWindow.document.activeElement, choose, "selection restores focus to the picker");
 
     const selectedMain = container.querySelector<HTMLButtonElement>('button[aria-label="Open in Cursor"]');
@@ -228,7 +229,7 @@ test("destination menu launches immediately, persists the primary action, and re
       );
     });
     await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
     assert.equal(domWindow.document.activeElement, choose, "Escape restores focus to the chevron");
   } finally {
     await mounted.cleanup();
@@ -295,7 +296,7 @@ test("busy launches stay focusable, suppress duplicates, and expose failure feed
     assert.equal(calls.length, 1);
     assert.equal(container.querySelector('[role="status"]')?.textContent, "A destination launch is already in progress.");
     act(() => { choose.click(); });
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "the menu cannot start another launch while busy");
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "the menu cannot start another launch while busy");
 
     await act(async () => {
       settleLaunch(new Error("Editor process failed to start."));
@@ -324,7 +325,7 @@ test("offline runners remain understandable while remote and unsupported runners
     await act(async () => { main.click(); });
     assert.equal(offline.container.querySelector('[role="status"]')?.textContent, "Runner is offline.");
     await offline.pushRunner({ ...runner, status: "online" });
-    assert.equal(offline.container.querySelector('[role="status"]'), null, "reconnecting clears stale offline feedback");
+    assertNoDomNode(offline.container.querySelector('[role="status"]'), "reconnecting clears stale offline feedback");
 
     const reopenedChoose = offline.container.querySelector<HTMLButtonElement>('button[aria-label="Choose Destination"]');
     assert.ok(reopenedChoose);
@@ -334,7 +335,7 @@ test("offline runners remain understandable while remote and unsupported runners
       .find((item) => item.textContent?.includes("Cursor"));
     assert.ok(cursor);
     await act(async () => { cursor.click(); });
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "an offline transition closes the stale menu");
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "an offline transition closes the stale menu");
     assert.equal(offline.container.querySelector('[role="status"]')?.textContent, "Runner is offline.");
   } finally {
     await offline.cleanup();
@@ -342,7 +343,7 @@ test("offline runners remain understandable while remote and unsupported runners
 
   const unsupported = await mountEditor(client, { ...runner, protocolVersion: 21 });
   try {
-    assert.equal(unsupported.container.querySelector(".editor-select"), null);
+    assertNoDomNode(unsupported.container.querySelector(".editor-select"));
   } finally {
     await unsupported.cleanup();
   }
@@ -356,7 +357,7 @@ test("offline runners remain understandable while remote and unsupported runners
     createdAt: 1,
   }]);
   try {
-    assert.equal(remote.container.querySelector(".editor-select"), null);
+    assertNoDomNode(remote.container.querySelector(".editor-select"));
   } finally {
     await remote.cleanup();
   }

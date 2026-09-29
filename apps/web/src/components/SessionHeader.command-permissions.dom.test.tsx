@@ -8,6 +8,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionHeader } from "./SessionHeader.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/session/session-permissions" });
 for (const [name, value] of Object.entries({
@@ -177,7 +178,7 @@ test("a person who may stop and restart keeps the Runtime items as before (#1843
       assert.equal(stop.disabled, false);
       assert.equal(stop.getAttribute("aria-describedby"), null);
       assert.equal(stop.title, "Terminate the agent process and discard queued messages");
-      assert.equal(page().querySelector("#session-runtime-caution"), null);
+      assertNoDomNode(page().querySelector("#session-runtime-caution"));
       await act(async () => { stop.click(); await tick(); await tick(); });
       assert.deepEqual(calls, ["confirm", "stop:session-running"]);
     } finally {
@@ -241,7 +242,7 @@ test("a person who may archive and unarchive keeps the archive item as before", 
       const archive = menuItem(page(), "Archive and Stop");
       assert.equal(archive.disabled, false);
       assert.equal(archive.getAttribute("aria-describedby"), null);
-      assert.equal(page().querySelector("#session-archive-caution"), null);
+      assertNoDomNode(page().querySelector("#session-archive-caution"));
       await act(async () => { archive.click(); await tick(); await tick(); });
       assert.deepEqual(calls, ["confirm", "archived:session-running:true"]);
     } finally {
@@ -278,7 +279,7 @@ test("a Viewer sees Rename Session disabled with the reason, and the rename dial
         assert.equal(description(rename), VIEWER);
         assert.equal(page().querySelector("#session-rename-caution")?.textContent, VIEWER);
       } else {
-        assert.equal(page().querySelector("#session-rename-caution"), null);
+        assertNoDomNode(page().querySelector("#session-rename-caution"));
       }
       await act(async () => { rename.click(); await tick(); });
       const dialog = domWindow.document.querySelector('[role="dialog"]');
@@ -326,7 +327,7 @@ test("a Viewer's Fork Conversation is disabled and describes the refusal; an all
       assert.equal(fork.disabled, false);
       assert.equal(fork.title, "Fork Conversation");
       assert.equal(fork.getAttribute("aria-describedby"), null);
-      assert.equal(page().querySelector("#session-fork-refusal"), null);
+      assertNoDomNode(page().querySelector("#session-fork-refusal"));
     } finally {
       await allowed.unmount();
     }

@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { TimelineItem } from "../timeline.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { EventTimeline } from "./EventTimeline.js";
 
@@ -89,6 +90,6 @@ test("tool rows carry the shared status badge: Running, Failed and Pending as ba
     ["Completed", "t-success", true],
     ["Pending", "t-neutral", false],
   ]);
-  assert.equal(container.querySelector(".tool-status"), null, "the retired pill recipe is gone");
+  assertNoDomNode(container.querySelector(".tool-status"), "the retired pill recipe is gone");
   assert.equal(container.querySelector('.tl-tool summary')?.getAttribute("aria-label"), "Build · Failed");
 });

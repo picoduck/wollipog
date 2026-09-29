@@ -7,6 +7,7 @@ import type { RunnerView, SessionView, UiSnapshotMessage } from "@wollipog/proto
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { Board } from "./Board.js";
 import { State, stateVariant } from "./State.js";
@@ -59,7 +60,7 @@ test("an empty state is top-left, carries its next step, and has no card or succ
     await act(async () => root.render(<State variant="error" title="Couldn't Load Skills">The request failed.</State>));
     const error = container.querySelector(".notice.t-danger[role=\"alert\"]");
     assert.ok(error, "an error state is a danger notice in the content's place (§12.4)");
-    assert.equal(container.querySelector(".state"), null);
+    assertNoDomNode(container.querySelector(".state"));
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -119,7 +120,7 @@ test("a board whose snapshot has not loaded says Loading, and a disconnected one
 
     await act(async () => socket.push(emptySnapshot));
     assert.match(text(), /No Sessions Yet/, "an authoritative empty snapshot is the only thing that says so");
-    assert.equal(container.querySelector(".state.loading"), null);
+    assertNoDomNode(container.querySelector(".state.loading"));
 
     await act(async () => socket.drop());
     assert.ok(container.querySelector(".state.offline"), "a dropped connection is offline, whatever loaded before");

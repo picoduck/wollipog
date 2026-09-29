@@ -17,6 +17,7 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -172,7 +173,7 @@ test("a campaign parent's session detail lists held children from its projection
       session: { ...parent, orchestratorCampaign: campaign(undefined, 0) },
     }));
     await settle();
-    assert.equal(section(), null, "no held children renders nothing, as an older control plane would");
+    assertNoDomNode(section(), "no held children renders nothing, as an older control plane would");
   } finally {
     await act(async () => root.unmount());
     container.remove();

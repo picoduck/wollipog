@@ -23,6 +23,7 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { AutomationsView } from "./AutomationsView.js";
 import { agentOptions } from "./agent-options.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -1113,7 +1114,7 @@ test("cards expand independently and collapse back to header-only", async () => 
     assert.equal(expansionOf(fixture.container, "Alpha"), "false");
     assert.equal(expansionOf(fixture.container, "Beta"), "true");
     assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 1);
-    assert.equal(fixture.container.querySelector("#automation-body-automation-a"), null);
+    assertNoDomNode(fixture.container.querySelector("#automation-body-automation-a"));
   } finally {
     await unmountFixture(fixture);
   }

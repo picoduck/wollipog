@@ -8,6 +8,7 @@ import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
 import { AgentHarnessDefaultsPanel } from "./SettingsView.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/settings/behavior" });
 const previous = new Map<string, unknown>();
@@ -548,7 +549,7 @@ test("Agent Harness manual Refresh explains repaired draft fields and clears the
 
     await act(async () => buttonNamed(fixture.container, "Save").click());
     await nextFrame();
-    assert.equal(fixture.container.querySelector(".agent-defaults-draft-notice"), null);
+    assertNoDomNode(fixture.container.querySelector(".agent-defaults-draft-notice"));
     assert.equal(codexRow.getAttribute("aria-expanded"), "false");
     await act(async () => codexRow.click());
     assert.equal(fixture.container.querySelector(".agent-defaults-draft-notice")?.textContent, "");
@@ -637,7 +638,7 @@ test("Agent Harness discovery refresh reports only changed drafts and closes a r
     await fixture.render({ revision: 2 });
     assert.equal(domWindow.document.activeElement, permission);
     assert.match(buttonNamed(fixture.container, "Codex App Server Model").getAttribute("aria-label") ?? "", /Choose Model/);
-    assert.equal(fixture.container.querySelector('[aria-label^="Codex App Server Reasoning Effort:"]'), null);
+    assertNoDomNode(fixture.container.querySelector('[aria-label^="Codex App Server Reasoning Effort:"]'));
     assert.match(buttonNamed(fixture.container, "Codex App Server Permission Mode").getAttribute("aria-label") ?? "", /Full Access/);
     const notice = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
     assert.equal(notice, persistentStatus);

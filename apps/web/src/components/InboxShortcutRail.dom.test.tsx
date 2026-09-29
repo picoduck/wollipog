@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import { InboxShortcutRail, type InboxShortcutRailProps } from "./InboxShortcutRail.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
 for (const [name, value] of Object.entries({
@@ -56,8 +57,8 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
     [...toolbar.querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
     ["Reply", "Expand", "Fork", "Pin", "Unread", "Archive and Stop", "Snooze"],
   );
-  assert.equal(toolbar.querySelector('[aria-label="Approve"]'), null);
-  assert.equal(toolbar.querySelector('[aria-label="Deny"]'), null);
+  assertNoDomNode(toolbar.querySelector('[aria-label="Approve"]'));
+  assertNoDomNode(toolbar.querySelector('[aria-label="Deny"]'));
   assert.equal(toolbar.querySelector('[aria-label="Expand"] kbd')?.textContent, "Enter");
 
   await act(async () => {
@@ -105,7 +106,7 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
     root.render(<InboxShortcutRail {...props} session={session(null, "completed")} pinned={false} busy={false} />);
   });
   assert.ok(container.querySelector('[aria-label="Archive"]'));
-  assert.equal(container.querySelector('[aria-label="Archive and Stop"]'), null);
+  assertNoDomNode(container.querySelector('[aria-label="Archive and Stop"]'));
 
   await act(async () => {
     root.render(<InboxShortcutRail {...props} session={{ ...session(null, "stopped"), archiveStatus: "stop_pending" }} pinned={false} busy={false} />);

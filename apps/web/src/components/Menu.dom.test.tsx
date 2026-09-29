@@ -10,6 +10,7 @@ import { FeedbackContext } from "./FeedbackProvider.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { Rail } from "./Rail.js";
 import { SessionHeader } from "./SessionHeader.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 /**
  * The shared menu primitive (docs/design-system.md §9.1) and the keyboard contract every menu keeps
@@ -138,18 +139,18 @@ async function assertKeyboardContract(name: string, reopen: () => Promise<HTMLEl
   assert.equal(focusedLabel(), labels[targetIndex], "type-ahead moves to the matching item");
 
   await press("Escape");
-  assert.equal(doc().querySelector(`[role="menu"][aria-label="${name}"]`), null, "Escape closes the menu");
+  assertNoDomNode(doc().querySelector(`[role="menu"][aria-label="${name}"]`), "Escape closes the menu");
   assert.ok(doc().activeElement === trigger, "Escape returns focus to the trigger");
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
 
   await reopen();
   assert.ok(doc().querySelector(`[role="menu"][aria-label="${name}"]`), `${name} opens again`);
   await press("Tab");
-  assert.equal(doc().querySelector(`[role="menu"][aria-label="${name}"]`), null, "Tab closes the menu");
+  assertNoDomNode(doc().querySelector(`[role="menu"][aria-label="${name}"]`), "Tab closes the menu");
   // The menu lived at the end of <body>: focus returns to the trigger before the browser's Tab
   // moves on, so Tab continues from where the menu was opened (the interaction contract).
   assert.ok(doc().activeElement === trigger, "Tab continues from the trigger, not the end of <body>");
-  assert.equal(doc().querySelector(".menu-backdrop"), null, "and leaves no backdrop behind");
+  assertNoDomNode(doc().querySelector(".menu-backdrop"), "and leaves no backdrop behind");
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
 }
 
@@ -329,7 +330,7 @@ test("a selected radio-like item shows a check icon, never color alone", async (
     assert.equal(selected!.getAttribute("aria-checked"), "true");
     assert.ok(selected!.querySelector(".menu-trail .menu-check"), "the selected item carries a trailing check");
     assert.equal(other!.getAttribute("aria-checked"), "false");
-    assert.equal(other!.querySelector(".menu-check"), null);
+    assertNoDomNode(other!.querySelector(".menu-check"));
     // The disabled reason is the item's second line: it describes the item without renaming it.
     const labelledBy = refused!.getAttribute("aria-labelledby");
     assert.equal(labelledBy ? doc().getElementById(labelledBy)?.textContent : null, "Refused");

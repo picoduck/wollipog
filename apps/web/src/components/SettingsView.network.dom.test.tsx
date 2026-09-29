@@ -8,6 +8,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { TailnetAccessSetting } from "../tailnet-access.js";
 import { NetworkPanel } from "./SettingsView.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/settings/network" });
 const previous = new Map<string, unknown>();
@@ -79,8 +80,8 @@ test("a failed Tailnet change reads as an error, in a class the stylesheet color
 test("without an error the description keeps its helper styling", async () => {
   const view = await render(tailnet());
   try {
-    assert.equal(view.container.querySelector(".danger-text"), null);
-    assert.equal(view.container.querySelector(".error-text"), null);
+    assertNoDomNode(view.container.querySelector(".danger-text"));
+    assertNoDomNode(view.container.querySelector(".error-text"));
   } finally {
     await view.unmount();
   }

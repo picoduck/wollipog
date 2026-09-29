@@ -18,6 +18,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { loadComposerDraft } from "../composer-drafts.js";
 import { FeedbackContext, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -317,7 +318,7 @@ test("a quarantine with no safe checkpoint offers no recovery it cannot perform"
   try {
     const banner = fixture.banner();
     assert.ok(banner);
-    assert.equal(banner.querySelector("button"), null, "no action is offered without a checkpoint");
+    assertNoDomNode(banner.querySelector("button"), "no action is offered without a checkpoint");
     assert.match(banner.textContent ?? "", /no earlier checkpoint/i);
     assert.equal(fixture.composer()?.disabled, true);
   } finally {
@@ -328,7 +329,7 @@ test("a quarantine with no safe checkpoint offers no recovery it cannot perform"
 test("a healthy session keeps its composer and shows no quarantine banner", async () => {
   const fixture = await mount(undefined);
   try {
-    assert.equal(fixture.banner(), null);
+    assertNoDomNode(fixture.banner());
     assert.equal(fixture.composer()?.disabled, false);
   } finally {
     await fixture.unmount();

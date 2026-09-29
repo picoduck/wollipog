@@ -15,6 +15,7 @@ import type {
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ReviewPanel } from "./ReviewPanel.js";
 import { clearPanelScratch } from "../right-panel-scratch.js";
@@ -366,7 +367,7 @@ test("a refused person sees every finding control disabled with the reason, and 
     for (const [, button] of controls) {
       await act(async () => { fireDomEvent.click(button); await Promise.resolve(); });
     }
-    assert.equal(harness.container.querySelector(".diff-comment-editor"), null, "no draft editor opened");
+    assertNoDomNode(harness.container.querySelector(".diff-comment-editor"), "no draft editor opened");
     assert.deepEqual(harness.calls, []);
   } finally {
     await harness.unmount();
@@ -401,7 +402,7 @@ test("an allowed or absent verdict leaves every finding control as it was (#1864
   for (const verdict of [{ allowed: true } as const, undefined]) {
     const harness = await mountPanel(sessionWith(verdict));
     try {
-      assert.equal(harness.container.querySelector(`#${REFUSAL_ID}`), null, "no refusal is shown");
+      assertNoDomNode(harness.container.querySelector(`#${REFUSAL_ID}`), "no refusal is shown");
       for (const [name, button] of findingControls(harness.container)) {
         assert.equal(button.disabled, false, `${name} is enabled`);
         assert.equal(button.getAttribute("aria-describedby"), null, `${name} has no refusal description`);

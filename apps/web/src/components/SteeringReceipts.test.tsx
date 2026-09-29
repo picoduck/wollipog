@@ -12,6 +12,7 @@ import {
   MAX_VISIBLE_STEERING_RECEIPTS,
   SteeringReceipts,
 } from "./SteeringReceipts.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -285,7 +286,7 @@ test("one rejected receipt can be durably dismissed", async () => {
   const button = container.querySelector("button") as HTMLButtonElement;
   assert.equal(button.classList.contains("steering-receipt-dismiss"), true);
   assert.equal(button.getAttribute("aria-label"), "Dismiss");
-  assert.equal(container.querySelector(".steering-receipt-actions"), null,
+  assertNoDomNode(container.querySelector(".steering-receipt-actions"),
     "a rejection uses the compact corner dismissal instead of an action row");
   await act(async () => button.click());
   assert.deepEqual(dismissed, ["rejected-one"]);

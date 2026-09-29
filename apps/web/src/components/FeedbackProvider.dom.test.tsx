@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { FeedbackProvider, useFeedback } from "./FeedbackProvider.js";
 import { Modal } from "./common.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -149,7 +150,7 @@ test("undo runs once, dismisses on success, and keeps actionable failure feedbac
   assert.match(container.querySelector('.toast')?.textContent ?? "", /Session archived.*Undo/);
   await act(async () => { container.querySelector<HTMLButtonElement>('.toast .btn')!.click(); });
   assert.equal(container.querySelector('[data-testid="undo-count"]')?.textContent, "1");
-  assert.equal(container.querySelector('.toast'), null);
+  assertNoDomNode(container.querySelector('.toast'));
 
   await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="broken-undo"]')!.click(); });
   await act(async () => { container.querySelector<HTMLButtonElement>('.toast .btn')!.click(); });
@@ -278,7 +279,7 @@ test("non-undo actions show their own busy label", async () => {
   await act(async () => { action.click(); await Promise.resolve(); });
   assert.equal(action.textContent, "Retrying…");
   await act(async () => { finishPendingAction?.(); await tick(); });
-  assert.equal(container.querySelector(".toast"), null);
+  assertNoDomNode(container.querySelector(".toast"));
   finishPendingAction = undefined;
   await act(async () => { root.unmount(); });
   container.remove();
@@ -348,7 +349,7 @@ test("a dismissed in-flight undo still reports failure, while teardown suppresse
   await act(async () => { container.querySelector("button")!.click(); });
   await act(async () => { container.querySelector<HTMLButtonElement>('.toast .btn')!.click(); });
   await act(async () => { container.querySelector<HTMLButtonElement>('.toast .icon-btn')!.click(); });
-  assert.equal(container.querySelector('.toast'), null);
+  assertNoDomNode(container.querySelector('.toast'));
   await act(async () => { rejectUndo?.(new Error("runner offline")); await tick(); });
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Undo failed: runner offline.*Retry Undo/);
 

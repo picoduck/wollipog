@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { GitStatusInfo, GitSummaryInfo } from "@wollipog/protocol";
 import { deriveGitPresentation } from "../pinned-summary.js";
 import { GitPinnedSection } from "./GitVisibility.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
@@ -135,7 +136,7 @@ test("the collapsed section keeps a scannable accessible headline; details stay 
     await act(async () => toggle.click());
     assert.equal(toggle.getAttribute("aria-expanded"), "true");
     assert.equal(toggle.textContent, "Hide Git Details");
-    assert.equal(section.querySelector(".ps-git-headline"), null);
+    assertNoDomNode(section.querySelector(".ps-git-headline"));
     assert.match(section.textContent ?? "", /Linked Worktree/);
     assert.match(section.textContent ?? "", /1 Conflicted.*1 Staged.*1 Modified/);
     assert.match(section.textContent ?? "", /Remote Status May Be Stale/);
@@ -220,7 +221,7 @@ test("collapsed non-ready states keep the explicit state row without headline le
       <GitPinnedSection model={model({ online: false })} onRefresh={async () => {}} />,
     ));
     assert.match(container.textContent ?? "", /Git Unavailable While Disconnected/);
-    assert.equal(container.querySelector(".ps-git-headline"), null);
+    assertNoDomNode(container.querySelector(".ps-git-headline"));
     assert.doesNotMatch(container.textContent ?? "", new RegExp(branch));
 
     // A failed refresh with confirmed facts keeps both the warning and the collapsed headline.

@@ -7,6 +7,7 @@ import type { ProviderLoginView } from "@wollipog/protocol";
 import type { ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
@@ -72,7 +73,7 @@ test("Codex device flow renders the provider code without a paste field", async 
       );
     });
     assert.equal(container.querySelector("code")?.textContent, "ABCD-EFGH");
-    assert.equal(container.querySelector("input"), null);
+    assertNoDomNode(container.querySelector("input"));
   } finally {
     await act(async () => root.unmount());
     container.remove();
