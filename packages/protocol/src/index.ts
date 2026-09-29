@@ -604,7 +604,10 @@
 //      No account identifier crosses. A stop Claude confirms only after the request was answered
 //      `unconfirmed` keeps the actor who asked. Older runners send no `endedBy`, and the dashboard
 //      shows the job as killed without saying who ended it, as before.
-export const PROTOCOL_VERSION = 192;
+// 193: a campaign archive can request managed worktree retirement with an additional delivery
+//      proof: the exact head is on the default branch or a forge-verified merged pull request.
+//      Older runners keep archive cleanup pending rather than discarding pushed unmerged work.
+export const PROTOCOL_VERSION = 193;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -911,6 +914,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeDiscard: 102,
   /** v159 reports durable deferred retirement instead of silently treating it as removal. */
   sessionWorktreeRetirement: 159,
+  /** v193 enforces delivery proof on archive-triggered managed retirement and replay. */
+  archiveWorktreeRetirement: 193,
   progressAwareSessionWorktrees: 113,
   /** v161 carries durable worktree-recovery state and its exact not-delivered receipt. */
   worktreeRecovery: 161,
@@ -2188,6 +2193,14 @@ export interface OrchestratorCampaignProjection {
     verified: number;
     cleanupPending: number;
   };
+  /** Worktrees still held by verified Stop and Archive children. Pending, deferred, and
+   * safety-refused entries remain cleanup-pending until the inventory shows retirement. */
+  cleanupWorktrees?: Array<{
+    sessionId: string;
+    path: string;
+    status: "pending" | "deferred" | "refused";
+    reason: string;
+  }>;
   /** Unverified children held from starting their next turn, with how to clear each (#1650).
    * Bounded; `children.blocked` stays the full count. Omitted when there are none. */
   heldChildren?: Array<{ sessionId: string; holds: SessionHoldView[] }>;
@@ -7475,6 +7488,15 @@ export interface SessionRuntimeUpdatedMessage {
   snapshot: SessionSnapshot;
 }
 
+/** Protocol v193: a deferred archive retirement reached a terminal safety refusal. */
+export interface SessionWorktreeRetirementRefusedMessage {
+  type: "session_worktree_retirement_refused";
+  sessionId: string;
+  worktreeId: string;
+  path: string;
+  reason: string;
+}
+
 /** A runner-owned threshold cancelled the active turn and is holding its queue. This notice is
  * replay-safe and contains no provider content; the control plane owns the durable decision card. */
 export interface GovernanceTrippedMessage {
@@ -7850,6 +7872,7 @@ export type RunnerToControlPlane =
   | WorkflowActionReconciliationResultMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
+  | SessionWorktreeRetirementRefusedMessage
   | GovernanceTrippedMessage
   | SessionEventMessage
   | SessionHistoryResultMessage
@@ -8369,7 +8392,10 @@ export type SessionWorktreeRequestMessage =
       /** Protocol v113+: ask the runner for bounded, content-free phase heartbeats. */
       progress?: boolean;
     }
-  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "discard" | "retry_setup"; path: string }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "retry_setup"; path: string }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "discard"; path: string;
+      /** Protocol v193: require proof the exact checkout head was delivered before removal. */
+      requireDelivered?: boolean }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "generate_setup" };
 
 /** Protocol v146. Inspect or generate the canonical config for one runner-owned workspace. The workspace id is

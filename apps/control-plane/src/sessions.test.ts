@@ -1502,6 +1502,104 @@ function stopAndArchiveCampaignFixture() {
   return { db, svc, hub, parent, spawn, report, verify };
 }
 
+test("Stop and Archive retires the original worktree but retains provider-owned and unsafe worktrees as cleanup-pending", async () => {
+  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  try {
+    const child = spawn(parent.id, "Deliver one issue");
+    const path = (name: string) => `/worktrees/${child}/${name}`;
+    const worktrees = ["original", "provider", "dirty", "unpushed"].map((name) => ({
+      id: name, path: path(name), branch: `fix/${name}`, source: "created" as const,
+    }));
+    db.setWorktreePath(child, path("provider"));
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify(worktrees), child);
+    const requests: string[] = [];
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "session_worktree");
+      assert.equal(message.operation, "discard");
+      assert.equal(message.requireDelivered, true);
+      requests.push(message.path);
+      const current = db.getSession(child)!;
+      if (message.path === path("dirty") || message.path === path("unpushed")) {
+        return { type: "session_worktree_result", requestId: message.requestId,
+          sessionId: child, operation: "discard", ok: false,
+          error: message.path === path("dirty")
+            ? "worktree retained: the worktree has uncommitted changes"
+            : "worktree retained: the branch has unpushed commits" };
+      }
+      const removed = message.path === path("original");
+      return { type: "session_worktree_result", requestId: message.requestId,
+        sessionId: child, operation: "discard", ok: true,
+        retirement: removed ? { status: "removed" } : { status: "deferred", reason: "provider_active" },
+        snapshot: snapshot({ id: child, status: "stopped",
+          worktreePath: current.worktreePath,
+          worktrees: removed ? current.worktrees?.filter((item) => item.path !== message.path) : current.worktrees }),
+      };
+    };
+    svc.onSessionStatus(child, "idle");
+    assert.ok(verify(child, report(child, "Delivered issue")).ok);
+    assert.equal(db.getSession(child)?.archiveStatus, "stop_pending");
+    svc.onSessionStatus(child, "stopped");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(requests, worktrees.map((item) => item.path));
+    assert.equal(db.campaignProjection(parent.id)?.status, "active");
+    assert.deepEqual(db.campaignProjection(parent.id)?.cleanupWorktrees, [
+      { sessionId: child, path: path("provider"), status: "deferred", reason: "provider_active" },
+      { sessionId: child, path: path("dirty"), status: "refused", reason: "the worktree has uncommitted changes" },
+      { sessionId: child, path: path("unpushed"), status: "refused", reason: "the branch has unpushed commits" },
+    ]);
+    svc.onCampaignWorktreeRetirementRefused(RUNNER_ID, {
+      sessionId: child, worktreeId: "provider", path: path("provider"),
+      reason: "the worktree has uncommitted changes",
+    });
+    assert.deepEqual(db.campaignProjection(parent.id)?.cleanupWorktrees?.[0], {
+      sessionId: child, path: path("provider"), status: "refused",
+      reason: "the worktree has uncommitted changes",
+    }, "a deferred cleanup that fails safety remains visible and does not retry");
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id: child, status: "stopped",
+      worktreePath: null, worktrees: worktrees.filter((item) => item.id === "dirty" || item.id === "unpushed") }));
+    assert.equal(db.campaignProjection(parent.id)?.status, "active",
+      "retained unsafe worktrees prevent Verified Complete");
+    assert.equal(db.campaignProjection(parent.id)?.children.cleanupPending, 1);
+    assert.deepEqual(db.getSession(child)?.worktrees?.map((item) => item.id), ["dirty", "unpushed"]);
+  } finally {
+    db.close();
+  }
+});
+
+test("Stop and Archive leaves old runners pending and retries an undelivered archive on reconnect", async () => {
+  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  try {
+    const child = spawn(parent.id, "Deliver another issue");
+    const path = `/worktrees/${child}/original`;
+    db.setWorktreePath(child, path);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([
+      { id: "original", path, branch: "agent/original", source: "created" },
+    ]), child);
+    db.registerRunner(runnerMeta(), Date.now(), 158);
+    svc.onSessionStatus(child, "idle");
+    assert.ok(verify(child, report(child, "Delivered issue")).ok);
+    svc.onSessionStatus(child, "stopped");
+    assert.equal(hub.sentOfType("session_worktree").length, 0);
+    assert.equal(db.campaignProjection(parent.id)?.children.cleanupPending, 1);
+    assert.match(db.campaignProjection(parent.id)?.cleanupWorktrees?.[0]?.reason ?? "", /runner lacks/);
+
+    db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "session_worktree");
+      assert.equal(message.requireDelivered, true);
+      return { type: "session_worktree_result", requestId: message.requestId,
+        sessionId: child, operation: "discard", ok: true, retirement: { status: "removed" },
+        snapshot: snapshot({ id: child, status: "stopped", worktreePath: null, worktrees: [] }) };
+    };
+    svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(hub.sentOfType("session_worktree").length, 1);
+    assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
+  } finally {
+    db.close();
+  }
+});
+
 test("a stopped campaign child with a final report can still be verified, and archived by that verification", () => {
   const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
   try {

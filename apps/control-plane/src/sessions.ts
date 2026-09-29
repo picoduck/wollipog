@@ -1448,6 +1448,7 @@ export class SessionsService {
   private readonly titleGenerationOwnership = new Map<string, "generated" | "user">();
   /** Armed merge occurrences whose lifecycle-end forge read is in flight. */
   private readonly forgeMergeSettlements = new Set<string>();
+  private readonly archiveWorktreeRetirements = new Set<string>();
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -6029,6 +6030,7 @@ export class SessionsService {
     const settled = this.db.settleSessionStopIntent(sessionId, now, confirmation);
     this.hub.sessionChangedById(sessionId);
     if (settled.archived && projectId) this.hub.projectChangedById(projectId);
+    if (settled.archived) this.queueCampaignWorktreeRetirement(sessionId);
   }
 
   stop(sessionId: string): ServiceResult<SessionView> {
@@ -6617,7 +6619,7 @@ export class SessionsService {
         const candidate = this.db.getSession(id);
         return !candidate || !this.db.campaignChildReportVerified(campaignSessionId, candidate.id) ||
         (campaign.orchestratorPolicy!.behavior.completion === "stop_and_archive" &&
-          (!candidate.archived || candidate.worktreePath !== null || (candidate.worktrees?.length ?? 0) > 0));
+          (!candidate.archived || !this.db.campaignChildWorktreesRetired(candidate.id)));
       });
     if (unfinishedDescendantId) {
       return fail(`campaign child still has unfinished descendant ${unfinishedDescendantId}`, 409);
@@ -6637,6 +6639,7 @@ export class SessionsService {
       const archived = this.setArchived(child.id, true);
       if (!archived.ok || !archived.data) return fail(archived.error ?? "campaign child archive failed", archived.status);
       updated = archived.data;
+      if (updated.archived) this.queueCampaignWorktreeRetirement(child.id);
     }
     const projection = this.db.campaignProjection(campaignSessionId)!;
     this.hub.sessionChangedById(campaignSessionId);
@@ -9619,6 +9622,102 @@ export class SessionsService {
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated, refreshProject);
     return ok(updated);
+  }
+
+  /** A verified child and its archived flag are the durable intent. Reconnect replays this
+   * request if the control plane exited before sending it; the runner owns deferred replay after
+   * it accepts a request. Safety refusals are recorded once and never retried automatically. */
+  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false): void {
+    const child = this.db.getSession(sessionId);
+    const campaignId = this.db.campaignForVerifiedChild(sessionId);
+    const campaign = campaignId ? this.db.getSession(campaignId) : null;
+    if (!child?.archived || !campaign?.orchestratorPolicy ||
+        campaign.orchestratorPolicy.behavior.completion !== "stop_and_archive" ||
+        !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "archiveWorktreeRetirement") ||
+        !this.hub.isRunnerOnline(child.runnerId) || this.archiveWorktreeRetirements.has(sessionId)) return;
+    const pending = this.db.campaignWorktreeCleanup(sessionId).filter((item) =>
+      item.status === "pending" || (retryDeferred && item.status === "deferred"));
+    if (!pending.length) return;
+    this.archiveWorktreeRetirements.add(sessionId);
+    void (async () => {
+      let retry = false;
+      try {
+        for (const item of pending) {
+          const current = this.db.getSession(sessionId);
+          if (!current?.archived || !this.db.campaignChildReportVerified(campaignId!, sessionId)) break;
+          const worktree = current.worktrees?.find((candidate) => candidate.path === item.path);
+          const worktreeId = worktree?.id ?? "";
+          if (item.status !== this.db.campaignWorktreeCleanup(sessionId)
+            .find((candidate) => candidate.path === item.path)?.status) continue;
+          const requestId = `archive_worktree_${randomUUID().slice(0, 8)}`;
+          try {
+            const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
+              type: "session_worktree", requestId, sessionId, operation: "discard", path: item.path,
+              requireDelivered: true,
+            }, 150_000);
+            if (result.type !== "session_worktree_result" || result.sessionId !== sessionId ||
+                result.operation !== "discard") {
+              retry = true;
+              continue;
+            }
+            if (result.ok && result.snapshot && result.retirement) {
+              this.db.updateSessionFromSnapshot(sessionId, result.snapshot, Date.now());
+              if (result.retirement.status === "deferred" &&
+                  this.db.campaignWorktreeCleanup(sessionId).find((candidate) => candidate.path === item.path)
+                    ?.status !== "refused") {
+                this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId,
+                  "deferred", result.retirement.reason ?? "runner cleanup is pending", Date.now());
+              }
+            } else if (!result.ok && result.error?.startsWith("worktree retained: ") &&
+                /^(?:attached operator-owned worktrees|the worktree has a detached HEAD|the worktree is checked out on branch|runner ownership could not be proven|the worktree has uncommitted changes|the branch has no upstream|the branch has unpushed commits|the worktree head is not on the default branch|the linked pull request is not verified as merged)/u
+                  .test(result.error.slice("worktree retained: ".length))) {
+              this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId,
+                "refused", result.error.slice("worktree retained: ".length, 1050), Date.now());
+            } else {
+              retry = true;
+              this.log.warn(`archive worktree retirement for ${sessionId} needs retry: ${result.error ?? "incomplete runner reply"}`);
+            }
+          } catch (error) {
+            retry = true;
+            this.log.warn(`archive worktree retirement for ${sessionId} needs retry: ${String(error)}`);
+          }
+          this.hub.sessionChangedById(sessionId);
+          this.hub.sessionChangedById(campaignId!);
+        }
+      } finally {
+        this.archiveWorktreeRetirements.delete(sessionId);
+        if (retry) setTimeout(() => this.queueCampaignWorktreeRetirement(sessionId), 60_000).unref();
+      }
+    })();
+  }
+
+  /** A new control-plane process replays an archive request that was not delivered before exit. */
+  reconcileArchivedCampaignWorktrees(runnerId: string): void {
+    for (const session of this.db.listSessions({ includeArchived: true })) {
+      if (session.runnerId === runnerId && session.archived &&
+          (session.worktreePath || session.worktrees?.length)) {
+        this.queueCampaignWorktreeRetirement(session.id, true);
+      }
+    }
+  }
+
+  /** Terminal safety refusal after a provider-owned archive retirement resumed on the runner. */
+  onCampaignWorktreeRetirementRefused(
+    runnerId: string, message: { sessionId: string; worktreeId: string; path: string; reason: string },
+  ): void {
+    const child = this.db.getSession(message.sessionId);
+    const campaignId = this.db.campaignForVerifiedChild(message.sessionId);
+    const campaign = campaignId ? this.db.getSession(campaignId) : null;
+    if (!child?.archived || child.runnerId !== runnerId || !campaign?.orchestratorPolicy ||
+        campaign.orchestratorPolicy.behavior.completion !== "stop_and_archive" ||
+        !(child.worktrees?.some((item) => item.id === message.worktreeId && item.path === message.path) ||
+          (message.worktreeId === "" && child.worktreePath === message.path)) ||
+        !this.db.campaignWorktreeCleanup(message.sessionId).some((item) =>
+          item.path === message.path && (item.status === "pending" || item.status === "deferred"))) return;
+    this.db.recordCampaignWorktreeCleanup(message.sessionId, message.path, message.worktreeId,
+      "refused", message.reason.slice(0, 1050), Date.now());
+    this.hub.sessionChangedById(message.sessionId);
+    this.hub.sessionChangedById(campaignId!);
   }
 
   /** Project bulk archive delegates every session to the same stop-and-archive primitive as the

@@ -2512,7 +2512,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               ? sessions.retryWorktreeSetup(msg.sessionId, msg.path)
               : msg.operation === "generate_setup"
                 ? sessions.generateWorktreeSetupConfig(msg.sessionId)
-                : sessions.discardWorktree(msg.sessionId, msg.path);
+                : sessions.discardWorktree(msg.sessionId, msg.path, {
+                  requireDelivered: msg.operation === "discard" && msg.requireDelivered === true,
+                });
       void operation.then((result) => {
         if (result.retirement?.status === "deferred" &&
             !runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionWorktreeRetirement")) {

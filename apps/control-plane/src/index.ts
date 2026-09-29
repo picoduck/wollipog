@@ -1210,6 +1210,7 @@ app.register(async (instance) => {
         // reconcile for pre-Phase-2 runners.
         if (msg.sessionSnapshots) svc.hydrateRunnerSessions(runnerId, msg.sessionSnapshots);
         else svc.reconcileRunnerSessions(runnerId, msg.liveSessions ?? []);
+        svc.reconcileArchivedCampaignWorktrees(runnerId);
         svc.recoverWorkflowRunner(runnerId);
         automations.tick(Date.now());
         automations.commandOutbox.flush(Date.now(), runnerId);
@@ -1309,6 +1310,11 @@ app.register(async (instance) => {
               durationMs: Math.round(durationMs),
             }, "session runtime update blocked the control plane");
           }
+        }
+        break;
+      case "session_worktree_retirement_refused":
+        if (runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "archiveWorktreeRetirement")) {
+          svc.onCampaignWorktreeRetirementRefused(runnerId!, msg);
         }
         break;
       case "governance_tripped":

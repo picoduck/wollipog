@@ -572,6 +572,42 @@ test("attach preserves a bare primary record while permitting its linked worktre
   }
 });
 
+test("archive retirement requires delivery beyond a push while preserving dirty and unpushed worktrees", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-archive-retirement-"));
+  const dataDir = join(root, "data");
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const original = await createRequestedWorktree(repo, "s_archive", {
+      baseRef: "HEAD", branch: "fix/original",
+    }, { dataDir });
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_archive", { ...original, source: "created" },
+      { dataDir, requireDelivered: true }), { removed: true });
+    const pushed = await createRequestedWorktree(repo, "s_archive", {
+      baseRef: "HEAD", branch: "fix/pushed-unmerged",
+    }, { dataDir });
+    writeFileSync(join(pushed.path, "change.txt"), "change\n");
+    execFileSync("git", ["-C", pushed.path, "add", "change.txt"]);
+    execFileSync("git", ["-C", pushed.path, "commit", "-m", "pushed but unmerged"]);
+    execFileSync("git", ["-C", pushed.path, "push", "-u", "origin", pushed.branch]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_archive", { ...pushed, source: "created" },
+      { dataDir, requireDelivered: true }), { removed: false, reason: "not_delivered" });
+    assert.equal(existsSync(pushed.path), true);
+    writeFileSync(join(pushed.path, "dirty.txt"), "retain\n");
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_archive", { ...pushed, source: "created" },
+      { dataDir, requireDelivered: true }), { removed: false, reason: "dirty" });
+    rmSync(join(pushed.path, "dirty.txt"));
+    writeFileSync(join(pushed.path, "later.txt"), "local\n");
+    execFileSync("git", ["-C", pushed.path, "add", "later.txt"]);
+    execFileSync("git", ["-C", pushed.path, "commit", "-m", "local only"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_archive", { ...pushed, source: "created" },
+      { dataDir, requireDelivered: true }), { removed: false, reason: "unpushed" });
+    assert.equal(existsSync(pushed.path), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("safe discard removes only a clean fully-pushed runner-owned worktree", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-safe-discard-"));
   const dataDir = join(root, "data");
@@ -7341,6 +7377,7 @@ test("a running session discards its own finished worktrees despite the per-sess
   let manager: SessionManager | undefined;
   try {
     const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
     const store = new SessionStore(join(dataDir, "sessions"));
     store.create({
       sessionId: "s_own_lease", agentId: "claude", workspaceId: "repo", repoPath: repo,
@@ -7424,7 +7461,8 @@ test("a running session discards its own finished worktrees despite the per-sess
       queue: [],
       client: { dispose: () => {} },
     });
-    const deferredCurrent = await manager.discardWorktree("s_own_lease", current.worktree.path);
+    const deferredCurrent = await manager.discardWorktree("s_own_lease", current.worktree.path,
+      { requireDelivered: true });
     assert.deepEqual(deferredCurrent.retirement, { status: "deferred", reason: "provider_active" });
     assert.equal(existsSync(current.worktree.path), true, "active provider keeps its selected path");
     const currentEntry = activeEntries.get("s_own_lease");

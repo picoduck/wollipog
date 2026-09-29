@@ -1053,7 +1053,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_campaign",
-    description: "Read this Orchestrator's effective campaign behavior, current typed-decision owners and policy revision, applicable limits, follow-up counts, child completion state, and credential-free compatibility information.",
+    description: "Read this Orchestrator's effective campaign behavior, current typed-decision owners and policy revision, applicable limits, follow-up counts, child completion state, and credential-free compatibility information. Under Stop and Archive, cleanupWorktrees names each retained child worktree and its pending, deferred, or safety-refused reason; older runners still require explicit cleanup.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args, deps) => {
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
@@ -1097,7 +1097,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "verify_campaign_child",
-    description: "Verify one campaign child's exact completed report after all reported follow-ups are recorded. Retain leaves it inspectable; Stop and Archive starts the existing durable stop/archive lifecycle. Campaign status becomes verified complete only after required worktree cleanup is also observed.",
+    description: "Verify one campaign child's exact completed report after all reported follow-ups are recorded. Retain leaves it inspectable; Stop and Archive starts durable stop/archive and managed retirement of its clean worktrees. Unsafe worktrees remain on disk with a per-child refusal reason; pending provider-owned retirements finish after provider exit.",
     inputSchema: {
       type: "object",
       properties: {

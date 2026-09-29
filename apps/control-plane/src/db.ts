@@ -841,6 +841,19 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_child_reports (
   FOREIGN KEY (child_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
+-- Safety refusals and deferrals remain visible while the runner's authoritative inventory still
+-- names the exact worktree. Neither status authorizes deletion or completes campaign cleanup.
+CREATE TABLE IF NOT EXISTS orchestrator_campaign_worktree_cleanup (
+  child_session_id TEXT NOT NULL,
+  path             TEXT NOT NULL,
+  worktree_id      TEXT NOT NULL,
+  status           TEXT NOT NULL CHECK (status IN ('deferred','refused')),
+  reason           TEXT NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  PRIMARY KEY (child_session_id, path),
+  FOREIGN KEY (child_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
 -- Recommendation content is bounded and credential-free. The normalized repository/title key is
 -- authoritative across children so caller-supplied ids cannot defeat campaign deduplication.
 CREATE TABLE IF NOT EXISTS orchestrator_campaign_follow_ups (
@@ -14433,6 +14446,21 @@ export class ControlPlaneDb {
   setSessionArchived(id: string, archived: boolean, now: number): void {
     this.stmt("UPDATE sessions SET archived=?, updated_at=? WHERE id=?")
       .run(archived ? 1 : 0, now, id);
+    if (!archived) this.stmt("DELETE FROM orchestrator_campaign_worktree_cleanup WHERE child_session_id=?").run(id);
+  }
+
+  recordCampaignWorktreeCleanup(
+    sessionId: string, path: string, worktreeId: string,
+    status: "deferred" | "refused", reason: string, now: number,
+  ): void {
+    this.stmt(
+      `INSERT INTO orchestrator_campaign_worktree_cleanup
+       (child_session_id, path, worktree_id, status, reason, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(child_session_id, path) DO UPDATE SET
+         worktree_id=excluded.worktree_id, status=excluded.status,
+         reason=excluded.reason, updated_at=excluded.updated_at`,
+    ).run(sessionId, path, worktreeId, status, reason, now);
   }
 
   setWorktreePath(id: string, path: string | null): void {
@@ -14750,6 +14778,14 @@ export class ControlPlaneDb {
     return this.validCampaignChildReportIds(campaignSessionId, childSessionId).has(childSessionId);
   }
 
+  campaignForVerifiedChild(childSessionId: string): string | null {
+    const row = this.stmt(
+      `SELECT campaign_session_id AS id FROM orchestrator_campaign_child_reports
+       WHERE child_session_id=? ORDER BY verified_at DESC LIMIT 1`,
+    ).get(childSessionId) as { id: string } | undefined;
+    return row && this.campaignChildReportVerified(row.id, childSessionId) ? row.id : null;
+  }
+
   recordCampaignContinuationEvent(input: {
     eventId: string;
     campaignSessionId: string;
@@ -15060,6 +15096,8 @@ export class ControlPlaneDb {
   invalidateCampaignChildReports(childSessionId: string): void {
     this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE child_session_id=?")
       .run(childSessionId);
+    this.stmt("DELETE FROM orchestrator_campaign_worktree_cleanup WHERE child_session_id=?")
+      .run(childSessionId);
   }
 
   private validCampaignChildReportIds(campaignSessionId: string, childSessionId?: string): Set<string> {
@@ -15171,6 +15209,47 @@ export class ControlPlaneDb {
     return this.resolvedCampaignSession(campaignSessionId)?.id ?? null;
   }
 
+  campaignWorktreeCleanup(sessionId: string): NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> {
+    // A SessionView embeds its campaign projection, so read the raw row here to avoid
+    // projecting the campaign recursively while its children are being counted.
+    const session = this.stmt(
+      "SELECT runner_id, archived, worktree_path, worktrees FROM sessions WHERE id=?",
+    ).get(sessionId) as {
+      runner_id: string; archived: number; worktree_path: string | null; worktrees: string | null;
+    } | undefined;
+    if (!session) return [];
+    const recorded = this.stmt(
+      `SELECT path, worktree_id, status, reason FROM orchestrator_campaign_worktree_cleanup
+       WHERE child_session_id=?`,
+    ).all(sessionId) as Array<{
+      path: string; worktree_id: string; status: "deferred" | "refused"; reason: string;
+    }>;
+    const byPath = new Map(recorded.map((row) => [row.path, row]));
+    const worktrees = [...(parseJson<SessionWorktreeView[]>(session.worktrees) ?? [])];
+    if (session.worktree_path && !worktrees.some((item) => item.path === session.worktree_path)) {
+      worktrees.push({ id: "", path: session.worktree_path, branch: "", source: "legacy" });
+    }
+    return worktrees.map((worktree) => {
+      const record = byPath.get(worktree.path);
+      if (record?.worktree_id === worktree.id) {
+        return { sessionId, path: worktree.path, status: record.status, reason: record.reason };
+      }
+      const runner = this.getRunner(session.runner_id);
+      const reason = session.archived !== 1
+        ? "the session archive is still pending"
+        : !runnerSupportsProtocol(runner?.protocolVersion, "archiveWorktreeRetirement")
+          ? "the runner lacks durable archive-time worktree retirement; cleanup remains explicit on this runner"
+          : runner?.status !== "online"
+            ? "the runner is offline; retirement will resume when it reconnects"
+            : "archive-time retirement is pending runner confirmation";
+      return { sessionId, path: worktree.path, status: "pending" as const, reason };
+    });
+  }
+
+  campaignChildWorktreesRetired(sessionId: string): boolean {
+    return this.campaignWorktreeCleanup(sessionId).length === 0;
+  }
+
   campaignProjection(campaignSessionId: string): OrchestratorCampaignProjection | null {
     const campaign = this.resolvedCampaignSession(campaignSessionId);
     if (!campaign) return null;
@@ -15210,6 +15289,7 @@ export class ControlPlaneDb {
     let blocked = 0;
     let fullyVerified = 0;
     let cleanupPending = 0;
+    const cleanupWorktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> = [];
     const heldChildren: NonNullable<OrchestratorCampaignProjection["heldChildren"]> = [];
     for (const child of rows) {
       const childPending = pending.filter((decision) => decision.session_id === child.id);
@@ -15234,9 +15314,11 @@ export class ControlPlaneDb {
       // A retained child may receive more work after verification. Re-check both the exact
       // latest report and terminal-for-review state instead of trusting a durable row forever.
       const reportVerified = verified.has(child.id);
-      const worktrees = parseJson<SessionWorktreeView[]>(child.worktrees) ?? [];
-      const cleanlyRetired = child.archived === 1 && child.worktree_path === null && worktrees.length === 0;
-      if (reportVerified && (policy.behavior.completion === "retain" || cleanlyRetired)) fullyVerified += 1;
+      const childCleanup = reportVerified && policy.behavior.completion === "stop_and_archive"
+        ? this.campaignWorktreeCleanup(child.id) : [];
+      cleanupWorktrees.push(...childCleanup);
+      const retired = child.archived === 1 && childCleanup.length === 0;
+      if (reportVerified && (policy.behavior.completion === "retain" || retired)) fullyVerified += 1;
       else if (reportVerified && policy.behavior.completion === "stop_and_archive") cleanupPending += 1;
       // A held child asks nothing, so it used to count as active while no turn could start (#1650).
       const holds = !reportVerified && !isTerminal(child.status)
@@ -15297,6 +15379,7 @@ export class ControlPlaneDb {
           // The human owns the gate by choice; nothing is unavailable.
           : { status: "available", effectiveOwner: "human" },
       children: { total, active, waitingHuman, blocked, verified: fullyVerified, cleanupPending },
+      ...(cleanupWorktrees.length ? { cleanupWorktrees } : {}),
       ...(heldChildren.length ? { heldChildren } : {}),
       pendingDecisions: { human: pendingHuman.length, orchestrator: pendingOrchestrator.length },
       ...(resolvedCampaignId === campaignSessionId ? { pendingRequests: {

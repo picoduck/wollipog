@@ -3452,6 +3452,7 @@ export class SessionManager {
           dataDir: this.dataDir,
           ownerHash: this.runnerOwnerHash,
           ...(record.verifiedMergedHead ? { verifiedMergedHead: record.verifiedMergedHead } : {}),
+          requireDelivered: record.trigger === "archive_retirement",
           retainRefs,
           beforeRemove,
         },
@@ -3654,7 +3655,7 @@ export class SessionManager {
     meta: SessionMeta,
     worktree: SessionWorktreeView,
     reason: "provider_active" | "provider_launching" | "cleanup_pending",
-    trigger: "explicit_discard" | "pull_request_reconciliation",
+    trigger: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation",
   ): Promise<{ removed: false; snapshot: SessionSnapshot; retirement: SessionWorktreeRetirementResult }> {
     let latest = meta;
     const existing = this.pendingSafeWorktreeCleanup(meta.sessionId, meta.context, worktree);
@@ -3701,7 +3702,7 @@ export class SessionManager {
   private async discardWorktreeLocked(
     sessionId: string,
     path: string,
-    options: { refreshMergedHead?: boolean; trigger?: "explicit_discard" | "pull_request_reconciliation" } = {},
+    options: { refreshMergedHead?: boolean; trigger?: "explicit_discard" | "archive_retirement" | "pull_request_reconciliation" } = {},
   ): Promise<{
     removed: boolean;
     reason?: string;
@@ -3776,6 +3777,10 @@ export class SessionManager {
     }
     if (worktree.source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
+    }
+    if (options.trigger === "archive_retirement" && worktree.pullRequest &&
+        !verifiedMergedHeadOid(worktree.pullRequest)) {
+      return { removed: false, reason: "the linked pull request is not verified as merged" };
     }
     const selectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (selectedIsLaunching) {
@@ -3877,6 +3882,7 @@ export class SessionManager {
           dirty: "the worktree has uncommitted changes",
           no_upstream: "the branch has no upstream",
           unpushed: "the branch has unpushed commits",
+          not_delivered: "the worktree head is not on the default branch or a verified merged pull request",
           unavailable: "Git state is unavailable or changed during cleanup",
         } as const;
         return { removed: false, reason: reasons[result.reason] };
@@ -3960,9 +3966,11 @@ export class SessionManager {
   async discardWorktree(
     sessionId: string,
     path: string,
+    options: { requireDelivered?: boolean } = {},
   ): Promise<{ snapshot: SessionSnapshot; retirement: SessionWorktreeRetirementResult }> {
     return this.runWorktreeOperation(sessionId, async () => {
-      const result = await this.discardWorktreeLocked(sessionId, path);
+      const result = await this.discardWorktreeLocked(sessionId, path,
+        options.requireDelivered ? { trigger: "archive_retirement" } : {});
       if ((!result.removed && result.retirement?.status !== "deferred") || !result.snapshot || !result.retirement) {
         throw new Error(`worktree retained: ${result.reason ?? "cleanup did not complete"}`);
       }
@@ -14109,6 +14117,17 @@ export class SessionManager {
       if (!record.worktreeRemovedAt) {
         await this.refreshDeferredMergedHead(record);
         if (worktreeFenced()) return logFenced();
+        const current = this.store.readMeta(record.sessionId);
+        const linked = current && this.attributedWorktrees(current).find((item) =>
+          item.id === record.worktreeId && sameWorktreePath(current.context, item.path, record.worktreePath));
+        if (record.trigger === "archive_retirement" && linked?.pullRequest && !record.verifiedMergedHead) {
+          if (this.removeWorktreeCleanupRecord(record, true)) {
+            this.send({ type: "session_worktree_retirement_refused", sessionId: record.sessionId,
+              worktreeId: record.worktreeId ?? "", path: record.worktreePath,
+              reason: "the linked pull request is not verified as merged" });
+          }
+          return;
+        }
       }
 
       const cleanupLeaseOwner = `${this.lockOwner}:cleanup-replay:${randomUUID()}`;
@@ -14130,6 +14149,23 @@ export class SessionManager {
             this.store.readMeta(record.sessionId) ?? meta,
           );
           if (!removal.removed) {
+            if (record.trigger === "archive_retirement" && removal.reason !== "unavailable") {
+              const reason = removal.reason === "branch_changed"
+                ? `the worktree is checked out on branch ${JSON.stringify(removal.checkedOutBranch)}, not its registered branch`
+                : {
+                    detached_head: "the worktree has a detached HEAD",
+                    not_runner_owned: "runner ownership could not be proven",
+                    dirty: "the worktree has uncommitted changes",
+                    no_upstream: "the branch has no upstream",
+                    unpushed: "the branch has unpushed commits",
+                    not_delivered: "the worktree head is not on the default branch or a verified merged pull request",
+                  }[removal.reason];
+              if (this.removeWorktreeCleanupRecord(record, true)) {
+                this.send({ type: "session_worktree_retirement_refused", sessionId: record.sessionId,
+                  worktreeId: record.worktreeId ?? "", path: record.worktreePath, reason });
+              }
+              return;
+            }
             this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after safe worktree removal`);
             return;
           }
