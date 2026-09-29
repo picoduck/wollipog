@@ -19,6 +19,7 @@ import { selectComparisonEvents, selectComparisonHistory, selectComparisonSessio
 import { transcriptPresentation } from "../transcript-presentation.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
+import { backLabel, destination, viewTitle } from "../navigation.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 
 const EMPTY_SESSION_IDS: string[] = [];
@@ -69,6 +70,7 @@ function MemberColumn({ sessionId }: { sessionId: string }) {
 }
 
 export function RunsView({ onNewRun }: { onNewRun: () => void }) {
+  const runsDestination = destination("runs");
   const { navigate } = useStoreActions();
   const runs = useStoreSelector((s) => s.runs);
   const conn = useStoreSelector((s) => s.conn);
@@ -81,13 +83,13 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
   let body: ReactNode;
   if (list.length === 0 && (!snapshotLoaded || conn !== "online")) {
     // An empty map proves nothing before the first snapshot or while disconnected (§12.5).
-    const placeholder = listPlaceholder("Multi-Agent Runs", conn);
+    const placeholder = listPlaceholder("runs", conn);
     body = <State variant={placeholder.variant} icon={<RunsIcon />} title={placeholder.title}>{placeholder.hint}</State>;
   } else if (list.length === 0) {
     body = (
       <State
         icon={<RunsIcon />}
-        title="No Multi-Agent Runs Yet"
+        title={`No ${runsDestination.name} Yet`}
         actions={<button type="button" className="btn primary" onClick={onNewRun}>New Multi-Agent Run</button>}
       >
         Start one to compare several agents on the same task.
@@ -99,7 +101,11 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
 
   return (
     <div className="page">
-      <PageHeader title="Multi-Agent Runs" primary={{ label: "New Multi-Agent Run", onClick: onNewRun }} />
+      <PageHeader
+        title={runsDestination.name}
+        description={runsDestination.description}
+        primary={{ label: "New Multi-Agent Run", onClick: onNewRun }}
+      />
       {body}
     </div>
   );
@@ -300,7 +306,7 @@ function RunDetailContent({ runId }: { runId: string }) {
     const placeholder = detailPlaceholder("Run", { authoritative: snapshotLoaded, conn });
     return (
       <div className="run-detail">
-        <DetailBar title="Multi-Agent Run" backLabel="Back to Multi-Agent Runs" onBack={back} />
+        <DetailBar title={viewTitle({ name: "run", id: runId })} backLabel={backLabel("runs")} onBack={back} />
         <State variant={placeholder.variant} title={placeholder.title}>{placeholder.hint}</State>
       </div>
     );
@@ -308,7 +314,7 @@ function RunDetailContent({ runId }: { runId: string }) {
 
   return (
     <div className="run-detail">
-      <DetailBar title={run.title} backLabel="Back to Multi-Agent Runs" onBack={back} />
+      <DetailBar title={viewTitle({ name: "run", id: runId }, run.title)} backLabel={backLabel("runs")} onBack={back} />
       <p className="detail-summary">{run.prompt}</p>
 
       {(workflow || workflowError) && (

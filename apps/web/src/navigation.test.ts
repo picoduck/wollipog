@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { titleCaseLabel } from "./format.js";
 import {
   absoluteViewUrl,
+  backLabel,
   BrowserNavigation,
+  destination,
+  viewTitle,
   decodeResourceId,
   encodeResourceId,
   isolatedNotificationNavigationHandler,
@@ -70,35 +76,122 @@ test("every dashboard view has a canonical round-tripping path", () => {
   );
 });
 
-test("global destinations use the polished Connections vocabulary everywhere", () => {
-  // The internal name stays "inbox" so saved preferences and the "/" route survive the visible
-  // rename to Sessions (#499).
-  assert.deepEqual(GLOBAL_VIEW_ITEMS[0], {
-    name: "inbox",
-    label: "Sessions",
-    title: "Sessions",
-    paletteLabel: "Sessions",
-  });
-  assert.deepEqual(GLOBAL_VIEW_ITEMS.find((item) => item.name === "projects"), {
-    name: "projects",
-    label: "Projects",
-    title: "Projects",
-    paletteLabel: "Projects",
-  });
-  const connections = GLOBAL_VIEW_ITEMS.find((item) => item.name === "runners");
-  assert.deepEqual(connections, {
-    name: "runners",
-    label: "Connections",
-    title: "Connections",
-    paletteLabel: "Connections",
-  });
-  assert.deepEqual(GLOBAL_VIEW_ITEMS.find((item) => item.name === "archived"), {
-    name: "archived",
-    label: "Archived",
-    title: "Archived Sessions",
-    paletteLabel: "Archived Sessions",
-  });
-  assert.equal(GLOBAL_VIEW_ITEMS.some((item) => /runner/i.test(`${item.label} ${item.title} ${item.paletteLabel}`)), false);
+test("every destination has one name, in the §4.1 order", () => {
+  // The internal id stays "inbox" (and "runners") so saved preferences and the "/" route survive
+  // the visible renames to Sessions (#499) and Connections.
+  assert.deepEqual(GLOBAL_VIEW_ITEMS.map((item) => [item.id, item.name, item.group]), [
+    ["inbox", "Sessions", "work"],
+    ["automations", "Automations", "work"],
+    ["projects", "Projects", "work"],
+    ["runs", "Multi-Agent Runs", "oversight"],
+    ["pods", "Pods", "oversight"],
+    ["runners", "Connections", "oversight"],
+    ["skills", "Agent Skills", "oversight"],
+    ["archived", "Archived Sessions", "records"],
+    ["usage", "Usage and Cost", "records"],
+  ]);
+  for (const item of GLOBAL_VIEW_ITEMS) {
+    // One field, not a short label, a long title and a palette label that drift apart.
+    assert.deepEqual(Object.keys(item).filter((key) => !["id", "name", "description", "group"].includes(key)), [], item.id);
+    assert.doesNotMatch(item.name, /&/, `${item.id} spells "and" out`);
+    assert.doesNotMatch(item.name, /runner|inbox/i, item.id);
+    assert.equal(item.name, titleCaseLabel(item.name), `${item.name} is Title Case`);
+  }
+  assert.equal(destination("pods").name, "Pods");
+  assert.equal(backLabel("runs"), "Back to Multi-Agent Runs");
+  assert.equal(backLabel("inbox"), "Back to Sessions");
+});
+
+/** docs/design-system.md §17.2: system nouns the UI no longer uses. */
+const RETIRED_TERMS = [
+  "control plane",
+  "control-plane",
+  "runtime capacity",
+  "durable",
+  "snapshot",
+  "projection",
+  "runner protocol",
+  "reminder parser",
+  "pnpm dev",
+  "content-free",
+];
+
+test("page descriptions are one short sentence in user terms", () => {
+  assert.deepEqual(
+    Object.fromEntries(GLOBAL_VIEW_ITEMS.map((item) => [item.id, item.description])),
+    {
+      inbox: undefined,
+      automations: "Run a prompt on a schedule, from a webhook, or from a chat message.",
+      projects: "Group related sessions and choose the folders where they run.",
+      runs: "Give one task to several agents and compare what each one does.",
+      pods: "Agents that share notes and a worktree while they work toward one objective.",
+      runners: undefined,
+      skills: "Write a skill once, then choose which machines and agents get it.",
+      archived: undefined,
+      usage: "What your agents spent, by day, agent and project.",
+    },
+  );
+  for (const item of GLOBAL_VIEW_ITEMS) {
+    if (item.description === undefined) continue;
+    assert.ok(item.description.length <= 80, `${item.name}: ${item.description.length} characters`);
+    // Sentence case: one capital to start, a full stop to end, and no Title Case run after it.
+    assert.match(item.description, /^[A-Z][^A-Z]*\.$/u, `${item.name} is one sentence-case line`);
+    for (const term of RETIRED_TERMS) {
+      assert.ok(!item.description.toLowerCase().includes(term), `${item.name} uses the retired term "${term}"`);
+    }
+  }
+});
+
+test("an entity page is titled by its entity once it has loaded", () => {
+  assert.equal(viewTitle({ name: "run", id: "run-1" }, "Compare Retry Strategies"), "Compare Retry Strategies");
+  assert.equal(viewTitle({ name: "pod", id: "pod-1" }, "Release Train"), "Release Train");
+  // The generic noun is only the loading fallback.
+  assert.equal(viewTitle({ name: "run", id: "run-1" }), "Multi-Agent Run");
+  assert.equal(viewTitle({ name: "pod", id: "pod-1" }), "Pod");
+  assert.equal(viewTitle({ name: "pod", id: "pod-1" }, ""), "Pod");
+  assert.equal(viewTitle({ name: "session", id: "s-1" }), "Session");
+});
+
+const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+
+test("every surface that names a destination reads the registry's one name", () => {
+  // The rail's accessible name and tooltip, its More sheet, the palette, the shortcut reference
+  // and the Settings › Navigation rows each render `name`. A second field would let them drift
+  // apart again, which is what put "Multi-Agent" in the rail and "Multi-Agent Runs" in the title.
+  const consumers: ReadonlyArray<[string, RegExp[]]> = [
+    ["./components/Rail.tsx", [
+      /aria-label=\{`\$\{item\.name\}\$\{shortcutSuffix\}\$\{countLabel\}`\}/,
+      /title=\{`\$\{item\.name\}\$\{shortcutSuffix\}`\}/,
+      /aria-label=\{`\$\{item\.name\}\$\{countLabel\}`\}/,
+      /<span className="menu-text">\{item\.name\}<\/span>/,
+    ]],
+    ["./components/CommandPalette.tsx", [/label: item\.name,/]],
+    ["./components/SettingsView.tsx", [/const item = destination\(name\);/, /\{item\.name\}/]],
+    ["./shortcuts.ts", [/label: item\.name,/]],
+    ["./experiments.ts", [/const multiAgentName = destination\("runs"\)\.name;/, /const podsName = destination\("pods"\)\.name;/]],
+  ];
+  for (const [path, patterns] of consumers) {
+    const text = source(path);
+    for (const pattern of patterns) assert.match(text, pattern, `${path} must read the destination name`);
+    assert.doesNotMatch(text, /\bitem\.(label|title|paletteLabel)\b/, `${path} reads a retired field`);
+  }
+  // Each destination's own page header reads its title (and description) from the registry.
+  const headers: ReadonlyArray<[string, string]> = [
+    ["./components/AutomationsView.tsx", "automations"],
+    ["./components/ProjectsView.tsx", "projects"],
+    ["./components/RunsView.tsx", "runs"],
+    ["./components/PodsView.tsx", "pods"],
+    ["./components/RunnersView.tsx", "runners"],
+    ["./components/SkillsView.tsx", "skills"],
+    ["./components/ArchivedSessionsView.tsx", "archived"],
+    ["./components/UsageView.tsx", "usage"],
+  ];
+  for (const [path, id] of headers) {
+    const text = source(path);
+    assert.match(text, new RegExp(`destination\\("${id}"\\)`), `${path} reads its registry entry`);
+    assert.doesNotMatch(text, /<PageHeader[^>]*?\stitle="/, `${path} hard-codes its page title`);
+    assert.doesNotMatch(text, /<PageHeader[^>]*?\sdescription="/, `${path} hard-codes its description`);
+  }
 });
 
 test("Session Naming is no longer a primary Settings destination and its legacy link reaches Behavior", () => {

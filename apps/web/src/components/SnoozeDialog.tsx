@@ -308,7 +308,7 @@ export function SnoozeDialog({
             ? returnedReminder.scheduleKind === "someday"
               ? "This session returned from a Someday snooze after activity. Choose a new schedule to snooze it again."
               : `This session returned from snooze after ${formatReminderInstant(returnedReminder.scheduledFor, returnedReminder.timeZone)}. Choose a new time to snooze it again.`
-            : "Snoozing changes Inbox visibility only. Running work and lifecycle state continue unchanged."}
+            : "Snoozing changes Sessions visibility only. Running work and lifecycle state continue unchanged."}
         </p>
         <span className="sr-only" role="status" aria-live="polite">
           {creatingFromDraft

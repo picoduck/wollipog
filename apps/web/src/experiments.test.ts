@@ -108,11 +108,11 @@ test("the list and detail views of a feature gate together", () => {
 
 test("every gated global destination takes its experiment's name from the navigation registry", () => {
   for (const item of GLOBAL_VIEW_ITEMS) {
-    const experiment = experimentForViewName(item.name);
+    const experiment = experimentForViewName(item.id);
     if (experiment !== null) {
       // One name for the rail's page title, the settings row and the turned-off page, so the
       // Pods rename (#1945) lands everywhere by editing the registry alone.
-      assert.equal(EXPERIMENT_COPY[experiment].name, item.title, item.name);
+      assert.equal(EXPERIMENT_COPY[experiment].name, item.name, item.id);
     }
   }
 });
@@ -153,7 +153,7 @@ test("every surface that exposes a gated feature consults the flags", () => {
     // exactly when the page does.
     ["./App.tsx", /<ExperimentGate experiment="multiAgent"[^>]*>\s*\{view\.name === "runs" \? <RunsView /,
       "the page header's create button is a creation surface and gates with its view"],
-    ["./components/RunsView.tsx", /<PageHeader title="Multi-Agent Runs" primary=\{\{ label: "New Multi-Agent Run"/,
+    ["./components/RunsView.tsx", /<PageHeader[^>]*?primary=\{\{ label: "New Multi-Agent Run"/,
       "the Runs create action belongs to the gated Runs page"],
     ["./components/AutomationsView.tsx", /multiAgentEnabled \|\| form\.actionKind === "workflow_run"/,
       "Automations must not OFFER workflow runs while multi-agent is off, but an automation already using one keeps rendering truthfully"],

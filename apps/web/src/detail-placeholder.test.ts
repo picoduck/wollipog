@@ -28,13 +28,13 @@ test("detail placeholder loading and unpaired titles are in Title Case with sent
 });
 
 test("list placeholders name the loading, offline and unpaired states in Title Case", () => {
-  assert.deepEqual(listPlaceholder("Multi-Agent Runs", "connecting"), {
+  assert.deepEqual(listPlaceholder("runs", "connecting"), {
     title: "Loading Multi-Agent Runs…", hint: "Waiting for the control-plane snapshot.", variant: "loading",
   });
-  assert.deepEqual(listPlaceholder("Collaboration Pods", "offline"), {
-    title: "Collaboration Pods Unavailable", hint: "Reconnect to the control plane to load this list.", variant: "offline",
+  assert.deepEqual(listPlaceholder("pods", "offline"), {
+    title: "Pods Unavailable", hint: "Reconnect to the control plane to load this list.", variant: "offline",
   });
-  assert.deepEqual(listPlaceholder("Multi-Agent Runs", "unauthorized"), {
+  assert.deepEqual(listPlaceholder("runs", "unauthorized"), {
     title: "Pair to Load Multi-Agent Runs", hint: "This device needs access to the control plane.", variant: "offline",
   });
 });

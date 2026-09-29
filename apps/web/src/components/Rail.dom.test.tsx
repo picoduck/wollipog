@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import { Rail } from "./Rail.js";
 import { saveSessionsViewMode } from "../sessions-view-mode.js";
 import { moveRailView, resetRailPreferencesForTest, setRailViewHidden } from "../rail-preferences.js";
-import type { View } from "../navigation.js";
+import { GLOBAL_VIEW_ITEMS, type View } from "../navigation.js";
 import { withCapturedAnimationFrames } from "./test-clock-overrides.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -79,16 +79,26 @@ test("rail exposes every destination, nested active states, live badges, and per
   await render({ name: "session", id: "session-1" });
   const links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
   assert.equal(links.length, 9);
+  // Work, Oversight, Records (§4.1).
   assert.deepEqual(links.map((link) => link.getAttribute("href")), [
-    "/", "/automations", "/runs", "/pods", "/connections/machines", "/skills", "/projects", "/archived", "/usage",
+    "/", "/automations", "/projects", "/runs", "/pods", "/connections/machines", "/skills", "/archived", "/usage",
   ]);
   // With Board folded into Sessions (#499), all nine destinations carry a digit keycap.
   assert.equal(links[8]!.querySelector(".rail-number")?.textContent, "9",
-    "the management tail ends at Usage with the ninth digit");
+    "the Records group ends at Usage and Cost with the ninth digit");
+  // One name per destination: the accessible name begins with the name the tooltip shows, so a
+  // screen-reader user hears the words on screen (label in name).
+  assert.deepEqual(links.map((link) => link.getAttribute("title")), [
+    "Sessions (1)", "Automations (2)", "Projects (3)", "Multi-Agent Runs (4)", "Pods (5)", "Connections (6)",
+    "Agent Skills (7)", "Archived Sessions (8)", "Usage and Cost (9)",
+  ]);
+  for (const [index, item] of GLOBAL_VIEW_ITEMS.entries()) {
+    assert.ok(links[index]!.getAttribute("aria-label")!.startsWith(`${item.name} (${index + 1})`), item.name);
+  }
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /^Sessions/);
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /2 Blocked/);
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /1 Stalled/);
-  assert.match(links[4]!.getAttribute("aria-label") ?? "", /3 Online/);
+  assert.match(links[5]!.getAttribute("aria-label") ?? "", /3 Online/);
   assert.equal(links[0]!.getAttribute("aria-current"), "page", "session detail belongs to Sessions");
   assert.equal(links[0]!.querySelector(".rail-badge.blocked")?.getAttribute("aria-hidden"), "true");
   assert.equal(links[0]!.querySelector(".rail-badge.stalled")?.getAttribute("aria-hidden"), "true");
@@ -97,12 +107,12 @@ test("rail exposes every destination, nested active states, live badges, and per
   assert.match(summary.textContent ?? "", /Sessions: 2 Blocked, 1 Stalled/);
 
   await render({ name: "run", id: "run-1" });
-  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[2]!.getAttribute("aria-current"), "page");
-  await render({ name: "pod", id: "pod-1" });
   assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[3]!.getAttribute("aria-current"), "page");
+  await render({ name: "pod", id: "pod-1" });
+  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[4]!.getAttribute("aria-current"), "page");
 
   await render({ name: "projects" });
-  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[6]!.getAttribute("aria-current"), "page");
+  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[2]!.getAttribute("aria-current"), "page");
 
   // Board mode is the Sessions destination: it marks Sessions current, and activating the item
   // reopens whichever mode was last used.
@@ -173,7 +183,7 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
       "four destinations plus More — five is the platform convention");
     assert.deepEqual(
       [...bar.querySelectorAll<HTMLAnchorElement>("a.rail-item")].map((item) => item.getAttribute("href")),
-      ["/", "/automations", "/runs", "/pods"],
+      ["/", "/automations", "/projects", "/runs"],
       "the bar takes the first four visible destinations in configured order");
 
     // Nothing that owns its own overlay may live in the bar or the sheet.
@@ -190,7 +200,7 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     // The bar takes the first four VISIBLE destinations (#385), so with every experiment on the
     // sheet holds the visible order past them, and Settings still trails everything.
     assert.deepEqual([...sheet.querySelectorAll(".menu-item")].map((el) => el.querySelector(".menu-text")?.textContent),
-      ["Connections", "Agent Skills", "Projects", "Archived Sessions", "Usage & Cost",
+      ["Pods", "Connections", "Agent Skills", "Archived Sessions", "Usage and Cost",
         "Settings"],
       "Settings is the trailing row, after every destination");
     // The default order overflows Connections, so its online count overflows with it (#532
@@ -290,7 +300,7 @@ test("More reports the current page when an overflow destination is selected", a
     });
     const trigger = container.querySelector(".rail-more-trigger")!;
     assert.equal(trigger.getAttribute("aria-current"), "page");
-    assert.match(trigger.getAttribute("aria-label") ?? "", /Usage & Cost selected/);
+    assert.match(trigger.getAttribute("aria-label") ?? "", /Usage and Cost selected/);
     assert.equal(container.querySelector('[aria-current="page"]'), trigger,
       "exactly one element may claim the current page");
   } finally {
@@ -303,7 +313,7 @@ test("More reports the current page when an overflow destination is selected", a
 test("only one element claims the current page while More is open", async () => {
   // The trigger stands in for the selected destination only while the sheet is CLOSED. With it
   // open, a screen reader previously met both "More Destinations, current page" and
-  // "Usage & Cost, current page" inside Primary Navigation.
+  // "Usage and Cost, current page" inside Primary Navigation.
   const restore = stubPhoneWidth();
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -452,7 +462,7 @@ test("crossing to desktop from the Settings row hands focus to the desktop gear"
 });
 
 test("hiding and reordering renumber the surviving destinations", async () => {
-  // Position IS the binding (#385): Automations gone means Multi-Agent holds digit 2 — the digit
+  // Position IS the binding (#385): Automations gone means Projects holds digit 2 — the digit
   // never goes dead the way the pre-#385 canonical anchoring left it.
   resetRailPreferencesForTest();
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -475,7 +485,7 @@ test("hiding and reordering renumber the surviving destinations", async () => {
     await render();
     let links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
     assert.equal(links.length, 8, "a hidden destination leaves the rail");
-    assert.equal(links[1]!.getAttribute("href"), "/runs");
+    assert.equal(links[1]!.getAttribute("href"), "/projects");
     assert.equal(links[1]!.querySelector(".rail-number")?.textContent, "2",
       "the survivor inherits the digit; nothing goes dead");
     assert.match(links[1]!.getAttribute("aria-label") ?? "", /\(2\)/);
@@ -496,7 +506,7 @@ test("hiding and reordering renumber the surviving destinations", async () => {
 });
 
 test("overflowed destinations keep their status counts and Sessions keeps its saved mode", async () => {
-  // Round-1 review findings on #532: the default order puts Connections fifth on a phone, so its
+  // Round-1 review findings on #532: the default order puts Connections sixth on a phone, so its
   // online count must overflow WITH it — and a Sessions row pushed into the sheet must open the
   // persisted list/board mode exactly like the bar item and the digit do.
   resetRailPreferencesForTest();

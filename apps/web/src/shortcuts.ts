@@ -1,4 +1,5 @@
 import type { ExperimentFlags, ExperimentId } from "./experiments.js";
+import { GLOBAL_VIEW_ITEMS, type GlobalViewName } from "./navigation.js";
 
 export type ShortcutId =
   | "search"
@@ -93,6 +94,19 @@ export type ShortcutDefinition = {
   };
 };
 
+/** The navigation shortcut advertising each rail destination, for derived-digit display. */
+export const RAIL_SHORTCUT_IDS = {
+  inbox: "navigate-inbox",
+  automations: "navigate-automations",
+  runs: "navigate-runs",
+  pods: "navigate-pods",
+  runners: "navigate-connections",
+  skills: "navigate-skills",
+  projects: "navigate-projects",
+  archived: "navigate-archived",
+  usage: "navigate-usage",
+} as const satisfies Record<GlobalViewName, ShortcutId>;
+
 export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "search",
@@ -105,79 +119,17 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   // The digits below are the DEFAULT configuration's bindings. At runtime the bare digits derive
   // solely from the visible rail order (#385, rail-preferences.ts): the shell's key handler and
   // the shortcut reference both read the derived mapping, so a reordered or hidden destination
-  // renumbers everywhere at once and these table entries never disagree with a keycap.
-  {
-    id: "navigate-inbox",
+  // renumbers everywhere at once and these table entries never disagree with a keycap. The
+  // entries are built from the destination registry, so each is labelled with the destination's
+  // one name (docs/design-system.md §4.1).
+  ...GLOBAL_VIEW_ITEMS.map((item, index): ShortcutDefinition => ({
+    id: RAIL_SHORTCUT_IDS[item.id],
     group: "Navigation",
-    label: "Sessions",
-    description: "Open Sessions in its last-used list or board mode",
+    label: item.name,
+    description: item.id === "inbox" ? `Open ${item.name} in its last-used list or board mode` : `Open ${item.name}`,
     scope: "Global",
-    binding: { key: "1", bare: true },
-  },
-  {
-    id: "navigate-automations",
-    group: "Navigation",
-    label: "Automations",
-    description: "Open Automations",
-    scope: "Global",
-    binding: { key: "2", bare: true },
-  },
-  {
-    id: "navigate-runs",
-    group: "Navigation",
-    label: "Multi-Agent",
-    description: "Open Multi-Agent Runs",
-    scope: "Global",
-    binding: { key: "3", bare: true },
-  },
-  {
-    id: "navigate-pods",
-    group: "Navigation",
-    label: "Pods",
-    description: "Open Collaboration Pods",
-    scope: "Global",
-    binding: { key: "4", bare: true },
-  },
-  {
-    id: "navigate-connections",
-    group: "Navigation",
-    label: "Connections",
-    description: "Open Connections",
-    scope: "Global",
-    binding: { key: "5", bare: true },
-  },
-  {
-    id: "navigate-skills",
-    group: "Navigation",
-    label: "Agent Skills",
-    description: "Open Agent Skills",
-    scope: "Global",
-    binding: { key: "6", bare: true },
-  },
-  {
-    id: "navigate-projects",
-    group: "Navigation",
-    label: "Projects",
-    description: "Open Projects",
-    scope: "Global",
-    binding: { key: "7", bare: true },
-  },
-  {
-    id: "navigate-archived",
-    group: "Navigation",
-    label: "Archived Sessions",
-    description: "Open Archived Sessions",
-    scope: "Global",
-    binding: { key: "8", bare: true },
-  },
-  {
-    id: "navigate-usage",
-    group: "Navigation",
-    label: "Usage",
-    description: "Open Usage & Cost",
-    scope: "Global",
-    binding: { key: "9", bare: true },
-  },
+    binding: { key: String(index + 1), bare: true },
+  })),
   {
     id: "toggle-sessions-view",
     group: "Navigation",
@@ -742,19 +694,6 @@ export function advanceShortcutSequence(
 /** Shortcuts whose feature can be switched off in Settings → Experimental. Their handlers all
  * live inside the gated surfaces, so the binding is already dead when the flag is off — this
  * mapping exists so the reference says why instead of advertising a working key. */
-/** The navigation shortcut advertising each rail destination, for derived-digit display. */
-export const RAIL_SHORTCUT_IDS = {
-  inbox: "navigate-inbox",
-  automations: "navigate-automations",
-  runs: "navigate-runs",
-  pods: "navigate-pods",
-  runners: "navigate-connections",
-  skills: "navigate-skills",
-  projects: "navigate-projects",
-  archived: "navigate-archived",
-  usage: "navigate-usage",
-} as const satisfies Record<string, ShortcutId>;
-
 const EXPERIMENT_SHORTCUT_IDS: Partial<Record<ShortcutId, ExperimentId>> = {
   "navigate-runs": "multiAgent",
   "submit-run": "multiAgent",

@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import type { PodContextEntry, PodView, RunnerView, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import type { View, ViewNavigation } from "../navigation.js";
+import { viewTitle, type View, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
@@ -234,28 +234,64 @@ const snapshotWithPods = (pods: PodView[]): UiSnapshotMessage => ({
 
 test("before the first snapshot the Pods list is loading, not empty", async () => {
   const list = await renderPodsList(() => {});
-  assert.match(list.text, /Loading Collaboration Pods…/u);
-  assert.doesNotMatch(list.text, /No Collaboration Pods Yet/u);
+  assert.match(list.text, /Loading Pods…/u);
+  assert.doesNotMatch(list.text, /No Pods Yet/u);
   assert.equal(list.createButton, false);
 });
 
 test("an offline or unpaired dashboard shows the Pods list as unavailable, not empty", async () => {
   const offline = await renderPodsList((socket) => socket.onclose?.({ code: 1006 }));
-  assert.match(offline.text, /Collaboration Pods Unavailable/u);
-  assert.doesNotMatch(offline.text, /No Collaboration Pods Yet/u);
+  assert.match(offline.text, /Pods Unavailable/u);
+  assert.doesNotMatch(offline.text, /No Pods Yet/u);
   assert.equal(offline.createButton, false);
 
   const unauthorized = await renderPodsList((socket) => socket.onclose?.({ code: 1008 }));
-  assert.match(unauthorized.text, /Pair to Load Collaboration Pods/u);
+  assert.match(unauthorized.text, /Pair to Load Pods/u);
   assert.equal(unauthorized.createButton, false);
+});
+
+test("a loaded pod titles its page by name and returns to Pods", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "pod-title", runtimeKey: "pod-title:1", createSocket: () => socket, close() {},
+  };
+  const client = { ...api, getSessionEventPage: pending, podContext: async () => ({ entries: [] }) } as unknown as ApiClient;
+  const navigation: ViewNavigation = { current: () => ({ name: "pod", id: podA.id }), push() {}, listen: () => () => {} };
+  const heading = () => container.querySelector("h1#page-title")?.textContent;
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <PodRoute />
+        </StoreProvider>
+      </ApiProvider>,
+    ));
+    // Until the pod arrives, the generic noun is the only thing the page can say.
+    assert.equal(heading(), "Pod");
+    assert.equal(heading(), viewTitle({ name: "pod", id: podA.id }));
+
+    await act(async () => socket.push(snapshotWithPods([podA])));
+    assert.equal(heading(), "Pod A");
+    assert.equal(heading(), viewTitle({ name: "pod", id: podA.id }, podA.title),
+      "the page h1 and viewTitle() name the same pod");
+    const back = container.querySelector(".detail-bar-back")!;
+    assert.equal(back.getAttribute("aria-label"), "Back to Pods");
+    assert.equal(back.getAttribute("title"), "Back to Pods");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
 
 test("only a loaded snapshot with no pods shows the empty state and its create action", async () => {
   const empty = await renderPodsList((socket) => socket.push(snapshotWithPods([])));
-  assert.match(empty.text, /No Collaboration Pods Yet/u);
+  assert.match(empty.text, /No Pods Yet/u);
   assert.equal(empty.createButton, true);
 
   const listed = await renderPodsList((socket) => socket.push(snapshotWithPods([podA])));
   assert.match(listed.text, /Pod A/u);
-  assert.doesNotMatch(listed.text, /No Collaboration Pods Yet|Loading/u);
+  assert.doesNotMatch(listed.text, /No Pods Yet|Loading/u);
 });

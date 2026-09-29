@@ -46,7 +46,7 @@ const PHRASAL_VERBS = new Set([
   "take", "turn",
 ]);
 const LABEL_TAGS = new Set(["button", "caption", "dt", "h1", "h2", "h3", "h4", "h5", "h6", "legend", "summary", "th"]);
-const LABEL_PROPERTIES = new Set(["actionLabel", "cancelLabel", "confirmLabel", "label", "paletteLabel"]);
+const LABEL_PROPERTIES = new Set(["actionLabel", "cancelLabel", "confirmLabel", "label"]);
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory).flatMap((entry) => {
@@ -252,6 +252,35 @@ test("picker no-match copy is a sentence built from a lowercase noun", () => {
   assert.deepEqual(failures, [], failures.join("\n"));
   // Not vacuous: New Session's Project and Agent pickers each pass a noun on both of their forms.
   assert.ok(nouns >= 4, `found ${nouns} picker nouns`);
+});
+
+test("no production screen calls Sessions the Inbox", () => {
+  // docs/design-system.md §4.1: the destination is Sessions, and "Inbox" is retired from all visible
+  // and accessible copy (#1945). The internal `inbox` view name, the "/" route and stored keys keep
+  // it, so the scan reads only JSX text and string copy, where the capitalised word would show.
+  const failures: string[] = [];
+  let scanned = 0;
+  for (const file of sourceFiles(SOURCE_ROOT)) {
+    if (!file.endsWith(".tsx") || file.includes(`${path.sep}e2e${path.sep}`)) continue;
+    scanned += 1;
+    const sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const check = (node: ts.Node, text: string) => {
+      if (!/\bInbox\b/.test(text)) return;
+      const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+      failures.push(`${path.relative(SOURCE_ROOT, file)}:${line} ${JSON.stringify(text.trim())}`);
+    };
+    const visit = (node: ts.Node) => {
+      if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return;
+      if (ts.isJsxText(node) || ts.isStringLiteralLike(node)) check(node, node.text);
+      if (ts.isTemplateExpression(node)) {
+        check(node, [node.head.text, ...node.templateSpans.map((span) => span.literal.text)].join(" "));
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  assert.ok(scanned > 50, `scanned ${scanned} production TSX files`);
+  assert.deepEqual(failures, [], failures.join("\n"));
 });
 
 test("the copy rules tell a sentence from a title", () => {

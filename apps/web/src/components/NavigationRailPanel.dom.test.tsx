@@ -81,8 +81,8 @@ test("the Navigation group lists every destination with derived digits and a pro
     assert.deepEqual(rows(container).map(rowDigit), ["1", "2", "3", "4", "5", "6", "7", "8", "9"]);
 
     // Reorder via the keyboard-operable move controls; Reset restores the product default.
-    await act(async () => { button(rows(container)[8]!, /Move Usage & Cost Up/).click(); });
-    assert.equal(rowTitle(rows(container)[7]!), "Usage & Cost");
+    await act(async () => { button(rows(container)[8]!, /Move Usage and Cost Up/).click(); });
+    assert.equal(rowTitle(rows(container)[7]!), "Usage and Cost");
     const reset = [...container.querySelectorAll<HTMLButtonElement>("button")]
       .find((candidate) => candidate.textContent === "Reset to Default")!;
     assert.equal(reset.disabled, false);

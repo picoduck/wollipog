@@ -26,7 +26,7 @@ import { GLOBAL_VIEW_ITEMS, type GlobalViewName } from "./navigation.js";
 export const RAIL_PREFERENCES_STORAGE_KEY = "wollipog.navigation.rail";
 const RAIL_PREFERENCES_SCHEMA_VERSION = 1;
 
-const CANONICAL_ORDER: readonly GlobalViewName[] = GLOBAL_VIEW_ITEMS.map((item) => item.name);
+const CANONICAL_ORDER: readonly GlobalViewName[] = GLOBAL_VIEW_ITEMS.map((item) => item.id);
 const KNOWN = new Set<string>(CANONICAL_ORDER);
 
 /** Sessions must stay recoverable from the rail itself, so it can never be hidden. */

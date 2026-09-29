@@ -110,8 +110,8 @@ test("the Inbox footer centers readable counts on phones and keeps shortcuts tra
   await page.setViewportSize({ width: 1280, height: 800 });
   await openHarness(page);
 
-  const footer = page.locator('footer[aria-label="Inbox Status and Shortcuts"]');
-  const summary = footer.getByLabel("Inbox Activity Summary");
+  const footer = page.locator('footer[aria-label="Sessions Status and Shortcuts"]');
+  const summary = footer.getByLabel("Sessions Activity Summary");
   const shortcuts = footer.locator(".inbox-shortcut-rail");
   await expect(shortcuts).toBeVisible();
   await expect(shortcuts.getByRole("button", { name: "Reply" })).toBeVisible();

@@ -24,7 +24,7 @@ import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { discardComposerDraft } from "../composer-drafts.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
-import { absoluteViewUrl } from "../navigation.js";
+import { absoluteViewUrl, backLabel } from "../navigation.js";
 import { reminderMenuActionLabel } from "../session-reminders.js";
 import { safeExternalHref } from "../external-href.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
@@ -502,7 +502,7 @@ export function SessionHeader({
     <div className="detail-head">
       {!isMobile && (
         <>
-          <button className="icon-btn back" onClick={onBack} title="Back to inbox" aria-label="Back to Inbox">
+          <button className="icon-btn back" onClick={onBack} title="Back to sessions" aria-label={backLabel("inbox")}>
             <ChevronLeftIcon size={22} />
           </button>
           <div className="detail-crumbs">

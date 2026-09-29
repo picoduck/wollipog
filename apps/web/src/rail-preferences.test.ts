@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import { DEFAULT_EXPERIMENT_FLAGS } from "./experiments.js";
+import { saveInstanceStorageValue } from "./instance-storage.js";
 import { GLOBAL_VIEW_ITEMS } from "./navigation.js";
 import {
+  RAIL_PREFERENCES_STORAGE_KEY,
   defaultRailPreferences,
   getRailPreferences,
   moveRailView,
@@ -19,7 +21,7 @@ import {
   type RailPreferences,
 } from "./rail-preferences.js";
 
-const CANONICAL = GLOBAL_VIEW_ITEMS.map((item) => item.name);
+const CANONICAL = GLOBAL_VIEW_ITEMS.map((item) => item.id);
 
 /** instance-storage reads the bare `localStorage` global; give the suite an isolated one. */
 const priorLocalStorage = (globalThis as Record<string, unknown>)["localStorage"];
@@ -50,6 +52,42 @@ test("absent, garbage, and non-object payloads all fall back to the canonical de
     assert.equal(preferences.hidden.size, 0);
     assert.equal(railPreferencesAreDefault(preferences), true);
   }
+});
+
+test("with no saved preferences the rail follows the Work, Oversight and Records groups", () => {
+  // docs/design-system.md §4.1. Projects is daily work, so it answers 3.
+  const preferences = getRailPreferences();
+  assert.deepEqual([...preferences.order],
+    ["inbox", "automations", "projects", "runs", "pods", "runners", "skills", "archived", "usage"]);
+  assert.deepEqual(
+    [...new Set(GLOBAL_VIEW_ITEMS.map((item) => item.group))],
+    ["work", "oversight", "records"],
+    "each group is one contiguous run of the default order",
+  );
+  const flags = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true };
+  const visible = visibleRailViews(preferences, flags);
+  assert.equal(railDigits(visible).get("projects"), "3");
+  assert.equal(railViewForDigit(visible, "3"), "projects");
+});
+
+test("a version-1 rail preference saved before the regrouping keeps its order, hidden items and digits", () => {
+  // Written by the previous default, which put Projects seventh, with Archived hidden.
+  const previousDefault = ["inbox", "automations", "runs", "pods", "runners", "skills", "projects", "archived", "usage"];
+  saveInstanceStorageValue(
+    RAIL_PREFERENCES_STORAGE_KEY,
+    JSON.stringify({ v: 1, order: previousDefault, hidden: ["archived"] }),
+  );
+  resetRailPreferencesForTest();
+  const preferences = getRailPreferences();
+  assert.deepEqual([...preferences.order], previousDefault, "a saved order is never re-sorted into the new default");
+  assert.deepEqual([...preferences.hidden], ["archived"]);
+  assert.equal(railPreferencesAreDefault(preferences), false);
+  const flags = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true };
+  const digits = railDigits(visibleRailViews(preferences, flags));
+  assert.deepEqual(
+    [...digits],
+    [["inbox", "1"], ["automations", "2"], ["runs", "3"], ["pods", "4"], ["runners", "5"], ["skills", "6"], ["projects", "7"], ["usage", "8"]],
+  );
 });
 
 test("a saved order round-trips per instance and hiding never touches order", () => {
@@ -104,12 +142,12 @@ test("digits derive solely from the visible order and skip hidden or gated desti
   const preferences: RailPreferences = { order: CANONICAL, hidden: new Set(["automations"]) };
   const flags = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: false, pods: false };
   const visible = visibleRailViews(preferences, flags);
-  assert.deepEqual(visible, ["inbox", "runners", "skills", "projects", "archived", "usage"]);
+  assert.deepEqual(visible, ["inbox", "projects", "runners", "skills", "archived", "usage"]);
   const digits = railDigits(visible);
   assert.equal(digits.get("inbox"), "1");
-  assert.equal(digits.get("runners"), "2", "a hidden destination consumes no slot");
+  assert.equal(digits.get("projects"), "2", "a hidden destination consumes no slot");
   assert.equal(digits.get("usage"), "6");
-  assert.equal(railViewForDigit(visible, "2"), "runners");
+  assert.equal(railViewForDigit(visible, "2"), "projects");
   assert.equal(railViewForDigit(visible, "7"), null, "a digit past the visible list is inert");
 });
 

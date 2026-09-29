@@ -52,7 +52,7 @@ export function NewPodDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Modal
-      title="New Collaboration Pod"
+      title="New Pod"
       onClose={onClose}
       footer={
         <>

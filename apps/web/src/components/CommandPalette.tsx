@@ -87,12 +87,12 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       // A hidden experiment is hidden from search too: a palette hit that lands on the
       // "turned off" notice would advertise a destination the rail says does not exist.
       ...GLOBAL_VIEW_ITEMS.filter((item) => {
-        const experiment = experimentForViewName(item.name);
+        const experiment = experimentForViewName(item.id);
         return experiment === null || flags[experiment];
       }).map((item) => ({
         kind: "view" as const,
-        label: item.paletteLabel,
-        view: { name: item.name } as View,
+        label: item.name,
+        view: { name: item.id } as View,
       })),
       // Settings has no rail row, so deriving the fixed list from GLOBAL_VIEW_ITEMS alone left the
       // one destination a keyboard user is most likely to search for unreachable from the palette.

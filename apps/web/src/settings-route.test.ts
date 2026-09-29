@@ -82,7 +82,7 @@ test("every view has a title of its own", () => {
   assert.equal(viewTitle({ name: "settings", section: "network" }), "Settings");
   assert.notEqual(viewTitle({ name: "settings" }), "Run");
   for (const item of GLOBAL_VIEW_ITEMS) {
-    assert.equal(viewTitle({ name: item.name } as never), item.title,
+    assert.equal(viewTitle({ name: item.id } as never), item.name,
       "the rail, the palette and the heading must read one list");
   }
   assert.doesNotMatch(app, /GLOBAL_VIEW_ITEMS\.find/,
@@ -100,7 +100,7 @@ test("the palette can reach Settings", () => {
   }
   // And not by adding it to the rail's list, which would render a second Settings item beside the
   // gear.
-  assert.ok(!GLOBAL_VIEW_ITEMS.some((item) => (item.name as string) === "settings"),
+  assert.ok(!GLOBAL_VIEW_ITEMS.some((item) => (item.id as string) === "settings"),
     "Settings is a gear, not a rail row");
 });
 

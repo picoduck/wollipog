@@ -49,34 +49,92 @@ export type ConnectionSection = "instances" | "machines" | "people";
 
 export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
+export type DestinationGroup = "work" | "oversight" | "records";
+
+export interface GlobalViewItem {
+  /** The internal destination id. Routes, rail preferences and digits key on it, never on `name`. */
+  id: GlobalViewName;
+  /**
+   * The destination's one name (docs/design-system.md §4.1). The rail's accessible name and
+   * tooltip, the page title, the phone app bar, the More sheet, the palette, the shortcut
+   * reference and the Settings › Navigation row all read it, so none of them can disagree.
+   */
+  name: string;
+  /** One line, at most 80 characters, in user terms (§4.2, §17.2). Hidden on phones. */
+  description?: string;
+  /** The rail group the destination belongs to (§4.1). */
+  group: DestinationGroup;
+}
+
 /** One vocabulary for every global destination, shared by the rail, header, and palette.
  *
  * The board is deliberately NOT a destination: it is the board mode of Sessions (the `inbox`
  * entry), reachable through the in-view toggle, the `b` shortcut, `/board`, and the palette's
- * extra Board entry below. The `inbox` name is retained internally so saved preferences and
+ * extra Board entry below. The `inbox` id is retained internally so saved preferences and
  * routes survive the visible rename to Sessions.
  *
- * Ordered in three clusters — work surfaces (Sessions, Automations, and the gated agent-work
- * views), infrastructure (Connections, Skills), then management (Projects, Archived, Usage) —
- * because the rail numbers double as the bare digit shortcuts: position IS the binding, so the
- * order is a product decision, not alphabetical. Day-to-day project access happens through the
- * Sessions split tabs, which is why the Projects page sits in the management tail. */
-export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
-  name: GlobalViewName;
-  label: string;
-  title: string;
-  paletteLabel: string;
-}> = [
-  { name: "inbox", label: "Sessions", title: "Sessions", paletteLabel: "Sessions" },
-  { name: "automations", label: "Automations", title: "Automations", paletteLabel: "Automations" },
-  { name: "runs", label: "Multi-Agent", title: "Multi-Agent Runs", paletteLabel: "Multi-Agent Runs" },
-  { name: "pods", label: "Pods", title: "Collaboration Pods", paletteLabel: "Collaboration Pods" },
-  { name: "runners", label: "Connections", title: "Connections", paletteLabel: "Connections" },
-  { name: "skills", label: "Skills", title: "Agent Skills", paletteLabel: "Agent Skills" },
-  { name: "projects", label: "Projects", title: "Projects", paletteLabel: "Projects" },
-  { name: "archived", label: "Archived", title: "Archived Sessions", paletteLabel: "Archived Sessions" },
-  { name: "usage", label: "Usage", title: "Usage & Cost", paletteLabel: "Usage & Cost" },
+ * Ordered in the three groups of §4.1 — Work, Oversight, Records — because the rail numbers
+ * double as the bare digit shortcuts: position IS the binding, so the order is a product
+ * decision, not alphabetical. Only the default follows this list: a saved rail order is kept
+ * as it was saved (rail-preferences.ts). */
+export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
+  { id: "inbox", name: "Sessions", group: "work" },
+  {
+    id: "automations",
+    name: "Automations",
+    description: "Run a prompt on a schedule, from a webhook, or from a chat message.",
+    group: "work",
+  },
+  {
+    id: "projects",
+    name: "Projects",
+    description: "Group related sessions and choose the folders where they run.",
+    group: "work",
+  },
+  {
+    id: "runs",
+    name: "Multi-Agent Runs",
+    description: "Give one task to several agents and compare what each one does.",
+    group: "oversight",
+  },
+  {
+    id: "pods",
+    name: "Pods",
+    description: "Agents that share notes and a worktree while they work toward one objective.",
+    group: "oversight",
+  },
+  { id: "runners", name: "Connections", group: "oversight" },
+  {
+    id: "skills",
+    name: "Agent Skills",
+    description: "Write a skill once, then choose which machines and agents get it.",
+    group: "oversight",
+  },
+  { id: "archived", name: "Archived Sessions", group: "records" },
+  {
+    id: "usage",
+    name: "Usage and Cost",
+    description: "What your agents spent, by day, agent and project.",
+    group: "records",
+  },
 ];
+
+/** The registry entry for a destination. */
+export function destination(id: GlobalViewName): GlobalViewItem {
+  return GLOBAL_VIEW_ITEMS.find((item) => item.id === id)!;
+}
+
+/** "Back to <Destination>": the name of every back control that returns to a destination. */
+export function backLabel(id: GlobalViewName): string {
+  return `Back to ${destination(id).name}`;
+}
+
+/** What an entity page is called until its entity has loaded. */
+export const ENTITY_FALLBACK_TITLES = {
+  session: "Session",
+  run: "Multi-Agent Run",
+  pod: "Pod",
+} as const;
 
 /**
  * The page title for any view.
@@ -85,12 +143,15 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
  * views and fell through to "Run", so Settings — added later — announced `<h1>Run</h1>` on every
  * one of its six routes. With no default branch, the next view that is added fails to compile
  * until it has a title.
+ *
+ * An entity page is titled by its entity: pass the loaded session's, run's or pod's own title.
+ * The generic noun is only the fallback while it loads.
  */
-export function viewTitle(view: View): string {
+export function viewTitle(view: View, entityTitle?: string | null): string {
   switch (view.name) {
-    // Board mode belongs to the Sessions destination; its page title matches the rail label.
+    // Board mode belongs to the Sessions destination; its page title matches the rail name.
     case "board":
-      return GLOBAL_VIEW_ITEMS.find((item) => item.name === "inbox")!.title;
+      return destination("inbox").name;
     case "inbox":
     case "projects":
     case "runs":
@@ -100,12 +161,13 @@ export function viewTitle(view: View): string {
     case "runners":
     case "archived":
     case "skills":
-      // Named once, in the list the rail and palette already read, so the three surfaces cannot
-      // drift apart.
-      return GLOBAL_VIEW_ITEMS.find((item) => item.name === view.name)!.title;
-    case "session": return "Session";
-    case "run": return "Run";
-    case "pod": return "Pod";
+      // Named once, in the list the rail and palette already read, so the surfaces cannot drift
+      // apart.
+      return destination(view.name).name;
+    case "session":
+    case "run":
+    case "pod":
+      return entityTitle || ENTITY_FALLBACK_TITLES[view.name];
     // The section is the <h2> inside the page; repeating it here would say it twice.
     case "settings": return "Settings";
   }

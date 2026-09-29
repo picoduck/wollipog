@@ -290,7 +290,7 @@ async function expectUndecorated(locator: Locator, label: string) {
  * Suppressing the label hides its children too, so anything they paint is attributed to the label:
  * an absolutely-positioned `<i>` over `color: transparent` text renders every overflow row as an
  * identical opaque slab, clears every floor, and leaves `toHaveText` passing because the canonical
- * string is still in the DOM. Production writes `<span>{item.title}</span>` — one text node, no
+ * string is still in the DOM. Production writes `<span>{item.name}</span>` — one text node, no
  * elements — so requiring exactly that costs nothing and closes the whole family.
  */
 async function expectPlainText(locator: Locator, label: string) {
@@ -405,8 +405,14 @@ const THEMES = ["dark", "light"] as const;
  * same as sheetLabel's. "Projects" joined the short band when the phone bar became the first four
  * of the configured order (#385): measured 1413-1588, so the 1330 floor still catches a third of
  * it going (1413 × 2/3 = 942).
+ *
+ * "Pods" moved into the sheet when the default order put Projects third (#1945), and one
+ * four-letter word has about half the ink of "Settings": measured 882-1001 paint / 610-721 legible
+ * across both themes and landscape. Its floors keep sheetShortLabel's ratios to the measured
+ * minimum (830 / 290), so losing a third of it (882 × 2/3 = 588) still trips the paint floor.
  */
 const SHORT_SHEET_TITLES = new Set(["Settings", "Projects"]);
+const TINY_SHEET_TITLES = new Set(["Pods"]);
 const MARKS = {
   icon: { paint: 1000, legible: 450, illegibleCells: 0, minContrast: CONTRAST.icon },
   /* The Automations bolt joined the primary bar when Board became a mode of Sessions (#499).
@@ -419,6 +425,7 @@ const MARKS = {
   sheetIcon: { paint: 255, legible: 85, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetLabel: { paint: 1850, legible: 650, illegibleCells: 0, minContrast: CONTRAST.label },
   sheetShortLabel: { paint: 1330, legible: 490, illegibleCells: 0, minContrast: CONTRAST.label },
+  sheetTinyLabel: { paint: 830, legible: 290, illegibleCells: 0, minContrast: CONTRAST.label },
 } as const satisfies Record<string, Mark>;
 
 interface HarnessOptions {
@@ -620,9 +627,9 @@ test("no two destinations render the same glyph", async ({ page }) => {
 // past the phone bar's first four (#385: the bar derives from configured order, not a fixed set).
 const MOBILE_PRIMARY_DEFAULTS = visibleRailViews(defaultRailPreferences(), { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true })
   .slice(0, MOBILE_PRIMARY_COUNT);
-for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULTS.includes(item.name))) {
-  test(`the More control reads as current on ${current.title}`, async ({ page }) => {
-    await useHarness(page, { view: current.name });
+for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULTS.includes(item.id))) {
+  test(`the More control reads as current on ${current.name}`, async ({ page }) => {
+    await useHarness(page, { view: current.id });
     await openKeyboard(page);
     // Every overflow destination, not just one: `overflowSelected = selected === "usage"` left the
     // single-case version green while a user on Runs, Pods or Automations saw a bar with nothing
@@ -636,7 +643,7 @@ for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULT
     await expect(active).toHaveCount(1);
     // The label span, not the row: an overflowed counted destination (Connections by default)
     // renders its count beside the label.
-    await expect(active.locator(".menu-text")).toHaveText(current.title);
+    await expect(active.locator(".menu-text")).toHaveText(current.name);
     await expectEveryDestinationReachable(page, KEYBOARD);
   });
 }
@@ -818,10 +825,10 @@ async function expectEveryPrimaryDestinationUsable(page: Page) {
     // primary destinations; the More trigger names itself and is checked where it is asserted.
     if (!isMoreTrigger) {
       const path = await item.evaluate((element) => new URL((element as HTMLAnchorElement).href).pathname);
-      const expected = GLOBAL_VIEW_ITEMS.find((entry) => viewPath({ name: entry.name } as View) === path);
+      const expected = GLOBAL_VIEW_ITEMS.find((entry) => viewPath({ name: entry.id } as View) === path);
       expect(expected, `no destination is served at ${path}`).toBeDefined();
-      expect(label, `the destination at ${path} must be announced as "${expected!.label}"`)
-        .toMatch(new RegExp(`^${expected!.label}\\b`));
+      expect(label, `the destination at ${path} must be announced as "${expected!.name}"`)
+        .toMatch(new RegExp(`^${expected!.name}\\b`));
     }
     // The icon, on its own. A phone destination carries no text, so the glyph IS the affordance —
     // and measuring the item instead let its border, and on Connections its count badge, stand in
@@ -929,10 +936,10 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     // `<i>Destination</i>` renamed all four rows identically, cleared the label floors, and named
     // itself in the diagnostics. The expected title comes from production's canonical list instead.
     const path = await item.evaluate((element) => new URL((element as HTMLAnchorElement).href).pathname);
-    const destination = GLOBAL_VIEW_ITEMS.find((entry) => viewPath({ name: entry.name } as View) === path);
+    const destination = GLOBAL_VIEW_ITEMS.find((entry) => viewPath({ name: entry.id } as View) === path);
     // Settings rides in the sheet without being a rail destination, so it is named from its own
     // canonical route title rather than from the destination list.
-    const expected = destination?.title ?? (path === SETTINGS_ROW.path ? SETTINGS_ROW.title : undefined);
+    const expected = destination?.name ?? (path === SETTINGS_ROW.path ? SETTINGS_ROW.title : undefined);
     expect(expected, `no destination is served at ${path}`).toBeDefined();
     const label = expected!;
     await expect(item.locator(".menu-text"), `the row at ${path} must be labelled "${label}"`).toHaveText(label);
@@ -954,7 +961,8 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     await expectPainted(page, item.locator("svg"), `${label} icon`, MARKS.sheetIcon);
     await expectPlainText(item.locator(".menu-text"), `${label} label`);
     await expectPainted(page, item.locator(".menu-text"), `${label} label`,
-      SHORT_SHEET_TITLES.has(label) ? MARKS.sheetShortLabel : MARKS.sheetLabel);
+      TINY_SHEET_TITLES.has(label) ? MARKS.sheetTinyLabel
+        : SHORT_SHEET_TITLES.has(label) ? MARKS.sheetShortLabel : MARKS.sheetLabel);
   }
 }
 

@@ -28,6 +28,7 @@ import { AccessScopeSettings, useAccessScopeIdentity } from "./AccessScopeContro
 import { useFeedback } from "./FeedbackProvider.js";
 import { PlusIcon, SearchIcon } from "./Icons.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
+import { backLabel, destination } from "../navigation.js";
 import { useIsMobile } from "./useIsMobile.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
@@ -132,7 +133,7 @@ function DeleteProjectDialog({ project, busy, error, onClose, onDelete }: {
   );
 }
 
-const PROJECTS_DESCRIPTION = "Group related sessions and choose the folders where they run.";
+const PROJECTS = destination("projects");
 
 export function ProjectsView({
   selectedProjectId,
@@ -241,7 +242,7 @@ export function ProjectsView({
     if (!selected) return;
     try {
       await runProjectMutation("visibility", async () => (await api.updateProject(selected.id, { hidden: !selected.hidden })).project);
-      showToast(selected.hidden ? "Project shown in Inbox." : "Project hidden from Inbox.");
+      showToast(selected.hidden ? "Project shown in Sessions." : "Project hidden from Sessions.");
     } catch { /* inline error */ }
   };
   const archiveSessions = async () => {
@@ -338,8 +339,8 @@ export function ProjectsView({
         {/* Disabled rather than omitted: it holds its own width, and there is nothing to create
             a Project against until the snapshot says which machines are connected. */}
         <PageHeader
-          title="Projects"
-          description={PROJECTS_DESCRIPTION}
+          title={PROJECTS.name}
+          description={PROJECTS.description}
           primary={{ label: "Create Project", onClick: () => undefined, disabled: true }}
         />
         <div className="project-manager-grid">
@@ -351,7 +352,7 @@ export function ProjectsView({
   if (!projectsSupported) {
     return (
       <div className="page full projects-view">
-        <PageHeader title="Projects" />
+        <PageHeader title={PROJECTS.name} />
         <div className="project-manager-unavailable">
           <strong>Project Management Unavailable</strong>
           <span>Update the connected control plane to manage durable Projects and Locations.</span>
@@ -369,15 +370,15 @@ export function ProjectsView({
     {phoneDetail && (
       <DetailBar
         title={selected.name}
-        backLabel="Back to Projects"
+        backLabel={backLabel("projects")}
         onBack={() => navigate({ name: "projects" })}
       />
     )}
     <div className="page full projects-view">
       {!phoneDetail && (
         <PageHeader
-          title="Projects"
-          description={PROJECTS_DESCRIPTION}
+          title={PROJECTS.name}
+          description={PROJECTS.description}
           primary={{ label: "Create Project", buttonRef: createButtonRef, onClick: () => openDialog({ kind: "create" }) }}
         />
       )}
@@ -392,7 +393,7 @@ export function ProjectsView({
               rather than one choice of three. */}
           <SegmentedControl
             className="block"
-            label="Inbox Visibility"
+            label="Sessions Visibility"
             value={visibility}
             options={[
               { value: "all", label: "All" },
@@ -428,7 +429,7 @@ export function ProjectsView({
             {visibleProjects.length === 0 && (
               <div className="project-manager-empty compact">
                 <strong>No Projects Found</strong>
-                <span>{allProjects.length ? "Try another search or Inbox visibility filter." : "Create a Project to organize related sessions."}</span>
+                <span>{allProjects.length ? "Try another search or Sessions visibility filter." : "Create a Project to organize related sessions."}</span>
               </div>
             )}
           </div>
@@ -451,7 +452,7 @@ export function ProjectsView({
                   )}
                 </div>
                 <span className={`project-visibility-state${selected.hidden ? " is-hidden" : ""}`}>
-                  {selected.hidden ? "Hidden from Inbox" : "Shown in Inbox"}
+                  {selected.hidden ? "Hidden from Sessions" : "Shown in Sessions"}
                 </span>
               </div>
               {selected.canManage === false && (
@@ -480,7 +481,7 @@ export function ProjectsView({
                 </form>
                 <div className="project-counts" aria-label="Project Counts">
                   <div><strong>{selected.activeSessionCount}</strong><span>Active Sessions</span></div>
-                  <div><strong>{selected.unarchivedSessionCount}</strong><span>Inbox Sessions</span></div>
+                  <div><strong>{selected.unarchivedSessionCount}</strong><span>Unarchived Sessions</span></div>
                   <div><strong>{selected.totalSessionCount}</strong><span>Total Sessions</span></div>
                   <div><strong>{selected.locations.length}</strong><span>Locations</span></div>
                 </div>

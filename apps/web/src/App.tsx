@@ -78,7 +78,7 @@ import { Notice } from "./components/Notice.js";
 import { OfflineBanner } from "./components/OfflineBanner.js";
 import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
-import { viewPath, viewSubjectName, viewTitle } from "./navigation.js";
+import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { useInstanceScope } from "./instance-scope.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
 import { railViewForDigit, visibleRailViews } from "./rail-preferences.js";
@@ -278,6 +278,11 @@ export function Shell() {
   const theme = useTheme();
   const { navigate, reconnectNow } = useStoreActions();
   const view = useStoreSelector((s) => s.view);
+  // A loaded run or pod titles its page by name; the generic noun is only the loading fallback.
+  const entityTitle = useStoreSelector((s) =>
+    s.view.name === "run" ? s.runs.get(s.view.id)?.title
+      : s.view.name === "pod" ? s.pods.get(s.view.id)?.title
+        : undefined);
   const viewRef = useRef(view);
   viewRef.current = view;
   const settingsReturnView = useStoreSelector((s) => s.settingsReturnView);
@@ -752,7 +757,7 @@ export function Shell() {
             name={viewSubjectName(view)}
             resetKey={viewPath(view)}
             // The Session's own bar owns its title (the phone top bar sits outside this boundary).
-            pageTitle={view.name === "session" ? undefined : viewTitle(view)}
+            pageTitle={view.name === "session" ? undefined : viewTitle(view, entityTitle)}
           >
           {(view.name === "inbox" || view.name === "session" || view.name === "board") && (
             /* Sessions takes the page header's title only. Its tab row, list, preview and splitter
@@ -785,12 +790,12 @@ export function Shell() {
           {/* A route into a feature this device has switched off keeps its page and says so:
               removing the branch entirely would make a bookmarked /runs a silent Inbox redirect. */}
           {(view.name === "runs" || view.name === "run") && (
-            <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view)} onOpenSettings={openExperimentalSettings}>
+            <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view, entityTitle)} onOpenSettings={openExperimentalSettings}>
               {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} />}
             </ExperimentGate>
           )}
           {(view.name === "pods" || view.name === "pod") && (
-            <ExperimentGate experiment="pods" pageTitle={viewTitle(view)} onOpenSettings={openExperimentalSettings}>
+            <ExperimentGate experiment="pods" pageTitle={viewTitle(view, entityTitle)} onOpenSettings={openExperimentalSettings}>
               {view.name === "pods" ? <PodsView onNewPod={() => setDialog({ kind: "pod" })} /> : <PodDetail podId={view.id} />}
             </ExperimentGate>
           )}
@@ -948,8 +953,8 @@ export function Header({
             type="button"
             className="icon-btn mobile-session-back"
             onClick={onSessionBack}
-            title="Back to inbox"
-            aria-label="Back to Inbox"
+            title="Back to sessions"
+            aria-label={backLabel("inbox")}
           >
             <ChevronLeftIcon size={18} />
           </button>

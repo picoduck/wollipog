@@ -10,13 +10,13 @@ const DESTINATIONS = [
   { path: "/inbox", title: "Sessions" },
   { path: "/automations", title: "Automations", description: true, max: 960 },
   { path: "/projects", title: "Projects", description: true },
-  { path: "/runs", title: "Multi-Agent Runs", max: 960 },
-  { path: "/pods", title: "Collaboration Pods", max: 960 },
+  { path: "/runs", title: "Multi-Agent Runs", description: true, max: 960 },
+  { path: "/pods", title: "Pods", description: true, max: 960 },
   // Connections puts its tabs in the header's tab slot (#1803).
   { path: "/connections", title: "Connections", max: 960, tabs: true },
   { path: "/skills", title: "Agent Skills", description: true },
   { path: "/archived", title: "Archived Sessions", max: 1200 },
-  { path: "/usage", title: "Usage & Cost", description: true, max: 1200 },
+  { path: "/usage", title: "Usage and Cost", description: true, max: 1200 },
   { path: "/settings", title: "Settings" },
 ] as const;
 
@@ -75,15 +75,15 @@ test.describe("at 1440×900", () => {
       expect(geometry.largest, "the page title is the largest text on the page").toBeLessThanOrEqual(20);
       if (geometry.description !== null) {
         expect(geometry.description.length).toBeLessThanOrEqual(80);
-        expect(geometry.description).not.toMatch(/control plane|durable|runtime capacity|snapshot|projection/i);
+        expect(geometry.description).not.toMatch(/control.plane|durable|runtime capacity|snapshot|projection|content-free/i);
       }
     });
   }
 
-  test("Multi-Agent Runs and Collaboration Pods create from a 32px primary with a plus icon", async ({ page }) => {
+  test("Multi-Agent Runs and Pods create from a 32px primary with a plus icon", async ({ page }) => {
     for (const [path, title, label] of [
       ["/runs", "Multi-Agent Runs", "New Multi-Agent Run"],
-      ["/pods", "Collaboration Pods", "New Collaboration Pod"],
+      ["/pods", "Pods", "New Pod"],
     ] as const) {
       await openDestination(page, path, title);
       const primary = page.locator(".page-header").getByRole("button", { name: label, exact: true });
@@ -92,6 +92,25 @@ test.describe("at 1440×900", () => {
       await expect(primary.locator("svg")).toHaveCount(1);
       const box = await primary.boundingBox();
       expect(box!.height, `${label} is one line at the control height`).toBe(32);
+    }
+    // One verb per action (§17.2): the Pods primary opens a dialog of the same name.
+    await page.locator(".page-header").getByRole("button", { name: "New Pod", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "New Pod", exact: true })).toBeVisible();
+  });
+
+  test("the destination descriptions show at 1440px and at 900px", async ({ page }) => {
+    for (const width of [1440, 900]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const [path, title, description] of [
+        ["/automations", "Automations", "Run a prompt on a schedule, from a webhook, or from a chat message."],
+        ["/runs", "Multi-Agent Runs", "Give one task to several agents and compare what each one does."],
+        ["/pods", "Pods", "Agents that share notes and a worktree while they work toward one objective."],
+        ["/usage", "Usage and Cost", "What your agents spent, by day, agent and project."],
+      ] as const) {
+        await openDestination(page, path, title);
+        await expect(page.locator(".page-header .page-desc"), `${title} at ${width}px`).toHaveText(description);
+        await expect(page.locator(".page-header .page-desc")).toBeVisible();
+      }
     }
   });
 
@@ -241,6 +260,21 @@ test.describe("page header actions follow the width tiers", () => {
       expect([box!.width, box!.height]).toEqual([44, 44]);
       await expect(primary).toHaveAccessibleName("New Skill");
       expect(await menuItems(page)).toEqual(["Import from Machine", "Manage Groups", "Import from Git"]);
+    });
+
+    test("Pods is a 44px plus named New Pod, and no destination shows its description", async ({ page }) => {
+      await openDestination(page, "/pods", "Pods");
+      const primary = page.locator(".page-header").getByRole("button", { name: "New Pod", exact: true });
+      const box = await primary.boundingBox();
+      expect([box!.width, box!.height]).toEqual([44, 44]);
+      await expect(primary.locator("svg")).toHaveCount(1);
+      await expect(primary).toHaveAccessibleName("New Pod");
+      for (const [path, title] of [
+        ["/automations", "Automations"], ["/runs", "Multi-Agent Runs"], ["/pods", "Pods"], ["/usage", "Usage and Cost"],
+      ] as const) {
+        await openDestination(page, path, title);
+        await expect(page.locator(".page-header .page-desc"), title).toBeHidden();
+      }
     });
   });
 });

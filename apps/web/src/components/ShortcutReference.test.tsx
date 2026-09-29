@@ -4,6 +4,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ShortcutReference } from "./ShortcutReference.js";
 import { resetRailPreferencesForTest, setRailViewHidden } from "../rail-preferences.js";
+import { GLOBAL_VIEW_ITEMS } from "../navigation.js";
 
 Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
 
@@ -69,8 +70,12 @@ test("navigation digits derive from the visible rail order and hidden destinatio
       "a hidden destination explains itself instead of advertising a digit");
     assert.match(html, /<dt>Automations<\/dt>[^]*?<kbd>—<\/kbd>/,
       "and shows no keycap");
-    assert.match(html, /<dt>Multi-Agent<\/dt>[^]*?<kbd>2<\/kbd>/,
+    assert.match(html, /<dt>Projects<\/dt>[^]*?<kbd>2<\/kbd>/,
       "the survivor inherits the freed digit");
+    // The Navigation group labels each destination with its one name, in the rail's order.
+    const navigation = html.slice(html.indexOf('id="shortcut-navigation"'), html.indexOf("Toggle List / Board"));
+    assert.deepEqual([...navigation.matchAll(/<dt>([^<]+)<\/dt>/g)].map((match) => match[1]).slice(1),
+      GLOBAL_VIEW_ITEMS.map((item) => item.name));
   } finally {
     resetRailPreferencesForTest();
   }

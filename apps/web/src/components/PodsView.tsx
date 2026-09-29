@@ -33,6 +33,7 @@ import { matchesShortcut } from "../shortcuts.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { confirmWhileAllowed } from "../confirmation-fence.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
+import { backLabel, destination, viewTitle } from "../navigation.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 
 const EMPTY_MEMBER_IDS: string[] = [];
@@ -209,11 +210,18 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   const conn = useStoreSelector((state) => state.conn);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const list = useMemo(() => [...pods.values()].sort((a, b) => b.updatedAt - a.updatedAt), [pods]);
-  const header = <PageHeader title="Collaboration Pods" primary={{ label: "New Collaboration Pod", onClick: onNewPod }} />;
+  const podsDestination = destination("pods");
+  const header = (
+    <PageHeader
+      title={podsDestination.name}
+      description={podsDestination.description}
+      primary={{ label: "New Pod", onClick: onNewPod }}
+    />
+  );
   if (list.length === 0) {
     // An empty map proves nothing before the first snapshot or while disconnected (§12.5).
     if (!snapshotLoaded || conn !== "online") {
-      const placeholder = listPlaceholder("Collaboration Pods", conn);
+      const placeholder = listPlaceholder("pods", conn);
       return (
         <div className="page">
           {header}
@@ -226,7 +234,7 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
         {header}
         <State
           icon={<PodsIcon />}
-          title="No Collaboration Pods Yet"
+          title={`No ${podsDestination.name} Yet`}
           actions={<button type="button" className="btn primary" onClick={onNewPod}>New Pod</button>}
         >
           Group isolated sessions to relay context across agents and runners.
@@ -407,7 +415,7 @@ function PodDetailContent({ podId }: { podId: string }) {
     const placeholder = detailPlaceholder("Pod", { authoritative: snapshotLoaded, conn });
     return (
       <div className="run-detail pod-detail">
-        <DetailBar title="Collaboration Pod" backLabel="Back to Collaboration Pods" onBack={() => navigate({ name: "pods" })} />
+        <DetailBar title={viewTitle({ name: "pod", id: podId })} backLabel={backLabel("pods")} onBack={() => navigate({ name: "pods" })} />
         <State variant={placeholder.variant} title={placeholder.title}>{placeholder.hint}</State>
       </div>
     );
@@ -644,8 +652,8 @@ function PodDetailContent({ podId }: { podId: string }) {
   return (
     <div className="run-detail pod-detail">
       <DetailBar
-        title={pod.title}
-        backLabel="Back to Collaboration Pods"
+        title={viewTitle({ name: "pod", id: podId }, pod.title)}
+        backLabel={backLabel("pods")}
         onBack={() => navigate({ name: "pods" })}
         status={<StatusBadge meta={statusMeta("pod", pod.status)} />}
         // Closing is destructive, so it lives only in ⋯ (§3.3).

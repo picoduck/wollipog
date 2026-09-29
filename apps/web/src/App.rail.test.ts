@@ -292,13 +292,14 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   assert.match(css, /@media \(pointer: coarse\) \{\s*:root \{[^}]*--control-h:\s*44px;/,
     "the shared creation control keeps a touch-sized target");
   // The intro paragraph became the page header's one-line description (#1801, §4.2: 80 characters).
-  assert.match(projectsView, /const PROJECTS_DESCRIPTION = "Group related sessions and choose the folders where they run\.";/);
+  // The registry holds it now, beside the destination name (#1945).
+  assert.match(projectsView, /const PROJECTS = destination\("projects"\);/);
   assert.match(projectsView, /className="muted project-detail-meta">Project ID:/);
   assert.match(projectsView, /className="muted project-detail-meta">\{projectAudienceVisibilitySummary/);
   assert.match(css, /\.project-detail-meta\s*\{\s*display:\s*block;/,
     "Project identity and audience metadata render on distinct lines");
-  assert.match(projectsView, /label="Inbox Visibility"/,
-    "the Inbox show-or-hide filter does not reuse the Project audience label");
+  assert.match(projectsView, /label="Sessions Visibility"/,
+    "the Sessions show-or-hide filter does not reuse the Project audience label");
   for (const label of ["Create Project", "Add Location", "Make Default", "Archive Sessions", "Delete Project"]) {
     assert.equal(projectsView.includes(label), true, label);
   }
@@ -337,7 +338,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "the collapsed creation disclosure remains a full-width readable target");
   // The phone Projects back control is the detail bar's (#1801): an `.icon-btn` named "Back to
   // Projects", one control height, which a touch screen makes 44px.
-  assert.match(projectsView, /const phoneDetail = isMobile && selected;[\s\S]*?\{phoneDetail && \(\s*<DetailBar[\s\S]*?backLabel="Back to Projects"/,
+  assert.match(projectsView, /const phoneDetail = isMobile && selected;[\s\S]*?\{phoneDetail && \(\s*<DetailBar[\s\S]*?backLabel=\{backLabel\("projects"\)\}/,
     "the mobile Projects back target is the detail bar's");
   assert.doesNotMatch(projectsView, /project-manager-back|← Back to Projects/);
   assert.match(pageHeader, /className="icon-btn detail-bar-back"[^>]*aria-label=\{backLabel\}/);
@@ -452,7 +453,7 @@ test("the phone topbar cannot push its controls off-screen", () => {
 });
 
 test("the phone Session topbar owns Back and the live Session title without Open", () => {
-  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn mobile-session-back"[\s\S]*?aria-label="Back to Inbox"[\s\S]*?<h1 id="page-title"[^>]*>\{sessionTitle \?\? title\}<\/h1>/,
+  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn mobile-session-back"[\s\S]*?aria-label=\{backLabel\("inbox"\)\}[\s\S]*?<h1 id="page-title"[^>]*>\{sessionTitle \?\? title\}<\/h1>/,
     "the mobile app bar must replace its generic Session heading with Back and the live title");
   // Only the phone Session route mounts the app-level bar now; destinations draw a page header (#1801).
   assert.match(app, /\{view\.name === "session" && isMobile && \(\s*<Header[\s\S]*?sessionTitle=\{sessions\.get\(view\.id\)\?\.title \?\? "Session"\}/,
@@ -493,9 +494,12 @@ test("the phone app bar leads with the instance switcher, with Settings gone", (
     "the page header's app bar leads with the switcher and ends with the primary");
 });
 
-test("the Multi-Agent Run and Collaboration Pod create actions are page header primaries", () => {
-  assert.match(runsView, /<PageHeader title="Multi-Agent Runs" primary=\{\{ label: "New Multi-Agent Run", onClick: onNewRun \}\} \/>/);
-  assert.match(podsView, /<PageHeader title="Collaboration Pods" primary=\{\{ label: "New Collaboration Pod", onClick: onNewPod \}\} \/>/);
+test("the Multi-Agent Run and Pod create actions are page header primaries", () => {
+  assert.match(runsView, /<PageHeader\s+title=\{runsDestination\.name\}\s+description=\{runsDestination\.description\}\s+primary=\{\{ label: "New Multi-Agent Run", onClick: onNewRun \}\}\s+\/>/);
+  // One verb per action (§17.2): the primary and the dialog it opens are both "New Pod".
+  assert.match(podsView, /<PageHeader\s+title=\{podsDestination\.name\}\s+description=\{podsDestination\.description\}\s+primary=\{\{ label: "New Pod", onClick: onNewPod \}\}\s+\/>/);
+  assert.match(readFileSync(new URL("./components/NewPodDialog.tsx", import.meta.url), "utf8"),
+    /<Modal\s+title="New Pod"/);
   assert.doesNotMatch(app, /topbar-create|NewPodHeaderButton/, "the top bar holds no create action");
   // One `.btn.primary` with a `+` icon; on a phone it is the 44px `+` alone, and its label stays
   // in the accessibility tree (clipped, never display: none) so the name still matches.

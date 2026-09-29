@@ -15,7 +15,7 @@ import { discardComposerDraft } from "../composer-drafts.js";
 import { formatRecordedRelativeTime, formatRecordedTimestamp } from "../format.js";
 import { statusMeta } from "../status-meta.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { viewPath } from "../navigation.js";
+import { destination, viewPath } from "../navigation.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -446,7 +446,7 @@ export function ArchivedSessionsView() {
 
   return (
     <section className="page wide archive-view" aria-labelledby="page-title">
-      <PageHeader title="Archived Sessions" />
+      <PageHeader title={destination("archived").name} />
       <div className="toolbar">
         <label className={`archive-search${queryInput ? " has-query" : ""}`}>
           <span>Search Sessions and Transcripts</span>
@@ -541,7 +541,7 @@ export function ArchivedSessionsView() {
           actions={<button type="button" className={hasActiveFilters ? "btn sm" : "btn primary"} onClick={() => {
             if (hasActiveFilters) { setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]); }
             else navigate({ name: "inbox" });
-          }}>{hasActiveFilters ? "Reset Filters" : "Go to Inbox"}</button>}
+          }}>{hasActiveFilters ? "Reset Filters" : "Go to Sessions"}</button>}
         >
           {hasActiveFilters
             ? "Try clearing search text or changing a filter."

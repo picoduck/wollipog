@@ -558,16 +558,18 @@ Rules
 - **Rail (desktop).** 64px, `--bg-elev`, hairline right edge. Square items at `--control-h-lg` (40px;
   48px on touch tablets), 20px outline icons,
   4px gap, 12px gap plus a hairline between groups: *Work* (Sessions, Automations, Projects),
-  *Oversight* (Multi-Agent, Pods, Connections, Skills), *Records* (Archived, Usage). Settings is pinned
+  *Oversight* (Multi-Agent Runs, Pods, Connections, Agent Skills), *Records* (Archived Sessions,
+  Usage and Cost). That is also the default rail order and digit order; a saved order is kept. Settings is pinned
   at the bottom. Active: `--accent` icon, 3px `--accent` bar on the left edge, `--surface-selected`
   fill. Hover: `--bg-elev-2`. Digit hints appear only in the tooltip ("Automations  2"), not as
   8px superscripts. One count badge per item (§11.4). Archived uses an outline archive-box glyph.
   The instance switcher (Tauri) replaces the brand tile at the top as a 32px monogram tile with a
   status corner dot.
-- **One name per destination**, used for the rail tooltip, `aria-label`, page title, More sheet and
-  palette: Sessions, Automations, Projects, Multi-Agent Runs, Pods, Connections, Agent Skills,
-  Archived Sessions, Usage and Cost, Settings. (`GLOBAL_VIEW_ITEMS.label`/`title`/`paletteLabel`
-  collapse to one field.) "Inbox" is retired from all copy.
+- **One name per destination**, used for the rail tooltip, `aria-label`, page title, phone app bar,
+  More sheet, palette, shortcut reference and Settings › Appearance › Navigation: Sessions,
+  Automations, Projects, Multi-Agent Runs, Pods, Connections, Agent Skills, Archived Sessions, Usage
+  and Cost, Settings. Each `GLOBAL_VIEW_ITEMS` entry carries that one `name`, its page `description`
+  (§4.2) and its `group`; back controls read "Back to <name>". "Inbox" is retired from all copy.
 - **Search.** A rail item "Search" (Ctrl/Cmd+K) at the top of the Work group and a search icon in the
   phone app bar open the command palette.
 

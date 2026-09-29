@@ -31,7 +31,7 @@ import { useRailPreferences } from "../use-rail-preferences.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
-import { GLOBAL_VIEW_ITEMS } from "../navigation.js";
+import { destination } from "../navigation.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
@@ -254,7 +254,7 @@ export function NavigationRailPanel() {
     <SettingsGroup title="Navigation">
       <ul className="rail-order-list" aria-label="Navigation Destinations">
         {preferences.order.map((name, index) => {
-          const item = GLOBAL_VIEW_ITEMS.find((candidate) => candidate.name === name)!;
+          const item = destination(name);
           const Icon = VIEW_ICONS[name];
           const required = REQUIRED_RAIL_VIEWS.has(name);
           const hidden = preferences.hidden.has(name);
@@ -271,7 +271,7 @@ export function NavigationRailPanel() {
           return (
             <li className={`rail-order-row${hidden || experimentOff ? " is-inactive" : ""}`} key={name}>
               <span className="rail-order-icon" aria-hidden="true"><Icon size={18} /></span>
-              <span className="rail-order-title">{item.title}</span>
+              <span className="rail-order-title">{item.name}</span>
               <span className="rail-order-state">
                 {digit !== undefined && <kbd aria-label={`Shortcut ${digit}`}>{digit}</kbd>}
                 {state !== null && <span className="rail-order-note">{state}</span>}
@@ -281,7 +281,7 @@ export function NavigationRailPanel() {
                   type="button"
                   className="icon-btn"
                   disabled={index === 0}
-                  aria-label={`Move ${item.title} Up`}
+                  aria-label={`Move ${item.name} Up`}
                   onClick={() => moveRailView(name, "up", instanceScope)}
                 >
                   <ArrowUpIcon size={14} />
@@ -290,7 +290,7 @@ export function NavigationRailPanel() {
                   type="button"
                   className="icon-btn"
                   disabled={index === preferences.order.length - 1}
-                  aria-label={`Move ${item.title} Down`}
+                  aria-label={`Move ${item.name} Down`}
                   onClick={() => moveRailView(name, "down", instanceScope)}
                 >
                   <ArrowDownIcon size={14} />
@@ -1510,13 +1510,13 @@ export function ExperimentalPanel({
     <SettingsGroup title="Untested Features">
       <SwitchRow
         title={EXPERIMENT_COPY.multiAgent.name}
-        description="Runs and workflow graphs that coordinate several agents. Off hides Multi-Agent from navigation and search on this device."
+        description={`Runs and workflow graphs that coordinate several agents. Off hides ${EXPERIMENT_COPY.multiAgent.name} from navigation and search on this device.`}
         checked={flags.multiAgent}
         onClick={() => onToggle("multiAgent", !flags.multiAgent)}
       />
       <SwitchRow
         title={EXPERIMENT_COPY.pods.name}
-        description="Shared-context groups of sessions. Off hides Pods from navigation and search on this device."
+        description={`Shared-context groups of sessions. Off hides ${EXPERIMENT_COPY.pods.name} from navigation and search on this device.`}
         checked={flags.pods}
         onClick={() => onToggle("pods", !flags.pods)}
       />

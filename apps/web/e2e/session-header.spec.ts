@@ -243,7 +243,7 @@ test("resolving a closed Requests surface leaves the cross-session generic toggl
     mode: localStorage.getItem("wollipog.rightpanel.mode"),
   }))).toEqual({ open: "0", mode: "launcher" });
 
-  await page.getByRole("button", { name: "Back to Inbox" }).click();
+  await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("button", { name: /No Project Session/ }).click();
   await page.getByRole("button", { name: "Expand Session" }).click();
   const toggle = page.getByRole("button", { name: "Show Side Panel" });
@@ -259,8 +259,8 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
 
   const header = page.locator(".detail-head");
   const back = header.locator(".back");
-  await expect(back).toHaveAccessibleName("Back to Inbox");
-  await expect(back).toHaveAttribute("title", "Back to inbox");
+  await expect(back).toHaveAccessibleName("Back to Sessions");
+  await expect(back).toHaveAttribute("title", "Back to sessions");
   await expect(header.locator(".status").first()).toBeVisible();
 
   const geometry = await header.evaluate((element) => {
@@ -807,7 +807,7 @@ for (const viewport of [
       const header = page.locator(".session-detail > .detail-head");
       const topbar = page.locator(".topbar");
       await expect(page.locator(".topbar, .session-detail > .detail-head")).toHaveCount(2);
-      await expect(topbar.getByRole("button", { name: "Back to Inbox" })).toBeVisible();
+      await expect(topbar.getByRole("button", { name: "Back to Sessions" })).toBeVisible();
       await expect(topbar.getByRole("heading", { name: "Alpha Session", exact: true })).toBeVisible();
       await expect(topbar.getByRole("button", { name: /^Open/ })).toHaveCount(0);
       // Settings left the phone topbar for the rail's More sheet (#458). The compact geometry this
@@ -908,7 +908,7 @@ for (const viewport of [
       });
       const shellMetrics = await topbar.evaluate((element) => {
         const topbarBox = element.getBoundingClientRect();
-        const back = element.querySelector('[aria-label="Back to Inbox"]')!.getBoundingClientRect();
+        const back = element.querySelector('[aria-label="Back to Sessions"]')!.getBoundingClientRect();
         const title = element.querySelector("h1")!.getBoundingClientRect();
         const controls = [...element.querySelectorAll(".topbar-mobile-controls button")]
           .map((node) => node.getBoundingClientRect());
@@ -1316,7 +1316,7 @@ test.describe("with a touch pointer", () => {
     await openSession(page, "preview-follow", { sessionShell: "1" });
     const header = page.locator(".session-detail > .detail-head");
     const actions = header.locator(".detail-actions");
-    const backBox = await page.locator(".topbar").getByRole("button", { name: "Back to Inbox" }).boundingBox();
+    const backBox = await page.locator(".topbar").getByRole("button", { name: "Back to Sessions" }).boundingBox();
     const headerBox = await header.boundingBox();
 
     expect(backBox?.width).toBeGreaterThanOrEqual(36);
@@ -1469,7 +1469,7 @@ test("shared Pod headers keep their trailing controls out of the back-button tra
   await expect(pod.locator(".detail-head")).toHaveCount(0);
 
   const bar = pod.locator(".detail-bar");
-  const back = bar.getByRole("button", { name: "Back to Collaboration Pods", exact: true });
+  const back = bar.getByRole("button", { name: "Back to Pods", exact: true });
   await expect(back).toBeVisible();
   await expect(back.locator("svg")).toHaveCount(1);
   await expect(back).toHaveText("");

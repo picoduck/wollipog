@@ -161,7 +161,7 @@ test("navigating to another route clears a view error", async () => {
     // Same route: the error stays, because re-rendering is not a recovery.
     await act(async () => view.root.render(<ErrorBoundary name="Automations" resetKey="/automations"><MaybeBroken /></ErrorBoundary>));
     assert.ok(view.container.querySelector('[role="alert"]'), "the error holds until the route changes");
-    await act(async () => view.root.render(<ErrorBoundary name="Usage & Cost" resetKey="/usage"><MaybeBroken /></ErrorBoundary>));
+    await act(async () => view.root.render(<ErrorBoundary name="Usage and Cost" resetKey="/usage"><MaybeBroken /></ErrorBoundary>));
     assertNoDomNode(view.container.querySelector('[role="alert"]'));
     assert.equal(view.container.querySelector(".content")?.textContent, "Usage");
   } finally {

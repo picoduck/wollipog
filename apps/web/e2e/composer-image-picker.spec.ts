@@ -210,7 +210,7 @@ test("picked images survive navigation and remount, then send through the prompt
   await expect(thumbnails(page)).toHaveCount(1);
   await page.locator(".composer-input").fill("what is wrong here?");
 
-  await page.getByRole("button", { name: "Back to Inbox" }).click();
+  await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();

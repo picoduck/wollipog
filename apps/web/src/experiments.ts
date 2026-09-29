@@ -3,7 +3,7 @@ import {
   saveInstanceStorageValue,
   LOCAL_INSTANCE_SCOPE,
 } from "./instance-storage.js";
-import { GLOBAL_VIEW_ITEMS, type GlobalViewName, type View } from "./navigation.js";
+import { destination, type View } from "./navigation.js";
 
 /**
  * Experimental-feature flags: per device, per control-plane instance, client-side only.
@@ -18,7 +18,7 @@ export type ExperimentId = "multiAgent" | "pods";
 export interface ExperimentFlags {
   /** Multi-Agent Runs and the workflow surfaces reached through them. */
   readonly multiAgent: boolean;
-  /** Collaboration Pods. */
+  /** Pods. */
   readonly pods: boolean;
 }
 
@@ -62,11 +62,8 @@ export interface ExperimentCopy {
   readonly offBody: string;
 }
 
-const destinationTitle = (name: GlobalViewName): string =>
-  GLOBAL_VIEW_ITEMS.find((item) => item.name === name)!.title;
-
-const multiAgentName = destinationTitle("runs");
-const podsName = destinationTitle("pods");
+const multiAgentName = destination("runs").name;
+const podsName = destination("pods").name;
 
 /** One vocabulary for the settings rows and the turned-off route, so they cannot drift. */
 export const EXPERIMENT_COPY: Record<ExperimentId, ExperimentCopy> = {

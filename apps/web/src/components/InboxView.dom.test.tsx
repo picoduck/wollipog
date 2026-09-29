@@ -812,7 +812,7 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   assert.ok(applyOrder, "sustained desktop activity exposes a deliberate reorder boundary");
   assert.equal(applyOrder.nextElementSibling, container.querySelector('[role="radiogroup"][aria-label="Sessions View"]'),
     "the conditional button leads List / Board so showing it cannot move the toggle (#1675)");
-  assert.match(container.textContent ?? "", /A newer Inbox order is available/);
+  assert.match(container.textContent ?? "", /A newer Sessions order is available/);
   await act(async () => { applyOrder.click(); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C", "Session A"]);
   assert.match(
@@ -930,7 +930,7 @@ test("InboxView does not offer a reorder when only a removed selected id remains
   assert.deepEqual(rowTitles(container), ["Session B"]);
   assertNoDomNode(container.querySelector(".inbox-order-update"),
     "a stale selected-id placeholder is not a visible order difference");
-  assert.doesNotMatch(container.textContent ?? "", /A newer Inbox order is available/);
+  assert.doesNotMatch(container.textContent ?? "", /A newer Sessions order is available/);
 
 });
 

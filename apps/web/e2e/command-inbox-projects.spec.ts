@@ -825,7 +825,7 @@ test("Session Reading movement owns an incomplete Inbox restore across an immedi
   expect(moved!.key).not.toBe(original.key);
 
   await expect(expandedReader.locator("[data-virtual-total='12']")).toBeVisible();
-  await page.getByRole("button", { name: "Back to Inbox" }).click();
+  await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("row", { name: /No Project Session/ }).click();
   await expect(page.locator("[data-session-surface-id='session-no-project']")).toBeVisible();
 
@@ -1634,7 +1634,7 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await expect(page.getByRole("heading", { name: "Durable Empty" })).toBeVisible();
   await expect(page.getByText("No Project Locations", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Hide Project" }).click();
-  await expect(page.getByText("Hidden from Inbox", { exact: true })).toBeVisible();
+  await expect(page.getByText("Hidden from Sessions", { exact: true })).toBeVisible();
 
   await page.reload();
   await openProjectManager(page);
@@ -1644,7 +1644,7 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await expect(page.getByRole("button", { name: /Durable Empty/ })).toBeVisible();
   await page.getByRole("button", { name: /Durable Empty/ }).click();
   await page.getByRole("button", { name: "Show Project" }).click();
-  await expect(page.getByText("Shown in Inbox", { exact: true })).toBeVisible();
+  await expect(page.getByText("Shown in Sessions", { exact: true })).toBeVisible();
 });
 
 test.describe("with a touch pointer", () => {

@@ -1,4 +1,5 @@
 import { browserRandomUUID } from "../browser-crypto.js";
+import { backLabel } from "../navigation.js";
 import { State } from "./State.js";
 import {
   type KeyboardEvent,
@@ -590,8 +591,8 @@ export function SessionDetail(props: SessionDetailProps) {
             <button
               className="icon-btn back"
               onClick={props.onBack ?? (() => navigate({ name: "inbox" }))}
-              title="Back to inbox"
-              aria-label="Back to Inbox"
+              title="Back to sessions"
+              aria-label={backLabel("inbox")}
             >
               <ChevronLeftIcon size={22} />
             </button>
@@ -6274,7 +6275,7 @@ function DurableProjectChip({ session, onOpenInbox }: { session: SessionView; on
       <button
         type="button"
         className="cctx-item cctx-chip"
-        title={`Open ${currentName} in the Inbox`}
+        title={`Open ${currentName} in Sessions`}
         onClick={() => {
           setInboxSplit(session.projectId ? durableInboxProjectKey(session.projectId) : INBOX_NO_PROJECT_SPLIT_KEY);
           onOpenInbox();

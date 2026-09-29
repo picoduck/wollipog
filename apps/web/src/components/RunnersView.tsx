@@ -60,7 +60,7 @@ import { formatHarnessLaunchCommand } from "../harness-command.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { PageHeader, type PageAction } from "./PageHeader.js";
 import { useInstances } from "../instances-context.js";
-import type { ConnectionSection } from "../navigation.js";
+import { destination, type ConnectionSection } from "../navigation.js";
 import {
   hasBundledLocalRunner,
   isManagedLocalRunnerRepair,
@@ -1704,7 +1704,7 @@ export function RunnersView() {
     <div className="page">
       {/* The tabs sit in the page header's tab slot (§4.2, §10.1), under its title and actions. */}
       <PageHeader
-        title="Connections"
+        title={destination("runners").name}
         {...machineActions}
         tabs={(
           <TabList label="Connection Settings" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>

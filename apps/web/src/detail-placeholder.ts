@@ -1,3 +1,4 @@
+import { destination } from "./navigation.js";
 import type { ConnState } from "./store.js";
 
 export interface DetailPlaceholder {
@@ -42,7 +43,8 @@ export function detailPlaceholder(
 
 /** A resource list before the first snapshot, or while disconnected. An empty map proves nothing
  * then, so the list must not claim "No … Yet" or offer to create what may already exist. */
-export function listPlaceholder(resource: "Multi-Agent Runs" | "Collaboration Pods", conn: ConnState): DetailPlaceholder {
+export function listPlaceholder(list: "runs" | "pods", conn: ConnState): DetailPlaceholder {
+  const resource = destination(list).name;
   if (conn === "unauthorized") return { title: `Pair to Load ${resource}`, hint: "This device needs access to the control plane.", variant: "offline" };
   if (conn === "offline") return { title: `${resource} Unavailable`, hint: "Reconnect to the control plane to load this list.", variant: "offline" };
   return { title: `Loading ${resource}…`, hint: "Waiting for the control-plane snapshot.", variant: "loading" };

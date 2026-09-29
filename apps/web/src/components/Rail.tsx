@@ -43,7 +43,7 @@ function selectedRailView(view: View): GlobalViewName | null {
   if (view.name === "session" || view.name === "board") return "inbox";
   if (view.name === "run") return "runs";
   if (view.name === "pod") return "pods";
-  return GLOBAL_VIEW_ITEMS.some((item) => item.name === view.name) ? view.name as GlobalViewName : null;
+  return GLOBAL_VIEW_ITEMS.some((item) => item.id === view.name) ? view.name as GlobalViewName : null;
 }
 
 export function Rail({
@@ -138,15 +138,15 @@ export function Rail({
   const preferences = useRailPreferences();
   const visibleNames = visibleRailViews(preferences, flags);
   const digits = railDigits(visibleNames);
-  const enabledItems = visibleNames.map((name) => GLOBAL_VIEW_ITEMS.find((item) => item.name === name)!);
+  const enabledItems = visibleNames.map((name) => GLOBAL_VIEW_ITEMS.find((item) => item.id === name)!);
   const visibleItems = isMobile ? enabledItems.slice(0, MOBILE_PRIMARY_COUNT) : enabledItems;
   const overflowItems = isMobile ? enabledItems.slice(MOBILE_PRIMARY_COUNT) : [];
   // A destination hidden behind More still has to read as current, or the bar looks like nothing
   // is selected while the user is standing on Usage — or, now, in Settings.
-  const overflowSelected = settingsSelected || overflowItems.some((item) => item.name === selected);
+  const overflowSelected = settingsSelected || overflowItems.some((item) => item.id === selected);
   const overflowSelectedTitle = settingsSelected
     ? "Settings"
-    : GLOBAL_VIEW_ITEMS.find((item) => item.name === selected)?.title ?? "";
+    : GLOBAL_VIEW_ITEMS.find((item) => item.id === selected)?.name ?? "";
   // The sheet is rendered for the whole phone breakpoint rather than only when a destination
   // overflows: Settings always lives there, so hiding every optional destination by experiment
   // must not strand it.
@@ -198,41 +198,41 @@ export function Rail({
       </a>
       <div className="rail-destinations">
         {visibleItems.map((item) => {
-          const shortcutDigit = digits.get(item.name) ?? null;
+          const shortcutDigit = digits.get(item.id) ?? null;
           const shortcutSuffix = isMobile || shortcutDigit === null ? "" : ` (${shortcutDigit})`;
-          const Icon = VIEW_ICONS[item.name];
-          const active = selected === item.name;
-          const badge = item.name === "runners" ? onlineConnections : 0;
-          const destination = { name: item.name } as View;
-          const countLabel = item.name === "inbox"
+          const Icon = VIEW_ICONS[item.id];
+          const active = selected === item.id;
+          const badge = item.id === "runners" ? onlineConnections : 0;
+          const destination = { name: item.id } as View;
+          const countLabel = item.id === "inbox"
             ? `${blockedCount > 0 ? `, ${blockedCount} Blocked` : ""}${stalledCount > 0 ? `, ${stalledCount} Stalled` : ""}`
-            : item.name === "runners" && badge > 0
+            : item.id === "runners" && badge > 0
               ? `, ${badge} Online`
               : "";
           return (
             <a
-              key={item.name}
+              key={item.id}
               className={`rail-item${active ? " active" : ""}`}
               href={viewPath(destination)}
               aria-current={active ? "page" : undefined}
-              aria-label={`${item.label}${shortcutSuffix}${countLabel}`}
-              title={`${item.title}${shortcutSuffix}`}
+              aria-label={`${item.name}${shortcutSuffix}${countLabel}`}
+              title={`${item.name}${shortcutSuffix}`}
               onClick={(event) => {
                 if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 event.preventDefault();
                 // Activating Sessions opens its persisted list/board mode; the href stays the
                 // canonical "/" so copied links deep-link the explicit list mode.
-                onNavigate(item.name === "inbox" ? sessionsViewDestination() : destination);
+                onNavigate(item.id === "inbox" ? sessionsViewDestination() : destination);
               }}
             >
               <Icon size={RAIL_ICON_SIZE} />
-              {item.name === "inbox" && blockedCount > 0 && (
+              {item.id === "inbox" && blockedCount > 0 && (
                 <span className="rail-badge blocked" aria-hidden="true">{blockedCount}</span>
               )}
-              {item.name === "inbox" && stalledCount > 0 && (
+              {item.id === "inbox" && stalledCount > 0 && (
                 <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
               )}
-              {item.name === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
+              {item.id === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
               {!isMobile && shortcutDigit !== null && (
                 <span className="rail-number" aria-hidden="true">{shortcutDigit}</span>
               )}
@@ -274,30 +274,30 @@ export function Rail({
                 onKeyDown={more.onMenuKeyDown}
               >
                 {overflowItems.map((item) => {
-                  const Icon = VIEW_ICONS[item.name];
-                  const destination = { name: item.name } as View;
+                  const Icon = VIEW_ICONS[item.id];
+                  const destination = { name: item.id } as View;
                   // A reordered rail can push a counted destination into the sheet; its status
                   // must overflow WITH it, or moving Connections fifth silently hides the
                   // online count and moving Sessions hides its blocked/stalled attention.
-                  const blocked = item.name === "inbox" ? blockedCount : 0;
-                  const stalled = item.name === "inbox" ? stalledCount : 0;
-                  const online = item.name === "runners" ? onlineConnections : 0;
-                  const countLabel = item.name === "inbox"
+                  const blocked = item.id === "inbox" ? blockedCount : 0;
+                  const stalled = item.id === "inbox" ? stalledCount : 0;
+                  const online = item.id === "runners" ? onlineConnections : 0;
+                  const countLabel = item.id === "inbox"
                     ? `${blocked > 0 ? `, ${blocked} Blocked` : ""}${stalled > 0 ? `, ${stalled} Stalled` : ""}`
                     : online > 0 ? `, ${online} Online` : "";
                   return (
                     <a
-                      key={item.name}
-                      className={`menu-item${selected === item.name ? " is-active" : ""}`}
-                      aria-label={`${item.title}${countLabel}`}
+                      key={item.id}
+                      className={`menu-item${selected === item.id ? " is-active" : ""}`}
+                      aria-label={`${item.name}${countLabel}`}
                       {...sheetItemProps(
                         destination,
-                        selected === item.name,
-                        item.name === "inbox" ? sessionsViewDestination : undefined,
+                        selected === item.id,
+                        item.id === "inbox" ? sessionsViewDestination : undefined,
                       )}
                     >
                       <span className="menu-icon" aria-hidden="true"><Icon size={16} /></span>
-                      <span className="menu-body"><span className="menu-text">{item.title}</span></span>
+                      <span className="menu-body"><span className="menu-text">{item.name}</span></span>
                       {(blocked > 0 || stalled > 0 || online > 0) && (
                         <span className="menu-trail" aria-hidden="true">
                           {blocked > 0 && <span className="rail-more-count blocked">{blocked}</span>}

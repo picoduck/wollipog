@@ -9,7 +9,7 @@ async function resetFixture(page: Page, suffix = ""): Promise<void> {
 }
 
 async function openSession(page: Page, name: string): Promise<void> {
-  const back = page.getByRole("button", { name: "Back to Inbox" });
+  const back = page.getByRole("button", { name: "Back to Sessions" });
   if (await back.isVisible()) await back.click();
   await page.getByRole("button", { name: new RegExp(name) }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });

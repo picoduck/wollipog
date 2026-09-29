@@ -41,6 +41,7 @@ import { SegmentedControl, Select } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { PageHeader } from "./PageHeader.js";
+import { destination } from "../navigation.js";
 
 const RANGES = [7, 30, 90, 365] as const;
 const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
@@ -412,7 +413,7 @@ export function UsageView() {
   return (
     <section className="page wide" aria-labelledby="page-title">
       {hasStore && <OfflineMachineWatcher onNames={onOfflineNames} />}
-      <PageHeader title="Usage & Cost" description="Scoped, content-free accounting across the sessions you can access." />
+      <PageHeader title={destination("usage").name} description={destination("usage").description} />
 
       <section className="subscription-usage" aria-labelledby="subscription-usage-heading">
         <div className="subscription-usage-heading">

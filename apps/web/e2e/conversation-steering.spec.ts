@@ -27,7 +27,7 @@ function receipt(page: Page, submissionId: string) {
 }
 
 async function reopenSteeringSession(page: Page) {
-  await page.getByRole("button", { name: "Back to Inbox" }).click();
+  await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("tab", { name: /No Project/ }).click();
   await page.getByRole("button", { name: /No Project Session/ }).click();
   await page.getByRole("tab", { name: /Alpha/ }).click();
@@ -305,7 +305,7 @@ test("an accepted steer settles cleanly across an in-place expanded-to-preview t
   await page.keyboard.press("Control+Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(1);
 
-  await page.getByRole("button", { name: "Back to Inbox" }).click();
+  await page.getByRole("button", { name: "Back to Sessions" }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   await expect(expand).toBeVisible();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredSteeringResult({

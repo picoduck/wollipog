@@ -210,7 +210,7 @@ test.describe("at 390px", () => {
   // The Archive in the real shell; the Usage breakdowns in their own fixture, which serves usage.
   // Archive rows are exactly two lines. A Usage row keeps every driver's value on its meta line,
   // which may wrap, because no detail view holds the per-driver split.
-  for (const [url, title, exact] of [[shell("/archived"), "Archived Sessions", true], ["/usage-view-e2e.html", "Usage & Cost", false]] as const) {
+  for (const [url, title, exact] of [[shell("/archived"), "Archived Sessions", true], ["/usage-view-e2e.html", "Usage and Cost", false]] as const) {
     test(`${title} tables become stacked rows without sideways scroll`, async ({ page }) => {
       await page.goto(url);
       const row = page.locator(".table tbody tr").first();

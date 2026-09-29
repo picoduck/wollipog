@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import type { RunView, UiSnapshotMessage, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import type { View, ViewNavigation } from "../navigation.js";
+import { viewTitle, type View, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { RunDetail, RunsView } from "./RunsView.js";
@@ -117,6 +117,22 @@ async function unmount(fixture: Fixture): Promise<void> {
 const section = (container: HTMLDivElement, label: string) => container.querySelector(`[aria-label="${label}"]`);
 // The run title is the detail bar's h1 (#1801).
 const title = (container: HTMLDivElement) => container.querySelector(".detail-bar-title")?.textContent;
+
+test("a loaded run titles its page by name and returns to Multi-Agent Runs", async () => {
+  const fixture = await mountRunDetail({ workflowInstances: pending, runWorkflowArtifacts: pending } as Partial<ApiClient>);
+  try {
+    const heading = fixture.container.querySelector("h1#page-title")?.textContent;
+    assert.equal(heading, "Run A");
+    assert.equal(heading, viewTitle({ name: "run", id: runA.id }, runA.title), "the page h1 and viewTitle() name the same run");
+    assert.equal(fixture.container.querySelector(".detail-bar-back")?.getAttribute("aria-label"), "Back to Multi-Agent Runs");
+
+    // A run the snapshot does not have falls back to the generic noun.
+    await fixture.jumpTo("run-missing");
+    assert.equal(fixture.container.querySelector("h1#page-title")?.textContent, "Multi-Agent Run");
+  } finally {
+    await unmount(fixture);
+  }
+});
 
 test("a direct run-to-run route change drops the previous run's error banners while the new run loads", async () => {
   const workflowRequests: string[] = [];
