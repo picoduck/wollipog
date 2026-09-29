@@ -1438,9 +1438,9 @@ pre {
   border-color: transparent;
   color: var(--danger-fg);
 }
+/* BusyButton zeroes the inline padding on the element itself, so a caller's padding cannot win. */
 .btn[data-busy-spinner="prepended"] {
   gap: var(--space-1);
-  padding-inline: 0;
 }
 .btn.sm[data-busy-spinner="prepended"] {
   gap: var(--space-0-5);

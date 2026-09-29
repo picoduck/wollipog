@@ -21,7 +21,8 @@ export interface BusyButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
  * a narrow row could wrap, and the label stopped naming the action. Here the label stays, a 14px
  * spinner takes the leading icon's place (or is prepended), and the button is locked to the width it
  * had just before it became busy. When the spinner is prepended it takes the room from the button's
- * inline padding rather than widening it (the `[data-busy-spinner]` rule in styles.css).
+ * inline padding rather than widening it, with the narrower gap of the `[data-busy-spinner]` rule
+ * in styles.css.
  *
  * Busy is `aria-busy` plus `aria-disabled`, not `disabled`: a disabled button drops the focus the
  * person just pressed it with, so the click is refused here instead. The live line is a sibling, since
@@ -51,12 +52,23 @@ export function BusyButton({ busy, progress, children, icon, ref, className, sty
   }, [ref]);
   const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
     if (busy) {
+      // What `disabled` would do: no default action (a form submit) and no click reaching a
+      // clickable row or card around the button.
       event.preventDefault();
+      event.stopPropagation();
       return;
     }
     onClick?.(event);
   };
-  const lockedStyle = lockedWidth == null ? style : { ...style, width: lockedWidth, minWidth: lockedWidth };
+  // A prepended spinner takes its room from the inline padding. Inline, so a caller's own padding
+  // (a `style` prop or a more specific class) cannot push the spinner and label past the edges.
+  const prepended = busy && !icon;
+  const lockedStyle = lockedWidth == null ? style : {
+    ...style,
+    width: lockedWidth,
+    minWidth: lockedWidth,
+    ...(prepended ? { paddingInline: 0 } : {}),
+  };
 
   return (
     <>
@@ -68,7 +80,7 @@ export function BusyButton({ busy, progress, children, icon, ref, className, sty
         style={lockedStyle}
         aria-busy={busy || undefined}
         aria-disabled={busy ? true : rest["aria-disabled"]}
-        data-busy-spinner={busy ? (icon ? "replaced" : "prepended") : undefined}
+        data-busy-spinner={busy ? (prepended ? "prepended" : "replaced") : undefined}
         onClick={handleClick}
       >
         {busy ? <Spinner decorative /> : icon}

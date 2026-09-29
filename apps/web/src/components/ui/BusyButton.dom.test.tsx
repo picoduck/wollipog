@@ -86,6 +86,7 @@ test("a busy button keeps its label and width, puts a spinner before the label a
   assert.equal(domWindow.getComputedStyle(button as never).width, idleWidth, "the width does not change");
   assert.equal(button.style.minWidth, idleWidth);
   assert.equal(button.getAttribute("data-busy-spinner"), "prepended");
+  assert.equal(Number.parseFloat(button.style.paddingInline), 0, "the spinner's room comes from the padding, whatever the caller set");
   assert.equal(status().textContent, "Installing the update…");
 
   await act(async () => { reset().click(); });
@@ -104,6 +105,29 @@ test("a busy button refuses a second press without submitting its form", async (
   await act(async () => { button.click(); });
   assert.equal(submits, 1, "a busy submit button does not submit again");
   await cleanup();
+});
+
+test("a press on a busy button does not reach a clickable row around it", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  let rowClicks = 0;
+  const row = (busy: boolean) => (
+    <div onClick={() => { rowClicks += 1; }}>
+      <BusyButton className="btn sm" busy={busy} progress="Removing the skill…"
+        onClick={(event) => event.stopPropagation()}>Remove</BusyButton>
+    </div>
+  );
+  await act(async () => { root.render(row(false)); });
+  const button = container.querySelector("button")!;
+  await act(async () => { button.click(); });
+  assert.equal(rowClicks, 0, "the idle button's own handler keeps the click to itself");
+  await act(async () => { root.render(row(true)); });
+  await act(async () => { button.click(); });
+  assert.equal(rowClicks, 0, "a busy button refuses the click the way a disabled one would");
+  await act(async () => root.unmount());
+  container.remove();
 });
 
 test("a spinner takes a leading icon's place", async () => {
@@ -131,5 +155,5 @@ test("the stylesheet draws the spinner at 14px and keeps a busy button's variant
   assert.match(spinner, /height: 14px;/);
   // A busy primary keeps its fill: the disabled rule would otherwise grey it out while it runs.
   assert.match(css, /\.btn\.primary\[aria-busy="true"\]\[aria-disabled="true"\] \{[^}]*background: var\(--primary-bg\)/);
-  assert.match(css, /\.btn\[data-busy-spinner="prepended"\] \{[^}]*padding-inline: 0/);
+  assert.match(css, /\.btn\.sm\[data-busy-spinner="prepended"\] \{[^}]*gap: var\(--space-0-5\)/);
 });
