@@ -536,7 +536,7 @@ export function ArchivedSessionsView() {
           variant={hasActiveFilters ? "no-results" : "empty"}
           title={hasActiveFilters
             ? "No Matching Sessions"
-            : "No Archived Sessions"}
+            : `No ${destination("archived").name}`}
           icon={<InboxIcon />}
           actions={<button type="button" className={hasActiveFilters ? "btn sm" : "btn primary"} onClick={() => {
             if (hasActiveFilters) { setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]); }

@@ -428,7 +428,7 @@ export function ProjectsView({
             })}
             {visibleProjects.length === 0 && (
               <div className="project-manager-empty compact">
-                <strong>No Projects Found</strong>
+                <strong>{`No ${PROJECTS.name} Found`}</strong>
                 <span>{allProjects.length ? "Try another search or Sessions visibility filter." : "Create a Project to organize related sessions."}</span>
               </div>
             )}

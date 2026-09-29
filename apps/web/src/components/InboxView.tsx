@@ -31,7 +31,7 @@ import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { encodeResourceId, type AttentionTarget, type SessionsTab } from "../navigation.js";
+import { destination, encodeResourceId, type AttentionTarget, type SessionsTab } from "../navigation.js";
 import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
@@ -1508,7 +1508,7 @@ export function InboxView({
                     showNewSession: false,
                   }
                   : {
-                    title: "No Sessions Yet",
+                    title: `No ${destination("inbox").name} Yet`,
                     description: `Start a session in ${activeSplit.name}.`,
                     showNewSession: true,
                   }

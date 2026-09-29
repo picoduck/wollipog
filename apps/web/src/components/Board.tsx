@@ -5,6 +5,7 @@ import { BOARD_COLUMNS, type BoardColumn, type BoxView, type SessionReminderView
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
+import { destination } from "../navigation.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import { SessionStatusIndicators, ReminderBadge, SessionPinIndicator, SnoozedAttentionBadge, ThreadDot } from "./common.js";
 import { inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
@@ -238,7 +239,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
         ) : (
           <State
             icon={<BoardIcon />}
-            title="No Sessions Yet"
+            title={`No ${destination("inbox").name} Yet`}
             // A filter can still be ACTIVE here — archive the last unarchived session and the count
             // is zero while Machine B stays selected. Creating a session on the dialog's own default
             // would then be hidden by that filter, and the board would come back empty. An action

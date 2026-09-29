@@ -188,10 +188,38 @@ test("every surface that names a destination reads the registry's one name", () 
   ];
   for (const [path, id] of headers) {
     const text = source(path);
-    assert.match(text, new RegExp(`destination\\("${id}"\\)`), `${path} reads its registry entry`);
-    assert.doesNotMatch(text, /<PageHeader[^>]*?\stitle="/, `${path} hard-codes its page title`);
-    assert.doesNotMatch(text, /<PageHeader[^>]*?\sdescription="/, `${path} hard-codes its description`);
+    // The registry entry, called directly or through a local bound to it (`const PROJECTS = …`).
+    const aliases = [...text.matchAll(new RegExp(`const (\\w+) = destination\\("${id}"\\);`, "g"))].map((match) => match[1]!);
+    const entry = `(?:destination\\("${id}"\\)|${[...aliases, "__none__"].join("|")})`;
+    const headerTags = [...text.matchAll(/<PageHeader\b[\s\S]*?\/?>(?=\s*[\n{<)])/g)].map((match) => match[0]);
+    assert.ok(headerTags.length > 0, `${path} renders a page header`);
+    for (const tag of headerTags) {
+      assert.match(tag, new RegExp(`\\stitle=\\{${entry}\\.name\\}`), `${path}: the page title is the registry name\n${tag}`);
+      const description = /\sdescription=(\{[^}]*\}|"[^"]*")/.exec(tag)?.[1];
+      if (description !== undefined) {
+        assert.match(description, new RegExp(`^\\{${entry}\\.description\\}$`), `${path}: the description is the registry's`);
+      }
+    }
+    if (destination(id as never).description !== undefined) {
+      assert.ok(headerTags.some((tag) => new RegExp(`\\sdescription=\\{${entry}\\.description\\}`).test(tag)),
+        `${path} shows its registry description`);
+    }
   }
+});
+
+test("empty states that name a destination read its name", () => {
+  const empties: ReadonlyArray<[string, RegExp]> = [
+    ["./components/AutomationsView.tsx", /title=\{`No \$\{destination\("automations"\)\.name\} Yet`\}/],
+    ["./components/SkillsView.tsx", /title=\{`No \$\{destination\("skills"\)\.name\} Yet`\}/],
+    ["./components/InboxView.tsx", /title: `No \$\{destination\("inbox"\)\.name\} Yet`/],
+    ["./components/Board.tsx", /title=\{`No \$\{destination\("inbox"\)\.name\} Yet`\}/],
+    ["./components/ArchivedSessionsView.tsx", /`No \$\{destination\("archived"\)\.name\}`/],
+    ["./components/ProjectsView.tsx", /`No \$\{PROJECTS\.name\} Found`/],
+    ["./components/RunsView.tsx", /title=\{`No \$\{runsDestination\.name\} Yet`\}/],
+    ["./components/PodsView.tsx", /title=\{`No \$\{podsDestination\.name\} Yet`\}/],
+    ["./detail-placeholder.ts", /const resource = destination\(list\)\.name;/],
+  ];
+  for (const [path, pattern] of empties) assert.match(source(path), pattern, path);
 });
 
 test("Session Naming is no longer a primary Settings destination and its legacy link reaches Behavior", () => {

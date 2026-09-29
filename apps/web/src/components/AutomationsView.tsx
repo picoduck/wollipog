@@ -882,7 +882,7 @@ export function AutomationsView() {
         {items.length === 0 && !showForm && (listLoaded ? (
           <State
             icon={<AutomationsIcon />}
-            title="No Automations Yet"
+            title={`No ${destination("automations").name} Yet`}
             // This screen exposed an `h3` before the conversion, and heading navigation is how a
             // screen-reader user finds a section. Losing it is not a styling change.
             headingLevel={3}

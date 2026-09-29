@@ -514,7 +514,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
             <State
               compact
               icon={<SkillsIcon />}
-              title="No Skills Yet"
+              title={`No ${destination("skills").name} Yet`}
               headingLevel={3}
               actions={
                 <button type="button" className="btn primary" onClick={() => setDialog("new-skill")}>
