@@ -211,23 +211,44 @@ test("the F6 zone line lights only the entered zone and goes out after 1.5s, a p
 
   // The edge is re-measured every frame, so landing focus scrolling an ancestor, a resize or
   // content loading above the zone moves the line with it instead of leaving it behind.
-  const frames: Array<() => void> = [];
-  (window as unknown as { requestAnimationFrame: (callback: () => void) => number }).requestAnimationFrame = (callback) =>
-    frames.push(callback);
+  const frames = new Map<number, () => void>();
+  let nextFrame = 0;
+  Object.assign(window, {
+    requestAnimationFrame: (callback: () => void) => { frames.set(++nextFrame, callback); return nextFrame; },
+    cancelAnimationFrame: (id: number) => { frames.delete(id); },
+  });
+  const runFrame = () => {
+    const [[id, callback]] = [...frames];
+    frames.delete(id!);
+    callback!();
+  };
   let top = 112;
   detail.getBoundingClientRect = () => ({ top, left: 388, width: 1028, height: 600 }) as DOMRect;
   indicateFocusZone(window.document, "main");
   assert.equal(detail.style.getPropertyValue("--zone-line-top"), "112px");
   top = 12;
-  frames.at(-1)!();
+  runFrame();
   assert.equal(detail.style.getPropertyValue("--zone-line-top"), "12px", "the line follows the zone's edge");
   assert.equal(detail.style.getPropertyValue("--zone-line-left"), "388px");
   assert.deepEqual(lit(), [detail]);
-  const pending = frames.length;
+  assert.equal(frames.size, 1, "exactly one placement frame is pending while lit");
+
+  // Every way out cancels the placement loop, so no frame outlives the line.
+  timers.at(-1)!();
+  assert.deepEqual([lit(), frames.size], [[], 0], "the 1.5s timeout");
+  indicateFocusZone(window.document, "main");
+  detail.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
+  assert.deepEqual([lit(), frames.size], [[], 0], "a pointer press");
+  indicateFocusZone(window.document, "main");
+  indicateFocusZone(window.document, "list");
+  assert.deepEqual([lit(), frames.size], [[list], 1], "relighting another zone replaces the loop");
+  window.dispatchEvent(new window.Event("popstate"));
+  assert.deepEqual([lit(), frames.size], [[], 0], "Back and Forward change the route under the same page root");
+
+  indicateFocusZone(window.document, "main");
   detail.remove();
-  frames.at(-1)!();
-  assert.deepEqual(lit(), [], "a zone unmounted by a route change puts the line out");
-  assert.equal(frames.length, pending, "no frame is scheduled after the line goes out");
+  runFrame();
+  assert.deepEqual([lit(), frames.size], [[], 0], "a zone unmounted by a route change puts the line out");
 });
 
 test("direct zone focus uses the list, empty-state, and board target chain", () => {

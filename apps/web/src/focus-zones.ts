@@ -86,8 +86,9 @@ let clearLitZone: (() => void) | null = null;
  * because most roots scroll, and an absolute line would scroll away with their content. The edge
  * is re-measured every frame while lit, so it follows the root when landing focus scrolls an
  * ancestor, the window resizes or content above it loads.
- * It goes out early on a pointer press, on focus leaving the zone, and on any other key: a digit
- * changes the route while the shell's page root keeps focus, so focus alone would not notice.
+ * It goes out early on a pointer press, on focus leaving the zone, on any other key and on history
+ * navigation: a digit or Back changes the route while the shell's page root keeps focus, so focus
+ * alone would not notice.
  */
 export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HTMLElement | null {
   clearLitZone?.();
@@ -109,6 +110,7 @@ export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HT
     targetDocument.removeEventListener("pointerdown", clear, true);
     targetDocument.removeEventListener("focusin", onFocusIn, true);
     targetDocument.removeEventListener("keydown", onKeyDown, true);
+    view.removeEventListener("popstate", clear);
     root.classList.remove("zone-lit");
     for (const property of ZONE_LINE_PROPERTIES) root.style.removeProperty(property);
     if (clearLitZone === clear) clearLitZone = null;
@@ -126,6 +128,8 @@ export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HT
   targetDocument.addEventListener("pointerdown", clear, true);
   targetDocument.addEventListener("focusin", onFocusIn, true);
   targetDocument.addEventListener("keydown", onKeyDown, true);
+  // Back and Forward change the route under the same page root, with no key or focus change.
+  view.addEventListener("popstate", clear);
   clearLitZone = clear;
   return root;
 }
