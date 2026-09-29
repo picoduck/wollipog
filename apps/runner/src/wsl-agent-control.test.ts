@@ -24,7 +24,7 @@ test("Direct WSL CLI bridge accepts only the Agent Control command families and 
 });
 
 test("target-local helper has no process or network launcher surface", () => {
-  assert.doesNotMatch(WSL_AGENT_CONTROL_HELPER_SOURCE, /child_process|\bspawn\b|\bexec(?:File)?\b|createConnection\([^s]/u);
+  assert.doesNotMatch(WSL_AGENT_CONTROL_HELPER_SOURCE, /child_process|\bspawn\s*\(|\bexec(?:File)?\s*\(|createConnection\([^s]/u);
   assert.match(WSL_AGENT_CONTROL_HELPER_SOURCE, /net\.createConnection\(socketPath\)/u);
   assert.match(WSL_AGENT_CONTROL_HELPER_SOURCE, /server\.listen\(socketPath/u);
   assert.match(WSL_AGENT_CONTROL_HELPER_SOURCE, /output\(\{\.\.\.msg,type:"open",id\}\)/u,
@@ -41,6 +41,9 @@ test("target-local relay materializes owner-only bootstrap files and owns frame 
   const mcp = JSON.stringify({ mcpServers: { wollipog: { command: "/usr/bin/node" } } });
   writeFileSync(helper, WSL_AGENT_CONTROL_HELPER_SOURCE);
   const child = spawn(process.execPath, [helper, "serve", socketPath], { stdio: ["pipe", "pipe", "pipe"] });
+  let childError = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => { childError += chunk; });
   t.after(() => {
     if (child.exitCode === null) child.kill();
     rmSync(root, { recursive: true, force: true });
@@ -48,12 +51,16 @@ test("target-local relay materializes owner-only bootstrap files and owns frame 
   child.stdin.write(`${JSON.stringify({ type: "bootstrap", token: Buffer.from(token).toString("base64"),
     mcp: Buffer.from(mcp).toString("base64") })}\n`);
   const deadline = Date.now() + 5_000;
-  while ((!existsSync(socketPath) || !existsSync(join(dir, "token")) || !existsSync(join(dir, "mcp.json"))) &&
+  while ((!existsSync(socketPath) || !existsSync(join(dir, "token")) || !existsSync(join(dir, "mcp.json")) ||
+      !existsSync(join(dir, "cli"))) &&
       Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(existsSync(join(dir, "cli")), true, childError);
   assert.equal(readFileSync(join(dir, "token"), "utf8"), token);
   assert.equal(readFileSync(join(dir, "mcp.json"), "utf8"), mcp);
   assert.equal(statSync(join(dir, "token")).mode & 0o777, 0o600);
   assert.equal(statSync(join(dir, "mcp.json")).mode & 0o777, 0o600);
+  assert.equal(statSync(join(dir, "cli")).mode & 0o777, 0o700);
+  assert.match(readFileSync(join(dir, "cli"), "utf8"), / cli "\$@"/u);
   const relayFrame = new Promise<Record<string, unknown>>((resolve, reject) => {
     let pending = "";
     child.stdout.setEncoding("utf8");
@@ -69,11 +76,44 @@ test("target-local relay materializes owner-only bootstrap files and owns frame 
   socket.write(`${JSON.stringify({ type: "data", id: "forged", v: 1, kind: "mcp", sessionId: "s", token })}\n`);
   assert.deepEqual(await relayFrame, { type: "open", id: "1", v: 1, kind: "mcp", sessionId: "s", token });
   socket.destroy();
+
+  const cliFrame = new Promise<Record<string, unknown>>((resolve, reject) => {
+    let pending = "";
+    child.stdout.on("data", (chunk: string) => {
+      pending += chunk;
+      for (;;) {
+        const at = pending.indexOf("\n");
+        if (at < 0) break;
+        const frame = JSON.parse(pending.slice(0, at)) as Record<string, unknown>;
+        pending = pending.slice(at + 1);
+        if (frame.type === "open" && frame.kind === "cli") { resolve(frame); return; }
+      }
+    });
+    child.once("error", reject);
+  });
+  const cli = spawn(join(dir, "cli"), ["session", "list", "--json"], {
+    env: { ...process.env, WOLLIPOG_AGENT_CONTROL_SOCKET: socketPath,
+      WOLLIPOG_SESSION_TOKEN_FILE: join(dir, "token"), WOLLIPOG_SESSION_ID: "s_child" },
+  });
+  let cliOutput = "";
+  cli.stdout.setEncoding("utf8");
+  cli.stdout.on("data", (chunk: string) => { cliOutput += chunk; });
+  const request = await cliFrame;
+  assert.deepEqual(request.args, ["session", "list", "--json"]);
+  assert.equal(request.sessionId, "s_child");
+  child.stdin.write(`${JSON.stringify({ id: request.id, accepted: true })}\n`);
+  child.stdin.write(`${JSON.stringify({ id: request.id, stream: "stdout",
+    data: Buffer.from('{"sessions":[]}\n').toString("base64") })}\n`);
+  child.stdin.write(`${JSON.stringify({ id: request.id, exit: 0 })}\n`);
+  assert.equal(await new Promise<number | null>((resolve) => cli.once("close", resolve)), 0);
+  assert.equal(cliOutput, '{"sessions":[]}\n');
+
   child.kill();
   await new Promise<void>((resolve) => child.once("close", () => resolve()));
   assert.equal(existsSync(socketPath), false);
   assert.equal(existsSync(join(dir, "token")), false);
   assert.equal(existsSync(join(dir, "mcp.json")), false);
+  assert.equal(existsSync(join(dir, "cli")), false);
   assert.equal(existsSync(dir), true,
     "relay preserves the pinned session directory for a subsequent metadata/provider launch");
 });

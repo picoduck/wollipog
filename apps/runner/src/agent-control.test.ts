@@ -15,9 +15,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type AgentDefinition, type SessionLaunchSpec } from "@wollipog/protocol";
 import {
   agentControlMcpConfigPath,
+  agentControlCliPath,
   agentControlRegistrationsToResend,
   agentControlTokenPath,
   agentControlReadyPath,
@@ -42,6 +44,7 @@ import {
 import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION } from "./orchestrator-preset.js";
 import { claudeHookSettingsPath, provisionClaudeHooks, resetClaudeGuardState } from "./hook-settings.js";
 import { PI_ORCHESTRATOR_PRESET_TOOLS_ENV, PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
+import { WSL_AGENT_CONTROL_PRIVATE_DIR } from "./wsl-agent-control.js";
 
 function spec(driver: SessionLaunchSpec["driver"] = "codex"): SessionLaunchSpec {
   return {
@@ -65,6 +68,39 @@ function spec(driver: SessionLaunchSpec["driver"] = "codex"): SessionLaunchSpec 
     context: { kind: "native" },
   };
 }
+
+test("injected POSIX CLI launcher carries Node and single-executable re-entry arguments", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cli-launcher-"));
+  try {
+    const nodeEntry = join(root, "entry with ' quotes.mjs");
+    writeFileSync(nodeEntry, "process.stdout.write(JSON.stringify(process.argv.slice(2)))");
+    const singleEntry = join(root, "runner with ' quotes");
+    writeFileSync(singleEntry, `#!${process.execPath}\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)))\n`, { mode: 0o700 });
+    for (const [name, host] of [
+      ["node", { isSea: false, execPath: process.execPath, execArgv: [], scriptPath: nodeEntry }],
+      ["single", { isSea: true, execPath: singleEntry, execArgv: [] }],
+    ] as const) {
+      const launch = spec();
+      launch.sessionId = `s_${name}`;
+      provisionAgentControl(launch, {
+        controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+        executionIsolationMode: "bwrap",
+      }, () => {}, { ...host, configDir: root, platform: "linux" });
+      assert.equal(launch.env.WOLLIPOG_CLI, agentControlCliPath(root, launch.sessionId));
+      assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "[]");
+      assert.equal(statSync(launch.env.WOLLIPOG_CLI!).mode & 0o777, 0o700);
+      const result = spawnSync(launch.env.WOLLIPOG_CLI!, ["session", "list", "with spaces", "quote'"],
+        { encoding: "utf8", cwd: tmpdir() });
+      assert.equal(result.status, 0, result.stderr);
+      assert.notEqual(result.stdout, "", `${name}: ${result.stderr}`);
+      assert.deepEqual(JSON.parse(result.stdout), ["--wollipog-cli", "session", "list", "with spaces", "quote'"]);
+      removeAgentControlFiles(launch.sessionId, root);
+      assert.equal(existsSync(launch.env.WOLLIPOG_CLI!), false);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("orchestrator provisioning restricts native tools and refuses unsupported launch boundaries", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-control-"));
@@ -191,7 +227,7 @@ test("discovery-verified Pi receives a private Agent Control extension and stric
     provisionAgentControl(ordinary, { ...control,
       orchestratorAgent: { ...piAgent, piAgentControl: undefined },
     }, () => {}, host);
-    assert.equal(ordinary.env.WOLLIPOG_CLI, "/opt/runner");
+    assert.equal(ordinary.env.WOLLIPOG_CLI, agentControlCliPath(root, ordinary.sessionId));
     assert.equal(ordinary.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE, undefined);
     assert.equal(ordinary.env[PI_SECURITY_REQUEST_NONCE_ENV], undefined);
     assert.equal(ordinary.args.includes("--extension"), false);
@@ -204,7 +240,7 @@ test("discovery-verified Pi receives a private Agent Control extension and stric
     provisionAgentControl(ordinaryUnverified, { ...control,
       orchestratorAgent: { ...piAgent, piAgentControl: undefined },
     }, () => {}, host);
-    assert.equal(ordinaryUnverified.env.WOLLIPOG_CLI, "/opt/runner");
+    assert.equal(ordinaryUnverified.env.WOLLIPOG_CLI, agentControlCliPath(root, ordinaryUnverified.sessionId));
     assert.equal(existsSync(agentControlTokenPath(root, ordinaryUnverified.sessionId)), true);
     assert.equal(ordinaryUnverified.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE, undefined);
     assert.equal(ordinaryUnverified.args.includes("--extension"), false);
@@ -428,8 +464,8 @@ test("verified Direct WSL rotates credentials and provisions only the target-loc
     assert.equal(first.nodeRuntime, "/usr/bin/node");
     assert.equal(first.tokenFile, agentControlTokenPath(root, launch.sessionId));
     assert.equal(JSON.stringify(launch).includes(first.token), false, "credential stays out of launch metadata");
-    assert.equal(launch.env.WOLLIPOG_CLI, "/usr/bin/node");
-    assert.match(launch.env.WOLLIPOG_CLI_ARGS, /wsl-agent-control-v1\.mjs/u);
+    assert.equal(launch.env.WOLLIPOG_CLI, `${WSL_AGENT_CONTROL_PRIVATE_DIR}/cli`);
+    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "[]");
     assert.ok(launch.args.some((arg) => arg.includes('"WOLLIPOG_AGENT_CONTROL_SOCKET" = "/tmp/wollipog-agent-control/control.sock"')),
       "Codex MCP receives the private socket explicitly instead of relying on ambient inheritance");
     assert.ok(launch.args.includes("--strict-config"));
@@ -494,7 +530,7 @@ test("native sessions receive a purpose-bound token file and CLI environment wit
     assert.equal(launch.env.WOLLIPOG_SESSION_TOKEN_FILE, tokenFile);
     assert.equal(launch.env.WOLLIPOG_SESSION_CREDENTIAL_READY_FILE, agentControlReadyPath(root, launch.sessionId));
     assert.equal(launch.env.WOLLIPOG_SESSION_ID, launch.sessionId);
-    assert.equal(launch.env.WOLLIPOG_CLI, "/opt/wollipog-runner");
+    assert.equal(launch.env.WOLLIPOG_CLI, agentControlCliPath(root, launch.sessionId));
     assert.equal(JSON.stringify(launch).includes(token), false, "plaintext token never enters launch metadata");
     assert.equal(registrations.length, 1);
     assert.equal(registrations[0]![0], launch.sessionId);
@@ -944,7 +980,7 @@ test("startup sweep removes final and interrupted staging files while retaining 
     writeFileSync(symlinkTarget, "retain");
     if (process.platform !== "win32") symlinkSync(symlinkTarget, stagedSymlink);
 
-    assert.equal(sweepAgentControlFiles(root), 4);
+    assert.equal(sweepAgentControlFiles(root), 5);
     assert.throws(() => readFileSync(agentControlTokenPath(root, launch.sessionId)));
     assert.throws(() => readFileSync(agentControlReadyPath(root, launch.sessionId)));
     assert.throws(() => readFileSync(agentControlMcpConfigPath(root, launch.sessionId)));

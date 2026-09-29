@@ -193,7 +193,8 @@ test("real WSL2 bridge carries CLI and MCP while adversarial routes fail closed 
     })), /bind source identity changed/u,
     "a concurrent additional-root replacement is rejected before bwrap exec");
 
-    const cli = launch(first, firstIsolation, "cli", ["session", "list", "--json"]);
+    const cli = spawnAgent({ command: first.env.WOLLIPOG_CLI!, args: ["session", "list", "--json"],
+      cwd: workspace, env: first.env, context, isolation: firstIsolation, windowsShell: false });
     const cliOutput = await readUntil(cli, /"sessions":\[\]/u);
     assert.match(cliOutput, /"sessions":\[\]/u);
     await waitBridgeClose(cli);

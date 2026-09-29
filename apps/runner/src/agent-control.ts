@@ -37,6 +37,7 @@ import {
   WSL_AGENT_CONTROL_HELPER_PATH,
   WSL_AGENT_CONTROL_HELPER_SHA256,
   WSL_AGENT_CONTROL_HELPER_SOURCE,
+  WSL_AGENT_CONTROL_PRIVATE_DIR,
   WSL_AGENT_CONTROL_PRIVATE_MCP,
   WSL_AGENT_CONTROL_PRIVATE_SOCKET,
   WSL_AGENT_CONTROL_PRIVATE_TOKEN,
@@ -264,6 +265,11 @@ export function agentControlReadyPath(configDir: string, sessionId: string): str
   return join(configDir, `${sessionId}.ready`);
 }
 
+export function agentControlCliPath(configDir: string, sessionId: string): string {
+  assertSafeSessionFileId(sessionId);
+  return join(configDir, `${sessionId}.cli`);
+}
+
 export function piAgentControlExtensionPath(configDir: string, sessionId: string): string {
   assertSafeSessionFileId(sessionId);
   return join(configDir, `${sessionId}${PI_AGENT_CONTROL_EXTENSION_SUFFIX}`);
@@ -280,6 +286,16 @@ function protectedWrite(file: string, value: string): void {
   try { chmodSync(staged, 0o600); } catch { /* Windows uses the owning account ACL. */ }
   renameSync(staged, file);
   try { chmodSync(file, 0o600); } catch { /* Windows uses the owning account ACL. */ }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function writeCliLauncher(file: string, command: string, args: readonly string[]): void {
+  const invocation = [command, ...args].map(shellQuote).join(" ");
+  protectedWrite(file, `#!/bin/sh\nexec ${invocation} "$@"\n`);
+  chmodSync(file, 0o700);
 }
 
 function sessionToken(file: string): string {
@@ -650,8 +666,8 @@ export function provisionAgentControl(
         ...spec.env,
         WOLLIPOG_SESSION_ID: spec.sessionId,
         WOLLIPOG_SESSION_TOKEN_FILE: WSL_AGENT_CONTROL_PRIVATE_TOKEN,
-        WOLLIPOG_CLI: runtime,
-        WOLLIPOG_CLI_ARGS: JSON.stringify([WSL_AGENT_CONTROL_HELPER_PATH, "cli"]),
+        WOLLIPOG_CLI: `${WSL_AGENT_CONTROL_PRIVATE_DIR}/cli`,
+        WOLLIPOG_CLI_ARGS: "[]",
       };
       spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
       spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver, runnerOwnedClaudeSettings);
@@ -680,6 +696,9 @@ export function provisionAgentControl(
   }
 
   const cli = runnerReentryCommand(host, "--wollipog-cli");
+  const cliPath = agentControlCliPath(host.configDir, spec.sessionId);
+  const nativeWindows = (host.platform ?? process.platform) === "win32";
+  if (!nativeWindows) writeCliLauncher(cliPath, cli.command, cli.args);
   const transportEnv: Record<string, string> = memory
     ? {
         WOLLIPOG_CONTROL_PLANE_URL: cpUrl,
@@ -696,8 +715,8 @@ export function provisionAgentControl(
   spec.env = {
     ...spec.env,
     ...transportEnv,
-    WOLLIPOG_CLI: cli.command,
-    WOLLIPOG_CLI_ARGS: JSON.stringify(cli.args),
+    WOLLIPOG_CLI: nativeWindows ? cli.command : cliPath,
+    WOLLIPOG_CLI_ARGS: nativeWindows ? JSON.stringify(cli.args) : "[]",
   };
   delete spec.env[ORCHESTRATOR_ENV_KEY];
   // Both role markers are re-established below for the shape this launch actually uses, so a value
@@ -796,6 +815,7 @@ export function removeAgentControlFiles(sessionId: string, configDir: string): v
     agentControlMcpConfigPath(configDir, sessionId),
     agentControlReadyPath(configDir, sessionId),
     piAgentControlExtensionPath(configDir, sessionId),
+    agentControlCliPath(configDir, sessionId),
   ]) {
     try { rmSync(file, { force: true }); } catch { /* Best effort after session deletion. */ }
   }
@@ -808,7 +828,7 @@ export function sweepAgentControlFiles(configDir: string): number {
   let removed = 0;
   for (const entry of readdirSync(configDir, { withFileTypes: true })) {
     if (!entry.isFile() ||
-        !([".token", ".mcp.json", ".ready", PI_AGENT_CONTROL_EXTENSION_SUFFIX].some((suffix) => entry.name.endsWith(suffix)) ||
+        !([".token", ".mcp.json", ".ready", ".cli", PI_AGENT_CONTROL_EXTENSION_SUFFIX].some((suffix) => entry.name.endsWith(suffix)) ||
           STAGED_AGENT_CONTROL_FILE_PATTERN.test(entry.name))) continue;
     rmSync(join(configDir, entry.name), { force: true });
     removed++;

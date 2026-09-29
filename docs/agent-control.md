@@ -43,8 +43,8 @@ The runner injects these non-transcript environment values at launch:
 - `WOLLIPOG_AGENT_CONTROL_RELAY_ENDPOINT`: native provider-mode, session-bound runner listener.
 - `WOLLIPOG_AGENT_CONTROL_RELAY_KEY`: native provider-mode opaque relay authorization; it is not a
   control-plane credential.
-- `WOLLIPOG_CLI`: standalone executable location.
-- `WOLLIPOG_CLI_ARGS`: JSON-encoded re-entry arguments for development/non-SEA launches.
+- `WOLLIPOG_CLI`: directly executable session CLI launcher on POSIX and WSL.
+- `WOLLIPOG_CLI_ARGS`: empty on POSIX and WSL; native Windows retains JSON-encoded re-entry arguments. The launcher never contains a bearer credential.
 
 The standalone installer publishes the same verified SEA bytes as both `wollipog-runner` and
 `wollipog` (`wollipog.exe` on Windows). The invocation name selects the user-facing CLI; no Node
