@@ -104,6 +104,7 @@ export function SessionNoticeSlot({ sessionId, entries }: {
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-notice-more");
   const focusTrigger = useRef(false);
+  const slotRef = useRef<HTMLDivElement>(null);
 
   const shown = (choice?.signature === signature ? visible.find((entry) => entry.key === choice.key) : undefined) ??
     visible[0];
@@ -116,10 +117,23 @@ export function SessionNoticeSlot({ sessionId, entries }: {
     focusTrigger.current = false;
     menu.triggerRef.current?.focus();
   });
-  // Nothing is left to choose from once the others resolve.
+  // A condition can resolve while its menu is open. The focused item goes with it, and when it was
+  // the last one so do the menu and its trigger; focus stays in the slot rather than falling to
+  // <body>. Nothing else moves focus here, so a lost focus is ours to restore.
   useLayoutEffect(() => {
-    if (rest.length === 0 && menuOpen) setMenuOpen(false);
-  }, [rest.length, menuOpen]);
+    if (!menuOpen) return;
+    const document = slotRef.current?.ownerDocument;
+    const focusLost = !document?.activeElement || document.activeElement === document.body;
+    if (rest.length === 0) {
+      setMenuOpen(false);
+      if (focusLost) {
+        (slotRef.current?.querySelector<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled)") ??
+          slotRef.current)?.focus();
+      }
+    } else if (focusLost) {
+      menu.menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    }
+  });
 
   if (!shown) return null;
 
@@ -166,7 +180,7 @@ export function SessionNoticeSlot({ sessionId, entries }: {
   );
 
   return (
-    <div className="session-notice-slot" data-notice-key={shown.key}>
+    <div ref={slotRef} className="session-notice-slot" data-notice-key={shown.key} tabIndex={-1}>
       {shown.render({
         trailing,
         ...(shown.severity === "info" ? { onDismiss: () => dismissInfo(sessionId, shown.key) } : {}),

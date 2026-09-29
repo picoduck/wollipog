@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import type { SessionView } from "@wollipog/protocol";
 import { Select } from "./ui/ChoiceControls.js";
@@ -15,6 +15,11 @@ function replacementBranch(expectedBranch: string): string {
   const suffix = Number(prior[2] ?? 1) + 1;
   return `${prior[1]!.slice(0, 218)}-recovery-${suffix}`;
 }
+
+/** The form typed for one recovery incident, by session and incident. The session notice slot shows
+ * one notice at a time, so choosing another from "+N More" unmounts this card; the draft outlives
+ * that for the life of the page (#1966). */
+const recoveryDrafts = new Map<string, Partial<{ branch: string; baseRef: string; selectedPath: string }>>();
 
 export function WorktreeRecoveryCard({
   session,
@@ -48,9 +53,15 @@ export function WorktreeRecoveryCard({
     return [...eligible.filter((worktree) => worktree.path !== recovery?.selectedPath),
       ...eligible.filter((worktree) => worktree.path === recovery?.selectedPath)];
   }, [recovery?.selectedPath, session.worktrees]);
-  const [branch, setBranch] = useState(() => replacementBranch(recovery?.expectedBranch ?? "recovered-worktree"));
-  const [baseRef, setBaseRef] = useState(() => broken?.baseRef ?? "");
-  const [selectedPath, setSelectedPath] = useState(() => candidates[0]?.path ?? "");
+  const draftKey = recovery ? `${session.id}:${recovery.recoveryId}` : null;
+  const [branch, setBranch] = useState(() =>
+    (draftKey ? recoveryDrafts.get(draftKey)?.branch : undefined) ??
+      replacementBranch(recovery?.expectedBranch ?? "recovered-worktree"));
+  const [baseRef, setBaseRef] = useState(() =>
+    (draftKey ? recoveryDrafts.get(draftKey)?.baseRef : undefined) ?? broken?.baseRef ?? "");
+  const [selectedPath, setSelectedPath] = useState(() =>
+    (draftKey ? recoveryDrafts.get(draftKey)?.selectedPath : undefined) ?? candidates[0]?.path ?? "");
+  const shownRecoveryId = useRef(recovery?.recoveryId);
   const [action, setAction] = useState<"create" | "select" | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Colons are legal in an id but hostile to CSS selectors, and these ids are looked up by tests
@@ -64,8 +75,19 @@ export function WorktreeRecoveryCard({
   // Creating and selecting a worktree are refused together for a person the server refuses (#1864).
   const refusal = sessionCommandRefusal(session, "manageWorktrees");
 
+  // Only what the person edits is kept, so an untouched form still proposes fresh defaults.
+  const edit = (change: Partial<{ branch: string; baseRef: string; selectedPath: string }>) => {
+    if (change.branch !== undefined) setBranch(change.branch);
+    if (change.baseRef !== undefined) setBaseRef(change.baseRef);
+    if (change.selectedPath !== undefined) setSelectedPath(change.selectedPath);
+    if (draftKey) recoveryDrafts.set(draftKey, { ...recoveryDrafts.get(draftKey), ...change });
+  };
+
   useEffect(() => {
-    if (!recovery) return;
+    // Mounting again for the same incident (the notice slot showed another notice meanwhile) keeps
+    // the draft the person typed.
+    if (!recovery || shownRecoveryId.current === recovery.recoveryId) return;
+    shownRecoveryId.current = recovery.recoveryId;
     setBranch(replacementBranch(recovery.expectedBranch));
     setBaseRef(broken?.baseRef ?? "");
     setSelectedPath(candidates[0]?.path ?? "");
@@ -133,12 +155,12 @@ export function WorktreeRecoveryCard({
             <input
               value={baseRef}
               placeholder="Default Branch"
-              onChange={(event) => setBaseRef(event.target.value)}
+              onChange={(event) => edit({ baseRef: event.target.value })}
             />
           </label>
           <label>
             <span>Branch</span>
-            <input value={branch} onChange={(event) => setBranch(event.target.value)} />
+            <input value={branch} onChange={(event) => edit({ branch: event.target.value })} />
           </label>
           <button
             type="button"
@@ -169,7 +191,7 @@ export function WorktreeRecoveryCard({
                   ? `${worktree.branch} (Restore Selected)`
                   : worktree.branch,
               }))}
-              onChange={setSelectedPath}
+              onChange={(path) => edit({ selectedPath: path })}
             />
           </label>
           <button

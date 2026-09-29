@@ -125,6 +125,26 @@ test("a choice holds while the conditions are unchanged, and focus follows +N Mo
   }
 });
 
+test("focus stays in the slot when the condition it was on resolves while the menu is open", async () => {
+  const [first, second, third] = [ORDERED[1]!, ORDERED[2]!, ORDERED[3]!];
+  const slot = await render("resolve-open", [first, second, third]);
+  try {
+    await act(async () => { (slot.container.querySelector(".session-notice-more") as HTMLButtonElement).click(); });
+    assert.equal(domWindow.document.activeElement?.textContent, second.title, "the menu opens on its first item");
+    // The focused item's condition resolves; focus moves to the item that is left.
+    await slot.draw([first, third]);
+    assert.equal(domWindow.document.activeElement?.textContent, third.title);
+    // The last one resolves: the menu and "+N More" go, and focus lands in the shown notice.
+    await slot.draw([first]);
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
+    const active = domWindow.document.activeElement as unknown as HTMLElement | null;
+    assert.notEqual(active, domWindow.document.body as unknown as HTMLElement, "focus does not fall to <body>");
+    assert.ok(active && slot.container.contains(active as never), "focus stays in the slot");
+  } finally {
+    await slot.unmount();
+  }
+});
+
 test("only info conditions are dismissible, and a dismissal lasts for the session", async () => {
   const info = ORDERED[5]!;
   const warning = ORDERED[3]!;
