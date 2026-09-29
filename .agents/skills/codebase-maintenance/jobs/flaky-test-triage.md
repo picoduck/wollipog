@@ -17,8 +17,10 @@ three times: `pnpm test:e2e`, from the repository root (the config and baseURL l
 historical flake in this repository has been e2e/browser, so a unit-only pass is structurally
 blind to the layer that actually flakes. Before each e2e run, check that port 4174 is free —
 concurrent worktree sessions run their own e2e servers; if the port is held, wait and retry
-rather than killing the other server, and stagger subsequent runs. Budget roughly twenty minutes
-of wall clock for the three e2e passes; they are cheap in tokens.
+rather than killing the other server, and stagger subsequent runs. Budget roughly ninety minutes
+of wall clock for the three e2e passes (about 1,100 browser tests at 26–31 minutes a pass on
+2026-09-29); they are cheap in tokens. A window that long is also why HEAD moves under the sweep,
+so the baseline-pinning rule above matters most for the e2e passes.
 
 Pin the baseline across the whole set of runs. Record `git rev-parse HEAD` before the first run
 and re-check it before and after every run, unit and e2e alike. Another session can fast-forward
@@ -40,9 +42,11 @@ dependency, a filesystem or port race, a shared-state or ordering dependency bet
 genuine bug that surfaces nondeterministically. Name the mechanism; do not guess a fix.
 
 Check history with `git log -1 --format='%h %ad' -- <test-file>`, and read CI history across all
-events, not only pushes to `main`: list the last 200 runs of the CI workflow
-(`gh run list --workflow ci.yml --limit 200`) and pull the log of every failed job other than the
-aggregator. In this repository flakes rarely show up as a red push. They surface as merge-queue
+events, not only pushes to `main`: list every failed run of the CI workflow since the previous
+sweep (`gh run list --workflow ci.yml --status failure --created '>=<previous sweep date>' --limit 500`)
+and pull the log of every failed job other than the aggregator. A fixed run count does not cover a
+week: on 2026-09-29 the last 200 runs reached back only 36 hours and held 15 of the week's 41
+failed runs, missing the ejection that carried the #1819 evidence. In this repository flakes rarely show up as a red push. They surface as merge-queue
 ejections and as browser jobs that failed once and passed on retry, which still fail the run
 because `playwright.config.ts` sets `failOnFlakyTests` under CI. A 20-run window missed the
 2026-09-22 phone-viewport flake and four merge-queue ejections entirely.
