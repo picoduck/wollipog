@@ -6875,6 +6875,8 @@ export function ComposerPlusMenu({
           id={popover.panelId}
           role="dialog"
           label="Session Attachments, Modes, and Guardrails"
+          // Where a coarse pointer's focus lands when the first enabled control is a field.
+          tabIndex={-1}
           width={320}
           boundary=".composer-box"
           onDismiss={() => popover.close(true)}

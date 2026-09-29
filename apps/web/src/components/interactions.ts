@@ -348,9 +348,18 @@ export function useDismissiblePopover(
   const toggle = useCallback(() => setOpen((value) => !value), [setOpen]);
   useEffect(() => {
     if (!open) return;
-    panelRef.current?.querySelector<HTMLElement>(
+    const panel = panelRef.current;
+    const first = panel?.querySelector<HTMLElement>(
       'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-    )?.focus();
+    );
+    // On a coarse pointer, focusing a field summons the software keyboard over the panel the user
+    // only asked to open (#1904). Land on the panel itself instead — a panel that can hold a field
+    // first is expected to be a tabIndex -1 dialog — and let the tap on the field open the keyboard.
+    if (first?.matches("input, select, textarea") && window.matchMedia("(pointer: coarse)").matches) {
+      panel?.focus();
+      return;
+    }
+    first?.focus();
   }, [open]);
   const onTriggerKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== "ArrowDown") return;

@@ -7,7 +7,7 @@ import type { SessionView } from "@wollipog/protocol";
 import { useCommandPaletteFocus } from "./CommandPalette.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { SessionApprovalRegion } from "./SessionApproval.js";
-import { handleMenuKeyDown, useAccessibleMenu } from "./interactions.js";
+import { handleMenuKeyDown, useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { clearQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
@@ -130,6 +130,56 @@ test("collection-owned menus skip disabled rows and restore on Escape", async ()
   assert.equal(domWindow.document.activeElement, trigger);
   await act(async () => { root.unmount(); });
   container.remove();
+});
+
+function FormPopoverHarness({ fieldFirst }: { fieldFirst: boolean }) {
+  const [open, setOpen] = useState(false);
+  const popover = useDismissiblePopover(open, setOpen, "test-popover");
+  return (
+    <>
+      <button ref={popover.triggerRef} data-testid="popover-trigger" onClick={popover.toggle}>Options</button>
+      {open && (
+        <div ref={popover.panelRef} id={popover.panelId} role="dialog" aria-label="Options" tabIndex={-1}
+          onKeyDown={popover.onPanelKeyDown}>
+          <button disabled>Unavailable</button>
+          {!fieldFirst && <button>Action</button>}
+          <input aria-label="Threshold" />
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Opens the harness under a stubbed pointer and reports what took focus. */
+async function openFormPopover(fieldFirst: boolean, coarse: boolean) {
+  const matchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    ...matchMedia.call(domWindow, query),
+    matches: query === "(pointer: coarse)" ? coarse : false,
+  })) as typeof matchMedia;
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<FormPopoverHarness fieldFirst={fieldFirst} />); });
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="popover-trigger"]')!.click(); });
+    const active = domWindow.document.activeElement;
+    return active?.getAttribute("role") === "dialog" ? "panel" : active?.getAttribute("aria-label") ?? active?.textContent;
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.matchMedia = matchMedia;
+  }
+}
+
+test("a form popover opens onto its panel, not a field, on a coarse pointer", async () => {
+  // A fine pointer keeps the first enabled control, field or not.
+  assert.equal(await openFormPopover(true, false), "Threshold");
+  // A coarse pointer never focuses a field on open (#1904): the software keyboard would cover it.
+  assert.equal(await openFormPopover(true, true), "panel");
+  // A button first is unaffected by the pointer.
+  assert.equal(await openFormPopover(false, true), "Action");
 });
 
 const CHOICES = [{ value: "a", label: "Alpha" }, { value: "b", label: "Beta" }] as const;
