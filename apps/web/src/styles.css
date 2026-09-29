@@ -9598,6 +9598,9 @@ button.file-head.source-path-link {
 .copy-btn-labels { display: inline-grid; }
 .copy-btn-labels > span { grid-area: 1 / 1; text-align: start; }
 .copy-btn-labels > span:not([data-shown]) { visibility: hidden; }
+/* The result tones are for neutral surfaces. On a filled button the icon keeps the button's own
+   foreground, which is what contrasts with the fill. */
+:is(.btn.primary, .btn.danger) > :is(.copy-status-icon-copied, .copy-status-icon-failed) { color: inherit; }
 .copy-btn.icon-only-copy {
   display: inline-flex;
   width: 30px;

@@ -153,9 +153,13 @@ export function CopyButton({
     }, COPY_RESULT_MS);
     onResult?.(ok);
   };
-  const icon = status === "copied" ? <CheckIcon size={iconOnly ? 16 : 14} className="copy-status-icon-copied" />
-    : status === "failed" ? <ErrorIcon size={iconOnly ? 16 : 14} className="copy-status-icon-failed" />
-      : <CopyIcon size={iconOnly ? 16 : 14} />;
+  // A menu row draws its icon in the menu's 16px icon slot, so its label lines up with its neighbours'.
+  const menuRow = role === "menuitem";
+  const iconSize = iconOnly || menuRow ? 16 : 14;
+  const glyph = status === "copied" ? <CheckIcon size={iconSize} className="copy-status-icon-copied" />
+    : status === "failed" ? <ErrorIcon size={iconSize} className="copy-status-icon-failed" />
+      : <CopyIcon size={iconSize} />;
+  const icon = menuRow ? <span className="menu-icon" aria-hidden="true">{glyph}</span> : glyph;
   const labels = [["idle", label], ["copied", "Copied"], ["failed", "Copy Failed"]] as const;
   return (
     <>

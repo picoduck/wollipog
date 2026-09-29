@@ -49,6 +49,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
           await expect(visible).toHaveText(shown);
           await expect(button.locator("svg").first()).toHaveClass(new RegExp(`\\b${iconClass}\\b`));
           await expect(button).not.toContainText("✓");
+          if (variant === "Primary") {
+            // The result tones are for neutral surfaces; on the fill the icon keeps the label's foreground.
+            const colors = await button.evaluate((element) => [getComputedStyle(element).color, getComputedStyle(element.querySelector("svg")!).color]);
+            expect(colors[1], `${variant} ${shown}: the icon contrasts with the fill`).toBe(colors[0]);
+          }
           expectSameBox(await box(button), idle, `${variant} ${shown}`);
           expectSameBox(await box(after), neighbour, `${variant} ${shown}'s neighbour`);
           // The label stays on one line inside the button.

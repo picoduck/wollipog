@@ -143,6 +143,26 @@ test("a labeled copy button reports a failure with an error icon and \"Copy Fail
   }
 });
 
+test("a copy menu row draws its icon in the menu's icon slot, so its label lines up with its neighbours'", async () => {
+  Object.defineProperty(domWindow.navigator, "clipboard", { configurable: true, value: { writeText: async () => {} } });
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<CopyButton text="https://example.test/s/1" label="Copy Internal Session Link" className="menu-item" role="menuitem" />);
+    });
+    const row = container.querySelector("[role=menuitem]")!;
+    const slot = row.firstElementChild!;
+    assert.ok(slot.matches(".menu-icon[aria-hidden=true]"));
+    assert.equal(slot.querySelector("svg.lucide-copy")?.getAttribute("width"), "16");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("a labeled copy button always holds every label it can show, so its width cannot change", async () => {
   const view = await renderLabeledCopyButton(async () => {});
   try {
