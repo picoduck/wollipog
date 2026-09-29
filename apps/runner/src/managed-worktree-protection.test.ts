@@ -119,8 +119,24 @@ test("PowerShell movers refuse a protected source when the destination defaults 
     `Move-Item -Filter *.ts ${protectedPath}`,
     `Move-Item -Fil *.ts ${protectedPath} /tmp/moved`,
     `Move-Item -Include *.ts ${protectedPath} /tmp/moved`,
+    `Move-Item -Include *.ts ${protectedPath}`,
     `Move-Item -ErrorAction Stop ${protectedPath} /tmp/moved`,
+    `Move-Item -ErrorAction Stop ${protectedPath}`,
+    `Move-Item -ea Stop ${protectedPath}`,
+    `Move-Item -ev failures ${protectedPath}`,
+    `Move-Item -wa Stop ${protectedPath}`,
+    `Move-Item -wv warnings ${protectedPath}`,
+    `Move-Item -infa Continue ${protectedPath}`,
+    `Move-Item -iv info ${protectedPath}`,
+    `Move-Item -ov output ${protectedPath}`,
+    `Move-Item -ob 1 ${protectedPath}`,
+    `Move-Item -pv pipeline ${protectedPath}`,
+    `Move-Item -proga Continue ${protectedPath}`,
     `mv -in ${protectedPath} /tmp/moved`,
+    `mv -iv info ${protectedPath}`,
+    `mv -fi *.ts ${protectedPath}`,
+    `mv -iv ${protectedPath} /tmp/moved`,
+    `mv -fi ${protectedPath} /tmp/moved`,
   ]) {
     assert.equal(commandTargetsManagedWorktree(command, "/projects/repo", protection), MANAGED_WORKTREE_REFUSAL,
       command);
@@ -129,6 +145,8 @@ test("PowerShell movers refuse a protected source when the destination defaults 
     `Move-Item -Filter *.ts src/old.ts ${protectedPath}`,
     `Move-Item -Include *.ts src/old.ts ${protectedPath}`,
     `mv -in src/old.ts ${protectedPath}`,
+    `mv -iv info src/old.ts ${protectedPath}`,
+    `mv -fi *.ts src/old.ts ${protectedPath}`,
   ]) assert.equal(commandTargetsManagedWorktree(command, "/projects/repo", protection), null, command);
 });
 

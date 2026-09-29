@@ -534,9 +534,11 @@ function powershellMoveParameter(
   executable: string,
 ): { role: "source" | "destination" | "other"; attached: string | null } | null {
   if (!value.startsWith("-") || value.startsWith("--")) return null;
-  // `mv` and `move` also run as GNU commands. A valid GNU short-option cluster must not swallow
-  // the next source just because its letters prefix a PowerShell parameter name.
-  if (["mv", "move"].includes(executable) && /^-[bfinuvZTtS]+$/u.test(value)) return null;
+  // `mv` and `move` also run as GNU commands. `-fi` and `-iv` have valid PowerShell readings
+  // that consume a value, so judge those readings too; otherwise keep GNU clusters intact.
+  const powerShellValueCluster = ["-fi", "-iv"].includes(value.toLowerCase());
+  if (["mv", "move"].includes(executable) && /^-[bfinuvZTtS]+$/u.test(value) &&
+      !powerShellValueCluster) return null;
   const colon = value.indexOf(":");
   const name = value.slice(1, colon < 0 ? undefined : colon).toLowerCase();
   if (!name) return null;
@@ -548,7 +550,8 @@ function powershellMoveParameter(
   // for the source while the real source is dropped as the destination.
   const other = ["credential", "erroraction", "errorvariable", "informationaction", "informationvariable",
     "outbuffer", "outvariable", "pipelinevariable", "progressaction", "warningaction", "warningvariable",
-    ...(rename ? [] : ["filter", "include", "exclude"])].some((parameter) => parameter.startsWith(name));
+    ...(rename ? [] : ["filter", "include", "exclude"])].some((parameter) => parameter.startsWith(name)) ||
+    ["ea", "ev", "infa", "iv", "ov", "ob", "pv", "proga", "wa", "wv"].includes(name);
   if (!source && !destination && !other) return null;
   return { role: source ? "source" : destination ? "destination" : "other",
     attached: colon < 0 ? null : value.slice(colon + 1) };
@@ -1397,6 +1400,7 @@ function commandVerdict(
     let optionsEnded = false;
     const operands: ShellToken[] = [];
     const namedSources: ShellToken[] = [];
+    const gnuClusterOperands: ShellToken[] = [];
     for (let index = 0; index < words.length; index += 1) {
       const token = words[index];
       if (token == null) continue;
@@ -1415,6 +1419,9 @@ function commandVerdict(
           if (argument != null) {
             if (parameter.role === "source") namedSources.push(argument);
             if (parameter.role === "destination") namedDestination = true;
+            if (["mv", "move"].includes(executable) && ["-fi", "-iv"].includes(value.toLowerCase())) {
+              gnuClusterOperands.push(argument);
+            }
           }
           continue;
         }
@@ -1430,7 +1437,10 @@ function commandVerdict(
     const positionalSources = targetDirectory || namedDestination || (namedSources.length === 0 && operands.length === 1)
       ? operands
       : operands.slice(0, -1);
-    const sources = [...namedSources, ...positionalSources];
+    const gnuSources = gnuClusterOperands.length === 0 ? []
+      : targetDirectory ? [...gnuClusterOperands, ...operands]
+      : [...gnuClusterOperands, ...operands].slice(0, -1);
+    const sources = [...namedSources, ...positionalSources, ...gnuSources];
     return strongest(sources.map((source) =>
       operandVerdict(source, cwd, environment, protections, false, optionsEnded)));
   }
