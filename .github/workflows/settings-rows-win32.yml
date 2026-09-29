@@ -1,0 +1,215 @@
+name: Settings-Rows win32 Baselines
+
+# apps/web/e2e/settings-rows.spec.ts commits pixel baselines for linux and win32, but the browser
+# suite runs only on Ubuntu. Five pull requests in a row regenerated the linux set and left the
+# win32 set stale, and nothing noticed until a Windows run failed 16 of 57 tests (#2010).
+#
+# CI calls this for every ready pull request and merge group, so the required aggregator waits on
+# it; it compares on Windows only when the diff touches the spec or its baselines. When the
+# comparison fails it regenerates the win32 images that differ and uploads exactly those, so the
+# fix is one download and one commit. Run it from the Actions page to regenerate for a ref whose
+# linux set changed outside a pull request.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Ref to compare; empty for the calling run's commit.
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit SHA to compare and regenerate; empty for the selected branch.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# No workflow-level concurrency: in a called workflow `github.workflow` is the CALLER's name, so a
+# group here would collide with CI's own group and cancel the run that called it.
+
+jobs:
+  scope:
+    name: Detect Settings-Rows Changes
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      affected: ${{ steps.scope.outputs.affected }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          # The pull-request checkout is GitHub's test merge commit; its first parent is the base.
+          fetch-depth: 2
+
+      # Compared against the base of the event rather than filtered with `paths:`: a path filter
+      # on the workflow would suppress the required check, and `pull_request` and `merge_group`
+      # carry their base in different places. Anything unresolvable compares rather than skips.
+      - name: Compare the Diff Against the Settings-Rows Paths
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          decide() {
+            echo "affected=$1" >> "$GITHUB_OUTPUT"
+            echo "$2"
+            echo "$2" >> "$GITHUB_STEP_SUMMARY"
+          }
+          case "$EVENT_NAME" in
+            pull_request)
+              if ! git rev-parse -q --verify 'HEAD^2' > /dev/null; then
+                decide true "The pull-request checkout is not a test merge commit, so the win32 baselines are compared anyway."
+                exit 0
+              fi
+              base="$(git rev-parse 'HEAD^1')"
+              ;;
+            merge_group) base="$MERGE_GROUP_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+            *)
+              decide true "A $EVENT_NAME run always compares the win32 baselines."
+              exit 0
+              ;;
+          esac
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" =~ ^0+$ ]] \
+            || ! git fetch --no-tags --depth=1 origin "$base"; then
+            decide true "The $EVENT_NAME base '$base' could not be resolved, so the win32 baselines are compared anyway."
+            exit 0
+          fi
+          matches="$(git diff --name-only "$base" HEAD \
+            | grep -E '^apps/web/e2e/settings-rows\.spec\.ts($|-snapshots/)' || true)"
+          if [[ -n "$matches" ]]; then
+            decide true "This $EVENT_NAME changes the settings-rows spec or its baselines against $base, so the win32 baselines are compared:"
+            printf '%s\n' "$matches" | sed 's/^/- `/; s/$/`/' | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            decide false "This $EVENT_NAME does not touch the settings-rows spec or its baselines against $base, so the win32 comparison is skipped."
+          fi
+
+  compare:
+    needs: scope
+    if: needs.scope.outputs.affected == 'true'
+    name: Compare win32 Settings-Rows Baselines
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node 24
+        id: setup_node_24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Retry Setup Node 24
+        if: ${{ !cancelled() && steps.setup_node_24.outcome == 'failure' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve Playwright Version
+        id: playwright-version
+        shell: bash
+        run: |
+          playwright_version="$(pnpm exec playwright --version)"
+          echo "version=${playwright_version#Version }" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright Browser
+        id: playwright-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/AppData/Local/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright Browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install chromium
+
+      - name: Compare Against the Committed win32 Baselines
+        id: compare
+        run: pnpm exec playwright test settings-rows
+
+      # Everything below runs only when the comparison failed, and the job still fails: these
+      # steps turn the failure into the files that fix it rather than into a green check.
+      - name: Regenerate the Changed win32 Baselines
+        if: failure() && steps.compare.outcome == 'failure'
+        continue-on-error: true
+        run: pnpm exec playwright test settings-rows --update-snapshots=changed
+
+      - name: Collect the Regenerated win32 Baselines
+        id: collect
+        if: failure() && steps.compare.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="$RUNNER_TEMP/settings-rows-win32-baselines"
+          mkdir -p "$staging"
+          # Modified and newly written images alike; the repository-relative path is kept so the
+          # artifact extracts over a checkout at the right place.
+          git status --porcelain --untracked-files=all -- 'apps/web/e2e/settings-rows.spec.ts-snapshots/*-win32.png' \
+            | cut -c4- > "$RUNNER_TEMP/regenerated.txt"
+          while IFS= read -r file; do
+            mkdir -p "$staging/$(dirname "$file")"
+            cp "$file" "$staging/$file"
+          done < "$RUNNER_TEMP/regenerated.txt"
+          echo "count=$(wc -l < "$RUNNER_TEMP/regenerated.txt" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "staging=$staging" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the Regenerated win32 Baselines
+        if: failure() && steps.collect.outputs.count != '' && steps.collect.outputs.count != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: settings-rows-win32-baselines
+          path: ${{ steps.collect.outputs.staging }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Tell the Author How to Commit Them
+        if: failure() && steps.compare.outcome == 'failure'
+        shell: bash
+        env:
+          COUNT: ${{ steps.collect.outputs.count }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$COUNT" && "$COUNT" != "0" ]]; then
+            echo "::error title=Stale win32 Baselines::$COUNT win32 settings-rows baselines differ from what Windows renders. The regenerated images are in this run's settings-rows-win32-baselines artifact; the job summary says how to commit them."
+          fi
+          {
+            if [[ -n "$COUNT" && "$COUNT" != "0" ]]; then
+              echo "## The win32 Settings-Rows Baselines Are Stale"
+              echo
+              echo "Windows no longer renders what the committed \`*-win32.png\` baselines show. This run regenerated the $COUNT that differ and uploaded them as the \`settings-rows-win32-baselines\` artifact. From the repository root, on this branch:"
+              echo
+              echo '```sh'
+              echo "gh run download $RUN_ID --repo $REPOSITORY --name settings-rows-win32-baselines --dir ."
+              echo "git add apps/web/e2e/settings-rows.spec.ts-snapshots"
+              echo "git commit -m \"Regenerate the win32 settings-rows baselines\""
+              echo '```'
+              echo
+              echo "Or download the artifact from this run's summary page and extract it at the repository root. Look at each image before committing it: it should show the same change as its linux pair."
+              echo
+              sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/regenerated.txt"
+            else
+              echo "## The win32 Settings-Rows Comparison Failed Without a Baseline Difference"
+              echo
+              echo "Regenerating changed no \`*-win32.png\` file, so this is not baseline drift. Read the test log above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

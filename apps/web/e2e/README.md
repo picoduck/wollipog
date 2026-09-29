@@ -155,6 +155,31 @@ bypasses and false positives, while only the running browser can say how much ma
 actually has. New numeric bounds whose safety depends on room to spare must use the helper and state
 why the bound is safe.
 
+## Pixel Baselines: Commit Every Platform's Set Together
+
+`settings-rows.spec.ts` compares screenshots against committed baselines, which Playwright keeps per
+platform: `settings-rows.spec.ts-snapshots/*-linux.png` and `*-win32.png`. Both sets are checked in
+CI:
+
+- The **Browser End-to-End Tests** job compares the linux set on every pull request.
+- The **Settings-Rows win32 Baselines** job compares the win32 set on `windows-latest`. It runs
+  only when the pull request or merge group changes the spec or its snapshots; otherwise it reports
+  success without starting a Windows runner. The required check waits for it either way.
+
+When a change regenerates the linux set, expect the win32 comparison to fail on the same images.
+The failed job re-runs with `--update-snapshots=changed`, uploads only the regenerated
+`*-win32.png` files as the `settings-rows-win32-baselines` artifact, and its job summary gives the
+command that downloads them into place:
+
+```bash
+gh run download <run-id> --repo <owner>/<repo> --name settings-rows-win32-baselines --dir .
+git add apps/web/e2e/settings-rows.spec.ts-snapshots
+```
+
+Look at each image before committing it: it should show the same change as its linux pair. If the
+linux set changes outside a pull request, run the **Settings-Rows win32 Baselines** workflow from
+the Actions page for that ref to produce the same artifact.
+
 ## Other Conventions
 
 - **Port 4174 is fixed and `--strictPort`.** Two checkouts cannot run the suite at once; wait rather

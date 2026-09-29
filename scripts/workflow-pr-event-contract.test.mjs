@@ -10,6 +10,7 @@ const WORKFLOWS = [
   ".github/workflows/platform-isolation.yml",
 ];
 const RELEASE_WORKFLOW = ".github/workflows/release.yml";
+const WIN32_BASELINES_WORKFLOW = ".github/workflows/settings-rows-win32.yml";
 
 const EXPECTED_PULL_REQUEST_TYPES = ["opened", "synchronize", "reopened", "ready_for_review"];
 const EXPECTED_GROUP_TEMPLATE =
@@ -205,7 +206,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["checks", "browser", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["checks", "browser", "win32", "check"], "CI jobs drifted");
   for (const id of ["checks", "browser"]) {
     assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
     assert.doesNotMatch(byId[id], /^    needs:/m, `${id}: the work jobs run in parallel, not chained`);
@@ -287,20 +288,34 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "the browser suites must not share the unit-test job's budget");
   assert.match(byId.checks, /^      - name: Unit Tests$/m);
   assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
-  assert.match(byId.check, /^    needs: \[checks, browser\]$/m, "the aggregator must wait for every work job");
+  assert.match(byId.check, /^    needs: \[checks, browser, win32\]$/m, "the aggregator must wait for every work job");
   assert.match(byId.check, /^    if: \$\{\{ always\(\) && \(/m,
     "the aggregator must run when a needed job failed or was cancelled, or the required context never reports");
   assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
   assert.match(byId.check, /needs\.browser\.result/, "the aggregator must inspect the browser job result");
+  // The win32 job is the draft guard, its name and the call, and nothing else. Its path scoping lives
+  // in the called workflow, where a skip is a job the call still reports as a success; a condition
+  // here would instead skip the call, which the aggregator rightly reads as a failure.
+  const win32 = byId.win32
+    .split("\n")
+    .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
+    .join("\n");
+  assert.match(win32,
+    /^  win32:\n    if: [^\n]*\n    name: Settings-Rows win32 Baselines\n    uses: \.\/\.github\/workflows\/settings-rows-win32\.yml$/,
+    "win32: the job must be exactly its guard, its name and the call to the win32 baselines workflow");
+  assert.match(byId.check, /needs\.win32\.result/,"the aggregator must inspect the win32 baselines result");
+  assert.match(byId.check, /^          report "Settings-Rows win32 Baselines" "\$WIN32_RESULT"$/m,
+    "the aggregator must fail when the win32 baselines job did not succeed");
   assert.match(byId.check, /cancelled\) .*timeout-minutes budget/, "a cancelled job is reported as a budget hit, not a flaky test");
 });
 
 test("workflow actions use immutable commit pins", () => {
-  for (const path of [...WORKFLOWS, RELEASE_WORKFLOW]) {
+  for (const path of [...WORKFLOWS, RELEASE_WORKFLOW, WIN32_BASELINES_WORKFLOW]) {
     const text = readFileSync(resolve(process.cwd(), path), "utf8");
-    const actionRefs = [...text.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm)].map(
-      (match) => match[1],
-    );
+    // A workflow in this repository is pinned by the commit that calls it, so it needs no SHA.
+    const actionRefs = [...text.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm)]
+      .map((match) => match[1])
+      .filter((ref) => !/^\.\/\.github\/workflows\/[\w.-]+\.yml$/.test(ref));
 
     assert.notEqual(actionRefs.length, 0, `${path}: expected at least one action reference`);
     for (const actionRef of actionRefs) {
@@ -536,7 +551,8 @@ test("every workflow job bounds its own runtime", () => {
   const PLATFORM_TIMEOUT_EXPRESSION =
     /^ {4}timeout-minutes: \$\{\{ startsWith\(matrix\.os, 'macos'\) && (\d+) \|\| (\d+) \}\}$/m;
 
-  for (const path of [...WORKFLOWS, RELEASE_WORKFLOW]) {
+  const bounded = [...WORKFLOWS, RELEASE_WORKFLOW, WIN32_BASELINES_WORKFLOW];
+  for (const path of bounded) {
     const text = readFileSync(resolve(process.cwd(), path), "utf8");
     const jobsIndex = text.search(/^jobs:$/m);
     assert.notEqual(jobsIndex, -1, `${path}: missing jobs block`);
@@ -563,6 +579,15 @@ test("every workflow job bounds its own runtime", () => {
           );
           continue;
         }
+      }
+
+      // A job that calls a workflow cannot carry timeout-minutes; the called workflow's own jobs
+      // are bounded instead, so that workflow must be one this loop reads.
+      const called = body.match(/^ {4}uses: \.\/(\.github\/workflows\/[\w.-]+\.yml)$/m);
+      if (called) {
+        assert.ok(bounded.includes(called[1]),
+          `${path}: job "${heading[1]}" calls ${called[1]}, whose jobs this test does not bound`);
+        continue;
       }
 
       const timeout = body.match(/^ {4}timeout-minutes: (\d+)$/m);

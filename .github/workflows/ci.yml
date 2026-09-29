@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   # The required status context "Typecheck, Test & Sidecar Bundle" is the `check` job below. It
-  # only aggregates: the work runs in two parallel jobs with their own time budgets, because the
+  # only aggregates: the work runs in parallel jobs with their own time budgets, because the
   # browser end-to-end suite alone takes ~19 minutes and was crowding the single 30-minute job
   # (a merge-queue run that hits the budget is cancelled and the PR silently leaves the queue).
   checks:
@@ -221,6 +221,14 @@ jobs:
       # dependencies still bundle into one CJS file. Skips SEA/postject packaging, so no
       # rustc or target triple is needed here.
 
+  # The win32 settings-rows baselines, which the Ubuntu browser job above cannot see. The called
+  # workflow compares on Windows only when the diff touches that spec or its baselines, and reports
+  # success otherwise; when it fails, its summary and artifact carry the regenerated images.
+  win32:
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    name: Settings-Rows win32 Baselines
+    uses: ./.github/workflows/settings-rows-win32.yml
+
   check:
     # Runs whenever the jobs above ran (always(), so a failed or cancelled job is reported rather
     # than leaving the required context missing); the draft guard keeps drafts off hosted runners.
@@ -228,12 +236,13 @@ jobs:
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-22.04
     timeout-minutes: 5
-    needs: [checks, browser]
+    needs: [checks, browser, win32]
     steps:
       - name: Require Every Job to Have Succeeded
         env:
           CHECKS_RESULT: ${{ needs.checks.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
+          WIN32_RESULT: ${{ needs.win32.result }}
         run: |
           status=0
           report() {
@@ -245,4 +254,5 @@ jobs:
           }
           report "Typecheck, Unit Tests & Bundles" "$CHECKS_RESULT"
           report "Browser End-to-End Tests" "$BROWSER_RESULT"
+          report "Settings-Rows win32 Baselines" "$WIN32_RESULT"
           exit "$status"
