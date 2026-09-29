@@ -461,6 +461,9 @@
   /* --- Derived colour (docs/design-system.md §2.2). Declared with var() in this shared block, so
      every scheme and both themes resolve them without regeneration. --- */
   --surface-selected: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
+  /* The ring a count badge draws on an icon (§11.4). A surface that is not `--bg-elev` (a selected
+     rail item on `--surface-selected`) sets this once instead of redrawing the badge. */
+  --count-badge-ring: var(--bg-elev);
   /* Focus is neutral, never teal: teal marks selection, and a focused row must not read as a
      selected one (§16.1). */
   --focus: var(--text);
@@ -14209,6 +14212,14 @@ body.shell-dock-dragging * {
 .count-badge.danger {
   background: var(--danger-bg);
   color: var(--danger-fg);
+}
+/* On an icon's top-right shoulder, growing away from the icon so a longer count covers no more of
+   it. The icon's wrapper is the positioned box; the ring separates the badge from the icon. */
+.count-badge.on-icon {
+  position: absolute;
+  top: -6px;
+  left: calc(100% - 8px);
+  box-shadow: 0 0 0 2px var(--count-badge-ring);
 }
 
 /* ---------------------------- Segmented control ----------------------------

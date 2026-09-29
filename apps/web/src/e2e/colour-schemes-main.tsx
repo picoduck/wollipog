@@ -1,5 +1,7 @@
 import React from "react";
 import { StatusBadge } from "../components/StatusBadge.js";
+import { CountBadge } from "../components/CountBadge.js";
+import { InboxIcon } from "../components/Icons.js";
 import { PROTOCOL_VERSION, type BoxView, type RunnerView } from "@wollipog/protocol";
 import { createRoot } from "react-dom/client";
 import { ApiProvider } from "../api-context.js";
@@ -106,6 +108,8 @@ const contrastSelectors = [
   ".status.t-warning",
   ".status.t-success",
   ".btn.danger",
+  ".count-badge",
+  ".count-badge.danger",
 ];
 
 const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -235,6 +239,20 @@ function Sample() {
               // The one status recipe in each tone, as `StatusBadge` renders it.
               <StatusBadge key={tone} tone={tone} label={tone} />
             ))}
+          </div>
+          {/* Count badges (§11.4) in both tones, beside a label and on a 20px icon, as `CountBadge`
+              renders them. The icon's wrapper is the positioned box an owner provides. */}
+          <div className="sample-row">
+            <span data-testid="count-badge-inline">Blocked <CountBadge count={3} /></span>
+            <span data-testid="count-badge-inline-danger">Stalled <CountBadge count={12} tone="danger" /></span>
+            <span data-testid="count-badge-icon" style={{ position: "relative", display: "inline-flex" }}>
+              <InboxIcon size={20} />
+              <CountBadge count={1} onIcon />
+            </span>
+            <span data-testid="count-badge-icon-danger" style={{ position: "relative", display: "inline-flex" }}>
+              <InboxIcon size={20} />
+              <CountBadge count={128} tone="danger" onIcon />
+            </span>
           </div>
           <div className="sample-row">
             <button type="button" className="btn primary">Primary</button>

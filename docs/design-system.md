@@ -149,6 +149,7 @@ correct in every scheme and theme without regeneration.
 :root {
   /* Derived (shared block, correct in every scheme) */
   --surface-selected: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));  /* selected row, active rail item */
+  --count-badge-ring: var(--bg-elev);  /* an on-icon count badge's ring; its surface overrides it (§11.4) */
 
   /* Focus: neutral, never teal */
   --focus: var(--text);
@@ -1291,9 +1292,18 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
 
 - Plain count: `--type-micro`, `--text-faint`, tabular, no pill (tabs, groups, segmented options).
 - Count badge (needs attention): 16px pill, min-width 16px, 11px/600 tabular, `--amber` fill with `--count-warning-fg` (9.47:1 dark, 4.87:1 light); danger variant uses
-  `--danger-bg` with `--danger-fg`.
+  `--danger-bg` with `--danger-fg`. `--accent` and `--accent-2` never fill a count.
   One per rail item, showing the highest-severity tone and the total.
-- Zero is never shown in color ("0 Stalled" is not red).
+- Inline by default, in the text flow of a list-foot row, a menu row or a tab. `.count-badge.on-icon`
+  places it on an icon's top-right shoulder (the icon's wrapper is the positioned box), growing
+  away from the icon, with a 2px ring in `--count-badge-ring`. That property defaults to
+  `--bg-elev`; a surface that is not `--bg-elev` (a selected rail item on `--surface-selected`)
+  sets it once on an ancestor rather than redrawing the badge.
+- Draw it with `CountBadge` (`count`, `tone: "warning" | "danger"`, `onIcon`), never by hand. The
+  badge is `aria-hidden` and holds only the number; the control that shows it states the count in
+  its accessible name or description.
+- Zero is never shown in color ("0 Stalled" is not red): `CountBadge` renders nothing for a count
+  of zero or less.
 
 ### 11.5 Keycap
 
