@@ -253,7 +253,9 @@ export function Modal({
     notifyLayers();
     const onKey = (e: KeyboardEvent) => {
       // Nested UI (e.g. the directory browser) claims Escape for itself via preventDefault —
-      // don't tear the whole dialog down over it.
+      // don't tear the whole dialog down over it. An Escape that dismisses an IME's candidate list
+      // is the input method's too: closing here discarded the whole form mid-word.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Escape" && !e.defaultPrevented && modalLayers.at(-1)?.id === layerId) {
         e.preventDefault();
         e.stopImmediatePropagation();

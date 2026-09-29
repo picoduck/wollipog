@@ -145,6 +145,31 @@ test("a child stacks on its parent on desktop, and closing it returns focus insi
   await view.unmount();
 });
 
+test("an Escape that belongs to an IME composition leaves the dialog open", async () => {
+  matchingMedia = new Set();
+  let closes = 0;
+  const view = await mount(
+    <Modal title="New Session" onClose={() => { closes += 1; }}>
+      <input aria-label="Search Project Options" />
+    </Modal>,
+  );
+  const field = document.querySelector<HTMLInputElement>('input[aria-label="Search Project Options"]')!;
+  // Dismissing a candidate list: the browser reports the key as composing, or as keyCode 229.
+  for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+    await act(async () => {
+      field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, ...init }) as never);
+      await tick();
+    });
+  }
+  assert.equal(closes, 0, "the input method keeps its Escape");
+  await act(async () => {
+    field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+    await tick();
+  });
+  assert.equal(closes, 1, "an ordinary Escape still closes the dialog");
+  await view.unmount();
+});
+
 test("on a phone a confirmation takes over the open sheet, and Back returns to it with its values", async () => {
   matchingMedia = new Set([PHONE]);
   let answer: boolean | undefined;
