@@ -81,6 +81,12 @@ export function useAnchoredMenuStyle(
      * the request grows to the rendered content, up to `maxHeight`.
      */
     measure?: () => HTMLElement | null;
+    /**
+     * Changes whenever the measured content may have. Placement otherwise runs again only when the
+     * option count changes the estimate, so a list whose options changed text but not number kept
+     * the height measured for the previous ones.
+     */
+    measureKey?: unknown;
     /** The most the measured content may ask for (the caller's one height cap). */
     maxHeight?: number;
   },
@@ -146,6 +152,7 @@ export function useAnchoredMenuStyle(
     options.desiredHeight,
     options.desiredWidth,
     options.matchTriggerWidth,
+    options.measureKey,
     options.minTriggerWidth,
     triggerRef,
   ]);

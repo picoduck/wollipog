@@ -16,6 +16,7 @@ import {
   ChoiceCards,
   InlineListbox,
   SegmentedControl,
+  SELECT_MENU_MAX_HEIGHT_PX,
   selectMenuDesiredHeight,
   useTouchTargetMode,
 } from "./ui/ChoiceControls.js";
@@ -105,6 +106,11 @@ export function SnoozeDialog({
       coarsePointer,
     }),
     matchTriggerWidth: true,
+    // A date that wraps at the list's width renders taller than the two lines counted above.
+    measure: () => document.getElementById(suggestionListId),
+    // Each query brings new dates, often as many as the last one had.
+    measureKey: suggestions,
+    maxHeight: SELECT_MENU_MAX_HEIGHT_PX,
   });
   const parsed = useMemo(() => {
     if (loadedReminder && !scheduleTouched) {

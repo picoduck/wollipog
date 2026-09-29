@@ -81,6 +81,33 @@ For example, `status-badge-parity.spec.ts` needs no pinned pass: its badge compa
 font and scale together, while its responsive status-row assertions derive which badges fit from
 the current face instead of expecting a particular wrap.
 
+### Wrap and Sizing Tests: Cause the Wrap, Then Prove It
+
+Some defects only appear when text wraps: a list sized from an estimated line count clips its last
+option, or a row grows and pushes its neighbour. The test for one must make the text wrap, and
+which text wraps depends on the face.
+
+Not every harness page renders in the app font. `settings-rows-e2e.html`,
+`skills-unavailable-e2e.html` and `new-session-choices-e2e.html` pin Arial, so their screenshot
+baselines and text-heavy measurements do not follow each machine's system UI font. Arial is narrow
+and hides wraps the product shows.
+
+- **Escape the face with `pinWidestFace(page, page.locator("body"))`,** not an ad hoc style tag. It
+  overrides a page's pinned font, and the widest verified face wraps at least as early as the app
+  font does on the CI runner. Pin `body` when the text under test mounts after the pin, such as an
+  opened list: descendants added later inherit the pin.
+- **Assert the wrap before the assertion it enables.** Count the text's line boxes (distinct `top`s
+  of a `Range` over it). Without that precondition, a machine whose widest candidate is narrower, or
+  a copy change that shortens the text, leaves a test that passes whether or not the defect is
+  fixed.
+- **When the widest face alone does not wrap at the width under test,** lengthen the text as a
+  person would, for example with a 150% root font size (the browser's text-size setting), and fix
+  the locale, time zone and clock for generated text such as dates.
+
+`snooze-typeahead.spec.ts` ("grows to its wrapped dates instead of scrolling") and
+`new-session-choices.spec.ts` ("a short Project list grows to its wrapped descriptions instead of
+scrolling") follow this pattern.
+
 ### Check Numeric Bounds at Runtime
 
 Use `expectGeometry` from `geometry-margins.ts` when a numeric bound is safe because the observed

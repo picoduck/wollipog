@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
+import { pinWidestFace } from "./font-geometry.js";
 
 /**
  * #832, in the only place that can answer it: a rendering engine.
@@ -346,13 +347,20 @@ test.describe("responsive Project and Agent controls", () => {
   test("a short Project list grows to its wrapped descriptions instead of scrolling", async ({ page }) => {
     // At 390px, in the app font, "No Project"'s description wraps to two lines. The list's height
     // request counted it as one, so a two-option list scrolled to show its last line and clipped it
-    // at the bottom edge. The harness pins Arial for its screenshot baselines, which does not wrap
-    // here, so this test renders in the app font the product uses.
+    // at the bottom edge. This page pins Arial, which does not wrap here, so the test measures in
+    // the widest verified face and first proves the description wrapped.
     await openDialog(page);
-    await page.addStyleTag({ content: "html body { font-family: var(--font-ui); }" });
+    const face = await pinWidestFace(page, page.locator("body"));
     await page.getByRole("button", { name: /^Project:/ }).click();
     const list = page.getByRole("listbox", { name: "Project" });
     await expect(list.getByRole("option")).toHaveCount(2);
+    const description = list.getByRole("option", { name: /No Project/ }).locator(".ui-select-option-desc");
+    const descriptionLines = await description.evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size;
+    });
+    expect(descriptionLines, `the description wraps in ${face}`).toBeGreaterThan(1);
     const fit = await list.evaluate((element) => ({
       scrollHeight: element.scrollHeight,
       clientHeight: element.clientHeight,
