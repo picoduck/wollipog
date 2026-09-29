@@ -64,7 +64,7 @@ function Harness() {
       }}>Persistent burst</button>
       <button data-testid="info" onClick={() => feedback.showToast("Saved.")}>Info</button>
       <button data-testid="double-action" onClick={() => feedback.showToast("Run once.", { action: { label: "Run", run: () => { setActionCount((count) => count + 1); } } })}>Double action</button>
-      <button data-testid="pending-action" onClick={() => feedback.showToast("Opening link.", { action: { label: "Retry", busyLabel: "Retrying…", run: () => new Promise<void>((resolve) => { finishPendingAction = resolve; }) } })}>Pending Action</button>
+      <button data-testid="pending-action" onClick={() => feedback.showToast("Opening link.", { action: { label: "Retry", progress: "Opening the link again…", run: () => new Promise<void>((resolve) => { finishPendingAction = resolve; }) } })}>Pending Action</button>
       <output data-testid="result">{result}</output>
       <output data-testid="undo-count">{undoCount}</output>
       <output data-testid="action-count">{actionCount}</output>
@@ -272,17 +272,122 @@ test("a synchronous double-click cannot run one toast action twice", async () =>
   container.remove();
 });
 
-test("non-undo actions show their own busy label", async () => {
+test("a running toast action keeps its label beside a spinner and announces its progress", async () => {
   const { container, root } = await renderHarness();
   await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="pending-action"]')!.click(); });
   const action = container.querySelector<HTMLButtonElement>(".toast .btn")!;
+  assert.equal(action.getAttribute("aria-busy"), null);
+  action.focus();
   await act(async () => { action.click(); await Promise.resolve(); });
-  assert.equal(action.textContent, "Retrying…");
+  assert.equal(action.textContent, "Retry", "the label names the action that is running");
+  assert.equal(action.getAttribute("aria-busy"), "true");
+  assert.equal(action.getAttribute("aria-disabled"), "true");
+  assert.equal(action.disabled, false, "aria-disabled, so the button keeps the focus it was pressed with");
+  assert.equal(domWindow.document.activeElement, action as unknown);
+  assert.equal(action.firstElementChild?.className, "spinner");
+  assert.equal(action.firstElementChild?.getAttribute("aria-hidden"), "true");
+  const toast = container.querySelector(".toast")!;
+  assert.doesNotMatch(toast.textContent ?? "", /Retrying…|Undoing…|Installing…|Working…/);
+  assert.equal(toast.querySelector('.sr-only[role="status"]')?.textContent, "Opening the link again…");
   await act(async () => { finishPendingAction?.(); await tick(); });
   assertNoDomNode(container.querySelector(".toast"));
   finishPendingAction = undefined;
   await act(async () => { root.unmount(); });
   container.remove();
+});
+
+/** A confirmation whose confirm action the test settles by hand, and what `confirm()` resolved to. */
+async function renderPendingConfirmation(options: { cancelWhileRunning?: boolean } = {}) {
+  const runs: Array<{ signal: AbortSignal; resolve: () => void; reject: (cause: Error) => void }> = [];
+  const outcome: { value?: boolean } = {};
+  function PendingConfirmHarness() {
+    const feedback = useFeedback();
+    return <button data-testid="stop" onClick={() => {
+      void feedback.confirm({
+        title: "Stop Session",
+        message: "The session stops now.",
+        confirmLabel: "Stop Session",
+        tone: "danger",
+        progress: "Stopping the session…",
+        ...options,
+        onConfirm: (signal) => new Promise<void>((resolve, reject) => { runs.push({ signal, resolve, reject }); }),
+      }).then((value) => { outcome.value = value; });
+    }}>Stop</button>;
+  }
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => { root.render(<FeedbackProvider><PendingConfirmHarness /></FeedbackProvider>); });
+  await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="stop"]')!.click(); });
+  const confirmButton = () => document.querySelector<HTMLButtonElement>(".modal-foot .danger");
+  const cancelButton = () => [...document.querySelectorAll<HTMLButtonElement>(".modal-foot .btn")].find((button) => button.textContent === "Cancel")!;
+  const cleanup = async () => {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  };
+  return { runs, outcome, confirmButton, cancelButton, cleanup };
+}
+
+test("a pending confirmation shows its confirm button busy with the label unchanged, and closes when the action succeeds", async () => {
+  const { runs, outcome, confirmButton, cancelButton, cleanup } = await renderPendingConfirmation();
+  const confirm = confirmButton()!;
+  confirm.focus();
+  await act(async () => { confirm.click(); await Promise.resolve(); });
+  assert.equal(runs.length, 1);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1, "the dialog waits for the action");
+  assert.equal(confirm.textContent, "Stop Session");
+  assert.equal(confirm.getAttribute("aria-busy"), "true");
+  assert.equal(confirm.firstElementChild?.className, "spinner");
+  assert.equal(domWindow.document.activeElement, confirm as unknown, "the pressed button keeps focus");
+  assert.equal(cancelButton().disabled, false, "Cancel stays available");
+  assert.equal(document.querySelector('.modal-foot .sr-only[role="status"]')?.textContent, "Stopping the session…");
+
+  await act(async () => { confirm.click(); await Promise.resolve(); });
+  assert.equal(runs.length, 1, "pressing a busy button does not run the action again");
+
+  await act(async () => { runs[0]!.resolve(); await tick(); });
+  assert.equal(outcome.value, true);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
+  assert.equal(runs[0]!.signal.aborted, false, "a finished action is not aborted when the dialog closes");
+  await cleanup();
+});
+
+test("a failed pending confirmation stays open with the error, and can be tried again", async () => {
+  const { runs, outcome, confirmButton, cancelButton, cleanup } = await renderPendingConfirmation();
+  await act(async () => { confirmButton()!.click(); await Promise.resolve(); });
+  await act(async () => { runs[0]!.reject(new Error("The runner is offline.")); await tick(); });
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1);
+  assert.equal(outcome.value, undefined, "a failure does not settle the confirmation");
+  assert.equal(confirmButton()!.getAttribute("aria-busy"), null);
+  assert.equal(confirmButton()!.textContent, "Stop Session");
+  assert.equal(document.querySelector('[role="dialog"] .notice[role="alert"]')?.textContent?.includes("The runner is offline."), true);
+
+  await act(async () => { confirmButton()!.click(); await Promise.resolve(); });
+  assert.equal(runs.length, 2, "the person can try again");
+  assertNoDomNode(document.querySelector('[role="dialog"] .notice'), "the old error clears while it runs again");
+  await act(async () => { cancelButton().click(); await tick(); });
+  assert.equal(outcome.value, false);
+  assert.equal(runs[1]!.signal.aborted, true, "cancelling while it runs aborts the action");
+  await act(async () => { runs[1]!.resolve(); await tick(); });
+  assert.equal(outcome.value, false, "an action that finishes after Cancel does not confirm");
+  await cleanup();
+});
+
+test("a caller can keep Cancel unavailable while its confirm action runs", async () => {
+  const { runs, outcome, confirmButton, cancelButton, cleanup } = await renderPendingConfirmation({ cancelWhileRunning: false });
+  assert.equal(cancelButton().disabled, false, "Cancel is available until the action starts");
+  await act(async () => { confirmButton()!.click(); await Promise.resolve(); });
+  assert.equal(cancelButton().disabled, true);
+  await act(async () => {
+    domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await tick();
+  });
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1, "Escape does not close it either");
+  assert.equal(runs[0]!.signal.aborted, false);
+  await act(async () => { runs[0]!.resolve(); await tick(); });
+  assert.equal(outcome.value, true);
+  await cleanup();
 });
 
 test("a nested confirmation owns Escape without closing its parent modal", async () => {

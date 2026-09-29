@@ -188,6 +188,7 @@ export function ProjectSplitMenu({
               durationMs: 0,
               action: {
                 label: "Restore Sessions",
+                progress: "Restoring the sessions…",
                 run: async () => {
                   const failures = await setArchivedForSessions(sessionIds, false, api.setArchived);
                   if (failures > 0) throw new Error(`${failures} session${failures === 1 ? "" : "s"} could not be restored`);

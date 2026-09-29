@@ -180,8 +180,8 @@ test("native opener failures become persistent actionable errors", async () => {
   assert.match(h.toasts[0]!.message, /Could not open link: No browser is configured/);
   assert.equal(h.toasts[0]!.options.tone, "error");
   assert.equal(h.toasts[0]!.options.durationMs, 0);
-  assert.equal((h.toasts[0]!.options.action as { label: string; busyLabel: string }).label, "Retry");
-  assert.equal((h.toasts[0]!.options.action as { label: string; busyLabel: string }).busyLabel, "Retrying…");
+  assert.equal((h.toasts[0]!.options.action as { label: string; progress: string }).label, "Retry");
+  assert.equal((h.toasts[0]!.options.action as { label: string; progress: string }).progress, "Opening the link again…");
 
   link.remove();
   await unmount();

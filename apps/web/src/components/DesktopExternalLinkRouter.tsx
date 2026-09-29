@@ -77,7 +77,7 @@ export function DesktopExternalLinkRouter({ desktop = shell }: { desktop?: Exter
           durationMs: 0,
           action: {
             label: "Retry",
-            busyLabel: "Retrying…",
+            progress: "Opening the link again…",
             run: open,
             failureLabel: "Could not open link",
           },

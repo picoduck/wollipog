@@ -1411,6 +1411,46 @@ pre {
   width: 100%;
   max-width: none;
 }
+/* Busy (§3.1, `BusyButton`): the action is running, not unavailable, so the button keeps its
+   variant's fill and text and only stops taking input. Its width is locked inline to the idle width;
+   a prepended spinner takes its room from the inline padding, with a narrower gap so some padding
+   is left (12 + 12 ≥ 14 + 4, and on `.sm` 8 + 8 ≥ 14 + 2), so the button neither grows nor moves
+   its neighbours. */
+.btn[aria-busy="true"] {
+  cursor: progress;
+}
+.btn[aria-busy="true"][aria-disabled="true"] {
+  color: var(--text);
+}
+.btn.ghost[aria-busy="true"][aria-disabled="true"] {
+  color: var(--text-dim);
+}
+.btn.ghost.danger[aria-busy="true"][aria-disabled="true"] {
+  color: var(--danger-text);
+}
+.btn.primary[aria-busy="true"][aria-disabled="true"] {
+  background: var(--primary-bg);
+  border-color: transparent;
+  color: var(--primary-fg);
+}
+.btn.danger:not(.ghost)[aria-busy="true"][aria-disabled="true"] {
+  background: var(--danger-bg);
+  border-color: transparent;
+  color: var(--danger-fg);
+}
+.btn[data-busy-spinner="prepended"] {
+  gap: var(--space-1);
+  padding-inline: 0;
+}
+.btn.sm[data-busy-spinner="prepended"] {
+  gap: var(--space-0-5);
+}
+/* The spinner draws in the button's own text colour, so it reads on a primary or danger fill. */
+.btn[aria-busy="true"] .spinner {
+  flex: none;
+  border-color: color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: currentColor;
+}
 /* §3.2 Split button: a primary action and the menu of its alternatives as one control. The two
    `.btn`s join on one shared edge. `:where()` keeps the recipe at a single class's weight, so a
    component can size its segments without fighting it. */

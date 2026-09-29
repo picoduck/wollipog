@@ -13,7 +13,8 @@ import React, {
 import { Modal } from "./common.js";
 import { CloseIcon } from "./Icons.js";
 import { useMenuOpen } from "./Menu.js";
-import { ToneIcon } from "./Notice.js";
+import { Notice, ToneIcon } from "./Notice.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { useIsMobile } from "./useIsMobile.js";
 
 export interface ConfirmationOptions {
@@ -30,6 +31,16 @@ export interface ConfirmationOptions {
    * a menu item that unmounts as the confirmation opens — the activeElement snapshot below
    * would then be disconnected by the time focus can be restored. */
   returnFocus?: { current: HTMLElement | null };
+  /** For a caller that waits on the action before closing: confirming runs this with the dialog
+   * still open and the confirm button busy (§3.1), and `confirm()` resolves true once it succeeds.
+   * A failure stays in the dialog as a danger notice, so the person can try again or cancel.
+   * Cancelling while it runs aborts `signal` and resolves false. */
+  onConfirm?: (signal: AbortSignal) => Promise<void>;
+  /** Sentence case, announced while `onConfirm` runs: "Stopping the session…". */
+  progress?: string;
+  /** Cancel, Escape and the backdrop stay available while `onConfirm` runs unless this is false, for
+   * an action that cannot be withdrawn once it has started. */
+  cancelWhileRunning?: boolean;
 }
 
 interface ConfirmationRequest extends ConfirmationOptions {
@@ -57,8 +68,10 @@ export interface ToastOptions {
    * Warnings and errors persist unless a duration is given (§13.1). */
   durationMs?: number;
   action?: {
+    /** Title Case. It stays on the button while the action runs, beside a spinner (§3.1). */
     label: string;
-    busyLabel?: string;
+    /** Sentence case, announced while the action runs: "Installing the update…". */
+    progress?: string;
     run: () => void | Promise<void>;
     failureLabel?: string;
     retryLabel?: string;
@@ -168,7 +181,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   const showUndo = useCallback((message: string, undo: () => void | Promise<void>) => (
     showToast(message, {
       tone: "success",
-      action: { label: "Undo", busyLabel: "Undoing…", run: undo, failureLabel: "Undo failed", retryLabel: "Retry Undo" },
+      action: { label: "Undo", progress: "Undoing the change…", run: undo, failureLabel: "Undo failed", retryLabel: "Retry Undo" },
       durationMs: 10_000,
     })
   ), [showToast]);
@@ -341,9 +354,10 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       </div>
       <div className="toast-actions">
         {toast.action && (
-          <button className="btn ghost sm" type="button" disabled={toast.actionBusy} onClick={() => void runToastAction(toast)}>
-            {toast.actionBusy ? toast.action.busyLabel ?? "Working…" : toast.action.label}
-          </button>
+          <BusyButton className="btn ghost sm" busy={toast.actionBusy === true} progress={toast.action.progress ?? "Working…"}
+            onClick={() => void runToastAction(toast)}>
+            {toast.action.label}
+          </BusyButton>
         )}
         <button className="icon-btn sm" type="button" aria-label="Dismiss Notification" title="Dismiss Notification"
           onClick={() => dismissToast(toast.id)}>
@@ -356,7 +370,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   return (
     <FeedbackContext.Provider value={value}>
       {children}
-      {active && <ConfirmationDialog request={active} onSettle={settleConfirmation} />}
+      {active && <ConfirmationDialog key={active.id} request={active} onSettle={settleConfirmation} />}
       <div
         ref={toastRegion}
         className={hiddenByMenu ? "toast-region under-menu" : "toast-region"}
@@ -474,6 +488,43 @@ function ConfirmationDialog({ request, onSettle }: {
 }) {
   const descriptionId = useId();
   const danger = request.tone === "danger";
+  const [running, setRunning] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  /** The running `onConfirm`, if any. Cleared before settling, so a finished action is never aborted
+   * by the dialog unmounting after it. */
+  const inFlight = useRef<AbortController | null>(null);
+  useEffect(() => () => inFlight.current?.abort(), []);
+
+  const cancelLocked = running && request.cancelWhileRunning === false;
+  const cancel = () => {
+    if (cancelLocked) return;
+    inFlight.current?.abort();
+    inFlight.current = null;
+    onSettle(false);
+  };
+  const confirm = async () => {
+    if (!request.onConfirm) {
+      onSettle(true);
+      return;
+    }
+    if (inFlight.current) return;
+    const controller = new AbortController();
+    inFlight.current = controller;
+    setRunning(true);
+    setFailure(null);
+    try {
+      await request.onConfirm(controller.signal);
+      if (controller.signal.aborted) return;
+      inFlight.current = null;
+      onSettle(true);
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      inFlight.current = null;
+      setRunning(false);
+      setFailure(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   return (
     <Modal
       className="feedback-confirmation"
@@ -481,15 +532,16 @@ function ConfirmationDialog({ request, onSettle }: {
       title={request.title}
       tone={danger ? "danger" : undefined}
       closeButton={false}
-      onClose={() => onSettle(false)}
+      onClose={cancel}
       describedBy={descriptionId}
       returnFocusRef={request.returnFocus}
       footer={(
         <>
-          <button className="btn" type="button" autoFocus onClick={() => onSettle(false)}>Cancel</button>
-          <button className={`btn ${danger ? "danger" : "primary"}`} type="button" onClick={() => onSettle(true)}>
+          <button className="btn" type="button" autoFocus disabled={cancelLocked} onClick={cancel}>Cancel</button>
+          <BusyButton className={`btn ${danger ? "danger" : "primary"}`} busy={running}
+            progress={request.progress ?? "Working…"} onClick={() => void confirm()}>
             {request.confirmLabel}
-          </button>
+          </BusyButton>
         </>
       )}
     >
@@ -497,6 +549,7 @@ function ConfirmationDialog({ request, onSettle }: {
         <p>{request.message}</p>
         {request.details && <div>{request.details}</div>}
       </div>
+      {failure && <Notice tone="danger" compact role="alert">{failure}</Notice>}
     </Modal>
   );
 }

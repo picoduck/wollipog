@@ -482,6 +482,17 @@ States
 | Disabled | Text `--text-faint`, fill unchanged, no hover, `cursor: not-allowed`. No opacity. A disabled control that the user would reasonably expect to work shows its reason as visible text next to it (§8.6), never only in `title`. |
 | Busy | Label stays; a 14px spinner replaces the leading icon (or is prepended); the button keeps its width (`min-width` locked on press). |
 
+Busy is one component, `BusyButton` (`apps/web/src/components/ui/BusyButton.tsx`). It locks the
+button to the width it had just before it became busy; a prepended spinner takes its room from the
+inline padding, so the button neither grows nor moves its neighbours. It sets `aria-busy="true"` and
+`aria-disabled="true"` (not `disabled`, which would drop the focus the person pressed it with) and
+refuses further presses, keeps its variant's fill, and announces a sentence-case `progress` line
+("Installing the update…") through a polite live region. Toast actions (`ToastOptions.action.progress`)
+and confirmations that wait on their action (`ConfirmationOptions.onConfirm`) use it. A button never
+swaps its label for a progress word ("Installing…"): `apps/web/src/busy-label-ratchet.test.ts`
+records the remaining `? "<Word>ing…"` label swaps by file and fails when one is added, and each area
+removes its own as it rebuilds the screen.
+
 Rules
 
 - Button text never wraps: `white-space: nowrap; flex: none`. If a row cannot fit its buttons, the
