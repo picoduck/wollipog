@@ -1405,6 +1405,10 @@ function commandVerdict(
       const token = words[index];
       if (token == null) continue;
       const value = word(token, cwd, environment);
+      if (value == null && powershellMoveParameter(wordText(token) ?? "", executable)?.role === "source") {
+        namedSources.push(token);
+        continue;
+      }
       if (value === "--") {
         for (const operand of words.slice(index + 1)) operands.push(operand);
         optionsEnded = true;
@@ -1413,6 +1417,10 @@ function commandVerdict(
       if (value?.startsWith("-")) {
         const parameter = powershellMoveParameter(value, executable);
         if (parameter) {
+          // With a following option word, PowerShell cannot bind a value to -fi/-iv. Preserve the
+          // GNU reading so a subsequent -t or --target-directory still marks every operand source.
+          if (["mv", "move"].includes(executable) && ["-fi", "-iv"].includes(value.toLowerCase()) &&
+              word(words[index + 1], cwd, environment)?.startsWith("-")) continue;
           const argument = parameter.attached == null || parameter.attached === ""
             ? words[++index]
             : parameter.attached;

@@ -137,6 +137,10 @@ test("PowerShell movers refuse a protected source when the destination defaults 
     `mv -fi *.ts ${protectedPath}`,
     `mv -iv ${protectedPath} /tmp/moved`,
     `mv -fi ${protectedPath} /tmp/moved`,
+    `mv -iv -t /tmp/moved ${protectedPath}`,
+    `mv -fi -t /tmp/moved ${protectedPath}`,
+    `mv -iv --target-directory /tmp/moved ${protectedPath}`,
+    `mv -iv -t /tmp/moved scratch.ts ${protectedPath}`,
   ]) {
     assert.equal(commandTargetsManagedWorktree(command, "/projects/repo", protection), MANAGED_WORKTREE_REFUSAL,
       command);
@@ -148,6 +152,8 @@ test("PowerShell movers refuse a protected source when the destination defaults 
     `mv -iv info src/old.ts ${protectedPath}`,
     `mv -fi *.ts src/old.ts ${protectedPath}`,
   ]) assert.equal(commandTargetsManagedWorktree(command, "/projects/repo", protection), null, command);
+  assert.equal(commandTargetsManagedWorktree("Move-Item /tmp/moved -Path:$UNKNOWN", "/projects/repo", protection),
+    MANAGED_WORKTREE_UNRESOLVED_REFUSAL);
 });
 
 test("env accepts assignment names that are not shell identifiers before a destructive command", () => {
