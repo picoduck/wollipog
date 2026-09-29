@@ -420,13 +420,18 @@ export function writeClaudeSettingsSet(
     memorySettingsDocuments.set(resolve(file), {
       combined: claudeSettingsDocument(file, manager, documentGuard),
       guardOnly: documentGuard ? claudeSettingsDocument(file, null, documentGuard) : null,
+      managerOnly: manager ? claudeSettingsDocument(file, manager, null) : null,
     });
   } else if (guard || !preserveGuardState) {
     memorySettingsDocuments.delete(resolve(file));
   }
   const contents = claudeSettingsDocument(file, diskManager ?? null, diskGuard);
   if (diskGuard) {
-    fileSettingsDocuments.set(resolve(file), { combined: contents, guardOnly: guardOnlyContents! });
+    fileSettingsDocuments.set(resolve(file), {
+      combined: contents,
+      guardOnly: guardOnlyContents!,
+      managerOnly: diskManager ? claudeSettingsDocument(file, diskManager, null) : null,
+    });
   } else {
     // This call is about to replace the live/template documents with a guard-less set. Keeping an
     // earlier baseline would mislabel the runner's own rewrite as tampering and drop the manager
@@ -1141,13 +1146,19 @@ const guardMemoryLists = new Map<string, ManagedWorktreeProtection[]>();
  * persisted `--settings` argument names. `prepareClaudeHookArgs` hands Claude one of them INLINE, so
  * the hook command comes from runner memory as well, and the file at that path is never opened.
  */
-const memorySettingsDocuments = new Map<string, { combined: string; guardOnly: string | null }>();
+interface ClaudeSettingsDocuments {
+  combined: string;
+  guardOnly: string | null;
+  /** Runner-authored fallback: no guard command is recovered from a distrusted disk document. */
+  managerOnly: string | null;
+}
+const memorySettingsDocuments = new Map<string, ClaudeSettingsDocuments>();
 /**
  * The exact file-form settings set last provisioned by this runner process. The live document may
  * legitimately be either member while the manager circuit is open, but no other bytes are trusted:
  * in particular, a rewritten guard command in any copy must mediate the next spawn (#1475).
  */
-const fileSettingsDocuments = new Map<string, { combined: string; guardOnly: string }>();
+const fileSettingsDocuments = new Map<string, ClaudeSettingsDocuments & { guardOnly: string }>();
 
 /** An abstract-namespace address: the list and the settings live in runner memory. */
 /**
@@ -1717,6 +1728,8 @@ export interface PreparedClaudeHookArgs {
    * permission mode — never an assumption about protections being present.
    */
   guardActive: boolean;
+  /** Manager policy hooks are present in the effective document for this spawn. */
+  managerActive: boolean;
   /** Why a settings document that was expected to carry the guard is not trusted for this spawn. */
   guardReason?: string;
   /**
@@ -1803,6 +1816,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
       hookAskCapable: false,
       healed: false,
       guardActive: false,
+      managerActive: false,
     };
   }
   const memory = memorySettingsDocuments.get(resolve(file));
@@ -1819,19 +1833,16 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
   const reprobePending = circuit.open && circuit.openedAt != null &&
     now - circuit.openedAt >= CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS;
   if ((expectedFileGuard || hasGuard) && (!settingsSetTrusted || !guardStateTrusted)) {
-    // The settings document carries a guard hook that can no longer be relied on. Launching with
-    // it would either block every matched tool or trust a foreign list, so the whole document is
-    // dropped for this spawn and the driver mediates, exactly as when no guard was provisionable.
-    // The manager transport's own state is reported as it is: dropping the document must not read
-    // as a recovered circuit, and no reprobe is started by a spawn that carries no hooks.
+    // Use only runner-held bytes for the manager fallback: neither the guard nor an altered
+    // manager command from any disk document may reach the spawn. Guard trust stays false, so
+    // the driver still mediates; the manager's independent circuit continues choosing its hooks.
+    const managerOnly = fileSettingsDocuments.get(resolve(file))?.managerOnly;
     return {
-      args: [...args.slice(0, index), ...args.slice(index + 2)],
-      circuitOpen: circuit.open,
-      circuitReprobePending: false,
-      ...(circuit.open && circuit.openedAt != null ? { circuitOpenedAt: circuit.openedAt } : {}),
-      hookAskCapable: false,
-      healed: false,
-      guardActive: false,
+      ...prepareMemorySettingsArgs(args, index, file, {
+        combined: managerOnly ?? "",
+        guardOnly: null,
+        managerOnly: managerOnly ?? null,
+      }, now),
       ...(!settingsSetTrusted
         ? {
           guardReason: expectedFileGuard
@@ -1856,6 +1867,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
           hookAskCapable,
           healed: false,
           guardActive: true,
+          managerActive: false,
           guardStateDirectory: dirname(resolve(file)),
         };
       } catch {
@@ -1870,6 +1882,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
       hookAskCapable,
       healed: false,
       guardActive: false,
+      managerActive: false,
       guardStateDirectory: dirname(resolve(file)),
     };
   }
@@ -1886,6 +1899,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
       hookAskCapable,
       healed: false,
       guardActive: false,
+      managerActive: false,
       guardStateDirectory: dirname(resolve(file)),
     };
   }
@@ -1911,6 +1925,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
     hookAskCapable,
     healed,
     guardActive: hasGuard,
+    managerActive: described?.manager === true,
     guardStateDirectory: dirname(resolve(file)),
   };
 }
@@ -1936,7 +1951,7 @@ function prepareMemorySettingsArgs(
   args: string[],
   index: number,
   file: string,
-  memory: { combined: string; guardOnly: string | null },
+  memory: ClaudeSettingsDocuments,
   now: number,
 ): PreparedClaudeHookArgs {
   const guardStateDirectory = dirname(resolve(file));
@@ -1947,23 +1962,25 @@ function prepareMemorySettingsArgs(
   const reprobePending = circuit.open && circuit.openedAt != null &&
     now - circuit.openedAt >= CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS;
   const circuitHolds = (circuit.open && !reprobePending) || circuit.probeStartedAt != null;
-  const hasGuard = memory.guardOnly !== null;
-  const document = circuitHolds ? memory.guardOnly : memory.combined;
+  const hasGuard = memory.guardOnly !== null && claudeGuardStateTrusted(file);
+  const document = circuitHolds
+    ? (hasGuard ? memory.guardOnly : null)
+    : memory.guardOnly !== null && !hasGuard ? memory.managerOnly : memory.combined || null;
   if (document === null) {
     // The manager hooks are out for this spawn and the document carries nothing else.
     return {
       args: [...args.slice(0, index), ...args.slice(index + 2)],
-      circuitOpen: true,
+      circuitOpen: circuit.open || circuitHolds,
       circuitReprobePending: false,
       ...(circuit.openedAt != null ? { circuitOpenedAt: circuit.openedAt } : {}),
       hookAskCapable: false,
       healed: false,
       guardActive: false,
+      managerActive: false,
       guardStateDirectory,
     };
   }
-  if ((hasGuard && !claudeGuardStateTrusted(file)) ||
-      Buffer.byteLength(document, "utf8") > MAX_INLINE_SETTINGS_BYTES) {
+  if (Buffer.byteLength(document, "utf8") > MAX_INLINE_SETTINGS_BYTES) {
     return {
       args: [...args.slice(0, index), ...args.slice(index + 2)],
       circuitOpen: circuit.open,
@@ -1972,6 +1989,7 @@ function prepareMemorySettingsArgs(
       hookAskCapable: false,
       healed: false,
       guardActive: false,
+      managerActive: false,
       guardStateDirectory,
     };
   }
@@ -1990,6 +2008,7 @@ function prepareMemorySettingsArgs(
     hookAskCapable,
     healed: false,
     guardActive: hasGuard,
+    managerActive: !circuitHolds && memory.managerOnly !== null,
     guardStateDirectory,
     // Only a spawn that carries the relayed hooks is handed the key to use them. The state outlives
     // a launch for which the manager hooks were blocked, so the document itself is what is asked.
