@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,6 +9,7 @@ import {
   applyClaudeHookCapability,
   claudeHookCircuitPath,
   claudeHookGuardPath,
+  claudeHookManagerPath,
   claudeHookProtectionsPath,
   claudeHookRunnerConfigDir,
   claudeHookReadyPath,
@@ -40,6 +41,7 @@ import {
 } from "./hook-settings.js";
 import { runManagedWorktreeGuardDecision } from "./managed-worktree-guard.js";
 import { POLICY_HOOK_RELAY_KEY_ENV } from "./policy-hook-relay.js";
+import { winQuoteArg } from "./spawn.js";
 
 function temp<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-hooks-"));
@@ -1018,7 +1020,7 @@ test("a rewritten hook command in any file-form settings copy disables the guard
     const prepared = prepareClaudeHookArgs(launch.args);
     assert.equal(prepared.guardActive, false, `${copy}: an altered command is never reported as an active guard`);
     assert.equal(prepared.managerActive, true);
-    const fallback = inlineSettings(prepared.args);
+    const fallback = preparedSettings(prepared.args);
     assert.equal(guardEntries(fallback).length, 0, `${copy}: the driver mediates without the guard`);
     assert.ok(fallback.hooks?.PostToolUse);
     assert.match(prepared.guardReason ?? "", /settings documents were modified after provisioning/u);
@@ -1480,7 +1482,7 @@ for (const enabled of [true, false]) {
       assert.equal(prepared.managerActive, enabled);
       assert.deepEqual(launch.args, persisted, "persisted arguments remain usable for later respawns");
       if (enabled) {
-        const fallback = inlineSettings(prepared.args);
+        const fallback = preparedSettings(prepared.args);
         assert.equal(guardEntries(fallback).length, 0);
         for (const event of ["PreToolUse", "PostToolUse", "UserPromptSubmit"]) {
           assert.equal(fallback.hooks?.[event]?.length, 1);
@@ -1509,10 +1511,12 @@ test("a distrusted guard's manager fallback uses runner-held commands even after
   const prepared = prepareClaudeHookArgs(launch.args);
   assert.equal(prepared.guardActive, false);
   assert.equal(prepared.managerActive, true);
-  const fallback = inlineSettings(prepared.args);
+  const fallback = preparedSettings(prepared.args);
   assert.equal(guardEntries(fallback).length, 0);
   assert.deepEqual(fallback.hooks?.PostToolUse, original.hooks.PostToolUse);
-  assert.ok(!prepared.args[1]!.includes("/bin/true"));
+  writeFileSync(claudeHookManagerPath(file), JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ command: "/bin/true" }] }] } }));
+  assert.deepEqual(preparedSettings(prepareClaudeHookArgs(launch.args).args).hooks?.PostToolUse, original.hooks.PostToolUse,
+    "each respawn republishes its manager copy from runner-held bytes");
 }));
 
 test("an invalidated guard does not make an open manager-hook circuit look recovered", () => temp((dir) => {
@@ -1533,7 +1537,7 @@ test("an invalidated guard does not make an open manager-hook circuit look recov
   assert.equal(reprobe.managerActive, true);
   assert.equal(reprobe.circuitReprobePending, true);
   assert.equal(reprobe.circuitOpenedAt, 100);
-  assert.equal(guardEntries(inlineSettings(reprobe.args)).length, 0);
+  assert.equal(guardEntries(preparedSettings(reprobe.args)).length, 0);
 }));
 
 test("a failed launch self-test is retried only after a cooldown, a success never", () => temp((dir) => {
@@ -1564,6 +1568,41 @@ function inlineSettings(args: string[]): ReturnType<typeof settingsOf>["live"] {
   assert.ok(value.startsWith("{"), `the launch carries the document inline, not a path: ${value.slice(0, 40)}`);
   return JSON.parse(value);
 }
+
+function preparedSettings(args: string[]): ReturnType<typeof settingsOf>["live"] {
+  const value = args[args.indexOf("--settings") + 1]!;
+  return JSON.parse(value.startsWith("{") ? value : readFileSync(value, "utf8"));
+}
+
+test("a file-form manager fallback stays compatible with Windows command quoting and is cleaned up", () => temp((dir) => {
+  const launch = provisionGuarded(dir);
+  const { file } = settingsOf(dir);
+  rmSync(claudeHookProtectionsPath(file));
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.managerActive, true);
+  assert.equal(prepared.guardActive, false);
+  assert.deepEqual(prepared.args, ["--settings", claudeHookManagerPath(file)]);
+  for (const arg of prepared.args) assert.doesNotThrow(() => winQuoteArg(arg));
+  if (process.platform !== "win32") assert.equal(statSync(claudeHookManagerPath(file)).mode & 0o777, 0o600);
+  assert.equal(guardEntries(preparedSettings(prepared.args)).length, 0);
+  removeClaudeHookFiles("sess_hook_1", dir);
+  assert.equal(existsSync(claudeHookManagerPath(file)), false);
+}));
+
+test("an unwritable manager fallback drops its hooks without claiming a circuit reprobe", () => temp((dir) => {
+  const launch = provisionGuarded(dir);
+  const { file } = settingsOf(dir);
+  rmSync(claudeHookProtectionsPath(file));
+  // A directory at the destination cannot be replaced by a protected settings file.
+  mkdirSync(claudeHookManagerPath(file));
+  writeHookCircuitState(claudeHookCircuitPath(file), { consecutiveFailures: 3, open: true, openedAt: 100 });
+  const prepared = prepareClaudeHookArgs(launch.args, 30_101);
+  assert.deepEqual(prepared.args, []);
+  assert.equal(prepared.guardActive, false);
+  assert.equal(prepared.managerActive, false);
+  assert.equal(prepared.circuitOpen, true);
+  assert.equal(prepared.circuitReprobePending, false);
+}));
 
 test("a memory-held guard launches from an inline document, and no list is written", () => temp((dir) => {
   const messages: string[] = [];

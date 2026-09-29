@@ -95,6 +95,8 @@ const TOKEN_SUFFIX = ".token";
 const READY_SUFFIX = ".ready";
 /** Guard-only copy of the settings, used whenever the manager hooks must not run (circuit open). */
 const GUARD_SUFFIX = ".guard.json";
+/** Manager-only copy published from runner-held bytes when the guard is distrusted. */
+const MANAGER_SUFFIX = ".manager.json";
 const POLICY_HOOK_CREDENTIAL_PREFIX = "wollipogh_";
 const POLICY_HOOK_CREDENTIAL = /^(?:wollipogh_|mamh_)[A-Za-z0-9_-]{43}$/u;
 export const CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS = 30_000;
@@ -221,6 +223,12 @@ export function claudeHookGuardPath(settingsFile: string): string {
   return settingsFile.endsWith(SETTINGS_SUFFIX)
     ? `${settingsFile.slice(0, -SETTINGS_SUFFIX.length)}${GUARD_SUFFIX}`
     : `${settingsFile}${GUARD_SUFFIX}`;
+}
+
+export function claudeHookManagerPath(settingsFile: string): string {
+  return settingsFile.endsWith(SETTINGS_SUFFIX)
+    ? `${settingsFile.slice(0, -SETTINGS_SUFFIX.length)}${MANAGER_SUFFIX}`
+    : `${settingsFile}${MANAGER_SUFFIX}`;
 }
 
 /** Live protected-worktree set consulted by the managed-worktree guard before every Bash call. */
@@ -458,7 +466,7 @@ export function sweepClaudeHookFiles(configDir = defaultHookConfigDir()): number
   for (const entry of readdirSync(configDir, { withFileTypes: true })) {
     if (!entry.isFile() ||
         ![SETTINGS_SUFFIX, TEMPLATE_SUFFIX, CIRCUIT_SUFFIX, CIRCUIT_LOCK_SUFFIX, TOKEN_SUFFIX, READY_SUFFIX,
-          GUARD_SUFFIX, MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX]
+          GUARD_SUFFIX, MANAGER_SUFFIX, MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX]
           .some((suffix) => entry.name.endsWith(suffix))) continue;
     rmSync(join(configDir, entry.name), { force: true });
     removed++;
@@ -486,6 +494,7 @@ export function removeClaudeHookFiles(sessionId: string, configDir = defaultHook
       claudeHookTokenPath(settings),
       claudeHookReadyPath(settings),
       claudeHookGuardPath(settings),
+      claudeHookManagerPath(settings),
       claudeHookProtectionsPath(settings),
     ]) {
       rmSync(file, { force: true });
@@ -1820,7 +1829,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
     };
   }
   const memory = memorySettingsDocuments.get(resolve(file));
-  if (memory) return prepareMemorySettingsArgs(args, index, file, memory, now);
+  if (memory) return prepareRunnerSettingsArgs(args, index, file, memory, now);
   const described = describeManagedSettings(file);
   const hasGuard = described?.guard === true;
   const expectedFileGuard = fileSettingsDocuments.has(resolve(file));
@@ -1838,11 +1847,11 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
     // the driver still mediates; the manager's independent circuit continues choosing its hooks.
     const managerOnly = fileSettingsDocuments.get(resolve(file))?.managerOnly;
     return {
-      ...prepareMemorySettingsArgs(args, index, file, {
+      ...prepareRunnerSettingsArgs(args, index, file, {
         combined: managerOnly ?? "",
         guardOnly: null,
         managerOnly: managerOnly ?? null,
-      }, now),
+      }, now, claudeHookManagerPath(file)),
       ...(!settingsSetTrusted
         ? {
           guardReason: expectedFileGuard
@@ -1945,14 +1954,16 @@ export const MAX_INLINE_SETTINGS_BYTES = 96 * 1024;
  * directory and nothing written there can change the hook command it runs. Nothing is healed,
  * because nothing on disk is launched. The manager hook's circuit chooses between the combined
  * document and the guard-only one. Where the runner relays that hook (#1472) the circuit is in
- * memory as well; the file form's is still read from disk, and both documents carry the guard.
+ * memory as well; the file form's is still read from disk. A file-form guard fallback publishes
+ * its runner-held manager-only bytes to `launchFile`, keeping JSON out of Windows command argv.
  */
-function prepareMemorySettingsArgs(
+function prepareRunnerSettingsArgs(
   args: string[],
   index: number,
   file: string,
   memory: ClaudeSettingsDocuments,
   now: number,
+  launchFile?: string,
 ): PreparedClaudeHookArgs {
   const guardStateDirectory = dirname(resolve(file));
   // A relayed manager hook (#1472) keeps its circuit in runner memory, so for that session nothing
@@ -1980,7 +1991,15 @@ function prepareMemorySettingsArgs(
       guardStateDirectory,
     };
   }
-  if (Buffer.byteLength(document, "utf8") > MAX_INLINE_SETTINGS_BYTES) {
+  let publicationFailed = false;
+  if (launchFile) {
+    try {
+      protectedWrite(launchFile, document);
+    } catch {
+      publicationFailed = true;
+    }
+  }
+  if (publicationFailed || (!launchFile && Buffer.byteLength(document, "utf8") > MAX_INLINE_SETTINGS_BYTES)) {
     return {
       args: [...args.slice(0, index), ...args.slice(index + 2)],
       circuitOpen: circuit.open,
@@ -2001,7 +2020,7 @@ function prepareMemorySettingsArgs(
     /* The runner serialized this document itself; an unreadable one simply claims no ask support. */
   }
   return {
-    args: [...args.slice(0, index + 1), document, ...args.slice(index + 2)],
+    args: [...args.slice(0, index + 1), launchFile ?? document, ...args.slice(index + 2)],
     circuitOpen: circuitHolds,
     circuitReprobePending: !circuitHolds && reprobePending,
     ...((circuitHolds || reprobePending) && circuit.openedAt != null ? { circuitOpenedAt: circuit.openedAt } : {}),
