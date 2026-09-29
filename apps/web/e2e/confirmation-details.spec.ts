@@ -62,11 +62,22 @@ test.describe("desktop", () => {
       ["Keep Open", "btn"],
       ["Quit Wollipog", "btn danger"],
     ]);
-    const foot = await dialog.locator(".modal-foot").evaluate((element) => ({
-      left: element.getBoundingClientRect().left,
-      gap: Number.parseFloat(getComputedStyle(element).columnGap),
-    }));
-    expectGeometry(buttons[0]!.left - foot.left, "the spacer holds the footer's leading space").toBeGreaterThan(40);
+    const foot = await dialog.locator(".modal-foot").evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        contentLeft: box.left + Number.parseFloat(style.paddingLeft),
+        contentRight: box.right - Number.parseFloat(style.paddingRight),
+        gap: Number.parseFloat(style.columnGap),
+      };
+    });
+    const tops = await dialog.locator(".modal-foot > button").evaluateAll((items) => items.map((item) => item.getBoundingClientRect().top));
+    expect(new Set(tops.map((top) => Math.round(top))).size, "the three buttons share one row").toBe(1);
+    // End-aligned, so the footer's free space (the spacer) lies before the ghost button (§3.2).
+    const last = buttons.at(-1)!;
+    expectGeometry(Math.abs(foot.contentRight - (last.left + last.width)), "the primary ends at the footer's trailing edge")
+      .toBeLessThanOrEqual(0.61);
+    expectGeometry(buttons[0]!.left - foot.contentLeft, "free space lies before the ghost button").toBeGreaterThan(0);
     expectGeometry(Math.abs(buttons[1]!.left - (buttons[0]!.left + buttons[0]!.width) - foot.gap),
       "the ghost button sits one footer gap before Keep Open").toBeLessThanOrEqual(0.61);
     await expect(dialog.getByRole("button", { name: "Keep Open" })).toBeFocused();
