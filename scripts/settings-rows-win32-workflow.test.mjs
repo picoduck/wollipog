@@ -72,6 +72,8 @@ test("a failed comparison regenerates only the changed win32 images and still fa
   assert.match(upload, /^        uses: actions\/upload-artifact@[0-9a-f]{40} # v\S+$/m);
   assert.match(upload, /^          name: settings-rows-win32-baselines$/m);
   assert.match(upload, /^          path: \$\{\{ steps\.collect\.outputs\.staging \}\}$/m);
+  assert.match(upload, /^          overwrite: true$/m,
+    "a re-run job is the same run, so its upload must replace the earlier attempt's artifact");
 
   const summary = step(compare, "Tell the Author How to Commit Them");
   assert.match(summary, /gh run download \$RUN_ID --repo \$REPOSITORY --name settings-rows-win32-baselines --dir \./);

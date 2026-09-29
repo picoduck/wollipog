@@ -177,6 +177,9 @@ jobs:
         with:
           name: settings-rows-win32-baselines
           path: ${{ steps.collect.outputs.staging }}
+          # A re-run job is another attempt of the same run, where an earlier attempt's upload may
+          # already hold this name; without overwrite the re-run could not publish its images.
+          overwrite: true
           if-no-files-found: error
           retention-days: 14
 
