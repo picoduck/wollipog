@@ -14,6 +14,7 @@ import { expectGeometry } from "./geometry-margins.js";
 
 const FAILED_LINK = "https://github.com/picoduck/wollipog/pull/2040/files#diff-4f8c2d1e9b7a6035c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4";
 const BLOCKED_LINK = "file:///Users/avery/Projects/wollipog/docs/design-system.md";
+const LONG_LINK = `https://example.com/report?filters=${Array.from({ length: 200 }, (_, index) => `session-${index}`).join(",")}`;
 
 /** Every line of `text` is inside the toast and the viewport: it wraps, and nothing is cut off. */
 async function expectFullyVisible(toast: Locator, text: Locator) {
@@ -166,6 +167,20 @@ for (const { width, height, phone } of [
           await expect(page.getByTestId("copied")).toHaveText(url);
         });
       }
+
+      test("a URL several kilobytes long scrolls inside the toast, which stays on screen", async ({ page }) => {
+        await page.goto(`/desktop-updates-e2e.html?state=link-long&theme=${theme}`);
+        const toast = page.locator(".toast");
+        await expect(toast).toHaveCount(1);
+        await expect(toast).toBeInViewport({ ratio: 1 });
+        const detail = toast.locator(".toast-detail.mono");
+        await expect(detail).toHaveText(LONG_LINK);
+        const box = await detail.evaluate((element) => ({ client: element.clientHeight, scroll: element.scrollHeight }));
+        expect(box.client, "eight lines at most").toBeLessThanOrEqual(8 * 16);
+        expect(box.scroll, "the rest of the URL scrolls, rather than being cut off").toBeGreaterThan(box.client);
+        await toast.getByRole("button", { name: "Copy Link" }).click();
+        await expect(page.getByTestId("copied")).toHaveText(LONG_LINK);
+      });
     });
   }
 }

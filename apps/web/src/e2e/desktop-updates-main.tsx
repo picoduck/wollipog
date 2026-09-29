@@ -17,7 +17,8 @@ import "../styles.css";
  * for two working sessions the local instance knows, and a confirmed install is recorded and never
  * finishes, as a restart would not. `?state=release-page` is a package-manager install, pointed at
  * the release page. `?state=link-failure` clicks a link the system browser refuses, and
- * `?state=link-policy` a `file:` link the shell's policy blocks. `?theme=light` switches theme.
+ * `?state=link-policy` a `file:` link the shell's policy blocks, and `?state=link-long` refuses a link
+ * several kilobytes long. `?theme=light` switches theme.
  * Chosen by query string so every state is a clean reload; the page records what reached the fake.
  */
 
@@ -31,8 +32,12 @@ const SESSIONS: Record<string, { title: string; status: SessionStatus }> = {
   s_migration: { title: "Review the migration plan", status: "input_required" },
 };
 
-type State = "in-place" | "release-page" | "link-failure" | "link-policy";
-const STATES: readonly State[] = ["in-place", "release-page", "link-failure", "link-policy"];
+/** A refused link several kilobytes long: its detail scrolls inside the toast. */
+const LONG_LINK = `https://example.com/report?filters=${Array.from({ length: 200 }, (_, index) => `session-${index}`).join(",")}`;
+
+type State = "in-place" | "release-page" | "link-failure" | "link-policy" | "link-long";
+const STATES: readonly State[] = ["in-place", "release-page", "link-failure", "link-policy", "link-long"];
+const LINK_STATES: readonly State[] = ["link-failure", "link-policy", "link-long"];
 
 function Harness() {
   const params = new URLSearchParams(window.location.search);
@@ -81,7 +86,7 @@ function Harness() {
   });
 
   const [links] = useState<ExternalLinkDesktop>(() => ({
-    isTauri: () => state === "link-failure" || state === "link-policy",
+    isTauri: () => LINK_STATES.includes(state),
     invoke: async () => {
       if (state === "link-policy") {
         throw `${EXTERNAL_URL_POLICY_ERROR_PREFIX}Wollipog can open only HTTP and HTTPS links in your system browser; file links are blocked.`;
@@ -108,7 +113,7 @@ function Harness() {
   // The link states click their link once the router below is listening: a child's effect runs first.
   const anchor = useRef<HTMLAnchorElement>(null);
   useEffect(() => {
-    if (state === "link-failure" || state === "link-policy") anchor.current?.click();
+    if (LINK_STATES.includes(state)) anchor.current?.click();
   }, [state]);
 
   return (
@@ -122,7 +127,7 @@ function Harness() {
       />
       {/* Clicked by the page, never shown; the records are read by the spec. */}
       <div className="sr-only">
-        <a ref={anchor} href={state === "link-policy" ? BLOCKED_LINK : FAILED_LINK} tabIndex={-1}>Link</a>
+        <a ref={anchor} href={state === "link-policy" ? BLOCKED_LINK : state === "link-long" ? LONG_LINK : FAILED_LINK} tabIndex={-1}>Link</a>
         <output data-testid="installs">{installs.join(",")}</output>
         <output data-testid="opened">{opened.join(",")}</output>
         <output data-testid="copied">{copied.join(",")}</output>

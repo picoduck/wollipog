@@ -9130,8 +9130,14 @@ button.file-head.source-path-link {
   color: var(--text-dim);
   font: var(--type-small);
 }
-/* A URL the person may copy (#1975). The copy column already wraps anywhere, so all of it shows. */
-.toast-detail.mono { font-family: var(--font-mono); }
+/* A URL the person may copy (#1975). The copy column already wraps anywhere, so all of it shows; a
+   URL longer than eight lines scrolls inside the toast instead of pushing it off the screen. */
+.toast-detail.mono {
+  max-height: calc(8 * 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-family: var(--font-mono);
+}
 .toast-link {
   justify-self: start;
   font: var(--type-small);
