@@ -836,9 +836,17 @@ test.describe("on a touch device", () => {
  * Scoped to the affordances themselves, never to text: glyph rasterisation differs across platforms
  * and would make these flaky, while a ring, a track and a chevron are pure geometry.
  *
- * BASELINES ARE PER-PLATFORM — Playwright suffixes them with the OS. Both linux (which CI runs)
- * and win32 sets are committed. A platform without a committed set skips loudly rather than
- * failing on a missing snapshot; regenerate with `playwright test settings-rows -u` on that OS.
+ * BASELINES ARE PER-PLATFORM — Playwright suffixes them with the OS. Both linux and win32 sets
+ * are committed. A platform without a committed set skips loudly rather than failing on a missing
+ * snapshot; regenerate with `playwright test settings-rows --update-snapshots=changed` on that OS.
+ *
+ * CI holds BOTH sets. The browser job compares linux on every pull request. Any change to this
+ * file or its snapshots also runs the "Settings-Rows win32 Baselines" job on Windows, and the
+ * required check waits for it. The linux set went stale against win32 five times in a row before
+ * that job existed (#2010). When the win32 comparison fails, the job regenerates the images that
+ * differ and uploads exactly those as the `settings-rows-win32-baselines` artifact; its summary
+ * gives the download command. Commit them with the linux change. When the linux set changes
+ * outside a pull request, run that workflow from the Actions page for the ref.
  */
 /**
  * An integer-sized, integer-positioned clip around an element.
