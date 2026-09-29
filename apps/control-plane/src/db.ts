@@ -847,7 +847,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_worktree_cleanup (
   child_session_id TEXT NOT NULL,
   path             TEXT NOT NULL,
   worktree_id      TEXT NOT NULL,
-  status           TEXT NOT NULL CHECK (status IN ('deferred','refused')),
+  status           TEXT NOT NULL CHECK (status IN ('pending','deferred','refused')),
   reason           TEXT NOT NULL,
   updated_at       INTEGER NOT NULL,
   PRIMARY KEY (child_session_id, path),
@@ -14451,7 +14451,7 @@ export class ControlPlaneDb {
 
   recordCampaignWorktreeCleanup(
     sessionId: string, path: string, worktreeId: string,
-    status: "deferred" | "refused", reason: string, now: number,
+    status: "pending" | "deferred" | "refused", reason: string, now: number,
   ): void {
     this.stmt(
       `INSERT INTO orchestrator_campaign_worktree_cleanup
@@ -15222,7 +15222,7 @@ export class ControlPlaneDb {
       `SELECT path, worktree_id, status, reason FROM orchestrator_campaign_worktree_cleanup
        WHERE child_session_id=?`,
     ).all(sessionId) as Array<{
-      path: string; worktree_id: string; status: "deferred" | "refused"; reason: string;
+      path: string; worktree_id: string; status: "pending" | "deferred" | "refused"; reason: string;
     }>;
     const byPath = new Map(recorded.map((row) => [row.path, row]));
     const worktrees = [...(parseJson<SessionWorktreeView[]>(session.worktrees) ?? [])];

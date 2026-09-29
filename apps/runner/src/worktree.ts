@@ -1591,6 +1591,19 @@ export async function mergedWorktreePullRequestForBranch(
       return null;
     }
     const identity = { remote, merge, headOid: head };
+    if (!options.runForgeCommand) {
+      const remoteUrl = (await command(
+        context, worktreePath, ["remote", "get-url", remote || "origin"], preflightTimeoutMs,
+      )).trim();
+      const githubRemote = /^git@github\.com:/iu.test(remoteUrl) || (() => {
+        try { return new URL(remoteUrl).hostname.toLowerCase() === "github.com"; }
+        catch { return false; }
+      })();
+      if (!githubRemote) {
+        options.onIneligible?.();
+        return null;
+      }
+    }
     if (options.onForgeAttempt && !options.onForgeAttempt(identity)) return null;
     try {
       const result = await (options.runForgeCommand ?? runContextCommand)(
@@ -1603,8 +1616,9 @@ export async function mergedWorktreePullRequestForBranch(
         { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
       );
       return parseMergedWorktreePullRequestForBranch(result.stdout, branch, head);
-    } catch {
-      options.onForgeUnavailable?.();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") options.onIneligible?.();
+      else options.onForgeUnavailable?.();
       return null;
     }
   } catch {

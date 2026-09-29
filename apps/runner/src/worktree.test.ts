@@ -650,6 +650,7 @@ test("archive retirement retries unavailable forge proof but refuses a confirmed
 test("archive retirement keeps an unlinked no-upstream worktree pending through forge outage and provider exit", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-archive-unlinked-forge-"));
   const dataDir = join(root, "data");
+  const sent: RunnerToControlPlane[] = [];
   let manager: SessionManager | undefined;
   try {
     const { repo } = initRepoWithOrigin(root);
@@ -661,15 +662,26 @@ test("archive retirement keeps an unlinked no-upstream worktree pending through 
       config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
       seq: 0, createdAt: 1, updatedAt: 1,
     });
-    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    manager = new SessionManager((message) => sent.push(message), () => {}, store, "runner", undefined, undefined, dataDir);
     const created = await manager.requestWorktree("s_archive_unlinked", { baseRef: "HEAD", branch: "fix/squashed" });
     writeFileSync(join(created.worktree.path, "change.txt"), "squashed elsewhere\n");
     execFileSync("git", ["-C", created.worktree.path, "add", "change.txt"]);
     execFileSync("git", ["-C", created.worktree.path, "commit", "-m", "branch head"]);
+    let ineligible = false;
+    let unavailable = false;
+    assert.equal(await mergedWorktreePullRequestForBranch(created.worktree.path, created.worktree.branch, {
+      onIneligible: () => { ineligible = true; },
+      onForgeUnavailable: () => { unavailable = true; },
+    }), null);
+    assert.equal(ineligible, true, "a local bare origin is not a GitHub forge candidate");
+    assert.equal(unavailable, false);
+    await assert.rejects(manager.discardWorktree("s_archive_unlinked", created.worktree.path,
+      { requireDelivered: true }), /the branch has no upstream/);
     const internals = manager as unknown as {
       discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
       active: Map<string, unknown>;
       deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+      reapWorktree: (record: WorktreeCleanupRecord) => Promise<void>;
     };
     let discoveryCalls = 0;
     internals.discoverMergedWorktreePullRequest = async (_path, _branch, options) => {
@@ -696,6 +708,20 @@ test("archive retirement keeps an unlinked no-upstream worktree pending through 
       item.worktreeId === created.worktree.id), true,
     "forge outage must retain the durable archive intent for retry");
     assert.equal(existsSync(created.worktree.path), true);
+    assert.equal(sent.filter((message) => message.type === "session_worktree_retirement_refused").length, 0);
+    const headOid = execFileSync("git", ["-C", created.worktree.path, "rev-parse", "HEAD"],
+      { encoding: "utf8" }).trim();
+    internals.discoverMergedWorktreePullRequest = async () => ({
+      url: "https://github.com/picoduck/wollipog/pull/1730", state: "merged",
+      headOid, provider: "github", kind: "pull_request",
+    });
+    const pending = new WorktreeCleanupJournal(dataDir).list().find((item) =>
+      item.worktreeId === created.worktree.id);
+    assert.ok(pending);
+    await internals.reapWorktree(pending);
+    await waitForCondition(() => !existsSync(created.worktree.path) &&
+      new WorktreeCleanupJournal(dataDir).list().every((item) => item.worktreeId !== created.worktree.id),
+    "retirement did not resume after exact merged-head proof became available");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

@@ -9641,6 +9641,7 @@ export class SessionsService {
     this.archiveWorktreeRetirements.add(sessionId);
     void (async () => {
       let retry = false;
+      let retryDelayMs = 60_000;
       try {
         for (const item of pending) {
           const current = this.db.getSession(sessionId);
@@ -9668,6 +9669,11 @@ export class SessionsService {
                 this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId,
                   "deferred", result.retirement.reason ?? "runner cleanup is pending", Date.now());
               }
+            } else if (!result.ok && result.error === "worktree retained: forge state is temporarily unavailable") {
+              this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId,
+                "pending", "forge state is temporarily unavailable; retirement will retry", Date.now());
+              retry = true;
+              retryDelayMs = 5 * 60_000;
             } else if (!result.ok && result.error?.startsWith("worktree retained: ") &&
                 /^(?:attached operator-owned worktrees|the worktree has a detached HEAD|the worktree is checked out on branch|runner ownership could not be proven|the worktree has uncommitted changes|the branch has no upstream|the branch has unpushed commits|the worktree head is not on the default branch|the linked pull request is not verified as merged)/u
                   .test(result.error.slice("worktree retained: ".length))) {
@@ -9686,7 +9692,7 @@ export class SessionsService {
         }
       } finally {
         this.archiveWorktreeRetirements.delete(sessionId);
-        if (retry) setTimeout(() => this.queueCampaignWorktreeRetirement(sessionId), 60_000).unref();
+        if (retry) setTimeout(() => this.queueCampaignWorktreeRetirement(sessionId), retryDelayMs).unref();
       }
     })();
   }

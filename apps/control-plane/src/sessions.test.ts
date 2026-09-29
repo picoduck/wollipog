@@ -1507,7 +1507,7 @@ test("Stop and Archive retires the original worktree but retains provider-owned 
   try {
     const child = spawn(parent.id, "Deliver one issue");
     const path = (name: string) => `/worktrees/${child}/${name}`;
-    const worktrees = ["original", "provider", "dirty", "unpushed"].map((name) => ({
+    const worktrees = ["original", "provider", "dirty", "unpushed", "forge"].map((name) => ({
       id: name, path: path(name), branch: `fix/${name}`, source: "created" as const,
     }));
     db.setWorktreePath(child, path("provider"));
@@ -1519,12 +1519,14 @@ test("Stop and Archive retires the original worktree but retains provider-owned 
       assert.equal(message.requireDelivered, true);
       requests.push(message.path);
       const current = db.getSession(child)!;
-      if (message.path === path("dirty") || message.path === path("unpushed")) {
+      if (message.path === path("dirty") || message.path === path("unpushed") || message.path === path("forge")) {
         return { type: "session_worktree_result", requestId: message.requestId,
           sessionId: child, operation: "discard", ok: false,
           error: message.path === path("dirty")
             ? "worktree retained: the worktree has uncommitted changes"
-            : "worktree retained: the branch has unpushed commits" };
+            : message.path === path("forge")
+              ? "worktree retained: forge state is temporarily unavailable"
+              : "worktree retained: the branch has unpushed commits" };
       }
       const removed = message.path === path("original");
       return { type: "session_worktree_result", requestId: message.requestId,
@@ -1546,6 +1548,8 @@ test("Stop and Archive retires the original worktree but retains provider-owned 
       { sessionId: child, path: path("provider"), status: "deferred", reason: "provider_active" },
       { sessionId: child, path: path("dirty"), status: "refused", reason: "the worktree has uncommitted changes" },
       { sessionId: child, path: path("unpushed"), status: "refused", reason: "the branch has unpushed commits" },
+      { sessionId: child, path: path("forge"), status: "pending",
+        reason: "forge state is temporarily unavailable; retirement will retry" },
     ]);
     svc.onCampaignWorktreeRetirementRefused(RUNNER_ID, {
       sessionId: child, worktreeId: "provider", path: path("provider"),
@@ -1556,11 +1560,12 @@ test("Stop and Archive retires the original worktree but retains provider-owned 
       reason: "the worktree has uncommitted changes",
     }, "a deferred cleanup that fails safety remains visible and does not retry");
     svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id: child, status: "stopped",
-      worktreePath: null, worktrees: worktrees.filter((item) => item.id === "dirty" || item.id === "unpushed") }));
+      worktreePath: null, worktrees: worktrees.filter((item) =>
+        item.id === "dirty" || item.id === "unpushed" || item.id === "forge") }));
     assert.equal(db.campaignProjection(parent.id)?.status, "active",
       "retained unsafe worktrees prevent Verified Complete");
     assert.equal(db.campaignProjection(parent.id)?.children.cleanupPending, 1);
-    assert.deepEqual(db.getSession(child)?.worktrees?.map((item) => item.id), ["dirty", "unpushed"]);
+    assert.deepEqual(db.getSession(child)?.worktrees?.map((item) => item.id), ["dirty", "unpushed", "forge"]);
   } finally {
     db.close();
   }
