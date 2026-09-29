@@ -532,8 +532,11 @@ function moveOption(value: string): { targetDirectory: boolean; consumesNext: bo
 function powershellMoveParameter(
   value: string,
   executable: string,
-): { source: boolean; attached: string | null } | null {
+): { role: "source" | "destination" | "other"; attached: string | null } | null {
   if (!value.startsWith("-") || value.startsWith("--")) return null;
+  // `mv` and `move` also run as GNU commands. A valid GNU short-option cluster must not swallow
+  // the next source just because its letters prefix a PowerShell parameter name.
+  if (["mv", "move"].includes(executable) && /^-[bfinuvZTtS]+$/u.test(value)) return null;
   const colon = value.indexOf(":");
   const name = value.slice(1, colon < 0 ? undefined : colon).toLowerCase();
   if (!name) return null;
@@ -541,8 +544,14 @@ function powershellMoveParameter(
     ["lp", "pspath"].includes(name);
   const rename = ["rename-item", "ren", "rni"].includes(executable);
   const destination = (rename ? "newname" : "destination").startsWith(name);
-  if (!source && !destination) return null;
-  return { source, attached: colon < 0 ? null : value.slice(colon + 1) };
+  // These value-taking options can precede a positional source. Their values must not be mistaken
+  // for the source while the real source is dropped as the destination.
+  const other = ["credential", "erroraction", "errorvariable", "informationaction", "informationvariable",
+    "outbuffer", "outvariable", "pipelinevariable", "progressaction", "warningaction", "warningvariable",
+    ...(rename ? [] : ["filter", "include", "exclude"])].some((parameter) => parameter.startsWith(name));
+  if (!source && !destination && !other) return null;
+  return { role: source ? "source" : destination ? "destination" : "other",
+    attached: colon < 0 ? null : value.slice(colon + 1) };
 }
 
 function executableName(value: string): string {
@@ -1404,8 +1413,8 @@ function commandVerdict(
             ? words[++index]
             : parameter.attached;
           if (argument != null) {
-            if (parameter.source) namedSources.push(argument);
-            else namedDestination = true;
+            if (parameter.role === "source") namedSources.push(argument);
+            if (parameter.role === "destination") namedDestination = true;
           }
           continue;
         }
@@ -1418,7 +1427,10 @@ function commandVerdict(
     }
     // The last operand is where the files LAND unless `-t` named that directory already. Moving
     // something into a protected worktree is ordinary work; moving the worktree away is not.
-    const sources = [...namedSources, ...(targetDirectory || namedDestination ? operands : operands.slice(0, -1))];
+    const positionalSources = targetDirectory || namedDestination || (namedSources.length === 0 && operands.length === 1)
+      ? operands
+      : operands.slice(0, -1);
+    const sources = [...namedSources, ...positionalSources];
     return strongest(sources.map((source) =>
       operandVerdict(source, cwd, environment, protections, false, optionsEnded)));
   }

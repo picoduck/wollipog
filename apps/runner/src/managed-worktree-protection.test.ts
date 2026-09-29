@@ -111,6 +111,27 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
   }
 });
 
+test("PowerShell movers refuse a protected source when the destination defaults or options precede it", () => {
+  for (const command of [
+    `Move-Item ${protectedPath}`,
+    `mi ${protectedPath}`,
+    `move ${protectedPath}`,
+    `Move-Item -Filter *.ts ${protectedPath}`,
+    `Move-Item -Fil *.ts ${protectedPath} /tmp/moved`,
+    `Move-Item -Include *.ts ${protectedPath} /tmp/moved`,
+    `Move-Item -ErrorAction Stop ${protectedPath} /tmp/moved`,
+    `mv -in ${protectedPath} /tmp/moved`,
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, "/projects/repo", protection), MANAGED_WORKTREE_REFUSAL,
+      command);
+  }
+  for (const command of [
+    `Move-Item -Filter *.ts src/old.ts ${protectedPath}`,
+    `Move-Item -Include *.ts src/old.ts ${protectedPath}`,
+    `mv -in src/old.ts ${protectedPath}`,
+  ]) assert.equal(commandTargetsManagedWorktree(command, "/projects/repo", protection), null, command);
+});
+
 test("env accepts assignment names that are not shell identifiers before a destructive command", () => {
   for (const command of [
     "env =x rm -rf .",
