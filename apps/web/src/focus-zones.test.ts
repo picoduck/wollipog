@@ -209,15 +209,25 @@ test("the F6 zone line lights only the entered zone and goes out after 1.5s, a p
   detail.dispatchEvent(new window.KeyboardEvent("keydown", { key: "3", bubbles: true }));
   assert.deepEqual(lit(), [], "a digit changes the route while the page root keeps focus, so any key puts the line out");
 
+  // The edge is re-measured every frame, so landing focus scrolling an ancestor, a resize or
+  // content loading above the zone moves the line with it instead of leaving it behind.
+  const frames: Array<() => void> = [];
+  (window as unknown as { requestAnimationFrame: (callback: () => void) => number }).requestAnimationFrame = (callback) =>
+    frames.push(callback);
+  let top = 112;
+  detail.getBoundingClientRect = () => ({ top, left: 388, width: 1028, height: 600 }) as DOMRect;
   indicateFocusZone(window.document, "main");
-  detail.dispatchEvent(new window.Event("scroll"));
-  assert.deepEqual(lit(), [detail], "the zone scrolling its own content leaves its edge in place");
-  find(".main-body").dispatchEvent(new window.Event("scroll"));
-  assert.deepEqual(lit(), [], "an ancestor scrolling moves the zone under the measured edge");
-
-  indicateFocusZone(window.document, "main");
-  window.dispatchEvent(new window.Event("resize"));
-  assert.deepEqual(lit(), [], "a resize moves the zone under the measured edge");
+  assert.equal(detail.style.getPropertyValue("--zone-line-top"), "112px");
+  top = 12;
+  frames.at(-1)!();
+  assert.equal(detail.style.getPropertyValue("--zone-line-top"), "12px", "the line follows the zone's edge");
+  assert.equal(detail.style.getPropertyValue("--zone-line-left"), "388px");
+  assert.deepEqual(lit(), [detail]);
+  const pending = frames.length;
+  detail.remove();
+  frames.at(-1)!();
+  assert.deepEqual(lit(), [], "a zone unmounted by a route change puts the line out");
+  assert.equal(frames.length, pending, "no frame is scheduled after the line goes out");
 });
 
 test("direct zone focus uses the list, empty-state, and board target chain", () => {

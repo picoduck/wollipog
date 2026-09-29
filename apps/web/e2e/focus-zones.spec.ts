@@ -143,7 +143,7 @@ test("the zone line stays visible in forced colors", async ({ page }) => {
   expect(line.color).not.toBe("rgba(0, 0, 0, 0)");
 });
 
-test("a key, an ancestor scroll or a resize puts the zone line out before 1.5s", async ({ page }) => {
+test("any other key puts the zone line out, including a digit that changes the route", async ({ page }) => {
   await openShell(page, shell("/automations"));
   await page.keyboard.press("F6");
   await page.keyboard.press("F6");
@@ -152,21 +152,29 @@ test("a key, an ancestor scroll or a resize puts the zone line out before 1.5s",
   await page.keyboard.press("3");
   await expect(page.getByRole("heading", { name: "Multi-Agent Runs", exact: true })).toBeVisible();
   expect((await zoneLine(page)).count).toBe(0);
+});
 
+test("the zone line follows its zone when landing focus scrolls the page, and on scroll or resize", async ({ page }) => {
   await openShell(page, shell("/skills"));
-  await f6IntoSkillsDetail(page);
-  expect((await zoneLine(page)).count).toBe(1);
-  await page.locator(".main-body").evaluate((element) => {
-    element.style.paddingBottom = "2000px";
-    element.scrollTop = 100;
+  // A long list: focusing its last control scrolls the page, and F6 into the detail scrolls it back.
+  await page.locator(".skills-list").evaluate((list) => {
+    const spacer = document.createElement("div");
+    spacer.style.height = "2400px";
+    const last = document.createElement("button");
+    last.type = "button";
+    last.textContent = "Last Row";
+    list.append(spacer, last);
   });
-  await expect.poll(() => zoneLine(page).then((value) => value.count)).toBe(0);
+  await page.getByRole("button", { name: "Last Row" }).focus();
+  expect(await page.locator(".main-body").evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await page.keyboard.press("F6");
+  await expect(page.locator(".skills-detail")).toBeFocused();
+  await expect.poll(() => zoneLine(page)).toMatchObject({ count: 1, top: 0, left: 0, width: 0 });
 
-  // From the detail pane, three presses come back round to it.
-  await f6IntoSkillsDetail(page);
-  expect((await zoneLine(page)).count).toBe(1);
+  await page.locator(".main-body").evaluate((element) => { element.scrollTop = 300; });
+  await expect.poll(() => zoneLine(page)).toMatchObject({ count: 1, top: 0 });
   await page.setViewportSize({ width: 1200, height: 900 });
-  await expect.poll(() => zoneLine(page).then((value) => value.count)).toBe(0);
+  await expect.poll(() => zoneLine(page)).toMatchObject({ count: 1, left: 0, width: 0 });
 });
 
 test("the zone line has no fade under reduced motion", async ({ page }) => {

@@ -82,28 +82,33 @@ let clearLitZone: (() => void) | null = null;
 /**
  * Mark the zone F6 just entered with `.zone-lit` for ZONE_INDICATOR_MS, which draws a line on its
  * top edge (§16.1). Only the F6 handler calls this, so a click, a digit, a route change or
- * programmatic focus never lights a zone. The line is `position: fixed` at the root's measured
- * edge because most roots scroll, and an absolute line would scroll away with their content.
+ * programmatic focus never lights a zone. The line is `position: fixed` at the root's top edge
+ * because most roots scroll, and an absolute line would scroll away with their content. The edge
+ * is re-measured every frame while lit, so it follows the root when landing focus scrolls an
+ * ancestor, the window resizes or content above it loads.
  * It goes out early on a pointer press, on focus leaving the zone, and on any other key: a digit
  * changes the route while the shell's page root keeps focus, so focus alone would not notice.
- * Scrolling an ancestor or resizing moves the root under the measured edge, so those end it too.
  */
 export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HTMLElement | null {
   clearLitZone?.();
   const root = zoneRoot(targetDocument, zone);
   const view = targetDocument.defaultView;
   if (!root || !view) return null;
-  const edge = root.getBoundingClientRect();
-  root.style.setProperty("--zone-line-top", `${edge.top}px`);
-  root.style.setProperty("--zone-line-left", `${edge.left}px`);
-  root.style.setProperty("--zone-line-width", `${edge.width}px`);
+  let frame = 0;
+  const place = () => {
+    if (!root.isConnected) return clear();
+    const edge = root.getBoundingClientRect();
+    root.style.setProperty("--zone-line-top", `${edge.top}px`);
+    root.style.setProperty("--zone-line-left", `${edge.left}px`);
+    root.style.setProperty("--zone-line-width", `${edge.width}px`);
+    frame = view.requestAnimationFrame(place);
+  };
   const clear = () => {
     view.clearTimeout(timer);
+    view.cancelAnimationFrame(frame);
     targetDocument.removeEventListener("pointerdown", clear, true);
     targetDocument.removeEventListener("focusin", onFocusIn, true);
     targetDocument.removeEventListener("keydown", onKeyDown, true);
-    targetDocument.removeEventListener("scroll", onScroll, true);
-    view.removeEventListener("resize", clear);
     root.classList.remove("zone-lit");
     for (const property of ZONE_LINE_PROPERTIES) root.style.removeProperty(property);
     if (clearLitZone === clear) clearLitZone = null;
@@ -115,17 +120,12 @@ export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HT
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key !== "F6" && event.key !== "Shift") clear();
   };
-  // The root scrolling its own content leaves its edge in place; an ancestor scrolling moves it.
-  const onScroll = (event: Event) => {
-    if (event.target !== root && (!(event.target instanceof view.Node) || event.target.contains(root))) clear();
-  };
-  root.classList.add("zone-lit");
   const timer = view.setTimeout(clear, ZONE_INDICATOR_MS);
+  place();
+  root.classList.add("zone-lit");
   targetDocument.addEventListener("pointerdown", clear, true);
   targetDocument.addEventListener("focusin", onFocusIn, true);
   targetDocument.addEventListener("keydown", onKeyDown, true);
-  targetDocument.addEventListener("scroll", onScroll, true);
-  view.addEventListener("resize", clear);
   clearLitZone = clear;
   return root;
 }
