@@ -9013,11 +9013,19 @@ button.file-head.source-path-link {
     padding-left: max(var(--space-4), env(safe-area-inset-left));
     padding-right: max(var(--space-4), env(safe-area-inset-right));
   }
+  /* Half the footer is narrower than a long confirm label ("Interrupt Sessions and Update"), so the
+     label wraps inside its button rather than spilling past both edges (§7.5, #2050). Two lines fit
+     the 48px; a third grows the button, and `align-self: stretch` grows its neighbour to match. */
   .modal-foot > .btn {
     flex: 1 1 0;
+    align-self: stretch;
     max-width: none;
     min-width: 0;
-    height: 48px;
+    height: auto;
+    min-height: 48px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: center;
   }
   .modal-foot > .form-error { flex-basis: 100%; }
   /* The destructive tertiary becomes a full-width ghost danger row at the body's end. */

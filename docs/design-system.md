@@ -497,7 +497,8 @@ removes its own as it rebuilds the screen.
 Rules
 
 - Button text never wraps: `white-space: nowrap; flex: none`. If a row cannot fit its buttons, the
-  **row** overflows into a ⋯ menu (§3.3); the button never shrinks.
+  **row** overflows into a ⋯ menu (§3.3); the button never shrinks. One exception: the phone sheet
+  footer's equal pair (§7.5), whose halves are narrower than a long confirm label.
 - Buttons never stretch. In column-flex and grid containers every button sits in an `.actions` row
   (`display: flex; gap: var(--space-2); align-items: center`) or has `justify-self: start`. This
   removes full-width "bar" buttons.
@@ -1034,6 +1035,10 @@ stacks on the first. Desktop keeps stacked dialogs as above.
   width, 48px** (`--control-h-lg` coarse): Cancel left, primary right. A destructive tertiary moves
   into the body end as a full-width ghost danger row. A confirmation's harmless secondary action is
   not shown (§7.4).
+- A label longer than its half of the footer ("Interrupt Sessions and Update" at 390px) wraps,
+  centered, inside its button, and never truncates: the person reads the whole action before
+  confirming it. Two lines fit the 48px; a third grows both buttons together, so the pair keeps one
+  width and one height.
 - Long forms (New Session) open as a **full-height sheet** (`height: 100dvh`, no grabber, back
   arrow instead of close).
 - Nested dialogs push onto the sheet with a back arrow instead of replacing the parent. A

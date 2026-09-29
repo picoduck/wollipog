@@ -136,4 +136,43 @@ test.describe("phone", () => {
     const buttons = await footButtons(dialog);
     expect(buttons.map(({ text }) => text)).toEqual(["Cancel", "Interrupt Sessions and Update"]);
   });
+
+  // #2050: the confirm label is wider than half a phone footer. It wraps inside its button instead of
+  // spilling past both edges, and the pair stays equal in width and height.
+  for (const [surface, label] of [["update", "Interrupt Sessions and Update"], ["adopt", "Interrupt Sessions and Adopt Legacy Data"]]) {
+    test(`"${label}" fits inside its half of the footer`, async ({ page }) => {
+      await page.goto(`/confirmation-details-e2e.html?surface=${surface}`);
+      const dialog = page.getByRole("dialog", { name: label });
+      await expect(dialog).toBeVisible();
+      await dialogMotionSettled(page);
+      const confirm = dialog.getByRole("button", { name: label, exact: true });
+      await expect(confirm).toHaveAccessibleName(label);
+      await expect(confirm).toHaveText(label);
+
+      const fits = await dialog.locator(".modal-foot > button").evaluateAll((buttons) => buttons.map((button) => {
+        const box = button.getBoundingClientRect();
+        const inner = {
+          left: box.left + button.clientLeft,
+          right: box.left + button.clientLeft + button.clientWidth,
+          top: box.top + button.clientTop,
+          bottom: box.top + button.clientTop + button.clientHeight,
+        };
+        const range = document.createRange();
+        range.selectNodeContents(button);
+        const spill = Math.max(...[...range.getClientRects()].flatMap((line) => [
+          inner.left - line.left, line.right - inner.right, inner.top - line.top, line.bottom - inner.bottom,
+        ]));
+        return { text: button.textContent, width: box.width, height: box.height, spill, overflow: button.scrollWidth - button.clientWidth };
+      }));
+      expect(fits.map(({ text }) => text)).toEqual(["Cancel", label]);
+      for (const { text, spill, overflow, height } of fits) {
+        expectGeometry(spill, `every line of "${text}" stays inside its button`).toBeLessThanOrEqual(0);
+        expect(overflow, `"${text}" does not overflow its button`).toBe(0);
+        // At least the phone footer's 48px: a label that needs a third line grows the pair, never clips.
+        expect(Math.round(height), `"${text}" is at least the 48px phone footer height`).toBeGreaterThanOrEqual(48);
+      }
+      expectGeometry(Math.abs(fits[0]!.width - fits[1]!.width), "the two footer buttons are equal width").toBeLessThanOrEqual(0.61);
+      expectGeometry(Math.abs(fits[0]!.height - fits[1]!.height), "the two footer buttons are equal height").toBeLessThanOrEqual(0.61);
+    });
+  }
 });
