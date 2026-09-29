@@ -8,8 +8,8 @@ test.use({ video: "on" });
  *
  * Scoped because the dialog has three radiogroups — Session Role, Harness and Mode — and a bare
  * `getByRole("radio")` matches across all of them. The name is anchored at the start because a
- * ChoiceCard's accessible name is its title followed by its description, and the Normal card's
- * description also mentions the harness.
+ * ChoiceRow radio is named by its title, and a looser match could reach another row whose
+ * description mentions the same word. The reason and description are its accessible description.
  */
 function presetCard(dialog: Locator, name: RegExp): Locator {
   return dialog.getByRole("radiogroup", { name: "Session Role" }).getByRole("radio", { name });
@@ -44,8 +44,8 @@ for (const scenario of [
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const orchestratorCard = presetCard(dialog, /^Orchestrator/);
     await expect(orchestratorCard).toHaveAttribute("aria-disabled", "true");
-    await expect(orchestratorCard).toContainText("Upgrade Codex to 0.154.0 or newer.");
-    await expect(orchestratorCard).toContainText("verified Direct WSL bridge and a bubblewrap-isolated runner");
+    await expect(orchestratorCard).toHaveAccessibleDescription(/Upgrade Codex to 0\.154\.0 or newer\./);
+    await expect(orchestratorCard).toHaveAccessibleDescription(/verified Direct WSL bridge and a bubblewrap-isolated runner/);
     await orchestratorCard.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("mixed-blockers.png"), fullPage: true });
   });
@@ -67,7 +67,7 @@ for (const theme of ["light", "dark"] as const) {
       const dialog = page.getByRole("dialog", { name: "New Session" });
       // A saved Orchestrator harness default selects the role on the user's behalf and names
       // itself in the always-visible Provider Permissions summary (#1281 separated the two).
-      await expect(presetCard(dialog, /^Orchestrator/)).toHaveAttribute("aria-checked", "true");
+      await expect(presetCard(dialog, /^Orchestrator/)).toBeChecked();
       await expect(dialog.getByText(/Saved Default — Orchestrator/)).toBeVisible();
       await dialog.getByRole("radio", { name: /^Native TUI/ }).click();
       await expect(dialog.getByText(/Usage Accounting: Unavailable/)).toBeVisible();
@@ -99,9 +99,9 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: testInfo.outputPath("preset-unselected.png") });
       // One click, no popup to open: that IS the fix for #832, whose defect was the second of two
       // options being clipped inside the menu this used to have to open.
-      await expect(orchestratorCard).toHaveAttribute("aria-checked", "false");
+      await expect(orchestratorCard).not.toBeChecked();
       await orchestratorCard.click();
-      await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
+      await expect(orchestratorCard).toBeChecked();
       const liveChildLimit = dialog.getByRole("spinbutton", { name: "Maximum Concurrent Children" });
       await expect(liveChildLimit).toHaveValue("4");
       await liveChildLimit.fill("7");
@@ -115,7 +115,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: testInfo.outputPath("preset-harness-selected.png") });
       const delegatedControl = dialog.getByRole("button", { name: /Descendant Requests: Questions and Approvals/ });
       await expect(delegatedControl).toBeVisible();
-      await expect(orchestratorCard).toContainText(/Delegate implementation by default/);
+      await expect(orchestratorCard).toHaveAccessibleDescription(/Delegate implementation by default/);
       await expect(dialog.getByRole("button", { name: /Strict Project Isolation: Disabled/ })).toBeVisible();
       await expect(dialog.getByText(/no read-only operating-system boundary is claimed/)).toBeVisible();
       const tui = dialog.getByRole("radio", { name: /^Native TUI/ });
@@ -163,14 +163,14 @@ for (const scenario of [
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
-    await expect(presetCard(dialog, /^Normal/)).toHaveAttribute("aria-checked", "true");
+    await expect(presetCard(dialog, /^Normal/)).toBeChecked();
     await expect(providerPermissions).toContainText("Harness Default");
     await providerPermissions.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("role-normal.png"), fullPage: true });
 
     const orchestratorCard = presetCard(dialog, /^Orchestrator/);
     await orchestratorCard.click();
-    await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
+    await expect(orchestratorCard).toBeChecked();
     // #1281: the role is additive. The provider permission summary is unchanged by the role and
     // the harness keeps its ordinary modes, so no preset is announced.
     await expect(providerPermissions).toContainText("Harness Default");
@@ -225,7 +225,7 @@ for (const scenario of [
     const orchestratorCard = presetCard(dialog, /^Orchestrator/);
     await expect(orchestratorCard).not.toHaveAttribute("aria-disabled", "true");
     await orchestratorCard.click();
-    await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
+    await expect(orchestratorCard).toBeChecked();
     await expect(providerPermissions).toContainText("Harness Default");
     await expect(providerPermissions).not.toContainText("Orchestrator Preset");
     await providerPermissions.scrollIntoViewIfNeeded();
@@ -280,7 +280,7 @@ for (const scenario of [
     const orchestratorCard = presetCard(dialog, /^Orchestrator/);
     await expect(orchestratorCard).not.toHaveAttribute("aria-disabled", "true");
     await orchestratorCard.click();
-    await expect(orchestratorCard).toHaveAttribute("aria-checked", "true");
+    await expect(orchestratorCard).toBeChecked();
     await expect(providerPermissions).toContainText("Harness Default");
     await expect(providerPermissions).not.toContainText("Orchestrator Preset");
     // Parity with a normal Codex session here, not a new boundary: no platform sentence is shown,
