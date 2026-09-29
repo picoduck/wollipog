@@ -1298,7 +1298,8 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
   places it on an icon's top-right shoulder (the icon's wrapper is the positioned box), growing
   away from the icon, with a 2px ring in `--count-badge-ring`. That property defaults to
   `--bg-elev`; a surface that is not `--bg-elev` (a selected rail item on `--surface-selected`)
-  sets it once on an ancestor rather than redrawing the badge.
+  sets it once on an ancestor rather than redrawing the badge. Forced colors drops the ring's
+  box-shadow, so there a 2px `Canvas` outline redraws it.
 - Draw it with `CountBadge` (`count`, `tone: "warning" | "danger"`, `onIcon`), never by hand. The
   badge is `aria-hidden` and holds only the number; the control that shows it states the count in
   its accessible name or description.

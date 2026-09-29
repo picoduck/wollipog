@@ -63,6 +63,7 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".column.drag-over { outline: 1px dashed var(--accent); outline-offset: -1px }", "a drop-target cue while dragging, not a focus indicator"],
   [".composer-box.drag-over { outline: 2px dashed var(--accent); outline-offset: 2px }", "a drop-target cue while dragging, not a focus indicator"],
   ["@media (forced-colors: active) .tl-message-action-unavailable > .tl-message-icon::after { outline: 1px solid Canvas }", "the unavailable slash's Canvas halo (#1887), on a pseudo-element, not a focus indicator"],
+  ["@media (forced-colors: active) .count-badge.on-icon { outline: 2px solid Canvas }", "the on-icon count badge's ring (§11.4), redrawn because forced colors drops its box-shadow; the badge is not focusable"],
   [".agents-list button[aria-current=\"true\"] { outline: 1px solid var(--border) }", "KNOWN GAP, not verified safe: this beats the global ring, so the focused current Agents item looks as it does at rest; reported as a follow-up to #1890"],
 ]);
 

@@ -14221,6 +14221,11 @@ body.shell-dock-dragging * {
   left: calc(100% - 8px);
   box-shadow: 0 0 0 2px var(--count-badge-ring);
 }
+/* Forced colors drops box-shadow, so an outline (kept) in the system's own Canvas redraws the ring
+   that separates the badge from the icon. */
+@media (forced-colors: active) {
+  .count-badge.on-icon { outline: 2px solid Canvas; }
+}
 
 /* ---------------------------- Segmented control ----------------------------
    One segmented control for every switch between modes or filters of the same content

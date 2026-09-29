@@ -101,5 +101,28 @@ for (const theme of ["dark", "light"] as const) {
       // Polled: the app's reduced-motion transition still runs for a millisecond, serialised as oklab().
       await expect.poll(ring).toBe(`${selected} 0px 0px 0px 2px`);
     });
+
+    test("in forced colors the on-icon ring survives as a 2px Canvas outline", async ({ page }) => {
+      await open(page, theme);
+      const badge = page.getByTestId("count-badge-icon").locator(".count-badge.on-icon");
+      const outline = () => badge.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { style: style.outlineStyle, width: style.outlineWidth, color: style.outlineColor, shadow: style.boxShadow };
+      });
+      // Outside forced colors the ring is the box-shadow alone.
+      expect((await outline()).style).toBe("none");
+
+      await page.emulateMedia({ forcedColors: "active" });
+      const canvas = await page.locator("body").evaluate((host) => {
+        const probe = document.createElement("span");
+        probe.style.color = "Canvas";
+        host.append(probe);
+        const value = getComputedStyle(probe).color;
+        probe.remove();
+        return value;
+      });
+      // Forced colors drops the box-shadow; the outline is what separates the badge from the icon.
+      await expect.poll(outline).toEqual({ style: "solid", width: "2px", color: canvas, shadow: "none" });
+    });
   });
 }
