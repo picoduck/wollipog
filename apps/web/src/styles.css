@@ -8945,14 +8945,21 @@ button.file-head.source-path-link {
 }
 /* The destructive tertiary sits far left (§7.3). */
 .modal-foot > .modal-tertiary { margin-right: auto; }
-.confirmation-copy {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-.confirmation-copy p {
+/* A confirmation's body (§7.4): the message, then what it affects as one surface of dense rows,
+   then "and N more" for the rows that do not show, tucked under the surface it counts. */
+.confirmation-message {
   margin: 0;
   color: var(--text);
+}
+.confirmation-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.confirmation-rows-more {
+  margin: calc(var(--space-2) - var(--space-4)) 0 0;
+  color: var(--text-dim);
+  font: var(--type-small);
 }
 /* One grabber recipe for every phone bottom sheet: dialog sheets and menus or popovers shown as
    sheets (§7.5, §9.2). Decorative; the scrim and Cancel close the sheet. */
@@ -9155,64 +9162,6 @@ button.file-head.source-path-link {
   font-weight: 600;
   letter-spacing: 0.2px;
   text-transform: uppercase;
-}
-.lifecycle-conflict {
-  display: grid;
-  gap: 8px;
-}
-.lifecycle-conflict h3 {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-.lifecycle-conflict-list {
-  display: grid;
-  max-height: 228px;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--bg-elev-2) 72%, transparent);
-  list-style: none;
-}
-.lifecycle-conflict-list li {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 12px;
-  padding: 10px 12px;
-}
-.lifecycle-conflict-list li + li {
-  border-top: 1px solid var(--border);
-}
-.lifecycle-conflict-title {
-  display: -webkit-box;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 12px;
-  line-height: 1.42;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.lifecycle-conflict-status {
-  padding: 2px 7px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 650;
-  line-height: 1.35;
-  white-space: nowrap;
-}
-.lifecycle-conflict-omitted {
-  margin: 0;
-  color: var(--text-faint);
-  font-size: 11px;
 }
 
 /* --------------------------------- Toasts --------------------------------

@@ -238,73 +238,115 @@ function optionLiterals(node: ts.Expression): ts.ObjectLiteralExpression[] {
 
 /**
  * docs/design-system.md §7.4 and §17: a confirmation's title is the action in Title Case with no question
- * mark, and its confirm button is required and repeats the title's verb. `ConfirmationOptions` makes the
+ * mark, and its confirm button is required and repeats the title's verb. A cancel label and a secondary
+ * action's label are button labels too: literal Title Case copy. `ConfirmationOptions` makes the confirm
  * label required for TypeScript; this reads every caller so the copy rule itself cannot drift.
  */
+function confirmationCopyFailures(file: string, source: string): { failures: string[]; checked: number } {
+  const failures: string[] = [];
+  let checked = 0;
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+    file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const where = (node: ts.Node) =>
+    `${path.relative(SOURCE_ROOT, file)}:${sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1}`;
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression.getText(sourceFile);
+      if (callee === "window.confirm") failures.push(`${where(node)} window.confirm is banned; use useFeedback().confirm`);
+      const isConfirm = callee === "confirm" || callee.endsWith(".confirm") || callee === "confirmWhileAllowed";
+      if (isConfirm && callee !== "window.confirm") {
+        for (const literal of node.arguments.flatMap(optionLiterals)) {
+          const property = (name: string, owner = literal) => owner.properties.find((entry): entry is ts.PropertyAssignment =>
+            ts.isPropertyAssignment(entry) && ts.isIdentifier(entry.name) && entry.name.text === name);
+          const title = property("title");
+          if (!title) continue;
+          checked += 1;
+          const label = property("confirmLabel");
+          if (!label) {
+            failures.push(`${where(literal)} confirmation has no confirmLabel`);
+            continue;
+          }
+          const message = property("message");
+          const bodies = message ? bodyBranches(message.initializer, sourceFile) : null;
+          if (message && !bodies && !COMPUTED_BODIES.some((pattern) => pattern.test(message.initializer.getText(sourceFile)))) {
+            failures.push(`${where(message)} body is not readable copy; add its helper to COMPUTED_BODIES and test it there`);
+          }
+          for (const body of bodies ?? []) {
+            if (sentenceCount(body) > 2) {
+              failures.push(`${where(message!)} body is longer than two sentences (§7.4): ${JSON.stringify(body)}`);
+            }
+          }
+          // The safe choice and the harmless extra action are buttons: literal Title Case labels.
+          const cancelLabel = property("cancelLabel");
+          const secondary = property("secondaryAction");
+          const secondaryLabel = secondary && ts.isObjectLiteralExpression(secondary.initializer)
+            ? property("label", secondary.initializer)
+            : undefined;
+          if (secondary && !secondaryLabel) failures.push(`${where(secondary)} secondary action label must be literal copy`);
+          for (const [name, assignment] of [["cancel label", cancelLabel], ["secondary action label", secondaryLabel]] as const) {
+            if (!assignment) continue;
+            const values = staticBranches(assignment.initializer);
+            if (!values) {
+              failures.push(`${where(assignment)} ${name} must be literal copy`);
+              continue;
+            }
+            for (const value of values) {
+              if (!isTitleCase(value)) failures.push(`${where(assignment)} ${name} is not Title Case: ${JSON.stringify(value)}`);
+            }
+          }
+          const titles = staticBranches(title.initializer);
+          const labels = staticBranches(label.initializer);
+          if (!titles || !labels) {
+            failures.push(`${where(literal)} confirmation title and label must be literal copy`);
+            continue;
+          }
+          for (const value of titles) {
+            if (value.trim().endsWith("?")) failures.push(`${where(title)} title ends in "?": ${JSON.stringify(value)}`);
+            if (!isTitleCase(value)) failures.push(`${where(title)} title is not Title Case: ${JSON.stringify(value)}`);
+            const verb = value.split(/\s+/)[0];
+            if (!labels.some((candidate) => candidate.split(/\s+/)[0] === verb)) {
+              failures.push(`${where(label)} no confirm label repeats the verb of ${JSON.stringify(value)}`);
+            }
+          }
+          for (const value of labels) {
+            if (/^(continue|ok|submit|yes)$/i.test(value.trim())) failures.push(`${where(label)} generic confirm label: ${JSON.stringify(value)}`);
+            if (!isTitleCase(value)) failures.push(`${where(label)} label is not Title Case: ${JSON.stringify(value)}`);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return { failures, checked };
+}
+
 test("every confirmation names its action in the title and its outcome on the button", () => {
   const failures: string[] = [];
   let checked = 0;
   for (const file of sourceFiles(SOURCE_ROOT)) {
     const source = readFileSync(file, "utf8");
     if (!source.includes("confirm")) continue;
-    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
-      file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
-    const where = (node: ts.Node) =>
-      `${path.relative(SOURCE_ROOT, file)}:${sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1}`;
-    const visit = (node: ts.Node) => {
-      if (ts.isCallExpression(node)) {
-        const callee = node.expression.getText(sourceFile);
-        if (callee === "window.confirm") failures.push(`${where(node)} window.confirm is banned; use useFeedback().confirm`);
-        const isConfirm = callee === "confirm" || callee.endsWith(".confirm") || callee === "confirmWhileAllowed";
-        if (isConfirm && callee !== "window.confirm") {
-          for (const literal of node.arguments.flatMap(optionLiterals)) {
-            const property = (name: string) => literal.properties.find((entry): entry is ts.PropertyAssignment =>
-              ts.isPropertyAssignment(entry) && ts.isIdentifier(entry.name) && entry.name.text === name);
-            const title = property("title");
-            if (!title) continue;
-            checked += 1;
-            const label = property("confirmLabel");
-            if (!label) {
-              failures.push(`${where(literal)} confirmation has no confirmLabel`);
-              continue;
-            }
-            const message = property("message");
-            const bodies = message ? bodyBranches(message.initializer, sourceFile) : null;
-            if (message && !bodies && !COMPUTED_BODIES.some((pattern) => pattern.test(message.initializer.getText(sourceFile)))) {
-              failures.push(`${where(message)} body is not readable copy; add its helper to COMPUTED_BODIES and test it there`);
-            }
-            for (const body of bodies ?? []) {
-              if (sentenceCount(body) > 2) {
-                failures.push(`${where(message!)} body is longer than two sentences (§7.4): ${JSON.stringify(body)}`);
-              }
-            }
-            const titles = staticBranches(title.initializer);
-            const labels = staticBranches(label.initializer);
-            if (!titles || !labels) {
-              failures.push(`${where(literal)} confirmation title and label must be literal copy`);
-              continue;
-            }
-            for (const value of titles) {
-              if (value.trim().endsWith("?")) failures.push(`${where(title)} title ends in "?": ${JSON.stringify(value)}`);
-              if (!isTitleCase(value)) failures.push(`${where(title)} title is not Title Case: ${JSON.stringify(value)}`);
-              const verb = value.split(/\s+/)[0];
-              if (!labels.some((candidate) => candidate.split(/\s+/)[0] === verb)) {
-                failures.push(`${where(label)} no confirm label repeats the verb of ${JSON.stringify(value)}`);
-              }
-            }
-            for (const value of labels) {
-              if (/^(continue|ok|submit|yes)$/i.test(value.trim())) failures.push(`${where(label)} generic confirm label: ${JSON.stringify(value)}`);
-              if (!isTitleCase(value)) failures.push(`${where(label)} label is not Title Case: ${JSON.stringify(value)}`);
-            }
-          }
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
+    const result = confirmationCopyFailures(file, source);
+    failures.push(...result.failures);
+    checked += result.checked;
   }
   assert.ok(checked >= 38, `expected to read every confirmation caller, read ${checked}`);
   assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+test("a confirmation's cancel label and secondary action label are literal Title Case copy", () => {
+  const read = (options: string) => confirmationCopyFailures(path.join(SOURCE_ROOT, "fixture.tsx"),
+    `confirm({ title: "Quit Wollipog", message: "Sessions on this computer stop.", confirmLabel: "Quit Wollipog", ${options} });`).failures;
+  assert.deepEqual(read(`cancelLabel: "Keep Open", secondaryAction: { label: "Show Sessions", run: showSessions }`), []);
+  assert.deepEqual(read(`cancelLabel: held ? "Install Later" : "Keep Open"`), []);
+  assert.deepEqual(read(`cancelLabel: "keep open"`), ['fixture.tsx:1 cancel label is not Title Case: "keep open"']);
+  assert.deepEqual(read(`cancelLabel: serverCopy`), ["fixture.tsx:1 cancel label must be literal copy"]);
+  assert.deepEqual(read(`secondaryAction: { label: "Show sessions", run: showSessions }`),
+    ['fixture.tsx:1 secondary action label is not Title Case: "Show sessions"']);
+  assert.deepEqual(read(`secondaryAction: { label: serverCopy, run: showSessions }`),
+    ["fixture.tsx:1 secondary action label must be literal copy"]);
+  assert.deepEqual(read(`secondaryAction: showSessionsAction`), ["fixture.tsx:1 secondary action label must be literal copy"]);
 });
 
 test("the confirmation sentence count reads sentences, not every dot", () => {

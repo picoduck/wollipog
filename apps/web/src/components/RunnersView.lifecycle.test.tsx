@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import { ApiError } from "../api.js";
+import { statusMeta } from "../status-meta.js";
 import {
   agentAvailabilityLabel,
   availableAgentCount,
-  LifecycleConflictDetails,
   lifecycleConflictPresentation,
 } from "./RunnersView.js";
 
@@ -23,33 +21,35 @@ test("Connections counts only verified runnable agents and labels legacy rows un
   assert.equal(agentAvailabilityLabel(agents[2]!), "Unverified");
 });
 
-test("runner lifecycle conflicts present bounded, normalized session details", () => {
+test("runner lifecycle conflicts list every named session as a confirmation detail row", () => {
   const error = new ApiError("active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
-    activeSessionCount: 6,
+    activeSessionCount: 8,
     activeSessions: [
       { title: "  # AGENTS.md\n\n   Review   the project  ", status: "idle" },
       { title: "Ship <unsafe> markup", status: "input_required" },
       { title: "", status: "running" },
       { title: 42, status: null },
-      { title: "This fifth row must remain hidden", status: "idle" },
+      { title: "A newer server's state", status: "hibernating" },
+      { title: "The sixth row is listed; the dialog counts it in \"and N more\"", status: "idle" },
     ],
   });
 
   const conflict = lifecycleConflictPresentation(error, "update");
-  assert.equal(conflict.message, "Updating this runner will interrupt 6 active sessions.");
-  assert.deepEqual(conflict.sessions, [
-    { title: "# AGENTS.md Review the project", status: "Idle" },
-    { title: "Ship <unsafe> markup", status: "Input Required" },
-    { title: "Untitled Session", status: "Running" },
-    { title: "Untitled Session", status: "Active" },
+  assert.equal(conflict.message, "Updating this runner will interrupt 8 active sessions.");
+  assert.deepEqual(conflict.detailRows, [
+    { label: "# AGENTS.md Review the project", status: statusMeta("session", "idle") },
+    { label: "Ship <unsafe> markup", status: statusMeta("session", "input_required") },
+    { label: "Untitled Session", status: statusMeta("session", "running") },
+    { label: "Untitled Session" },
+    { label: "A newer server's state", status: statusMeta("session", "hibernating") },
+    { label: "The sixth row is listed; the dialog counts it in \"and N more\"", status: statusMeta("session", "idle") },
   ]);
-  assert.equal(conflict.omittedSessionCount, 2);
-
-  const markup = renderToStaticMarkup(<LifecycleConflictDetails conflict={conflict} />);
-  assert.match(markup, /Affected Sessions/);
-  assert.match(markup, /Ship &lt;unsafe&gt; markup/);
-  assert.match(markup, /2 more active sessions not shown/);
-  assert.doesNotMatch(markup, /fifth row/);
+  // The status reads from the one vocabulary, never the raw wire value.
+  assert.deepEqual(conflict.detailRows.map((row) => row.status?.label), [
+    "Awaiting Prompt", "Awaiting Input", "Running", undefined, "Status Unavailable", "Awaiting Prompt",
+  ]);
+  // Two sessions were counted but not listed (beyond the server's limit, or not visible here).
+  assert.equal(conflict.detailRowsOverflow, 2);
 });
 
 test("runner lifecycle conflicts stay useful when the server omits session details", () => {
@@ -58,9 +58,8 @@ test("runner lifecycle conflicts stay useful when the server omits session detai
     "reconnect",
   );
   assert.equal(conflict.message, "Reconnecting this runner will interrupt active work.");
-  assert.deepEqual(conflict.sessions, []);
-  assert.equal(conflict.omittedSessionCount, 0);
-  assert.equal(renderToStaticMarkup(<LifecycleConflictDetails conflict={conflict} />), "");
+  assert.deepEqual(conflict.detailRows, []);
+  assert.equal(conflict.detailRowsOverflow, 0);
 });
 
 test("legacy adoption conflict copy preserves the explicit migration action", () => {

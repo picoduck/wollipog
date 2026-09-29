@@ -38,7 +38,7 @@ import { Notice } from "./Notice.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { OnboardRunnerDialog } from "./OnboardRunnerDialog.js";
 import { AddBoxDialog } from "./AddBoxDialog.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
 import { agentDisplayName, agentDriverDescription, agentDriverLabel } from "../agent-presentation.js";
 import {
   ChevronRightIcon,
@@ -582,8 +582,11 @@ function boxStatusMeta(status: BoxStatus): StatusMeta {
 
 export interface LifecycleConflictPresentation {
   message: string;
-  sessions: Array<{ title: string; status: string }>;
-  omittedSessionCount: number;
+  /** The interrupted sessions the server listed, for the confirmation's detail rows. */
+  detailRows: ConfirmationDetailRow[];
+  /** Interrupted sessions the server counted but did not list (beyond its limit, or not visible to
+   * this person). */
+  detailRowsOverflow: number;
 }
 
 function normalizedSessionTitle(value: unknown): string {
@@ -596,16 +599,13 @@ export function lifecycleConflictPresentation(
   action: "update" | "reconnect" | "adopt",
 ): LifecycleConflictPresentation {
   const count = typeof error.details?.activeSessionCount === "number" ? error.details.activeSessionCount : null;
-  const sessions = Array.isArray(error.details?.activeSessions)
+  const detailRows: ConfirmationDetailRow[] = Array.isArray(error.details?.activeSessions)
     ? error.details.activeSessions
         .filter((session): session is { title?: unknown; status?: unknown } => !!session && typeof session === "object")
         .map((session) => ({
-          title: normalizedSessionTitle(session.title),
-          status: typeof session.status === "string"
-            ? titleCaseLabel(session.status.replaceAll("_", " "))
-            : "Active",
+          label: normalizedSessionTitle(session.title),
+          ...(typeof session.status === "string" ? { status: statusMeta("session", session.status) } : {}),
         }))
-        .slice(0, 4)
     : [];
   const actionLabel = action === "update" ? "Updating" : action === "reconnect" ? "Reconnecting" : "Adopting legacy data for";
   const message = count == null
@@ -613,31 +613,9 @@ export function lifecycleConflictPresentation(
     : `${actionLabel} this runner will interrupt ${count} active session${count === 1 ? "" : "s"}.`;
   return {
     message,
-    sessions,
-    omittedSessionCount: count == null ? 0 : Math.max(0, count - sessions.length),
+    detailRows,
+    detailRowsOverflow: count == null ? 0 : Math.max(0, count - detailRows.length),
   };
-}
-
-export function LifecycleConflictDetails({ conflict }: { conflict: LifecycleConflictPresentation }) {
-  if (conflict.sessions.length === 0) return null;
-  return (
-    <section className="lifecycle-conflict" aria-label="Affected Sessions">
-      <h3>Affected Sessions</h3>
-      <ul className="lifecycle-conflict-list">
-        {conflict.sessions.map((session, index) => (
-          <li key={`${session.title}-${session.status}-${index}`}>
-            <span className="lifecycle-conflict-title" title={session.title}>{session.title}</span>
-            <span className="lifecycle-conflict-status">{session.status}</span>
-          </li>
-        ))}
-      </ul>
-      {conflict.omittedSessionCount > 0 && (
-        <p className="lifecycle-conflict-omitted">
-          {conflict.omittedSessionCount} more active session{conflict.omittedSessionCount === 1 ? "" : "s"} not shown.
-        </p>
-      )}
-    </section>
-  );
 }
 
 function updateSourceLabel(source: "staged" | "release-cache", releaseTag: string): string {
@@ -865,7 +843,8 @@ function MachineSettingsDialog({
         const force = await confirm({
           title: "Interrupt Sessions and Adopt Legacy Data",
           message: conflict.message,
-          details: <LifecycleConflictDetails conflict={conflict} />,
+          detailRows: conflict.detailRows,
+          detailRowsOverflow: conflict.detailRowsOverflow,
           confirmLabel: "Interrupt Sessions and Adopt Legacy Data",
           tone: "danger",
         });
@@ -1363,7 +1342,8 @@ export function BoxCard({
         const approved = await confirm({
           title: "Interrupt Sessions and Update",
           message: conflict.message,
-          details: <LifecycleConflictDetails conflict={conflict} />,
+          detailRows: conflict.detailRows,
+          detailRowsOverflow: conflict.detailRowsOverflow,
           confirmLabel: "Interrupt Sessions and Update",
           tone: "danger",
         });
@@ -1399,7 +1379,8 @@ export function BoxCard({
         const approved = await confirm({
           title: "Interrupt Sessions and Reconnect",
           message: conflict.message,
-          details: <LifecycleConflictDetails conflict={conflict} />,
+          detailRows: conflict.detailRows,
+          detailRowsOverflow: conflict.detailRowsOverflow,
           confirmLabel: "Interrupt Sessions and Reconnect",
           tone: "danger",
         });

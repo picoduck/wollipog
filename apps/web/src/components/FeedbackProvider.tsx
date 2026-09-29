@@ -14,18 +14,58 @@ import { Modal } from "./common.js";
 import { CloseIcon } from "./Icons.js";
 import { useMenuOpen } from "./Menu.js";
 import { Notice, ToneIcon } from "./Notice.js";
+import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import type { StatusMeta } from "../status-meta.js";
 import { useIsMobile } from "./useIsMobile.js";
 
+/** One thing a confirmation affects, drawn as a dense row under its body (§7.4). */
+export interface ConfirmationDetailRow {
+  /** The affected object's name, such as a session title. One line, truncated, with the full text in
+   * a tooltip. */
+  label: string;
+  /** A short neutral fact, trailing in `--text-faint` (§11.3). */
+  meta?: string;
+  /** Drawn as the shared inline status badge, normally `statusMeta(domain, value)` (§11.1). */
+  status?: StatusMeta;
+}
+
+/** Confirmation copy and behaviour (docs/design-system.md §7.4). Every field after the required ones
+ * is optional, so a caller that does not use a field compiles unchanged when one is added. A new
+ * field that changes what the dialog shows or offers also joins `confirmationFingerprint`, so two
+ * requests that differ only in that field are never merged. */
 export interface ConfirmationOptions {
   /** The action in Title Case, with no question mark: "Stop Session", "Delete Skill" (§7.4). */
   title: string;
   /** One or two sentences: what happens, to which named object, and whether it can be undone. */
   message: string;
+  /** Content under the body that is not a list of affected objects, such as a mono preview. A list
+   * uses `detailRows`. */
   details?: ReactNode;
+  /** What the action affects, as one surface of dense rows under the body. At most
+   * `MAX_CONFIRMATION_DETAIL_ROWS` show; the rest are counted in "and N more". The rows are part of
+   * the dialog's accessible description. */
+  detailRows?: readonly ConfirmationDetailRow[];
+  /** Affected objects the caller knows of but cannot list (the server withheld them), added to the
+   * "and N more" count. */
+  detailRowsOverflow?: number;
   /** Required, and repeats the title's verb. There is no generic default such as "Continue": the
    * button names the outcome it runs. */
   confirmLabel: string;
+  /** Title Case, replacing "Cancel" when the safe choice has a better name: "Keep Open", "Install
+   * Later". The button keeps the secondary style, and choosing it, Escape, the backdrop and Back all
+   * resolve false. */
+  cancelLabel?: string;
+  /** A harmless extra choice, drawn as a ghost button before Cancel (§3.2): "Show Sessions".
+   * Choosing it closes the dialog, runs `run` and resolves false. It is not shown on a phone, whose
+   * sheet footer holds two buttons (§7.5), so the caller must not depend on it there. */
+  secondaryAction?: {
+    /** Title Case. */
+    label: string;
+    run: () => void;
+  };
+  /** `danger` draws the danger confirm button and tone icon, and opens with focus on the cancel
+   * button. Any other tone opens with focus on the confirm button (§7.4). */
   tone?: "default" | "danger";
   /** Durable element to restore focus to after settling. Needed when the invoking control is
    * a menu item that unmounts as the confirmation opens — the activeElement snapshot below
@@ -50,6 +90,9 @@ interface ConfirmationRequest extends ConfirmationOptions {
   resolve: (confirmed: boolean) => void;
 }
 
+/** At most this many detail rows show; the rest are counted in "and N more". */
+export const MAX_CONFIRMATION_DETAIL_ROWS = 5;
+
 function confirmationFingerprint(options: ConfirmationOptions): string {
   return [
     options.title,
@@ -57,7 +100,16 @@ function confirmationFingerprint(options: ConfirmationOptions): string {
     options.confirmLabel,
     options.tone ?? "",
     typeof options.details === "string" ? options.details : "",
+    JSON.stringify((options.detailRows ?? []).map((row) => [row.label, row.meta ?? "", row.status?.label ?? "", row.status?.tone ?? ""])),
+    String(options.detailRowsOverflow ?? 0),
+    options.cancelLabel ?? "",
+    options.secondaryAction?.label ?? "",
   ].join("\u0000");
+}
+
+function detailRowsOverflowCount(rows: readonly ConfirmationDetailRow[], overflow: number | undefined): number {
+  const unlisted = Number.isFinite(overflow) ? Math.max(0, Math.floor(overflow!)) : 0;
+  return Math.max(0, rows.length - MAX_CONFIRMATION_DETAIL_ROWS) + unlisted;
 }
 
 export interface ToastOptions {
@@ -487,7 +539,20 @@ function ConfirmationDialog({ request, onSettle }: {
   onSettle: (confirmed: boolean) => void;
 }) {
   const descriptionId = useId();
+  const detailsId = useId();
+  const rowsId = useId();
+  const moreId = useId();
   const danger = request.tone === "danger";
+  const isPhone = useIsMobile();
+  const rows = request.detailRows ?? [];
+  const shownRows = rows.slice(0, MAX_CONFIRMATION_DETAIL_ROWS);
+  const moreRows = detailRowsOverflowCount(rows, request.detailRowsOverflow);
+  const describedBy = [
+    descriptionId,
+    request.details ? detailsId : null,
+    shownRows.length > 0 ? rowsId : null,
+    moreRows > 0 ? moreId : null,
+  ].filter(Boolean).join(" ");
   const [running, setRunning] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   /** The running `onConfirm`, if any. Cleared before settling, so a finished action is never aborted
@@ -501,6 +566,12 @@ function ConfirmationDialog({ request, onSettle }: {
     inFlight.current?.abort();
     inFlight.current = null;
     onSettle(false);
+  };
+  const runSecondary = () => {
+    if (running || !request.secondaryAction) return;
+    const { run } = request.secondaryAction;
+    onSettle(false);
+    run();
   };
   const confirm = async () => {
     if (!request.onConfirm) {
@@ -533,22 +604,43 @@ function ConfirmationDialog({ request, onSettle }: {
       tone={danger ? "danger" : undefined}
       closeButton={false}
       onClose={cancel}
-      describedBy={descriptionId}
+      describedBy={describedBy}
       returnFocusRef={request.returnFocus}
       footer={(
         <>
-          <button className="btn" type="button" autoFocus disabled={cancelLocked} onClick={cancel}>Cancel</button>
-          <BusyButton className={`btn ${danger ? "danger" : "primary"}`} busy={running}
+          {/* A phone sheet's footer holds two buttons (§7.5), so the extra action is desktop-only. */}
+          {request.secondaryAction && !isPhone && (
+            <button className="btn ghost" type="button" disabled={running} onClick={runSecondary}>
+              {request.secondaryAction.label}
+            </button>
+          )}
+          {/* A destructive confirmation opens on its safe choice; any other opens on its primary (§7.4). */}
+          <button className="btn" type="button" autoFocus={danger} disabled={cancelLocked} onClick={cancel}>
+            {request.cancelLabel ?? "Cancel"}
+          </button>
+          <BusyButton className={`btn ${danger ? "danger" : "primary"}`} autoFocus={!danger} busy={running}
             progress={request.progress ?? "Working…"} onClick={() => void confirm()}>
             {request.confirmLabel}
           </BusyButton>
         </>
       )}
     >
-      <div className="confirmation-copy" id={descriptionId}>
-        <p>{request.message}</p>
-        {request.details && <div>{request.details}</div>}
-      </div>
+      <p className="confirmation-message" id={descriptionId}>{request.message}</p>
+      {request.details && <div id={detailsId}>{request.details}</div>}
+      {shownRows.length > 0 && (
+        <ul className="surface confirmation-rows" id={rowsId}>
+          {shownRows.map((row, index) => (
+            <li className="row dense" key={index}>
+              <span className="row-body">
+                <span className="row-title" title={row.label}>{row.label}</span>
+              </span>
+              {row.meta && <span className="row-trail">{row.meta}</span>}
+              {row.status && <StatusBadge meta={row.status} inline />}
+            </li>
+          ))}
+        </ul>
+      )}
+      {moreRows > 0 && <p className="confirmation-rows-more" id={moreId}>and {moreRows} more</p>}
       {failure && <Notice tone="danger" compact role="alert">{failure}</Notice>}
     </Modal>
   );

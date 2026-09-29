@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import React, { act, StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { FeedbackProvider, useFeedback } from "./FeedbackProvider.js";
+import { FeedbackProvider, useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { Modal } from "./common.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import { statusMeta } from "../status-meta.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -125,7 +126,8 @@ test("a sequential confirmation keeps focus trapped and restores the original in
     await tick();
   });
   assert.equal(document.querySelector('[role="dialog"] h2')?.textContent, "Second");
-  assert.equal((domWindow.document.activeElement as unknown as HTMLElement | null)?.textContent, "Cancel");
+  // A non-destructive confirmation opens on its primary (§7.4).
+  assert.equal((domWindow.document.activeElement as unknown as HTMLElement | null)?.textContent, "Second Action");
   await act(async () => { document.querySelector<HTMLButtonElement>('.modal-foot .btn')!.click(); await tick(); });
   assert.equal(domWindow.document.activeElement, chain);
   await act(async () => { root.unmount(); });
@@ -328,6 +330,218 @@ async function renderPendingConfirmation(options: { cancelWhileRunning?: boolean
   };
   return { runs, outcome, confirmButton, cancelButton, cleanup };
 }
+
+/** Unmounted after every test, even a failing one, so its dialog cannot leak into the next. */
+const mountedServices = new Set<() => Promise<void>>();
+afterEach(async () => {
+  for (const cleanup of mountedServices) await cleanup();
+});
+
+/** A provider whose `confirm` the test calls directly, recording what each request resolved to. */
+async function renderConfirmationService() {
+  let feedback: ReturnType<typeof useFeedback> | undefined;
+  function Capture() {
+    feedback = useFeedback();
+    return <button data-testid="invoker">Invoker</button>;
+  }
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => { root.render(<StrictMode><FeedbackProvider><Capture /></FeedbackProvider></StrictMode>); });
+  const outcomes: Array<boolean | undefined> = [];
+  const open = async (options: ConfirmationOptions) => {
+    const index = outcomes.push(undefined) - 1;
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="invoker"]')!.focus();
+      void feedback!.confirm(options).then((value) => { outcomes[index] = value; });
+      await tick();
+    });
+    return index;
+  };
+  const footButtons = () => [...document.querySelectorAll<HTMLButtonElement>(".modal-foot button")];
+  const activeText = () => (domWindow.document.activeElement as unknown as HTMLElement | null)?.textContent;
+  const cleanup = async () => {
+    if (!mountedServices.delete(cleanup)) return;
+    await act(async () => { root.unmount(); });
+    container.remove();
+  };
+  mountedServices.add(cleanup);
+  return { open, outcomes, footButtons, activeText, cleanup };
+}
+
+const INTERRUPT: ConfirmationOptions = {
+  title: "Interrupt Sessions and Update",
+  message: "Updating this runner will interrupt 7 active sessions.",
+  confirmLabel: "Interrupt Sessions and Update",
+  tone: "danger",
+};
+
+test("a confirmation shows five detail rows with their status badges, then \"and N more\", in its accessible description", async () => {
+  const { open, cleanup } = await renderConfirmationService();
+  const detailRows = Array.from({ length: 7 }, (_, index) => ({
+    label: `Session ${index + 1} with a title long enough to truncate on one line`,
+    ...(index === 1 ? { meta: "3 Queued" } : {}),
+    status: statusMeta("session", index % 2 === 0 ? "running" : "input_required"),
+  }));
+  await open({ ...INTERRUPT, detailRows });
+
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  const rows = [...dialog.querySelectorAll<HTMLElement>(".surface.confirmation-rows > li.row.dense")];
+  assert.equal(rows.length, 5, "at most five rows show");
+  assert.deepEqual(rows.map((row) => row.querySelector(".row-title")?.textContent), detailRows.slice(0, 5).map((row) => row.label));
+  // The full label is the tooltip of the truncated one.
+  assert.deepEqual(rows.map((row) => row.querySelector(".row-title")?.getAttribute("title")), detailRows.slice(0, 5).map((row) => row.label));
+  // Each status is the shared inline badge, from the one vocabulary.
+  assert.deepEqual(rows.map((row) => row.querySelector(".status.inline")?.textContent),
+    ["Running", "Awaiting Input", "Running", "Awaiting Input", "Running"]);
+  assert.equal(rows[0]!.querySelector(".status.inline")?.className.includes("t-info"), true);
+  assert.equal(rows[1]!.querySelector(".row-trail")?.textContent, "3 Queued");
+  assert.equal(dialog.querySelector(".confirmation-rows-more")?.textContent, "and 2 more");
+
+  // A screen reader hears the message, the rows and the overflow as the dialog's description.
+  const description = (dialog.getAttribute("aria-describedby") ?? "").split(/\s+/)
+    .map((id) => document.getElementById(id)?.textContent ?? "").join(" ");
+  assert.match(description, /^Updating this runner will interrupt 7 active sessions\./);
+  for (const row of detailRows.slice(0, 5)) assert.ok(description.includes(row.label), row.label);
+  assert.ok(description.includes("and 2 more"));
+  await cleanup();
+});
+
+test("rows a caller cannot list join the \"and N more\" count, and no rows means no surface", async () => {
+  const { open, footButtons, cleanup } = await renderConfirmationService();
+  await open({ ...INTERRUPT, detailRows: [{ label: "Only Listed Session" }], detailRowsOverflow: 3 });
+  assert.equal(document.querySelectorAll(".confirmation-rows > li").length, 1);
+  assertNoDomNode(document.querySelector(".confirmation-rows .status"), "a row without a status draws no badge");
+  assert.equal(document.querySelector(".confirmation-rows-more")?.textContent, "and 3 more");
+  await act(async () => { footButtons().find((button) => button.textContent === "Cancel")!.click(); await tick(); });
+
+  await open(INTERRUPT);
+  assertNoDomNode(document.querySelector(".confirmation-rows"), "no surface without rows");
+  assertNoDomNode(document.querySelector(".confirmation-rows-more"), "no overflow line without overflow");
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  assert.equal(document.getElementById(dialog.getAttribute("aria-describedby")!)?.textContent, INTERRUPT.message);
+  await cleanup();
+});
+
+test("a cancel label names the safe choice, and Escape, the backdrop and that button all resolve false", async () => {
+  const { open, outcomes, footButtons, cleanup } = await renderConfirmationService();
+  const quit: ConfirmationOptions = {
+    title: "Quit Wollipog",
+    message: "Quitting stops the sessions running on this computer.",
+    confirmLabel: "Quit Wollipog",
+    cancelLabel: "Keep Open",
+    tone: "danger",
+  };
+  const first = await open(quit);
+  assert.deepEqual(footButtons().map((button) => button.textContent), ["Keep Open", "Quit Wollipog"]);
+  const keepOpen = footButtons()[0]!;
+  assert.equal(keepOpen.className, "btn", "it keeps the secondary style");
+  await act(async () => { domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape" })); await tick(); });
+  assert.equal(outcomes[first], false);
+
+  const second = await open(quit);
+  await act(async () => {
+    const backdrop = document.querySelector(".modal-backdrop")!;
+    backdrop.dispatchEvent(new domWindow.MouseEvent("mousedown", { bubbles: true }) as unknown as Event);
+    await tick();
+  });
+  assert.equal(outcomes[second], false);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
+
+  const third = await open(quit);
+  await act(async () => { footButtons().find((button) => button.textContent === "Keep Open")!.click(); await tick(); });
+  assert.equal(outcomes[third], false);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
+  await cleanup();
+});
+
+test("a secondary action is a ghost button before Cancel that runs, closes and resolves false", async () => {
+  const { open, outcomes, footButtons, cleanup } = await renderConfirmationService();
+  let shown = 0;
+  const index = await open({
+    title: "Quit Wollipog",
+    message: "Quitting stops the sessions running on this computer.",
+    confirmLabel: "Quit Wollipog",
+    cancelLabel: "Keep Open",
+    secondaryAction: { label: "Show Sessions", run: () => { shown += 1; } },
+    tone: "danger",
+  });
+  // Spacer, then [ghost] [secondary] [primary] (§3.2): the footer is end-aligned, so the space before
+  // the ghost button is the spacer.
+  assert.deepEqual(footButtons().map((button) => [button.textContent, button.className]), [
+    ["Show Sessions", "btn ghost"],
+    ["Keep Open", "btn"],
+    ["Quit Wollipog", "btn danger"],
+  ]);
+  await act(async () => { footButtons()[0]!.click(); await tick(); });
+  assert.equal(shown, 1);
+  assert.equal(outcomes[index], false);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
+  await cleanup();
+});
+
+test("on a phone a confirmation leaves out its secondary action, so the footer holds two buttons", async () => {
+  const previousWidth = domWindow.innerWidth;
+  domWindow.happyDOM.setViewport({ width: 390, height: 844 });
+  try {
+    const { open, footButtons, cleanup } = await renderConfirmationService();
+    await open({
+      title: "Quit Wollipog",
+      message: "Quitting stops the sessions running on this computer.",
+      confirmLabel: "Quit Wollipog",
+      cancelLabel: "Keep Open",
+      secondaryAction: { label: "Show Sessions", run: () => undefined },
+      tone: "danger",
+    });
+    assert.deepEqual(footButtons().map((button) => button.textContent), ["Keep Open", "Quit Wollipog"]);
+    await cleanup();
+  } finally {
+    domWindow.happyDOM.setViewport({ width: previousWidth, height: 768 });
+  }
+});
+
+test("a destructive confirmation opens on its cancel button, and any other on its primary", async () => {
+  const { open, activeText, footButtons, cleanup } = await renderConfirmationService();
+  const close = async () => { await act(async () => { footButtons().at(-2)!.click(); await tick(); }); };
+  await open(INTERRUPT);
+  assert.equal(activeText(), "Cancel");
+  await close();
+  await open({ ...INTERRUPT, cancelLabel: "Keep Running" });
+  assert.equal(activeText(), "Keep Running");
+  await close();
+  await open({ title: "Recover Session", message: "The session restarts from its last checkpoint.", confirmLabel: "Recover Session" });
+  assert.equal(activeText(), "Recover Session");
+  await close();
+  await open({ title: "Install Update", message: "Wollipog restarts to finish installing.", confirmLabel: "Install Update", cancelLabel: "Install Later", tone: "default" });
+  assert.equal(activeText(), "Install Update");
+  await cleanup();
+});
+
+test("confirmations that differ only in rows, overflow or labels are not merged, and identical ones are", async () => {
+  const { open, outcomes, footButtons, cleanup } = await renderConfirmationService();
+  const base: ConfirmationOptions = { ...INTERRUPT, detailRows: [{ label: "First Session", status: statusMeta("session", "running") }] };
+  const variants: ConfirmationOptions[] = [
+    { ...base, detailRows: [{ label: "Second Session", status: statusMeta("session", "running") }] },
+    { ...base, detailRows: [{ label: "First Session", status: statusMeta("session", "idle") }] },
+    { ...base, detailRows: [{ label: "First Session", meta: "3 Queued", status: statusMeta("session", "running") }] },
+    { ...base, detailRowsOverflow: 1 },
+    { ...base, cancelLabel: "Keep Running" },
+    { ...base, secondaryAction: { label: "Show Sessions", run: () => undefined } },
+  ];
+  await open(base);
+  const duplicate = await open({ ...base, detailRows: [...base.detailRows!] });
+  assert.equal(outcomes[duplicate], false, "an identical request is dropped");
+  const queued = [];
+  for (const variant of variants) queued.push(await open(variant));
+  for (const index of queued) assert.equal(outcomes[index], undefined, "a request that differs waits in the queue");
+  for (let shown = 0; shown <= variants.length; shown += 1) {
+    await act(async () => { footButtons().at(-2)!.click(); await tick(); });
+  }
+  for (const index of queued) assert.equal(outcomes[index], false);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
+  await cleanup();
+});
 
 test("a pending confirmation shows its confirm button busy with the label unchanged, and closes when the action succeeds", async () => {
   const { runs, outcome, confirmButton, cancelButton, cleanup } = await renderPendingConfirmation();

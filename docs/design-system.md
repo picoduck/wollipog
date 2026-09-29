@@ -713,7 +713,7 @@ may contain rows, never another Surface. Inside dialogs, Surfaces are allowed on
 | --- | --- | --- |
 | Single-line | `--row-h` 40 | `[16 icon] Title ........ [meta] [badge] [action]` |
 | Two-line | `--row-h-2` 56 | Line 1: title (`--type-body-strong`, 1 line, ellipsis) + trailing status badge or time. Line 2: meta or description (`--type-small`, `--text-dim`, **1 line, ellipsis**). |
-| Dense (trees, file lists) | `--row-h-dense` 32 | `.row.dense`: `[16 icon] Name ........ [meta]`, one line, `--type-body`. **Fine pointers only**: on coarse pointers the token is 44px, so a touch tree is never denser than a menu. Only for trees and file lists, where 40px rows would show too few items (the Files tree shows 16 at 40px). Never for lists of entities. |
+| Dense (trees, file lists) | `--row-h-dense` 32 | `.row.dense`: `[16 icon] Name ........ [meta]`, one line, `--type-body`. **Fine pointers only**: on coarse pointers the token is 44px, so a touch tree is never denser than a menu. Only for trees and file lists, where 40px rows would show too few items (the Files tree shows 16 at 40px). Never for lists of entities, except a confirmation's read-only list of what it affects (§7.4). |
 | Card row (sessions list) | per the settled sessions list design (#882) | Two rows on desktop (exactly `--row-h-2`), three on phone. Unchanged by this spec except tokens. In the stacked layout, when the list is 880px or wider, the same two lines add a snippet after the title and move status, time, activity and flags into fixed trailing columns (§6.3). |
 
 Rules
@@ -963,7 +963,8 @@ stacks on the first. Desktop keeps stacked dialogs as above.
 - Description (optional): `--type-body`, `--text-dim`, one sentence.
 - Body sections: `--type-section` headings with 24px above; no bordered subsections.
 - The card itself is focused on open **without** a visible ring (§16.1); the first field (or Cancel in
-  a destructive confirmation, or the name field in a type-to-confirm dialog, §7.4) receives focus.
+  a destructive confirmation, the primary in a non-destructive one, or the name field in a
+  type-to-confirm dialog, §7.4) receives focus.
 
 ### 7.3 Footer and Action Order
 
@@ -974,6 +975,8 @@ stacks on the first. Desktop keeps stacked dialogs as above.
   names the outcome ("Pair Device"), never Continue.
 - A destructive tertiary action (Delete Team, Remove Location) goes far left as `.btn.ghost.danger`
   and opens its own confirmation.
+- A harmless extra action (Show Sessions) is a `.btn.ghost` after the spacer and before Cancel
+  (§3.2). It is not the tertiary slot, which is reserved for a destructive action.
 - Submit errors render as a danger Notice directly **above** the footer, inside the body's end. Field
   errors render under the field (§8.5).
 - A disabled primary shows why in the footer's left slot as `--type-small` `--text-dim` text ("Choose
@@ -997,12 +1000,27 @@ stacks on the first. Desktop keeps stacked dialogs as above.
 - Body: **one or two sentences**: what happens, to which named object, and whether it can be undone.
   No mechanism, no ids.
 - Confirm button: `.btn.danger`, same verb as the title and the trigger. Cancel has initial focus.
+- **What it affects.** When the action affects named objects (the sessions an update interrupts),
+  list them as `detailRows` rather than drawing a list in `details`: one `.surface` of `.row.dense`
+  rows under the body, each a label that truncates on one line with its full text as a tooltip, an
+  optional trailing meta, and an optional inline status badge (`.status.inline`, §11.1). At most five
+  rows show; the rest read "and N more" in `--text-dim`, counting any the caller knows of but cannot
+  list (`detailRowsOverflow`). The rows are part of the dialog's accessible description. `details`
+  stays for content that is not a list, such as a mono preview.
+- **Naming the safe choice.** `cancelLabel` replaces "Cancel" when the safe choice has a better name
+  ("Keep Open", "Install Later"). It is still the secondary `.btn`, still the initial focus of a
+  destructive confirmation, and Escape, the scrim and Back still choose it.
+- **A harmless extra choice.** `secondaryAction` adds a `.btn.ghost` before Cancel (§7.3) for a
+  non-destructive alternative ("Show Sessions"). Choosing it closes the confirmation and runs the
+  action; the confirmation resolves as not confirmed. It is not shown on a phone (§7.5), so a flow
+  must still work without it.
 - Irreversible actions affecting many items ("Delete Group and Its Assignments") add a type-to-confirm
   field only when more than one item is affected.
 - **Type-to-confirm dialogs focus the name field**, not Cancel: the user must type before
   anything else can happen, and the danger button stays disabled until the name matches, so focus
   there cannot confirm by accident.
-- Non-destructive confirmations (Recover Session) use a primary button and no tone icon.
+- Non-destructive confirmations (Recover Session) use a primary button and no tone icon, and open
+  with focus on the primary.
 - `window.confirm` is banned; every confirmation goes through `useFeedback().confirm`.
 
 ### 7.5 Phone: Bottom Sheet
@@ -1012,7 +1030,8 @@ stacks on the first. Desktop keeps stacked dialogs as above.
 - Header 48px: title 16/600, close icon 44px hit.
 - Footer sticky at the bottom with the safe-area inset; **at most two buttons, side by side, equal
   width, 48px** (`--control-h-lg` coarse): Cancel left, primary right. A destructive tertiary moves
-  into the body end as a full-width ghost danger row.
+  into the body end as a full-width ghost danger row. A confirmation's harmless secondary action is
+  not shown (§7.4).
 - Long forms (New Session) open as a **full-height sheet** (`height: 100dvh`, no grabber, back
   arrow instead of close).
 - Nested dialogs push onto the sheet with a back arrow instead of replacing the parent. A
