@@ -77,10 +77,7 @@ export function SkillOrphanImportDialog({ runnerId, machineLabel, copy, onClose,
         {preview.importBlocker && <p className="form-error" role="alert">{preview.importBlocker}</p>}
         <p>Review every file, including scripts. Reading and importing never run skill contents.</p>
         <SkillCopyFileReview previousFiles={preview.previousFiles} files={preview.files} copyLabel="Copy" />
-        {preview.importable && needsAcceptance && <label className="field"><span>
-          <Checkbox label="Accept Version Diff and Update Existing Assignments" checked={accepted} disabled={busy} onChange={setAccepted} />
-          {" "}Accept Version Diff and Update Existing Assignments
-        </span></label>}
+        {preview.importable && needsAcceptance && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
       </>}
     </div>
   </Modal>;

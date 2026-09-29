@@ -218,6 +218,14 @@ function clickButton(container: HTMLDivElement, text: string): void {
   button.click();
 }
 
+/** Run Preset is a ChoiceRows group: a click on the row's `<label>` checks its native radio. */
+function choosePreset(container: HTMLDivElement, title: string): void {
+  const row = [...container.querySelectorAll<HTMLLabelElement>('[aria-label="Run Preset"] .choice-row')]
+    .find((candidate) => candidate.querySelector(".choice-row-title")?.textContent?.trim() === title);
+  assert.ok(row, `${title} preset is rendered`);
+  row.click();
+}
+
 test("run Project copy names every audience and the new transcript consequence", async () => {
   const expectations = [
     ["user", "Project Visibility: Only the Project Owner"],
@@ -262,7 +270,7 @@ test("workflow creation discloses Project visibility and how ready roles advance
     try {
       await act(async () => {
         selectByLabel(fixture.container, "Project", project.id);
-        clickButton(fixture.container, "Build + Review Workflow");
+        choosePreset(fixture.container, "Build + Review Workflow");
       });
       const copy = [...fixture.container.querySelectorAll("label")]
         .find((label) => label.querySelector(":scope > span")?.textContent === "Project")?.textContent ?? "";
@@ -306,7 +314,7 @@ test("workflow run submission sends the selected exact Project identity", async 
   try {
     await act(async () => {
       selectByLabel(fixture.container, "Project", project.id);
-      clickButton(fixture.container, "Build + Review Workflow");
+      choosePreset(fixture.container, "Build + Review Workflow");
       enterTask(fixture.container);
     });
     await act(async () => {});

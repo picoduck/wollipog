@@ -220,11 +220,9 @@ export function ProjectLocationDialog({
       <div className="project-location-picker">
         <p className="muted">Add an existing Location to this Project. Its other Project memberships and sessions will not change. If the folder is not registered yet, create a new Location from a connected machine.</p>
         {onboarding && (
-          <label className="project-location-generate-option">
-            <Checkbox checked={generateSetup} disabled={busyKey !== null} label="Generate Starter Config"
-              onChange={setGenerateSetup} />
-            <span><strong>Generate Starter Config</strong><small>After adding the Location, create .wollipog.json for review. No tools run, and nothing is staged or committed.</small></span>
-          </label>
+          <Checkbox className="project-location-generate-option" checked={generateSetup} disabled={busyKey !== null}
+            label="Generate Starter Config" onChange={setGenerateSetup}
+            helper="After adding the Location, create .wollipog.json for review. No tools run, and nothing is staged or committed." />
         )}
         <div className="project-location-create-section">
           <button

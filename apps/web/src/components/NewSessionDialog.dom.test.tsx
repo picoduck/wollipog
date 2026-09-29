@@ -242,16 +242,16 @@ async function selectProject(container: HTMLDivElement, value: string): Promise<
 }
 
 /**
- * Whether a ChoiceCard option is refused, by the attribute the primitive actually uses.
+ * Whether a ChoiceRow option is refused, by the attribute the primitive actually uses.
  *
- * `ChoiceCards` marks an unavailable option `aria-disabled` rather than setting the `disabled`
+ * `ChoiceRows` marks an unavailable option's input `aria-disabled` rather than setting `disabled`
  * property, deliberately: the DOM property removes the control from the tab order, so a keyboard
  * user could not reach the option to hear why it is unavailable. The Harness group moved onto the
  * primitive, so its assertions moved onto the same contract.
  */
 function cardRefused(card: Element | undefined): boolean {
   assert.ok(card, "the card is rendered even when it cannot be chosen");
-  return card.getAttribute("aria-disabled") === "true";
+  return card.querySelector("input")?.getAttribute("aria-disabled") === "true";
 }
 
 function createButton(container: HTMLDivElement): HTMLButtonElement {
@@ -295,9 +295,16 @@ function permissionPresetGroup(container: HTMLDivElement): Element {
   return group;
 }
 
-function permissionPresetCard(container: HTMLDivElement, title: string): HTMLButtonElement | undefined {
-  return [...permissionPresetGroup(container).querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-    .find((button) => button.querySelector(".ui-choice-card-title")?.textContent?.trim() === title);
+/** The ChoiceRow — the `<label>` that is the whole target — around each native radio in `scope`. */
+function radioRows(scope: ParentNode): HTMLLabelElement[] {
+  return [...scope.querySelectorAll<HTMLInputElement>('input[type="radio"]')]
+    .map((input) => input.closest("label"))
+    .filter((row): row is HTMLLabelElement => row !== null);
+}
+
+function permissionPresetCard(container: HTMLDivElement, title: string): HTMLLabelElement | undefined {
+  return radioRows(permissionPresetGroup(container))
+    .find((row) => row.querySelector(".choice-row-title")?.textContent?.trim() === title);
 }
 
 function submitWithEnter(container: HTMLDivElement): void {
@@ -533,8 +540,8 @@ test("recommitting the selected Project preserves an explicit Location", async (
   );
   try {
     const selected = () => fixture.container.querySelector(
-      '[role="radiogroup"][aria-label="Project Location"] [role="radio"][aria-checked="true"]',
-    );
+      '[role="radiogroup"][aria-label="Project Location"] input[type="radio"]:checked',
+    )?.closest("label");
     assert.match(selected()?.textContent ?? "", /wollipog-fork/);
 
     const input = combobox(fixture.container, "Project");
@@ -646,12 +653,12 @@ test("Additional Directories use shared multiple-choice cards without changing t
     await act(async () => { await selectProject(fixture.container, project.id); });
     const group = fixture.container.querySelector('[role="group"][aria-label="Additional Directories"]');
     assert.ok(group);
-    const option = group.querySelector<HTMLButtonElement>('[role="checkbox"]');
+    const option = group.querySelector('input[type="checkbox"]')?.closest("label");
     assert.ok(option);
-    assert.equal(option.getAttribute("aria-checked"), "false");
+    assert.equal(option.querySelector("input")?.checked.toString(), "false");
 
     await act(async () => { option.click(); });
-    assert.equal(option.getAttribute("aria-checked"), "true");
+    assert.equal(option.querySelector("input")?.checked.toString(), "true");
     await act(async () => { createButton(fixture.container).click(); });
     assert.deepEqual(fixture.requests[0]?.acpSessionContext, { additionalDirectories: [grant] });
   } finally {
@@ -675,7 +682,7 @@ test("saved-default recovery buttons name the agent they actually select", async
   );
   try {
     const action = [...unavailableFixture.container.querySelectorAll("button")].find((button) =>
-      button.textContent?.trim() === "Use Codex — Non-Interactive (codex exec)") as HTMLButtonElement | undefined;
+      button.textContent?.trim() === "Use Codex — Non-Interactive (codex exec)") as HTMLLabelElement | undefined;
     assert.ok(action, "the recovery action names Codex Exec rather than App Server");
     await act(async () => { action.click(); });
     assert.equal(loadAgentDefaults()[runner.runnerId], "codex-exec");
@@ -688,7 +695,7 @@ test("saved-default recovery buttons name the agent they actually select", async
   const missingFixture = await mountFixture({}, { runnerId: runner.runnerId });
   try {
     const action = [...missingFixture.container.querySelectorAll("button")].find((button) =>
-      button.textContent?.trim() === "Use Claude Code") as HTMLButtonElement | undefined;
+      button.textContent?.trim() === "Use Claude Code") as HTMLLabelElement | undefined;
     assert.ok(action, "the recovery action names Claude Code when that is the actual fallback");
   } finally {
     await unmountFixture(missingFixture);
@@ -999,7 +1006,7 @@ test("Native TUI orchestrator creation is gated by its own runner capability", a
     try {
       await act(async () => { await selectProject(fixture.container, project.id); });
       await choosePermissionPreset(fixture.container, "Orchestrator");
-      const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      const tui = radioRows(fixture.container)
         .find((button) => button.textContent?.includes("Native TUI"))!;
       assert.ok(tui);
       assert.equal(cardRefused(tui), protocolVersion < 112);
@@ -1033,7 +1040,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   });
   try {
     await act(async () => { await selectProject(ordinary.container, project.id); });
-    const tui = [...ordinary.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+    const tui = radioRows(ordinary.container)
       .find((button) => button.textContent?.includes("Native TUI"))!;
     assert.ok(tui);
     assert.equal(cardRefused(tui), false, "ordinary WSL Native TUI remains available");
@@ -1114,7 +1121,7 @@ test("WSL keeps ordinary Native TUI while Direct Orchestrator requires v124 and 
   try {
     await act(async () => { await selectProject(bridged.container, project.id); });
     assert.equal(createButton(bridged.container).disabled, false, "verified bridge enables Direct creation");
-    const tui = [...bridged.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+    const tui = radioRows(bridged.container)
       .find((button) => button.textContent?.includes("Native TUI"))!;
     assert.equal(cardRefused(tui), true, "WSL Orchestrator Native TUI stays fail-closed");
     await choosePermissionPreset(bridged.container, "Orchestrator");
@@ -1142,11 +1149,11 @@ test("saved Orchestrator default is visible and gates Native TUI without requiri
     }] }), undefined, strictOrchestratorDefaults);
     try {
       await act(async () => { await selectProject(fixture.container, project.id); });
-      assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-checked"), "true",
+      assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.querySelector("input")?.checked.toString(), "true",
         "a saved Orchestrator default selects the role without an explicit override");
       assert.match(fixture.container.textContent!, /Saved Default — Orchestrator/,
         "the saved default names itself in the always-visible Provider Permissions summary");
-      const tui = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      const tui = radioRows(fixture.container)
         .find((button) => button.textContent?.includes("Native TUI"))!;
       assert.equal(cardRefused(tui), protocolVersion < 112);
       if (protocolVersion === 112) {
@@ -1523,7 +1530,7 @@ test("a delayed Project preset hydrates once its exact Project and Location arri
     await act(async () => { fixture.socket.push(snapshot()); });
 
     assert.equal(combobox(fixture.container, "Project").value, "Wollipog");
-    const location = fixture.container.querySelector('[role="radio"][aria-checked="true"]');
+    const location = fixture.container.querySelector('input[type="radio"]:checked')?.closest("label");
     assert.equal(location?.textContent?.includes("/repos/wollipog"), true);
     assert.equal(createButton(fixture.container).disabled, false);
   } finally {
@@ -1632,10 +1639,10 @@ test("Native TUI is capability-gated, sends one-shot intent, and opens Terminal 
     assert.ok(harness);
     assert.match(harness.textContent ?? "", /Use structured chat, tool events, approval cards, and manager controls\./);
     assert.match(harness.textContent ?? "", /Usage accounting is unavailable\./);
-    const native = [...harness.querySelectorAll('button[role="radio"]')]
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
+    const native = radioRows(harness)
+      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
     assert.ok(native);
-    // `cardRefused`, not `.disabled`: ChoiceCards never sets the DOM property, so asserting it is
+    // `cardRefused`, not `.disabled`: ChoiceRows never sets the DOM property, so asserting it is
     // `false` would pass even for a refused card. The click below only means something if the
     // option is genuinely selectable.
     assert.equal(cardRefused(native), false);
@@ -1686,8 +1693,8 @@ test("Native TUI shows the content-free live provider accounting boundary", asyn
   });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
+    const native = radioRows(fixture.container)
+      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
     assert.ok(native);
     await act(async () => { native.click(); });
     assert.match(
@@ -1704,8 +1711,8 @@ test("Native TUI is disabled when the control plane does not advertise atomic la
   const fixture = await mountFixture();
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
+    const native = radioRows(fixture.container)
+      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
     assert.ok(native);
     assert.equal(cardRefused(native), true);
     // The reason now lives ON the refused card rather than in a sibling paragraph, so assert it
@@ -1730,8 +1737,8 @@ test("Native TUI initial launch fails closed against a v66 runner", async () => 
   });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
+    const native = radioRows(fixture.container)
+      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
     assert.ok(native);
     assert.equal(cardRefused(native), true);
     // The start-fence hint is the refused card's own reason now, not a sibling paragraph.
@@ -1753,8 +1760,8 @@ test("a failed atomic Native TUI launch leaves Terminal closed and surfaces the 
   }, undefined, "provider TUI exited");
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
+    const native = radioRows(fixture.container)
+      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
     assert.ok(native);
     await act(async () => { native.click(); });
     await act(async () => { createButton(fixture.container).click(); });
@@ -1785,8 +1792,8 @@ test("an ambiguous Native TUI launch retains one session and prevents duplicate 
   ));
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
+    const native = radioRows(fixture.container)
+      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
     assert.ok(native);
     await act(async () => { native.click(); });
     await act(async () => { createButton(fixture.container).click(); });
@@ -1820,8 +1827,8 @@ test("failed Native TUI compensation exposes the retained session and disables r
   ));
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    const native = [...fixture.container.querySelectorAll('button[role="radio"]')]
-      .find((button) => button.textContent?.includes("Native TUI")) as HTMLButtonElement | undefined;
+    const native = radioRows(fixture.container)
+      .find((button) => button.textContent?.includes("Native TUI")) as HTMLLabelElement | undefined;
     assert.ok(native);
     await act(async () => { native.click(); });
     await act(async () => { createButton(fixture.container).click(); });
@@ -1857,7 +1864,7 @@ test("both permission presets are on screen without opening anything", async () 
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
 
-    const cards = [...permissionPresetGroup(fixture.container).querySelectorAll('[role="radio"]')];
+    const cards = radioRows(permissionPresetGroup(fixture.container));
     assert.equal(cards.length, 2, "both presets are rendered");
     // No trigger, so nothing can be behind one. This is the assertion that would have failed
     // before the migration, when the group was a closed listbox with a single visible button.
@@ -1868,7 +1875,7 @@ test("both permission presets are on screen without opening anything", async () 
     assertNoDomNode(fixture.container.querySelector(".menu.listbox"), "and opens no list");
 
     assert.ok(permissionPresetCard(fixture.container, "Orchestrator"));
-    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-disabled"), null,
+    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.querySelector("input")?.getAttribute("aria-disabled"), null,
       "a supported Orchestrator is selectable");
   } finally {
     await unmountFixture(fixture);
@@ -1885,7 +1892,7 @@ test("an unsupported Orchestrator is disabled and says why, rather than vanishin
 
     const orchestrator = permissionPresetCard(fixture.container, "Orchestrator");
     assert.ok(orchestrator, "Orchestrator is rendered even where it cannot be chosen");
-    assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
+    assert.equal(orchestrator.querySelector("input")?.getAttribute("aria-disabled"), "true");
     assert.match(orchestrator.textContent ?? "", /runner is too old to orchestrate child sessions/);
     assert.doesNotMatch(orchestrator.textContent ?? "", /agent does not offer/,
       "an old runner cannot establish whether its missing capability is agent-specific");
@@ -1893,8 +1900,8 @@ test("an unsupported Orchestrator is disabled and says why, rather than vanishin
     // Disabled, not merely styled: clicking must not select it, and the reason must be readable
     // rather than living in a `title` a touch user cannot reach.
     await act(async () => { orchestrator.click(); });
-    assert.equal(orchestrator.getAttribute("aria-checked"), "false");
-    assert.ok(orchestrator.querySelector(".ui-choice-card-reason"));
+    assert.equal(orchestrator.querySelector("input")?.checked.toString(), "false");
+    assert.ok(orchestrator.querySelector(".choice-row-reason"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -1933,11 +1940,11 @@ test("an old Codex on unverified WSL reports both independent Orchestrator block
     await act(async () => { await selectProject(fixture.container, project.id); });
     const orchestrator = permissionPresetCard(fixture.container, "Orchestrator");
     assert.ok(orchestrator);
-    assert.equal(orchestrator.getAttribute("aria-disabled"), "true");
+    assert.equal(orchestrator.querySelector("input")?.getAttribute("aria-disabled"), "true");
     assert.match(orchestrator.textContent ?? "", /Upgrade Codex to 0\.154\.0 or newer/);
     assert.match(orchestrator.textContent ?? "", /verified Direct WSL bridge and a bubblewrap-isolated runner/);
     await act(async () => { orchestrator.click(); });
-    assert.equal(orchestrator.getAttribute("aria-checked"), "false", "mixed constraints remain fail closed");
+    assert.equal(orchestrator.querySelector("input")?.checked.toString(), "false", "mixed constraints remain fail closed");
   } finally {
     await unmountFixture(fixture);
   }
@@ -1946,7 +1953,7 @@ test("an old Codex on unverified WSL reports both independent Orchestrator block
 test("an unavailable Project Location is refused with the availability as its reason", async () => {
   // The bespoke `.loc-pick` button used the DOM `disabled` property, which took the option out of
   // the tab order — so the availability badge explaining WHY it could not be chosen was reachable
-  // by mouse and by nothing else. On ChoiceCards it is `aria-disabled`, and the reason is a
+  // by mouse and by nothing else. On ChoiceRows it is `aria-disabled`, and the reason is a
   // sentence on the card rather than a badge the user has to interpret.
   const offlineRunner: RunnerView = { ...runner, status: "offline" };
   const fixture = await mountFixture({
@@ -1961,15 +1968,15 @@ test("an unavailable Project Location is refused with the availability as its re
     const group = fixture.container.querySelector('[role="radiogroup"][aria-label="Project Location"]');
     assert.ok(group, "Project Location renders as a choice group");
 
-    const card = [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')][0];
+    const card = radioRows(group)[0];
     assert.ok(card);
-    assert.equal(card.getAttribute("aria-disabled"), "true");
+    assert.equal(card.querySelector("input")?.getAttribute("aria-disabled"), "true");
     assert.match(card.textContent ?? "", /Runner Offline/);
     assert.match(card.textContent ?? "", /cannot host a session right now/);
 
     // Refused, not merely styled: clicking must not select it or enable creation.
     await act(async () => { card.click(); });
-    assert.equal(card.getAttribute("aria-checked"), "false");
+    assert.equal(card.querySelector("input")?.checked.toString(), "false");
     assert.equal(createButton(fixture.container).disabled, true);
   } finally {
     await unmountFixture(fixture);
@@ -1986,7 +1993,7 @@ test("the Location groups and Harness share one control family", async () => {
     for (const label of ["Project Location", "Session Role", "Harness"]) {
       const group = fixture.container.querySelector(`[role="radiogroup"][aria-label="${label}"]`);
       assert.ok(group, `${label} is a labelled radiogroup`);
-      assert.ok(group.querySelector(".ui-choice-card"), `${label} uses the shared Choice Card`);
+      assert.ok(group.querySelector(".choice-row"), `${label} uses the shared ChoiceRow`);
     }
     // And nothing bespoke is left from the families this PR retired.
     assertNoDomNode(fixture.container.querySelector(".loc-pick"));
@@ -2139,7 +2146,7 @@ test("an additive Codex Orchestrator is offered where the audited sandbox is una
   } });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-disabled"), null,
+    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.querySelector("input")?.getAttribute("aria-disabled"), null,
       "the role is offered wherever the runner advertises the additive launch");
     await choosePermissionPreset(fixture.container, "Orchestrator");
     const providerPermissions = fixture.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
@@ -2257,10 +2264,10 @@ test("choosing Normal explicitly overrides a saved Orchestrator harness default 
   }] }));
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-checked"), "true");
+    assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.querySelector("input")?.checked.toString(), "true");
     assert.match(fixture.container.textContent!, /Choose Normal to ignore it for this session/);
     await choosePermissionPreset(fixture.container, "Normal");
-    assert.equal(permissionPresetCard(fixture.container, "Normal")?.getAttribute("aria-checked"), "true");
+    assert.equal(permissionPresetCard(fixture.container, "Normal")?.querySelector("input")?.checked.toString(), "true");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.role, "normal");
     assert.equal(fixture.requests[0]?.config?.permissionMode, undefined);

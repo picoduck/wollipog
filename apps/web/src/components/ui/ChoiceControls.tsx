@@ -89,26 +89,104 @@ export function InlineListbox<T>({
   );
 }
 
-/** A labelled binary choice with the platform checkbox interaction contract. */
+/**
+ * The 16px marker a Checkbox row or a ChoiceRow leads with (§8.4), drawn over a real input.
+ *
+ * The input IS the box — `appearance: none` restyles it rather than hiding it — so focus, `:checked`,
+ * `:disabled` and the platform's keyboard contract all belong to the element the user sees. The
+ * check and the radio dot are siblings the stylesheet reveals from `input:checked`, which is how
+ * the drawn state and the announced state come from one value.
+ */
+function ChoiceMark({ type, className, ...input }: {
+  type: "checkbox" | "radio";
+  className?: string;
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, "type" | "className">) {
+  return (
+    <span className={`${type === "checkbox" ? "checkbox-mark" : "radio-mark"}${className ? ` ${className}` : ""}`}>
+      <input type={type} {...input} />
+      {type === "checkbox"
+        ? <CheckIcon size={12} className="checkbox-check" />
+        : <span className="radio-dot" aria-hidden="true" />}
+    </span>
+  );
+}
+
+/**
+ * A labelled binary choice: a 16px box with its visible label, and the whole row as the target.
+ *
+ * The bare 13px input this replaces had only an `aria-label`, so every caller drew its own label
+ * beside it and only the box itself was clickable — far below 44px on a phone. The row is a
+ * `<label>`, so a click anywhere on it toggles the input and Space toggles it from the keyboard.
+ *
+ * Copy (§8.4, §17.1): an ordinary label is Title Case; a `consent` label is a sentence the user
+ * agrees to ("I understand this deletes 3 assignments") and stays in sentence case. The flag is
+ * what `ui-copy-style.test.ts` reads to tell the two apart.
+ */
 export function Checkbox({
   checked,
   disabled,
   label,
+  helper,
+  consent,
+  ariaLabel,
+  labelHidden,
+  className,
+  title,
   onChange,
 }: {
   checked: boolean;
   disabled?: boolean;
+  /** The visible label; Title Case unless `consent`. */
   label: string;
+  /** An optional second line in `--text-dim`, announced as the checkbox's description. */
+  helper?: ReactNode;
+  /** A sentence the user agrees to; its label stays in sentence case. */
+  consent?: boolean;
+  /**
+   * A fuller accessible name where the visible label repeats across a list ("Reviewed" beside every
+   * evidence item). It must contain the visible label, so speech input can still say what it sees.
+   */
+  ariaLabel?: string;
+  /** Icon-only use inside a dense row that is already labelled elsewhere: no visible label. */
+  labelHidden?: boolean;
+  className?: string;
+  title?: string;
   onChange: (checked: boolean) => void;
 }) {
+  const ids = useId();
+  const change = (event: React.ChangeEvent<HTMLInputElement>) => onChange(event.target.checked);
+  if (labelHidden) {
+    return (
+      <ChoiceMark
+        type="checkbox"
+        className={className}
+        checked={checked}
+        disabled={disabled}
+        aria-label={ariaLabel ?? label}
+        title={title}
+        onChange={change}
+      />
+    );
+  }
+  const labelId = `${ids}-label`;
+  const helperId = `${ids}-helper`;
   return (
-    <input
-      type="checkbox"
-      checked={checked}
-      disabled={disabled}
-      aria-label={label}
-      onChange={(event) => onChange(event.target.checked)}
-    />
+    <label
+      className={`checkbox${disabled ? " is-disabled" : ""}${className ? ` ${className}` : ""}`}
+      title={title}
+    >
+      <ChoiceMark
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabel ? undefined : labelId}
+        aria-describedby={helper ? helperId : undefined}
+        onChange={change}
+      />
+      <span className="checkbox-label" id={labelId}>{label}</span>
+      {helper && <span className="checkbox-helper" id={helperId}>{helper}</span>}
+    </label>
   );
 }
 
@@ -126,7 +204,8 @@ export function Checkbox({
  * The choice of THREE is about shape, not taste — each answers a different question:
  *
  *   SegmentedControl  2-4 short, mutually exclusive options, always visible. A filter, a mode.
- *   ChoiceCard        options that need a description or an icon to choose between. A preset.
+ *   ChoiceRows        options that need a description or an icon to choose between. A preset.
+ *   ChoiceList        a compact list of radio rows with a trailing value. A worktree.
  *   Select            data-backed options that fit ordinary listbox navigation. A machine.
  *   SearchableCombobox data-backed options users need to narrow by typing. A project, an agent.
  *
@@ -220,8 +299,8 @@ export function SegmentedControl<T extends string>({
         role="radiogroup"
         aria-label={label}
         aria-describedby={groupReason ? reasonId : undefined}
-        // See the note beside ChoiceCards' handler: disabled options stay in the arrow order so
-        // their reason is reachable without a mouse.
+        // Disabled options stay in the arrow order so their reason is reachable without a mouse;
+        // activating one is refused by its own `onClick`, so focus moves and nothing is selected.
         onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}
       >
         {options.map((option, index) => {
@@ -265,11 +344,12 @@ export function SegmentedControl<T extends string>({
 }
 
 /* ------------------------------------------------------------------------------------------------
- * ChoiceCard
+ * ChoiceRow
  * ---------------------------------------------------------------------------------------------- */
 
-export interface ChoiceCardOption<T extends string> {
+export interface ChoiceRowOption<T extends string> {
   value: T;
+  /** Title Case label. It alone (with `status`) is the option's accessible name. */
   title: string;
   /**
    * Short status shown BESIDE the title — a kind, a state, an availability.
@@ -284,35 +364,128 @@ export interface ChoiceCardOption<T extends string> {
    * mark decorative parts `aria-hidden` themselves.
    */
   status?: ReactNode;
+  /**
+   * One line in `--text-dim`, ellipsized on desktop and wrapped to two lines on phones. The full
+   * text stays in the accessible description, and in a tooltip when it is a string.
+   */
   description?: ReactNode;
   icon?: ReactNode;
+  /** The trailing slot: a value or a status that belongs at the row's end. */
+  meta?: ReactNode;
   disabled?: boolean;
+  /** Why it is disabled. Rendered as the row's second line — §11.3: never hide a setting that could exist. */
   disabledReason?: string;
 }
 
 /**
- * Options that need room to explain themselves.
+ * One row of a choice group (§8.4): a leading 16px radio or checkbox, the title, an optional
+ * one-line description, an optional icon and a trailing meta slot.
+ *
+ * The row is a `<label>` around a real input, so the whole row is the target, arrow keys and Space
+ * are the platform's, and the selected look (`--surface-selected` with the accent control) is drawn
+ * from `input:checked` — the look can never disagree with what is announced, because there is only
+ * one value (the §8.4 rule from #1805).
+ *
+ * The marker leads and is aligned to the title's FIRST line, so in a group whose rows have one-line
+ * and two-line text the markers still form one column. The cards this replaces centred a trailing
+ * marker on the whole card, so two cards of different heights put their markers at different
+ * heights and the eye had to find each one.
+ *
+ * An unavailable row cannot be checked by click, Space or arrows, but stays reachable; it keeps its
+ * size, reads in faint text and shows its reason in place of the description. The description stays
+ * in its accessible description, beside the reason.
+ */
+export function ChoiceRow({
+  type,
+  name,
+  checked,
+  onSelect,
+  title,
+  status,
+  description,
+  icon,
+  meta,
+  disabled,
+  disabledReason,
+  compact,
+}: Omit<ChoiceRowOption<string>, "value"> & {
+  type: "radio" | "checkbox";
+  /** The radio group's shared name, which is what makes arrows move between its rows. */
+  name?: string;
+  checked: boolean;
+  /** A radio calls this when it becomes checked; a checkbox on every toggle. */
+  onSelect: () => void;
+  /** The ChoiceList form: one line, no description. */
+  compact?: boolean;
+}) {
+  const ids = useId();
+  const titleId = `${ids}-title`;
+  const descriptionId = `${ids}-desc`;
+  const reasonId = `${ids}-reason`;
+  const showReason = Boolean(disabled && disabledReason);
+  const describedBy = [
+    description ? descriptionId : null,
+    showReason ? reasonId : null,
+  ].filter(Boolean).join(" ") || undefined;
+  const select = () => { if (!disabled) onSelect(); };
+  return (
+    <label
+      className={`choice-row${compact ? " compact" : ""}${disabled ? " is-disabled" : ""}`}
+    >
+      <ChoiceMark
+        type={type}
+        name={name}
+        checked={checked}
+        // `aria-disabled`, not `disabled`: a natively disabled radio drops out of the arrow order,
+        // so the row and its reason would be reachable by mouse and by nothing else. The change is
+        // refused instead — `onSelect` is never called, and React restores the checked input the
+        // controlled value names — so arrows reach it, a screen reader announces it with its
+        // reason, and nothing is selected.
+        aria-disabled={disabled || undefined}
+        aria-labelledby={titleId}
+        aria-describedby={describedBy}
+        onChange={select}
+        // A checked radio fires no `change` when it is clicked (or Space is pressed on it) again,
+        // but the cards this replaced reported that re-selection, and callers rely on it: New
+        // Session records an explicit role override, Move to Project re-applies the choice. `checked`
+        // is the value before this click, so a first selection is reported once, by `change`.
+        onClick={type === "radio" && checked ? select : undefined}
+      />
+      {icon && <span className="choice-row-icon" aria-hidden="true">{icon}</span>}
+      <span className="choice-row-body">
+        <span className="choice-row-title" id={titleId}>
+          {title}
+          {status && <span className="choice-row-status">{status}</span>}
+        </span>
+        {description && (
+          <span
+            className={showReason ? "sr-only" : "choice-row-desc"}
+            id={descriptionId}
+            title={typeof description === "string" ? description : undefined}
+          >
+            {description}
+          </span>
+        )}
+        {showReason && <small className="choice-row-reason" id={reasonId}>{disabledReason}</small>}
+      </span>
+      {meta && <span className="choice-row-meta">{meta}</span>}
+    </label>
+  );
+}
+
+/**
+ * A group of ChoiceRows: options that need room to explain themselves.
  *
  * Single and multiple selection are the same component because they looked identical in six
  * different places and differed only in role — `.loc-pick` and `.workflow-preset` were single,
- * `.agent-pick` and `.advanced-agent-pick` were checkbox-backed multiples, and a user could not
- * tell which was which until they clicked a second card and the first one either stayed on or
- * turned off. The role now says it, and so does the marker: a dot for one-of, a tick for many-of.
- */
-/*
- * Arrows reach a DISABLED option; only activating it is refused.
+ * `.agent-pick` and `.advanced-agent-pick` were checkbox-backed multiples. The input type says which
+ * it is, and so does the marker: a ring with a dot for one-of, a box with a tick for many-of.
  *
- * `handleRovingChoiceKeyDown` filters `aria-disabled` out of the roving set by default, and neither
- * primitive opted out — so an option the comments above promise is "rendered, never hidden" was
- * reachable by mouse and by nothing else. `rovingChoiceStop` never puts the tab stop on a disabled
- * option either, which left the arrows as the only way in, and they skipped it.
- *
- * Including them is safe because the activation guard lives on the option: the handler clicks
- * whatever it focuses, and each `onClick` below returns early when `option.disabled`. So focus
- * moves, the screen reader announces the option and its reason, and nothing is selected — which is
- * what the ARIA practices recommend for a radio that must explain why it is unavailable.
+ * A single group is native radios sharing one `name`, so Tab reaches the checked row (or the first
+ * row when nothing is checked) and arrows move and select within the group — the
+ * behaviour the hand-written roving handler used to imitate.
  */
-export function ChoiceCards<T extends string>({
+export function ChoiceRows<T extends string>({
   options,
   value,
   onChange,
@@ -321,65 +494,100 @@ export function ChoiceCards<T extends string>({
   className,
   id,
 }: {
-  options: readonly ChoiceCardOption<T>[];
+  options: readonly ChoiceRowOption<T>[];
   onChange: (value: T) => void;
+  /** The group's accessible name. Required: an unlabelled radiogroup announces only its options. */
   label: string;
   className?: string;
   id?: string;
 } & ({ multiple: true; value: readonly NoInfer<T>[] } | { multiple?: false; value: NoInfer<T> | null })) {
   // The mode decides the shape, so the types cannot disagree with it: a single mode given an array
-  // silently selected nothing, and a multiple mode given a scalar selected one card and then could
-  // never deselect it. Both were expressible and neither was meaningful.
-  // `null` is a real single-choice state — an approval question starts unanswered — and the type
-  // rejecting it forced an adopter into a cast or a fake selection. Normalised to an empty set, so
-  // the roving fallback's "nothing selected" branch handles it.
+  // silently selected nothing, and a multiple mode given a scalar selected one row and then could
+  // never deselect it. `null` is a real single-choice state — an approval question starts
+  // unanswered — so it is normalised to an empty set rather than forced into a fake selection.
   const selectedValues = multiple ? value : value === null ? [] : [value as T];
-  const isSelected = (option: ChoiceCardOption<T>) => selectedValues.includes(option.value);
-  // Single-select cards rove exactly as the segmented control does, so they share the rule rather
-  // than restating it — the restatement had the same all-disabled hole, in the same shape.
-  // Multi-select does not rove: every checkbox is its own stop.
-  const stopAt = rovingChoiceStop(options.map((option) => ({
-    selected: isSelected(option),
-    disabled: option.disabled,
-  })));
+  const name = useId();
   return (
     <div
       id={id}
-      className={`ui-choice-cards${className ? ` ${className}` : ""}`}
+      className={`choice-rows${className ? ` ${className}` : ""}`}
       role={multiple ? "group" : "radiogroup"}
       aria-label={label}
-      onKeyDown={multiple ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}
     >
-      {options.map((option, index) => {
-        const selected = isSelected(option);
-        return (
-          <button
-            key={option.value}
-            type="button"
-            role={multiple ? "checkbox" : "radio"}
-            aria-checked={selected}
-            aria-disabled={option.disabled || undefined}
-            tabIndex={multiple || index === stopAt ? 0 : -1}
-            className={`ui-choice-card${selected ? " is-selected" : ""}${option.disabled ? " is-disabled" : ""}`}
-            onClick={() => { if (!option.disabled) onChange(option.value); }}
-          >
-            {option.icon && <span className="ui-choice-card-icon" aria-hidden="true">{option.icon}</span>}
-            <span className="ui-choice-card-body">
-              <span className="ui-choice-card-title">
-                {option.title}
-                {option.status && <span className="ui-choice-card-status">{option.status}</span>}
-              </span>
-              {option.description && <span className="ui-choice-card-desc">{option.description}</span>}
-              {option.disabled && option.disabledReason && (
-                <small className="ui-choice-card-reason">{option.disabledReason}</small>
-              )}
-            </span>
-            <span className={`ui-choice-mark${multiple ? " is-multi" : ""}`} aria-hidden="true">
-              {selected && multiple ? <CheckIcon size={13} /> : null}
-            </span>
-          </button>
-        );
-      })}
+      {options.map((option) => (
+        <ChoiceRow
+          key={option.value}
+          type={multiple ? "checkbox" : "radio"}
+          name={multiple ? undefined : name}
+          checked={selectedValues.includes(option.value)}
+          onSelect={() => onChange(option.value)}
+          title={option.title}
+          status={option.status}
+          description={option.description}
+          icon={option.icon}
+          meta={option.meta}
+          disabled={option.disabled}
+          disabledReason={option.disabledReason}
+        />
+      ))}
+    </div>
+  );
+}
+
+export interface ChoiceListOption<T extends string> {
+  value: T;
+  /** Title Case label. */
+  label: string;
+  /** The trailing value — a count, a branch, a time. */
+  meta?: ReactNode;
+  icon?: ReactNode;
+  disabled?: boolean;
+  disabledReason?: string;
+}
+
+/**
+ * The compact ChoiceRow group (`.choice-list`): radio rows with a trailing value and no
+ * description, for pickers inside sheets and presets — a list to pick from rather than options to
+ * weigh. Same native radios, same leading marker column, a single-line row.
+ */
+export function ChoiceList<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+  className,
+  id,
+}: {
+  options: readonly ChoiceListOption<T>[];
+  value: NoInfer<T> | null;
+  onChange: (value: T) => void;
+  label: string;
+  className?: string;
+  id?: string;
+}) {
+  const name = useId();
+  return (
+    <div
+      id={id}
+      className={`choice-list${className ? ` ${className}` : ""}`}
+      role="radiogroup"
+      aria-label={label}
+    >
+      {options.map((option) => (
+        <ChoiceRow
+          key={option.value}
+          compact
+          type="radio"
+          name={name}
+          checked={option.value === value}
+          onSelect={() => onChange(option.value)}
+          title={option.label}
+          icon={option.icon}
+          meta={option.meta}
+          disabled={option.disabled}
+          disabledReason={option.disabledReason}
+        />
+      ))}
     </div>
   );
 }

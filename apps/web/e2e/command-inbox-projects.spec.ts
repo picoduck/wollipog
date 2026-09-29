@@ -913,8 +913,8 @@ test("Project launch actions submit stable Project and Location identity", async
 
   const dialog = page.getByRole("dialog", { name: "New Session" });
   await expect(dialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
-  await expect(dialog.getByRole("radiogroup", { name: "Project Location" }).getByRole("radio", { name: /\/repos\/alpha$/ }))
-    .toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByRole("radiogroup", { name: "Project Location" }).locator(".choice-row").filter({ hasText: /\/repos\/alpha$/ }).getByRole("radio"))
+    .toBeChecked();
   await dialog.getByRole("button", { name: "Create Session" }).click();
   await expect(dialog).toBeHidden();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
@@ -948,7 +948,7 @@ test("Native TUI launch sends the harness intent and opens Terminal only after c
 
   const dialog = page.getByRole("dialog", { name: "New Session" });
   const harness = dialog.getByRole("radiogroup", { name: "Harness" });
-  await expect(harness.getByRole("radio", { name: /Direct/ })).toHaveAttribute("aria-checked", "true");
+  await expect(harness.getByRole("radio", { name: /Direct/ })).toBeChecked();
   await harness.getByRole("radio", { name: /Native TUI/ }).click();
   await dialog.getByRole("button", { name: "Create Session" }).click();
   await expect(dialog).toBeHidden();
@@ -1033,7 +1033,7 @@ test("C defaults New Session to the active single-Project Inbox tab", async ({ p
   const dialog = page.getByRole("dialog", { name: "New Session" });
   await expect(dialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
   await expect(dialog.getByRole("radiogroup", { name: "Project Location" })
-    .getByRole("radio", { name: /\/repos\/alpha$/ })).toHaveAttribute("aria-checked", "true");
+    .locator(".choice-row").filter({ hasText: /\/repos\/alpha$/ }).getByRole("radio")).toBeChecked();
 });
 
 test.describe("with a touch pointer", () => {
@@ -1133,10 +1133,10 @@ test("multi-Location Projects without a default require an explicit Location", a
 
   const dialog = page.getByRole("dialog", { name: "New Session" });
   const locations = dialog.getByRole("radiogroup", { name: "Project Location" });
-  const first = locations.getByRole("radio", { name: /\/repos\/alpha$/ });
-  const second = locations.getByRole("radio", { name: /\/repos\/alpha-secondary$/ });
-  await expect(first).toHaveAttribute("aria-checked", "false");
-  await expect(second).toHaveAttribute("aria-checked", "false");
+  const first = locations.locator(".choice-row").filter({ hasText: /\/repos\/alpha$/ }).getByRole("radio");
+  const second = locations.locator(".choice-row").filter({ hasText: /\/repos\/alpha-secondary$/ }).getByRole("radio");
+  await expect(first).not.toBeChecked();
+  await expect(second).not.toBeChecked();
   await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
 
   await second.click();
@@ -1178,8 +1178,8 @@ test("New Session creates a durable Project and links its first Location inline"
   const loose = addLocation.getByRole("listitem").filter({ hasText: "/repos/loose" });
   await loose.getByRole("button", { name: "Add to Project" }).click();
   await expect(newSession).toBeVisible();
-  await expect(newSession.getByRole("radiogroup", { name: "Project Location" }).getByRole("radio", { name: /\/repos\/loose$/ }))
-    .toHaveAttribute("aria-checked", "true");
+  await expect(newSession.getByRole("radiogroup", { name: "Project Location" }).locator(".choice-row").filter({ hasText: /\/repos\/loose$/ }).getByRole("radio"))
+    .toBeChecked();
   await newSession.getByRole("button", { name: "Create Session" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
     .toMatchObject({
@@ -1288,7 +1288,7 @@ test("Project-first creation distinguishes same names and explains multi-locatio
     .getByRole("option").filter({ hasText: "Alpha" })).toHaveCount(2);
   await page.keyboard.press("Escape");
   await expect(locationChoices.getByRole("radio")).toHaveCount(2);
-  await expect(locationChoices.getByRole("radio", { name: /\/repos\/alpha$/ })).toHaveAttribute("aria-checked", "true");
+  await expect(locationChoices.locator(".choice-row").filter({ hasText: /\/repos\/alpha$/ }).getByRole("radio")).toBeChecked();
 
   await chooseNewSessionProject(dialog, "Gamma");
   await expect(dialog.getByText("No Project Locations", { exact: true })).toBeVisible();
@@ -1299,8 +1299,8 @@ test("Project-first creation distinguishes same names and explains multi-locatio
   await expect(dialog.getByRole("button", { name: "Create Session" })).toBeDisabled();
 
   await chooseNewSessionProject(dialog, "/repos/alpha-copy", "/repos/alpha-copy");
-  await expect(dialog.getByRole("radiogroup", { name: "Project Location" }).getByRole("radio", { name: /\/repos\/alpha-copy$/ }))
-    .toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByRole("radiogroup", { name: "Project Location" }).locator(".choice-row").filter({ hasText: /\/repos\/alpha-copy$/ }).getByRole("radio"))
+    .toBeChecked();
   await dialog.getByRole("button", { name: "Create Session" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.lastCreateSessionRequest()))
     .toMatchObject({ projectId: "alpha-copy", projectLocationId: "location-alpha-copy" });
@@ -1446,7 +1446,7 @@ test("an imported session can link its verified Location while moving to a manag
   await page.getByRole("button", { name: "Expand Session" }).click();
   const moveDialog = await openMoveToProjectDialog(page);
   const gammaChoice = moveDialog.getByRole("radio", { name: /Gamma/ });
-  await expect(gammaChoice).toContainText("Link this imported Location when moving.");
+  await expect(gammaChoice).toHaveAccessibleDescription(/Link this imported Location when moving\./);
   await gammaChoice.click();
 
   const confirmation = page.getByRole("dialog", { name: "Link Location and Move Session" });
@@ -1482,7 +1482,7 @@ test("personal sessions require explicit confirmation before joining a team Proj
   await page.getByRole("button", { name: "Expand Session" }).click();
   const moveDialog = await openMoveToProjectDialog(page);
   const alphaChoice = moveDialog.getByRole("radio", { name: /Alpha/ });
-  await expect(alphaChoice).toContainText("Team Project. Linked to this exact Location.");
+  await expect(alphaChoice).toHaveAccessibleDescription(/Team Project\. Linked to this exact Location\./);
   await alphaChoice.click();
 
   const confirmation = page.getByRole("dialog", { name: "Share and Move Session" });

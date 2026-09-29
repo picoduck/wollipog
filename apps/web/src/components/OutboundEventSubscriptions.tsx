@@ -149,15 +149,13 @@ export function OutboundEventSubscriptions({
             placeholder="https://events.example.com/wollipog" maxLength={2048}
             onInput={(event) => setCallbackUrl(event.currentTarget.value)} /></label>
           <fieldset className="automation-span"><legend>Event Kinds</legend><div className="outbound-event-kinds">
-            {EVENT_KINDS.map((kind) => <label key={kind}><Checkbox label={eventLabel(kind)}
+            {EVENT_KINDS.map((kind) => <Checkbox key={kind} label={eventLabel(kind)}
               checked={eventKinds.includes(kind)} onChange={(checked) => setEventKinds((current) => checked
                 ? [...current, kind]
-                : current.filter((value) => value !== kind))} />{eventLabel(kind)}</label>)}
+                : current.filter((value) => value !== kind))} />)}
           </div></fieldset>
-          <label className="automation-enable"><Checkbox label="Include Session Name" checked={includeSessionName}
-            onChange={setIncludeSessionName} />Include Session Name</label>
-          <label className="automation-enable"><Checkbox label="Include Question Title" checked={includeQuestionTitle}
-            onChange={setIncludeQuestionTitle} />Include Question Title</label>
+          <div><Checkbox label="Include Session Name" checked={includeSessionName} onChange={setIncludeSessionName} /></div>
+          <div><Checkbox label="Include Question Title" checked={includeQuestionTitle} onChange={setIncludeQuestionTitle} /></div>
         </div>
         <p className="automation-hint">Session names and question titles are excluded unless selected. Prompts, transcripts, answers, and tool input are never delivered.</p>
         <div className="automation-editor-actions"><button className="btn primary sm" type="button"

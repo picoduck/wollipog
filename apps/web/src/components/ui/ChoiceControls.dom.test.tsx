@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ChoiceCards, SegmentedControl, Select } from "./ChoiceControls.js";
+import { Checkbox, ChoiceList, ChoiceRows, SegmentedControl, Select } from "./ChoiceControls.js";
 
 /**
  * What made seventeen patterns indistinguishable was never their looks alone — it was that the
@@ -75,47 +75,134 @@ const PRESETS = [
   { value: "review", title: "Reviewed", description: "Two agents and a review pass" },
 ] as const;
 
-test("ChoiceCards says one-of or many-of in its roles", () => {
+test("ChoiceRows are native radios or checkboxes, grouped by role", () => {
+  // Buttons with `role="radio"` kept selection in ARIA and styling; a real input keeps it in the
+  // form control, and its arrow keys, Space and `:checked` come from the platform.
   const single = render(
-    <ChoiceCards options={PRESETS} value="quick" onChange={() => undefined} label="Preset" />,
+    <ChoiceRows options={PRESETS} value="quick" onChange={() => undefined} label="Preset" />,
   );
   assert.match(single, /role="radiogroup"/);
-  assert.equal(single.match(/role="radio"/g)?.length, 2);
+  assert.equal(single.match(/<input type="radio"/g)?.length, 2);
+  assert.doesNotMatch(single, /role="radio"/);
+  // One shared name is what makes the browser treat them as one group for arrows and Tab.
+  const names = [...single.matchAll(/name="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(names.length, 2);
+  assert.equal(names[0], names[1]);
+  assert.equal(single.match(/checked=""/g)?.length, 1);
 
   const multi = render(
-    <ChoiceCards options={PRESETS} value={["quick", "review"]} onChange={() => undefined} label="Agents" multiple />,
+    <ChoiceRows options={PRESETS} value={["quick", "review"]} onChange={() => undefined} label="Agents" multiple />,
   );
   assert.match(multi, /role="group"/);
-  assert.equal(multi.match(/role="checkbox"/g)?.length, 2);
-  assert.equal(multi.match(/aria-checked="true"/g)?.length, 2);
+  assert.equal(multi.match(/<input type="checkbox"/g)?.length, 2);
+  assert.equal(multi.match(/checked=""/g)?.length, 2);
 });
 
-test("a disabled card explains itself in the card, not only in a tooltip", () => {
+test("each row is a label around its input, so the whole row is the target", () => {
+  const html = render(
+    <ChoiceRows options={PRESETS} value="quick" onChange={() => undefined} label="Preset" />,
+  );
+  // The marker LEADS: the input comes before the title in every row.
+  const rows = html.match(/<label class="choice-row[^"]*">[\s\S]*?<\/label>/g) ?? [];
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.ok(row.indexOf("<input") < row.indexOf("choice-row-title"), "the marker leads the row");
+  }
+});
+
+test("a row's name is its title and its description is announced as a description", () => {
+  const html = render(
+    <ChoiceRows options={PRESETS} value="quick" onChange={() => undefined} label="Preset" />,
+  );
+  const labelledBy = /aria-labelledby="([^"]+)"/.exec(html)?.[1];
+  assert.ok(labelledBy);
+  assert.match(html, new RegExp(`id="${labelledBy}"[^>]*>Quick<`));
+  const describedBy = /aria-describedby="([^"]+)"/.exec(html)?.[1];
+  assert.ok(describedBy);
+  // The full text, even though the stylesheet cuts it to one line on desktop; a string also
+  // becomes the tooltip.
+  assert.match(html, new RegExp(`id="${describedBy}" title="One agent, no review">One agent, no review<`));
+});
+
+test("a disabled row explains itself in the row, not only in a tooltip", () => {
   const options = [
     { value: "local", title: "Local", description: "Run on this machine" },
-    { value: "box", title: "Remote Box", disabled: true, disabledReason: "No box is connected" },
+    { value: "box", title: "Remote Box", description: "Run over SSH", disabled: true, disabledReason: "No box is connected" },
   ] as const;
   const html = render(
-    <ChoiceCards options={options} value="local" onChange={() => undefined} label="Location" />,
+    <ChoiceRows options={options} value="local" onChange={() => undefined} label="Location" />,
   );
   // A `title` is invisible on touch and to most screen readers. §11.3: every disabled control
   // carries a <small> reason, and never hide a setting that could exist.
-  assert.match(html, /<small[^>]*>No box is connected<\/small>/);
+  assert.match(html, /<small class="choice-row-reason"[^>]*>No box is connected<\/small>/);
+  // `aria-disabled` rather than `disabled`, so arrows still reach it.
   assert.match(html, /aria-disabled="true"/);
+  assert.doesNotMatch(html, /<input[^>]*\sdisabled=""/);
+  // The reason takes the description's line, so the row keeps its size; the description stays in
+  // the accessible description beside the reason.
+  const row = /<label class="choice-row is-disabled">[\s\S]*?<\/label>/.exec(html)?.[0] ?? "";
+  assert.match(row, /class="sr-only"[^>]*>Run over SSH</);
+  assert.doesNotMatch(row, /choice-row-desc/);
+  const describedBy = /aria-describedby="([^"]+)"/.exec(row)?.[1]?.split(" ") ?? [];
+  assert.equal(describedBy.length, 2, "both the description and the reason describe the input");
 });
 
-test("ChoiceCards renders a marker whose SHAPE distinguishes the two modes", () => {
+test("ChoiceRows draws a marker whose SHAPE distinguishes the two modes", () => {
   const single = render(
-    <ChoiceCards options={PRESETS} value="quick" onChange={() => undefined} label="Preset" />,
+    <ChoiceRows options={PRESETS} value="quick" onChange={() => undefined} label="Preset" />,
   );
   const multi = render(
-    <ChoiceCards options={PRESETS} value={["quick"]} onChange={() => undefined} label="Agents" multiple />,
+    <ChoiceRows options={PRESETS} value={["quick"]} onChange={() => undefined} label="Agents" multiple />,
   );
-  // The marker is the visible half of the same distinction the roles make. Without it, the six
-  // patterns this replaces looked identical until you clicked a second card.
-  assert.match(single, /ui-choice-mark(?!.*is-multi)/);
-  assert.match(multi, /ui-choice-mark is-multi/);
-  assert.doesNotMatch(single, /ui-choice-mark is-multi/);
+  // The marker is the visible half of the same distinction the input type makes.
+  assert.match(single, /class="radio-mark"/);
+  assert.doesNotMatch(single, /checkbox-mark/);
+  assert.match(multi, /class="checkbox-mark"/);
+  assert.doesNotMatch(multi, /radio-mark/);
+});
+
+test("ChoiceList is the compact form: radio rows with a trailing value and no description", () => {
+  const html = render(
+    <ChoiceList
+      label="Worktree"
+      value="main"
+      onChange={() => undefined}
+      options={[
+        { value: "main", label: "Main Checkout", meta: "main" },
+        { value: "fix", label: "Fix Branch", meta: "fix/1952" },
+      ]}
+    />,
+  );
+  assert.match(html, /class="choice-list" role="radiogroup" aria-label="Worktree"/);
+  assert.equal(html.match(/class="choice-row compact"/g)?.length, 2);
+  assert.match(html, /<span class="choice-row-meta">fix\/1952<\/span>/);
+  assert.doesNotMatch(html, /choice-row-desc/);
+});
+
+test("a Checkbox has a visible label, and the row is the label", () => {
+  const html = render(<Checkbox label="Include Session Name" checked={false} onChange={() => undefined} />);
+  assert.match(html, /^<label class="checkbox">/);
+  assert.match(html, /<input type="checkbox"/);
+  assert.doesNotMatch(html, /aria-label=/, "the visible label names it; no hidden duplicate");
+  const labelledBy = /aria-labelledby="([^"]+)"/.exec(html)?.[1];
+  assert.match(html, new RegExp(`id="${labelledBy}">Include Session Name<`));
+});
+
+test("a Checkbox helper is its description, and a list-wide label can carry a fuller name", () => {
+  const html = render(
+    <Checkbox label="Reviewed" ariaLabel="Mark viewport-1 as Reviewed" helper="Shown above." checked onChange={() => undefined} />,
+  );
+  assert.match(html, /aria-label="Mark viewport-1 as Reviewed"/);
+  assert.doesNotMatch(html, /aria-labelledby/);
+  const describedBy = /aria-describedby="([^"]+)"/.exec(html)?.[1];
+  assert.match(html, new RegExp(`id="${describedBy}">Shown above.<`));
+  assert.match(html, />Reviewed</, "the visible label is still drawn");
+});
+
+test("an icon-only Checkbox keeps its aria-label and draws no row", () => {
+  const html = render(<Checkbox labelHidden label="Select worktree line 3 for prompt" checked={false} onChange={() => undefined} />);
+  assert.match(html, /^<span class="checkbox-mark"><input type="checkbox" aria-label="Select worktree line 3 for prompt"/);
+  assert.doesNotMatch(html, /<label/);
 });
 
 const PROJECTS = [
@@ -182,12 +269,13 @@ test("a disabled Select is announced as disabled but stays in the tab order", ()
 
 test("a single choice can be unanswered", () => {
   // An approval question starts with nothing chosen. The type rejecting `null` forced an adopter
-  // into a cast or a fake selection, and the roving fallback then had to have a stop anyway.
+  // into a cast or a fake selection. With native radios the browser puts the tab stop on the first
+  // row when none is checked, so no tabindex is written at all.
   const html = render(
-    <ChoiceCards options={PRESETS} value={null} onChange={() => undefined} label="Preset" />,
+    <ChoiceRows options={PRESETS} value={null} onChange={() => undefined} label="Preset" />,
   );
-  assert.doesNotMatch(html, /aria-checked="true"/);
-  assert.equal(html.match(/tabindex="0"/g)?.length, 1);
+  assert.doesNotMatch(html, /checked=""/);
+  assert.doesNotMatch(html, /tabindex/);
 });
 
 test("a selected-but-disabled option still leaves the group reachable", () => {
@@ -208,7 +296,7 @@ test("every primitive requires an accessible name", () => {
   // read out with no indication of what it sets.
   for (const html of [
     render(<SegmentedControl options={SIZES} value="md" onChange={() => undefined} label="Size" />),
-    render(<ChoiceCards options={PRESETS} value="quick" onChange={() => undefined} label="Preset" />),
+    render(<ChoiceRows options={PRESETS} value="quick" onChange={() => undefined} label="Preset" />),
     render(<Select options={PROJECTS} value="alpha" onChange={() => undefined} label="Project" />),
   ]) {
     assert.match(html, /aria-label="[^"]+"/);
@@ -285,13 +373,13 @@ test("two groups with the same label do not share a description id", () => {
   assert.notEqual(ids[0], ids[1], "an id derived from the label is the same id for both groups");
 });
 
-test("a card's status joins the title row and the accessible name", () => {
+test("a row's status joins the title row and the accessible name", () => {
   // §11.1 names "options that need descriptions or status" as this primitive's remit, and the
   // Location pickers are the status half: a machine name alone does not say whether it is local or
   // SSH, or whether it can host a session. The status has to reach a screen reader, because it is
   // the whole basis for choosing between two otherwise identical names.
   const html = render(
-    <ChoiceCards
+    <ChoiceRows
       label="Project Location"
       value="loc-1"
       onChange={() => undefined}
@@ -308,24 +396,23 @@ test("a card's status joins the title row and the accessible name", () => {
       ]}
     />,
   );
-  assert.match(html, /ui-choice-card-status/);
-  // Inside the title, not the description: a badge that wraps under a path reads as part of it.
-  assert.match(html, /ui-choice-card-title[^>]*>runner-1<span class="ui-choice-card-status"/);
-  // Both the status and the reason are rendered, so the name announces "runner-2, SSH, …, Offline".
+  // Inside the title — which is what `aria-labelledby` names — not the description: a badge that
+  // wraps under a path reads as part of it.
+  assert.match(html, /choice-row-title" id="[^"]+">runner-1<span class="choice-row-status"/);
   assert.match(html, /SSH/);
   assert.match(html, /Runner Offline — this Location cannot host a session/);
 });
 
-test("a card without a status renders no status element at all", () => {
+test("a row without a status renders no status element at all", () => {
   // An empty wrapper would still take the title row's gap, so an option with no status would sit
   // a few pixels wider than one with. Absence has to mean absence.
   const html = render(
-    <ChoiceCards
+    <ChoiceRows
       label="Mode"
       value="a"
       onChange={() => undefined}
       options={[{ value: "a", title: "Alpha" }]}
     />,
   );
-  assert.doesNotMatch(html, /ui-choice-card-status/);
+  assert.doesNotMatch(html, /choice-row-status/);
 });

@@ -537,10 +537,8 @@ function DiffCommentEditor({
             <option value="nit">Nit</option>
           </select>
         </label>
-        <label className="review-required-toggle">
-          <input type="checkbox" checked={draft.required} onChange={(event) => update({ required: event.target.checked })} />
-          Must Resolve Before Publish
-        </label>
+        <Checkbox className="review-required-toggle" label="Must Resolve Before Publish" checked={draft.required}
+          onChange={(required) => update({ required })} />
         <button className="btn sm" disabled={review.creating || !draft.body.trim() || Boolean(review.refusal)}
           title={review.refusal?.reason} aria-describedby={review.refusal?.id} onClick={() => void submit()}>
           {review.creating ? "Adding…" : "Add Finding"}
@@ -634,9 +632,10 @@ function HunkView({
   };
   const referenceCheckbox = (row: DiffHunkRow) => onAttachWorkspaceReference ? (
     <Checkbox
+      labelHidden
       checked={selectedReferenceLines?.side === row.anchor.side && selectedReferenceLines.lines.has(row.anchor.line)}
       disabled={attachBusy}
-      label={`Select ${row.anchor.side === "left" ? "base" : "worktree"} line ${row.anchor.line} for prompt`}
+      label={`Select ${row.anchor.side === "left" ? "Base" : "Worktree"} Line ${row.anchor.line} for Prompt`}
       onChange={() => toggleReferenceLine(row)}
     />
   ) : null;

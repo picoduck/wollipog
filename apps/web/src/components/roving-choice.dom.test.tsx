@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { ChoiceCards, SegmentedControl } from "./ui/ChoiceControls.js";
+import { Checkbox, ChoiceRows, SegmentedControl } from "./ui/ChoiceControls.js";
 
 const domWindow = new Window({ url: "http://localhost/usage" });
 for (const [name, value] of Object.entries({
@@ -12,6 +12,7 @@ for (const [name, value] of Object.entries({
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
   HTMLButtonElement: domWindow.HTMLButtonElement,
+  HTMLInputElement: domWindow.HTMLInputElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
@@ -133,10 +134,14 @@ test("a held arrow key does not queue a request per repeat", async () => {
  * when unsupported; it is now rendered with the reason it cannot be chosen, and a keyboard user who
  * could not reach the card could not read the reason.
  */
-test("arrow keys reach a disabled option so its reason can be read", () => {
+test("a disabled ChoiceRow stays focusable, refuses the click, and says why", () => {
+  // ChoiceRows are native radios, so the ARROWS are the browser's (choice-rows.spec.ts drives them
+  // in Chromium). What a DOM can check is the contract that makes them reach the row: the input is
+  // `aria-disabled` rather than `disabled` — a natively disabled radio drops out of the arrow order,
+  // leaving its reason reachable by mouse and by nothing else — and the refusal holds on the row.
   const chosen: string[] = [];
   const { host, unmount } = mount(
-    <ChoiceCards
+    <ChoiceRows
       label="Permission Preset"
       value="default"
       onChange={(value) => chosen.push(value)}
@@ -147,27 +152,53 @@ test("arrow keys reach a disabled option so its reason can be read", () => {
     />,
   );
   try {
-    const group = host.querySelector('[role="radiogroup"]')!;
-    const [first, second] = [...host.querySelectorAll<HTMLElement>('[role="radio"]')];
+    const [first, second] = [...host.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
     assert.ok(first && second);
-    act(() => first.focus());
-
-    press(first, "ArrowDown");
+    assert.equal(second.hasAttribute("disabled"), false);
+    assert.equal(second.getAttribute("aria-disabled"), "true");
+    act(() => second.focus());
     // `assert.equal` on two DOM NODES, not a boolean: happy-dom elements reference their window, so
     // a failed comparison serialises the whole circular tree for the diff and the runner hangs for
     // ~16s before dying with no message. Compare something primitive.
-    assert.equal(document.activeElement === second, true,
-      "the disabled option must be focusable by arrow, or its reason is unreadable without a mouse");
+    assert.equal(document.activeElement === second, true, "the disabled row can take focus");
 
-    // Reachable is not selectable. Moving onto it must not choose it, and must not fire onChange —
-    // the handler clicks whatever it focuses, so the guard has to hold on the option itself.
-    assert.equal(second.getAttribute("aria-checked"), "false");
+    // Reachable is not selectable: a click anywhere on the row must not choose it or fire onChange,
+    // and the controlled value puts the check back where it was.
+    act(() => (second.closest("label") as HTMLElement).click());
+    assert.equal(second.checked, false);
     assert.deepEqual(chosen, []);
-    assert.equal(first.getAttribute("aria-checked"), "true", "the real selection is unchanged");
+    assert.equal(first.checked, true, "the real selection is unchanged");
 
-    // And the reason is in the accessible name, so focusing the card announces it.
-    assert.match(second.textContent ?? "", /This runner is too old/);
-    assert.ok(group);
+    // And the reason is its accessible description, so focusing the row announces it.
+    const described = (second.getAttribute("aria-describedby") ?? "").split(" ")
+      .map((id) => host.querySelector(`[id="${id}"]`)?.textContent).join(" ");
+    assert.match(described, /This runner is too old/);
+  } finally {
+    unmount();
+  }
+});
+
+test("clicking anywhere on an available ChoiceRow selects it, and clicking the selected one reports it again", () => {
+  const chosen: string[] = [];
+  const { host, unmount } = mount(
+    <ChoiceRows
+      label="Wake Policy"
+      value="until_activity"
+      onChange={(value) => chosen.push(value)}
+      options={[
+        { value: "until_activity", title: "Until Activity", description: "Return sooner for activity." },
+        { value: "regardless", title: "Regardless", description: "Return only at the scheduled time." },
+      ]}
+    />,
+  );
+  try {
+    const rows = [...host.querySelectorAll<HTMLElement>(".choice-row")];
+    act(() => (rows[1]!.querySelector(".choice-row-desc") as HTMLElement).click());
+    assert.deepEqual(chosen, ["regardless"], "the description is part of the target");
+    // The cards this replaced reported a re-selection, and New Session and Move to Project rely on
+    // it; a checked native radio fires no `change`, so the row reports it from the click.
+    act(() => rows[0]!.click());
+    assert.deepEqual(chosen, ["regardless", "until_activity"]);
   } finally {
     unmount();
   }
@@ -194,6 +225,35 @@ test("a segmented control reaches its disabled option too", () => {
     press(first, "ArrowRight");
     assert.equal(document.activeElement === second, true);
     assert.equal(second.getAttribute("aria-checked"), "false");
+  } finally {
+    unmount();
+  }
+});
+
+test("clicking a Checkbox row's label toggles it, and a disabled row does not", () => {
+  // The bare 13px box this replaced was the only target; the label beside it was the caller's
+  // own text and did nothing. The row is the `<label>` now, so its text toggles the box.
+  const changes: boolean[] = [];
+  function Harness() {
+    const [checked, setChecked] = React.useState(false);
+    return (
+      <>
+        <Checkbox label="Include Session Name" checked={checked}
+          onChange={(next) => { changes.push(next); setChecked(next); }} />
+        <Checkbox label="Expired" disabled checked={false} onChange={(next) => changes.push(next)} />
+      </>
+    );
+  }
+  const { host, unmount } = mount(<Harness />);
+  try {
+    const [enabled, disabled] = [...host.querySelectorAll<HTMLElement>(".checkbox-label")];
+    act(() => enabled!.click());
+    assert.deepEqual(changes, [true]);
+    assert.equal(host.querySelectorAll<HTMLInputElement>("input")[0]!.checked, true);
+    act(() => enabled!.click());
+    assert.deepEqual(changes, [true, false]);
+    act(() => disabled!.click());
+    assert.deepEqual(changes, [true, false], "a disabled row refuses the click");
   } finally {
     unmount();
   }

@@ -73,8 +73,8 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
       {preview?.candidates.map((candidate) => {
         const paths = [...new Set([...candidate.files, ...candidate.previousFiles].map((file) => file.path))].sort();
         return <section className="skills-section" key={candidate.path}>
-          <label className="field"><span><Checkbox label={candidate.name} disabled={busy} checked={selected.includes(candidate.path)}
-            onChange={(checked) => { setAccepted(false); setSelected((current) => checked ? [...current, candidate.path] : current.filter((path) => path !== candidate.path)); }} /> {candidate.name}</span></label>
+          <Checkbox label={candidate.name} disabled={busy} checked={selected.includes(candidate.path)}
+            onChange={(checked) => { setAccepted(false); setSelected((current) => checked ? [...current, candidate.path] : current.filter((path) => path !== candidate.path)); }} />
           <p className="skills-hint">{candidate.disposition === "identical" ? "Identical content; reuses the library version." : candidate.disposition === "update" ? `New version · ${candidate.assignmentCount} existing assignments` : "New skill · no assignments"}</p>
           <p className="skills-hint">Source: {candidate.source.url} · {candidate.path || "/"} · Commit {candidate.commit}</p>
           <p>Review every file below. Scripts and instructions are imported as content.</p>
@@ -89,7 +89,7 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
           })}
         </section>;
       })}
-      {updates.length > 0 && <label className="field"><span><Checkbox label="Accept Version Diffs and Update Existing Assignments" checked={accepted} disabled={busy} onChange={setAccepted} /> Accept Version Diffs and Update Existing Assignments</span></label>}
+      {updates.length > 0 && <Checkbox consent label="Accept version diffs and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
     </div>
   </Modal>;
 }

@@ -1075,10 +1075,10 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | Text input / textarea | As §8.1. Textarea starts at 3 rows and grows to 12. `resize: vertical`. |
 | Select | Custom `Select` everywhere (native `<select>` removed). Trigger shows a `ChevronDown` 14px. |
 | Combobox | Same trigger with `ChevronDown`; typing filters; brand icons sit inside the field, not outside. |
-| Checkbox | 16px box, `--radius-xs`, `--control-outline`; checked = `--accent` fill with a check. Label to the right, 8px gap, the whole row is the target (≥32px, 44px coarse). Used for multi-select and consent. Consent labels are sentences and stay in sentence case ("Open the session after creating it"). |
-| Radio | 16px circle; checked = accent ring plus dot. Used inside ChoiceRows. |
+| Checkbox | 16px box, `--radius-xs`, `--control-outline`; checked = `--accent` fill with a check. Label to the right, 8px gap, the whole row is the target (≥32px, 44px coarse). Used for multi-select and consent. Consent labels are sentences and stay in sentence case ("Open the session after creating it"). Built by `Checkbox` (`.checkbox`, a `<label>` around the input): `label` is required and visible, `helper` is an optional second line announced as the description, `consent` marks a sentence label, `ariaLabel` gives a fuller name that contains the visible label where the label repeats down a list, and `labelHidden` is the icon-only form (the bare box with its `aria-label`). |
+| Radio | 16px circle; checked = accent ring plus dot. Used inside ChoiceRows. The marker (`.radio-mark`, `.checkbox-mark`) is the restyled native input itself, so focus, `:checked` and `:disabled` belong to what the user sees. |
 | Switch | 32×18 track (40×24 on touch), `--radius-pill`, `--control-outline` edge; on = `--accent` track. **For settings that apply instantly.** Label is the row title, and `aria-label` matches it. Never a button that says "On"/"Off". |
-| ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. **Selection follows the checked input**: the row's selected look and its `aria-checked` (or `:checked`) come from one value, so the look never disagrees with what is announced. |
+| ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. **Selection follows the checked input**: the row's selected look and its `aria-checked` (or `:checked`) come from one value, so the look never disagrees with what is announced. Built by `ChoiceRows` (`.choice-rows`; `multiple` for checkboxes) over `ChoiceRow` (`.choice-row`, a `<label>` around a native radio or checkbox): the marker sits on the title's first line, the description is one ellipsized line on desktop and at most two on phones (full text in the tooltip and the accessible description), and rows are `--row-h` tall at least (40px, 48px coarse). An unavailable row keeps its size, reads faint, shows its reason in place of the description, and is `aria-disabled` rather than `disabled`, so arrows still reach it and announce the reason while selection is refused. `ChoiceList` (`.choice-list`) is the compact form: radio rows with a trailing value and no description, for pickers inside sheets. |
 | File picker | A dropzone row: icon, "Drop files here or", `.btn.sm` "Choose Folder…". Never the native "Choose Files / No file chosen". |
 | Number with unit | `.w-xs` input with the unit as a suffix inside the field ("30 s"). |
 
@@ -1734,6 +1734,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `.inbox-tab`, `.connections-tabs > button`, `.settings-nav` on phone | `.tabs` / `.tab` |
 | `.ui-select-trigger` (160px min, content width), native `<select>` | `.select-trigger` (full width in `.field`, list min 280px) |
 | `ui/ChoiceControls` `Checkbox` (native 13px) | `.checkbox` + `.switch` |
+| `ChoiceCards` (`.ui-choice-cards`, `.ui-choice-card*`, trailing `.ui-choice-mark`), `.workflow-preset`, `.agent-pick`, `.pod-member-pick`, `.access-choice`, the People member checklist | `ChoiceRows` (`.choice-row`, leading `.radio-mark` / `.checkbox-mark`) or `ChoiceList` (`.choice-list`) (#1952) |
 | `.field` / `.access-form` (two systems) | `.field` (label, control, helper/error) |
 | `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` |
 | `.archive-table`, `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
@@ -1851,7 +1852,8 @@ local name so the two do not collide.
   of their own would change what the menu draws.
 - §6.3 and §19.2: `.sessions-md`, which is `.master-detail.sessions-md` and is built with Sessions.
 - §8.4 ChoiceRow: the choice list, ChoiceRow selection that follows the checked input, and
-  `.cand-list`/`.radio-mark`.
+  `.cand-list`/`.radio-mark`. #1952 built them as `ChoiceRows`/`ChoiceRow`, `ChoiceList` and the
+  `.radio-mark`/`.checkbox-mark` markers; a candidate list is a `multiple` `ChoiceRows` group.
 
 **Reject** (component-local; area work keeps these in its component's CSS block):
 

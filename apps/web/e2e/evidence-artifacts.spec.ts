@@ -107,13 +107,24 @@ test("the inline approval card shows a blocked item's reviewed checkbox as disab
   const open = card.getByRole("checkbox", { name: "Mark viewport-1 as Reviewed" });
   await expect(card.getByRole("img", { name: "Evidence: viewport-1" })).toBeVisible();
   await expect(blocked).toBeDisabled();
+  // The Checkbox row (§8.4): a disabled row keeps its size and reads in --text-faint rather than
+  // fading, and the box takes its row's cursor.
   const styles = (checkbox: Locator) => checkbox.evaluate((input) => {
-    const label = getComputedStyle(input.closest("label")!);
-    return { label: label.cursor, opacity: label.opacity, checkbox: getComputedStyle(input).cursor };
+    const label = input.closest("label")!;
+    const probe = document.createElement("span");
+    probe.style.color = "var(--text-faint)";
+    label.append(probe);
+    const faint = getComputedStyle(probe).color;
+    probe.remove();
+    return {
+      label: getComputedStyle(label).cursor,
+      faint: getComputedStyle(label).color === faint,
+      checkbox: getComputedStyle(input).cursor,
+    };
   });
-  expect(await styles(blocked)).toEqual({ label: "not-allowed", opacity: "0.6", checkbox: "not-allowed" });
-  // An enabled item is untouched: no disabled cursor or dimming leaks onto it.
-  expect(await styles(open)).toEqual({ label: "default", opacity: "1", checkbox: "default" });
+  expect(await styles(blocked)).toEqual({ label: "not-allowed", faint: true, checkbox: "not-allowed" });
+  // An enabled item is untouched: the whole row is the target, and nothing faint leaks onto it.
+  expect(await styles(open)).toEqual({ label: "pointer", faint: false, checkbox: "pointer" });
   await open.check();
   await expect(open).toBeChecked();
 });
@@ -125,14 +136,25 @@ test("the review surface shows a blocked item's reviewed checkbox with the disab
   const open = page.locator(".evidence-review-item", { hasText: "viewport-1" }).getByRole("checkbox");
   await expect(page.getByRole("img", { name: "Evidence: viewport-1" })).toBeVisible();
   await expect(blocked).toBeDisabled();
+  // The Checkbox row (§8.4): a disabled row keeps its size and reads in --text-faint rather than
+  // fading, and the box takes its row's cursor.
   const styles = (checkbox: Locator) => checkbox.evaluate((input) => {
-    const label = getComputedStyle(input.closest("label")!);
-    return { label: label.cursor, opacity: label.opacity, checkbox: getComputedStyle(input).cursor };
+    const label = input.closest("label")!;
+    const probe = document.createElement("span");
+    probe.style.color = "var(--text-faint)";
+    label.append(probe);
+    const faint = getComputedStyle(probe).color;
+    probe.remove();
+    return {
+      label: getComputedStyle(label).cursor,
+      faint: getComputedStyle(label).color === faint,
+      checkbox: getComputedStyle(input).cursor,
+    };
   });
   // The checkbox agrees with its label instead of keeping the browser's own default arrow.
-  expect(await styles(blocked)).toEqual({ label: "not-allowed", opacity: "0.6", checkbox: "not-allowed" });
-  // An enabled item is untouched: its label keeps the pointer and its checkbox the browser default.
-  expect(await styles(open)).toEqual({ label: "pointer", opacity: "1", checkbox: "default" });
+  expect(await styles(blocked)).toEqual({ label: "not-allowed", faint: true, checkbox: "not-allowed" });
+  // An enabled item is untouched: the whole row is the target, and nothing faint leaks onto it.
+  expect(await styles(open)).toEqual({ label: "pointer", faint: false, checkbox: "pointer" });
   await open.check();
   await expect(open).toBeChecked();
 });

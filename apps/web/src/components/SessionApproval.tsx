@@ -577,15 +577,13 @@ export function SessionApprovalBanner({
               {isRenderableEvidence(item)
                 ? <EvidenceArtifactView item={item} onStatusChange={onArtifactStatus} />
                 : isArtifactBackedEvidence(item) && <UnrenderableEvidenceArtifact item={item} />}
-              <label className="evidence-reviewed-control">
-                <Checkbox
-                  label={`Mark ${item.evidenceId} as Reviewed`}
-                  checked={reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)}
-                  disabled={evidenceBlocked(item)}
-                  onChange={(checked) => updateEvidence(item.evidenceId, checked)}
-                />
-                Reviewed
-              </label>
+              <Checkbox
+                label="Reviewed"
+                ariaLabel={`Mark ${item.evidenceId} as Reviewed`}
+                checked={reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)}
+                disabled={evidenceBlocked(item)}
+                onChange={(checked) => updateEvidence(item.evidenceId, checked)}
+              />
             </article>
           ))}
           <details className="evidence-review-details">
@@ -746,15 +744,13 @@ export function SessionApprovalBanner({
                 : item.uri
                   ? <a className="link" href={item.uri} target="_blank" rel="noreferrer">Open External Evidence: {item.evidenceId}</a>
                   : <p className="form-error" role="alert">This evidence has no viewable artifact or external link.</p>}
-              <label>
-                <Checkbox
-                  label={`Mark ${item.evidenceId} as Reviewed`}
-                  checked={reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)}
-                  disabled={evidenceBlocked(item)}
-                  onChange={(checked) => updateEvidence(item.evidenceId, checked)}
-                />
-                I reviewed this evidence.
-              </label>
+              <Checkbox
+                label="Reviewed"
+                ariaLabel={`Mark ${item.evidenceId} as Reviewed`}
+                checked={reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)}
+                disabled={evidenceBlocked(item)}
+                onChange={(checked) => updateEvidence(item.evidenceId, checked)}
+              />
             </div>
           ))}
         </div>

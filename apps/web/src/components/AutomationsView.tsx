@@ -866,8 +866,8 @@ export function AutomationsView() {
             <label>Concurrency<select value={form.concurrency} onChange={(event) => patch("concurrency", event.target.value as FormState["concurrency"])}><option value="wait">Wait for Previous</option><option value="skip">Skip While Active</option>{form.actionKind !== "prompt_session" && <option value="parallel">Allow Parallel</option>}</select></label>
             <label>Max Additional Cost (USD)<input type="number" min="0.01" max="10000" step="0.01" value={form.maxCostUsd} onChange={(event) => patch("maxCostUsd", event.target.value)} /></label>
             <label>Max Tool Calls<input type="number" min="1" max="100000" value={form.maxToolCalls} onChange={(event) => patch("maxToolCalls", event.target.value)} /></label>
-            <fieldset className="automation-span"><legend>Web Push Events</legend><div className="automation-checks">{(["started", "succeeded", "failed", "expired"] as const).map((event) => <label key={event}><input type="checkbox" checked={form.pushEvents.includes(event)} onChange={(change) => patch("pushEvents", change.target.checked ? [...form.pushEvents, event] : form.pushEvents.filter((item) => item !== event))} />{titleCaseLabel(event)}</label>)}</div></fieldset>
-            <label className="automation-enable"><input type="checkbox" checked={form.enabled} onChange={(event) => patch("enabled", event.target.checked)} />Enabled</label>
+            <fieldset className="automation-span"><legend>Web Push Events</legend><div className="automation-checks">{(["started", "succeeded", "failed", "expired"] as const).map((event) => <Checkbox key={event} label={titleCaseLabel(event)} checked={form.pushEvents.includes(event)} onChange={(checked) => patch("pushEvents", checked ? [...form.pushEvents, event] : form.pushEvents.filter((item) => item !== event))} />)}</div></fieldset>
+            <div><Checkbox label="Enabled" checked={form.enabled} onChange={(checked) => patch("enabled", checked)} /></div>
           </div>
           {incompatibleRunners.length > 0 && <div className="automation-error" role="alert">
             Update and restart {incompatibleRunners.map((runner) => runner!.hostname).join(", ")} to protocol 53 before this automation can run. Durable delivery never falls back to an older fire-and-forget command.
@@ -961,9 +961,9 @@ export function AutomationsView() {
               <div className="automation-form-grid">
                 <label>Name<input value={triggerDraft.name} maxLength={80} onChange={(event) => setTriggerDraft((current) => current ? { ...current, name: event.target.value } : current)} /></label>
                 <label>Kind<input value={titleCaseLabel(triggerDraft.kind)} readOnly /></label>
-                {item.action.kind !== "workflow_run" && <label className="automation-enable automation-span"><Checkbox checked={triggerDraft.configurable} label="Accept Delivery Fields" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, configurable: checked } : current)} />Accept Delivery Fields</label>}
+                {item.action.kind !== "workflow_run" && <div className="automation-span"><Checkbox checked={triggerDraft.configurable} label="Accept Delivery Fields" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, configurable: checked } : current)} /></div>}
                 {item.action.kind !== "workflow_run" && triggerDraft.configurable && <>
-                  <label className="automation-enable"><Checkbox checked={triggerDraft.allowPrompt} label="Delivered Prompt" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, allowPrompt: checked } : current)} />Delivered Prompt</label>
+                  <div><Checkbox checked={triggerDraft.allowPrompt} label="Delivered Prompt" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, allowPrompt: checked } : current)} /></div>
                   <div className="automation-field"><span className="field-label">Missing References</span><Select label="Missing References" value={triggerDraft.missingReferences} onChange={(missingReferences) => setTriggerDraft((current) => current ? { ...current, missingReferences } : current)} options={[
                     { value: "reject", label: "Reject Delivery" },
                     { value: "use_stored", label: "Use Stored Text" },
@@ -974,7 +974,7 @@ export function AutomationsView() {
                   }} /><small>Comma-separated names. Reference them as <code>{"{{delivery.parameters.issue}}"}</code>.</small></label>
                   {item.action.kind === "prompt_session" && <fieldset className="automation-span"><legend>Session Selectors</legend><div className="automation-checks">{([
                     ["session_id", "Session ID"], ["branch", "Branch"], ["pull_request", "Pull Request"],
-                  ] as const).map(([selector, label]) => <label key={selector}><Checkbox checked={triggerDraft.sessionSelectors.includes(selector)} label={label} onChange={(checked) => setTriggerDraft((current) => current ? { ...current, sessionSelectors: toggleSelector(current.sessionSelectors, selector, checked) } : current)} />{label}</label>)}</div></fieldset>}
+                  ] as const).map(([selector, label]) => <Checkbox key={selector} checked={triggerDraft.sessionSelectors.includes(selector)} label={label} onChange={(checked) => setTriggerDraft((current) => current ? { ...current, sessionSelectors: toggleSelector(current.sessionSelectors, selector, checked) } : current)} />)}</div></fieldset>}
                   <p className="automation-hint automation-span">Use <code>{"{{delivery.prompt}}"}</code> to place delivered text. Allowed parameters are also included in the signed-delivery context preamble.</p>
                 </>}
               </div>

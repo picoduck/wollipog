@@ -3,6 +3,7 @@ import { isTerminal } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
 import { Modal } from "./common.js";
+import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { sessionAgentLabel } from "./agent-options.js";
 
 export function NewPodDialog({ onClose }: { onClose: () => void }) {
@@ -80,20 +81,18 @@ export function NewPodDialog({ onClose }: { onClose: () => void }) {
           {candidates.length === 0 ? (
             <p className="muted">Start at least two worktree sessions that are not already in a pod.</p>
           ) : (
-            <div className="pod-member-picks">
-              {candidates.map((session) => (
-                <label key={session.id} className={`pod-member-pick ${selected.includes(session.id) ? "on" : ""}`}>
-                  <input type="checkbox" checked={selected.includes(session.id)} onChange={() => toggle(session.id)} />
-                  <span>
-                    <strong>{session.title || "Untitled"}</strong>
-                    <small>
-                      {sessionAgentLabel(session.agentName, session.driver, session.agentId)} · {session.runnerId}
-                      {session.worktreePath ? " · Worktree Ready" : " · Worktree Starting"}
-                    </small>
-                  </span>
-                </label>
-              ))}
-            </div>
+            <ChoiceRows<string>
+              multiple
+              label="Isolated Sessions"
+              value={selected}
+              onChange={toggle}
+              options={candidates.map((session) => ({
+                value: session.id,
+                title: session.title || "Untitled",
+                description: `${sessionAgentLabel(session.agentName, session.driver, session.agentId)} · ${session.runnerId}${
+                  session.worktreePath ? " · Worktree Ready" : " · Worktree Starting"}`,
+              }))}
+            />
           )}
         </div>
       </div>

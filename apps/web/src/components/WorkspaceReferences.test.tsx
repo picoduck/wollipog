@@ -78,9 +78,9 @@ test("Review exposes selectable added, removed, and both context sides with immu
     }],
   };
   const html = renderToStaticMarkup(<GitDiffViewer diff={diff} layout="split" onAttachWorkspaceReference={async () => {}} />);
-  assert.match(html, /Select base line 10 for prompt/);
-  assert.match(html, /Select worktree line 10 for prompt/);
-  assert.match(html, /Select base line 11 for prompt/);
-  assert.match(html, /Select worktree line 11 for prompt/);
+  assert.match(html, /Select Base Line 10 for Prompt/);
+  assert.match(html, /Select Worktree Line 10 for Prompt/);
+  assert.match(html, /Select Base Line 11 for Prompt/);
+  assert.match(html, /Select Worktree Line 11 for Prompt/);
   assert.match(html, /Attach Selected \(0\)/);
 });

@@ -95,11 +95,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/Board.tsx", "native-select", 2],
   ["components/FilesPanel.tsx", "native-select", 1],
   ["components/GitDiffViewer.tsx", "native-select", 1],
-  ["components/NewPodDialog.tsx", "pod-member-pick", 2],
-  ["components/NewRunDialog.tsx", "agent-pick", 4],
   ["components/NewRunDialog.tsx", "native-select", 6],
-  ["components/NewRunDialog.tsx", "workflow-preset", 3],
-  ["components/PeopleDevicesPanel.tsx", "access-choice", 2],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
   ["components/PodsView.tsx", "native-select", 8],
   ["components/ProjectLocationDialog.tsx", "native-select", 1],
@@ -114,26 +110,22 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
      semantics inside the primitives file. The entry came off with the control, which is the
      ratchet working rather than an exemption being granted. */
   ["components/AgentSessionDiscoveryDialog.tsx", "raw-radiogroup", 1],
-  ["components/NewRunDialog.tsx", "raw-radiogroup", 5],
-  ["components/PeopleDevicesPanel.tsx", "raw-radiogroup", 3],
   /* Down from 9 with #1803: the diff scope, index pane and diff layout groups became the shared
      SegmentedControl, as did the Browser, Files and runner-host groups above, whose entries came
      off. The one left is the findings list's selection checkbox. */
   ["components/ReviewPanel.tsx", "raw-radiogroup", 1],
   ["components/SessionApproval.tsx", "raw-radiogroup", 2],
-  ["components/AutomationsView.tsx", "raw-radiogroup", 2],
   ["components/CommandPalette.tsx", "raw-radiogroup", 2],
   // Like CommandPalette, this is transient command navigation rather than a persisted setting or
   // one-of-N form choice. Listbox/option is the correct combobox popup contract for its textarea.
   ["components/SlashCommandMenu.tsx", "raw-radiogroup", 2],
   ["components/ComposerControls.tsx", "raw-radiogroup", 2],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
-  ["components/GitDiffViewer.tsx", "raw-radiogroup", 3],
+  ["components/GitDiffViewer.tsx", "raw-radiogroup", 2],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
-  ["components/NewPodDialog.tsx", "raw-radiogroup", 1],
-  ["components/PodsView.tsx", "raw-radiogroup", 2],
-  /* Down from 6 on 2026-08-12: the Move to Project dialog adopted ChoiceCards, retiring the
-     durable Project chip's bespoke menuitemradio popover. */
+  ["components/PodsView.tsx", "raw-radiogroup", 1],
+  /* Down from 6 on 2026-08-12: the Move to Project dialog adopted ChoiceCards (now ChoiceRows),
+     retiring the durable Project chip's bespoke menuitemradio popover. */
   ["components/SessionDetail.tsx", "raw-radiogroup", 4],
 ];
 
@@ -265,7 +257,7 @@ test("a fully migrated screen renders a primitive", () => {
   // half — and it looks for a RENDERED element: matching the bare name passed against a screen
   // whose primitive had been renamed and therefore rendered nothing.
   for (const name of FULLY_MIGRATED) {
-    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceCards|Select|SearchableCombobox)[\s/>]/,
+    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceRows|ChoiceList|Select|SearchableCombobox)[\s/>]/,
       `${name} is listed as fully migrated but renders no choice primitive`);
   }
 });
@@ -273,7 +265,7 @@ test("a fully migrated screen renders a primitive", () => {
 test("New Session completed the shared-choice migration", () => {
   const source = read(join(SRC, "components/NewSessionDialog.tsx"));
   assert.match(source, /<SearchableCombobox/, "Project and Agent use the searchable primitive");
-  assert.match(source, /<ChoiceCards/, "described and multiple choices use shared cards");
+  assert.match(source, /<ChoiceRows/, "described and multiple choices use shared choice rows");
   assert.match(source, /<SegmentedControl/, "short fixed modes use the segmented primitive");
   assert.equal(BASELINE.some(([file]) => file === "components/NewSessionDialog.tsx"), false,
     "no bespoke New Session picker remains in the ratchet inventory");

@@ -86,7 +86,7 @@ export function SkillGroupsDialog({ runners, machineLabels, onClose, onChanged }
           <p>Resulting ownership: {creationScope ? ownership(creationScope) : "Unavailable — a human identity is required"}.</p>
           <button className="btn" type="button" disabled={busy || !accepted || !creationScope} onClick={() => void mutate(() => api.convertSkillGroup(selected.id))}>Convert Group</button>
         </section>}
-        <label className="field"><span><Checkbox label="Accept Group-Wide Deployment and Ownership Impact" checked={accepted} disabled={busy} onChange={setAccepted} /> Accept Group-Wide Deployment and Ownership Impact</span></label>
+        <Checkbox consent label="Accept group-wide deployment and ownership impact" checked={accepted} disabled={busy} onChange={setAccepted} />
         <p className="skills-hint">Membership changes can add or remove deployment on every targeted machine. Removing a member or deleting the group preserves library content, direct assignments, and version pins.</p>
         <section className="skills-section"><h4>Members</h4>
           {skills.filter(skill => skill.groupId === selected.id).map(skill => <div className="skills-section-heading" key={skill.id}><span>{skill.name}</span>

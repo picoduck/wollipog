@@ -15,6 +15,7 @@ import { pairingLinks } from "../device-token.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { accountLabelText, isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { CopyButton, Modal } from "./common.js";
+import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { ChevronRightIcon, DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import {
@@ -380,24 +381,18 @@ export function PairDeviceDialog({
               />
             </div>
           )}
-          <div className="access-choice-list" id="pair-person-choices" role="radiogroup" aria-label="Person">
-            {activeMembers.map((member, index) => (
-              <label className={`access-choice${userId === member.userId ? " selected" : ""}`} key={member.userId}>
-                <input
-                  type="radio"
-                  name="pair-person"
-                  value={member.userId}
-                  checked={userId === member.userId}
-                  onChange={() => setUserId(member.userId)}
-                />
-                <span>
-                  <strong>{namesRevealed ? member.userName : memberTitles[index]}</strong>
-                  <small>{titleCaseLabel(member.role)} Access</small>
-                </span>
-              </label>
-            ))}
-            {activeMembers.length === 0 && <div className="access-empty-copy">Add an active person before pairing a device.</div>}
-          </div>
+          <ChoiceRows<string>
+            id="pair-person-choices"
+            label="Person"
+            value={userId || null}
+            onChange={setUserId}
+            options={activeMembers.map((member, index) => ({
+              value: member.userId,
+              title: namesRevealed ? member.userName : memberTitles[index]!,
+              description: `${titleCaseLabel(member.role)} Access`,
+            }))}
+          />
+          {activeMembers.length === 0 && <div className="access-empty-copy">Add an active person before pairing a device.</div>}
         </>
       ) : (
         <div className="access-form">
@@ -519,17 +514,17 @@ function TeamDialog({
               withText
             />
           )}
-          {activeMembers.map((member, index) => (
-            <label key={member.userId}>
-              <input
-                type="checkbox"
-                checked={memberIds.includes(member.userId)}
-                onChange={() => toggle(member.userId)}
-              />
-              <span>{namesRevealed ? member.userName : memberTitles[index]}</span>
-              <small>{member.role}</small>
-            </label>
-          ))}
+          <ChoiceRows<string>
+            multiple
+            label="Members"
+            value={memberIds}
+            onChange={toggle}
+            options={activeMembers.map((member, index) => ({
+              value: member.userId,
+              title: namesRevealed ? member.userName : memberTitles[index]!,
+              description: member.role,
+            }))}
+          />
           {activeMembers.length === 0 && <div className="access-empty-copy">No active people are available.</div>}
         </fieldset>
         <DialogError error={error} />

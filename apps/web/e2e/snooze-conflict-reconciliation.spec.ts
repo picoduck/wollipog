@@ -33,7 +33,7 @@ test("a stale Snooze save reconciles without live delivery and preserves the dra
   await expect(conflict).toContainText("Your local draft is preserved");
   await expect(expression).toHaveValue("today at 3:30 pm");
   await expect(exact).toHaveValue("2099-04-05T06:30");
-  await expect(page.getByRole("radio", { name: /Regardless/ })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("radio", { name: /Regardless/ })).toBeChecked();
   await expect(update).toBeFocused();
   expect(await page.evaluate(() => window.__reminderWriteCalls)).toBe(1);
   if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath("after-conflict.png") });
@@ -43,7 +43,7 @@ test("a stale Snooze save reconciles without live delivery and preserves the dra
   await expect(conflict).toHaveCount(0);
   await expect(expression).toHaveValue("");
   await expect(exact).toHaveValue("2099-05-06T21:45");
-  await expect(page.getByRole("radio", { name: /Until Activity/ })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("radio", { name: /Until Activity/ })).toBeChecked();
   await expect(expression).toBeFocused();
   expect(await page.evaluate(() => window.__reminderWriteCalls)).toBe(1);
   await pause(3_500);
@@ -90,7 +90,7 @@ test("a removed reminder can create a new reminder from its preserved draft", as
     .toContainText("Creating a new reminder from the preserved draft");
   await expect(expression).toHaveValue("today at 3:30 pm");
   await expect(exact).toHaveValue("2099-04-05T06:30");
-  await expect(page.getByRole("radio", { name: /Regardless/ })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("radio", { name: /Regardless/ })).toBeChecked();
   await expect(page.locator(".snooze-preview span").last()).toHaveText(draftTimeZone ?? "");
   await expect(expression).toBeFocused();
   if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath("preserved-draft-create-mode.png") });

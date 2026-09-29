@@ -177,7 +177,7 @@ test("the pairing person picker masks email-named people until one deliberate re
     await act(async () => {
       root.render(<PairDeviceDialog identity={emailIdentity} onClose={() => {}} onSaved={async () => {}} />);
     });
-    const names = () => Array.from(container.querySelectorAll(".access-choice strong")).map((node) => node.textContent);
+    const names = () => Array.from(container.querySelectorAll(".choice-row-title")).map((node) => node.textContent);
     assert.equal(container.innerHTML.includes("@example."), false);
     assert.deepEqual(names(), ["Misko", "Hidden Name 1", "Hidden Name 2"]);
     const reveal = Array.from(container.querySelectorAll("button"))

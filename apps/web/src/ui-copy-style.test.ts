@@ -83,6 +83,25 @@ function isTitleCase(value: string): boolean {
   });
 }
 
+/**
+ * A consent checkbox's label is a sentence the user agrees to (§8.4, §17.1): the first word is
+ * capitalized and the rest stay lowercase, apart from acronyms and proper names in capitals.
+ */
+function isSentenceCase(value: string): boolean {
+  const words = value.match(/[A-Za-z][A-Za-z'-]*/g) ?? [];
+  return words.every((word, index) => index === 0
+    ? /^[A-Z]/.test(word)
+    : word === word.toLowerCase() || /^[A-Z0-9]+(?:[-/][A-Z0-9]+)*$/.test(word));
+}
+
+/** Whether a JSX element carries a bare boolean attribute such as `consent`. */
+function hasFlag(owner: ts.JsxOpeningLikeElement, name: string, sourceFile: ts.SourceFile): boolean {
+  return owner.attributes.properties.some((property) => ts.isJsxAttribute(property)
+    && property.name.getText(sourceFile) === name
+    && (!property.initializer || (ts.isJsxExpression(property.initializer)
+      && property.initializer.expression?.kind === ts.SyntaxKind.TrueKeyword)));
+}
+
 test("static compact UI labels use Title Case", () => {
   const failures: string[] = [];
   for (const file of sourceFiles(SOURCE_ROOT)) {
@@ -110,9 +129,24 @@ test("static compact UI labels use Title Case", () => {
         // A JsxAttribute sits in JsxAttributes; the element that owns it is one level further up.
         const owner = node.parent.parent;
         const tag = ts.isJsxOpeningLikeElement(owner) ? owner.tagName.getText(sourceFile) : "";
-        if (name === "aria-label" || name === "ariaLabel" || name === "data-menu-label" || name === "label" || (name === "title" && (tag === "State" || tag === "Notice" || tag === "Modal"))) {
+        const consent = tag === "Checkbox" && ts.isJsxOpeningLikeElement(owner) && hasFlag(owner, "consent", sourceFile);
+        if (consent && name === "label") {
+          // Checked below as a sentence instead.
+        } else if (name === "aria-label" || name === "ariaLabel" || name === "data-menu-label" || name === "label" || (name === "title" && (tag === "State" || tag === "Notice" || tag === "Modal"))) {
           report(node, name, node.initializer.text);
         }
+      }
+      // A ChoiceRow's title is its label (§8.4): every static title in a ChoiceRows `options` list.
+      if (ts.isJsxAttribute(node) && node.name.getText(sourceFile) === "options" && node.initializer &&
+          ts.isJsxExpression(node.initializer) && node.initializer.expression &&
+          ts.isJsxOpeningLikeElement(node.parent.parent) && node.parent.parent.tagName.getText(sourceFile) === "ChoiceRows") {
+        const titles = (inner: ts.Node) => {
+          if (ts.isPropertyAssignment(inner) && ts.isIdentifier(inner.name) && inner.name.text === "title") {
+            for (const branch of staticBranches(inner.initializer) ?? []) report(inner, "ChoiceRow title", branch);
+          }
+          ts.forEachChild(inner, titles);
+        };
+        titles(node.initializer.expression);
       }
       // A dialog title chosen by a condition is still a title (§7.2): read every branch.
       if (ts.isJsxAttribute(node) && node.name.getText(sourceFile) === "title" && node.initializer &&
@@ -136,6 +170,58 @@ test("static compact UI labels use Title Case", () => {
     visit(sourceFile);
   }
   assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+test("consent checkbox labels are sentences, and every other checkbox label is Title Case", () => {
+  const failures: string[] = [];
+  let consents = 0;
+  let labels = 0;
+  for (const file of sourceFiles(SOURCE_ROOT)) {
+    const source = readFileSync(file, "utf8");
+    if (!source.includes("<Checkbox")) continue;
+    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const visit = (node: ts.Node) => {
+      if (ts.isJsxOpeningLikeElement(node) && node.tagName.getText(sourceFile) === "Checkbox") {
+        const consent = hasFlag(node, "consent", sourceFile);
+        const label = node.attributes.properties.find((property): property is ts.JsxAttribute =>
+          ts.isJsxAttribute(property) && property.name.getText(sourceFile) === "label");
+        const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+        const where = `${path.relative(SOURCE_ROOT, file)}:${line}`;
+        if (!label?.initializer) failures.push(`${where} Checkbox has no visible label`);
+        else {
+          const expression = ts.isStringLiteral(label.initializer) ? label.initializer
+            : ts.isJsxExpression(label.initializer) ? label.initializer.expression : undefined;
+          // A template's holes are data (a skill name), so only its static words are read.
+          const branches = expression && ts.isTemplateExpression(expression)
+            ? [expression.head.text + expression.templateSpans.map((span) => ` x${span.literal.text}`).join("")]
+            : expression ? staticBranches(expression) : null;
+          for (const branch of branches ?? []) {
+            labels += 1;
+            if (consent) {
+              consents += 1;
+              if (!isSentenceCase(branch)) failures.push(`${where} consent label is not a sentence: ${JSON.stringify(branch)}`);
+            } else if (!isTitleCase(branch.replace(/ x\b/g, " X"))) {
+              failures.push(`${where} checkbox label is not Title Case: ${JSON.stringify(branch)}`);
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  assert.deepEqual(failures, [], failures.join("\n"));
+  // Not vacuous: the scan found the consent labels in the Skills review dialogs and ordinary ones.
+  assert.ok(consents >= 8, `found ${consents} consent labels`);
+  assert.ok(labels - consents >= 8, `found ${labels - consents} ordinary checkbox labels`);
+});
+
+test("the copy rules tell a sentence from a title", () => {
+  assert.equal(isSentenceCase("Accept version diff and update existing assignments"), true);
+  assert.equal(isSentenceCase("Accept Version Diff and Update Existing Assignments"), false);
+  assert.equal(isSentenceCase("Open the PR after creating it"), true);
+  assert.equal(isTitleCase("Include Session Name"), true);
+  assert.equal(isTitleCase("Include session name"), false);
 });
 
 /** Every string a title or label expression can produce; template holes read as a placeholder word. */

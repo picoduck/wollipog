@@ -1028,8 +1028,8 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
     fireDomEvent.change(expression);
     exact.value = "2099-04-05T06:30";
     fireDomEvent.change(exact);
-    [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-      .find((button) => button.textContent?.includes("Regardless"))!.click();
+    [...container.querySelectorAll<HTMLLabelElement>(".snooze-policy .choice-row")]
+      .find((row) => row.textContent?.includes("Regardless"))!.click();
     exact.focus();
   });
   const draftTimeZone = [...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent;
@@ -1052,7 +1052,7 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
   assert.equal(domWindow.document.activeElement, exact);
   assert.equal(expression.value, "today at 3:30 pm");
   assert.equal(exact.value, "2099-04-05T06:30");
-  assert.equal(container.querySelector<HTMLButtonElement>('.snooze-policy [role="radio"][aria-checked="true"]')?.textContent?.includes("Regardless"), true);
+  assert.equal(container.querySelector('.snooze-policy input:checked')?.closest("label")?.textContent?.includes("Regardless"), true);
   assert.equal([...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent, draftTimeZone);
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client/i);
   const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;

@@ -17,7 +17,7 @@ import {
   workflowBindingsComplete,
   type RunWorkMode,
 } from "../workflow-presets.js";
-import { handleRovingChoiceKeyDown } from "./interactions.js";
+import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { matchesShortcut } from "../shortcuts.js";
 import {
   NO_PROJECT_SELECTION,
@@ -270,16 +270,23 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
         <div className="form">
           <div className="field">
             <span>Preset</span>
-            <div className="workflow-preset-grid" role="radiogroup" aria-label="Run Preset" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-              <button type="button" role="radio" aria-checked={mode === "parallel"} tabIndex={mode === "parallel" ? 0 : -1} className={`workflow-preset ${mode === "parallel" ? "on" : ""}`} onClick={() => setMode("parallel")}>
-                <strong>Parallel Comparison</strong>
-                <span>Send the same task to selected agents in isolated worktrees.</span>
-              </button>
-              <button type="button" role="radio" aria-checked={mode === "workflow"} tabIndex={mode === "workflow" ? 0 : -1} className={`workflow-preset ${mode === "workflow" ? "on" : ""}`} onClick={() => setMode("workflow")}>
-                <strong>Build + Review Workflow</strong>
-                <span>Dispatch role-specific steps and converge through durable artifacts and gates.</span>
-              </button>
-            </div>
+            <ChoiceRows<RunWorkMode>
+              label="Run Preset"
+              value={mode}
+              onChange={setMode}
+              options={[
+                {
+                  value: "parallel",
+                  title: "Parallel Comparison",
+                  description: "Send the same task to selected agents in isolated worktrees.",
+                },
+                {
+                  value: "workflow",
+                  title: "Build + Review Workflow",
+                  description: "Dispatch role-specific steps and converge through durable artifacts and gates.",
+                },
+              ]}
+            />
           </div>
           <p className="muted">
             {mode === "parallel"
@@ -362,28 +369,32 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
           {mode === "parallel" ? (
             <div className="field">
               <span>Agents</span>
-              <div className="agent-picks">
-                {primaryOptions.map(({ agent: a, label }) => (
-                  <label key={a.id} className={`agent-pick ${agentIds.includes(a.id) ? "on" : ""}`}>
-                    <input type="checkbox" checked={agentIds.includes(a.id)} onChange={() => toggleAgent(a.id)} />
-                    <AgentIcon driver={a.driver ?? "acp"} agentName={a.name} size={13} />
-                    {label}
-                  </label>
-                ))}
-              </div>
+              <ChoiceRows<string>
+                multiple
+                label="Agents"
+                value={agentIds}
+                onChange={toggleAgent}
+                options={primaryOptions.map(({ agent: a, label }) => ({
+                  value: a.id,
+                  title: label,
+                  icon: <AgentIcon driver={a.driver ?? "acp"} agentName={a.name} size={16} />,
+                }))}
+              />
               {advancedOptions.length > 0 && (
                 <details className="advanced-agents">
                   <summary>Advanced Agents</summary>
                   <p className="muted">Non-interactive targets are not selected by default.</p>
-                  <div className="agent-picks">
-                    {advancedOptions.map(({ agent: a, label }) => (
-                      <label key={a.id} className={`agent-pick ${agentIds.includes(a.id) ? "on" : ""}`}>
-                        <input type="checkbox" checked={agentIds.includes(a.id)} onChange={() => toggleAgent(a.id)} />
-                        <AgentIcon driver={a.driver ?? "acp"} agentName={a.name} size={13} />
-                        {label}
-                      </label>
-                    ))}
-                  </div>
+                  <ChoiceRows<string>
+                    multiple
+                    label="Advanced Agents"
+                    value={agentIds}
+                    onChange={toggleAgent}
+                    options={advancedOptions.map(({ agent: a, label }) => ({
+                      value: a.id,
+                      title: label,
+                      icon: <AgentIcon driver={a.driver ?? "acp"} agentName={a.name} size={16} />,
+                    }))}
+                  />
                 </details>
               )}
             </div>

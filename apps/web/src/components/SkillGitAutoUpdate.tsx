@@ -23,7 +23,7 @@ export function SkillGitAutoUpdateControls({ status, gitRef, busy, onChange }: {
   const enabled = status?.enabled === true;
   const held = enabled ? status?.held : null;
   return <div className="skills-git-auto-update">
-    <label className="field"><span><Checkbox label="Automatic Updates" checked={enabled} disabled={busy} onChange={onChange} /> Automatic Updates</span></label>
+    <Checkbox label="Automatic Updates" checked={enabled} disabled={busy} onChange={onChange} />
     <p className="skills-hint">{enabled
       ? `Checks ${gitRef} every ${formatUpdateInterval(status?.intervalMs)} and imports new commits as library versions. Updates that add or change scripts wait for review.`
       : "Off. Use Check for Updates to review new commits."}</p>

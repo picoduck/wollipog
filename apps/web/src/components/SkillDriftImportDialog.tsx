@@ -91,10 +91,7 @@ export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, 
         {preview.disposition === "identical" && <p>The edited files already match the latest library version. Importing only resolves the machine's hold.</p>}
         <p>Review every file, including scripts. Reading and importing never run skill contents.</p>
         <SkillCopyFileReview previousFiles={preview.previousFiles} files={preview.files} copyLabel="Edited" />
-        {preview.importable && needsAcceptance && <label className="field"><span>
-          <Checkbox label="Accept Version Diff and Update Existing Assignments" checked={accepted} disabled={busy} onChange={setAccepted} />
-          {" "}Accept Version Diff and Update Existing Assignments
-        </span></label>}
+        {preview.importable && needsAcceptance && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
       </>}
     </div>
   </Modal>;

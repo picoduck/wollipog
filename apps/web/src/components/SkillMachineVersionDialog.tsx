@@ -94,7 +94,7 @@ export function SkillMachineVersionDialog({ skillId, runners, initialRunnerId, o
         <h4>Current</h4><pre className="skill-import-content">{contents(preview.currentVersion?.files?.find((file) => file.path === path))}</pre>
         <h4>Proposed</h4><pre className="skill-import-content">{contents(preview.proposedVersion.files?.find((file) => file.path === path))}</pre>
       </details>)}
-      <label className="field"><span><Checkbox label="Accept Files and Machine-Wide Version Policy" checked={accepted} disabled={busy} onChange={setAccepted} /> Accept Files and Machine-Wide Version Policy</span></label>
+      <Checkbox consent label="Accept files and machine-wide version policy" checked={accepted} disabled={busy} onChange={setAccepted} />
     </section>}
   </div></Modal>;
 }

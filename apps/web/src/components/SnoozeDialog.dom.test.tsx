@@ -227,8 +227,8 @@ test("live reminder changes preserve the complete draft and require an explicit 
     fireDomEvent.change(expression);
     exact.value = "2099-04-05T06:30";
     fireDomEvent.change(exact);
-    [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-      .find((button) => button.textContent?.includes("Regardless"))!.click();
+    [...container.querySelectorAll<HTMLLabelElement>(".snooze-policy .choice-row")]
+      .find((row) => row.textContent?.includes("Regardless"))!.click();
     exact.focus();
   });
   const draftTimeZone = [...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent;
@@ -238,7 +238,7 @@ test("live reminder changes preserve the complete draft and require an explicit 
   assert.equal(domWindow.document.activeElement, exact, "a live update must not remount or move focus");
   assert.equal(expression.value, "today at 3:30 pm");
   assert.equal(exact.value, "2099-04-05T06:30");
-  assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')?.textContent?.includes("Regardless"), true);
+  assert.equal(container.querySelector('.snooze-policy input:checked')?.closest("label")?.textContent?.includes("Regardless"), true);
   assert.equal([...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent, draftTimeZone);
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client.*local draft is preserved/i);
   const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
@@ -256,7 +256,7 @@ test("live reminder changes preserve the complete draft and require an explicit 
   assert.equal(domWindow.document.activeElement, expression, "reloading must restore focus inside the dialog");
   assert.equal(expression.value, "");
   assert.equal(exact.value, "2099-05-06T07:45");
-  assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')?.textContent?.includes("Until Activity"), true);
+  assert.equal(container.querySelector('.snooze-policy input:checked')?.closest("label")?.textContent?.includes("Until Activity"), true);
   assert.match([...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent ?? "", /Asia\/Tokyo/);
 
   await act(async () => {
@@ -476,8 +476,8 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
       fireDomEvent.change(expression);
       exact.value = "2099-04-05T06:30";
       fireDomEvent.change(exact);
-      [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-        .find((button) => button.textContent?.includes("Regardless"))!.click();
+      [...container.querySelectorAll<HTMLLabelElement>(".snooze-policy .choice-row")]
+        .find((row) => row.textContent?.includes("Regardless"))!.click();
       exact.focus();
       container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
       await Promise.resolve();
@@ -487,7 +487,7 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
     assert.equal(reconciliations, 1, `${scenario.name}: exactly one authoritative read follows the conflict`);
     assert.equal(expression.value, "today at 3:30 pm", `${scenario.name}: natural-language draft`);
     assert.equal(exact.value, "2099-04-05T06:30", `${scenario.name}: exact-time draft`);
-    assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
+    assert.equal(container.querySelector('.snooze-policy input:checked')?.closest("label")
       ?.textContent?.includes("Regardless"), true, `${scenario.name}: Wake Policy draft`);
     assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", scenario.message, scenario.name);
     assert.equal(domWindow.document.activeElement, exact, `${scenario.name}: reconciliation keeps focus`);
@@ -499,7 +499,7 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
     if (scenario.authoritative === null) {
       assert.equal(expression.value, "", "normal reset discards the natural-language draft without inventing input");
       assert.equal(exact.value, "", "normal reset discards the exact-time draft");
-      assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
+      assert.equal(container.querySelector('.snooze-policy input:checked')?.closest("label")
         ?.textContent?.includes("Until Activity"), true, "normal reset restores the default Wake Policy");
       assert.equal(container.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled, true,
         "a reset reminder remains unavailable until the user chooses a schedule");
@@ -561,8 +561,8 @@ test("a removed reminder can be recreated explicitly from the complete preserved
     fireDomEvent.change(expression);
     exact.value = "2099-04-05T06:30";
     fireDomEvent.change(exact);
-    [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-      .find((button) => button.textContent?.includes("Regardless"))!.click();
+    [...container.querySelectorAll<HTMLLabelElement>(".snooze-policy .choice-row")]
+      .find((row) => row.textContent?.includes("Regardless"))!.click();
     exact.focus();
   });
   const draftTimeZone = [...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent;
@@ -587,7 +587,7 @@ test("a removed reminder can be recreated explicitly from the complete preserved
   assert.equal(domWindow.document.activeElement, expression, "activating draft reuse keeps focus in the dialog");
   assert.equal(expression.value, "today at 3:30 pm", "natural-language input is retained");
   assert.equal(exact.value, "2099-04-05T06:30", "exact date and time are retained");
-  assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
+  assert.equal(container.querySelector('.snooze-policy input:checked')?.closest("label")
     ?.textContent?.includes("Regardless"), true, "Wake Policy is retained");
   assert.equal([...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent, draftTimeZone,
     "time-zone context is retained");

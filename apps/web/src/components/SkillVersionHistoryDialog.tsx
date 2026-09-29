@@ -87,7 +87,7 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
             <h4>Proposed</h4><pre className="skill-import-content">{contents(after)}</pre>
           </details>;
         })}
-        {preview.version.id !== preview.currentVersion?.id && <label className="field"><span><Checkbox label="Accept Version Diff and Update Existing Assignments" checked={accepted} disabled={busy} onChange={setAccepted} /> Accept Version Diff and Update Existing Assignments</span></label>}
+        {preview.version.id !== preview.currentVersion?.id && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
       </section>}
     </div>
   </Modal>;

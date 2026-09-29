@@ -143,6 +143,9 @@ async function selectCommonProjectWithoutPointer(page: Page, touch = false) {
 const permissionPresets = (page: Page) =>
   page.getByRole("radiogroup", { name: "Session Role" });
 
+/** The ChoiceRow a native radio sits in: the `<label>` that is the row's whole target. */
+const choiceRow = (radio: Locator) => radio.locator("xpath=ancestor::label[1]");
+
 /**
  * Whether an element's own content overflows the box it is drawn in.
  *
@@ -172,7 +175,7 @@ for (const viewport of VIEWPORTS) {
     test("both presets are fully visible and nothing overflows the form", async ({ page }) => {
       await openDialog(page);
       const group = permissionPresets(page);
-      const options = group.getByRole("radio");
+      const options = group.locator(".choice-row");
       await expect(options).toHaveCount(2);
 
       // The structural half: the inline Permission Preset group has no trigger or popup. The
@@ -190,7 +193,7 @@ for (const viewport of VIEWPORTS) {
         expect(box!.height).toBeGreaterThan(0);
         expect(box!.y).toBeGreaterThanOrEqual(groupBox!.y - 1);
         expect(box!.y + box!.height).toBeLessThanOrEqual(groupBox!.y + groupBox!.height + 1);
-        // And no clipped label, description or reason inside the card itself.
+        // And no clipped label, description or reason inside the row itself.
         const inner = await overflow(option);
         expect(inner.vertical).toBeLessThanOrEqual(1);
         expect(inner.horizontal).toBeLessThanOrEqual(1);
@@ -208,7 +211,7 @@ for (const viewport of VIEWPORTS) {
       const formBox = (await form.boundingBox())!;
       // `.loc-pick` and the native Project/Agent selects are gone. Include both responsive owners
       // so the two controls #218 migrated cannot overflow unnoticed.
-      for (const selector of [".ui-choice-card", ".seg", ".ui-select-trigger", ".ui-searchable-combobox-input"]) {
+      for (const selector of [".choice-row", ".seg", ".ui-select-trigger", ".ui-searchable-combobox-input"]) {
         for (const control of await page.locator(selector).all()) {
           if (!(await control.isVisible())) continue;
           const box = (await control.boundingBox())!;
@@ -625,8 +628,9 @@ test.describe("unavailable preset", () => {
     // that the reason was their agent.
     await expect(orchestrator).toBeVisible();
     await expect(orchestrator).toHaveAttribute("aria-disabled", "true");
-    await expect(orchestrator).toContainText(/does not offer the Orchestrator/);
-    expect((await overflow(orchestrator)).vertical).toBeLessThanOrEqual(1);
+    await expect(orchestrator).toHaveAccessibleDescription(/does not offer the Orchestrator/);
+    await expect(choiceRow(orchestrator)).toContainText(/does not offer the Orchestrator/);
+    expect((await overflow(choiceRow(orchestrator))).vertical).toBeLessThanOrEqual(1);
   });
 });
 
@@ -640,7 +644,7 @@ test.describe("increased text size", () => {
     await page.addStyleTag({ content: "html { font-size: 150%; }" });
     const group = permissionPresets(page);
     await expect(group.getByRole("radio")).toHaveCount(2);
-    for (const option of await group.getByRole("radio").all()) {
+    for (const option of await group.locator(".choice-row").all()) {
       await expect(option).toBeVisible();
       const clipped = await overflow(option);
       expect(clipped.vertical).toBeLessThanOrEqual(1);
@@ -659,5 +663,41 @@ test.describe("increased text size", () => {
     await lastOption.scrollIntoViewIfNeeded();
     await lastOption.click();
     await expect(agent).toHaveAccessibleName(/Agent: Pi RPC/);
+  });
+});
+
+test.describe("choice rows at 1440px (#1952)", () => {
+  test.use({ viewport: { width: 1440, height: 1000 } });
+
+  test("each group's markers share one x and sit on their titles' first lines", async ({ page }) => {
+    // The cards this replaced centred a trailing marker on the whole card, so a card with a
+    // one-line description and one with a two-line description (57px and 85px here) put their
+    // markers at different heights. A leading marker on the title's first line makes them one
+    // column whatever each row's height; every size compared is fixed by the stylesheet.
+    await openDialog(page);
+    const groups = page.locator('[role="radiogroup"]:has(> .choice-row), [role="group"]:has(> .choice-row)');
+    const names = await groups.evaluateAll((elements) => elements.map((element) => element.getAttribute("aria-label")));
+    for (const name of ["Project Location", "Session Role", "Harness"]) expect(names).toContain(name);
+    for (const group of await groups.all()) {
+      const name = await group.getAttribute("aria-label");
+      const rows = await group.locator(":scope > .choice-row").evaluateAll((elements) => elements.map((row) => {
+        const marker = row.querySelector("input")!.getBoundingClientRect();
+        const title = row.querySelector<HTMLElement>(".choice-row-title")!;
+        const titleBox = title.getBoundingClientRect();
+        return {
+          left: marker.left,
+          markerCentre: marker.top + marker.height / 2,
+          firstLineCentre: titleBox.top + parseFloat(getComputedStyle(title).lineHeight) / 2,
+          markerRight: marker.right,
+          titleLeft: titleBox.left,
+        };
+      }));
+      for (const row of rows) {
+        expect(row.left, `${name}: every marker shares one x`).toBe(rows[0]!.left);
+        expect(Math.abs(row.markerCentre - row.firstLineCentre), `${name}: the marker is on the title's first line`)
+          .toBeLessThanOrEqual(0.5);
+        expect(row.titleLeft, `${name}: the marker leads its title`).toBeGreaterThan(row.markerRight);
+      }
+    }
   });
 });

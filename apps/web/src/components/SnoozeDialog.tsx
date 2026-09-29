@@ -13,7 +13,7 @@ import {
 import { useAnchoredMenuStyle } from "./interactions.js";
 import { Modal } from "./common.js";
 import {
-  ChoiceCards,
+  ChoiceRows,
   InlineListbox,
   SegmentedControl,
   SELECT_MENU_MAX_HEIGHT_PX,
@@ -444,7 +444,7 @@ export function SnoozeDialog({
         <span className="field-hint" id="snooze-expression-hint">Start typing to see schedules supported by the reminder parser. Numeric dates belong in Exact Date and Time.</span>
         <label className="field-label" htmlFor="snooze-exact">Exact Date and Time</label>
         <input id="snooze-exact" className="input" type="datetime-local" value={exact} onChange={(event) => { setScheduleTouched(true); setSelectedPreset(null); setSelectedSuggestion(null); setSuggestionsOpen(false); setExact(event.target.value); }} />
-        <ChoiceCards<SessionReminderWakePolicy>
+        <ChoiceRows<SessionReminderWakePolicy>
           className="snooze-policy"
           label="Wake Policy"
           value={wakePolicy}

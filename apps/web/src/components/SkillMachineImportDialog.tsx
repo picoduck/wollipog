@@ -195,11 +195,9 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
               : ""}{operation.context?.kind === "wsl" ? `WSL: ${operation.context.distro} · ` : ""}{operation.sourceDirectory}/{operation.name} · {operation.state.replaceAll("_", " ")} · {operation.operationId}</p>
             <p>{operation.detail}</p>
             {restorable && <>
-              <label className="field"><span>
-                <Checkbox label={`Confirm Restore of ${operation.name}`} checked={restoreConfirmed === operation.operationId}
-                  disabled={busy} onChange={(checked) => setRestoreConfirmed(checked ? operation.operationId : null)} />
-                {" "}Confirm Restore of {operation.name}
-              </span><small>The current managed link is preserved inside {operation.backupDirectory} before an exclusive recovery link exposes the original.</small></label>
+              <Checkbox consent label={`Confirm restore of ${operation.name}`} checked={restoreConfirmed === operation.operationId}
+                disabled={busy} onChange={(checked) => setRestoreConfirmed(checked ? operation.operationId : null)}
+                helper={`The current managed link is preserved inside ${operation.backupDirectory} before an exclusive recovery link exposes the original.`} />
               <button className="btn danger" type="button" disabled={busy || restoreConfirmed !== operation.operationId}
                 onClick={() => void restore(operation.operationId)}>Restore Original Source</button>
             </>}
@@ -229,7 +227,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
             <h4>Proposed</h4><pre className="skill-import-content">{contents(after)}</pre>
           </details>;
         })}
-        {preview.disposition === "update" && <label className="field"><span><Checkbox label="Accept Version Diff and Update Existing Assignments" checked={accepted} disabled={busy} onChange={setAccepted} /> Accept Version Diff and Update Existing Assignments</span></label>}
+        {preview.disposition === "update" && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
         {preview.disposition === "identical" && <>
           <button className="btn" type="button" disabled={busy || !adoptionSupported}
             onClick={() => void checkAdoption()}>Check Adoption</button>
@@ -240,14 +238,10 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
               <li key={blocker}>{adoptionBlocker(blocker)}</li>)}</ul></>}
             {preflight.mutationSupported && preflight.adoptionToken && <>
               <p>The original directory will be moved into a private recovery journal before the managed link is created. This is not an atomic exchange.</p>
-              {preflight.sharedReaders.length > 0 && <label className="field"><span>
-                <Checkbox label="Accept Shared Directory Impact" checked={sharedAccepted} disabled={busy} onChange={setSharedAccepted} />
-                {" "}Accept Shared Directory Impact
-              </span><small>Also readable by: {preflight.sharedReaders.join(", ")}</small></label>}
-              <label className="field"><span>
-                <Checkbox label="Confirm Recoverable Adoption" checked={adoptionConfirmed} disabled={busy} onChange={setAdoptionConfirmed} />
-                {" "}Confirm Recoverable Adoption
-              </span></label>
+              {preflight.sharedReaders.length > 0 && <Checkbox consent label="Accept shared directory impact"
+                checked={sharedAccepted} disabled={busy} onChange={setSharedAccepted}
+                helper={`Also readable by: ${preflight.sharedReaders.join(", ")}`} />}
+              <Checkbox consent label="Confirm recoverable adoption" checked={adoptionConfirmed} disabled={busy} onChange={setAdoptionConfirmed} />
               <button className="btn danger" type="button" disabled={busy || !adoptionConfirmed ||
                 (preflight.sharedReaders.length > 0 && !sharedAccepted)} onClick={() => void adopt()}>
                 Adopt Source Directory

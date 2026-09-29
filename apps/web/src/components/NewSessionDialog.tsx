@@ -78,7 +78,7 @@ import { projectAudienceVisibilitySummary } from "../session-project-assignment.
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
 import {
-  ChoiceCards,
+  ChoiceRows,
   SearchableCombobox,
   SegmentedControl,
   Select,
@@ -1055,7 +1055,7 @@ export function NewSessionDialog({
       } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !projectLocationLaunchable) {
         setValidationError("Choose an available Project Location.");
         focusValidationProblem(
-          `[id="${projectLocationOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`,
+          `[id="${projectLocationOptionsId}"] input:not([aria-disabled="true"])`,
           '[data-validation-target="add-location"]:not(:disabled)',
           '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
         );
@@ -1081,7 +1081,7 @@ export function NewSessionDialog({
         focusValidationProblem('[data-validation-target="defaults"]');
       } else if (orchestrator && !orchestratorSupported) {
         setValidationError("Choose an available Session Role.");
-        focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+        focusValidationProblem(`[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
       } else if (orchestrator && !orchestratorSettingsReady) {
         setValidationError(orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.");
         focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
@@ -1102,10 +1102,10 @@ export function NewSessionDialog({
         focusValidationProblem(`[id="${liveChildLimitInputId}"]`);
       } else if (directWslRequiresSafeOrchestrator && !orchestrator) {
         setValidationError("Choose Orchestrator or another execution context.");
-        focusValidationProblem(`[id="${permissionOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+        focusValidationProblem(`[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
       } else if (launchSurface === "native_tui" && !nativeTuiSupported) {
         setValidationError("Choose an available Harness.");
-        focusValidationProblem(`[id="${harnessOptionsId}"] .ui-choice-card:not([aria-disabled="true"])`);
+        focusValidationProblem(`[id="${harnessOptionsId}"] input:not([aria-disabled="true"])`);
       } else if (executionTarget && !executionTarget.available) {
         setValidationError("Choose an available Execution Target.");
         focusValidationProblem('button[aria-label^="Execution Target:"]');
@@ -1290,7 +1290,7 @@ export function NewSessionDialog({
             <div className="field">
               <span>Project Location</span>
               {selectedProject.locations.length > 0 ? (
-                <ChoiceCards<string>
+                <ChoiceRows<string>
                   id={projectLocationOptionsId}
                   label="Project Location"
                   value={projectLocationId || null}
@@ -1364,7 +1364,7 @@ export function NewSessionDialog({
               {/* The legacy workspace quick-pick, on the same primitive as Project Location so
                   the two read identically. No option here is ever unavailable: `locations` is
                   already filtered to runners that are online and still advertise the workspace. */}
-              <ChoiceCards<string>
+              <ChoiceRows<string>
                 label="Workspace Location"
                 value={browsedPath ? null : workspaceLocationKey(runnerId, workspaceId)}
                 onChange={(key) => {
@@ -1464,7 +1464,7 @@ export function NewSessionDialog({
             <fieldset className="field">
               <legend>Additional Directories (Preview)</legend>
               <span className="muted">Each directory expands this ACP agent's workspace access for this session only.</span>
-              <ChoiceCards<string>
+              <ChoiceRows<string>
                 multiple
                 label="Additional Directories"
                 value={additionalDirectories}
@@ -1563,11 +1563,11 @@ export function NewSessionDialog({
 
           <div className="field">
             <span>Session Role</span>
-            {/* Cards rather than the shared Select: two options that each need a sentence is the
-                shape ChoiceCard exists for, and hiding them behind a trigger is what produced
+            {/* Rows rather than the shared Select: two options that each need a sentence is the
+                shape ChoiceRows exist for, and hiding them behind a trigger is what produced
                 #832's clipping — a 76px menu over 98px of touch targets, with half of one of only
                 two choices below the fold. Always visible, there is no menu to mis-measure. */}
-            <ChoiceCards<"normal" | "orchestrator">
+            <ChoiceRows<"normal" | "orchestrator">
               id={permissionOptionsId}
               label="Session Role"
               value={orchestrator ? "orchestrator" : "normal"}
@@ -1864,11 +1864,11 @@ export function NewSessionDialog({
 
           <div className="field">
             <span>Harness</span>
-            {/* Two fixed options that each need a sentence: the shape ChoiceCard exists for.
+            {/* Two fixed options that each need a sentence: the shape ChoiceRows exist for.
                 The six mutually exclusive muted spans that used to sit below this group are now the
                 unavailable option's own `disabledReason`, so the control and its explanation arrive
                 together instead of as siblings a screen reader meets separately. */}
-            <ChoiceCards<"direct" | "native_tui">
+            <ChoiceRows<"direct" | "native_tui">
               id={harnessOptionsId}
               label="Harness"
               value={launchSurface}

@@ -20,6 +20,7 @@ import { useApi } from "../api-context.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { SessionStatusIndicators } from "./common.js";
+import { Checkbox } from "./ui/ChoiceControls.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { useTimeline } from "./useTimeline.js";
@@ -185,9 +186,8 @@ function PodMemberColumn({
             <option value="32768">32k</option>
           </select>
         </label>
-        <label className="pod-relay-target" title="Include this member in the next manual relay">
-          <input type="checkbox" checked={selected} onChange={onToggle} /> Relay
-        </label>
+        <Checkbox label="Relay" title="Include this member in the next manual relay"
+          checked={selected} onChange={onToggle} />
         <button className="btn ghost sm" disabled={!canShare || sharing} onClick={onShare}>
           {sharing ? "Sharing…" : "Share Latest"}
         </button>

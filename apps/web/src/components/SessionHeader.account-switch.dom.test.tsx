@@ -162,14 +162,14 @@ test("email-shaped account labels stay masked in the header and the Switch Accou
   try {
     await openSwitch();
     assert.equal(html().includes("@example."), false, "no account email is in the DOM before a reveal");
-    const titles = [...domWindow.document.querySelectorAll(".ui-choice-card-title")].map((node) => node.textContent);
+    const titles = [...domWindow.document.querySelectorAll(".choice-row-title")].map((node) => node.textContent);
     assert.deepEqual(titles, ["Hidden Account 1", "Hidden Account 2"]);
 
     const revealAll = buttonNamed("Show Account Emails");
     assert.ok(revealAll, "the picker offers one deliberate reveal");
     await act(async () => { revealAll.click(); });
     assert.deepEqual(
-      [...domWindow.document.querySelectorAll(".ui-choice-card-title")].map((node) => node.textContent),
+      [...domWindow.document.querySelectorAll(".choice-row-title")].map((node) => node.textContent),
       ["work.me@example.com", "work.me@example.org"],
     );
     assert.equal(html().includes("current.me@example.com"), false, "the picker reveal does not reveal other values");

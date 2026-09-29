@@ -232,7 +232,7 @@ import {
   shouldSubmitProjectAssignment,
 } from "../session-project-assignment.js";
 import { durableInboxProjectKey, INBOX_NO_PROJECT_SPLIT_KEY } from "../inbox.js";
-import { ChoiceCards, Select, type ChoiceCardOption } from "./ui/ChoiceControls.js";
+import { ChoiceRows, Select, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import {
   clearDurableQueuedEditRecoveriesForAccount,
   clearDurableQueuedEditRecovery,
@@ -6256,7 +6256,7 @@ function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
     }
   };
 
-  const options: ChoiceCardOption<string>[] = [
+  const options: ChoiceRowOption<string>[] = [
     {
       value: "",
       title: "No Project",
@@ -6298,7 +6298,7 @@ function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
         <p className="muted project-assignment-note">
           Changing this organizes the session without moving files or changing its execution Location. Team sharing is confirmed separately.
         </p>
-        <ChoiceCards
+        <ChoiceRows
           label="Project"
           options={options}
           value={session.projectId ?? ""}
@@ -6374,7 +6374,7 @@ function LegacyWorkspaceMoveDialog({ session, onClose, returnFocusRef }: {
     }
   };
 
-  const options: ChoiceCardOption<string>[] = [
+  const options: ChoiceRowOption<string>[] = [
     {
       value: "",
       title: "No Workspace",
@@ -6480,7 +6480,7 @@ function LegacyWorkspaceMoveDialog({ session, onClose, returnFocusRef }: {
           <p className="muted project-assignment-note">
             Changing this legacy grouping does not move files or change the session's execution path.
           </p>
-          <ChoiceCards
+          <ChoiceRows
             label="Workspace"
             options={options}
             value={session.workspaceId ?? ""}

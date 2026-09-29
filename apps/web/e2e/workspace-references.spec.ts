@@ -5,8 +5,8 @@ test("workspace paths and exact diff lines become inspectable prompt attachments
   await expect(page.getByRole("listbox", { name: "Workspace Paths" })).toBeVisible();
   await page.getByRole("option", { name: /src\/session\.ts/ }).click();
   await expect(page.getByRole("button", { name: /Inspect Workspace Reference src\/session\.ts$/ })).toBeVisible();
-  await page.getByRole("checkbox", { name: "Select worktree line 19 for prompt" }).check();
-  await page.getByRole("checkbox", { name: "Select worktree line 20 for prompt" }).check();
+  await page.getByRole("checkbox", { name: "Select Worktree Line 19 for Prompt" }).check();
+  await page.getByRole("checkbox", { name: "Select Worktree Line 20 for Prompt" }).check();
   await page.getByRole("button", { name: "Attach Selected (2)" }).click();
   await expect(page.getByRole("button", { name: /Inspect Workspace Reference src\/session\.ts:19-20 · Worktree/ })).toBeVisible();
 });

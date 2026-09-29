@@ -66,10 +66,7 @@ export function SkillBuiltInReviewDialog({ skillId, skillName, onClose, onAccept
         {!changed && <p>The built-in version matches the latest library version. Accepting only records where it comes from.</p>}
         <p>Review every file, including scripts. Reviewing and accepting never run skill contents.</p>
         <SkillCopyFileReview previousFiles={review.currentVersion?.files ?? []} files={review.files} copyLabel="Built-In" />
-        {changed && <label className="field"><span>
-          <Checkbox label="Accept Version Diff and Update Existing Assignments" checked={accepted} disabled={busy} onChange={setAccepted} />
-          {" "}Accept Version Diff and Update Existing Assignments
-        </span></label>}
+        {changed && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
       </>}
     </div>
   </Modal>;
