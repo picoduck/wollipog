@@ -3459,11 +3459,19 @@ function SessionDetailLoaded({
     setError(null);
     await createRecoveryWorktreeWithProgress(input);
   }, [createRecoveryWorktreeWithProgress]);
+  // Held here rather than in the card: the notice slot unmounts the card while another notice shows,
+  // and a selection still running must keep both recovery actions refused when it comes back.
+  const [recoverySelectPending, setRecoverySelectPending] = useState(false);
   const selectRecoveryWorktree = useCallback(async (path: string) => {
     const generation = viewGenerationRef.current;
     setError(null);
-    const result = await api.selectSessionWorktree(session.id, path);
-    if (viewGenerationRef.current === generation) loadSession(result.session);
+    setRecoverySelectPending(true);
+    try {
+      const result = await api.selectSessionWorktree(session.id, path);
+      if (viewGenerationRef.current === generation) loadSession(result.session);
+    } finally {
+      setRecoverySelectPending(false);
+    }
   }, [api, loadSession, session.id]);
   const retryWorktreeSetup = useCallback(async () => {
     if (!failedSetupWorktree || setupRetryPending || !runnerOnline || worktreeSetupRefusal !== null) return;
@@ -3681,6 +3689,7 @@ function SessionDetailLoaded({
           runnerOnline={runnerOnline}
           offlineReason={runnerOfflineReason ?? undefined}
           creation={recoveryCreation}
+          selecting={recoverySelectPending}
           onCreate={createRecoveryWorktree}
           onSelect={selectRecoveryWorktree}
           trailing={trailing}
@@ -5370,7 +5379,8 @@ function SessionDetailLoaded({
             >
             {/* The one notice slot (§13.2): the most severe session condition, the rest behind
                 "+N More". Session notices are entries of it, never banners of their own. */}
-            <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} />
+            <SessionNoticeSlot sessionId={session.id} entries={sessionNotices}
+              onFocusLost={() => inputRef.current?.focus()} />
             {switchAccountOpen && (
               <SwitchAccountDialog
                 session={session}

@@ -86,9 +86,12 @@ function dismissInfo(sessionId: string, key: string): void {
   for (const listener of [...dismissalListeners]) listener();
 }
 
-export function SessionNoticeSlot({ sessionId, entries }: {
+export function SessionNoticeSlot({ sessionId, entries, onFocusLost }: {
   sessionId: string;
   entries: readonly SessionNoticeEntry[];
+  /** Where focus goes when every condition resolves while the "+N More" menu holds it, and the slot
+   * is gone: the composer. */
+  onFocusLost?: () => void;
 }) {
   const dismissed = useSyncExternalStore(
     subscribeDismissals,
@@ -122,14 +125,16 @@ export function SessionNoticeSlot({ sessionId, entries }: {
   // <body>. Nothing else moves focus here, so a lost focus is ours to restore.
   useLayoutEffect(() => {
     if (!menuOpen) return;
-    const document = slotRef.current?.ownerDocument;
-    const focusLost = !document?.activeElement || document.activeElement === document.body;
+    const doc = slotRef.current?.ownerDocument ?? window.document;
+    const focusLost = !doc.activeElement || doc.activeElement === doc.body;
     if (rest.length === 0) {
       setMenuOpen(false);
-      if (focusLost) {
-        (slotRef.current?.querySelector<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled)") ??
-          slotRef.current)?.focus();
-      }
+      if (!focusLost) return;
+      // Every condition can resolve in one update, taking the slot itself away.
+      const target = slotRef.current?.querySelector<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled)") ??
+        slotRef.current;
+      if (target) target.focus();
+      else onFocusLost?.();
     } else if (focusLost) {
       menu.menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
     }

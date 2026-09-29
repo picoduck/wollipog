@@ -145,6 +145,29 @@ test("focus stays in the slot when the condition it was on resolves while the me
   }
 });
 
+test("when every condition resolves at once with the menu open, focus goes to the fallback", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  let restored = 0;
+  const draw = (next: readonly SessionNoticeEntry[]) => act(async () => {
+    root.render(<SessionNoticeSlot sessionId="resolve-all" entries={next} onFocusLost={() => { restored += 1; }} />);
+  });
+  try {
+    await draw([ORDERED[1]!, ORDERED[2]!]);
+    await act(async () => { (container.querySelector(".session-notice-more") as HTMLButtonElement).click(); });
+    assert.equal(domWindow.document.activeElement?.getAttribute("role"), "menuitem");
+    await draw([]);
+    assert.equal(container.innerHTML, "");
+    assert.equal(restored, 1, "the slot hands focus to its fallback (the composer)");
+    await draw([]);
+    assert.equal(restored, 1, "only once");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("only info conditions are dismissible, and a dismissal lasts for the session", async () => {
   const info = ORDERED[5]!;
   const warning = ORDERED[3]!;

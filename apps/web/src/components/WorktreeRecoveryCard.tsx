@@ -26,10 +26,14 @@ export function WorktreeRecoveryCard({
   runnerOnline,
   offlineReason = "The runner is offline.",
   creation = null,
+  selecting = false,
   onCreate,
   onSelect,
   trailing,
 }: {
+  /** A worktree selection is still running. Like `creation`, it outlives this card, which the
+   * session notice slot unmounts while another notice shows. */
+  selecting?: boolean;
   session: SessionView;
   runnerOnline: boolean;
   /** The visible reason both actions are unavailable while the runner is offline, naming its Machine. */
@@ -104,7 +108,7 @@ export function WorktreeRecoveryCard({
   const creationFailure = !creating && action === null && creation?.status === "failed" ? creation : null;
   const phase = creation?.status === "creating" && creation.phase ? worktreeCreationPhase(creation.phase) : null;
   const failedPhase = creationFailure?.phase ? worktreeCreationPhase(creationFailure.phase) : null;
-  const disabled = action !== null || creating || checking || !runnerOnline || refusal !== null;
+  const disabled = action !== null || selecting || creating || checking || !runnerOnline || refusal !== null;
   // Both actions carry the incident detail and the reason ordinary submission is unavailable, so a
   // screen reader announces why the card exists rather than just the action's own name.
   const describedBy = [detailId, retainedId, ...(refusal === null ? [] : [refusalId]), ...(runnerOnline ? [] : [offlineId]),
@@ -202,7 +206,7 @@ export function WorktreeRecoveryCard({
             disabled={disabled || !selectedPath}
             onClick={() => void run("select", () => onSelect(selectedPath))}
           >
-            {action === "select" ? "Selecting…" : "Select Worktree"}
+            {action === "select" || selecting ? "Selecting…" : "Select Worktree"}
           </button>
         </fieldset>
       </div>

@@ -344,6 +344,50 @@ test("with the runner offline, every disabled action has a visible reason naming
   }
 });
 
+test("a worktree selection still running keeps recovery refused after showing another notice", async () => {
+  let settle: (() => void) | undefined;
+  const selections: string[] = [];
+  const session = sessionView({
+    historyQuarantine: quarantine,
+    worktreeRecovery: {
+      recoveryId: "recovery-select", detectedAt: 3, selectedPath: worktreePath, expectedBranch: "agent/setup",
+      detail: "The selected worktree is missing.",
+    },
+    worktrees: [{ id: "other", path: "/repos/demo/other", branch: "agent/other", source: "created" }],
+  });
+  const fixture = await mount(session, {
+    client: {
+      sessionWorktreeOperations: async () => ({ operations: [] }),
+      selectSessionWorktree: (_id: string, path: string) => {
+        selections.push(path);
+        return new Promise((resolve) => { settle = () => resolve({ session }); });
+      },
+    } as unknown as Partial<ApiClient>,
+  });
+  const choose = async (title: string) => {
+    await act(async () => { (fixture.container.querySelector(".session-notice-more") as HTMLButtonElement).click(); });
+    const item = ([...domWindow.document.querySelectorAll('[role="menuitem"]')] as unknown as HTMLButtonElement[])
+      .find((candidate) => candidate.textContent === title)!;
+    await act(async () => { item.click(); });
+    await flush();
+  };
+  const actions = () => [...fixture.container.querySelectorAll(".worktree-recovery-controls button.btn")] as HTMLButtonElement[];
+  try {
+    await flush(5);
+    await act(async () => { actions().find((button) => button.textContent === "Select Worktree")!.click(); });
+    assert.deepEqual(selections, ["/repos/demo/other"]);
+    await choose("Conversation Quarantined");
+    await choose("Worktree Recovery Required");
+    assert.ok(actions().every((button) => button.disabled), "no second selection or create while the first runs");
+    assert.ok(actions().some((button) => button.textContent === "Selecting…"));
+    await act(async () => { settle!(); });
+    await flush();
+    assert.ok(actions().every((button) => !button.disabled), "the actions return once the selection settles");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a missing worktree ranks first and renders the recovery card in the slot", async () => {
   const fixture = await mount(sessionView({
     historyQuarantine: quarantine,

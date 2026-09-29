@@ -172,6 +172,24 @@ test("a typed draft survives the card unmounting while another session notice sh
   }
 });
 
+test("a selection still running from an earlier mount keeps both actions refused (#1966)", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <WorktreeRecoveryCard session={recoverySession()} runnerOnline selecting
+        onCreate={async () => {}} onSelect={async () => {}} />,
+    ));
+    const buttons = [...container.querySelectorAll(".worktree-recovery-controls button.btn")] as HTMLButtonElement[];
+    assert.deepEqual(buttons.map((button) => button.textContent), ["Create Replacement", "Selecting…"]);
+    assert.ok(buttons.every((button) => button.disabled), "neither a second selection nor a create can start");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("a repeated recovery proposes a fresh replacement branch", async () => {
   const { container, root } = await renderCard({ session: recoverySession("fix/missing-recovery") });
   try {
