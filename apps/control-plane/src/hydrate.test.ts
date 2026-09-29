@@ -7,10 +7,12 @@ import type {
   SessionHistoryResultMessage,
   SessionSnapshot,
 } from "@wollipog/protocol";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
+import { RUNNER_REPORTED_STOP } from "./db.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 type StoredSessionEvent = { seq: number; ts: number; payload: SessionEventPayload };
 
@@ -88,6 +90,131 @@ function scriptedRunnerSocket(hub: Hub, events: StoredSessionEvent[], seen: Cont
       });
     },
   };
+}
+
+function campaignHistoryHarness(protocolVersion = PROTOCOL_VERSION, warnings: string[] = []) {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), 500, protocolVersion);
+  const hub = new Hub(db);
+  const svc = new SessionsService(db, hub, { ...NOOP_LOG, warn: (message) => warnings.push(message) });
+  const base = { runnerId: RUNNER_ID, workspaceId: "ws-1", agentId: "claude", title: "Campaign",
+    driver: "claude-code" as const, useWorktree: false, config: {}, now: 500 };
+  db.createSession({ ...base, id: "campaign",
+    orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") });
+  db.createSession({ ...base, id: "child", parentSessionId: "campaign" });
+  db.updateSessionStatus("child", "idle", 999);
+  db.reconcileRunnerHistory("child", 1, 1);
+  return { db, hub, svc };
+}
+
+test("campaign verification hydrates a dropped cache before checking the exact stopped-child report", async () => {
+  const { db, hub, svc } = campaignHistoryHarness();
+  try {
+    db.updateSessionStatus("child", "stopped", 999, RUNNER_REPORTED_STOP);
+    const payload = { kind: "agent_message", text: "Completed report", final: true } as const;
+    db.appendEvent("child", payload, 1_000, { runnerSeq: 1 });
+    db.reconcileRunnerHistory("child", 2, 1);
+    const seen: ControlPlaneToRunner[] = [];
+    hub.attachRunner(RUNNER_ID, { send(data: string) {
+      const msg = JSON.parse(data) as ControlPlaneToRunner;
+      seen.push(msg);
+      if (msg.type !== "session_history_page") return;
+      queueMicrotask(() => hub.resolveRunnerRequest({ type: "session_history_page_result",
+        requestId: msg.requestId, sessionId: msg.sessionId, ok: true,
+        events: [{ seq: 1, ts: 1_000, payload }],
+        page: { logEpoch: 2, throughSeq: 1, nextAfterSeq: 1, hasMore: false } }));
+    } });
+    assert.equal(db.listEvents("child").length, 0);
+    const result = await svc.verifyCampaignChildWithHistory("campaign", {
+      childSessionId: "child", reportEventSeq: 1, followUpsAccounted: true,
+    });
+    assert.ok(result.ok, result.error);
+    assert.equal(result.data?.campaign.children.verified, 1);
+    assert.equal(seen.filter((message) => message.type === "session_history_page").length, 1);
+  } finally { db.close(); }
+});
+
+test("campaign reads restore a legacy attestation with a missing report, and leave active children lazy", async () => {
+  const { db, hub, svc } = campaignHistoryHarness();
+  try {
+    const payload = { kind: "agent_message", text: "Completed report", final: true } as const;
+    db.raw().prepare(`INSERT INTO orchestrator_campaign_child_reports
+      (campaign_session_id, child_session_id, report_event_seq, verified_at) VALUES ('campaign','child',1,1001)`)
+      .run();
+    db.createSession({ id: "active", runnerId: RUNNER_ID, workspaceId: "ws-1", agentId: "claude",
+      title: "Active", driver: "claude-code", useWorktree: false, config: {}, now: 500, parentSessionId: "campaign" });
+    const seen: ControlPlaneToRunner[] = [];
+    hub.attachRunner(RUNNER_ID, { send(data: string) {
+      const msg = JSON.parse(data) as ControlPlaneToRunner;
+      seen.push(msg);
+      if (msg.type !== "session_history_page") return;
+      queueMicrotask(() => hub.resolveRunnerRequest({ type: "session_history_page_result",
+        requestId: msg.requestId, sessionId: msg.sessionId, ok: true,
+        events: [{ seq: 1, ts: 1_000, payload }],
+        page: { logEpoch: 1, throughSeq: 1, nextAfterSeq: 1, hasMore: false } }));
+    } });
+    assert.equal(db.campaignProjection("campaign")?.children.verified, 0);
+    const projection = await svc.campaignProjectionWithHistory("campaign");
+    assert.equal(projection.data?.children.verified, 1);
+    assert.deepEqual(seen.filter((message) => message.type === "session_history_page")
+      .map((message) => message.sessionId), ["child"]);
+    await svc.campaignProjectionWithHistory("campaign");
+    assert.equal(seen.filter((message) => message.type === "session_history_page").length, 1);
+  } finally { db.close(); }
+});
+
+test("verification does not fetch inaccessible or unrelated child history", async () => {
+  const { db, hub, svc } = campaignHistoryHarness();
+  try {
+    const seen: ControlPlaneToRunner[] = [];
+    hub.attachRunner(RUNNER_ID, scriptedRunnerSocket(hub, [], seen));
+    const result = await svc.verifyCampaignChildWithHistory("campaign", {
+      childSessionId: "child", reportEventSeq: 1, followUpsAccounted: true,
+    }, (id) => id !== "child");
+    assert.equal(result.status, 404);
+    assert.deepEqual(seen, []);
+  } finally { db.close(); }
+});
+
+for (const protocolVersion of [53, PROTOCOL_VERSION]) {
+  test(`protocol ${protocolVersion} history failures are reported without transcript data and retry on the next read`, async () => {
+    const warnings: string[] = [];
+    const { db, hub, svc } = campaignHistoryHarness(protocolVersion, warnings);
+    try {
+      const payload = { kind: "agent_message", text: "Private completed report", final: true } as const;
+      const report = db.appendEvent("child", payload, 1_000, { runnerSeq: 1 });
+      db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+      db.reconcileRunnerHistory("child", 2, 1);
+      let attempts = 0;
+      hub.attachRunner(RUNNER_ID, { send(data: string) {
+        const msg = JSON.parse(data) as ControlPlaneToRunner;
+        if (msg.type !== "session_history_page" && msg.type !== "session_history") return;
+        const ok = ++attempts > 1;
+        queueMicrotask(() => hub.resolveRunnerRequest(msg.type === "session_history_page"
+          ? { type: "session_history_page_result", requestId: msg.requestId, sessionId: msg.sessionId, ok,
+            ...(ok ? { events: [{ seq: 1, ts: 1_000, payload }],
+              page: { logEpoch: 2, throughSeq: 1, nextAfterSeq: 1, hasMore: false } }
+              : { error: "Private runner error" }) }
+          : { type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok,
+            ...(ok ? { events: [{ seq: 1, ts: 1_000, payload }] } : { error: "Private runner error" }) }));
+      } });
+      await svc.hydrateHistory("child");
+      assert.equal(db.campaignChildReportVerified("campaign", "child"), true);
+      assert.equal(db.getHydratedSeq("child"), 0);
+      assert.equal(warnings.length, 1);
+      const warning = JSON.parse(warnings[0]!);
+      assert.equal(warning.event, "history_hydration_failed");
+      assert.equal(warning.sessionId, "child");
+      assert.equal(warning.runnerId, RUNNER_ID);
+      assert.ok(warning.requestId);
+      assert.equal(warning.reason, "invalid_runner_response");
+      assert.doesNotMatch(warnings.join("\n"), /Private/);
+      await svc.hydrateHistory("child");
+      assert.equal(attempts, 2);
+      assert.equal(db.getHydratedSeq("child"), 1);
+      assert.equal(db.campaignChildReportVerified("campaign", "child"), true);
+    } finally { db.close(); }
+  });
 }
 
 test("hydrateHistory pulls the box's event log over the hub and advances the high-water", async () => {

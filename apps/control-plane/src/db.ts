@@ -835,6 +835,9 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_child_reports (
   campaign_session_id TEXT NOT NULL,
   child_session_id    TEXT NOT NULL,
   report_event_seq    INTEGER NOT NULL,
+  report_event_epoch  INTEGER,
+  report_ts           INTEGER,
+  report_digest       TEXT,
   verified_at         INTEGER NOT NULL,
   PRIMARY KEY (campaign_session_id, child_session_id),
   FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
@@ -5951,6 +5954,13 @@ export class ControlPlaneDb {
       } catch (error) {
         db.exec("ROLLBACK");
         throw error;
+      }
+    }
+    const campaignReportColumns = new Set((db.prepare("PRAGMA table_info(orchestrator_campaign_child_reports)")
+      .all() as Array<{ name: string }>).map((column) => column.name));
+    for (const column of ["report_event_epoch INTEGER", "report_ts INTEGER", "report_digest TEXT"]) {
+      if (!campaignReportColumns.has(column.split(" ")[0]!)) {
+        db.exec(`ALTER TABLE orchestrator_campaign_child_reports ADD COLUMN ${column}`);
       }
     }
     const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId);
@@ -13887,6 +13897,7 @@ export class ControlPlaneDb {
       ? tailSeq
       : Math.max(tailSeq, before.runner_history_tail_seq, before.hydrated_seq);
     if (reset) {
+      this.preserveCampaignReportsBeforeCacheReset(id);
       // File attachments are authored by the control plane, not the runner. Keep their original
       // rows (including ids and timestamps) while replacing only runner-owned history. Compact
       // their CP sequence so replayed runner pages can append after them without stale gaps.
@@ -13982,6 +13993,7 @@ export class ControlPlaneDb {
   clearSessionEvents(id: string): void {
     this.db.exec("BEGIN");
     try {
+      this.preserveCampaignReportsBeforeCacheReset(id);
       this.stmt(
         `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
            AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
@@ -14765,13 +14777,80 @@ export class ControlPlaneDb {
     reportEventSeq: number,
     now: number,
   ): void {
+    const report = this.stmt(
+      `SELECT event.ts, event.payload, session.event_epoch FROM session_events event
+       JOIN sessions session ON session.id=event.session_id WHERE event.session_id=? AND event.seq=?`,
+    ).get(childSessionId, reportEventSeq) as { ts: number; payload: string; event_epoch: number } | undefined;
     this.stmt(
       `INSERT INTO orchestrator_campaign_child_reports
-       (campaign_session_id, child_session_id, report_event_seq, verified_at)
-       VALUES (?, ?, ?, ?)
+       (campaign_session_id, child_session_id, report_event_seq, verified_at, report_event_epoch, report_ts, report_digest)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(campaign_session_id, child_session_id) DO UPDATE SET
-         report_event_seq=excluded.report_event_seq, verified_at=excluded.verified_at`,
-    ).run(campaignSessionId, childSessionId, reportEventSeq, now);
+         report_event_seq=excluded.report_event_seq, verified_at=excluded.verified_at,
+         report_event_epoch=excluded.report_event_epoch, report_ts=excluded.report_ts,
+         report_digest=excluded.report_digest`,
+    ).run(campaignSessionId, childSessionId, reportEventSeq, now, report?.event_epoch ?? null,
+      report?.ts ?? null, report ? this.campaignReportDigest(JSON.parse(report.payload) as SessionEventPayload) : null);
+  }
+
+  private campaignReportDigest(payload: SessionEventPayload): string | null {
+    if (payload.kind === "agent_response_completed") return createHash("sha256").update(payload.kind).digest("hex");
+    if (payload.kind !== "agent_message" || !payload.final || !payload.text.trim() || payload.parentToolUseId) return null;
+    return createHash("sha256").update(JSON.stringify([payload.kind, payload.text])).digest("hex");
+  }
+
+  /** Capture legacy attestations while their exact report still exists. An invalidated report
+   * must never become valid just because the cache holding its superseding assignment is lost. */
+  private preserveCampaignReportsBeforeCacheReset(childSessionId: string): void {
+    const reports = this.stmt(
+      "SELECT campaign_session_id, report_event_seq, verified_at FROM orchestrator_campaign_child_reports WHERE child_session_id=?",
+    ).all(childSessionId) as Array<{ campaign_session_id: string; report_event_seq: number; verified_at: number }>;
+    for (const report of reports) {
+      if (!this.campaignChildReportVerified(report.campaign_session_id, childSessionId)) {
+        this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE campaign_session_id=? AND child_session_id=?")
+          .run(report.campaign_session_id, childSessionId);
+      } else if (this.stmt("SELECT 1 FROM session_events WHERE session_id=? AND seq=?")
+        .get(childSessionId, report.report_event_seq)) {
+        // Only upgrade a legacy row; a stale CP sequence in another epoch may name something else.
+        const legacy = this.stmt(
+          "SELECT 1 FROM orchestrator_campaign_child_reports WHERE campaign_session_id=? AND child_session_id=? AND report_digest IS NULL",
+        ).get(report.campaign_session_id, childSessionId);
+        if (legacy) this.verifyCampaignChildReport(report.campaign_session_id, childSessionId, report.report_event_seq, report.verified_at);
+      }
+    }
+  }
+
+  /** A replayed report is identified by its content and timestamp, never by its old CP sequence.
+   * CP-only interleavings and retained attachments can shift that sequence after a reset. */
+  private rebindCampaignReportInTransaction(sessionId: string, seq: number, ts: number, payload: SessionEventPayload): void {
+    const digest = this.campaignReportDigest(payload);
+    if (!digest) return;
+    this.stmt(
+      `UPDATE orchestrator_campaign_child_reports
+       SET report_event_seq=?, report_event_epoch=(SELECT event_epoch FROM sessions WHERE id=?)
+       WHERE child_session_id=? AND report_ts=? AND report_digest=?
+         AND report_event_epoch!=(SELECT event_epoch FROM sessions WHERE id=?)`,
+    ).run(seq, sessionId, sessionId, ts, digest, sessionId);
+  }
+
+  /** Once a complete replacement log lacks the attested report, the old proof is no longer
+   * applicable. Partial/failed reloads leave the durable attestation intact. */
+  finishCampaignReportHistoryHydration(sessionId: string): void {
+    this.stmt(
+      `DELETE FROM orchestrator_campaign_child_reports WHERE child_session_id=? AND report_digest IS NOT NULL
+       AND report_event_epoch!=(SELECT event_epoch FROM sessions WHERE id=?)`,
+    ).run(sessionId, sessionId);
+  }
+
+  /** Live work supersedes a durable proof even while its old cache is absent. Historical replay
+   * uses the rebind/complete path instead, so replaying the initial assignment cannot erase it. */
+  invalidateCampaignReportsForLiveEvent(sessionId: string, payload: SessionEventPayload, ts: number): void {
+    const digest = this.campaignReportDigest(payload);
+    if (payload.kind !== "user_message" && !digest) return;
+    this.stmt(
+      `DELETE FROM orchestrator_campaign_child_reports WHERE child_session_id=?
+       AND (report_digest IS NULL OR report_digest!=? OR report_ts!=?)`,
+    ).run(sessionId, digest ?? "", ts);
   }
 
   campaignChildReportVerified(campaignSessionId: string, childSessionId: string): boolean {
@@ -14784,6 +14863,17 @@ export class ControlPlaneDb {
        WHERE child_session_id=? ORDER BY verified_at DESC LIMIT 1`,
     ).get(childSessionId) as { id: string } | undefined;
     return row && this.campaignChildReportVerified(row.id, childSessionId) ? row.id : null;
+  }
+
+  campaignReportRecoverySessionIds(campaignSessionId: string): string[] {
+    return (this.stmt(
+      `SELECT verification.child_session_id AS id FROM orchestrator_campaign_child_reports verification
+       JOIN sessions child ON child.id=verification.child_session_id
+       WHERE verification.campaign_session_id=? AND verification.report_digest IS NULL
+         AND NOT EXISTS (SELECT 1 FROM session_events target
+           WHERE target.session_id=child.id AND target.seq=verification.report_event_seq)
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))`,
+    ).all(campaignSessionId) as Array<{ id: string }>).map((row) => row.id);
   }
 
   recordCampaignContinuationEvent(input: {
@@ -15107,11 +15197,13 @@ export class ControlPlaneDb {
       `SELECT verification.child_session_id AS id
        FROM orchestrator_campaign_child_reports verification
        JOIN sessions child ON child.id=verification.child_session_id
-       JOIN session_events target ON target.session_id=verification.child_session_id
+       LEFT JOIN session_events target ON target.session_id=verification.child_session_id
          AND target.seq=verification.report_event_seq
+         AND (verification.report_event_epoch IS NULL OR verification.report_event_epoch=child.event_epoch)
        WHERE verification.campaign_session_id=?${childFilter}
          AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))
-         AND (
+         AND ((verification.report_digest IS NOT NULL AND verification.report_event_epoch!=child.event_epoch) OR (
+         (
            target.kind='agent_response_completed' OR
            (target.kind='agent_message' AND json_extract(target.payload, '$.final')=1
             AND trim(json_extract(target.payload, '$.text'))!=''
@@ -15130,7 +15222,7 @@ export class ControlPlaneDb {
            SELECT 1 FROM session_events assignment
            WHERE assignment.session_id=target.session_id AND assignment.seq>target.seq
              AND assignment.kind='user_message'
-         )`,
+         )))`,
     ).all(...params) as unknown as Array<{ id: string }>;
     return new Set(rows.map((row) => row.id));
   }
@@ -20071,6 +20163,10 @@ export class ControlPlaneDb {
            VALUES (?, ?, ?, ?, ?, ?)`,
         )
         .run(sessionId, seq, options?.runnerSeq ?? null, ts, payload.kind, JSON.stringify(payload));
+      if (options?.runnerSeq === undefined || options.armBackgroundStatusSettlement) {
+        this.invalidateCampaignReportsForLiveEvent(sessionId, payload, ts);
+      }
+      this.rebindCampaignReportInTransaction(sessionId, seq, ts, payload);
       if (payload.kind === "background_continuation_delivered") {
         const eventEpoch = (this.stmt("SELECT event_epoch FROM sessions WHERE id=?").get(sessionId) as
           | { event_epoch: number }
@@ -20248,6 +20344,10 @@ export class ControlPlaneDb {
           JSON.stringify(event.payload),
         );
         const rowId = Number(info.lastInsertRowid);
+        if (options.armBackgroundStatusSettlement) {
+          this.invalidateCampaignReportsForLiveEvent(sessionId, event.payload, event.ts);
+        }
+        this.rebindCampaignReportInTransaction(sessionId, cpSeq, event.ts, event.payload);
         this.linkSessionEventArtifacts(
           rowId,
           event.artifactIds ?? [],

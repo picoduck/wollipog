@@ -6549,6 +6549,32 @@ export class SessionsService {
     return ok(followUp, 201);
   }
 
+  /** Campaign reads recover legacy attestations whose cache was lost before durable report
+   * identity was recorded. Ordinary projections remain synchronous and cache-independent. */
+  async campaignProjectionWithHistory(campaignSessionId: string): Promise<ServiceResult<OrchestratorCampaignProjection>> {
+    const projection = this.campaignProjection(campaignSessionId);
+    if (!projection.ok) return projection;
+    for (const id of this.db.campaignReportRecoverySessionIds(this.db.resolvedCampaignSessionId(campaignSessionId)!)) {
+      await this.hydrateHistory(id);
+    }
+    return this.campaignProjection(campaignSessionId);
+  }
+
+  async verifyCampaignChildWithHistory(
+    campaignSessionId: string,
+    request: VerifyOrchestratorChildRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): Promise<ServiceResult<{ campaign: OrchestratorCampaignProjection; child: SessionView }>> {
+    // Check scope before fetching anything; hydration must not become an access side channel.
+    if (this.db.getSession(campaignSessionId)?.orchestratorPolicy &&
+        boundedDecisionString(request?.childSessionId, 256) &&
+        this.db.isSessionDescendant(campaignSessionId, request.childSessionId) &&
+        canAccess(campaignSessionId) && canAccess(request.childSessionId)) {
+      await this.hydrateHistory(request.childSessionId);
+    }
+    return this.verifyCampaignChild(campaignSessionId, request, canAccess);
+  }
+
   verifyCampaignChild(
     campaignSessionId: string,
     request: VerifyOrchestratorChildRequest,
@@ -11820,6 +11846,7 @@ export class SessionsService {
     if (runnerSeq != null) {
       const cursor = this.db.getHydratedSeq(sessionId);
       if (runnerSeq <= cursor) return; // already ingested (duplicate live frame / replay)
+      this.db.invalidateCampaignReportsForLiveEvent(sessionId, payload, now);
       if (runnerSeq !== cursor + 1) {
         if (indexedHistory) this.db.reconcileRunnerHistory(sessionId, history.historyEpoch!, runnerSeq);
         this.noteLiveContinuationArm(sessionId, payload);
@@ -12753,10 +12780,15 @@ export class SessionsService {
     let trailingAsk: PendingApproval | null = null;
     const limit = 200;
     const maxSerializedBytes = 32 * 1024 * 1024;
+    let requestId = "";
+    const rejectPage = (reason: string): void => this.log.warn(JSON.stringify({
+      event: "history_hydration_failed", entryPoint: "indexed_history", sessionId,
+      runnerId: session.runnerId, requestId, afterSeq, reason,
+    }));
 
     try {
       for (;;) {
-        const requestId = `histp_${randomUUID()}`;
+        requestId = `histp_${randomUUID()}`;
         const res = await this.hub.requestFromRunner(
           session.runnerId,
           requestId,
@@ -12771,21 +12803,26 @@ export class SessionsService {
           10_000,
         );
         if (res.type !== "session_history_page_result" || res.requestId !== requestId ||
-            res.sessionId !== sessionId || !res.ok || !res.events || !res.page) return;
+            res.sessionId !== sessionId || !res.ok || !res.events || !res.page) {
+          rejectPage("invalid_runner_response");
+          return;
+        }
         const page = res.page;
         if (![page.logEpoch, page.throughSeq, page.nextAfterSeq].every(
           (value) => Number.isSafeInteger(value) && value >= 0,
-        )) return;
-        if (res.events.length > limit || Buffer.byteLength(JSON.stringify(res.events), "utf8") > maxSerializedBytes) return;
+        )) { rejectPage("invalid_page_bounds"); return; }
+        if (res.events.length > limit || Buffer.byteLength(JSON.stringify(res.events), "utf8") > maxSerializedBytes) {
+          rejectPage("page_limit_exceeded"); return;
+        }
         if (page.nextAfterSeq < afterSeq || page.nextAfterSeq > page.throughSeq ||
-            page.hasMore !== (page.nextAfterSeq < page.throughSeq)) return;
+            page.hasMore !== (page.nextAfterSeq < page.throughSeq)) { rejectPage("invalid_page_cursor"); return; }
         for (let i = 0; i < res.events.length; i++) {
           const event = res.events[i]!;
           if (event.seq !== afterSeq + i + 1 || !Number.isSafeInteger(event.ts) || event.ts < 0 ||
-              event.seq > page.throughSeq) return;
+              event.seq > page.throughSeq) { rejectPage("noncontiguous_page"); return; }
         }
         if ((res.events.at(-1)?.seq ?? afterSeq) !== page.nextAfterSeq ||
-            (page.hasMore && res.events.length === 0)) return;
+            (page.hasMore && res.events.length === 0)) { rejectPage("invalid_page_cursor"); return; }
 
         if (logEpoch === undefined) {
           logEpoch = page.logEpoch;
@@ -12805,7 +12842,7 @@ export class SessionsService {
             return;
           }
         } else if (page.logEpoch !== logEpoch || page.throughSeq !== throughSeq) {
-          return;
+          rejectPage("changed_frozen_history"); return;
         }
 
         const activeLogEpoch = logEpoch;
@@ -12863,8 +12900,9 @@ export class SessionsService {
       this.settleHydratedAsk(sessionId, trailingAsk);
       const latest = this.db.getRunnerHistoryState(sessionId);
       if (latest && throughSeq !== undefined && latest.tailSeq > throughSeq) this.rehydrate.add(sessionId);
+      else if (latest?.complete) this.db.finishCampaignReportHistoryHydration(sessionId);
     } catch {
-      /* runner slow/offline or malformed page: retain the committed cache prefix */
+      rejectPage("runner_request_or_apply_failed");
     }
   }
 
@@ -12882,7 +12920,11 @@ export class SessionsService {
         { type: "session_history", requestId, sessionId, afterSeq },
         10_000,
       );
-      if (res.type !== "session_history_result" || !res.ok || !res.events) return;
+      if (res.type !== "session_history_result" || !res.ok || !res.events) {
+        this.log.warn(JSON.stringify({ event: "history_hydration_failed", entryPoint: "legacy_history",
+          sessionId, runnerId: session.runnerId, requestId, afterSeq, reason: "invalid_runner_response" }));
+        return;
+      }
       // Fold the recovered batch to its NET trailing ask (a later resolution cancels an
       // earlier request) so a question/permission request recovered through a gap hydration
       // can re-park its card — without this, the runner sits parked while the CP shows no
@@ -12925,8 +12967,10 @@ export class SessionsService {
       // must never be displaced by recovered history. Cold hydrations of settled sessions
       // (idle/stopped, whose logs can end with an ask reconcileStore already cleared) skip.
       this.settleHydratedAsk(sessionId, trailingAsk);
+      this.db.finishCampaignReportHistoryHydration(sessionId);
     } catch {
-      /* runner slow/offline — the UI shows whatever is cached */
+      this.log.warn(JSON.stringify({ event: "history_hydration_failed", entryPoint: "legacy_history",
+        sessionId, runnerId: session.runnerId, requestId, afterSeq, reason: "runner_request_or_apply_failed" }));
     }
   }
 

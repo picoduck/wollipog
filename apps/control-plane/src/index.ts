@@ -3706,7 +3706,7 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
   if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
   }
-  const projection = svc.campaignProjection(id);
+  const projection = await svc.campaignProjectionWithHistory(id);
   return respond(reply, projection.ok && projection.data
     ? { ...projection, data: withCampaignHoldAdviceFor(db, principal, projection.data) }
     : projection);
@@ -3731,7 +3731,7 @@ app.post("/api/sessions/:id/orchestrator-campaign/verify-child", async (req, rep
   if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
   }
-  return respond(reply, svc.verifyCampaignChild(
+  return respond(reply, await svc.verifyCampaignChildWithHistory(
     id,
     req.body as VerifyOrchestratorChildRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),

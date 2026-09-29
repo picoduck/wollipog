@@ -2880,6 +2880,149 @@ test("campaign report verification and normalized follow-up deduplication surviv
   }
 });
 
+test("verified campaign children survive an event cache reset without a history read", () => {
+  const db = withRunner();
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" },
+      orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default"),
+    }));
+    db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    db.updateSessionStatus("child", "idle", 999);
+    db.reconcileRunnerHistory("child", 1, 1);
+    const report = db.appendEvent("child", {
+      kind: "agent_message", text: "Final report", final: true,
+    }, 1_000, { runnerSeq: 1, historyEpoch: 1 });
+    db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+    assert.equal(db.campaignProjection("campaign")?.children.verified, 1);
+    db.reconcileRunnerHistory("child", 2, 1);
+    assert.deepEqual(db.listEvents("child"), []);
+    assert.equal(db.campaignProjection("campaign")?.children.verified, 1);
+    assert.equal(db.campaignProjection("campaign")?.status, "verified_complete");
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign attestation rebinds to its report after CP sequences shift, and invalidations survive resets", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "campaign",
+      orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default"),
+    }));
+    db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    db.updateSessionStatus("child", "idle", 999);
+    db.reconcileRunnerHistory("child", 1, 2);
+    db.appendEvent("child", { kind: "agent_thought", text: "CP-only interleave" }, 999);
+    const payload = { kind: "agent_message", text: "Final report", final: true } as const;
+    const report = db.appendEvent("child", payload, 1_000, { runnerSeq: 1, historyEpoch: 1 });
+    db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+    db.reconcileRunnerHistory("child", 2, 2);
+    const state = db.getRunnerHistoryState("child")!;
+    db.appendHydratedPage("child", { afterSeq: 0, historyEpoch: 2, eventEpoch: state.eventEpoch }, [
+      { seq: 1, ts: 1_000, payload },
+      { seq: 2, ts: 1_002, payload: { kind: "agent_thought", text: "After report" } },
+    ]);
+    db.finishCampaignReportHistoryHydration("child");
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), true,
+      "the old CP seq now names a thought, but the exact report moved to seq 1");
+    db.appendEvent("child", { kind: "user_message", text: "More work" }, 2_000);
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), false);
+    db.reconcileRunnerHistory("child", 3, 3);
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), false);
+  } finally { db.close(); }
+});
+
+test("a replacement report at the old sequence cannot inherit verification", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "campaign" }));
+    db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    db.updateSessionStatus("child", "idle", 999);
+    db.reconcileRunnerHistory("child", 1, 1);
+    const report = db.appendEvent("child", { kind: "agent_message", text: "Original", final: true },
+      1_000, { runnerSeq: 1, historyEpoch: 1 });
+    db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+    db.reconcileRunnerHistory("child", 2, 1);
+    const state = db.getRunnerHistoryState("child")!;
+    db.appendHydratedPage("child", { afterSeq: 0, historyEpoch: 2, eventEpoch: state.eventEpoch }, [
+      { seq: 1, ts: 1_000, payload: { kind: "agent_message", text: "Replacement", final: true } },
+    ]);
+    db.finishCampaignReportHistoryHydration("child");
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), false);
+  } finally { db.close(); }
+});
+
+test("legacy attestations are preserved only if valid before their cache reset", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "campaign" }));
+    db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    db.updateSessionStatus("child", "idle", 999);
+    const report = db.appendEvent("child", { kind: "agent_message", text: "Original", final: true }, 1_000);
+    db.raw().prepare(`INSERT INTO orchestrator_campaign_child_reports
+      (campaign_session_id, child_session_id, report_event_seq, verified_at) VALUES (?, ?, ?, ?)`)
+      .run("campaign", "child", report.seq, 1_001);
+    db.clearSessionEvents("child");
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), true);
+    // A replayed historical assignment precedes the report, so it must not invalidate proof.
+    db.appendEvent("child", { kind: "user_message", text: "Original assignment" }, 900, { runnerSeq: 1 });
+    const rebound = db.appendEvent("child", { kind: "agent_message", text: "Original", final: true }, 1_000, { runnerSeq: 2 });
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), true);
+    db.appendEvent("child", { kind: "agent_message", text: "Newer", final: true }, 2_000, { runnerSeq: 3 });
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), false);
+    db.clearSessionEvents("child");
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), false);
+    assert.equal(rebound.seq, 2);
+  } finally { db.close(); }
+});
+
+test("durable report identity survives repeated resets and a database restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-campaign-cache-reset-"));
+  const file = join(root, "cp.db");
+  try {
+    const db = ControlPlaneDb.open(file);
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" } }));
+    db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    db.updateSessionStatus("child", "stopped", 999, RUNNER_REPORTED_STOP);
+    db.reconcileRunnerHistory("child", 1, 1);
+    const report = db.appendEvent("child", { kind: "agent_response_completed" }, 1_000, { runnerSeq: 1 });
+    db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+    db.setSessionArchived("child", true, 1_002);
+    db.reconcileRunnerHistory("child", 2, 1);
+    db.reconcileRunnerHistory("child", 3, 1);
+    db.close();
+    const reopened = ControlPlaneDb.open(file);
+    assert.equal(reopened.campaignProjection("campaign")?.children.verified, 1);
+    assert.equal(reopened.campaignProjection("campaign")?.children.blocked, 0);
+    reopened.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("old campaign report tables migrate without losing an existing verification", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-campaign-report-migration-"));
+  const file = join(root, "cp.db");
+  try {
+    const db = ControlPlaneDb.open(file);
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" } }));
+    db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    db.updateSessionStatus("child", "idle", 999);
+    const report = db.appendEvent("child", { kind: "agent_message", text: "Original", final: true }, 1_000);
+    db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+    for (const column of ["report_event_epoch", "report_ts", "report_digest"]) {
+      db.raw().exec(`ALTER TABLE orchestrator_campaign_child_reports DROP COLUMN ${column}`);
+    }
+    db.close();
+    const reopened = ControlPlaneDb.open(file);
+    assert.equal(reopened.campaignChildReportVerified("campaign", "child"), true);
+    reopened.clearSessionEvents("child");
+    assert.equal(reopened.campaignChildReportVerified("campaign", "child"), true);
+    reopened.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("createSession persists driver + config and sessionView reflects them", () => {
   const db = withRunner();
   const config: SessionConfig = {
