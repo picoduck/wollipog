@@ -467,7 +467,7 @@ test.describe("desktop: context and cost flank the live-output control", () => {
     // state needs a semantic-navigation reveal the usage fixture does not model, and the property
     // under test is the label's WIDTH, so the spec substitutes the text directly.
     await page.setViewportSize({ width: 1280, height: 820 });
-    await page.goto("/session-usage-e2e.html?width=600&height=780&cost=12345.67");
+    await page.goto("/session-usage-e2e.html?width=624&height=780&cost=12345.67");
     await expect(page.locator(".follow-tail-chip")).toBeVisible();
     await page.mouse.move(300, 300);
     await page.mouse.wheel(0, -900);
@@ -488,10 +488,10 @@ test.describe("desktop: context and cost flank the live-output control", () => {
     }));
     expect(legible.visible).toBeGreaterThanOrEqual(legible.needed - 0.5);
 
-    // 580px sits between the cutoff calibrated on "Paused" (~556px) and the one budgeted for the
-    // widest label (596px), so this is what actually fails if the budget regresses to the narrower
-    // figure — the 600px pane above is inside neither cutoff and would pass either way.
-    await page.goto("/session-usage-e2e.html?width=580&height=780&cost=12345.67");
+    // 610px sits between a cutoff calibrated on "Paused" (about 20px narrower, ~590px) and the one
+    // budgeted for the widest label (618px), so this is what actually fails if the budget regresses
+    // to the narrower figure — the 624px pane above is inside neither cutoff and would pass either way.
+    await page.goto("/session-usage-e2e.html?width=610&height=780&cost=12345.67");
     await expect(page.locator(".follow-tail-chip")).toBeVisible();
     await expect(page.locator(".transcript-status-actions")).toBeHidden();
   });

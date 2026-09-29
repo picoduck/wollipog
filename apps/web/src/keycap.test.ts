@@ -28,9 +28,10 @@ const RECIPE = /^(font|font-size|font-family|font-weight|line-height|height|min-
 test("one kbd rule draws the keycap from tokens (§11.5)", () => {
   const body = new Map<string, string>();
   for (const node of topLevelRule(css, "kbd").nodes) if (node.type === "decl") body.set(node.prop, node.value);
-  assert.equal(body.get("font"), "500 var(--text-xs)/16px var(--font-mono)", "11px monospace from the tokens");
-  assert.equal(body.get("height"), "18px");
-  assert.equal(body.get("min-width"), "18px");
+  assert.equal(body.get("font"), "500 var(--text-xs)/1 var(--font-mono)", "11px monospace from the tokens");
+  // 18px at the default root, in rem so the box grows with the text it holds.
+  assert.equal(body.get("height"), "1.125rem");
+  assert.equal(body.get("min-width"), "1.125rem");
   assert.equal(body.get("box-sizing"), "border-box", "the 18px includes the border");
   assert.equal(body.get("padding"), "0 var(--space-1)");
   assert.equal(body.get("border"), "1px solid var(--border-strong)");

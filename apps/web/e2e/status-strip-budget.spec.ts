@@ -35,13 +35,13 @@ interface Cutoff {
  * Parsed rather than regex-matched against a remembered shape: the point of this spec is to track
  * the stylesheet, so it has to read what is actually there, including a rule someone adds later.
  */
-function readCutoffs(): Cutoff[] {
+function readCutoffs(selector = ".transcript-status-actions"): Cutoff[] {
   const found: Cutoff[] = [];
   postcss.parse(STYLESHEET).walkAtRules("container", (rule) => {
     if (!rule.params.includes("transcript-pane")) return;
     const hidesActions = rule.nodes?.some(
       (node) => node.type === "rule"
-        && node.selector.includes(".transcript-status-actions")
+        && node.selector.includes(selector)
         && node.nodes?.some((decl) => decl.type === "decl" && decl.prop === "display" && decl.value === "none"),
     );
     if (!hidesActions) return;
@@ -182,6 +182,53 @@ for (const rootPx of [16, 24, 32]) {
       + `${rootPx}px root. Headroom is deliberate, but this much means the budget no longer `
       + "describes the strip — re-derive it rather than padding it.",
     ).toBeLessThan(200);
+  });
+}
+
+/**
+ * #1956: the follow control's resume keycap is the shared rem keycap inside a px-sized control, so
+ * at an enlarged root the keycap alone can outgrow the centered cluster. With the Reply hint already
+ * retired, the cluster needs the chip WITH its keycap plus the larger side paid twice; below that
+ * the keycap yields. Same contract as the actions cutoff: every pane above it must fit.
+ */
+async function clusterWithKeycap(page: Page, rootPx: number): Promise<number> {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.goto("/session-usage-e2e.html?width=1360&height=840&cost=12345.67");
+  await page.addStyleTag({ content: `html { font-size: ${rootPx}px; }` });
+  await expect(page.locator(".follow-tail-chip")).toBeVisible();
+  await page.mouse.move(680, 300);
+  await page.mouse.wheel(0, -900);
+  await expect(page.locator(".follow-tail-chip .follow-tail-kbd")).toBeVisible();
+
+  return page.locator(".transcript-status-strip").evaluate((strip) => {
+    const stripStyle = getComputedStyle(strip);
+    const cluster = strip.querySelector(".transcript-status-cluster") as HTMLElement;
+    const context = cluster.querySelector(".context-control") as HTMLElement;
+    const chip = strip.querySelector(".follow-tail-chip") as HTMLElement;
+    const stateLabel = chip.querySelector("span")!;
+    const original = stateLabel.textContent;
+    stateLabel.textContent = "Previewing";
+    const chipWidest = chip.getBoundingClientRect().width;
+    stateLabel.textContent = original;
+    const cost = strip.querySelector(".transcript-status-usage .session-cost-button") as HTMLElement;
+    const clusterGap = parseFloat(getComputedStyle(cluster).columnGap);
+    return parseFloat(stripStyle.paddingLeft) + parseFloat(stripStyle.paddingRight) + clusterGap * 2
+      + chipWidest + Math.max(context.scrollWidth, cost.scrollWidth) * 2;
+  });
+}
+
+for (const rootPx of [16, 24, 32]) {
+  test(`the resume keycap's cutoff covers the cluster it widens at a ${rootPx}px root`, async ({ page }) => {
+    const cutoffs = readCutoffs(".follow-tail-kbd");
+    expect(cutoffs.length, "a transcript-pane rule retires the follow control's keycap").toBeGreaterThan(0);
+    const required = await clusterWithKeycap(page, rootPx);
+    const declared = effectiveCutoff(cutoffs, rootPx);
+    expect(
+      declared,
+      `the resume keycap cutoff (${cutoffs.map((c) => c.source).join(" and ")} = ${declared}px) no longer `
+      + `covers the ${required.toFixed(1)}px the cluster needs with it at a ${rootPx}px root.`,
+    ).toBeGreaterThanOrEqual(required);
+    expect(declared - required, "re-derive the keycap cutoff rather than padding it").toBeLessThan(200);
   });
 }
 
