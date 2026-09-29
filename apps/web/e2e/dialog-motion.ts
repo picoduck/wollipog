@@ -10,10 +10,16 @@ import type { Page } from "@playwright/test";
  */
 export async function dialogMotionSettled(page: Page): Promise<void> {
   await page.evaluate(async () => {
-    const layers = [...document.querySelectorAll(".modal-backdrop, .menu-backdrop, .menu, .popover")];
-    // An infinite animation inside a layer (a Running status dot) never finishes; it is not motion.
-    await Promise.all(layers.flatMap((layer) => layer.getAnimations({ subtree: true })
-      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
-      .map((animation) => animation.finished)));
+    const running = () => [...document.querySelectorAll(".modal-backdrop, .menu-backdrop, .menu, .popover")]
+      .flatMap((layer) => layer.getAnimations({ subtree: true }))
+      // An infinite animation inside a layer (a Running status dot) never finishes; it is not motion.
+      .filter((animation) => animation.playState === "running"
+        && animation.effect?.getComputedTiming().iterations !== Infinity);
+    // A transition canceled before it finishes rejects `finished` with an AbortError. A hover
+    // transition is, when the sheet slides or reflows out from under a pointer left where the dialog
+    // was opened from, and the browser starts one back in its place. So settle, then look again.
+    for (let motion = running(); motion.length > 0; motion = running()) {
+      await Promise.allSettled(motion.map((animation) => animation.finished));
+    }
   });
 }
