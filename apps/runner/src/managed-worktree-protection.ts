@@ -528,7 +528,7 @@ function moveOption(value: string): { targetDirectory: boolean; consumesNext: bo
   };
 }
 
-/** PowerShell mover parameters can appear in either order and accept unambiguous prefixes. */
+/** PowerShell mover parameters can appear in either order and accept prefixes or aliases. */
 function powershellMoveParameter(
   value: string,
   executable: string,
@@ -537,8 +537,10 @@ function powershellMoveParameter(
   const colon = value.indexOf(":");
   const name = value.slice(1, colon < 0 ? undefined : colon).toLowerCase();
   if (!name) return null;
-  const source = ["path", "literalpath"].some((parameter) => parameter.startsWith(name));
-  const destination = (executable === "rename-item" ? "newname" : "destination").startsWith(name);
+  const source = ["path", "literalpath"].some((parameter) => parameter.startsWith(name)) ||
+    ["lp", "pspath"].includes(name);
+  const rename = ["rename-item", "ren", "rni"].includes(executable);
+  const destination = (rename ? "newname" : "destination").startsWith(name);
   if (!source && !destination) return null;
   return { source, attached: colon < 0 ? null : value.slice(colon + 1) };
 }
@@ -1380,7 +1382,7 @@ function commandVerdict(
   if (executable === "gio" && word(words[0], cwd, environment) === "trash") {
     return strongest(removerVerdicts(words.slice(1), cwd, environment, protections));
   }
-  if (["mv", "move", "move-item", "rename-item"].includes(executable)) {
+  if (["mv", "move", "mi", "move-item", "ren", "rni", "rename-item"].includes(executable)) {
     let targetDirectory = false;
     let namedDestination = false;
     let optionsEnded = false;
@@ -1398,7 +1400,9 @@ function commandVerdict(
       if (value?.startsWith("-")) {
         const parameter = powershellMoveParameter(value, executable);
         if (parameter) {
-          const argument = parameter.attached == null ? words[++index] : parameter.attached;
+          const argument = parameter.attached == null || parameter.attached === ""
+            ? words[++index]
+            : parameter.attached;
           if (argument != null) {
             if (parameter.source) namedSources.push(argument);
             else namedDestination = true;
