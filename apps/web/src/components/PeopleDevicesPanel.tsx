@@ -522,7 +522,7 @@ function TeamDialog({
             options={activeMembers.map((member, index) => ({
               value: member.userId,
               title: namesRevealed ? member.userName : memberTitles[index]!,
-              description: member.role,
+              description: titleCaseLabel(member.role),
             }))}
           />
           {activeMembers.length === 0 && <div className="access-empty-copy">No active people are available.</div>}
