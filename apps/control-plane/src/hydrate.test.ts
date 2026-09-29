@@ -107,13 +107,14 @@ function campaignHistoryHarness(protocolVersion = PROTOCOL_VERSION, warnings: st
   return { db, hub, svc };
 }
 
-test("campaign verification hydrates a dropped cache before checking the exact stopped-child report", async () => {
+for (const advertisedTail of [0, 1]) {
+test(`campaign verification hydrates a dropped cache with advertised tail ${advertisedTail} before checking the stopped-child report`, async () => {
   const { db, hub, svc } = campaignHistoryHarness();
   try {
     db.updateSessionStatus("child", "stopped", 999, RUNNER_REPORTED_STOP);
     const payload = { kind: "agent_message", text: "Completed report", final: true } as const;
     db.appendEvent("child", payload, 1_000, { runnerSeq: 1 });
-    db.reconcileRunnerHistory("child", 2, 1);
+    db.reconcileRunnerHistory("child", 2, advertisedTail);
     const seen: ControlPlaneToRunner[] = [];
     hub.attachRunner(RUNNER_ID, { send(data: string) {
       const msg = JSON.parse(data) as ControlPlaneToRunner;
@@ -133,6 +134,7 @@ test("campaign verification hydrates a dropped cache before checking the exact s
     assert.equal(seen.filter((message) => message.type === "session_history_page").length, 1);
   } finally { db.close(); }
 });
+}
 
 test("campaign reads restore a legacy attestation with a missing report, and leave active children lazy", async () => {
   const { db, hub, svc } = campaignHistoryHarness();
@@ -141,6 +143,7 @@ test("campaign reads restore a legacy attestation with a missing report, and lea
     db.raw().prepare(`INSERT INTO orchestrator_campaign_child_reports
       (campaign_session_id, child_session_id, report_event_seq, verified_at) VALUES ('campaign','child',1,1001)`)
       .run();
+    db.clearSessionEvents("child");
     db.createSession({ id: "active", runnerId: RUNNER_ID, workspaceId: "ws-1", agentId: "claude",
       title: "Active", driver: "claude-code", useWorktree: false, config: {}, now: 500, parentSessionId: "campaign" });
     const seen: ControlPlaneToRunner[] = [];
@@ -173,6 +176,51 @@ test("verification does not fetch inaccessible or unrelated child history", asyn
     }, (id) => id !== "child");
     assert.equal(result.status, 404);
     assert.deepEqual(seen, []);
+  } finally { db.close(); }
+});
+
+test("a new live report arriving after a gap invalidates proof before its old cache is reloaded", async () => {
+  const { db, hub, svc } = campaignHistoryHarness();
+  try {
+    const payload = { kind: "agent_message", text: "Original", final: true } as const;
+    const report = db.appendEvent("child", payload, 1_000, { runnerSeq: 1 });
+    db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+    db.reconcileRunnerHistory("child", 2, 1);
+    let reply: (() => void) | undefined;
+    hub.attachRunner(RUNNER_ID, { send(data: string) {
+      const msg = JSON.parse(data) as ControlPlaneToRunner;
+      if (msg.type !== "session_history_page") return;
+      reply = () => hub.resolveRunnerRequest({ type: "session_history_page_result",
+        requestId: msg.requestId, sessionId: msg.sessionId, ok: false, error: "retry later" });
+    } });
+    svc.onSessionEvent("child", { kind: "agent_message", text: "New report", final: true }, 3, 2_000);
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), false);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.ok(reply);
+    reply();
+    await svc.hydrateHistory("child");
+  } finally { db.close(); }
+});
+
+test("a complete runner reload without a legacy report stops repeated campaign recovery requests", async () => {
+  const { db, hub, svc } = campaignHistoryHarness();
+  try {
+    db.raw().prepare(`INSERT INTO orchestrator_campaign_child_reports
+      (campaign_session_id, child_session_id, report_event_seq, verified_at) VALUES ('campaign','child',2,1001)`).run();
+    let requests = 0;
+    hub.attachRunner(RUNNER_ID, { send(data: string) {
+      const msg = JSON.parse(data) as ControlPlaneToRunner;
+      if (msg.type !== "session_history_page") return;
+      requests++;
+      queueMicrotask(() => hub.resolveRunnerRequest({ type: "session_history_page_result",
+        requestId: msg.requestId, sessionId: msg.sessionId, ok: true,
+        events: [{ seq: 1, ts: 1_000, payload: { kind: "agent_thought", text: "No final report" } }],
+        page: { logEpoch: 1, throughSeq: 1, nextAfterSeq: 1, hasMore: false } }));
+    } });
+    await svc.campaignProjectionWithHistory("campaign");
+    await svc.campaignProjectionWithHistory("campaign");
+    assert.equal(requests, 1);
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), false);
   } finally { db.close(); }
 });
 

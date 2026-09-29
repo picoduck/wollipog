@@ -14803,19 +14803,27 @@ export class ControlPlaneDb {
    * must never become valid just because the cache holding its superseding assignment is lost. */
   private preserveCampaignReportsBeforeCacheReset(childSessionId: string): void {
     const reports = this.stmt(
-      "SELECT campaign_session_id, report_event_seq, verified_at FROM orchestrator_campaign_child_reports WHERE child_session_id=?",
-    ).all(childSessionId) as Array<{ campaign_session_id: string; report_event_seq: number; verified_at: number }>;
+      `SELECT campaign_session_id, report_event_seq, verified_at, report_digest, report_event_epoch
+       FROM orchestrator_campaign_child_reports WHERE child_session_id=?`,
+    ).all(childSessionId) as Array<{
+      campaign_session_id: string; report_event_seq: number; verified_at: number;
+      report_digest: string | null; report_event_epoch: number | null;
+    }>;
+    const eventEpoch = (this.stmt("SELECT event_epoch FROM sessions WHERE id=?").get(childSessionId) as
+      { event_epoch: number } | undefined)?.event_epoch;
     for (const report of reports) {
+      const cached = this.stmt("SELECT 1 FROM session_events WHERE session_id=? AND seq=?")
+        .get(childSessionId, report.report_event_seq);
+      // An already-evicted legacy proof has no identity to preserve yet. Keep it recoverable by
+      // campaign reads rather than mistaking a cache miss for evidence of a superseding task.
+      if (!report.report_digest && !cached) continue;
       if (!this.campaignChildReportVerified(report.campaign_session_id, childSessionId)) {
         this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE campaign_session_id=? AND child_session_id=?")
           .run(report.campaign_session_id, childSessionId);
-      } else if (this.stmt("SELECT 1 FROM session_events WHERE session_id=? AND seq=?")
-        .get(childSessionId, report.report_event_seq)) {
-        // Only upgrade a legacy row; a stale CP sequence in another epoch may name something else.
-        const legacy = this.stmt(
-          "SELECT 1 FROM orchestrator_campaign_child_reports WHERE campaign_session_id=? AND child_session_id=? AND report_digest IS NULL",
-        ).get(report.campaign_session_id, childSessionId);
-        if (legacy) this.verifyCampaignChildReport(report.campaign_session_id, childSessionId, report.report_event_seq, report.verified_at);
+      } else if (cached && (!report.report_digest || report.report_event_epoch === eventEpoch)) {
+        // Refresh current proof (including one updated by an older app), but never interpret an
+        // old CP sequence against a different epoch's cache.
+        this.verifyCampaignChildReport(report.campaign_session_id, childSessionId, report.report_event_seq, report.verified_at);
       }
     }
   }
@@ -14836,10 +14844,26 @@ export class ControlPlaneDb {
   /** Once a complete replacement log lacks the attested report, the old proof is no longer
    * applicable. Partial/failed reloads leave the durable attestation intact. */
   finishCampaignReportHistoryHydration(sessionId: string): void {
-    this.stmt(
+    this.atomic(() => {
+      this.stmt(
       `DELETE FROM orchestrator_campaign_child_reports WHERE child_session_id=? AND report_digest IS NOT NULL
        AND report_event_epoch!=(SELECT event_epoch FROM sessions WHERE id=?)`,
-    ).run(sessionId, sessionId);
+      ).run(sessionId, sessionId);
+      const legacy = this.stmt(
+        `SELECT campaign_session_id, report_event_seq, verified_at FROM orchestrator_campaign_child_reports
+         WHERE child_session_id=? AND report_digest IS NULL`,
+      ).all(sessionId) as Array<{ campaign_session_id: string; report_event_seq: number; verified_at: number }>;
+      for (const report of legacy) {
+        if (this.campaignChildReportVerified(report.campaign_session_id, sessionId)) {
+          this.verifyCampaignChildReport(report.campaign_session_id, sessionId, report.report_event_seq, report.verified_at);
+        } else {
+          // The full log cannot restore this legacy sequence. Stop repeatedly fetching it on
+          // every campaign poll; a new exact report verification remains available.
+          this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE campaign_session_id=? AND child_session_id=?")
+            .run(report.campaign_session_id, sessionId);
+        }
+      }
+    });
   }
 
   /** Live work supersedes a durable proof even while its old cache is absent. Historical replay
@@ -14847,10 +14871,10 @@ export class ControlPlaneDb {
   invalidateCampaignReportsForLiveEvent(sessionId: string, payload: SessionEventPayload, ts: number): void {
     const digest = this.campaignReportDigest(payload);
     if (payload.kind !== "user_message" && !digest) return;
-    this.stmt(
-      `DELETE FROM orchestrator_campaign_child_reports WHERE child_session_id=?
-       AND (report_digest IS NULL OR report_digest!=? OR report_ts!=?)`,
-    ).run(sessionId, digest ?? "", ts);
+    if (this.stmt(
+      `SELECT 1 FROM orchestrator_campaign_child_reports WHERE child_session_id=?
+       AND (report_digest IS NULL OR report_digest!=? OR report_ts!=?) LIMIT 1`,
+    ).get(sessionId, digest ?? "", ts)) this.invalidateCampaignChildReports(sessionId);
   }
 
   campaignChildReportVerified(campaignSessionId: string, childSessionId: string): boolean {

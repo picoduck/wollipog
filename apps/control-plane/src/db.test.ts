@@ -2953,6 +2953,50 @@ test("a replacement report at the old sequence cannot inherit verification", () 
   } finally { db.close(); }
 });
 
+for (const payload of [
+  { kind: "agent_message", text: "Same text", final: true } as const,
+  { kind: "agent_response_completed" } as const,
+]) {
+  test(`${payload.kind} reports with different timestamps cannot inherit verification`, () => {
+    const db = withRunner();
+    try {
+      db.createSession(newSession({ id: "campaign" }));
+      db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+      db.updateSessionStatus("child", "idle", 999);
+      db.reconcileRunnerHistory("child", 1, 1);
+      const report = db.appendEvent("child", payload, 1_000, { runnerSeq: 1 });
+      db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+      db.reconcileRunnerHistory("child", 2, 1);
+      const state = db.getRunnerHistoryState("child")!;
+      db.appendHydratedPage("child", { afterSeq: 0, historyEpoch: 2, eventEpoch: state.eventEpoch }, [
+        { seq: 1, ts: 2_000, payload },
+      ]);
+      db.finishCampaignReportHistoryHydration("child");
+      assert.equal(db.campaignChildReportVerified("campaign", "child"), false);
+    } finally { db.close(); }
+  });
+}
+
+test("live work arriving before replay invalidates durable proof and prior cleanup refusals", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "campaign" }));
+    db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    db.updateSessionStatus("child", "idle", 999);
+    db.reconcileRunnerHistory("child", 1, 1);
+    const payload = { kind: "agent_message", text: "Original", final: true } as const;
+    const report = db.appendEvent("child", payload, 1_000, { runnerSeq: 1 });
+    db.verifyCampaignChildReport("campaign", "child", report.seq, 1_001);
+    db.recordCampaignWorktreeCleanup("child", "/repos/demo/child", "tree-1", "refused", "dirty", 1_002);
+    db.reconcileRunnerHistory("child", 2, 1);
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), true);
+    db.appendEvent("child", { kind: "user_message", text: "New assignment" }, 2_000);
+    assert.equal(db.campaignChildReportVerified("campaign", "child"), false);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS count FROM orchestrator_campaign_worktree_cleanup WHERE child_session_id='child'")
+      .get()?.count, 0);
+  } finally { db.close(); }
+});
+
 test("legacy attestations are preserved only if valid before their cache reset", () => {
   const db = withRunner();
   try {

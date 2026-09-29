@@ -6555,7 +6555,7 @@ export class SessionsService {
     const projection = this.campaignProjection(campaignSessionId);
     if (!projection.ok) return projection;
     for (const id of this.db.campaignReportRecoverySessionIds(this.db.resolvedCampaignSessionId(campaignSessionId)!)) {
-      await this.hydrateHistory(id);
+      await this.hydrateHistory(id, { force: true });
     }
     return this.campaignProjection(campaignSessionId);
   }
@@ -6571,6 +6571,11 @@ export class SessionsService {
         this.db.isSessionDescendant(campaignSessionId, request.childSessionId) &&
         canAccess(campaignSessionId) && canAccess(request.childSessionId)) {
       await this.hydrateHistory(request.childSessionId);
+      // Registration inventories can advertise seq=0 without inspecting the stored log. A
+      // complete cursor is not proof that the exact requested report is absent from the runner.
+      if (!this.db.hasCompletedAgentReportAt(request.childSessionId, request.reportEventSeq)) {
+        await this.hydrateHistory(request.childSessionId, { force: true });
+      }
     }
     return this.verifyCampaignChild(campaignSessionId, request, canAccess);
   }
@@ -12667,7 +12672,7 @@ export class SessionsService {
 
   /** Lazy-hydrate a session's event timeline from the runner (the box owns the log). Called when a
    * dashboard opens a session whose cache may be behind the box; a no-op if already up to date. */
-  async hydrateHistory(sessionId: string): Promise<void> {
+  async hydrateHistory(sessionId: string, options: { force?: boolean } = {}): Promise<void> {
     const session = this.db.getSession(sessionId);
     if (!session || !this.hub.isRunnerOnline(session.runnerId)) return;
     const inFlight = this.hydrating.get(sessionId);
@@ -12676,18 +12681,18 @@ export class SessionsService {
       await inFlight;
       return;
     }
-    const task = this.runHistoryHydration(sessionId, session.runnerId);
+    const task = this.runHistoryHydration(sessionId, session.runnerId, options.force === true);
     this.hydrating.set(sessionId, task);
     await task;
   }
 
-  private async runHistoryHydration(sessionId: string, runnerId: string): Promise<void> {
+  private async runHistoryHydration(sessionId: string, runnerId: string, force = false): Promise<void> {
     try {
       do {
         this.rehydrate.delete(sessionId);
         const protocolVersion = this.db.getRunner(runnerId)?.protocolVersion;
         if (runnerSupportsProtocol(protocolVersion, "indexedHistory")) {
-          await this.scheduleRunnerHistory(runnerId, () => this.fetchIndexedHistoryChain(sessionId));
+          await this.scheduleRunnerHistory(runnerId, () => this.fetchIndexedHistoryChain(sessionId, force));
         } else {
           await this.fetchHistoryOnce(sessionId);
         }
@@ -12768,11 +12773,11 @@ export class SessionsService {
 
   /** v54 history is a frozen, count/byte-bounded chain. Each page commits atomically before its
    * targeted broadcasts; a concurrent tail advance is recovered by a later frozen pass. */
-  private async fetchIndexedHistoryChain(sessionId: string): Promise<void> {
+  private async fetchIndexedHistoryChain(sessionId: string, force = false): Promise<void> {
     const session = this.db.getSession(sessionId);
     const initial = this.db.getRunnerHistoryState(sessionId);
     if (!session || !initial) return;
-    if (initial.complete) return;
+    if (initial.complete && !force) return;
     let afterSeq = initial.hydratedSeq;
     let logEpoch: number | undefined;
     let throughSeq: number | undefined;
