@@ -1523,6 +1523,9 @@ export function Select<T extends string>({
       ref={rootRef}
       onKeyDown={(event) => {
         if (!open) return;
+        // A key that belongs to an IME composition in the filter — Escape dismissing a candidate
+        // list, most of all — is the input method's, not a dismissal of this list.
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return;
         // Escape wherever focus sits inside an open Select — including on the TRIGGER, which is
         // where it stays when the list is empty and has nothing to focus. Unhandled there, it
         // bubbled to the enclosing modal and closed the whole dialog instead of the list.

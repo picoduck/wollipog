@@ -799,7 +799,12 @@ test.describe("searchable pickers at 1440px (#1951)", () => {
     await expect(list).toContainText("No projects match “wolipogx”.");
     await expect(list.getByRole("option")).toHaveText(["Create Project…"]);
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("dialog", { name: "Create Project" })).toBeVisible();
+    const create = page.getByRole("dialog", { name: "Create Project" });
+    await expect(create).toBeVisible();
+    // Cancelling returns to the picker whose row opened it, not to the Create Project button.
+    await create.getByRole("button", { name: "Cancel" }).click();
+    await expect(create).toHaveCount(0);
+    await expect(project).toBeFocused();
   });
 
   test("the combobox, a Select and a text field in one form are one control height", async ({ page }) => {
@@ -843,6 +848,14 @@ test.describe("searchable touch pickers at 390px (#1951)", () => {
     await filter.fill("wolipogx");
     await expect(panel).toContainText("No projects match “wolipogx”.");
     await expect(options).toHaveText(["Create Project…"]);
+
+    await options.click();
+    const create = page.getByRole("dialog", { name: "Create Project" });
+    await expect(create).toBeVisible();
+    await create.getByRole("button", { name: "Cancel" }).click();
+    await expect(create).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Project:/ }), "focus returns to the picker")
+      .toBeFocused();
   });
 
   test("a list that opens above its trigger keeps its filter still as a search empties it", async ({ page }) => {

@@ -214,10 +214,16 @@ export function NewSessionDialog({
   const [projectLocationId, setProjectLocationId] = useState(initialProjectLocation?.id ?? "");
   const projectSelectionChangedRef = useRef(false);
   const [creatingProject, setCreatingProject] = useState(false);
+  // Which control opened Create Project, so closing it returns focus there rather than to the
+  // other one: the button below the picker, or the picker's own no-match row.
+  const [createProjectFromPicker, setCreateProjectFromPicker] = useState(false);
   // A Project search that finds nothing offers to create one, beside the button that already does.
   const createProjectOption: PickerCreateOption = {
     label: "Create Project…",
-    onSelect: () => setCreatingProject(true),
+    onSelect: () => {
+      setCreateProjectFromPicker(true);
+      setCreatingProject(true);
+    },
   };
   const [addingLocation, setAddingLocation] = useState(false);
   // New Session stays open under Create Project and Add Location (§7.1): these return focus to the
@@ -318,6 +324,15 @@ export function NewSessionDialog({
   const retainedSessionButtonRef = useRef<HTMLButtonElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const projectChoiceRef = useRef<HTMLDivElement>(null);
+  // The Project control as it is when the dialog above it closes: the combobox, or on touch the
+  // Select trigger, whichever this width renders. Read then, because the width may have changed.
+  const projectPickerFocusRef = useMemo(() => ({
+    get current() {
+      return projectChoiceRef.current?.querySelector<HTMLElement>(
+        '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
+      ) ?? null;
+    },
+  }), []);
   const agentChoiceRef = useRef<HTMLDivElement>(null);
   const generatedFormId = useId();
   const formId = `${generatedFormId}-new-session`;
@@ -1294,7 +1309,7 @@ export function NewSessionDialog({
                       ? `A Project is a durable home across Locations. ${projectAudienceVisibilitySummary(selectedProject.audience)}. New session transcripts use the Project's visibility.`
                       : "A Project is a durable home for related sessions across Locations. This control plane does not report the Project's visibility."}
                 </span>
-                <button ref={createProjectButtonRef} type="button" className="btn ghost new-session-project-control" onClick={() => setCreatingProject(true)}>Create Project…</button>
+                <button ref={createProjectButtonRef} type="button" className="btn ghost new-session-project-control" onClick={() => { setCreateProjectFromPicker(false); setCreatingProject(true); }}>Create Project…</button>
               </div>
             </>
           )}
@@ -1987,7 +2002,7 @@ export function NewSessionDialog({
     {creatingProject && (
       <CreateProjectDialog
         accessScopeManagementSupported={accessScopeManagementSupported}
-        returnFocusRef={createProjectButtonRef}
+        returnFocusRef={createProjectFromPicker ? projectPickerFocusRef : createProjectButtonRef}
         onClose={() => setCreatingProject(false)}
         onCreated={(project) => {
           projectSelectionChangedRef.current = true;

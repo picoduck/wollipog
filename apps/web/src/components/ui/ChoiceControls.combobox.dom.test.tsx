@@ -5,6 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { fireDomEvent } from "../test-dom-events.js";
+import { assertNoDomNode } from "../../dom-test-assertions.js";
 import { SearchableCombobox, Select, type PickerCreateOption } from "./ChoiceControls.js";
 
 const domWindow = new Window({ url: "http://localhost/choices" });
@@ -325,7 +326,7 @@ test("a search with no results names the caller's noun and offers the create row
   });
   try {
     act(() => input.focus());
-    assert.equal(host.querySelector('[role="option"][id$="-create"]'), null,
+    assertNoDomNode(host.querySelector('[role="option"][id$="-create"]'),
       "the create row follows a failed search, not every list");
 
     type(input, "  zzz ");
@@ -480,6 +481,24 @@ test("Escape closes a searchable Select's list without reaching the dialog, and 
     const reopened = open();
     assert.equal(reopened.value, "");
     assert.equal(options().length, 3);
+  } finally {
+    unmount();
+  }
+});
+
+test("an IME's own keys in a searchable Select's filter neither commit nor close the list", () => {
+  const chosen: string[] = [];
+  const { trigger, bubbledKeys, open, unmount } = mountSelect({ onChange: (value) => chosen.push(value) });
+  try {
+    const filter = open();
+    type(filter, "beta");
+    // Escape dismissing a candidate list, and Enter accepting one, belong to the input method.
+    assert.equal(press(filter, "Escape", { isComposing: true }), true);
+    assert.equal(press(filter, "Enter", { isComposing: true }), true);
+    assert.equal(trigger.getAttribute("aria-expanded"), "true", "the list stays open");
+    assert.equal(document.activeElement === filter, true, "focus stays in the filter");
+    assert.deepEqual(chosen, []);
+    assert.deepEqual(bubbledKeys, ["Escape", "Enter"], "the keys stay the browser's and the IME's");
   } finally {
     unmount();
   }
