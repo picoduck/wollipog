@@ -32,7 +32,7 @@ test("the Sessions digit shortcut refocuses the already-active list", async ({ p
   await expect(grid).toBeVisible();
   await grid.focus();
   await page.keyboard.press("F6");
-  await expect(page.locator('[data-focus-zone="detail"] .detail-scroll, [data-focus-zone="detail"] .inbox-preview-empty')).toBeFocused();
+  await expect(page.locator('.inbox-preview-pane[data-focus-zone="main"] :is(.detail-scroll, .inbox-preview-empty)')).toBeFocused();
   await page.keyboard.press("1");
   await expect(grid).toBeFocused();
   const lastId = await grid.getByRole("row").last().getAttribute("id");
@@ -106,7 +106,7 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   await expect(shortcutDialog).toBeHidden();
   await expect(grid).toBeFocused();
   await page.keyboard.press("F6");
-  await expect(page.locator('[data-focus-zone="detail"] .detail-scroll, [data-focus-zone="detail"] .inbox-preview-empty')).toBeFocused();
+  await expect(page.locator('.inbox-preview-pane[data-focus-zone="main"] :is(.detail-scroll, .inbox-preview-empty)')).toBeFocused();
   await grid.focus();
   const previousRow = await grid.getAttribute("aria-activedescendant");
   await grid.press("j");

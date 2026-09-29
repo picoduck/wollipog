@@ -55,8 +55,8 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".agent-session-agent-step:focus, .agent-session-results-step:focus { outline: none }", "tabIndex={-1} programmatic focus targets, never a keyboard stop"],
   [":where([tabindex=\"-1\"]:not( a[href], button, input, select, textarea, summary, [role=\"button\"], [role=\"checkbox\"], [role=\"link\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"radio\"], [role=\"switch\"], [role=\"tab\"], [role=\"treeitem\"], [role=\"combobox\"], [role=\"grid\"], [role=\"listbox\"], [role=\"menu\"], [role=\"menubar\"], [role=\"radiogroup\"], [role=\"searchbox\"], [role=\"slider\"], [role=\"spinbutton\"], [role=\"tablist\"], [role=\"textbox\"], [role=\"tree\"], [role=\"treegrid\"] )):focus { outline: none }",
     "tabIndex={-1} programmatic targets only (page title, dialog card, panel headings, scrollers): controls, widget roles and F6 landing targets are excluded or restored after it"],
-  [".inbox-list { outline: none }", "the list pane's :has(> .inbox-list:focus-visible)::after border marks focus, and forced colors keeps borders"],
-  [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the list and preview panes' :has()::after borders mark focus; in the app SessionDetail renders only inside the preview pane"],
+  [".inbox-list { outline: none }", "the focused grid is marked on its active row, and forced colors redraws that row's ring as a transparent outline"],
+  [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the grid is marked on its active row (redrawn in forced colors); the transcript scroller is a programmatic focus target, and F6 marks its pane with the zone line"],
   ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }", "the same @media block rings the toggle's inner span with the known-good ring instead"],
   [".usage-chart-hit:focus-visible { outline: none; stroke: var(--accent); stroke-width: 2 }", "an SVG <rect>: the 2px stroke marks focus, and forced colors repaints strokes rather than dropping them"],
   // Not focus indicators.
@@ -67,17 +67,17 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".agents-list button[aria-current=\"true\"] { outline: 1px solid var(--border) }", "KNOWN GAP, not verified safe: this beats the global ring, so the focused current Agents item looks as it does at rest; reported as a follow-up to #1890"],
 ]);
 
-const PANE_BORDER =
-  ".inbox-list-pane:has(> .inbox-list:focus-visible)::after, .inbox-preview-pane:has(.detail-scroll:focus-visible)::after " +
-  "{ position: absolute; z-index: var(--z-sticky); inset: 0; border: 2px solid var(--accent); pointer-events: none; content: \"\" }";
+const ACTIVE_ROW_RING =
+  "@media (forced-colors: active) .inbox-list:focus-visible .inbox-row-shell.selected .inbox-row " +
+  "{ outline: 2px solid transparent; outline-offset: 1px }";
 
 /**
  * The rules some REVIEWED reasons point to instead of the entry's own block. They set no outline of
  * their own, or a known-good one, so the inventory does not record them; each must still exist verbatim.
  */
 const CUES: ReadonlyMap<string, string> = new Map([
-  [".inbox-list { outline: none }", PANE_BORDER],
-  [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", PANE_BORDER],
+  [".inbox-list { outline: none }", ACTIVE_ROW_RING],
+  [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", ACTIVE_ROW_RING],
   ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }",
     "@media (pointer: coarse) .inbox-thread-toggle:focus-visible > span { outline: var(--focus-width) solid var(--focus); outline-offset: 0 }"],
 ]);

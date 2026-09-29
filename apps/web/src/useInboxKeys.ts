@@ -53,7 +53,7 @@ const BINDINGS: ReadonlyArray<[ShortcutId, keyof InboxKeyActions]> = [
   ["inbox-reply", "reply"],
   ["inbox-page-down", "pageDown"],
   ["inbox-page-up", "pageUp"],
-  // Preview End remains available from the detail zone. The focused Sessions grid handles End
+  // Preview End remains available from the reading pane. The focused Sessions grid handles End
   // earlier as conventional last-row navigation, alongside ArrowUp/ArrowDown and Home.
   ["inbox-follow-latest", "resumeFollow"],
   ["inbox-follow-latest-end", "resumeFollow"],
@@ -67,7 +67,7 @@ export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
       if (event.defaultPrevented || shortcutLayerActive(document) || inTypingContext(document)) return;
       const active = document.activeElement;
       const zone = active instanceof Element ? focusZoneForElement(active) : null;
-      if (zone !== null && zone !== "list" && zone !== "detail") return;
+      if (zone !== null && zone !== "list" && zone !== "main") return;
       if (active instanceof HTMLElement &&
           active.matches('button, summary, a[href], input, textarea, select, [role="button"], [role="radio"], [role="checkbox"]') &&
           !active.matches(".inbox-list")) return;
@@ -85,7 +85,8 @@ export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
       }
       for (const [shortcutId, action] of BINDINGS) {
         if (!matchesShortcut(event, shortcutId)) continue;
-        if (action === "fork" && zone !== "list" && zone !== "detail") return;
+        // Fork acts on the Sessions list or reading pane, not on the page header around them.
+        if (action === "fork" && !(active instanceof Element && active.closest(".inbox-view"))) return;
         if (action === "resumeFollow") {
           if (!actions.resumeFollow()) return;
           event.preventDefault();

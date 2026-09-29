@@ -140,6 +140,10 @@ export function varReads(rawValue: string): { name: string; fallback: string | n
  */
 const RUNTIME_PROPERTIES = new Map([
   ["--keyboard-inset", { why: "published by mobile-viewport.ts before first paint", fallback: "0px" }],
+  // indicateFocusZone (focus-zones.ts) sets these on the zone F6 entered; absent, no zone is lit.
+  ["--zone-line-top", { why: "measured by indicateFocusZone while a zone is lit", fallback: "0px" }],
+  ["--zone-line-left", { why: "measured by indicateFocusZone while a zone is lit", fallback: "0px" }],
+  ["--zone-line-width", { why: "measured by indicateFocusZone while a zone is lit", fallback: "0px" }],
 ]);
 
 /** Every declaration value in the stylesheet. */

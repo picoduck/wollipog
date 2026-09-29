@@ -30,6 +30,24 @@ same keyboard helper because one hook instance cannot safely own every repeated 
   `aria-activedescendant`. Enter never commits during IME composition. Escape dismisses the current
   suggestion set, while Shift+Tab remains normal reverse focus navigation.
 
+## Focus zones
+
+F6 and Shift+F6 move focus between the zones mounted on the current page, in the order rail, list,
+page (`rail`, `list` and `main` in `apps/web/src/focus-zones.ts`). The shell marks every route's
+page root `main`, so F6 reaches the page on every route. Master-detail pages (Sessions, Agent
+Skills, Projects) mark their list pane `list` and their detail pane `main`; the innermost mounted
+zone wins, and a page without a list cycles rail and page.
+
+- F6 into the rail focuses the current destination (the Settings control while in Settings), and
+  otherwise the first destination, never the brand link. Landing targets are tried one selector at
+  a time, because a comma selector returns the first match in document order.
+- A list or page zone lands on its root, a `tabIndex={-1}` container with no ring, so the next Tab
+  continues inside it. The Sessions list keeps its grid, empty-state and board targets, and the
+  Sessions reading pane lands on its transcript scroller.
+- After F6 only, the entered zone shows a 2px `--focus` line on its top edge for 1.5s that then fades
+  (no fade under reduced motion). A click, a digit, a route change or programmatic focus never shows
+  it, and no pane is ever framed on focus: selection keeps its own treatment.
+
 ## Session-detail ownership
 
 The Inbox grid retains its active-descendant selection and project-switching Tab shortcut. A row
@@ -41,7 +59,7 @@ focus-zone shortcuts remain available without invoking Inbox row actions.
 
 While the Inbox grid owns focus, bare Arrow Up/Down select adjacent sessions and bare Home/End
 select the first/last session. Modified variants remain available to the browser or another
-registered shortcut. In the preview focus zone, End instead jumps to the latest preview event and
+registered shortcut. In the reading pane, End instead jumps to the latest preview event and
 resumes following; the shortcut reference describes both contexts in one End entry.
 
 `SessionDetailLoaded` remains the coordinator for the single send/fork busy gate, composer-draft

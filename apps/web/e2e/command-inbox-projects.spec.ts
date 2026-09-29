@@ -159,7 +159,7 @@ async function openComposerResponseFixture(page: Page) {
   await expect(page.getByRole("tab", { name: /Alpha/ })).toBeVisible();
 }
 
-async function focusZoneWithKeyboard(page: Page, zone: "list" | "detail") {
+async function focusZoneWithKeyboard(page: Page, zone: "list" | "main") {
   const presses = zone === "list" ? 2 : 3;
   for (let index = 0; index < presses; index += 1) await page.keyboard.press("F6");
   await expect.poll(() => page.evaluate(() =>

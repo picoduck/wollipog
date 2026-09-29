@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Window } from "happy-dom";
-import { cycleFocusZone, escapeOwner, focusZone, focusZoneForElement, shortcutScopeForFocus } from "./focus-zones.js";
+import {
+  cycleFocusZone,
+  escapeOwner,
+  focusZone,
+  focusZoneForElement,
+  indicateFocusZone,
+  shortcutScopeForFocus,
+  ZONE_INDICATOR_MS,
+  ZONE_TARGETS,
+} from "./focus-zones.js";
 
 function escape(modifiers: Partial<Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey" | "altKey" | "defaultPrevented">> = {}) {
   return {
@@ -22,66 +31,176 @@ function setup() {
   return window;
 }
 
-test("focus zones resolve contextual Inbox and session-reading scopes", () => {
+/** The shell as App renders it: the rail, then the page root that every route marks `main`. */
+function shell(window: Window, page: string, { current = "skills" }: { current?: string } = {}) {
+  window.document.body.innerHTML = `
+    <nav class="app-rail" data-focus-zone="rail" tabindex="-1">
+      <a class="rail-brand" href="/" aria-label="Wollipog Sessions"></a>
+      <div class="rail-destinations">
+        ${["inbox", "projects", "skills", "usage"].map((name) =>
+          `<a class="rail-item" id="rail-${name}" href="/${name}"${name === current ? ' aria-current="page"' : ""}></a>`).join("")}
+      </div>
+      <div class="rail-settings">
+        <button class="settings-trigger" type="button"${current === "settings" ? ' aria-current="page"' : ""}></button>
+      </div>
+    </nav>
+    <main class="main">
+      <div class="main-body" data-focus-zone="main" tabindex="-1">${page}</div>
+    </main>`;
+  return (selector: string) => window.document.querySelector<HTMLElement>(selector)!;
+}
+
+test("focus zones resolve contextual Sessions and session-reading scopes", () => {
   const window = setup();
-  const list = window.document.createElement("section");
-  list.dataset.focusZone = "list";
-  const listButton = window.document.createElement("button");
-  list.append(listButton);
-  const detail = window.document.createElement("section");
-  detail.dataset.focusZone = "detail";
-  const detailButton = window.document.createElement("button");
-  detail.append(detailButton);
-  const rail = window.document.createElement("nav");
-  rail.dataset.focusZone = "rail";
-  const railButton = window.document.createElement("button");
-  rail.append(railButton);
-  window.document.body.append(list, detail, rail);
+  const find = shell(window, `
+    <div class="page-header"><button id="header" type="button"></button></div>
+    <div class="inbox-view" data-focus-zone="list">
+      <button id="list-button" type="button"></button>
+      <div class="inbox-preview-pane" data-focus-zone="main"><button id="pane-button" type="button"></button></div>
+    </div>`);
+  const listButton = find("#list-button");
+  const paneButton = find("#pane-button");
+  const railItem = find("#rail-inbox");
 
   assert.equal(focusZoneForElement(listButton), "list");
-  assert.equal(focusZoneForElement(detailButton), "detail");
+  assert.equal(focusZoneForElement(paneButton), "main");
+  assert.equal(focusZoneForElement(find("#header")), "main", "the page header belongs to the shell's page zone");
   assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: listButton }), "Sessions List");
-  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: detailButton }), "Sessions List");
-  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: railButton }), "Global");
-  assert.equal(shortcutScopeForFocus({ viewName: "session", activeElement: detailButton, sessionReading: true }), "Session Reading");
-  assert.equal(shortcutScopeForFocus({ viewName: "session", activeElement: detailButton }), "Session");
+  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: paneButton }), "Sessions List");
+  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: railItem }), "Global");
+  assert.equal(shortcutScopeForFocus({ viewName: "session", activeElement: paneButton, sessionReading: true }), "Session Reading");
+  assert.equal(shortcutScopeForFocus({ viewName: "session", activeElement: paneButton }), "Session");
 });
 
-test("F6 cycling targets the active rail item, Inbox list, and transcript while skipping inert zones", () => {
+test("F6 on Sessions cycles the current rail item, the list and the transcript, skipping inert zones", () => {
   const window = setup();
-  const rail = window.document.createElement("nav");
-  rail.dataset.focusZone = "rail";
-  const railItem = window.document.createElement("a");
-  railItem.href = "/";
-  railItem.setAttribute("aria-current", "page");
-  rail.append(railItem);
-  const listZone = window.document.createElement("section");
-  listZone.dataset.focusZone = "list";
-  const search = window.document.createElement("input");
-  const list = window.document.createElement("div");
-  list.className = "inbox-list";
-  list.tabIndex = 0;
-  listZone.append(search, list);
-  const detailZone = window.document.createElement("section");
-  detailZone.dataset.focusZone = "detail";
-  const back = window.document.createElement("button");
-  const transcript = window.document.createElement("div");
-  transcript.className = "detail-scroll";
-  transcript.tabIndex = 0;
-  detailZone.append(back, transcript);
-  window.document.body.append(rail, listZone, detailZone);
+  const find = shell(window, `
+    <div class="inbox-view" data-focus-zone="list">
+      <section class="inbox-list-pane">
+        <input aria-label="Search Sessions">
+        <div class="inbox-list" role="grid" tabindex="0"></div>
+      </section>
+      <div class="inbox-preview-pane" data-focus-zone="main">
+        <button type="button">Back</button>
+        <div class="detail-scroll" tabindex="-1"></div>
+      </div>
+    </div>`, { current: "inbox" });
 
   assert.equal(cycleFocusZone(window.document, "next"), "rail");
-  assert.equal(window.document.activeElement, railItem);
+  assert.equal(window.document.activeElement, find("#rail-inbox"));
   assert.equal(cycleFocusZone(window.document, "next"), "list");
-  assert.equal(window.document.activeElement, list, "list zone must not land on search");
-  assert.equal(cycleFocusZone(window.document, "next"), "detail");
-  assert.equal(window.document.activeElement, transcript, "detail zone must land on the transcript");
+  assert.equal(window.document.activeElement, find(".inbox-list"), "the list zone must not land on search");
+  assert.equal(cycleFocusZone(window.document, "next"), "main");
+  assert.equal(window.document.activeElement, find(".detail-scroll"),
+    "the reading pane, not the shell's page root, is the innermost page zone");
   assert.equal(cycleFocusZone(window.document, "next"), "rail");
+  assert.equal(cycleFocusZone(window.document, "previous"), "main");
+  assert.equal(cycleFocusZone(window.document, "previous"), "list");
 
-  listZone.setAttribute("inert", "");
-  railItem.focus();
-  assert.equal(cycleFocusZone(window.document, "next"), "detail");
+  // An open session hides the list pane; the expanded view becomes the page zone.
+  find(".inbox-view").dataset.focusZone = "main";
+  find(".inbox-list-pane").setAttribute("inert", "");
+  find("#rail-inbox").focus();
+  assert.equal(cycleFocusZone(window.document, "next"), "main");
+  assert.equal(window.document.activeElement, find(".detail-scroll"));
+  assert.equal(cycleFocusZone(window.document, "next"), "rail", "with no list mounted, F6 cycles rail and page");
+});
+
+test("F6 into the rail lands on the current destination, never the brand", () => {
+  const window = setup();
+  let find = shell(window, "<div class='page'></div>", { current: "usage" });
+  find(".main-body").focus();
+  assert.equal(cycleFocusZone(window.document, "next"), "rail");
+  assert.equal(window.document.activeElement, find("#rail-usage"),
+    "a destination after the first must win over earlier rail items and the brand");
+
+  find = shell(window, "<div class='page'></div>", { current: "settings" });
+  assert.equal(focusZone(window.document, "rail"), "rail");
+  assert.equal(window.document.activeElement, find(".settings-trigger"), "Settings lands on the Settings control");
+
+  // A route with no rail destination (the recovery screen) falls back to the first destination.
+  find = shell(window, "<div class='page'></div>", { current: "none" });
+  assert.equal(focusZone(window.document, "rail"), "rail");
+  assert.equal(window.document.activeElement, find("#rail-inbox"));
+  assert.notEqual(window.document.activeElement, find(".rail-brand"));
+
+  for (const [zone, selectors] of Object.entries(ZONE_TARGETS)) {
+    for (const selector of selectors) {
+      assert.doesNotMatch(selector, /,/, `${zone} targets are tried one selector at a time`);
+    }
+  }
+});
+
+test("pages without a list cycle rail and page; master-detail pages land on their pane roots", () => {
+  const window = setup();
+  let find = shell(window, "<div class='page'><button type='button'>New Automation</button></div>", { current: "automations" });
+  assert.equal(cycleFocusZone(window.document, "next"), "rail");
+  assert.equal(cycleFocusZone(window.document, "next"), "main");
+  assert.equal(window.document.activeElement, find(".main-body"),
+    "the page zone lands on its root so the next Tab continues into the page");
+  assert.equal(cycleFocusZone(window.document, "next"), "rail", "the mounted-zone filter skips the absent list");
+  assert.equal(cycleFocusZone(window.document, "previous"), "main");
+
+  find = shell(window, `
+    <div class="page">
+      <div class="skills-layout">
+        <aside class="skills-list" data-focus-zone="list" tabindex="-1"><button class="row" type="button"></button></aside>
+        <div class="skills-detail" data-focus-zone="main" tabindex="-1"><button type="button"></button></div>
+      </div>
+    </div>`);
+  assert.equal(cycleFocusZone(window.document, "next"), "rail");
+  assert.equal(window.document.activeElement, find("#rail-skills"));
+  assert.equal(cycleFocusZone(window.document, "next"), "list");
+  assert.equal(window.document.activeElement, find(".skills-list"));
+  assert.equal(cycleFocusZone(window.document, "next"), "main");
+  assert.equal(window.document.activeElement, find(".skills-detail"), "the detail pane wins over the shell's page root");
+
+  find(".skills-list").hidden = true;
+  find(".skills-detail").setAttribute("aria-hidden", "true");
+  assert.equal(focusZone(window.document, "list"), null, "a hidden pane is not a mounted zone");
+  assert.equal(focusZone(window.document, "main"), "main");
+  assert.equal(window.document.activeElement, find(".main-body"), "a hidden detail pane falls back to the page root");
+});
+
+test("the F6 zone line lights only the entered zone and goes out after 1.5s, a press, or focus leaving", () => {
+  const window = setup();
+  const find = shell(window, `
+    <aside class="skills-list" data-focus-zone="list" tabindex="-1"><button class="row" type="button"></button></aside>
+    <div class="skills-detail" data-focus-zone="main" tabindex="-1"><button type="button"></button></div>`);
+  const timers: Array<() => void> = [];
+  const delays: number[] = [];
+  (window as unknown as { setTimeout: (callback: () => void, delay: number) => number }).setTimeout = (callback, delay) => {
+    timers.push(callback);
+    delays.push(delay);
+    return timers.length;
+  };
+  const list = find(".skills-list");
+  const detail = find(".skills-detail");
+  const lit = () => [...window.document.querySelectorAll(".zone-lit")];
+
+  assert.equal(focusZone(window.document, "list"), "list");
+  assert.deepEqual(lit(), [], "focusing a zone without F6 draws no line");
+
+  assert.equal(indicateFocusZone(window.document, "list"), list);
+  assert.deepEqual(lit(), [list]);
+  assert.deepEqual(delays, [ZONE_INDICATOR_MS]);
+  assert.equal(ZONE_INDICATOR_MS, 1500);
+  assert.match(list.style.getPropertyValue("--zone-line-width"), /px$/);
+  timers[0]!();
+  assert.deepEqual(lit(), []);
+  assert.equal(list.style.getPropertyValue("--zone-line-top"), "", "the measured edge is cleared with the class");
+
+  indicateFocusZone(window.document, "list");
+  indicateFocusZone(window.document, "main");
+  assert.deepEqual(lit(), [detail], "only the zone F6 entered last is lit");
+  detail.querySelector("button")!.focus();
+  assert.deepEqual(lit(), [detail], "moving within the zone keeps the line");
+  list.querySelector("button")!.focus();
+  assert.deepEqual(lit(), [], "focus leaving the zone puts the line out");
+
+  indicateFocusZone(window.document, "main");
+  detail.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
+  assert.deepEqual(lit(), [], "a click puts the line out");
 });
 
 test("direct zone focus uses the list, empty-state, and board target chain", () => {

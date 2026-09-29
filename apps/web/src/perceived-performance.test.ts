@@ -148,7 +148,7 @@ test("typing is decoupled from filtering", () => {
 
 test("pane focus boundaries are not painted by scrolling containers", () => {
   const focusRules = rulesWith(css, ["outline"])
-    .filter(({ selector }) => /\.inbox-list:focus-visible|\.detail-scroll:focus-visible/.test(selector));
+    .filter(({ selector }) => /\.(inbox-list|detail-scroll):focus-visible\s*(,|$)/.test(selector));
   assert.ok(focusRules.length > 0,
     "the scroll containers must explicitly suppress their moving focus boundary");
   assert.ok(focusRules.every(({ declarations }) => declarations.outline === "none"),
@@ -159,9 +159,10 @@ test("pane focus boundaries are not painted by scrolling containers", () => {
       `${selector} repaints a shadow while scrolling`);
   }
 
-  const overlay = rulesWith(css, ["position", "inset", "pointer-events"])
-    .find(({ selector }) => selector.includes(".inbox-list-pane:has") && selector.includes(".inbox-preview-pane:has"));
-  assert.ok(overlay, "both pane wrappers need one fixed, pointer-transparent focus overlay");
+  // The panes are not framed on focus either (docs/design-system.md §16.1): F6 draws a brief zone line.
+  const frames = rulesWith(css, ["border"])
+    .filter(({ selector }) => /\.inbox-(list|preview)-pane:has\(/.test(selector));
+  assert.deepEqual(frames.map(({ selector }) => selector), [], "a pane frame competes with the selected row");
 });
 
 test("the disclosures do not claim a height they do not have", () => {

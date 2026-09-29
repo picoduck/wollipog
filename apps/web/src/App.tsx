@@ -56,7 +56,7 @@ import {
   handleRovingChoiceKeyDown,
   rovingChoiceTabIndex,
 } from "./components/interactions.js";
-import { cycleFocusZone, escapeOwner, focusZone } from "./focus-zones.js";
+import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone } from "./focus-zones.js";
 import { installTerminalExitBoundary } from "./terminal-focus.js";
 import {
   bareDigitPressed,
@@ -582,12 +582,11 @@ export function Shell() {
         window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
           document.querySelector<HTMLInputElement>(".inbox-search input")?.focus();
         }));
-      } else if (matchesShortcut(event, "focus-next-zone")) {
+      } else if (matchesShortcut(event, "focus-next-zone") || matchesShortcut(event, "focus-previous-zone")) {
         event.preventDefault();
-        cycleFocusZone(document, "next");
-      } else if (matchesShortcut(event, "focus-previous-zone")) {
-        event.preventDefault();
-        cycleFocusZone(document, "previous");
+        // F6 is the only caller that lights the entered zone (§16.1).
+        const zone = cycleFocusZone(document, event.shiftKey ? "previous" : "next");
+        if (zone !== null) indicateFocusZone(document, zone);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -751,7 +750,13 @@ export function Shell() {
               : <OfflineBanner connecting={conn === "connecting"} onRetryNow={reconnectNow} />
           )
         )}
-        <div className={`main-body${view.name === "inbox" || view.name === "session" || view.name === "board" ? " inbox-main-body" : ""}`}>
+        {/* Every route's page root is the `main` F6 zone; master-detail pages mark their own list
+            and detail panes inside it (focus-zones.ts). */}
+        <div
+          className={`main-body${view.name === "inbox" || view.name === "session" || view.name === "board" ? " inbox-main-body" : ""}`}
+          data-focus-zone="main"
+          tabIndex={-1}
+        >
           <PageChromeProvider appBarControl={appBarControl}>
           <ErrorBoundary
             name={viewSubjectName(view)}

@@ -383,7 +383,7 @@ export function ProjectsView({
         />
       )}
       <div className="project-manager-grid">
-        <aside className={`project-manager-list${selected ? " has-selection" : ""}`} aria-label="Projects">
+        <aside className={`project-manager-list${selected ? " has-selection" : ""}`} aria-label="Projects" data-focus-zone="list" tabIndex={-1}>
           <label className="project-manager-search">
             <span className="sr-only">Search Projects</span>
             <SearchIcon />
@@ -402,7 +402,7 @@ export function ProjectsView({
             ]}
             onChange={setVisibility}
           />
-          <div className="project-manager-items">
+          <div className="project-manager-items clip-focus">
             {visibleProjects.map((project) => {
               const active = project.id === selected?.id;
               const available = project.locations.filter((location) => location.availability === "available").length;
@@ -434,7 +434,7 @@ export function ProjectsView({
             )}
           </div>
         </aside>
-        <main className={`project-manager-detail${selected ? " is-open" : ""}`}>
+        <main className={`project-manager-detail${selected ? " is-open" : ""}`} data-focus-zone="main" tabIndex={-1}>
           {!selected ? (
             <div className="project-manager-empty">
               <strong>{allProjects.length ? "Select a Project" : "Create Your First Project"}</strong>

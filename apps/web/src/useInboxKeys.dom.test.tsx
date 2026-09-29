@@ -22,14 +22,16 @@ for (const [name, value] of Object.entries({
 function Harness({ actions }: { actions: InboxKeyActions }) {
   useInboxKeys(true, actions);
   return (
-    <div>
+    <div className="main-body" data-focus-zone="main" tabIndex={-1}>
+      <div className="inbox-view">
       <div className="inbox-list" data-focus-zone="list" role="grid" tabIndex={0}>List</div>
       <textarea aria-label="Composer" />
       <details><summary>Requests</summary><button type="button">Open Request</button></details>
       <div className="xterm"><textarea aria-label="Terminal" /></div>
-      <div data-focus-zone="detail">
+      <div data-focus-zone="main">
         <div className="detail-scroll" tabIndex={0}>Preview</div>
         <button type="button" aria-label="Allow Once">Allow Once</button>
+      </div>
       </div>
     </div>
   );
@@ -122,7 +124,7 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   const detail = container.querySelector<HTMLElement>(".detail-scroll")!;
   detail.focus();
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }));
-  assert.equal(calls.at(-1), "resumeFollow", "End keeps its preview-follow behavior in the detail zone");
+  assert.equal(calls.at(-1), "resumeFollow", "End keeps its preview-follow behavior in the reading pane");
 
   previewAvailable = false;
   detail.focus();
@@ -134,8 +136,10 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
 
   domWindow.document.body.focus();
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "f", bubbles: true }));
+  container.querySelector<HTMLElement>(".main-body")!.focus();
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "f", bubbles: true }));
   assert.equal(calls.filter((call) => call === "fork").length, 1,
-    "Fork is scoped to the Inbox list and detail zones");
+    "Fork is scoped to the Sessions list and reading pane, not the page root around them");
 
   await act(async () => { root.unmount(); });
   container.remove();

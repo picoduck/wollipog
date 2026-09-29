@@ -1,30 +1,54 @@
 import { inTypingContext, shortcutLayerActive, type ShortcutScope } from "./shortcuts.js";
 
-export type FocusZone = "rail" | "list" | "detail";
+/**
+ * F6 zones (docs/design-system.md §16.1). The shell marks every route's page root `main`;
+ * master-detail pages mark their list pane `list` and their detail pane `main`. The innermost
+ * mounted root wins, so the shell's `main` is the fallback for a page without a detail pane.
+ */
+export type FocusZone = "rail" | "list" | "main";
 
-export const FOCUS_ZONE_ORDER: readonly FocusZone[] = ["rail", "list", "detail"];
+export const FOCUS_ZONE_ORDER: readonly FocusZone[] = ["rail", "list", "main"];
+
+/** How long the F6 zone indicator stays on the entered zone's top edge. */
+export const ZONE_INDICATOR_MS = 1500;
 
 export type ShortcutViewName = "inbox" | "session" | string;
 
 export function focusZoneForElement(element: Element | null): FocusZone | null {
   const zone = element?.closest<HTMLElement>("[data-focus-zone]")?.dataset.focusZone;
-  return zone === "rail" || zone === "list" || zone === "detail" ? zone : null;
+  return zone === "rail" || zone === "list" || zone === "main" ? zone : null;
+}
+
+/**
+ * Landing targets, tried one selector at a time and never joined into a comma list:
+ * querySelector returns the first match in DOCUMENT order, not the first selector that matches,
+ * so a list resolved to the brand link above the rail's current destination.
+ */
+export const ZONE_TARGETS: Readonly<Record<FocusZone, readonly string[]>> = {
+  // The current destination (the Settings control while in Settings), then the first destination.
+  rail: ['[aria-current="page"]', ".rail-item"],
+  // Board mode replaces the Sessions list with the kanban canvas; F6 still needs a landing spot there.
+  list: [".inbox-list", ".inbox-zero", ".board-wrap"],
+  // The Sessions reading pane lands on its transcript scroller, as opening a session does.
+  main: [".detail-scroll", ".inbox-preview-empty"],
+};
+
+function zoneRoot(targetDocument: Document, zone: FocusZone): HTMLElement | null {
+  const roots = [...targetDocument.querySelectorAll<HTMLElement>(`[data-focus-zone="${zone}"]`)]
+    .filter((candidate) => !candidate.closest('[inert], [hidden], [aria-hidden="true"]'));
+  // A page's own zone sits inside the shell's page root, and the page's is the one it means.
+  return roots.find((root) => !roots.some((other) => other !== root && root.contains(other))) ?? null;
 }
 
 function focusTargetForZone(targetDocument: Document, zone: FocusZone): HTMLElement | null {
-  const root = [...targetDocument.querySelectorAll<HTMLElement>(`[data-focus-zone="${zone}"]`)]
-    .find((candidate) => !candidate.closest("[inert]") && !candidate.hidden && candidate.getAttribute("aria-hidden") !== "true");
+  const root = zoneRoot(targetDocument, zone);
   if (!root) return null;
-  if (zone === "rail") {
-    return root.querySelector<HTMLElement>('[aria-current="page"], button:not(:disabled), [href]') ?? root;
+  for (const selector of ZONE_TARGETS[zone]) {
+    const target = root.querySelector<HTMLElement>(selector);
+    if (target) return target;
   }
-  // Board mode replaces the list with the kanban canvas; F6 still needs a landing spot there.
-  if (zone === "list") return root.querySelector<HTMLElement>(".inbox-list, .inbox-zero, .board-wrap") ?? root;
-  if (zone === "detail") return root.querySelector<HTMLElement>(".detail-scroll, .inbox-preview-empty") ?? root;
-  if (root.matches('[tabindex]:not([tabindex="-1"])')) return root;
-  return root.querySelector<HTMLElement>(
-    '[tabindex]:not([tabindex="-1"]), button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href]',
-  ) ?? root;
+  // Otherwise the zone lands on its root (tabIndex -1, no ring), so the next Tab continues inside it.
+  return root;
 }
 
 /** Focus one mounted zone using the same durable target chain as F6 navigation. */
@@ -52,6 +76,44 @@ export function cycleFocusZone(
   return focusZone(targetDocument, next);
 }
 
+const ZONE_LINE_PROPERTIES = ["--zone-line-top", "--zone-line-left", "--zone-line-width"] as const;
+let clearLitZone: (() => void) | null = null;
+
+/**
+ * Mark the zone F6 just entered with `.zone-lit` for ZONE_INDICATOR_MS, which draws a line on its
+ * top edge (§16.1). Only the F6 handler calls this, so a click, a digit, a route change or
+ * programmatic focus never lights a zone. The line is `position: fixed` at the root's measured
+ * edge because most roots scroll, and an absolute line would scroll away with their content.
+ * A pointer press, or focus leaving the zone, puts it out early.
+ */
+export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HTMLElement | null {
+  clearLitZone?.();
+  const root = zoneRoot(targetDocument, zone);
+  const view = targetDocument.defaultView;
+  if (!root || !view) return null;
+  const edge = root.getBoundingClientRect();
+  root.style.setProperty("--zone-line-top", `${edge.top}px`);
+  root.style.setProperty("--zone-line-left", `${edge.left}px`);
+  root.style.setProperty("--zone-line-width", `${edge.width}px`);
+  const clear = () => {
+    view.clearTimeout(timer);
+    targetDocument.removeEventListener("pointerdown", clear, true);
+    targetDocument.removeEventListener("focusin", onFocusIn, true);
+    root.classList.remove("zone-lit");
+    for (const property of ZONE_LINE_PROPERTIES) root.style.removeProperty(property);
+    if (clearLitZone === clear) clearLitZone = null;
+  };
+  const onFocusIn = (event: Event) => {
+    if (!(event.target instanceof view.Node) || !root.contains(event.target)) clear();
+  };
+  root.classList.add("zone-lit");
+  const timer = view.setTimeout(clear, ZONE_INDICATOR_MS);
+  targetDocument.addEventListener("pointerdown", clear, true);
+  targetDocument.addEventListener("focusin", onFocusIn, true);
+  clearLitZone = clear;
+  return root;
+}
+
 /** Resolve contextual precedence once; component handlers should not invent their own scopes. */
 export function shortcutScopeForFocus({
   viewName,
@@ -63,8 +125,8 @@ export function shortcutScopeForFocus({
   sessionReading?: boolean;
 }): ShortcutScope {
   const zone = focusZoneForElement(activeElement);
-  if (viewName === "inbox" && (zone === null || zone === "list" || zone === "detail")) return "Sessions List";
-  if (viewName === "session" && sessionReading && (zone === null || zone === "detail")) return "Session Reading";
+  if (viewName === "inbox" && (zone === null || zone === "list" || zone === "main")) return "Sessions List";
+  if (viewName === "session" && sessionReading && (zone === null || zone === "main")) return "Session Reading";
   return viewName === "session" ? "Session" : "Global";
 }
 

@@ -1281,7 +1281,7 @@ export function InboxView({
   };
 
   return (
-    <div className={`inbox-view${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`} ref={viewRef} data-focus-zone={expanded ? "detail" : "list"}>
+    <div className={`inbox-view${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`} ref={viewRef} data-focus-zone={expanded ? "main" : "list"}>
       <section
         className="inbox-list-pane"
         style={{ height: isMobile || boardMode ? "100%" : `${ratio * 100}%` }}
@@ -1596,7 +1596,7 @@ export function InboxView({
               event.preventDefault();
             }}
           />
-          <div className="inbox-preview-pane" style={{ height: expanded ? "100%" : `${(1 - ratio) * 100}%` }} data-focus-zone="detail">
+          <div className="inbox-preview-pane" style={{ height: expanded ? "100%" : `${(1 - ratio) * 100}%` }} data-focus-zone="main">
             {surfaceSessionId ? (
               <SessionDetail
                 key={surfaceSessionId}

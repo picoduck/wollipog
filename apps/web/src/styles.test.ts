@@ -104,6 +104,10 @@ test("every referenced custom property is defined in the shared root scope", () 
   // must be genuinely runtime-set — this is not a place to silence a real missing token.
   const RUNTIME_PUBLISHED = new Set([
     "--keyboard-inset", // installMobileViewportFallback; absent means no occlusion
+    // indicateFocusZone measures the lit zone's top edge; absent means no zone is lit.
+    "--zone-line-top",
+    "--zone-line-left",
+    "--zone-line-width",
   ]);
 
   const unresolved = [...referenced]
@@ -161,13 +165,17 @@ test("the global focus ring is neutral, zero-specificity and absent on programma
     assert.ok(programmatic[0]!.selector.includes(control),
       `the programmatic-focus suppression must exclude ${control}`);
   }
-  // F6 lands keyboard focus on these tabIndex -1 containers; the ring is their only cue, so it is
-  // restored after the suppression (equal specificity, later wins).
-  const zoneRing = ":where(.board-wrap, .inbox-zero, .inbox-preview-empty, [data-focus-zone]):focus-visible";
+  // A digit or a handoff also focuses these tabIndex -1 Sessions containers, where no zone line
+  // appears, so the ring is their only cue and is restored after the suppression (equal
+  // specificity, later wins). Zone roots stay ringless: the F6 zone line is their cue.
+  const zoneRing = ":where(.board-wrap, .inbox-zero):focus-visible";
   assert.equal(baseRule(zoneRing),
     "outline: var(--focus-width) solid var(--focus);\noutline-offset: calc(-1 * var(--focus-width));");
   assert.ok(css.indexOf(zoneRing) > css.indexOf(':where([tabindex="-1"]:not('),
-    "the F6 landing ring must follow the programmatic-focus suppression to win the tie");
+    "the Sessions landing ring must follow the programmatic-focus suppression to win the tie");
+  assert.equal(allDeclarations(css).filter((declaration) =>
+    /data-focus-zone|zone-lit/.test(declaration.selector) && /focus/.test(declaration.selector)).length, 0,
+  "a zone root takes no ring when F6 lands on it");
   // The palette search suppresses its outline, so its bottom edge is its only focus cue.
   assert.equal(soleRuleBody(".palette-input:focus-visible"), "border-color: var(--focus);");
   assert.equal(soleRuleBody(".clip-focus :focus-visible"), "outline-offset: calc(-1 * var(--focus-width));");
@@ -193,6 +201,28 @@ test("no focus ring anywhere is drawn in the accent colour", () => {
   assert.deepEqual(accentRings.map((declaration) => `${declaration.line}: ${declaration.selector}`), []);
   assert.match(soleRuleBody(".inbox-row-shell.selected .inbox-row"), /border-color: var\(--text\);/,
     "the exception exists only while the selected row is drawn in --text; remove it when that changes");
+});
+
+/**
+ * F6 zones (docs/design-system.md §16.1): no pane is framed on focus, and the zone F6 enters shows a
+ * 2px --focus line on its top edge that fades out, without the fade under reduced motion.
+ */
+test("focus never frames a pane, and the F6 zone line is a brief neutral top edge", () => {
+  const paneFrames = allDeclarations(css).filter((declaration) =>
+    /focus/.test(declaration.selector) && /^(border|box-shadow)/.test(declaration.prop) && /--accent\b/.test(declaration.value)
+    && /::?(after|before)|pane/.test(declaration.selector));
+  assert.deepEqual(paneFrames.map((declaration) => `${declaration.line}: ${declaration.selector}`), []);
+  assert.doesNotMatch(css, /\.inbox-preview-pane:has\(\.detail-scroll:focus-visible\)::after/);
+  assert.doesNotMatch(css, /\.inbox-list-pane:has\(> \.inbox-list:focus-visible\)::after/);
+
+  const line = soleRuleBody(".zone-lit::after");
+  for (const declaration of ["position: fixed;", "top: var(--zone-line-top, 0px);", "left: var(--zone-line-left, 0px);",
+    "width: var(--zone-line-width, 0px);", "height: var(--focus-width);", "background: var(--focus);", "pointer-events: none;"]) {
+    assert.ok(line.includes(declaration), `the zone line needs ${declaration}`);
+  }
+  assert.match(line, /animation: zone-line-fade 1\.5s /, "the line lasts the 1.5s ZONE_INDICATOR_MS holds the class");
+  assert.ok(mediaBlocks(css).some((block) => block.params === "(prefers-reduced-motion: reduce)"
+    && block.containsSelector(".zone-lit::after")), "reduced motion shows the line without the fade");
 });
 
 /**

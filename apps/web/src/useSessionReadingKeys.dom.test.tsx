@@ -43,7 +43,7 @@ function Harness({
   useSessionReadingKeys({ enabled: true, sessionId, scrollRef, composerAvailable, actions });
   return (
     <div>
-      <div data-focus-zone="detail">
+      <div data-focus-zone="main">
         <div className="detail-scroll" ref={scrollRef} tabIndex={0} onKeyDown={onTranscriptKeyDown}>
           Transcript
           <button type="button">Transcript Control</button>
@@ -259,7 +259,7 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
   dispatchKey("j", { ctrlKey: true });
   assert.deepEqual(fixture.calls, ["nextSession"], "typing blocks bare keys but preserves modifier navigation");
 
-  fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=detail] button")!.focus();
+  fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=main] button")!.focus();
   for (const key of ["a", "j", " "]) dispatchKey(key);
   fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Terminal"]')!.focus();
   dispatchKey("j", { ctrlKey: true });

@@ -179,7 +179,11 @@ test("the global keyboard layer wires rail navigation, Inbox search, creation, a
     "the board route must render board mode");
   assert.match(app, /if \(isMobile\) return;/);
   assert.match(app, /xtermOwnsKey\(event\.target\)/);
-  assert.match(app, /cycleFocusZone\(document, "next"\)/);
+  assert.match(app, /const zone = cycleFocusZone\(document, event\.shiftKey \? "previous" : "next"\);\s*if \(zone !== null\) indicateFocusZone\(document, zone\);/,
+    "F6 and Shift+F6 cycle the zones and light the one they enter");
+  assert.equal(app.match(/indicateFocusZone\(/g)?.length, 1, "only the F6 handler lights a zone (§16.1)");
+  assert.match(app, /className=\{\`main-body[^\n]*\n\s*data-focus-zone="main"\n\s*tabIndex=\{-1\}/,
+    "every route's page root is the main F6 zone");
   assert.match(app, /destination === "inbox"[\s\S]{0,500}focusZone\(document, "list"\)/,
     "the Sessions digit focuses its remembered list or board surface after navigation");
 
@@ -205,8 +209,8 @@ test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatm
     "justifying an overflowing rail to its end puts its first shortcut out of scroll reach");
   assert.match(css, /\.inbox-shortcut-rail > :first-child\s*\{\s*margin-inline-start:\s*auto;\s*\}/,
     "shortcuts still pack to the trailing edge while they fit, through an auto margin that collapses on overflow");
-  assert.match(css, /\.inbox-list-pane:has\(> \.inbox-list:focus-visible\)::after,[\s\S]*?\.inbox-preview-pane:has\(\.detail-scroll:focus-visible\)::after[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0;[\s\S]*?border:\s*2px solid var\(--accent\);[\s\S]*?pointer-events:\s*none;/,
-    "active panes draw one stable overlay above Inbox and transcript contents");
+  assert.doesNotMatch(css, /\.inbox-(list|preview)-pane:has\([^{]*focus-visible/,
+    "the panes are never framed on focus; F6 marks a zone with a brief top-edge line instead");
   assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?\.detail-scroll:focus-visible \{ outline: none; \}/,
     "scrolling contents must not own the focus boundary");
   assert.match(css, /\.inbox-row-shell\.unread \.inbox-row\s*\{[\s\S]*?linear-gradient[\s\S]*?inset 3px 0 0/,

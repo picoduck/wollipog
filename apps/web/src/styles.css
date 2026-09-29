@@ -633,12 +633,40 @@ kbd {
 )):focus {
   outline: none;
 }
-/* F6 zone landing targets (focus-zones.ts) are tabIndex -1 containers, but keyboard focus lands on
-   them. `.inbox-list` and `.detail-scroll` draw a zone frame; these have only the ring, drawn inset
-   because they fill clipped panes. Equal specificity with the suppression above, so order wins. */
-:where(.board-wrap, .inbox-zero, .inbox-preview-empty, [data-focus-zone]):focus-visible {
+/* The Sessions list's board and empty state are tabIndex -1 containers that a digit or a handoff
+   also focuses, where no zone line appears, so they keep the ring, drawn inset because they fill
+   clipped panes. Equal specificity with the suppression above, so order wins. Zone roots and the
+   reading pane's targets take no ring: the zone line below is their F6 cue (§16.1). */
+:where(.board-wrap, .inbox-zero):focus-visible {
   outline: var(--focus-width) solid var(--focus);
   outline-offset: calc(-1 * var(--focus-width));
+}
+/* The F6 zone indicator (§16.1). focus-zones.ts adds `.zone-lit` to the zone F6 entered for 1.5s
+   and measures its top edge into the `--zone-line-*` properties. Fixed rather than absolute, because
+   most zone roots scroll and an absolute line would scroll away with their content. */
+.zone-lit::after {
+  position: fixed;
+  z-index: var(--z-sticky);
+  top: var(--zone-line-top, 0px);
+  left: var(--zone-line-left, 0px);
+  width: var(--zone-line-width, 0px);
+  height: var(--focus-width);
+  background: var(--focus);
+  pointer-events: none;
+  content: "";
+  animation: zone-line-fade 1.5s var(--ease-out) forwards;
+}
+@keyframes zone-line-fade {
+  0%,
+  60% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .zone-lit::after { animation: none; }
 }
 /* Inside an `overflow: hidden` container an outset ring is clipped, so it is drawn inset. */
 .clip-focus :focus-visible {
@@ -10553,16 +10581,14 @@ body.shell-dock-dragging * {
   padding: 7px 10px;
   outline: none;
 }
+/* No pane frame (§16.1): the focused list shows its selected row, and the reading pane is a
+   programmatic focus target. F6 marks either with the zone line instead. */
 .inbox-list:focus-visible,
 .detail-scroll:focus-visible { outline: none; }
-.inbox-list-pane:has(> .inbox-list:focus-visible)::after,
-.inbox-preview-pane:has(.detail-scroll:focus-visible)::after {
-  position: absolute;
-  z-index: var(--z-sticky);
-  inset: 0;
-  border: 2px solid var(--accent);
-  pointer-events: none;
-  content: "";
+/* The focused grid's cue is its active row's --text ring, a box-shadow that forced colors drops, so a
+   transparent outline, which forced colors repaints in a system colour, redraws it there. */
+@media (forced-colors: active) {
+  .inbox-list:focus-visible .inbox-row-shell.selected .inbox-row { outline: 2px solid transparent; outline-offset: 1px; }
 }
 .inbox-activity-footer {
   display: flex;

@@ -491,7 +491,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
       {error && <div className="form-error" role="alert">{error}</div>}
 
       <div className="skills-layout">
-        <aside className="skills-list" aria-label="Skills">
+        <aside className="skills-list clip-focus" aria-label="Skills" data-focus-zone="list" tabIndex={-1}>
           {(orphanCount > 0 || showOrphans || keptAsideUnreported) && (
             <button
               type="button"
@@ -551,7 +551,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
           ))}
         </aside>
 
-        <div className="skills-detail">
+        <div className="skills-detail" data-focus-zone="main" tabIndex={-1}>
           {showOrphans && (
             <SkillOrphanedCopies
               runners={runners}
