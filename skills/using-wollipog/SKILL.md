@@ -146,14 +146,16 @@ it is waiting for. That is not a failure: report the deferred path and reason in
 and leave it alone. The runner resumes retirement after provider exit and removes the worktree only
 when its ownership, cleanliness, publication, and pull-request safety checks pass.
 
-If `wollipog` is not on `PATH`, invoke the injected executable directly:
+If `wollipog` is not on `PATH`, use the injected executable directly on POSIX
+hosts and WSL:
 
 ```sh
 "$WOLLIPOG_CLI" session list --json
 ```
 
-The launcher includes its own re-entry arguments; do not parse or append
-`WOLLIPOG_CLI_ARGS` on POSIX or WSL. On native Windows, use PowerShell to pass the
+The POSIX and WSL launcher includes its own re-entry arguments; do not parse or
+append `WOLLIPOG_CLI_ARGS`. On native Windows, including Git Bash sessions, run
+this PowerShell form so the runner receives its mode argument. It reads the
 injected JSON argument array without copying a launcher path into a prompt:
 
 ```powershell

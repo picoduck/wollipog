@@ -211,7 +211,7 @@ for leaf in provider relay scratch; do
   /usr/bin/chown "$uid:$gid" "$path"; /usr/bin/chmod 0700 "$path"
 done
 test "$(/usr/bin/stat -c '%u:%a' "$root")" = 0:711
-for stale in control.sock token mcp.json provider.pgid; do
+for stale in control.sock token mcp.json cli provider.pgid; do
   if test -e "$root/relay/$stale" || test -L "$root/relay/$stale"; then
     test ! -d "$root/relay/$stale"; /usr/bin/rm -f -- "$root/relay/$stale"
   fi

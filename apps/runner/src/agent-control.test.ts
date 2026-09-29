@@ -102,6 +102,22 @@ test("injected POSIX CLI launcher carries Node and single-executable re-entry ar
   }
 });
 
+test("native Windows retains a safe argument-array CLI fallback", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cli-windows-"));
+  try {
+    const launch = spec();
+    provisionAgentControl(launch, {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+    }, () => {}, { isSea: true, execPath: "C:\\wollipog-runner.exe", execArgv: [],
+      configDir: root, platform: "win32" });
+    assert.equal(launch.env.WOLLIPOG_CLI, "C:\\wollipog-runner.exe");
+    assert.deepEqual(JSON.parse(launch.env.WOLLIPOG_CLI_ARGS!), ["--wollipog-cli"]);
+    assert.equal(existsSync(agentControlCliPath(root, launch.sessionId)), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("orchestrator provisioning restricts native tools and refuses unsupported launch boundaries", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-control-"));
   try {
@@ -530,7 +546,9 @@ test("native sessions receive a purpose-bound token file and CLI environment wit
     assert.equal(launch.env.WOLLIPOG_SESSION_TOKEN_FILE, tokenFile);
     assert.equal(launch.env.WOLLIPOG_SESSION_CREDENTIAL_READY_FILE, agentControlReadyPath(root, launch.sessionId));
     assert.equal(launch.env.WOLLIPOG_SESSION_ID, launch.sessionId);
-    assert.equal(launch.env.WOLLIPOG_CLI, agentControlCliPath(root, launch.sessionId));
+    assert.equal(launch.env.WOLLIPOG_CLI, process.platform === "win32"
+      ? "/opt/wollipog-runner" : agentControlCliPath(root, launch.sessionId));
+    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, process.platform === "win32" ? '["--wollipog-cli"]' : "[]");
     assert.equal(JSON.stringify(launch).includes(token), false, "plaintext token never enters launch metadata");
     assert.equal(registrations.length, 1);
     assert.equal(registrations[0]![0], launch.sessionId);
@@ -980,7 +998,7 @@ test("startup sweep removes final and interrupted staging files while retaining 
     writeFileSync(symlinkTarget, "retain");
     if (process.platform !== "win32") symlinkSync(symlinkTarget, stagedSymlink);
 
-    assert.equal(sweepAgentControlFiles(root), 5);
+    assert.equal(sweepAgentControlFiles(root), process.platform === "win32" ? 4 : 5);
     assert.throws(() => readFileSync(agentControlTokenPath(root, launch.sessionId)));
     assert.throws(() => readFileSync(agentControlReadyPath(root, launch.sessionId)));
     assert.throws(() => readFileSync(agentControlMcpConfigPath(root, launch.sessionId)));

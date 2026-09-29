@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,7 +40,10 @@ test("target-local relay materializes owner-only bootstrap files and owns frame 
   const token = "wollipoga_pipe_only";
   const mcp = JSON.stringify({ mcpServers: { wollipog: { command: "/usr/bin/node" } } });
   writeFileSync(helper, WSL_AGENT_CONTROL_HELPER_SOURCE);
-  const child = spawn(process.execPath, [helper, "serve", socketPath], { stdio: ["pipe", "pipe", "pipe"] });
+  const helperFd = process.platform === "linux" ? openSync(helper, "r") : undefined;
+  const child = spawn(process.execPath, [helperFd === undefined ? helper : "/proc/self/fd/3", "serve", socketPath],
+    { stdio: helperFd === undefined ? ["pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe", helperFd] });
+  if (helperFd !== undefined) closeSync(helperFd);
   let childError = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => { childError += chunk; });
@@ -48,7 +51,8 @@ test("target-local relay materializes owner-only bootstrap files and owns frame 
     if (child.exitCode === null) child.kill();
     rmSync(root, { recursive: true, force: true });
   });
-  child.stdin.write(`${JSON.stringify({ type: "bootstrap", token: Buffer.from(token).toString("base64"),
+  child.stdin.write(`${JSON.stringify({ type: "bootstrap", runtime: process.execPath, helper,
+    token: Buffer.from(token).toString("base64"),
     mcp: Buffer.from(mcp).toString("base64") })}\n`);
   const deadline = Date.now() + 5_000;
   while ((!existsSync(socketPath) || !existsSync(join(dir, "token")) || !existsSync(join(dir, "mcp.json")) ||
@@ -197,6 +201,8 @@ test("broker authenticates exact MCP session and exposes only the Orchestrator t
   }));
   const bootstrap = JSON.parse(f.lines[0]!);
   assert.equal(bootstrap.type, "bootstrap");
+  assert.equal(bootstrap.runtime, f.config.nodeRuntime);
+  assert.equal(bootstrap.helper, f.config.helperPath);
   assert.equal(Buffer.from(bootstrap.token, "base64").toString(), f.config.token);
   assert.equal(JSON.parse(Buffer.from(bootstrap.mcp, "base64").toString()).mcpServers.wollipog.env.WOLLIPOG_AGENT_CONTROL_SOCKET,
     "/tmp/wollipog-agent-control/control.sock");

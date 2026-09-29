@@ -236,6 +236,9 @@ test("real WSL2 bridge carries CLI and MCP while adversarial routes fail closed 
     const uid = Number((await wslExec(["id", "-u"])).trim());
     const firstState = await provisionWslBwrapSessionState(distro!, ownerHash, sessionKeys[0]!, uid);
     const siblingState = await provisionWslBwrapSessionState(distro!, ownerHash, sessionKeys[1]!, uid);
+    await wslExec(["sh", "-c", 'printf stale > "$1/cli"', "sh", firstState.relay]);
+    await provisionWslBwrapSessionState(distro!, ownerHash, sessionKeys[0]!, uid);
+    await wslExec(["test", "!", "-e", `${firstState.relay}/cli`]);
     assert.equal((await wslExec(["stat", "-c", "%u:%a", firstState.scratch])).trim(), `${uid}:700`,
       "the root-owned WSL state provisioner creates a private provider-writable scratch leaf");
     await wslExec(["test", "!", "-e", `${firstState.relay}/control.sock`]);
