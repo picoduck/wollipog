@@ -1298,7 +1298,7 @@ export class AutomationsService {
   ): AutomationTriggerInvocationRecord {
     const trigger = this.db.getAutomationTriggerRecord(invocation.triggerId);
     const current = trigger ? this.db.getAutomation(trigger.automationId) : null;
-    const automation = this.db.automationScheduleForTriggerInvocation(invocation.invocationId);
+    let automation = this.db.automationScheduleForTriggerInvocation(invocation.invocationId);
     if (!trigger || !current || !current.enabled || !automation) {
       return this.db.settleAutomationTriggerInvocation(invocation.invocationId, "rejected", now) ?? invocation;
     }
@@ -1314,6 +1314,28 @@ export class AutomationsService {
         error: `execution '${active.executionId}' is still active`, now,
       });
       return this.db.getAutomationTriggerInvocation(invocation.invocationId) ?? invocation;
+    }
+    if (automation.action.kind === "create_session") {
+      // The trigger preserves its accepted revision, but an old plain-id target may have gained
+      // a sole installation since acceptance. Pin both the live schedule and that snapshot before
+      // target resolution; neither write changes the cron cursor or admits an explicit empty map.
+      if (current.action.kind === "create_session") {
+        const livePin = pinAutomationSpec(this.db, current, current);
+        if (JSON.stringify(livePin.action) !== JSON.stringify(current.action) ||
+            JSON.stringify(livePin.runnerPolicy) !== JSON.stringify(current.runnerPolicy)) {
+          if (!this.db.pinLegacyAutomationSpec(current, livePin, now)) return invocation;
+        }
+      }
+      const pinned = pinAutomationSpec(this.db, automation, automation);
+      if (JSON.stringify(pinned.action) !== JSON.stringify(automation.action) ||
+          JSON.stringify(pinned.runnerPolicy) !== JSON.stringify(automation.runnerPolicy)) {
+        if (!this.db.pinLegacyAutomationTriggerInvocationSpec(invocation.invocationId, invocation.specJson,
+          pinned.action, pinned.runnerPolicy, now)) {
+          return this.db.getAutomationTriggerInvocation(invocation.invocationId) ?? invocation;
+        }
+        automation = this.db.automationScheduleForTriggerInvocation(invocation.invocationId);
+        if (!automation) return invocation;
+      }
     }
     const target = this.resolveTarget(automation);
     if (!target.ok) {

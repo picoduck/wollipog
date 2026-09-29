@@ -23902,6 +23902,22 @@ export class ControlPlaneDb {
     };
   }
 
+  /** Pin only the target metadata of an accepted, still-pending trigger snapshot. */
+  pinLegacyAutomationTriggerInvocationSpec(
+    invocationId: string,
+    expectedSpecJson: string,
+    action: AutomationSpec["action"],
+    runnerPolicy: AutomationSpec["runnerPolicy"],
+    now: number,
+  ): boolean {
+    const spec = JSON.parse(expectedSpecJson) as AutomationSpec;
+    const updated = this.stmt(
+      `UPDATE automation_trigger_invocations SET spec_json=?,updated_at=?
+       WHERE invocation_id=? AND state='pending' AND spec_json=?`,
+    ).run(JSON.stringify({ ...spec, action, runnerPolicy }), now, invocationId, expectedSpecJson);
+    return Number(updated.changes) === 1;
+  }
+
   settleAutomationTriggerInvocation(
     invocationId: string,
     state: Exclude<AutomationTriggerInvocationState, "pending" | "dispatched">,

@@ -1335,6 +1335,100 @@ test("the first due tick pins an untouched legacy action before launching it", (
     execution.specSnapshot.action.installationBindings?.agent?.installationId, "system");
 });
 
+test("a signed trigger pins an untouched legacy action before its first cron tick", () => {
+  const { db, service, created } = harness(175);
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  const credential = service.createTrigger(automation.automationId,
+    { kind: "webhook", name: "Legacy hook" }, { kind: "human", id: "device" }, 1_000).data!;
+  const selected = { ...runner("runner-1").agents[0]!, driver: "codex-app-server" as const,
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  db.updateRunnerAgents("runner-1", [selected], 1_500);
+  const nextFireAt = db.getAutomation(automation.automationId)?.nextFireAt;
+  const result = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+    Buffer.from('{"eventId":"legacy-before-cron"}'), 2_000);
+  assert.equal(result.status, 200);
+  assert.equal(created.length, 1);
+  assert.equal(receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+    Buffer.from('{"eventId":"legacy-before-cron"}'), 2_100).data?.duplicate, true);
+  assert.equal(created.length, 1, "an event replay must not launch a second session");
+  assert.equal(db.getAutomation(automation.automationId)?.nextFireAt, nextFireAt);
+  assert.equal(db.getAutomation(automation.automationId)?.action.kind === "create_session" &&
+    db.getAutomation(automation.automationId)?.action.installationBindings?.agent?.installationId, "system");
+  const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+  assert.equal(execution.specSnapshot?.action.kind === "create_session" &&
+    execution.specSnapshot.action.installationBindings?.agent?.installationId, "system");
+  assert.equal(service.tick(60_000), 0, "a running trigger respects the schedule's wait policy");
+  assert.equal(db.getAutomation(automation.automationId)?.nextFireAt, nextFireAt);
+});
+
+test("signed triggers preserve ambiguous and explicit empty installation bindings", () => {
+  for (const mode of ["ambiguous", "explicit empty"] as const) {
+    const { db, service, created } = harness(175);
+    const actor = { kind: "human" as const, id: "device" };
+    const automation = service.create(baseSpec(), actor, 0).data!;
+    const installed = { ...runner("runner-1").agents[0]!, driver: "codex-app-server" as const,
+      installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+    db.updateRunnerAgents("runner-1", mode === "ambiguous" ? [
+      { ...installed, id: "first-installation" },
+      { ...installed, id: "second-installation",
+        installation: { id: "other", path: "/opt/codex", via: "path" as const } },
+    ] : [installed], 1_000);
+    if (mode === "explicit empty") {
+      const updated = service.update(automation.automationId, baseSpec({ action: {
+        kind: "create_session", request: {
+          runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Build",
+        },
+        installationBindings: {},
+      } }), actor, 1_100).data!;
+      assert.deepEqual(updated.action.kind === "create_session" && updated.action.installationBindings, {});
+    }
+    const credential = service.createTrigger(automation.automationId,
+      { kind: "webhook", name: "Blocked hook" }, actor, 1_500).data!;
+    const result = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret,
+      Buffer.from(`{"eventId":"${mode.replaceAll(" ", "-")}"}`), 2_000);
+    assert.equal(result.status, 202, mode);
+    assert.equal(created.length, 0, mode);
+    assert.equal(db.listAutomationExecutions(automation.automationId).length, 0, mode);
+    assert.equal(db.getAutomation(automation.automationId)?.action.kind === "create_session" &&
+      db.getAutomation(automation.automationId)?.action.installationBindings?.agent, undefined, mode);
+  }
+});
+
+test("pending legacy signed triggers pin on restart without changing accepted work or cron cursor", () => {
+  const { db, service, restartService, created, online } = harness(175);
+  const actor = { kind: "human" as const, id: "device" };
+  const automation = service.create(baseSpec(), actor, 0).data!;
+  const credential = service.createTrigger(automation.automationId,
+    { kind: "webhook", name: "Recovery hook" }, actor, 1_000).data!;
+  online.clear();
+  const body = Buffer.from('{"eventId":"install-after-acceptance"}');
+  const accepted = receiveSignedTrigger(service, credential.trigger.triggerId, credential.secret, body, 2_000);
+  assert.equal(accepted.status, 202);
+  const acceptedRevision = db.getAutomationTriggerInvocation(accepted.data!.invocation.invocationId)!.automationRevision;
+  const nextFireAt = db.getAutomation(automation.automationId)!.nextFireAt;
+  const installed = { ...runner("runner-1").agents[0]!, driver: "codex-app-server" as const,
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  db.updateRunnerAgents("runner-1", [installed], 3_000);
+  service.update(automation.automationId, baseSpec({ action: {
+    kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Changed later",
+    },
+  } }), actor, 3_100);
+  online.add("runner-1");
+  restartService().recover(4_000);
+  assert.equal(created.length, 1);
+  assert.equal(created[0]?.prompt, "Build", "recovery must retain the accepted prompt");
+  const invocation = db.getAutomationTriggerInvocation(accepted.data!.invocation.invocationId)!;
+  assert.equal(invocation.automationRevision, acceptedRevision);
+  assert.equal(db.listAutomationExecutions(automation.automationId)[0]?.specSnapshot?.action.kind === "create_session" &&
+    db.listAutomationExecutions(automation.automationId)[0]?.specSnapshot?.action.installationBindings?.agent?.installationId,
+  "system");
+  assert.equal(db.getAutomation(automation.automationId)?.nextFireAt, nextFireAt);
+  assert.equal(receiveSignedTrigger(restartService(), credential.trigger.triggerId, credential.secret,
+    body, 4_100).data?.duplicate, true);
+  assert.equal(created.length, 1);
+});
+
 test("an on-time unresolved target follows runner policy across every misfire policy", () => {
   const misfires = [
     { kind: "skip" as const }, { kind: "fire_once" as const },
