@@ -74,9 +74,22 @@ export function useAnchoredMenuStyle(
     align?: "start" | "end";
     matchTriggerWidth?: boolean;
     minTriggerWidth?: boolean;
+    /**
+     * The open list itself, measured on every placement. `desiredHeight` is an estimate from the
+     * option count and lines as written, and a description that wraps at the list's real width
+     * renders taller than it counted: the list then scrolled to show its last line. With `measure`,
+     * the request grows to the rendered content, up to `maxHeight`.
+     */
+    measure?: () => HTMLElement | null;
+    /** The most the measured content may ask for (the caller's one height cap). */
+    maxHeight?: number;
   },
 ): CSSProperties | undefined {
   const [style, setStyle] = useState<CSSProperties>();
+  // Read through a ref: callers pass a fresh closure every render, and as an effect dependency it
+  // would re-run placement, set a new style, and render again without end.
+  const measureRef = useRef(options.measure);
+  measureRef.current = options.measure;
   useLayoutEffect(() => {
     if (!open) {
       setStyle(undefined);
@@ -86,16 +99,26 @@ export function useAnchoredMenuStyle(
       const trigger = triggerRef.current;
       if (!trigger) return;
       const rect = trigger.getBoundingClientRect();
-      const placement = anchoredMenuPlacement({
+      const place = (desiredHeight: number) => anchoredMenuPlacement({
         trigger: rect,
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight,
         desiredWidth: options.matchTriggerWidth
           ? rect.width
           : Math.max(options.minTriggerWidth ? rect.width : 0, options.desiredWidth ?? rect.width),
-        desiredHeight: options.desiredHeight,
+        desiredHeight,
         align: options.align,
       });
+      let placement = place(options.desiredHeight);
+      const content = measureRef.current?.();
+      if (content) {
+        // Measured at the width it is about to get, so descriptions wrap where they will render. The
+        // commit below sets the same width.
+        content.style.width = `${placement.width}px`;
+        const rendered = content.scrollHeight + content.offsetHeight - content.clientHeight;
+        const wanted = Math.min(rendered, options.maxHeight ?? rendered);
+        if (wanted > options.desiredHeight) placement = place(wanted);
+      }
       setStyle({
         position: "fixed",
         top: placement.top,

@@ -342,6 +342,23 @@ test.describe("responsive Project and Agent controls", () => {
     await expect(agent).toHaveAccessibleName(/Agent: Codex — Non-Interactive/);
     await expect(page.locator(".agent-meta")).toContainText("Non-interactive via codex exec");
   });
+
+  test("a short Project list grows to its wrapped descriptions instead of scrolling", async ({ page }) => {
+    // At 390px "No Project"'s description wraps to two lines. The list's height request counted it
+    // as one, so a two-option list scrolled to show its last line and clipped it at the bottom edge.
+    await openDialog(page);
+    await page.getByRole("button", { name: /^Project:/ }).click();
+    const list = page.getByRole("listbox", { name: "Project" });
+    await expect(list.getByRole("option")).toHaveCount(2);
+    const fit = await list.evaluate((element) => ({
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
+      lastBottom: element.querySelector("[role=option]:last-child")!.getBoundingClientRect().bottom,
+      listBottom: element.getBoundingClientRect().bottom,
+    }));
+    expect(fit.scrollHeight, "the list sizes to its content").toBeLessThanOrEqual(fit.clientHeight + 1);
+    expect(fit.lastBottom, "the last option sits inside the list").toBeLessThanOrEqual(fit.listBottom);
+  });
 });
 
 for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
@@ -399,6 +416,19 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
 
 test.describe("responsive Project and Agent presentation", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
+
+  test("the searchable and Select lists size to their content at desktop width", async ({ page }) => {
+    await openDialog(page);
+    const fits = (name: string) => page.getByRole("listbox", { name }).evaluate((element) =>
+      element.scrollHeight <= element.clientHeight + 1);
+    // The Project combobox opens its list with initial focus.
+    await expect(page.getByRole("listbox", { name: "Project Options" })).toBeVisible();
+    expect(await fits("Project Options")).toBe(true);
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: /Account:/ }).click();
+    await expect(page.getByRole("listbox", { name: "Account" })).toBeVisible();
+    expect(await fits("Account")).toBe(true);
+  });
 
   test("keeps focus on each logical selector while its responsive control changes", async ({ page }) => {
     await openDialog(page);

@@ -743,7 +743,8 @@ default (converge on the People & Devices anatomy).
 One recipe for every read-only label and value list. It is the §19.4 merge of the proposed
 `.facts`, `dl.facts`, `.kv` and `.kv-list`.
 
-- `<dl class="facts">`: a two-column grid, `max-content` labels and `minmax(0, 1fr)` values,
+- `<dl class="facts">`: a two-column grid, `auto` labels and `minmax(60%, 1fr)` values, so a
+  value always keeps at least 60% of the width and a long label wraps instead of starving it;
   `gap: var(--space-2) var(--space-4)`, baseline-aligned. Pairs may be flat `<dt>`/`<dd>` or one
   `<div>` per pair (the `<div>` is `display: contents`).
 - Label (`dt`): `--type-label` in `--text-dim`, Title Case (a definition term, §17.1). Value
@@ -1147,7 +1148,8 @@ workflow step list is a different component and keeps a local name.
 - **Listbox** (`.menu.listbox`): the Select and SearchableCombobox list. It is the menu container
   around listbox options. `useAnchoredMenuStyle` anchors it to its field and sets its width (at
   least the trigger and at least 280px, §8.3) and its one height cap, `SELECT_MENU_MAX_HEIGHT_PX` in
-  `ChoiceControls.tsx`; the stylesheet sets no height. It stays anchored to its field on phones.
+  `ChoiceControls.tsx`; the stylesheet sets no height. It stays anchored to its field on phones and
+  appears in place, without the menu's entrance motion.
   It replaced `.ui-select-list`.
 
 ### 9.2 Popover

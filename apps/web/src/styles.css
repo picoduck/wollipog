@@ -2219,8 +2219,8 @@ button.status { cursor: pointer; }
    aside. Its options keep their own height (block flow, not the menu's shrinking flex column).
    On a phone it stays anchored to its field rather than becoming a sheet: the anchor's inline
    placement wins over the sheet's, and this rule restates the container the sheet rules replace.
-   It has no stylesheet corner (`top`/`left` auto): until the anchor places it, it sits where its
-   field is, so nothing moves or transitions from the viewport's corner. */
+   It has no stylesheet corner (`top`/`left` auto) and no entrance animation: it appears where its
+   field is, already in place, as the list always has. */
 .menu.listbox {
   top: auto;
   left: auto;
@@ -2232,7 +2232,7 @@ button.status { cursor: pointer; }
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   box-shadow: var(--elev-2);
-  animation: menu-open var(--dur-fast) var(--ease-out);
+  animation: none;
 }
 @keyframes menu-open { from { opacity: 0; transform: translateY(-4px); } }
 
@@ -2284,12 +2284,13 @@ button.status { cursor: pointer; }
 
 /* ---------------------------------- Facts ----------------------------------
    Read-only labels and values (docs/design-system.md §5.4): a two-column grid of <dt> and <dd>,
-   written flat or one <div> per pair. Values wrap anywhere rather than overflow. `.strip` lays the
-   pairs side by side as figures separated by hairlines, for a summary above a table or chart; on
-   a phone the strip becomes rows. */
+   written flat or one <div> per pair. A value keeps at least 60% of the width and a long label
+   wraps, so a label never starves its value; values wrap anywhere rather than overflow. `.strip`
+   lays the pairs side by side as figures separated by hairlines, for a summary above a table or
+   chart; on a phone the strip becomes rows. */
 .facts {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-columns: auto minmax(60%, 1fr);
   align-items: baseline;
   gap: var(--space-2) var(--space-4);
   min-width: 0;
@@ -2298,6 +2299,7 @@ button.status { cursor: pointer; }
 }
 .facts > div { display: contents; }
 .facts dt {
+  min-width: 0;
   color: var(--text-dim);
   font: var(--type-label);
 }
@@ -8999,7 +9001,6 @@ button.file-head.source-path-link {
   .modal,
   .modal-panel.pushed,
   .menu,
-  .menu.listbox,
   .popover { animation: modal-fade-in var(--dur-base) var(--ease-out); }
 }
 .shortcut-intro,
@@ -13800,6 +13801,12 @@ body.shell-dock-dragging * {
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }
+  /* A narrow card stacks each window's label over its figures, as it always has. */
+  .subscription-source > .facts {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-1);
+  }
+  .subscription-source > .facts > div + div > dt { margin-top: var(--space-2); }
   .subscription-usage-heading { align-items: stretch; flex-direction: column; }
 }
 

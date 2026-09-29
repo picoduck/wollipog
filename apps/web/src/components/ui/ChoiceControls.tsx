@@ -486,6 +486,8 @@ export function SearchableCombobox<T extends string>({
   const listStyle = useAnchoredMenuStyle(open, inputRef, {
     desiredHeight,
     matchTriggerWidth: true,
+    measure: () => document.getElementById(listboxId),
+    maxHeight: SELECT_MENU_MAX_HEIGHT_PX,
   });
 
   const close = () => {
@@ -1022,6 +1024,10 @@ export function Select<T extends string>({
     // not wrap its option descriptions onto five lines (§8.3). The helper still clamps to the viewport.
     desiredWidth: Math.max(menuWidth ?? 0, SELECT_LIST_MIN_WIDTH_PX),
     minTriggerWidth: true,
+    // The estimate above counts lines as written; a description that wraps at the list's width is
+    // taller. The list grows to what it renders, still within SELECT_MENU_MAX_HEIGHT_PX.
+    measure: () => popover.panelRef.current,
+    maxHeight: SELECT_MENU_MAX_HEIGHT_PX,
   });
 
   const openAt = (index: number) => {
