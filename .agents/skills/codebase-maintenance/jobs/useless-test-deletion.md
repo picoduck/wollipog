@@ -53,9 +53,11 @@ test would fail to catch, and name the other test that does catch it.
 
 ## Report
 
-**Calibration, recorded 2026-09-01, re-based 2026-09-15:** the suite was ~4,300 tests on
-2026-09-01 and ~6,460 (589 files, e2e included) on 2026-09-15; count it with an inventory that
-also matches `test(`/`it(` nested inside `describe` blocks, not only at column one. Weekly runs
+**Calibration, recorded 2026-09-01:** the suite grows by roughly a thousand tests a week (about
+4,300 on 2026-09-01, 8,900 in 769 files on 2026-09-29), so no absolute count belongs in this file.
+Count it every run with an inventory that also matches `test(`/`it(` nested inside `describe`
+blocks, not only at column one, report the count, and compare it with the previous run's report
+rather than with a number recorded here. Weekly runs
 have produced at most one small duplicate-test finding each and zero findings in the other three
 categories — this job's steady-state yield is roughly one six-to-nine-line finding per run. The
 schedule stays weekly by explicit decision (the cost is negligible on a subscription); read this
