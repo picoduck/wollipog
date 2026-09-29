@@ -129,6 +129,14 @@ test.describe("with a fine pointer at 1440px", () => {
     }
   });
 
+  test("the Sessions search field's / is the same keycap once the field opens", async ({ page }) => {
+    await page.goto(SHELL);
+    const key = page.locator(".inbox-search kbd.inbox-search-key");
+    await expect(key).toBeHidden();
+    await page.getByRole("textbox", { name: "Search Sessions" }).focus();
+    await expectKeycap(page, key, "Sessions search key");
+  });
+
   test("a menu item with a binding carries the keycap in its trailing slot", async ({ page }) => {
     const item = await openCreateMenu(page);
     await expectKeycap(page, item.locator(".menu-trail kbd"), "New Session menu item");
@@ -143,6 +151,9 @@ test.describe("with a fine pointer at 760px", () => {
     const item = await openCreateMenu(page);
     expect(await page.evaluate(() => matchMedia("(max-width: 760px)").matches), "this is the phone layout").toBe(true);
     await expectKeycap(page, item.locator(".menu-trail kbd"), "New Session sheet item");
+    await page.keyboard.press("Escape");
+    // The phone layout keeps the search field open, so its / keycap shows without focus.
+    await expectKeycap(page, page.locator(".inbox-search kbd.inbox-search-key"), "Sessions search key");
   });
 });
 
@@ -154,6 +165,11 @@ for (const width of [390, 1440]) {
       const item = await openCreateMenu(page);
       expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
       await expect(item.locator("kbd")).toBeHidden();
+      await page.keyboard.press("Escape");
+      // Even with the search field open and focused, a touch screen shows no / keycap.
+      await page.getByRole("textbox", { name: "Search Sessions" }).focus();
+      await expect(page.locator(".inbox-search:focus-within")).toHaveCount(1);
+      await expect(page.locator(".inbox-search kbd.inbox-search-key")).toBeHidden();
       if (width === 1440) {
         await page.goto(PREVIEW);
         const strip = page.locator(".transcript-status-strip");

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import postcss from "postcss";
 import { allDeclarations, mediaBlocks, topLevelRule } from "./css-rules.js";
 import { contrast, everyPalette, SCHEMES, THEMES } from "./palettes.js";
 
@@ -14,7 +15,7 @@ import { contrast, everyPalette, SCHEMES, THEMES } from "./palettes.js";
 const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
 /** The classes that name a keycap element rather than the surface around it. */
-const KEYCAP_CLASSES = ["rp-kbd", "follow-tail-kbd"];
+const KEYCAP_CLASSES = ["rp-kbd", "follow-tail-kbd", "inbox-search-key"];
 
 /** True when the rule's subject — the last compound of the selector — is a keycap. */
 function targetsKeycap(selector: string): boolean {
@@ -50,6 +51,47 @@ test("no other rule sizes a keycap or sets its font, border or colours", () => {
   assert.deepEqual(offenders, []);
 });
 
+/**
+ * Bordered monospace boxes that are not keycaps, each with why. A keycap drawn on a `<span>` escapes
+ * every `kbd` selector above (the Sessions search `/` did, with its own 10px stack), so any new rule
+ * that draws a bordered monospace box fails here until it is a `<kbd>` or is listed with a reason.
+ */
+const MONO_BOXES_THAT_ARE_NOT_KEYCAPS = new Map([
+  [".composer-answer-input", "a text field for a typed answer"],
+  [".workspace-reference-chip", "a file or folder reference chip"],
+  [".md code", "inline code in rendered markdown"],
+  [".dir-path-input", "a path text field"],
+  [".onboard-recommended-skill-names > li", "skill identifiers in a list"],
+]);
+
+test("every bordered monospace box is a kbd keycap or a listed non-keycap", () => {
+  const MONO = /--font-mono|--mono\b|monospace|Cascadia|Consolas|SFMono|Menlo/i;
+  const found = new Set<string>();
+  postcss.parse(css).walkRules((rule) => {
+    const declarations = rule.nodes.filter((node): node is postcss.Declaration => node.type === "decl");
+    const mono = declarations.some((node) => /^(font|font-family)$/.test(node.prop) && MONO.test(node.value));
+    const bordered = declarations.some((node) => /^border(-width|-style)?$/.test(node.prop) && !/^(0|none)\b/.test(node.value.trim()));
+    if (mono && bordered) found.add(rule.selector.replace(/\s+/g, " ").trim());
+  });
+  const unexplained = [...found].filter((selector) => selector !== "kbd" && !MONO_BOXES_THAT_ARE_NOT_KEYCAPS.has(selector));
+  assert.deepEqual(unexplained, [], "draw a keycap with <kbd> and the one kbd rule (§11.5)");
+  const stale = [...MONO_BOXES_THAT_ARE_NOT_KEYCAPS.keys()].filter((selector) => !found.has(selector));
+  assert.deepEqual(stale, [], "remove exemptions whose rule is gone");
+});
+
+test("a keycap-named class is only ever put on a kbd element", () => {
+  const components = fileURLToPath(new URL("./components/", import.meta.url));
+  const offenders: string[] = [];
+  for (const name of readdirSync(components).filter((file) => file.endsWith(".tsx") && !file.includes(".test."))) {
+    const source = readFileSync(`${components}${name}`, "utf8");
+    for (const match of source.matchAll(/<([a-zA-Z]+)\b[^<>]*?className="([^"]*)"/g)) {
+      const keycapClass = match[2]!.split(/\s+/).some((token) => /(kbd|keycap|key-hint)|-key$/.test(token));
+      if (keycapClass && match[1] !== "kbd") offenders.push(`${name}: <${match[1]} className="${match[2]}">`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
 test("the subject check reads the keycap, not the surface around it", () => {
   assert.ok(targetsKeycap(".shortcut-hint kbd"));
   assert.ok(targetsKeycap(".menu-trail > kbd"));
@@ -78,13 +120,14 @@ test("keycaps and hints hide on a coarse pointer, never by width, except in the 
   const hide = css.search(/@media \(pointer: coarse\)\s*\{\s*kbd:not\(\.shortcut-list kbd\),\s*\.shortcut-hint\s*\{/);
   const hint = css.search(/(^|\})\s*\.shortcut-hint\s*\{/);
   assert.ok(hint >= 0 && hide > hint, "the coarse-pointer hide follows the hint rule it overrides");
-  const widthHides = allDeclarations(css).filter((declaration) =>
-    declaration.prop === "display" && declaration.value === "none" && declaration.selectors.some(targetsKeycap));
-  const outsideCoarse = mediaBlocks(css)
+  // A max-width block may place or show a keycap (the phone's open search field shows its `/`), but
+  // never hides one.
+  const keycapSelectors = [...new Set(allDeclarations(css).flatMap((declaration) => declaration.selectors).filter(targetsKeycap))];
+  const widthHides = mediaBlocks(css)
     .filter((block) => block.maxWidths.length > 0)
-    .flatMap((block) => widthHides.filter((declaration) => declaration.selectors.some((selector) => block.containsSelector(selector))))
-    .map((declaration) => declaration.selector);
-  assert.deepEqual(outsideCoarse, [], "a narrow window with a mouse still has a keyboard");
+    .flatMap((block) => keycapSelectors.filter((selector) =>
+      block.declarationsForSelector(selector).get("display")?.includes("none")));
+  assert.deepEqual(widthHides, [], "a narrow window with a mouse still has a keyboard");
 });
 
 test("keycap text is --text-dim on --bg-elev-2 at 4.5:1 or better in every palette (§2.11)", () => {

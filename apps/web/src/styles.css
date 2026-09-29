@@ -10596,16 +10596,10 @@ body.shell-dock-dragging * {
   opacity: 1;
   pointer-events: auto;
 }
-.inbox-search-key {
-  display: none;
-  padding: 0 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  color: var(--text-faint);
-  font: 10px "Cascadia Code", Consolas, monospace;
-}
-.inbox-search:focus-within .inbox-search-key,
-.inbox-search.has-query .inbox-search-key { display: inline-block; }
+/* The `/` keycap shows only while the field is open. `:where()` keeps these at one class, so the
+   coarse-pointer keycap hide still wins on a touch screen. */
+.inbox-search-key { display: none; }
+:where(.inbox-search:focus-within, .inbox-search.has-query) .inbox-search-key { display: inline-flex; }
 .inbox-list {
   min-height: 0;
   flex: 1;
@@ -11185,7 +11179,7 @@ body.shell-dock-dragging * {
   .inbox-toolbar-actions { width: 100%; }
   .inbox-search { width: 100%; min-width: 0; flex: 1; margin-bottom: 0; }
   .inbox-search input { width: auto; flex: 1; opacity: 1; pointer-events: auto; }
-  .inbox-search-key { display: inline-block; }
+  .inbox-search-key { display: inline-flex; }
   /* A phone drops what a tablet can still afford: the base ref off the Git line, and a few cells
      off the activity strip. The three-line STACK itself is no longer a phone rule — it starts at
      the tablet breakpoint now (#901), in the block above. */

@@ -1425,7 +1425,7 @@ export function InboxView({
                 }}
                 placeholder="Search sessions"
               />
-              <span className="inbox-search-key" aria-hidden="true">/</span>
+              <kbd className="inbox-search-key" aria-hidden="true">/</kbd>
             </label>
           </div>
         </div>
