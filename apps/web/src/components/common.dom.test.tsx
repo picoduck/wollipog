@@ -91,7 +91,7 @@ async function renderLabeledCopyButton(writeText: () => Promise<void>) {
     root.render(<CopyButton text="wollipog runner start" label="Copy Command" />);
   });
   const button = () => container.querySelector("button")!;
-  const shown = () => [...button().querySelectorAll(".copy-btn-labels > [data-shown]")].map((label) => label.textContent);
+  const shown = () => [...button().querySelectorAll(".copy-btn-labels > span")].map((label) => label.textContent);
   const press = () => act(async () => {
     button().click();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -163,13 +163,16 @@ test("a copy menu row draws its icon in the menu's icon slot, so its label lines
   }
 });
 
-test("a labeled copy button always holds every label it can show, so its width cannot change", async () => {
+test("a labeled copy button sizes itself for every label it can show, but its text is only the shown one", async () => {
   const view = await renderLabeledCopyButton(async () => {});
   try {
-    const labels = () => [...view.button().querySelectorAll(".copy-btn-labels > span")].map((label) => label.textContent);
-    assert.deepEqual(labels(), ["Copy Command", "Copied", "Copy Failed"]);
+    const stack = () => view.button().querySelector<HTMLElement>(".copy-btn-labels")!;
+    const sizers = () => [stack().dataset.sizerA, stack().dataset.sizerB];
+    assert.equal(view.button().textContent, "Copy Command");
+    assert.deepEqual(sizers(), ["Copied", "Copy Failed"]);
     await view.press();
-    assert.deepEqual(labels(), ["Copy Command", "Copied", "Copy Failed"]);
+    assert.equal(view.button().textContent, "Copied");
+    assert.deepEqual(sizers(), ["Copy Command", "Copy Failed"]);
   } finally {
     await view.cleanup();
   }

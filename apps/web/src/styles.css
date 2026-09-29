@@ -9588,7 +9588,8 @@ button.file-head.source-path-link {
   color: var(--text);
 }
 /* The labeled form: a leading icon, then every label it can show stacked in one cell with only the
-   current one visible, so "Copied" and "Copy Failed" never change the button's width. */
+   current one visible, so "Copied" and "Copy Failed" never change the button's width. The two it is
+   not showing are generated content, so they are neither text nor announced. */
 .copy-btn.copy-btn-labeled {
   display: inline-flex;
   align-items: center;
@@ -9596,8 +9597,11 @@ button.file-head.source-path-link {
   gap: var(--space-1);
 }
 .copy-btn-labels { display: inline-grid; }
-.copy-btn-labels > span { grid-area: 1 / 1; text-align: start; }
-.copy-btn-labels > span:not([data-shown]) { visibility: hidden; }
+.copy-btn-labels > span,
+.copy-btn-labels::before,
+.copy-btn-labels::after { grid-area: 1 / 1; text-align: start; }
+.copy-btn-labels::before { content: attr(data-sizer-a); visibility: hidden; }
+.copy-btn-labels::after { content: attr(data-sizer-b); visibility: hidden; }
 /* The result tones are for neutral surfaces. On a filled button the icon keeps the button's own
    foreground, which is what contrasts with the fill. */
 :is(.btn.primary, .btn.danger) > :is(.copy-status-icon-copied, .copy-status-icon-failed) { color: inherit; }

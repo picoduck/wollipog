@@ -57,7 +57,9 @@ export const COPY_RESULT_MS = 2000;
  * its label "Copied" (or an error icon and "Copy Failed"), announced politely as well.
  *
  * The labeled form stacks all three labels in one grid cell and shows one, so the button is always as
- * wide as its longest label and does not change width when the result appears.
+ * wide as its longest label and does not change width when the result appears. Only the shown label is
+ * text; the other two are hidden generated content (`data-sizer-*`, styles.css), so the button's text
+ * is never the three run together.
  */
 export function CopyButton({
   text,
@@ -160,7 +162,8 @@ export function CopyButton({
     : status === "failed" ? <ErrorIcon size={iconSize} className="copy-status-icon-failed" />
       : <CopyIcon size={iconSize} />;
   const icon = menuRow ? <span className="menu-icon" aria-hidden="true">{glyph}</span> : glyph;
-  const labels = [["idle", label], ["copied", "Copied"], ["failed", "Copy Failed"]] as const;
+  const labels = { idle: label, copied: "Copied", failed: "Copy Failed" } as const;
+  const [sizerA, sizerB] = (["idle", "copied", "failed"] as const).filter((each) => each !== status).map((each) => labels[each]);
   return (
     <>
       <button
@@ -175,10 +178,8 @@ export function CopyButton({
       >
         {icon}
         {!iconOnly && (
-          <span className="copy-btn-labels">
-            {labels.map(([shows, text]) => (
-              <span key={shows} data-shown={status === shows || undefined}>{text}</span>
-            ))}
+          <span className="copy-btn-labels" data-sizer-a={sizerA} data-sizer-b={sizerB}>
+            <span>{labels[status]}</span>
           </span>
         )}
       </button>

@@ -39,7 +39,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         for (const [variant, label] of VARIANTS) {
           const row = page.locator(`.actions[data-variant="${variant}"]`);
           const button = row.getByRole("button", { name: label });
-          const visible = button.locator(".copy-btn-labels > [data-shown]");
+          const visible = button.locator(".copy-btn-labels > span");
           const after = row.locator('[data-neighbour="after"]');
           await expect(visible).toHaveText(label);
           const idle = await box(button);
