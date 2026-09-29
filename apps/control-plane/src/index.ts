@@ -2743,7 +2743,7 @@ app.delete("/api/runners/:id/provider-logins/:operationId", async (req, reply) =
       return reply.code(502).send({ error: "unexpected runner reply" });
     }
     if (!result.ok || !result.login) {
-      return reply.code(409).send({ error: result.error ?? "Provider sign-in could not be cancelled" });
+      return reply.code(409).send({ error: result.error ?? "Provider sign-in could not be canceled" });
     }
     return { login: result.login };
   } catch (error) {

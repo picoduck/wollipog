@@ -9,7 +9,7 @@ function statusLabel(status: ProviderLoginView["status"]): string {
   if (status === "awaiting_code") return "Authorization Code Required";
   if (status === "waiting_for_provider") return "Waiting for Provider";
   if (status === "succeeded") return "Signed In";
-  if (status === "cancelled") return "Cancelled";
+  if (status === "cancelled") return "Canceled";
   if (status === "timed_out") return "Timed Out";
   return "Sign-In Failed";
 }

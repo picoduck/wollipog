@@ -146,7 +146,7 @@ const VOCABULARY = {
    * A message the user sent that the agent has not taken yet: the transcript's pending bubbles
    * and the composer's queue. Keys are the wire `PendingPromptState` values, plus the states the
    * queue derives (Pending Delivery, Steering…, Held) and the two failure readings (Not Sent,
-   * Cancelled).
+   * Canceled).
    */
   queuedMessage: {
     pending: neutral("Pending"),
@@ -160,7 +160,7 @@ const VOCABULARY = {
     uncertain: warning("Delivery Uncertain"),
     failed: danger("Delivery Failed"),
     not_sent: danger("Not Sent"),
-    cancelled: neutral("Cancelled"),
+    cancelled: neutral("Canceled"),
   },
   /** Delivery receipts: a background result returning, or a push notification. */
   delivery: {

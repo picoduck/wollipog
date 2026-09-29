@@ -185,11 +185,11 @@ test("one pending action disables every prompt action", async () => {
     const buttons = [...container.querySelectorAll("button")];
     assert.equal(buttons.length, 2);
     assert.equal(buttons.every((button) => button.disabled), true);
-    assert.equal(buttons[0]!.getAttribute("aria-label"), "Cancelling Pending Message");
+    assert.equal(buttons[0]!.getAttribute("aria-label"), "Canceling Pending Message");
     assert.equal(buttons[0]!.parentElement?.getAttribute("aria-busy"), "true");
     assert.equal(buttons[1]!.getAttribute("aria-label"), "Dismiss Pending Message");
     assert.equal(buttons[1]!.parentElement?.getAttribute("aria-busy"), null);
-    assert.match(container.textContent ?? "", /Cancelling…/);
+    assert.match(container.textContent ?? "", /Canceling…/);
     await act(async () => { buttons[1]!.click(); });
     assert.deepEqual(actions, []);
   } finally {
@@ -211,7 +211,7 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
           pending({ commandId: "cancel-live", state: "queued", attemptCount: 2 }),
           pending({
             commandId: "failed", state: "failed", errorCode: "COMMAND_CANCELLED",
-            error: "prompt cancelled before runner delivery", canDismiss: true,
+            error: "prompt canceled before runner delivery", canDismiss: true,
           }),
           pending({
             commandId: "auth-retry", state: "failed", errorCode: "PROVIDER_AUTHENTICATION_REQUIRED",
@@ -233,7 +233,7 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
     assertNoDomNode(container.querySelector("[data-testid='pending-prompt-delivered']"));
     assert.deepEqual(
       [...container.querySelectorAll(".pending-prompt-state")].map((node) => node.textContent),
-      ["Pending", "Queued", "Cancelled", "Delivery Failed"],
+      ["Pending", "Queued", "Canceled", "Delivery Failed"],
     );
     const buttons = [...container.querySelectorAll("button")];
     assert.deepEqual(buttons.map((button) => button.getAttribute("aria-describedby")), [
@@ -258,7 +258,7 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
       "dismiss:auth-retry",
       "retry:auth-retry",
     ]);
-    assert.match(container.textContent ?? "", /prompt cancelled before runner delivery/);
+    assert.match(container.textContent ?? "", /prompt canceled before runner delivery/);
     assert.match(container.textContent ?? "", /message was not sent/);
 
     const noOp = () => {};

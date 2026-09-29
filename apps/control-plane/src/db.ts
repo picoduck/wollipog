@@ -18836,7 +18836,7 @@ export class ControlPlaneDb {
     if (row.state !== "pending") return "delivery_started";
     const updated = this.stmt(
       `UPDATE session_prompt_commands SET state='failed',revision=revision+1,
-       error='prompt cancelled before runner delivery',error_code='COMMAND_CANCELLED',
+       error='prompt canceled before runner delivery',error_code='COMMAND_CANCELLED',
        next_attempt_at=NULL,expires_at=?,updated_at=?
        WHERE session_id=? AND command_id=? AND state='pending' AND dismissed_at IS NULL`,
     ).run(now + SESSION_PROMPT_TERMINAL_RETENTION_MS, now, sessionId, commandId);

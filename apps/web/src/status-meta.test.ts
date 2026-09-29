@@ -80,7 +80,7 @@ const TABLE: readonly Row[] = [
   ["queuedMessage", "uncertain", "Delivery Uncertain", "warning"],
   ["queuedMessage", "failed", "Delivery Failed", "danger"],
   ["queuedMessage", "not_sent", "Not Sent", "danger"],
-  ["queuedMessage", "cancelled", "Cancelled", "neutral"],
+  ["queuedMessage", "cancelled", "Canceled", "neutral"],
   // Delivery receipt
   ["delivery", "delivered", "Delivered", "success"],
   ["delivery", "delivery_failed", "Delivery Failed", "danger"],
@@ -161,6 +161,34 @@ test("Orphaned, Status Unverified and No Longer Reachable are retired from the w
       if (!/\.tsx?$/.test(entry) || /\.test\.tsx?$/.test(entry)) continue;
       const source = readFileSync(path, "utf8");
       for (const match of source.matchAll(/"[^"\n]*(Background Work Orphaned|Status Unverified|No Longer Reachable|: Orphaned)[^"\n]*"/g)) {
+        offenders.push(`${path.slice(root.length)}: ${match[0]}`);
+      }
+    }
+  };
+  visit(root);
+  assert.deepEqual(offenders, []);
+});
+
+test("both canceled states read Canceled, the US spelling the copy rules require", () => {
+  // The keys differ (`job.canceled`, `queuedMessage.cancelled`) and stay as they are; only what a
+  // person reads is one word (docs/design-system.md §17.2).
+  assert.equal(statusMeta("job", "canceled").label, "Canceled");
+  assert.equal(statusMeta("queuedMessage", "cancelled").label, "Canceled");
+});
+
+test("no visible string in the web client spells canceled the British way", () => {
+  // Quoted literals only, so the `cancelled` wire value and code comments are not copy. The native
+  // transport's abort errors reach only a caller that already stopped waiting, so none is shown.
+  const root = fileURLToPath(new URL(".", import.meta.url));
+  const offenders: string[] = [];
+  const visit = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const path = join(dir, entry);
+      if (statSync(path).isDirectory()) { if (entry !== "e2e") visit(path); continue; }
+      if (!/\.tsx?$/.test(entry) || /\.test\.tsx?$/.test(entry) || entry === "native-api-transport.ts") continue;
+      const source = readFileSync(path, "utf8");
+      for (const match of source.matchAll(/(["'`])(?:(?!\1).)*?[Cc]ancell(?:ed|ing)(?:(?!\1).)*?\1/g)) {
+        if (match[0].slice(1, -1) === "cancelled") continue;
         offenders.push(`${path.slice(root.length)}: ${match[0]}`);
       }
     }

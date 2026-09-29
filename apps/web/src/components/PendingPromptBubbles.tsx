@@ -125,13 +125,13 @@ export function PendingPromptBubbles({
                   className="btn ghost sm"
                   disabled={actionPending || refused}
                   title={actionRefusal ?? undefined}
-                  aria-label={busy ? "Cancelling Pending Message" : "Cancel Pending Message"}
+                  aria-label={busy ? "Canceling Pending Message" : "Cancel Pending Message"}
                   aria-describedby={describedBy}
                   onClick={() => cancelPending
                     ? onCancelPending(prompt.commandId)
                     : onCancelLive(prompt.commandId)}
                 >
-                  {busy ? "Cancelling…" : "Cancel"}
+                  {busy ? "Canceling…" : "Cancel"}
                 </button>
               )}
               {prompt.canDismiss && (

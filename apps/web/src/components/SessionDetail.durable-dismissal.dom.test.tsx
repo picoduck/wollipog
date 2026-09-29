@@ -594,7 +594,7 @@ test("a nonterminal durable entry keeps the existing pre-admission cancellation 
     assert.equal(cancel.disabled, true);
     assert.equal(
       cancel.getAttribute("title"),
-      "Durable delivery entries cannot be cancelled before runner admission.",
+      "Durable delivery entries cannot be canceled before runner admission.",
     );
   } finally {
     await unmountFixture(fixture);

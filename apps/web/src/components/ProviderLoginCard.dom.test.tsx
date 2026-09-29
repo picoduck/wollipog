@@ -79,3 +79,24 @@ test("Codex device flow renders the provider code without a paste field", async 
     container.remove();
   }
 });
+
+test("a canceled sign-in reads Canceled, while its wire status stays cancelled", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={{} as ApiClient}>
+          <ProviderLoginCard runnerId="runner-1" login={{ ...login, status: "cancelled", expectsCode: false }} />
+        </ApiProvider>,
+      );
+    });
+    const card = container.querySelector(".provider-login-card")!;
+    assert.equal(card.getAttribute("data-provider-login-status"), "cancelled");
+    assert.equal(card.querySelector(".provider-login-head > div > span")?.textContent, "Claude · Canceled");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

@@ -1266,7 +1266,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
 | Session header, background work | "Background Work Lost": danger (was "Background Work Orphaned") |
 | Delivery receipt | Delivered: success (inline, no pill) · Delivery Failed: danger |
-| Queued message (`queuedMessage`: pending bubbles and the composer queue) | Pending, Queued, Cancelled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
+| Queued message (`queuedMessage`: pending bubbles and the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
 | Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out: neutral |

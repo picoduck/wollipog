@@ -9602,6 +9602,8 @@ test("pending prompt cancellation is definite before send and wins late admissio
   assert.equal(cancelled?.commandId, before.commandId);
   assert.equal(cancelled?.state, "failed");
   assert.equal(cancelled?.errorCode, "COMMAND_CANCELLED");
+  // The bubble shows this text; it follows the US spelling of the copy rules.
+  assert.equal(cancelled?.error, "prompt canceled before runner delivery");
   assert.equal(cancelled?.canDismiss, true);
   assert.equal(cancelled?.canCancel, undefined);
   assert.ok(db.getSessionPromptCommand(commandId)!.expiresAt <= now + 7 * 24 * 60 * 60_000 + 1_000,

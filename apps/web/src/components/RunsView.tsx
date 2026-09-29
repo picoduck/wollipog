@@ -338,7 +338,7 @@ function RunDetailContent({ runId }: { runId: string }) {
                       {node.kind === "agent" ? `${node.agentId} · ${state.attemptCount}/${node.retry.maxAttempts} Attempts` : titleCaseLabel(node.kind.replace("_", " "))}
                     </div>
                     {state.outcome && <div className="workflow-node-outcome">Outcome: {titleCaseLabel(state.outcome.replace("_", " "))}</div>}
-                    {latest && <div className="muted sm">Latest Attempt: {titleCaseLabel(latest.status.replace("_", " "))}</div>}
+                    {latest && <div className="muted sm">Latest Attempt: {latest.status === "cancelled" ? "Canceled" : titleCaseLabel(latest.status.replace("_", " "))}</div>}
                     {state.error && <div className="tl-error">{state.error}</div>}
                     {node.kind === "agent" && state.status === "ready" && (
                       <button className="btn primary sm" disabled={Boolean(workflowBusy) || retryDelayed} onClick={() => void dispatchNode(node.nodeId, state.attemptCount)}>

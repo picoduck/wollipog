@@ -251,3 +251,25 @@ test("only a loaded snapshot with no runs shows the empty state and its create a
   assert.match(listed.text, /Run A/u);
   assert.doesNotMatch(listed.text, /No Multi-Agent Runs Yet|Loading/u);
 });
+
+test("a canceled workflow attempt reads Canceled, while its wire status stays cancelled", async () => {
+  const workflow = {
+    ...workflowA,
+    attempts: [{
+      attemptId: "attempt-1", instanceId: workflowA.instanceId, nodeId: "build", attempt: 1, status: "cancelled",
+      dispatchKey: "dispatch-1", startedAt: 1, deadlineAt: 2, completedAt: 2,
+    }],
+  } as WorkflowInstanceDetail;
+  const fixture = await mountRunDetail({
+    workflowInstances: async () => [workflow],
+    workflowInstance: async () => workflow,
+    runWorkflowArtifacts: async () => ({ artifacts: [] }),
+  } as Partial<ApiClient>);
+  try {
+    const progress = section(fixture.container, "Workflow Progress")?.textContent ?? "";
+    assert.match(progress, /Latest Attempt: Canceled/u);
+    assert.doesNotMatch(progress, /Cancelled/u);
+  } finally {
+    await unmount(fixture);
+  }
+});

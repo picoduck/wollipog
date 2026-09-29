@@ -5488,7 +5488,7 @@ function SessionDetailLoaded({
                             className="btn ghost sm queued-dismiss"
                             disabled={pendingPromptAction !== undefined || queueRefusal !== null}
                             aria-busy={dismissBusy || undefined}
-                            title={queueRefusal ?? "Remove this delivery receipt. The message already recorded in the transcript is kept, and no provider work is cancelled, resent, or restarted."}
+                            title={queueRefusal ?? "Remove this delivery receipt. The message already recorded in the transcript is kept, and no provider work is canceled, resent, or restarted."}
                             aria-label={q.durableDeliveryState === "failed"
                               ? "Dismiss Failed Message"
                               : "Dismiss Uncertain Message"}
@@ -5510,9 +5510,9 @@ function SessionDetailLoaded({
                                     "Queued prompt cancellation",
                                   )
                                 : reserved || locallyPromoting
-                                  ? "Resolve steering before cancelling this queued message."
+                                  ? "Resolve steering before canceling this queued message."
                                   : durable
-                                    ? "Durable delivery entries cannot be cancelled before runner admission."
+                                    ? "Durable delivery entries cannot be canceled before runner admission."
                                   : "Cancel this queued message."
                             )}
                             aria-label={canCancelThis ? "Cancel Queued Message" : "Queued Message Cancellation Unavailable"}
