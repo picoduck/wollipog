@@ -626,7 +626,7 @@ export function PeopleDevicesPanel({
             return (
               <div className="access-row" key={member.userId}>
                 <div className="access-row-main">
-                  <strong><PersonalIdentifier value={member.userName} label="Person Name" lead="Name" /></strong>
+                  <strong><PersonalIdentifier value={member.userName} label="Person Name" lead="Person" /></strong>
                   <span className="access-row-meta">
                     <StatusBadge tone="neutral" noDot label={titleCaseLabel(member.role)} />
                     <StatusBadge meta={statusMeta("member", member.userStatus)} />

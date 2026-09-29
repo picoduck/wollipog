@@ -250,8 +250,9 @@ test("every masked name on People & Devices says what it hides after a visible l
     const rows = [...container.querySelectorAll(".access-row-main")];
     const [owner, member, device] = rows;
     assert.equal(rows.length, 3, "two people and one device");
-    assert.equal(labelled(owner!), "Name");
-    assert.equal(labelled(member!), "Name");
+    // The value is an email, not a name, so the row says whose it is (#1954 review).
+    assert.equal(labelled(owner!), "Person");
+    assert.equal(labelled(member!), "Person");
     // A device row names the device first; the person it belongs to is labelled on its own line.
     assert.equal(device!.querySelector("strong")?.textContent, "Pat's Phone");
     assert.equal(labelled(device!.children[1]!), "Person");

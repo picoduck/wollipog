@@ -1397,7 +1397,7 @@ value is not in the DOM.
   picker's field head it is a `.btn.sm.ghost` with the Eye icon and the action as text ("Show
   Emails"). Inside a compact `.tag` the chip drops its frame and the control keeps the tag's height.
 - A mask never stands alone: a visible label comes before it — the field's own label, "Account:",
-  or the component's `lead` ("Account", "Name", "Claude Code reports"), which appears only when the
+  or the component's `lead` ("Account", "Person", "Claude Code reports"), which appears only when the
   value is masked, so an alias still reads as the account's configured name.
 - A field label with a reveal control for the values its picker hides is `.pid-field-head`.
 - Replaces `.personal-identifier`, `.personal-identifier-value`, `.personal-identifier-mask`,
