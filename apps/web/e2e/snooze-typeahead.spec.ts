@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion";
 import { pinWidestFace } from "./font-geometry";
 
 const EVIDENCE_CAPTURE = Boolean(process.env.EVIDENCE_CAPTURE);
@@ -127,7 +128,7 @@ test.describe("a short suggestions list on a phone", () => {
     const face = await pinWidestFace(page, page.locator("body"));
     // The sheet's entrance ends with a placement pass of its own, which would hide a list that is
     // not placed again when its suggestions change.
-    await page.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== "running"));
+    await dialogMotionSettled(page);
 
     const expression = page.getByRole("combobox", { name: "Natural Language" });
     const list = page.getByRole("listbox", { name: "Schedule Suggestions" });
