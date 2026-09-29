@@ -1093,8 +1093,8 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | Control | Spec |
 | --- | --- |
 | Text input / textarea | As §8.1. Textarea starts at 3 rows and grows to 12. `resize: vertical`. |
-| Select | Custom `Select` everywhere (native `<select>` removed). Trigger shows a `ChevronDown` 14px. |
-| Combobox | Same trigger with `ChevronDown`; typing filters; brand icons sit inside the field, not outside. |
+| Select | Custom `Select` everywhere (native `<select>` removed). Trigger shows a `ChevronDown` 14px. `leadingIcon` draws a 16px icon inside the trigger, before the value. `searchable` leads the open list with a filter field, focused on open (16px text on touch, so iOS does not zoom); the list keeps the side it opened on while the filter narrows it, so the filter never moves. It is the touch form of the Combobox. |
+| Combobox | Same trigger with `ChevronDown`; typing filters; brand icons sit inside the field, not outside. Built by `SearchableCombobox`: the chevron opens and closes the list without moving the caret, `leadingIcon` is the same 16px slot as Select's, and focus opens the list with the caret after the value (it never selects the value). A search with no results shows the §12.2 sentence, "No projects match “wolipog”.", from the caller's plural `noun`; an optional `createOption` row ("Create Project…") follows it. Other footer actions belong to the area that owns the picker. |
 | Checkbox | 16px box, `--radius-xs`, `--control-outline`; checked = `--accent` fill with a check. Label to the right, 8px gap, the whole row is the target (≥32px, 44px coarse). Used for multi-select and consent. Consent labels are sentences and stay in sentence case ("Open the session after creating it"). Built by `Checkbox` (`.checkbox`, a `<label>` around the input): `label` is required and visible, `helper` is an optional second line announced as the description, `consent` marks a sentence label, `ariaLabel` gives a fuller name that contains the visible label where the label repeats down a list, and `labelHidden` is the icon-only form (the bare box with its `aria-label`). |
 | Radio | 16px circle; checked = accent ring plus dot. Used inside ChoiceRows. The marker (`.radio-mark`, `.checkbox-mark`) is the restyled native input itself, so focus, `:checked` and `:disabled` belong to what the user sees. |
 | Switch | 32×18 track (40×24 on touch), `--radius-pill`, `--control-outline` edge; on = `--accent` track. **For settings that apply instantly.** Label is the row title, and `aria-label` matches it. Never a button that says "On"/"Off". |
@@ -1419,7 +1419,8 @@ One `State` component with variants; the states are **mutually exclusive** in th
 ### 12.2 No Results
 
 Inline in the list: `Search` icon, "No skills match “terr”." and a `.btn.sm` "Clear Search". Neutral
-tone, never a success mark.
+tone, never a success mark. Inside a picker's open list (§8.4) the row is the icon and the sentence, and an optional create row
+follows it instead of Clear Search: the query lives in the field, where clearing it is one keystroke.
 
 ### 12.3 Loading
 

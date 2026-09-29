@@ -216,6 +216,43 @@ test("consent checkbox labels are sentences, and every other checkbox label is T
   assert.ok(labels - consents >= 8, `found ${labels - consents} ordinary checkbox labels`);
 });
 
+/**
+ * A picker's no-match row is a message (§12.2), "No projects match “wolipog”.", built by the
+ * primitive from the caller's noun. "No Matching Projects" was a Title Case label standing in for
+ * it: it named no search and offered no next step. So no picker copy may say "No Matching", and every
+ * `noun` is the lowercase plural the sentence reads with.
+ */
+test("picker no-match copy is a sentence built from a lowercase noun", () => {
+  const failures: string[] = [];
+  let nouns = 0;
+  for (const file of sourceFiles(SOURCE_ROOT)) {
+    const source = readFileSync(file, "utf8");
+    if (!source.includes("<SearchableCombobox") && !source.includes("<Select")) continue;
+    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const visit = (node: ts.Node) => {
+      if (ts.isJsxOpeningLikeElement(node) && ["SearchableCombobox", "Select"].includes(node.tagName.getText(sourceFile))) {
+        const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+        const where = `${path.relative(SOURCE_ROOT, file)}:${line}`;
+        for (const property of node.attributes.properties) {
+          if (!ts.isJsxAttribute(property) || !property.initializer || !ts.isStringLiteral(property.initializer)) continue;
+          const name = property.name.getText(sourceFile);
+          const text = property.initializer.text;
+          if (/^No Matching\b/i.test(text)) failures.push(`${where} ${name} is a "No Matching" label: ${JSON.stringify(text)}`);
+          if (name === "noun") {
+            nouns += 1;
+            if (text !== text.toLowerCase()) failures.push(`${where} noun is not lowercase: ${JSON.stringify(text)}`);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  assert.deepEqual(failures, [], failures.join("\n"));
+  // Not vacuous: New Session's Project and Agent pickers each pass a noun on both of their forms.
+  assert.ok(nouns >= 4, `found ${nouns} picker nouns`);
+});
+
 test("the copy rules tell a sentence from a title", () => {
   assert.equal(isSentenceCase("Accept version diff and update existing assignments"), true);
   assert.equal(isSentenceCase("Accept Version Diff and Update Existing Assignments"), false);

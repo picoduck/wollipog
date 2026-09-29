@@ -9,7 +9,8 @@ import React, {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { CheckIcon, ChevronDownIcon } from "../Icons.js";
+import { flushSync } from "react-dom";
+import { CheckIcon, ChevronDownIcon, PlusIcon, SearchIcon } from "../Icons.js";
 import {
   handleRovingChoiceKeyDown,
   rovingChoiceStop,
@@ -613,10 +614,10 @@ export interface SearchableComboboxOption<T extends string> {
  * the authorization boundary for Project paths, runner details and other potentially private
  * context. Terms are ANDed so "dashboard remote" can distinguish duplicate names.
  */
-export function filterSearchableComboboxOptions<T extends string>(
-  options: readonly SearchableComboboxOption<T>[],
+export function filterSearchableComboboxOptions<O extends Omit<SearchableComboboxOption<string>, "value">>(
+  options: readonly O[],
   query: string,
-): SearchableComboboxOption<T>[] {
+): O[] {
   const terms = query.trim().toLowerCase().split(/\s+/u).filter(Boolean);
   if (terms.length === 0) return [...options];
   return options.filter((option) => {
@@ -631,12 +632,82 @@ export function filterSearchableComboboxOptions<T extends string>(
 }
 
 /**
+ * The sentence a search with no results shows (§12.2): "No projects match “wolipog”."
+ *
+ * A message rather than a label, so it names what was searched and reads in sentence case. The
+ * caller supplies the plural noun, because only it knows what the list holds.
+ */
+export function noMatchSentence(noun: string, query: string): string {
+  return `No ${noun} match “${query.trim()}”.`;
+}
+
+/**
+ * A row that follows the no-match sentence and turns a failed search into a next step
+ * ("Create Project…"). Only this one action lives in the list; any other footer action belongs to
+ * the area that owns the picker.
+ */
+export interface PickerCreateOption {
+  /** Title Case, ending in an ellipsis when it opens a dialog. */
+  label: string;
+  /** Called with the query that found nothing, after the list has closed. */
+  onSelect: (query: string) => void;
+}
+
+function NoMatchRow({ noun, query }: { noun: string; query: string }) {
+  return (
+    <p className="ui-select-empty ui-select-no-match">
+      <SearchIcon size={14} />
+      <span>{noMatchSentence(noun, query)}</span>
+    </p>
+  );
+}
+
+function CreateOptionRow({ id, label, active, onSelect, onActive }: {
+  id: string;
+  label: string;
+  active: boolean;
+  onSelect: () => void;
+  onActive?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="option"
+      id={id}
+      aria-selected={active}
+      tabIndex={-1}
+      className={`ui-select-option${active ? " is-active" : ""}`}
+      onMouseDown={(event) => event.preventDefault()}
+      onMouseMove={onActive}
+      onClick={onSelect}
+    >
+      <PlusIcon size={14} />
+      <span className="ui-select-option-body"><span>{label}</span></span>
+    </button>
+  );
+}
+
+/**
+ * The leading and trailing slots a picker's field draws INSIDE its own edge (§8.4): a 16px icon
+ * before the value, and the 14px chevron after it. Inside rather than beside, so the field's left
+ * edge lines up with every other field in the form.
+ */
+function LeadingIcon({ icon }: { icon: ReactNode }) {
+  return <span className="ui-picker-leading-icon" aria-hidden="true">{icon}</span>;
+}
+
+/**
  * An editable list autocomplete built on InlineListbox.
  *
  * DOM focus stays on the input while `aria-activedescendant` moves through the popup. Unavailable
  * options stay in that arrow order so their rendered reason can be inspected, but activation is
  * refused in both this owner and InlineListbox. Enter belongs to selection only while the popup is
  * open; once closed it is deliberately untouched so an enclosing form can own default submission.
+ *
+ * It reads as a picker, like the Select beside it (§8.4): the same trailing chevron, which opens and
+ * closes the list without moving the caret, and an optional brand icon inside the field. Focus opens
+ * the list with the caret after the value rather than selecting it — a selection painted the value
+ * in the native highlight and let the next keystroke silently replace it.
  */
 export function SearchableCombobox<T extends string>({
   options,
@@ -645,7 +716,10 @@ export function SearchableCombobox<T extends string>({
   label,
   describedBy,
   placeholder = "Search…",
-  emptyLabel = "No Matches",
+  emptyLabel = "Nothing to choose from",
+  noun = "options",
+  createOption,
+  leadingIcon,
   disabled = false,
   className,
   inputId,
@@ -657,7 +731,14 @@ export function SearchableCombobox<T extends string>({
   label: string;
   describedBy?: string;
   placeholder?: string;
+  /** Shown when there is nothing to choose from at all, before any search. */
   emptyLabel?: string;
+  /** The plural, lowercase noun a search with no results names: "No projects match “x”." */
+  noun?: string;
+  /** An optional next step after a search that found nothing. */
+  createOption?: PickerCreateOption;
+  /** A 16px decoration drawn inside the field, before the value. Hidden from assistive technology. */
+  leadingIcon?: ReactNode;
   disabled?: boolean;
   className?: string;
   /** Optional DOM id for associating a visible label with the editable owner. */
@@ -684,8 +765,12 @@ export function SearchableCombobox<T extends string>({
   // an effect and rendering one frame with an aria-activedescendant that names nothing.
   const activeIndex = results.length === 0 ? 0 : Math.min(active, results.length - 1);
   const inputValue = searching ? query : selected?.label ?? "";
+  const noMatch = searching && query.trim() !== "" && results.length === 0;
+  // The create row is the list's only option when it shows, so it is also the active one.
+  const showCreate = noMatch && Boolean(createOption);
+  const createId = `${listboxId}-create`;
   const desiredHeight = selectMenuDesiredHeight({
-    optionCount: results.length,
+    optionCount: results.length + (showCreate ? 1 : 0),
     maxOptionLines: results.reduce((most, option) => Math.max(most, 1
       + (option.description ? 1 : 0)
       + (option.disabled && option.disabledReason ? 1 : 0)), 1),
@@ -712,6 +797,24 @@ export function SearchableCombobox<T extends string>({
     if (option.disabled) return;
     onChange(option.value);
     close();
+  };
+  const create = () => {
+    if (!createOption) return;
+    const searched = query;
+    close();
+    createOption.onSelect(searched.trim());
+  };
+  // The chevron toggles the list and leaves the caret where it is: its mousedown is cancelled, so
+  // focus never leaves the field. From an unfocused field it focuses the field, whose focus opens it.
+  const toggleFromChevron = () => {
+    if (disabled) return;
+    if (open) {
+      close();
+      return;
+    }
+    const input = inputRef.current;
+    if (input && document.activeElement !== input) input.focus();
+    else openAll();
   };
 
   useEffect(() => {
@@ -743,9 +846,10 @@ export function SearchableCombobox<T extends string>({
 
   return (
     <div
-      className={`ui-searchable-combobox${className ? ` ${className}` : ""}`}
+      className={`ui-searchable-combobox${leadingIcon ? " has-leading-icon" : ""}${className ? ` ${className}` : ""}`}
       ref={rootRef}
     >
+      {leadingIcon && <LeadingIcon icon={leadingIcon} />}
       <input
         id={inputId}
         ref={inputRef}
@@ -758,7 +862,9 @@ export function SearchableCombobox<T extends string>({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
-        aria-activedescendant={open && activeOption ? `${listboxId}-${activeIndex}` : undefined}
+        aria-activedescendant={open
+          ? showCreate ? createId : activeOption ? `${listboxId}-${activeIndex}` : undefined
+          : undefined}
         aria-disabled={disabled || undefined}
         readOnly={disabled}
         autoComplete="off"
@@ -768,7 +874,10 @@ export function SearchableCombobox<T extends string>({
         onFocus={(event) => {
           if (disabled) return;
           if (!open) openAll();
-          event.currentTarget.select();
+          // The caret goes after the value, collapsed. A pointer focus then moves it to where the
+          // click landed, which is the platform's behaviour for any other text field.
+          const end = event.currentTarget.value.length;
+          event.currentTarget.setSelectionRange(end, end);
         }}
         onClick={() => { if (!disabled && !open) openAll(); }}
         onChange={(event) => {
@@ -810,10 +919,19 @@ export function SearchableCombobox<T extends string>({
           }
           if (event.key === "Enter" && open) {
             event.preventDefault();
-            if (activeOption) commit(activeOption);
+            if (showCreate) create();
+            else if (activeOption) commit(activeOption);
           }
         }}
       />
+      <span
+        className="ui-picker-chevron"
+        aria-hidden="true"
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={toggleFromChevron}
+      >
+        <ChevronDownIcon size={14} className="ui-select-caret" />
+      </span>
       {open && (
         <InlineListbox
           id={listboxId}
@@ -826,8 +944,13 @@ export function SearchableCombobox<T extends string>({
           onSelect={commit}
           className="ui-searchable-combobox-list menu listbox"
           style={listStyle}
-          before={results.length === 0
-            ? <p className="ui-select-empty">{emptyLabel}</p>
+          before={noMatch
+            ? <NoMatchRow noun={noun} query={query} />
+            : results.length === 0
+              ? <p className="ui-select-empty">{emptyLabel}</p>
+              : undefined}
+          after={showCreate && createOption
+            ? <CreateOptionRow id={createId} label={createOption.label} active onSelect={create} />
             : undefined}
           renderOption={(option) => (
             <span className="ui-select-option-body">
@@ -861,6 +984,8 @@ export interface SelectOption<T extends string> {
    * icon component is.
    */
   swatch?: ReactNode;
+  /** Extra terms a `searchable` Select's filter matches, as SearchableComboboxOption's do. */
+  keywords?: readonly string[];
   disabled?: boolean;
   /** Rendered in the option, not a tooltip — §11.3: never hide a setting that could exist. */
   disabledReason?: string;
@@ -966,6 +1091,17 @@ export const SELECT_LIST_MIN_WIDTH_PX = 280;
 
 /** Past this the list scrolls on purpose: the options genuinely do not fit. */
 export const SELECT_MENU_MAX_HEIGHT_PX = 320;
+
+/** `--control-h` outside the coarse-pointer block: the height every field and trigger shares. */
+const COMPACT_CONTROL_HEIGHT_PX = 32;
+
+/**
+ * What a searchable Select's filter row adds to its list: one field at the control height the
+ * stylesheet gives this pointer, plus the 4px (`--space-1`) that separates it from the first option.
+ */
+export function selectFilterRowHeight(coarsePointer: boolean): number {
+  return (coarsePointer ? TOUCH_OPTION_MIN_HEIGHT_PX : COMPACT_CONTROL_HEIGHT_PX) + 4;
+}
 
 /** One line of option: the label on its own, for a pointer the touch floor does not apply to. */
 const COMPACT_OPTION_HEIGHT_PX = 34;
@@ -1083,6 +1219,12 @@ function useMediaMatch(query: string): boolean {
  * reason. This is a listbox with the same keyboard contract: type-ahead is deliberately NOT
  * implemented here, because the palette already owns search and a half-working type-ahead is worse
  * than none.
+ *
+ * A `searchable` Select is the touch form of SearchableCombobox: the open list leads with a filter
+ * field of its own, focused, so a long list can still be narrowed by typing. The filter lives in the
+ * list rather than in the trigger because the trigger sits in a sheet the software keyboard covers,
+ * and the list is placed where there is room. The list keeps the side it opened on while the filter
+ * narrows it, so the field being typed into never moves.
  */
 export function Select<T extends string>({
   options,
@@ -1093,6 +1235,10 @@ export function Select<T extends string>({
   describedBy,
   placeholder = "Select…",
   emptyLabel = "Nothing to choose from",
+  leadingIcon,
+  searchable = false,
+  noun = "options",
+  createOption,
   disabled = false,
   className,
   menuWidth,
@@ -1121,6 +1267,14 @@ export function Select<T extends string>({
   placeholder?: string;
   /** Shown INSIDE the open list when there are no options, so the control still explains itself. */
   emptyLabel?: string;
+  /** A 16px decoration drawn inside the trigger, before the value. Hidden from assistive technology. */
+  leadingIcon?: ReactNode;
+  /** Lead the open list with a focused filter field. */
+  searchable?: boolean;
+  /** The plural, lowercase noun a filter with no results names: "No projects match “x”." */
+  noun?: string;
+  /** An optional next step after a filter that found nothing. */
+  createOption?: PickerCreateOption;
   disabled?: boolean;
   className?: string;
   /** Requested open-list width; collision handling still clamps it to the viewport. */
@@ -1130,17 +1284,29 @@ export function Select<T extends string>({
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  const [query, setQuery] = useState("");
   const coarsePointer = useTouchTargetMode();
   const popover = useDismissiblePopover(open, setOpen, "ui-select");
   const rootRef = useRef<HTMLDivElement>(null);
+  const filterRef = useRef<HTMLInputElement>(null);
+  // What the list shows: every option, or a searchable list's matches. Every index below — the
+  // active one, the option ids, the preview — counts THIS list.
+  const visible = useMemo(
+    () => searchable ? filterSearchableComboboxOptions(options, query) : [...options],
+    [options, query, searchable],
+  );
+  const activeIndex = Math.min(active, Math.max(0, visible.length - 1));
+  const noMatch = searchable && query.trim() !== "" && visible.length === 0;
+  const showCreate = noMatch && Boolean(createOption);
   useEffect(() => {
     if (!open) return;
     // After the controller's own focus effect, not instead of it: it focuses the first button in
     // the panel, and every option is a button, so DOM focus and aria-activedescendant pointed at
-    // different options. With activedescendant driving, focus belongs on the list.
-    const frame = requestAnimationFrame(() => popover.panelRef.current?.focus());
+    // different options. With activedescendant driving, focus belongs on the list — or, when the
+    // list is searchable, on its filter, which drives the same activedescendant.
+    const frame = requestAnimationFrame(() => (searchable ? filterRef.current : popover.panelRef.current)?.focus());
     return () => cancelAnimationFrame(frame);
-  }, [open, popover]);
+  }, [open, popover, searchable]);
   useEffect(() => {
     if (!open) return;
     const dismiss = (event: Event) => {
@@ -1172,7 +1338,7 @@ export function Select<T extends string>({
    * still open to explain why the app changed colour. Derived, there is one rule — the list is
    * either browsing an option or it is not — and every dismissal satisfies it by closing.
    */
-  const previewValue = open ? options[active]?.value ?? null : null;
+  const previewValue = open ? visible[activeIndex]?.value ?? null : null;
   const previewRef = useRef(onPreview);
   previewRef.current = onPreview;
   /*
@@ -1218,8 +1384,10 @@ export function Select<T extends string>({
     // A described option is TWO lines, and a touch option is 44px whatever it contains, so the row
     // budget answers to both. Still a request rather than a size — the helper clamps to the
     // viewport and flips above the trigger.
-    desiredHeight: selectMenuDesiredHeight({
-      optionCount: options.length,
+    desiredHeight: Math.min(SELECT_MENU_MAX_HEIGHT_PX, selectMenuDesiredHeight({
+      // Every option, even while a filter narrows them: a searchable list keeps the box it opened
+      // with (see below), and the no-match sentence with its create row needs two rows of it.
+      optionCount: Math.max(options.length, createOption ? 2 : 1),
       // Counted from what each option will actually render, so a caller cannot add a line the
       // budget has not accounted for.
       maxOptionLines: options.reduce((most, option) => Math.max(most, 1
@@ -1227,7 +1395,7 @@ export function Select<T extends string>({
         + (option.disabled && option.disabledReason ? 1 : 0)), 1),
       estimatedOptionHeight,
       coarsePointer,
-    }),
+    }) + (searchable ? selectFilterRowHeight(coarsePointer) : 0)),
     // At least as wide as the trigger and at least SELECT_LIST_MIN_WIDTH_PX, so a short trigger does
     // not wrap its option descriptions onto five lines (§8.3). The helper still clamps to the viewport.
     desiredWidth: Math.max(menuWidth ?? 0, SELECT_LIST_MIN_WIDTH_PX),
@@ -1237,10 +1405,24 @@ export function Select<T extends string>({
     measure: () => popover.panelRef.current,
     maxHeight: SELECT_MENU_MAX_HEIGHT_PX,
   });
+  // A searchable list that opened ABOVE its trigger holds the height it was placed at. It is anchored
+  // by its bottom edge, so shrinking to its matches slid the filter being typed into down the screen
+  // with every keystroke. A list anchored by its top edge keeps its filter still as it shrinks.
+  const panelStyle = searchable && listStyle?.top === "auto"
+    ? { ...listStyle, height: listStyle.maxHeight }
+    : listStyle;
 
   const openAt = (index: number) => {
     setActive(Math.max(0, index));
-    setOpen(true);
+    setQuery("");
+    if (!searchable) {
+      setOpen(true);
+      return;
+    }
+    // Rendered and focused inside the same user gesture: iOS raises the software keyboard only for a
+    // focus that happens synchronously in the tap or keypress that asked for it.
+    flushSync(() => setOpen(true));
+    filterRef.current?.focus();
   };
   const commit = (option: SelectOption<T>) => {
     if (option.disabled) return;
@@ -1249,8 +1431,91 @@ export function Select<T extends string>({
     // keyboard position on <body>, the defect #207 fixed in the rail's sheet.
     popover.close(true);
   };
+  const create = () => {
+    if (!createOption) return;
+    const searched = query.trim();
+    popover.close(true);
+    createOption.onSelect(searched);
+  };
+  const filter = (next: string) => {
+    setQuery(next);
+    // The first result a keypress can commit, as Home would choose.
+    setActive(Math.max(0, filterSearchableComboboxOptions(options, next).findIndex((option) => !option.disabled)));
+  };
 
   const optionId = (index: number) => `${popover.panelId}-option-${index}`;
+  const listId = searchable ? `${popover.panelId}-list` : popover.panelId;
+  const createId = `${popover.panelId}-create`;
+  const activeDescendant = showCreate ? createId : visible[activeIndex] ? optionId(activeIndex) : undefined;
+
+  /**
+   * The list's keyboard contract, owned by whatever holds focus while it is open: the list itself,
+   * or a searchable list's filter. Space belongs to the filter's text there, so only the list
+   * commits with it; Escape and Tab are the root's in both forms.
+   */
+  const navigate = (event: React.KeyboardEvent<HTMLElement>, spaceCommits: boolean) => {
+    const step = (delta: number) => {
+      event.preventDefault();
+      if (visible.length === 0) return;
+      let next = activeIndex;
+      for (let hop = 0; hop < visible.length; hop += 1) {
+        next = (next + delta + visible.length) % visible.length;
+        if (!visible[next]?.disabled) break;
+      }
+      setActive(next);
+    };
+    if (event.key === "ArrowDown") return step(1);
+    if (event.key === "ArrowUp") return step(-1);
+    if (event.key === "Home") { event.preventDefault(); return setActive(visible.findIndex((o) => !o.disabled)); }
+    if (event.key === "End") { event.preventDefault(); return setActive(visible.map((o, i) => (o.disabled ? -1 : i)).filter((i) => i >= 0).pop() ?? 0); }
+    if (event.key === "Enter" || (spaceCommits && event.key === " ")) {
+      event.preventDefault();
+      if (showCreate) return create();
+      const option = visible[activeIndex];
+      if (option) commit(option);
+      return;
+    }
+    // Escape comes from the shared popover controller so this behaves like every other menu in the
+    // app. Tab is handled on the ROOT instead of here: it has to close the list from the trigger as
+    // well, which this handler never sees.
+    if (!searchable) popover.onPanelKeyDown(event as React.KeyboardEvent<HTMLDivElement>);
+  };
+
+  const rows = (
+    <>
+      {noMatch
+        ? <NoMatchRow noun={noun} query={query} />
+        : visible.length === 0 && <p className="ui-select-empty">{emptyLabel}</p>}
+      {visible.map((option, index) => (
+        <button
+          key={option.value}
+          id={optionId(index)}
+          type="button"
+          role="option"
+          aria-selected={option.value === value}
+          aria-disabled={option.disabled || undefined}
+          tabIndex={-1}
+          className={`ui-select-option${option.value === value ? " is-selected" : ""}`
+            + `${index === activeIndex ? " is-active" : ""}${option.disabled ? " is-disabled" : ""}`}
+          onMouseEnter={() => setActive(index)}
+          onClick={() => commit(option)}
+        >
+          {option.swatch}
+          <span className="ui-select-option-body">
+            <span>{option.label}</span>
+            {option.description && <small className="ui-select-option-desc">{option.description}</small>}
+            {option.disabled && option.disabledReason && (
+              <small className="ui-select-option-reason">{option.disabledReason}</small>
+            )}
+          </span>
+          {option.value === value && <CheckIcon size={13} />}
+        </button>
+      ))}
+      {showCreate && createOption && (
+        <CreateOptionRow id={createId} label={createOption.label} active onSelect={create} />
+      )}
+    </>
+  );
 
   return (
     <div
@@ -1288,10 +1553,10 @@ export function Select<T extends string>({
       <button
         ref={popover.triggerRef}
         type="button"
-        className="ui-select-trigger"
+        className={`ui-select-trigger${leadingIcon ? " has-leading-icon" : ""}`}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-controls={open ? popover.panelId : undefined}
+        aria-controls={open ? listId : undefined}
         // The trigger's accessible name is the LABEL AND THE VALUE. `aria-label` alone replaced the
         // content, so the chosen option was never announced — the control read as "Project" whether
         // it said Alpha or nothing at all.
@@ -1310,75 +1575,66 @@ export function Select<T extends string>({
           }
         }}
       >
+        {leadingIcon && <LeadingIcon icon={leadingIcon} />}
         {selected?.swatch}
         <span className={`ui-select-value${selected ? "" : " is-placeholder"}`}>
           {selected?.label ?? placeholder}
         </span>
         <ChevronDownIcon size={14} className="ui-select-caret" />
       </button>
-      {open && (
+      {open && !searchable && (
         <div
           className="menu listbox"
           id={popover.panelId}
           ref={popover.panelRef}
           role="listbox"
           aria-label={label}
-          aria-activedescendant={options[active] ? optionId(active) : undefined}
+          aria-activedescendant={activeDescendant}
           tabIndex={-1}
-          style={listStyle}
-          onKeyDown={(event) => {
-            const step = (delta: number) => {
-              event.preventDefault();
-              if (options.length === 0) return;
-              let next = active;
-              for (let hop = 0; hop < options.length; hop += 1) {
-                next = (next + delta + options.length) % options.length;
-                if (!options[next]?.disabled) break;
-              }
-              setActive(next);
-            };
-            if (event.key === "ArrowDown") return step(1);
-            if (event.key === "ArrowUp") return step(-1);
-            if (event.key === "Home") { event.preventDefault(); return setActive(options.findIndex((o) => !o.disabled)); }
-            if (event.key === "End") { event.preventDefault(); return setActive(options.map((o, i) => (o.disabled ? -1 : i)).filter((i) => i >= 0).pop() ?? 0); }
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              const option = options[active];
-              if (option) commit(option);
-              return;
-            }
-            // Escape comes from the shared popover controller so this behaves like every other menu
-            // in the app. Tab is handled on the ROOT instead of here: it has to close the list from
-            // the trigger as well, which this handler never sees.
-            popover.onPanelKeyDown(event);
-          }}
+          style={panelStyle}
+          onKeyDown={(event) => navigate(event, true)}
         >
-          {options.length === 0 && <p className="ui-select-empty">{emptyLabel}</p>}
-          {options.map((option, index) => (
-            <button
-              key={option.value}
-              id={optionId(index)}
-              type="button"
-              role="option"
-              aria-selected={option.value === value}
-              aria-disabled={option.disabled || undefined}
-              tabIndex={-1}
-              className={`ui-select-option${option.value === value ? " is-selected" : ""}`
-                + `${index === active ? " is-active" : ""}${option.disabled ? " is-disabled" : ""}`}
-              onMouseEnter={() => setActive(index)}
-              onClick={() => commit(option)}
-            >
-              {option.swatch}
-              <span className="ui-select-option-body">
-                <span>{option.label}</span>
-                {option.description && <small className="ui-select-option-desc">{option.description}</small>}
-                {option.disabled && option.disabledReason && (
-                  <small className="ui-select-option-reason">{option.disabledReason}</small>
-                )}
-              </span>
-              {option.value === value && <CheckIcon size={13} />}
-            </button>
-          ))}
+          {rows}
+        </div>
+      )}
+      {open && searchable && (
+        <div
+          className="menu listbox"
+          id={popover.panelId}
+          ref={popover.panelRef}
+          tabIndex={-1}
+          style={panelStyle}
+        >
+          <div className="ui-select-filter-row">
+            <SearchIcon size={14} className="ui-select-filter-icon" />
+            <input
+              ref={filterRef}
+              type="text"
+              role="combobox"
+              className="ui-select-filter"
+              aria-label={`Search ${label} Options`}
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls={listId}
+              aria-activedescendant={activeDescendant}
+              placeholder="Search…"
+              autoComplete="off"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              value={query}
+              onChange={(event) => filter(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                // Shifted Home and End still select text in the field.
+                if ((event.key === "Home" || event.key === "End") && event.shiftKey) return;
+                navigate(event, false);
+              }}
+            />
+          </div>
+          <div role="listbox" id={listId} aria-label={label}>
+            {rows}
+          </div>
         </div>
       )}
     </div>

@@ -1060,7 +1060,7 @@ test.describe("with a touch pointer", () => {
         const controls = [
           dialog.getByRole("button", { name: "Create Project…" }),
           dialog.getByRole("button", { name: "Add Location…" }),
-          dialog.locator('.agent-select [aria-haspopup="listbox"]'),
+          dialog.locator('[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]'),
         ];
         const geometry = await Promise.all(controls.map(controlGeometry));
 
@@ -1091,7 +1091,7 @@ test.describe("with a touch pointer", () => {
     const controls = [
       dialog.getByRole("button", { name: "Create Project…" }),
       dialog.getByRole("button", { name: "Add Location…" }),
-      dialog.locator('.agent-select [aria-haspopup="listbox"]'),
+      dialog.locator('[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]'),
     ];
     await expect(dialog.getByRole("button", { name: /^Agent:/ })).toHaveAccessibleName(
       /Áccented Agent With Descenders ģyq — Extended Name/,

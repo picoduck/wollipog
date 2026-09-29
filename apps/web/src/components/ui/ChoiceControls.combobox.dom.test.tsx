@@ -5,7 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { fireDomEvent } from "../test-dom-events.js";
-import { SearchableCombobox } from "./ChoiceControls.js";
+import { SearchableCombobox, Select, type PickerCreateOption } from "./ChoiceControls.js";
 
 const domWindow = new Window({ url: "http://localhost/choices" });
 for (const [name, value] of Object.entries({
@@ -14,11 +14,15 @@ for (const [name, value] of Object.entries({
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
   HTMLInputElement: domWindow.HTMLInputElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
   PointerEvent: domWindow.PointerEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
+  // Select moves focus into its open list on a frame.
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -36,7 +40,11 @@ const OPTIONS = [
   { value: "legacy", label: "Legacy Agent", disabled: true, disabledReason: "Runner Too Old" },
 ] as const;
 
-function mount(onChange: (value: string) => void = () => undefined, disabled = false) {
+function mount(
+  onChange: (value: string) => void = () => undefined,
+  disabled = false,
+  extra: { noun?: string; createOption?: PickerCreateOption; leadingIcon?: React.ReactNode } = {},
+) {
   const host = document.createElement("div");
   const after = document.createElement("button");
   after.textContent = "After";
@@ -52,6 +60,7 @@ function mount(onChange: (value: string) => void = () => undefined, disabled = f
         onChange={onChange}
         placeholder="Choose an Agent"
         disabled={disabled}
+        {...extra}
       />
     </div>,
   ));
@@ -186,7 +195,8 @@ test("an empty search keeps Enter inside the popup without inventing a choice", 
     act(() => input.focus());
     type(input, "no such agent");
     assert.equal(host.querySelectorAll('[role="option"]').length, 0);
-    assert.match(host.querySelector('[role="listbox"]')?.textContent ?? "", /No Matches/);
+    assert.equal(host.querySelector('[role="listbox"]')?.textContent, "No options match “no such agent”.",
+      "the no-match row is a sentence naming the search (§12.2), not a Title Case label");
     assert.equal(input.hasAttribute("aria-activedescendant"), false);
     assert.equal(press(input, "Enter"), false, "open autocomplete Enter must not submit its form");
     assert.deepEqual(chosen, []);
@@ -241,6 +251,248 @@ test("a disabled combobox stays readable without accepting edits", () => {
     assert.equal(input.value, "Dashboard");
     assert.equal(input.getAttribute("aria-expanded"), "false");
     assert.deepEqual(chosen, []);
+  } finally {
+    unmount();
+  }
+});
+
+test("a closed combobox shows a chevron that opens the list and closes it again", () => {
+  const { host, input, unmount } = mount();
+  try {
+    const chevron = host.querySelector<HTMLElement>(".ui-picker-chevron");
+    assert.ok(chevron?.querySelector(".ui-select-caret"), "the closed field draws Select's chevron");
+    assert.equal(chevron?.getAttribute("aria-hidden"), "true", "the combobox itself is the announced control");
+    assert.equal(input.getAttribute("aria-expanded"), "false");
+
+    act(() => fireDomEvent.click(chevron!));
+    assert.equal(input.getAttribute("aria-expanded"), "true", "the first click opens the list");
+    assert.equal(document.activeElement === input, true, "opening from the chevron focuses the field");
+
+    act(() => fireDomEvent.click(chevron!));
+    assert.equal(input.getAttribute("aria-expanded"), "false", "the second click closes it");
+    assert.equal(document.activeElement === input, true, "closing leaves focus and the caret in the field");
+
+    let pressAllowed = true;
+    act(() => {
+      pressAllowed = chevron!.dispatchEvent(new domWindow.MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: true,
+      }) as never);
+    });
+    assert.equal(pressAllowed, false, "pressing the chevron never takes focus from the field");
+  } finally {
+    unmount();
+  }
+});
+
+test("focus opens the list with the caret after the value instead of selecting it", () => {
+  const { host, input, unmount } = mount();
+  try {
+    act(() => input.focus());
+    assert.equal(input.getAttribute("aria-expanded"), "true");
+    assert.equal(input.selectionStart, input.selectionEnd, "no text is selected");
+    assert.equal(input.selectionEnd, "Dashboard".length, "the caret sits after the value");
+
+    type(input, "remote beta");
+    assert.equal(host.querySelectorAll('[role="option"]').length, 1, "typing still filters");
+  } finally {
+    unmount();
+  }
+});
+
+test("a leading icon renders inside the field, before the value, hidden from assistive technology", () => {
+  const { host, input, unmount } = mount(undefined, false, {
+    leadingIcon: <svg className="probe-icon" />,
+  });
+  try {
+    const root = host.querySelector(".ui-searchable-combobox")!;
+    assert.ok(root.classList.contains("has-leading-icon"), "the field indents its text past the icon");
+    const slot = root.querySelector(".ui-picker-leading-icon")!;
+    assert.ok(slot.querySelector(".probe-icon"));
+    assert.equal(slot.getAttribute("aria-hidden"), "true");
+    assert.equal(slot.nextElementSibling === input, true, "the icon leads the field it sits inside");
+  } finally {
+    unmount();
+  }
+});
+
+test("a search with no results names the caller's noun and offers the create row", () => {
+  const created: string[] = [];
+  const chosen: string[] = [];
+  const { host, input, unmount } = mount((value) => chosen.push(value), false, {
+    noun: "agents",
+    createOption: { label: "Create Agent…", onSelect: (query) => created.push(query) },
+  });
+  try {
+    act(() => input.focus());
+    assert.equal(host.querySelector('[role="option"][id$="-create"]'), null,
+      "the create row follows a failed search, not every list");
+
+    type(input, "  zzz ");
+    const listbox = host.querySelector<HTMLElement>('[role="listbox"]')!;
+    assert.match(listbox.textContent ?? "", /^No agents match “zzz”\./);
+    const create = listbox.querySelector<HTMLElement>('[role="option"]')!;
+    assert.equal(create.textContent, "Create Agent…");
+    assert.equal(input.getAttribute("aria-activedescendant"), create.id, "the only row is the active one");
+
+    assert.equal(press(input, "Enter"), false);
+    assert.deepEqual(created, ["zzz"], "the create row receives the trimmed query");
+    assert.deepEqual(chosen, []);
+    assert.equal(input.getAttribute("aria-expanded"), "false");
+  } finally {
+    unmount();
+  }
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * A searchable Select: the touch form of the combobox
+ * ---------------------------------------------------------------------------------------------- */
+
+const PROJECTS = [
+  { value: "alpha", label: "Alpha", description: "Local · ~/dev/alpha" },
+  { value: "archived", label: "Archive", disabled: true, disabledReason: "Runner Offline" },
+  { value: "beta", label: "Beta", description: "Remote · /srv/beta" },
+] as const;
+
+function mountSelect(extra: {
+  createOption?: PickerCreateOption;
+  leadingIcon?: React.ReactNode;
+  onChange?: (value: string) => void;
+} = {}) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host as unknown as Element);
+  const bubbledKeys: string[] = [];
+  act(() => root.render(
+    <div onKeyDown={(event) => bubbledKeys.push(event.key)}>
+      <Select
+        label="Project"
+        options={PROJECTS}
+        value="alpha"
+        onChange={extra.onChange ?? (() => undefined)}
+        searchable
+        noun="projects"
+        createOption={extra.createOption}
+        leadingIcon={extra.leadingIcon}
+      />
+    </div>,
+  ));
+  const trigger = host.querySelector<HTMLButtonElement>(".ui-select-trigger")!;
+  return {
+    host,
+    trigger,
+    bubbledKeys,
+    open: () => {
+      act(() => fireDomEvent.click(trigger));
+      return host.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    },
+    options: () => [...host.querySelectorAll<HTMLElement>('[role="option"]')],
+    unmount: () => {
+      act(() => root.unmount());
+      host.remove();
+    },
+  };
+}
+
+test("a searchable Select opens with its filter focused at the top of the list", () => {
+  const { host, trigger, open, unmount } = mountSelect();
+  try {
+    const filter = open();
+    assert.ok(filter, "the open list leads with a filter field");
+    assert.equal(document.activeElement === filter, true, "focused in the gesture that opened it");
+    assert.equal(filter.getAttribute("aria-label"), "Search Project Options");
+    const panel = host.querySelector<HTMLElement>(".menu.listbox")!;
+    assert.equal(panel.firstElementChild?.contains(filter), true, "the filter comes before every option");
+    const listbox = host.querySelector<HTMLElement>('[role="listbox"]')!;
+    assert.equal(filter.getAttribute("aria-controls"), listbox.id);
+    assert.equal(trigger.getAttribute("aria-controls"), listbox.id, "the trigger still names the listbox it opens");
+  } finally {
+    unmount();
+  }
+});
+
+test("typing in a searchable Select's filter narrows the options and Enter commits the active one", () => {
+  const chosen: string[] = [];
+  const { trigger, open, options, unmount } = mountSelect({ onChange: (value) => chosen.push(value) });
+  try {
+    const filter = open();
+    assert.equal(options().length, 3);
+    type(filter, "remote");
+    assert.deepEqual(options().map((option) => option.textContent?.startsWith("Beta")), [true]);
+    assert.equal(filter.getAttribute("aria-activedescendant"), options()[0]!.id);
+
+    assert.equal(press(filter, " "), true, "Space is the filter's text, not a commit");
+    assert.deepEqual(chosen, []);
+    assert.equal(press(filter, "Enter"), false);
+    assert.deepEqual(chosen, ["beta"]);
+    assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  } finally {
+    unmount();
+  }
+});
+
+test("a searchable Select's arrows skip unavailable options, as the plain list's do", () => {
+  const { open, options, unmount } = mountSelect();
+  try {
+    const filter = open();
+    assert.equal(filter.getAttribute("aria-activedescendant"), options()[0]!.id);
+    press(filter, "ArrowDown");
+    assert.equal(filter.getAttribute("aria-activedescendant"), options()[2]!.id);
+    press(filter, "Home");
+    assert.equal(filter.getAttribute("aria-activedescendant"), options()[0]!.id);
+    press(filter, "End");
+    assert.equal(filter.getAttribute("aria-activedescendant"), options()[2]!.id);
+  } finally {
+    unmount();
+  }
+});
+
+test("a searchable Select shows the no-match sentence and its create row", () => {
+  const created: string[] = [];
+  const chosen: string[] = [];
+  const { host, open, options, unmount } = mountSelect({
+    onChange: (value) => chosen.push(value),
+    createOption: { label: "Create Project…", onSelect: (query) => created.push(query) },
+  });
+  try {
+    const filter = open();
+    type(filter, "wolipog");
+    const listbox = host.querySelector<HTMLElement>('[role="listbox"]')!;
+    assert.match(listbox.textContent ?? "", /^No projects match “wolipog”\./);
+    assert.deepEqual(options().map((option) => option.textContent), ["Create Project…"]);
+    assert.equal(filter.getAttribute("aria-activedescendant"), options()[0]!.id);
+    press(filter, "Enter");
+    assert.deepEqual(created, ["wolipog"]);
+    assert.deepEqual(chosen, []);
+  } finally {
+    unmount();
+  }
+});
+
+test("Escape closes a searchable Select's list without reaching the dialog, and reopening clears the filter", () => {
+  const { trigger, bubbledKeys, open, options, unmount } = mountSelect();
+  try {
+    const filter = open();
+    type(filter, "beta");
+    assert.equal(press(filter, "Escape"), false);
+    assert.deepEqual(bubbledKeys.filter((key) => key === "Escape"), []);
+    assert.equal(trigger.getAttribute("aria-expanded"), "false");
+    const reopened = open();
+    assert.equal(reopened.value, "");
+    assert.equal(options().length, 3);
+  } finally {
+    unmount();
+  }
+});
+
+test("a Select's leading icon renders inside its trigger, before the value", () => {
+  const { trigger, unmount } = mountSelect({ leadingIcon: <svg className="probe-icon" /> });
+  try {
+    const slot = trigger.querySelector(".ui-picker-leading-icon")!;
+    assert.ok(slot.querySelector(".probe-icon"));
+    assert.equal(slot.getAttribute("aria-hidden"), "true");
+    assert.equal(slot.nextElementSibling?.classList.contains("ui-select-value"), true);
+    assert.equal(trigger.getAttribute("aria-label"), "Project: Alpha", "the icon adds nothing to the name");
   } finally {
     unmount();
   }

@@ -127,7 +127,8 @@ async function selectCommonProjectWithoutPointer(page: Page, touch = false) {
   await expect(project).toBeFocused();
   if (touch) {
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("listbox", { name: "Project" })).toBeFocused();
+    // The touch list is searchable (#1951): it opens with its own filter focused.
+    await expect(page.getByRole("combobox", { name: "Search Project Options" })).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(project).toHaveAccessibleName(/Project: Wollipog/);
   } else {
@@ -222,7 +223,7 @@ for (const viewport of VIEWPORTS) {
       }
 
       if (viewport.tapOnly) {
-        await expect(page.locator('.agent-select input[type="text"]')).toHaveCount(0);
+        await expect(page.getByRole("combobox", { name: "Agent", exact: true })).toHaveCount(0);
         await expect(page.getByRole("button", { name: /^Agent:/ })).toBeVisible();
       } else {
         await expect(page.getByRole("combobox", { name: "Agent" })).toBeVisible();
@@ -318,7 +319,8 @@ test.describe("responsive Project and Agent controls", () => {
     const project = page.getByRole("button", { name: /^Project:/ });
     await expect(project).toHaveAccessibleName(/Project: Wollipog/);
     await project.click();
-    expect(await page.evaluate(() => document.activeElement instanceof HTMLInputElement)).toBe(false);
+    // Searchable (#1951): the filter inside the list takes focus, never a field the sheet covers.
+    await expect(page.getByRole("combobox", { name: "Search Project Options" })).toBeFocused();
 
     const projects = page.getByRole("listbox", { name: "Project" }).getByRole("option");
     await expect(projects).toHaveCount(2);
@@ -327,12 +329,12 @@ test.describe("responsive Project and Agent controls", () => {
     await expect(project).toHaveAccessibleName("Project: No Project");
 
     await expect(page.getByText("Advanced Agents", { exact: true })).toHaveCount(0);
-    await expect(page.locator('.agent-select input[type="text"]')).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Agent", exact: true })).toHaveCount(0);
 
     const agent = page.getByRole("button", { name: /^Agent:/ });
     await expect(agent).toHaveAccessibleName(/Agent: Claude Code/);
     await agent.click();
-    expect(await page.evaluate(() => document.activeElement instanceof HTMLInputElement)).toBe(false);
+    await expect(page.getByRole("combobox", { name: "Search Agent Options" })).toBeFocused();
 
     const options = page.getByRole("listbox", { name: "Agent" }).getByRole("option");
     await expect(options).toHaveCount(4);
@@ -355,7 +357,8 @@ test.describe("responsive Project and Agent controls", () => {
     await openDialog(page);
     const face = await pinWidestFace(page, page.locator("body"));
     await page.getByRole("button", { name: /^Project:/ }).click();
-    const list = page.getByRole("listbox", { name: "Project" });
+    // The searchable list's scroll box is its panel, which holds the filter above the listbox.
+    const list = page.locator(".menu.listbox");
     await expect(list.getByRole("option")).toHaveCount(2);
     const description = list.getByRole("option", { name: /No Project/ }).locator(".ui-select-option-desc");
     const descriptionLines = await description.evaluate((element) => {
@@ -402,8 +405,7 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
         const agent = page.getByRole("button", { name: /^Agent:/ });
         await expect(agent).toBeFocused();
         await page.keyboard.press("Enter");
-        const list = page.getByRole("listbox", { name: "Agent" });
-        await expect(list).toBeFocused();
+        await expect(page.getByRole("combobox", { name: "Search Agent Options" })).toBeFocused();
         await page.keyboard.press("ArrowDown");
         await page.keyboard.press("Enter");
         await expect(agent).toHaveAccessibleName(/Agent: Codex App Server/);
@@ -411,6 +413,9 @@ for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
       } else {
         const agent = page.getByRole("combobox", { name: "Agent" });
         await expect(agent).toBeFocused();
+        // Focus leaves the caret after "Claude Code" rather than selecting it (#1951), so replace
+        // the value the way a person would before searching.
+        await page.keyboard.press("ControlOrMeta+a");
         await page.keyboard.type("codex app server");
         await page.keyboard.press("ArrowDown");
         await page.keyboard.press("Enter");
@@ -460,7 +465,8 @@ test.describe("responsive Project and Agent presentation", () => {
 
     await touchProject.press("Enter");
     const touchProjectOptions = page.getByRole("listbox", { name: "Project", exact: true });
-    await expect(touchProjectOptions).toBeFocused();
+    await expect(touchProjectOptions).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Search Project Options" })).toBeFocused();
     await page.setViewportSize({ width: 1280, height: 900 });
     await expect(page.getByRole("combobox", { name: "Project" })).toBeFocused();
     await expect(touchProjectOptions).toHaveCount(0);
@@ -478,7 +484,8 @@ test.describe("responsive Project and Agent presentation", () => {
 
     await touchAgent.press("Enter");
     const touchAgentOptions = page.getByRole("listbox", { name: "Agent", exact: true });
-    await expect(touchAgentOptions).toBeFocused();
+    await expect(touchAgentOptions).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Search Agent Options" })).toBeFocused();
     await page.setViewportSize({ width: 1280, height: 900 });
     await expect(page.getByRole("combobox", { name: "Agent" })).toBeFocused();
     await expect(touchAgentOptions).toHaveCount(0);
@@ -508,7 +515,11 @@ test.describe("responsive Project and Agent presentation", () => {
     await expect(desktopProject).toHaveValue("No Project");
 
     const desktopAgent = page.getByRole("combobox", { name: "Agent" });
-    await desktopAgent.fill("non-interactive");
+    // Not `fill()`: it selects the text BEFORE focusing, and focus now leaves the caret after the
+    // value instead of keeping a selection (#1951). Replace the value the way a person would.
+    await desktopAgent.focus();
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.type("non-interactive");
     await page.keyboard.press("Enter");
     await expect(desktopAgent).toHaveValue(/Codex — Non-Interactive/);
 
@@ -581,6 +592,7 @@ test.describe("New Session dialog keyboard contract", () => {
     for (let index = 0; index < 4; index += 1) await page.keyboard.press("Tab");
     const agent = page.getByRole("combobox", { name: "Agent" });
     await expect(agent).toBeFocused();
+    await page.keyboard.press("ControlOrMeta+a");
     await page.keyboard.type("codex app server");
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ControlOrMeta+Enter");
@@ -653,7 +665,7 @@ test.describe("increased text size", () => {
 
     const agent = page.getByRole("button", { name: /^Agent:/ });
     await agent.click();
-    const list = page.getByRole("listbox", { name: "Agent" });
+    const list = page.locator(".menu.listbox");
     const listBox = (await list.boundingBox())!;
     expect(listBox.x).toBeGreaterThanOrEqual(0);
     expect(listBox.y).toBeGreaterThanOrEqual(0);
@@ -699,5 +711,167 @@ test.describe("choice rows at 1440px (#1952)", () => {
         expect(row.titleLeft, `${name}: the marker leads its title`).toBeGreaterThan(row.markerRight);
       }
     }
+  });
+});
+
+/**
+ * #1951: the searchable pickers read as fields — the Select's chevron, the brand icon inside the
+ * field, a caret rather than a selection on focus — and keep search on touch.
+ */
+
+/** A plain text field in the same form, for the one-control-height comparison (§3.2, #1799). */
+async function probeTextInput(page: Page): Promise<Locator> {
+  await page.locator(".form").evaluate((form) => {
+    const field = document.createElement("div");
+    field.className = "field";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.setAttribute("aria-label", "Height Probe");
+    field.append(input);
+    form.prepend(field);
+  });
+  return page.getByRole("textbox", { name: "Height Probe" });
+}
+
+async function height(locator: Locator): Promise<number> {
+  return (await locator.boundingBox())!.height;
+}
+
+test.describe("searchable pickers at 1440px (#1951)", () => {
+  test.use({ viewport: { width: 1440, height: 1000 } });
+
+  test("the Agent icon sits inside its field, whose left edge is Project's", async ({ page }) => {
+    await openDialog(page);
+    const project = page.getByRole("combobox", { name: "Project" });
+    const agent = page.getByRole("combobox", { name: "Agent" });
+    const projectBox = (await project.boundingBox())!;
+    const agentBox = (await agent.boundingBox())!;
+    expect(Math.abs(agentBox.x - projectBox.x), "the Agent field starts where the Project field does")
+      .toBeLessThanOrEqual(0.5);
+
+    const agentField = page.locator(".field", { has: agent });
+    const icons = agentField.locator(".agent-icon");
+    await expect(icons).toHaveCount(1);
+    const iconBox = (await icons.boundingBox())!;
+    expect(iconBox.x).toBeGreaterThan(agentBox.x);
+    expect(iconBox.x + iconBox.width).toBeLessThan(agentBox.x + agentBox.width);
+    expect(iconBox.y).toBeGreaterThanOrEqual(agentBox.y);
+    expect(iconBox.y + iconBox.height).toBeLessThanOrEqual(agentBox.y + agentBox.height);
+    expect(Math.round(iconBox.width), "the leading icon is 16px").toBe(16);
+    // The value starts after the icon rather than under it.
+    const textStart = await agent.evaluate((element) =>
+      element.getBoundingClientRect().left + parseFloat(getComputedStyle(element).paddingLeft));
+    expect(textStart).toBeGreaterThan(iconBox.x + iconBox.width);
+  });
+
+  test("the chevron opens and closes the list, and focus never selects the value", async ({ page }) => {
+    await openDialog(page);
+    const agent = page.getByRole("combobox", { name: "Agent" });
+    const chevron = page.locator(".field", { has: agent }).locator(".ui-picker-chevron");
+    await expect(chevron.locator("svg")).toBeVisible();
+    await expect(agent).toHaveAttribute("aria-expanded", "false");
+
+    await chevron.click();
+    await expect(agent).toHaveAttribute("aria-expanded", "true");
+    await expect(agent).toBeFocused();
+    await chevron.click();
+    await expect(agent).toHaveAttribute("aria-expanded", "false");
+    await expect(agent).toBeFocused();
+
+    await page.getByRole("button", { name: "Create Project…" }).focus();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await expect(agent).toBeFocused();
+    const selection = await agent.evaluate((element: HTMLInputElement) =>
+      [element.selectionStart, element.selectionEnd, element.value.length]);
+    expect(selection[0], "no text is selected").toBe(selection[1]);
+    expect(selection[1], "the caret follows the value").toBe(selection[2]);
+  });
+
+  test("a Project search with no results says so in a sentence and offers Create Project", async ({ page }) => {
+    await openDialog(page);
+    const project = page.getByRole("combobox", { name: "Project" });
+    await expect(project).toBeFocused();
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.type("wolipogx");
+    const list = page.getByRole("listbox", { name: "Project Options" });
+    await expect(list).toContainText("No projects match “wolipogx”.");
+    await expect(list.getByRole("option")).toHaveText(["Create Project…"]);
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog", { name: "Create Project" })).toBeVisible();
+  });
+
+  test("the combobox, a Select and a text field in one form are one control height", async ({ page }) => {
+    await openDialog(page);
+    const probe = await probeTextInput(page);
+    const heights = await Promise.all([
+      height(page.getByRole("combobox", { name: "Project" })),
+      height(page.getByRole("button", { name: /^Account:/ })),
+      height(probe),
+    ]);
+    for (const value of heights) expect(value).toBeCloseTo(32, 0);
+  });
+});
+
+test.describe("searchable touch pickers at 390px (#1951)", () => {
+  test.use({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
+
+  test("the Project list opens with a focused 16px filter at its top that narrows it", async ({ page }) => {
+    await openDialog(page);
+    await page.getByRole("button", { name: /^Project:/ }).click();
+    const filter = page.getByRole("combobox", { name: "Search Project Options" });
+    await expect(filter).toBeFocused();
+    expect(await filter.evaluate((element) => getComputedStyle(element).fontSize),
+      "16px, so iOS does not zoom the page").toBe("16px");
+
+    const panel = page.locator(".menu.listbox");
+    const options = page.getByRole("listbox", { name: "Project" }).getByRole("option");
+    await expect(options).toHaveCount(2);
+    const filterBox = (await filter.boundingBox())!;
+    const panelBox = (await panel.boundingBox())!;
+    const firstOptionBox = (await options.first().boundingBox())!;
+    expect(filterBox.y).toBeGreaterThanOrEqual(panelBox.y);
+    expect(filterBox.y + filterBox.height, "the filter leads the options").toBeLessThanOrEqual(firstOptionBox.y);
+
+    await page.keyboard.type("no proj");
+    await expect(options).toHaveCount(1);
+    await expect(options).toContainText("No Project");
+    expect((await filter.boundingBox())!.y, "the filter being typed into stays put as the list narrows")
+      .toBeCloseTo(filterBox.y, 0);
+
+    await filter.fill("wolipogx");
+    await expect(panel).toContainText("No projects match “wolipogx”.");
+    await expect(options).toHaveText(["Create Project…"]);
+  });
+
+  test("a list that opens above its trigger keeps its filter still as a search empties it", async ({ page }) => {
+    // A short phone (a landscape-ish window), so the Agent trigger can sit with no room below it.
+    await page.setViewportSize({ width: 390, height: 560 });
+    await openDialog(page);
+    const agent = page.getByRole("button", { name: /^Agent:/ });
+    await agent.evaluate((element) => element.scrollIntoView({ block: "end" }));
+    await agent.click();
+    const filter = page.getByRole("combobox", { name: "Search Agent Options" });
+    await expect(filter).toBeFocused();
+    const panelBox = (await page.locator(".menu.listbox").boundingBox())!;
+    const agentBox = (await agent.boundingBox())!;
+    expect(panelBox.y + panelBox.height, "no room below, so the list opened above").toBeLessThanOrEqual(agentBox.y);
+
+    const before = (await filter.boundingBox())!.y;
+    await page.keyboard.type("zzz");
+    await expect(page.locator(".menu.listbox")).toContainText("No agents match “zzz”.");
+    expect((await filter.boundingBox())!.y, "the bottom-anchored list held its height").toBeCloseTo(before, 0);
+  });
+
+  test("the Select trigger, the filter and a text field are all the 44px touch height", async ({ page }) => {
+    await openDialog(page);
+    const probe = await probeTextInput(page);
+    const trigger = page.getByRole("button", { name: /^Project:/ });
+    await trigger.click();
+    const filter = page.getByRole("combobox", { name: "Search Project Options" });
+    await expect(filter).toBeFocused();
+    const heights = await Promise.all([height(trigger), height(filter), height(probe)]);
+    for (const value of heights) expect(value).toBeCloseTo(44, 0);
   });
 });

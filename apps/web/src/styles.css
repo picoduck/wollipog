@@ -9428,11 +9428,6 @@ button.file-head.source-path-link {
      moving that line box one pixel toward the optical centre. */
   padding-block: 6px 4px;
 }
-.agent-select {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 .new-session-choice-control {
   width: 100%;
   min-width: 0;
@@ -9443,13 +9438,6 @@ button.file-head.source-path-link {
 .new-session-choice-control .ui-select-trigger {
   width: 100%;
   min-width: 0;
-}
-.agent-select .new-session-choice-control {
-  flex: 1;
-  min-width: 0;
-}
-.agent-select .agent-icon {
-  flex: none;
 }
 .agent-meta {
   margin-top: 4px;
@@ -14385,6 +14373,72 @@ body.shell-dock-dragging * {
 .ui-select-option.is-selected { color: var(--accent-on-tint); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .ui-select-option-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .ui-select-option-desc { color: var(--text-dim); font-size: var(--text-xs); line-height: 16px; }
+
+/* A picker's own slots sit INSIDE its field (§8.4): a 16px leading icon before the value and the
+   14px chevron at the trailing edge, so every picker's outer edge lines up with the fields beside
+   it. The trigger is a flex row and places both itself; the combobox's input cannot hold children,
+   so its slots are laid over the input and the text is indented past them. */
+.ui-picker-leading-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon);
+  height: var(--icon);
+}
+.ui-searchable-combobox .ui-picker-leading-icon {
+  position: absolute;
+  top: 50%;
+  left: var(--space-3);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.ui-searchable-combobox-input { padding-right: calc(var(--space-3) + var(--icon-sm) + var(--space-2)); }
+.ui-searchable-combobox.has-leading-icon .ui-searchable-combobox-input {
+  padding-left: calc(var(--space-3) + var(--icon) + var(--space-2));
+}
+/* The whole trailing inset is the chevron's target, not just the 14px glyph. */
+.ui-picker-chevron {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: var(--space-3);
+  padding-left: var(--space-2);
+  cursor: pointer;
+}
+.ui-searchable-combobox-input[aria-disabled="true"] ~ .ui-picker-chevron { cursor: not-allowed; }
+
+/* The no-match row (§12.2): a sentence naming the search, never a Title Case label. */
+.ui-select-no-match { display: flex; align-items: center; gap: var(--space-2); }
+.ui-select-no-match > .app-icon { flex: none; }
+
+/* A searchable Select's filter, pinned at the top of its list while the options scroll under it.
+   The list's own inset is pulled into the row so nothing scrolls into view above the field. */
+.ui-select-filter-row {
+  position: sticky;
+  top: calc(-1 * var(--space-1));
+  display: flex;
+  align-items: center;
+  margin: calc(-1 * var(--space-1)) calc(-1 * var(--space-1)) 0;
+  padding: var(--space-1);
+  background: var(--bg-elev);
+}
+.ui-select-filter-icon {
+  position: absolute;
+  left: calc(var(--space-1) + var(--space-3));
+  color: var(--text-dim);
+  pointer-events: none;
+}
+.ui-select-filter {
+  width: 100%;
+  height: var(--control-h);
+  padding: 0 var(--space-3) 0 calc(var(--space-3) + var(--icon-sm) + var(--space-2));
+  font-size: var(--text-base);
+}
 
 /* ------------------------------------------------------------------------------------------------
  * Settings as a route (§11.3): the master/detail shape ProjectsView already establishes.
