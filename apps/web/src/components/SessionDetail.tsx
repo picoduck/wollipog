@@ -53,7 +53,7 @@ import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUna
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
 import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
-import { SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
+import { compareSessionNotices, SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
@@ -2775,15 +2775,29 @@ function SessionDetailLoaded({
   // The failed switch's notice opens the same dialog as More Actions → Switch Account….
   const [switchAccountOpen, setSwitchAccountOpen] = useState(false);
   const switchAccountButtonRef = useRef<HTMLButtonElement | null>(null);
+  // The notice slot's order for the conditions that also stop a new message. Their slot entries
+  // take it from here, so the composer names the one the slot shows first (#2037).
+  const worktreeMissingOrder = worktreeRecovery && {
+    key: `worktree-missing:${worktreeRecovery.recoveryId}`, severity: "danger", rank: SESSION_NOTICE_RANK.worktreeMissing,
+  } as const;
+  const historyQuarantineOrder = historyQuarantine && {
+    key: "history-quarantine", severity: "danger", rank: SESSION_NOTICE_RANK.historyQuarantine,
+  } as const;
+  const accountSwitchFailedOrder = accountSwitchFailure && {
+    key: `account-switch-failed:${accountSwitchFailureKey}`, severity: "warning", rank: SESSION_NOTICE_RANK.accountSwitchFailed,
+  } as const;
+  const sessionNoticeReason = [
+    worktreeMissingOrder && { ...worktreeMissingOrder, reason: "Worktree recovery is required before sending another message." },
+    historyQuarantineOrder && { ...historyQuarantineOrder, reason: "Conversation quarantined. Recover this session to continue." },
+    accountSwitchFailedOrder && { ...accountSwitchFailedOrder, reason: "Choose another account before sending another message." },
+  ].filter((condition) => condition !== undefined).sort(compareSessionNotices)[0]?.reason;
   // A person the server refuses a prompt (a Viewer) gets a read-only composer that says why.
   const promptRefusal = sessionCommandRefusal(session, "prompt");
   // Why the composer cannot send a new message now. Edit & Resend states the same reason.
   const promptUnavailableReason = promptRefusal !== null ? promptRefusal
     : terminal ? `Session is ${session.status}.`
     : !runnerOnline ? "Runner is offline."
-    : accountSwitchFailure ? "Choose another account before sending another message."
-    : worktreeRecovery ? "Worktree recovery is required before sending another message."
-    : historyQuarantine ? "Conversation quarantined. Recover this session to continue."
+    : sessionNoticeReason !== undefined ? sessionNoticeReason
     : policyPaused ? "Session is paused by guardrails. Review the pending decision to continue."
     : null;
   const canPrompt = promptUnavailableReason === null;
@@ -3698,11 +3712,9 @@ function SessionDetailLoaded({
   const accountSwitchApplicable = sessionAccountSwitchApplicable(session);
   const accountSwitchSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionProviderAccountSwitch");
   const sessionNotices: SessionNoticeEntry[] = [];
-  if (worktreeRecovery) {
+  if (worktreeRecovery && worktreeMissingOrder) {
     sessionNotices.push({
-      key: `worktree-missing:${worktreeRecovery.recoveryId}`,
-      severity: "danger",
-      rank: SESSION_NOTICE_RANK.worktreeMissing,
+      ...worktreeMissingOrder,
       title: "Worktree Missing",
       render: ({ trailing }) => (
         <WorktreeRecoveryCard
@@ -3719,14 +3731,12 @@ function SessionDetailLoaded({
       ),
     });
   }
-  if (historyQuarantine) {
+  if (historyQuarantine && historyQuarantineOrder) {
     const quarantine = historyQuarantine;
     const recoverable = quarantine.recoveryTurn !== undefined;
     const recoverReason = forkRefusal ?? runnerOfflineReason;
     sessionNotices.push({
-      key: "history-quarantine",
-      severity: "danger",
-      rank: SESSION_NOTICE_RANK.historyQuarantine,
+      ...historyQuarantineOrder,
       title: "Conversation Quarantined",
       render: ({ trailing }) => (
         <Notice tone="danger" role="status" ariaLabel="Conversation Quarantined" title="Conversation Quarantined"
@@ -3794,7 +3804,7 @@ function SessionDetailLoaded({
       ),
     });
   }
-  if (accountSwitchFailure) {
+  if (accountSwitchFailure && accountSwitchFailedOrder) {
     const failure = accountSwitchFailure;
     // A personal identifier is never inlined, masked or not: the sentence names the account by role.
     const account = isPersonalIdentifier(failure.providerAccountLabel)
@@ -3804,9 +3814,7 @@ function SessionDetailLoaded({
       ? runnerCapabilityRequirement(runner?.protocolVersion, "sessionProviderAccountSwitch", "Session account switching")
       : runnerOfflineReason;
     sessionNotices.push({
-      key: `account-switch-failed:${accountSwitchFailureKey}`,
-      severity: "warning",
-      rank: SESSION_NOTICE_RANK.accountSwitchFailed,
+      ...accountSwitchFailedOrder,
       title: "Account Switch Failed",
       render: ({ trailing }) => (
         <Notice tone="warning" role="status" ariaLabel="Account Switch Failed" title="Account Switch Failed"

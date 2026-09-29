@@ -18,8 +18,11 @@ import { ToneIcon } from "./Notice.js";
  * `SESSION_NOTICE_RANK` (add one there, so the order stays in one table), a one-line Title Case
  * `title` for the menu, and a `render` that returns one `Notice` (or a component built on it) and
  * passes the context's `trailing` to the notice's `trailing` prop, and, for an info entry,
- * `onDismiss` to its `onDismiss`. The Approvals epic's request dock takes the slot ahead of every
- * entry while a request is pending; it is not an entry.
+ * `onDismiss` to its `onDismiss`. A condition that also stops a new message defines its `key`,
+ * severity and rank once, beside the composer's reason for it in `SessionDetail`, and the entry
+ * spreads them: the composer sorts those reasons with `compareSessionNotices`, so its placeholder
+ * names the condition this slot shows first (#2037). The Approvals epic's request dock takes the
+ * slot ahead of every entry while a request is pending; it is not an entry.
  */
 
 export type SessionNoticeSeverity = "danger" | "warning" | "info";

@@ -8,11 +8,11 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, RunnerView, SessionView } from "@wollipog/protocol";
+import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
-import { StoreProvider } from "../store.js";
+import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
@@ -27,6 +27,10 @@ Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
     return { x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 72, width: 800, height: 72, toJSON: () => ({}) };
   },
 });
+// The transcript renders only the rows that fit its viewport, so it needs a height to show any.
+for (const [name, value] of [["clientHeight", 1_200], ["offsetHeight", 72]] as const) {
+  Object.defineProperty(domWindow.HTMLElement.prototype, name, { configurable: true, get: () => value });
+}
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -105,6 +109,24 @@ function sessionView(overrides: Partial<SessionView>): SessionView {
   };
 }
 
+function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
+  const ready = useStoreSelector((state) => state.sessions.has(sessionId));
+  const { dispatch } = useStoreActions();
+  React.useEffect(() => {
+    if (!ready) return;
+    payloads.forEach((payload, index) => {
+      dispatch({
+        type: "msg",
+        msg: {
+          type: "session_event",
+          event: { id: index + 1, sessionId, seq: index + 1, ts: index + 1, payload },
+        },
+      });
+    });
+  }, [dispatch, payloads, ready, sessionId]);
+  return null;
+}
+
 class FakeSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
   onopen: (() => void) | null = null;
@@ -123,9 +145,11 @@ async function flush(delay = 0) {
   });
 }
 
-async function mount(current: SessionView, { online = true, client: overrides = {} }: {
+async function mount(current: SessionView, { online = true, client: overrides = {}, events }: {
   online?: boolean;
   client?: Partial<ApiClient>;
+  /** Transcript events, delivered live once the session is in the store. */
+  events?: SessionEvent["payload"][];
 } = {}) {
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -153,6 +177,7 @@ async function mount(current: SessionView, { online = true, client: overrides = 
     <ApiProvider client={client}>
       <FeedbackContext.Provider value={{ confirm: async () => true, showToast: () => 0, dismissToast: () => {} } as never}>
         <StoreProvider connection={connection} navigation={navigation}>
+          {events && <EventSeeder sessionId={current.id} payloads={events} />}
           <SessionDetail sessionId={current.id} mode="expanded" rightPanel={rightPanel}
             onOpenTerminal={() => {}} pinnedOpen={false} composerDraftLoader={async () => null} />
         </StoreProvider>
@@ -477,5 +502,79 @@ test("a missing worktree ranks first and renders the recovery card in the slot",
     }
   } finally {
     await fixture.unmount();
+  }
+});
+
+// #2037: the composer says why it cannot send by naming the condition the slot shows first, and
+// Edit & Resend says the same.
+async function mountWithMessage(session: SessionView, online = true) {
+  const fixture = await mount(session, { online, events: [{ kind: "user_message", text: "original prompt", images: [] }] });
+  const composer = () => fixture.container.querySelector(".composer-box textarea") as HTMLTextAreaElement;
+  const resendReason = () => {
+    const summary = fixture.container.querySelector('[aria-label="Edit User Message as a New Turn Unavailable"]');
+    assert.ok(summary, "Edit & Resend stays visible, unavailable");
+    return describedText(fixture.container, summary as HTMLElement)[0];
+  };
+  return { ...fixture, composer, resendReason };
+}
+
+test("with a quarantined conversation and a failed account switch, the composer names the quarantine", async () => {
+  const session = sessionView({ historyQuarantine: quarantine, providerAccountSwitchFailure: accountFailure("Work") });
+  const fixture = await mountWithMessage(session);
+  try {
+    assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Conversation Quarantined");
+    const quarantined = "Conversation quarantined. Recover this session to continue.";
+    assert.equal(fixture.composer().placeholder, quarantined, "the placeholder names the notice the slot shows");
+    assert.equal(fixture.composer().disabled, true);
+    assert.ok(fixture.resendReason()?.endsWith(quarantined), "Edit & Resend states the same reason");
+
+    // Once the quarantine resolves, both surfaces move to the account switch together.
+    await fixture.update({ ...session, updatedAt: 2, historyQuarantine: undefined });
+    assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Account Switch Failed");
+    const chooseAccount = "Choose another account before sending another message.";
+    assert.equal(fixture.composer().placeholder, chooseAccount);
+    assert.ok(fixture.resendReason()?.endsWith(chooseAccount));
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("with a missing worktree and a quarantined conversation, the composer names the missing worktree", async () => {
+  const fixture = await mountWithMessage(sessionView({
+    historyQuarantine: quarantine,
+    providerAccountSwitchFailure: accountFailure("Work"),
+    worktreeRecovery: {
+      recoveryId: "recovery-order", detectedAt: 3, selectedPath: worktreePath, expectedBranch: "agent/setup",
+      detail: "The selected worktree is missing.",
+    },
+  }));
+  try {
+    assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Worktree Missing");
+    const recovery = "Worktree recovery is required before sending another message.";
+    assert.equal(fixture.composer().placeholder, recovery);
+    assert.ok(fixture.resendReason()?.endsWith(recovery));
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("reasons that are not slot conditions keep their place around the slot's", async () => {
+  const offline = await mountWithMessage(sessionView({
+    historyQuarantine: quarantine, providerAccountSwitchFailure: accountFailure("Work"),
+  }), false);
+  try {
+    assert.equal(offline.composer().placeholder, "Runner is offline.", "an offline runner still comes first");
+  } finally {
+    await offline.unmount();
+  }
+  const paused = await mountWithMessage(sessionView({
+    historyQuarantine: quarantine,
+    pendingApproval: { requestId: "budget-1", kind: "cost_budget", title: "Cost Budget Reached", options: [] },
+  }));
+  try {
+    assert.equal(paused.composer().placeholder, "Conversation quarantined. Recover this session to continue.",
+      "a guardrail pause still comes after the slot's conditions");
+  } finally {
+    await paused.unmount();
   }
 });
