@@ -52,7 +52,8 @@ exports.
 | `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices. |
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts. |
-| `LockIcon` | Lucide | `Lock` | Locked or restricted state. |
+| `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |
+| `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
 | `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |
 | `EyeOffIcon` | Lucide | `EyeOff` | Hide a revealed personal identifier. |
 | `WarningTriangleIcon` | Lucide | `TriangleAlert` | Generic warning banner. |

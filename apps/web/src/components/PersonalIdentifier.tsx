@@ -39,7 +39,7 @@ export function PersonalIdentifierRevealButton({
   return (
     <button
       type="button"
-      className={withText ? "btn sm ghost pid-toggle with-text" : "icon-btn sm pid-toggle"}
+      className={withText ? "btn sm ghost pid-toggle" : "icon-btn sm pid-toggle"}
       aria-label={withText ? undefined : action}
       aria-controls={controls}
       title={withText ? undefined : action}
