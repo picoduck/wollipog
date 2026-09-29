@@ -117,6 +117,28 @@ test("env does not swallow a destructive command from a split assignment expansi
     { C: `rm -rf ${protectedPath} x` }), MANAGED_WORKTREE_REFUSAL);
 });
 
+test("env names outside shell syntax cannot shadow a nested shell expansion", () => {
+  assert.equal(commandTargetsManagedWorktree(
+    "env A-.=/tmp/scratch sh -c 'rm -rf ${A-.}'", protectedPath, protection,
+  ), MANAGED_WORKTREE_UNRESOLVED_REFUSAL,
+  "the shell's default-value expansion must not read env's non-identifier key");
+  assert.equal(commandTargetsManagedWorktree(
+    `env 'A:-${protectedPath}=/tmp/scratch' sh -c 'rm -rf \${A:-${protectedPath}}'`,
+    protectedPath, protection,
+  ), MANAGED_WORKTREE_UNRESOLVED_REFUSAL);
+});
+
+test("ordinary expanded env arguments remain available", () => {
+  for (const command of [
+    'env FOO="$(git rev-parse HEAD)" make',
+    'env NODE_OPTIONS="$NODE_OPTIONS --inspect" node app.js',
+    'env $EDITOR notes.md',
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection,
+      { NODE_OPTIONS: "--no-warnings", EDITOR: "code --wait" }), null, command);
+  }
+});
+
 test("env options with equals signs remain options, while shell assignments still require identifiers", () => {
   for (const command of [
     "env --split-string='rm -rf .'",

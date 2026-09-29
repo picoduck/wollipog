@@ -169,6 +169,10 @@ function expandsLeadingTilde(token: ShellToken | undefined): boolean {
 function lookup(name: string, cwd: string, environment: ReadonlyMap<string, string>): string | undefined {
   if (name === "PWD" || name === "CWD") return cwd === UNKNOWN_CWD ? undefined : cwd;
   if (SHELL_MAINTAINED.has(name)) return undefined;
+  // `env` can create keys that a shell cannot reference. shell-quote may parse the
+  // whole body of `${A-.}` as a name, but the shell reads `A` with a default of `.`.
+  // Never let such a key shadow the shell's actual expansion.
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) return undefined;
   return environment.get(name);
 }
 
@@ -658,16 +662,19 @@ function commandWords(
         // (`env "$ASSIGNMENT" sh -c ...`) is an assignment to it like any other.
         const raw = plainWordText(tokens[index])!;
         const resolved = word(tokens[index], cwd, environment);
+        const value = resolved ?? raw;
         // A variable may be quoted (one argv word) or unquoted (several fields), and
-        // shell-quote does not preserve which. Do not let the whole value masquerade as
-        // one `env` assignment when the split reading could contain a command.
-        if (raw.includes("\0")) {
+        // shell-quote does not preserve which. The new, broader assignment rule could
+        // swallow a command in the split reading. Existing shell-identifier assignments
+        // and ordinary env arguments keep their previous classification.
+        const newlyRecognizedAssignment = !value.startsWith("-") && /^[^=\0]+=/u.test(value) &&
+          !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
+        if (newlyRecognizedAssignment && raw.includes("\0")) {
           const fields = resolved === null ? null : expansionFields(raw, resolved, cwd, environment);
           if (fields === null || fields.length !== 1 || fields[0] !== resolved) {
             throw new UnclassifiableCommandError("env argument has ambiguous field splitting");
           }
         }
-        const value = resolved ?? raw;
         // Like a prefix assignment, this builds the environment of the command `env` runs; it is
         // not in effect while the shell expands the words of this very command.
         // `env` accepts any nonempty name without `=` or NUL, unlike the shell prefix above.
