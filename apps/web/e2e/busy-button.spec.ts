@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { dialogMotionSettled } from "./dialog-motion.js";
+import { dialogMotionSettled, motionSettled } from "./dialog-motion.js";
 import { expectGeometry } from "./geometry-margins.js";
 
 /**
@@ -112,9 +112,7 @@ for (const pointer of ["fine", "coarse"] as const) {
         const toast = page.locator(".toast");
         await expect(toast).toBeVisible();
         // The toast slides in; measure the layout, not a frame of that motion.
-        await toast.evaluate((element) => Promise.all(element.getAnimations()
-          .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
-          .map((animation) => animation.finished)));
+        await motionSettled(toast);
         const message = await box(toast.locator(".toast-message"));
         const action = toast.getByRole("button", { name: label });
         await expectSteadyWhenBusy(action, label);

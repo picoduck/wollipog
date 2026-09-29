@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
+import { motionSettled } from "./dialog-motion.js";
 
 /**
  * Discard's label against what is actually painted behind it: its own fill composited over the
@@ -6,10 +7,10 @@ import { expect, test, type Locator } from "@playwright/test";
  * `color-mix(…, transparent)` hover tint is measured as Chromium blends it, not as declared.
  */
 async function paint(locator: Locator) {
-  return locator.evaluate(async (element) => {
-    // Buttons ease color and background over 130ms, so a reading taken mid-transition is neither
-    // state. Settle first.
-    await Promise.all(element.getAnimations().map((animation) => animation.finished));
+  // Buttons ease color and background over 130ms, so a reading taken mid-transition is neither
+  // state. Settle first.
+  await motionSettled(locator);
+  return locator.evaluate((element) => {
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = 1;
     const context = canvas.getContext("2d", { willReadFrequently: true })!;
