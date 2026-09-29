@@ -84,7 +84,9 @@ let clearLitZone: (() => void) | null = null;
  * top edge (§16.1). Only the F6 handler calls this, so a click, a digit, a route change or
  * programmatic focus never lights a zone. The line is `position: fixed` at the root's measured
  * edge because most roots scroll, and an absolute line would scroll away with their content.
- * A pointer press, or focus leaving the zone, puts it out early.
+ * It goes out early on a pointer press, on focus leaving the zone, and on any other key: a digit
+ * changes the route while the shell's page root keeps focus, so focus alone would not notice.
+ * Scrolling an ancestor or resizing moves the root under the measured edge, so those end it too.
  */
 export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HTMLElement | null {
   clearLitZone?.();
@@ -99,6 +101,9 @@ export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HT
     view.clearTimeout(timer);
     targetDocument.removeEventListener("pointerdown", clear, true);
     targetDocument.removeEventListener("focusin", onFocusIn, true);
+    targetDocument.removeEventListener("keydown", onKeyDown, true);
+    targetDocument.removeEventListener("scroll", onScroll, true);
+    view.removeEventListener("resize", clear);
     root.classList.remove("zone-lit");
     for (const property of ZONE_LINE_PROPERTIES) root.style.removeProperty(property);
     if (clearLitZone === clear) clearLitZone = null;
@@ -106,10 +111,21 @@ export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HT
   const onFocusIn = (event: Event) => {
     if (!(event.target instanceof view.Node) || !root.contains(event.target)) clear();
   };
+  // F6 relights through the shortcut handler, which clears the previous zone itself.
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== "F6" && event.key !== "Shift") clear();
+  };
+  // The root scrolling its own content leaves its edge in place; an ancestor scrolling moves it.
+  const onScroll = (event: Event) => {
+    if (event.target !== root && (!(event.target instanceof view.Node) || event.target.contains(root))) clear();
+  };
   root.classList.add("zone-lit");
   const timer = view.setTimeout(clear, ZONE_INDICATOR_MS);
   targetDocument.addEventListener("pointerdown", clear, true);
   targetDocument.addEventListener("focusin", onFocusIn, true);
+  targetDocument.addEventListener("keydown", onKeyDown, true);
+  targetDocument.addEventListener("scroll", onScroll, true);
+  view.addEventListener("resize", clear);
   clearLitZone = clear;
   return root;
 }

@@ -643,15 +643,17 @@ kbd {
 }
 /* The F6 zone indicator (§16.1). focus-zones.ts adds `.zone-lit` to the zone F6 entered for 1.5s
    and measures its top edge into the `--zone-line-*` properties. Fixed rather than absolute, because
-   most zone roots scroll and an absolute line would scroll away with their content. */
+   most zone roots scroll and an absolute line would scroll away with their content. A border rather
+   than a background, because forced colors repaints a border in a system colour but a background
+   as Canvas, which would hide the line. */
 .zone-lit::after {
   position: fixed;
   z-index: var(--z-sticky);
   top: var(--zone-line-top, 0px);
   left: var(--zone-line-left, 0px);
   width: var(--zone-line-width, 0px);
-  height: var(--focus-width);
-  background: var(--focus);
+  height: 0;
+  border-top: var(--focus-width) solid var(--focus);
   pointer-events: none;
   content: "";
   animation: zone-line-fade 1.5s var(--ease-out) forwards;

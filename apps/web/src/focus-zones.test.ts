@@ -201,6 +201,23 @@ test("the F6 zone line lights only the entered zone and goes out after 1.5s, a p
   indicateFocusZone(window.document, "main");
   detail.dispatchEvent(new window.Event("pointerdown", { bubbles: true }));
   assert.deepEqual(lit(), [], "a click puts the line out");
+
+  indicateFocusZone(window.document, "main");
+  detail.dispatchEvent(new window.KeyboardEvent("keydown", { key: "F6", bubbles: true }));
+  detail.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Shift", bubbles: true }));
+  assert.deepEqual(lit(), [detail], "F6 and Shift+F6 leave relighting to the shortcut handler");
+  detail.dispatchEvent(new window.KeyboardEvent("keydown", { key: "3", bubbles: true }));
+  assert.deepEqual(lit(), [], "a digit changes the route while the page root keeps focus, so any key puts the line out");
+
+  indicateFocusZone(window.document, "main");
+  detail.dispatchEvent(new window.Event("scroll"));
+  assert.deepEqual(lit(), [detail], "the zone scrolling its own content leaves its edge in place");
+  find(".main-body").dispatchEvent(new window.Event("scroll"));
+  assert.deepEqual(lit(), [], "an ancestor scrolling moves the zone under the measured edge");
+
+  indicateFocusZone(window.document, "main");
+  window.dispatchEvent(new window.Event("resize"));
+  assert.deepEqual(lit(), [], "a resize moves the zone under the measured edge");
 });
 
 test("direct zone focus uses the list, empty-state, and board target chain", () => {

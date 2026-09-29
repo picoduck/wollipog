@@ -244,7 +244,7 @@ test("one R from the split preview enters Composer Response without losing the o
   await page.keyboard.press("F6");
   await expect.poll(() => page.evaluate(() =>
     document.activeElement?.closest<HTMLElement>("[data-focus-zone]")?.dataset.focusZone ?? null))
-    .toBe("detail");
+    .toBe("main");
   await page.keyboard.press("r");
   await page.keyboard.press("1");
 
@@ -282,7 +282,7 @@ test("offline Composer Response owns the immediate digit after R from the split 
   await page.keyboard.press("F6");
   await expect.poll(() => page.evaluate(() =>
     document.activeElement?.closest<HTMLElement>("[data-focus-zone]")?.dataset.focusZone ?? null))
-    .toBe("detail");
+    .toBe("main");
   await page.keyboard.press("r");
   await page.keyboard.press("1");
 

@@ -86,6 +86,15 @@ const zoneLine = (page: Page) => page.evaluate(() => {
   const root = lit[0]!;
   const line = getComputedStyle(root, "::after");
   const box = root.getBoundingClientRect();
+  /** A custom property resolved to the rgb() the browser paints. */
+  const resolve = (property: string) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${property})`;
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  };
   return {
     count: 1,
     className: root.className,
@@ -93,29 +102,72 @@ const zoneLine = (page: Page) => page.evaluate(() => {
     top: Number.parseFloat(line.top) - box.top,
     left: Number.parseFloat(line.left) - box.left,
     width: Number.parseFloat(line.width) - box.width,
-    height: line.height,
-    background: line.backgroundColor,
+    thickness: line.borderTopWidth,
+    color: line.borderTopColor,
+    focus: resolve("--focus"),
+    accent: resolve("--accent"),
+    paneBackground: getComputedStyle(root).backgroundColor,
     animation: line.animationName,
   };
 });
+
+async function f6IntoSkillsDetail(page: Page) {
+  await page.keyboard.press("F6");
+  await page.keyboard.press("F6");
+  await page.keyboard.press("F6");
+  await expect(page.locator(".skills-detail")).toBeFocused();
+}
 
 for (const theme of ["dark", "light"] as const) {
   test(`F6 draws a 2px --focus line on the entered zone's top edge that is gone after 1.5s (${theme})`, async ({ page }) => {
     await page.emulateMedia({ colorScheme: theme });
     await openShell(page, shell("/skills"));
-    await page.keyboard.press("F6");
-    await page.keyboard.press("F6");
-    await page.keyboard.press("F6");
-    await expect(page.locator(".skills-detail")).toBeFocused();
+    await f6IntoSkillsDetail(page);
     const line = await zoneLine(page);
     expect(line.count).toBe(1);
     expect(line.className).toContain("skills-detail");
-    expect(line).toMatchObject({ position: "fixed", top: 0, left: 0, width: 0, height: "2px", animation: "zone-line-fade" });
-    const accent = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim());
-    expect(line.background).not.toBe(accent);
+    expect(line).toMatchObject({ position: "fixed", top: 0, left: 0, width: 0, thickness: "2px", animation: "zone-line-fade" });
+    expect(line.color).toBe(line.focus);
+    expect(line.color).not.toBe(line.accent);
     await expect.poll(() => zoneLine(page).then((value) => value.count), { timeout: 3_000 }).toBe(0);
   });
 }
+
+test("the zone line stays visible in forced colors", async ({ page }) => {
+  await page.emulateMedia({ forcedColors: "active" });
+  await openShell(page, shell("/skills"));
+  await f6IntoSkillsDetail(page);
+  const line = await zoneLine(page);
+  expect(line).toMatchObject({ count: 1, thickness: "2px" });
+  expect(line.color).not.toBe(line.paneBackground);
+  expect(line.color).not.toBe("rgba(0, 0, 0, 0)");
+});
+
+test("a key, an ancestor scroll or a resize puts the zone line out before 1.5s", async ({ page }) => {
+  await openShell(page, shell("/automations"));
+  await page.keyboard.press("F6");
+  await page.keyboard.press("F6");
+  expect((await zoneLine(page)).count).toBe(1);
+  // A digit changes the route while the page root keeps focus.
+  await page.keyboard.press("3");
+  await expect(page.getByRole("heading", { name: "Multi-Agent Runs", exact: true })).toBeVisible();
+  expect((await zoneLine(page)).count).toBe(0);
+
+  await openShell(page, shell("/skills"));
+  await f6IntoSkillsDetail(page);
+  expect((await zoneLine(page)).count).toBe(1);
+  await page.locator(".main-body").evaluate((element) => {
+    element.style.paddingBottom = "2000px";
+    element.scrollTop = 100;
+  });
+  await expect.poll(() => zoneLine(page).then((value) => value.count)).toBe(0);
+
+  // From the detail pane, three presses come back round to it.
+  await f6IntoSkillsDetail(page);
+  expect((await zoneLine(page)).count).toBe(1);
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await expect.poll(() => zoneLine(page).then((value) => value.count)).toBe(0);
+});
 
 test("the zone line has no fade under reduced motion", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });

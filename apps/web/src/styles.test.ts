@@ -217,7 +217,7 @@ test("focus never frames a pane, and the F6 zone line is a brief neutral top edg
 
   const line = soleRuleBody(".zone-lit::after");
   for (const declaration of ["position: fixed;", "top: var(--zone-line-top, 0px);", "left: var(--zone-line-left, 0px);",
-    "width: var(--zone-line-width, 0px);", "height: var(--focus-width);", "background: var(--focus);", "pointer-events: none;"]) {
+    "width: var(--zone-line-width, 0px);", "height: 0;", "border-top: var(--focus-width) solid var(--focus);", "pointer-events: none;"]) {
     assert.ok(line.includes(declaration), `the zone line needs ${declaration}`);
   }
   assert.match(line, /animation: zone-line-fade 1\.5s /, "the line lasts the 1.5s ZONE_INDICATOR_MS holds the class");
