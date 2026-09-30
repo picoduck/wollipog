@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { glyphUnderMark, ringAndFill } from "./rail-marks.js";
 test.use({ video: "on" });
 
@@ -256,43 +256,67 @@ for (const [label, device] of [
   test.describe(label, () => {
     test.use(device);
 
+    const sessionsItem = (page: Page) =>
+      page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: "Sessions", exact: true });
+    const placement = (page: Page) => sessionsItem(page).evaluate((element) => {
+      const badge = element.querySelector(".count-badge")!.getBoundingClientRect();
+      const railElement = element.closest(".app-rail")!;
+      const edge = railElement.getBoundingClientRect().right - parseFloat(getComputedStyle(railElement).borderRightWidth);
+      // The glyph of the item above: a lifted badge may rise into that item's foot, never onto its glyph.
+      const above = element.previousElementSibling?.querySelector("svg")?.getBoundingClientRect();
+      // The ring is 2px outside the badge; it may meet the border but not cover it.
+      return {
+        width: badge.width,
+        overhang: badge.right + 2 - edge,
+        rise: element.getBoundingClientRect().top - (badge.top - 2),
+        clearsAbove: above ? badge.top - 2 >= above.bottom : true,
+      };
+    });
+    const expectPlaced = async (page: Page, what: string) => {
+      const placed = await placement(page);
+      expect(placed.overhang, `${what}: the badge and its ring end at or inside the rail's border`).toBeLessThanOrEqual(0);
+      expect(placed.clearsAbove, `${what}: the ring stops short of the glyph of the item above`).toBe(true);
+      // The lift is capped at 7px, on top of the shoulder's 1px to 3px.
+      expect(placed.rise, `${what}: rises no more than the capped lift`).toBeLessThanOrEqual(10);
+      expect(await glyphUnderMark(page, sessionsItem(page)), `${what}: the badge and its ring cover none of the glyph`).toBe(0);
+      return placed;
+    };
+
     for (const [extra, count] of [[0, "8"], [7, "15"], [120, "128"]] as const) {
       test(`a Sessions badge of ${count} and its ring stay inside the rail, clear of the glyph (#2110)`, async ({ page }) => {
-        const rail = page.getByRole("navigation", { name: "Primary Navigation" });
-        const sessions = rail.getByRole("link", { name: "Sessions", exact: true });
-        const inside = () => sessions.evaluate((element) => {
-          const badge = element.querySelector(".count-badge")!.getBoundingClientRect();
-          const railElement = element.closest(".app-rail")!;
-          const edge = railElement.getBoundingClientRect().right - parseFloat(getComputedStyle(railElement).borderRightWidth);
-          // The glyph of the item above: a lifted three-digit badge may rise into that item's foot,
-          // never onto its glyph.
-          const above = element.previousElementSibling?.querySelector("svg")?.getBoundingClientRect();
-          // The ring is 2px outside the badge; it may meet the border but not cover it.
-          return {
-            overhang: badge.right + 2 - edge,
-            rise: element.getBoundingClientRect().top - (badge.top - 2),
-            clearsAbove: above ? badge.top - 2 >= above.bottom : true,
-          };
-        });
+        const sessions = sessionsItem(page);
         for (const path of ["/projects", undefined]) {
           await page.goto(`${fullShell(path)}&more-blocked=${extra}`);
           await expect(sessions.locator(".count-badge.danger.on-icon")).toHaveText(count);
           // At rest on Projects, then on the current item, whose ring follows the selected fill.
           if (path) await expect(sessions).not.toHaveAttribute("aria-current", "page");
           else await expect(sessions).toHaveAttribute("aria-current", "page");
-          const placed = await inside();
-          expect(placed.overhang, "the badge and its ring end at or inside the rail's border").toBeLessThanOrEqual(0);
-          expect(placed.clearsAbove, "the ring stops short of the glyph of the item above").toBe(true);
-          // Only three digits rise out of the item, by the 7px lift (#2110); one and two digits keep
-          // the shoulder's 1px to 3px overlap of the item's top edge, depending on the tier.
+          const placed = await expectPlaced(page, count);
+          // One digit fits beside the glyph in any face and does not move. Three digits never fit, so
+          // they rise out of the item: the one accepted exception (#2110).
+          if (count === "8") expect(placed.rise).toBeLessThanOrEqual(3);
           if (count === "128") expect(placed.rise).toBeGreaterThan(3);
-          else expect(placed.rise).toBeLessThanOrEqual(3);
-          expect(await glyphUnderMark(page, sessions), "the badge and its ring cover none of the glyph").toBe(0);
           const { ring, fill } = await ringAndFill(sessions);
           expect(ring).toBe(`${fill} 0px 0px 0px 2px`);
         }
       });
     }
+
+    // A count's width depends on the face system-ui resolves to: "15" is 16.4px in Ubuntu or Arial
+    // and 19.3px in DejaVu Sans, which CI's runner uses. Widening one badge by its padding sweeps
+    // every width a one- to four-digit count reaches in any of them, so no face can find a gap.
+    test("a badge of any width stays inside the rail and clear of the glyph (#2110)", async ({ page }) => {
+      await page.goto(`${fullShell("/projects")}&more-blocked=7`);
+      const badge = sessionsItem(page).locator(".count-badge");
+      await expect(badge).toHaveText("15");
+      const widths: number[] = [];
+      for (let side = 2; side <= 12; side += 0.5) {
+        await badge.evaluate((element, px) => { (element as HTMLElement).style.padding = `0 ${px}px`; }, side);
+        widths.push((await expectPlaced(page, `${side}px sides`)).width);
+      }
+      expect(Math.min(...widths)).toBeLessThanOrEqual(17);
+      expect(Math.max(...widths)).toBeGreaterThanOrEqual(35);
+    });
   });
 }
 

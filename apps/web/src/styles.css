@@ -874,17 +874,19 @@ kbd {
    past the rail (#2110): the badge and its ring end at the rail's border, never on it. The room runs
    from the badge's anchor, 8px in from the box's right edge, to that line less the ring. The icon
    box is centred in every tier, so the room is the same at 40px, 36px and 48px items. A translation's
-   percentage is the badge's own width, which is how a rule can know how wide the count is. */
+   percentage is the badge's own width, which is how a rule can know how wide the count is.
+
+   Grown back, the badge's lower corner reaches the glyph's shoulder, so it also rises: twice the
+   distance it grew back, plus 1px, up to 7px. Rotating the axis a quarter turn is what lets that
+   second translation read the badge's width too. A count that fits does not move. Two digits in a
+   wide face (DejaVu Sans, a common Linux system-ui) rise about 3px; three digits rise the full 7px,
+   and their ring leaves the item's top edge by 4px to 10px across the tiers, over the gap and the
+   empty foot of the item above: the one case where the ring leaves its item, accepted for #2110. */
 .rail-icon > .count-badge.on-icon {
-  transform: translateX(min(0px, calc((var(--rail-w) - 1px - var(--icon-lg) - 18px) / 2 + 8px - 2px - 100%)));
-}
-/* Three digits cannot fit beside the glyph at all: grown back that far, the badge would sit on the
-   glyph's top edge. It rises 7px instead, so it clears the stroke, and its ring leaves the item's
-   top edge by 4px to 10px across the tiers, over the gap and the empty foot of the item above. The
-   one exception to a ring kept inside its item, accepted for counts of 100 or more (#2110). */
-.rail-icon > .count-badge.on-icon.long {
   transform: translateX(min(0px, calc((var(--rail-w) - 1px - var(--icon-lg) - 18px) / 2 + 8px - 2px - 100%)))
-    translateY(-7px);
+    rotate(90deg)
+    translateX(max(-7px, min(0px, calc(((var(--rail-w) - 1px - var(--icon-lg) - 18px) / 2 + 8px - 2px - 100%) * 2 - 1px))))
+    rotate(-90deg);
 }
 @media (hover: hover) {
   .rail-item:hover { --count-badge-ring: var(--bg-elev-2); }

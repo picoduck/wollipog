@@ -5,11 +5,7 @@ export interface CountBadgeProps {
   count: number;
   /** Amber by default; danger for counts that are failing rather than waiting (stalled, errored). */
   tone?: "warning" | "danger";
-  /**
-   * Places the badge on an icon's top-right shoulder. The icon's wrapper is the positioned box. A
-   * count of three digits or more also carries `long`, which the 64px rail lifts clear of its glyph
-   * (§11.4, #2110).
-   */
+  /** Places the badge on an icon's top-right shoulder. The icon's wrapper is the positioned box. */
   onIcon?: boolean;
   className?: string;
 }
@@ -27,7 +23,6 @@ export function CountBadge({ count, tone = "warning", onIcon = false, className 
         "count-badge",
         tone === "danger" ? "danger" : "",
         onIcon ? "on-icon" : "",
-        onIcon && count >= 100 ? "long" : "",
         className ?? "",
       ].filter(Boolean).join(" ")}
       aria-hidden="true"

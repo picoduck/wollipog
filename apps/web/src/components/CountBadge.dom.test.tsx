@@ -37,20 +37,15 @@ test("the danger tone adds the danger class and nothing else", () => {
   assert.deepEqual(rendered(renderToStaticMarkup(<CountBadge count={12} tone="warning" />)).classes, ["count-badge"]);
 });
 
-test("on an icon the badge adds on-icon, in either tone, and long from three digits (#2110)", () => {
+test("on an icon the badge adds on-icon, in either tone", () => {
   assert.deepEqual(rendered(renderToStaticMarkup(<CountBadge count={128} onIcon />)), {
-    classes: ["count-badge", "on-icon", "long"],
+    classes: ["count-badge", "on-icon"],
     text: "128",
     hidden: "true",
     children: 0,
   });
   assert.deepEqual(rendered(renderToStaticMarkup(<CountBadge count={1} tone="danger" onIcon />)).classes,
     ["count-badge", "danger", "on-icon"]);
-  assert.deepEqual(rendered(renderToStaticMarkup(<CountBadge count={99} onIcon />)).classes, ["count-badge", "on-icon"]);
-  assert.deepEqual(rendered(renderToStaticMarkup(<CountBadge count={100} tone="danger" onIcon />)).classes,
-    ["count-badge", "danger", "on-icon", "long"]);
-  // Inline, a long count flows with its text and needs nothing.
-  assert.deepEqual(rendered(renderToStaticMarkup(<CountBadge count={128} />)).classes, ["count-badge"]);
 });
 
 test("an owner class is kept alongside the badge's own", () => {

@@ -1438,11 +1438,12 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
   away from the icon, with 2px sides rather than 4px (one digit stays a 16px circle, two are about 17px
   wide) and a 2px ring in `--count-badge-ring`. On the 64px rail a count too wide for the room
   beside the glyph grows back over the icon box's corner instead, so the badge and its ring end at
-  the rail's border and never cross it, in every tier (#2110). Three digits or more (`CountBadge`
-  adds `long` on an icon) also rise 7px there, because grown back that far the badge would sit on
-  the glyph's top edge: it clears the glyph, and its ring leaves the item's top edge by 4px to 10px,
-  over the gap and the empty foot of the item above. That is the one case where the ring leaves its
-  item. A phone tab has room to grow away as usual. That property defaults to
+  the rail's border and never cross it, in every tier (#2110). Grown back, its lower corner would
+  reach the glyph's shoulder, so it also rises by twice the distance it grew back plus 1px, up to
+  7px. A count that fits does not move. Two digits fit in most faces and rise about 3px in a wide
+  one (DejaVu Sans); three digits rise the full 7px, clear of the glyph, with their ring leaving the
+  item's top edge by 4px to 10px, over the gap and the empty foot of the item above. That is the
+  one case where the ring leaves its item. A phone tab has room to grow away as usual. That property defaults to
   `--bg-elev`; a surface that is not `--bg-elev` (a selected rail item on `--surface-selected`)
   sets it once on an ancestor rather than redrawing the badge. Forced colors drops the ring's
   box-shadow, so there a 2px `Canvas` outline redraws it.
