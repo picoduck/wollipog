@@ -18,8 +18,15 @@ export const MOBILE_BREAKPOINT_PX = 760;
  */
 export const TABLET_BREAKPOINT_PX = 900;
 
+/**
+ * A phone on its side: at or below this height the More sheet lays its rows out in two columns so
+ * every row, Settings included, fits a 568×320 screen without scrolling (#1959).
+ */
+export const SHORT_VIEWPORT_PX = 420;
+
 const MOBILE_QUERY = `(max-width: ${MOBILE_BREAKPOINT_PX}px)`;
 const TABLET_QUERY = `(max-width: ${TABLET_BREAKPOINT_PX}px)`;
+const SHORT_QUERY = `(max-height: ${SHORT_VIEWPORT_PX}px)`;
 
 /** Live width flag; re-renders on breakpoint crossings only (not every resize pixel —
  * the snapshot is a boolean, so useSyncExternalStore ignores same-value notifications).
@@ -54,6 +61,11 @@ export function useIsMobile(): boolean {
  */
 export function useIsTabletOrSmaller(): boolean {
   return useMediaQuery(TABLET_QUERY);
+}
+
+/** Live flag for a viewport at most SHORT_VIEWPORT_PX tall. */
+export function useIsShortViewport(): boolean {
+  return useMediaQuery(SHORT_QUERY);
 }
 
 /** Live touch-phone flag — the layout where typing means a software keyboard (TOUCH_PHONE_MEDIA).

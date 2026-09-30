@@ -387,12 +387,18 @@ export function useAccessibleMenu(
   open: boolean,
   setOpen: Dispatch<SetStateAction<boolean>>,
   idPrefix = "menu",
+  /**
+   * Where focus goes when a click opens the menu. `"menu"` focuses the surface itself, which needs
+   * `tabIndex={-1}`: a sheet then opens with no row ringed or filled, and the arrow keys still
+   * reach the rows. Opening with an arrow key always focuses a row.
+   */
+  openFocus: "item" | "menu" = "item",
 ): AccessibleMenuController {
   const reactId = useId().replace(/:/g, "");
   const menuId = `${idPrefix}-${reactId}`;
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const initialFocus = useRef<"first" | "last">("first");
+  const initialFocus = useRef<"first" | "last" | "menu">("first");
   const typeahead = useRef("");
   const typeaheadTimer = useRef<number | null>(null);
 
@@ -406,6 +412,10 @@ export function useAccessibleMenu(
 
   useEffect(() => {
     if (!open) return;
+    if (initialFocus.current === "menu") {
+      menuRef.current?.focus({ preventScroll: true });
+      return;
+    }
     const items = menuItems(menuRef.current);
     const selected = items.find(
       (item) => item.getAttribute("aria-checked") === "true" || item.getAttribute("aria-current") === "page",
@@ -419,9 +429,9 @@ export function useAccessibleMenu(
   }, []);
 
   const toggle = useCallback(() => {
-    initialFocus.current = "first";
+    initialFocus.current = openFocus === "menu" ? "menu" : "first";
     setOpen((value) => !value);
-  }, [setOpen]);
+  }, [setOpen, openFocus]);
 
   const onTriggerKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;

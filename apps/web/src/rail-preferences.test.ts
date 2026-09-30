@@ -9,6 +9,7 @@ import {
   getRailPreferences,
   moveRailView,
   parseRailPreferences,
+  phoneBarViews,
   railDigitForIndex,
   railDigits,
   railPreferencesAreDefault,
@@ -176,4 +177,73 @@ test("moves clamp at the edges and reset restores the product default", () => {
 
 test("reconcileRailOrder is deterministic for an empty save", () => {
   assert.deepEqual(reconcileRailOrder([]), CANONICAL);
+});
+
+const ALL_ON = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true };
+const ALL_OFF = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: false, pods: false };
+
+test("the default phone bar is Sessions, Projects, Connections and Automations whatever the experiments", () => {
+  // Slicing the rail order let experiments take the phone's four slots and pushed Projects and
+  // Connections into More (#1959).
+  for (const flags of [ALL_ON, ALL_OFF]) {
+    assert.deepEqual(phoneBarViews(defaultRailPreferences(), flags), ["inbox", "projects", "runners", "automations"]);
+  }
+  // Reordering the rail reorders digits and More, not the bar.
+  const reordered: RailPreferences = { order: [...CANONICAL].reverse(), hidden: new Set() };
+  assert.deepEqual(phoneBarViews(reordered, ALL_ON), ["inbox", "projects", "runners", "automations"]);
+});
+
+test("a hidden default tab is filled in place by the next visible non-experimental destination", () => {
+  const hideProjects: RailPreferences = { order: CANONICAL, hidden: new Set(["projects"]) };
+  assert.deepEqual(phoneBarViews(hideProjects, ALL_ON), ["inbox", "skills", "runners", "automations"],
+    "Multi-Agent Runs and Pods come first in rail order, but never fill a slot");
+  // The filler follows the user's rail order, not the canonical one.
+  const usageFirst: RailPreferences = {
+    order: ["usage", ...CANONICAL.filter((name) => name !== "usage")],
+    hidden: new Set(["projects"]),
+  };
+  assert.deepEqual(phoneBarViews(usageFirst, ALL_ON), ["inbox", "usage", "runners", "automations"]);
+  // Hide enough and the bar shrinks rather than taking an experiment.
+  const sparse: RailPreferences = {
+    order: CANONICAL,
+    hidden: new Set(["projects", "runners", "automations", "skills", "archived", "usage"]),
+  };
+  assert.deepEqual(phoneBarViews(sparse, ALL_ON), ["inbox"]);
+});
+
+test("a chosen phone bar overrides the default and may hold an experiment the user put there", () => {
+  const chosen: RailPreferences = { order: CANONICAL, hidden: new Set(), phoneBar: ["runs", "inbox", "usage", "pods"] };
+  assert.deepEqual(phoneBarViews(chosen, ALL_ON), ["runs", "inbox", "usage", "pods"]);
+  // Turned off, the experiments' slots are topped up in place from the rail order.
+  assert.deepEqual(phoneBarViews(chosen, ALL_OFF), ["automations", "inbox", "usage", "projects"]);
+  // A choice shorter than the bar is topped up at its end.
+  const short: RailPreferences = { order: CANONICAL, hidden: new Set(), phoneBar: ["usage"] };
+  assert.deepEqual(phoneBarViews(short, ALL_ON), ["usage", "inbox", "automations", "projects"]);
+});
+
+test("the phone bar choice is parsed defensively, survives edits and is cleared by reset", () => {
+  const parsed = parseRailPreferences(JSON.stringify({
+    v: 1, order: CANONICAL, hidden: [], phoneBar: ["usage", "board", 7, "usage", "inbox", "runs", "pods", "skills"],
+  }));
+  assert.deepEqual(parsed.phoneBar, ["usage", "inbox", "runs", "pods"],
+    "unknown names and repeats are dropped and the choice holds at most four");
+  assert.equal(railPreferencesAreDefault(parsed), false);
+  for (const phoneBar of [[], "usage", null, ["board"]]) {
+    const preferences = parseRailPreferences(JSON.stringify({ v: 1, order: CANONICAL, hidden: [], phoneBar }));
+    assert.equal(preferences.phoneBar, undefined, `${JSON.stringify(phoneBar)} is no choice, so the default applies`);
+  }
+
+  saveInstanceStorageValue(
+    RAIL_PREFERENCES_STORAGE_KEY,
+    JSON.stringify({ v: 1, order: CANONICAL, hidden: [], phoneBar: ["usage"] }),
+  );
+  resetRailPreferencesForTest();
+  moveRailView("usage", "up");
+  setRailViewHidden("archived", true);
+  resetRailPreferencesForTest();
+  assert.deepEqual(getRailPreferences().phoneBar, ["usage"], "reordering and hiding keep the stored choice");
+  resetRailPreferences();
+  resetRailPreferencesForTest();
+  assert.equal(getRailPreferences().phoneBar, undefined);
+  assert.equal(railPreferencesAreDefault(getRailPreferences()), true);
 });

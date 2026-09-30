@@ -3,6 +3,7 @@ import type { View } from "../navigation.js";
 import { GLOBAL_VIEW_ITEMS, viewPath, type GlobalViewName } from "../navigation.js";
 import {
   AutomationsIcon,
+  CloseIcon,
   ConnectionsIcon,
   InboxIcon,
   FolderSolidIcon,
@@ -16,11 +17,11 @@ import {
 } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuSeparator, MenuSurface } from "./Menu.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsMobile, useIsShortViewport } from "./useIsMobile.js";
 import { useExperiments } from "../use-experiments.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { sessionsDestination } from "../sessions-view-mode.js";
-import { MOBILE_PRIMARY_COUNT, railDigits, visibleRailViews } from "../rail-preferences.js";
+import { phoneBarViews, railDigits, visibleRailViews } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 
 /** Shared with Settings → Appearance → Navigation, whose rows show the same glyphs (#385). */
@@ -37,6 +38,10 @@ export const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; classNa
 };
 
 const RAIL_ICON_SIZE = 26;
+/** A phone tab's icon sits over its label (docs/design-system.md §15.1). */
+const TAB_ICON_SIZE = 24;
+/** More sheet rows are 48px with 20px icons (#1959). */
+const SHEET_ICON_SIZE = 20;
 
 function selectedRailView(view: View): GlobalViewName | null {
   // Board mode and an expanded session are both the Sessions destination.
@@ -74,8 +79,10 @@ export function Rail({
   // It is therefore tracked on its own rather than through selectedRailView.
   const settingsSelected = view.name === "settings";
   const isMobile = useIsMobile();
+  const isShort = useIsShortViewport();
   const [moreOpen, setMoreOpen] = useState(false);
-  const more = useAccessibleMenu(moreOpen, setMoreOpen, "rail-more-menu");
+  // A tap opens the sheet focused on itself, so no row is ringed or filled; arrow keys still rove.
+  const more = useAccessibleMenu(moreOpen, setMoreOpen, "rail-more-menu", "menu");
 
   // Leaving the phone breakpoint empties overflowItems but leaves moreOpen true, so returning to
   // mobile remounted the sheet and its backdrop with focus still on <body> — roving keys dead until
@@ -132,15 +139,17 @@ export function Rail({
   }, [isMobile, moreOpen, more, settingsSelected]);
 
   // The user's configured order, minus hidden and experiment-disabled destinations, IS the rail
-  // (#385): digits, keycaps, the phone bar's first four, and the More sheet all derive from this
-  // one list, so hiding a destination renumbers the survivors — position is the binding.
+  // (#385): digits, keycaps and the More sheet's order all derive from this one list, so hiding a
+  // destination renumbers the survivors — position is the binding. The phone bar is chosen
+  // separately (phoneBarViews), so the desktop order and experiments never decide its four slots.
   const { flags } = useExperiments();
   const preferences = useRailPreferences();
   const visibleNames = visibleRailViews(preferences, flags);
   const digits = railDigits(visibleNames);
-  const enabledItems = visibleNames.map((name) => GLOBAL_VIEW_ITEMS.find((item) => item.id === name)!);
-  const visibleItems = isMobile ? enabledItems.slice(0, MOBILE_PRIMARY_COUNT) : enabledItems;
-  const overflowItems = isMobile ? enabledItems.slice(MOBILE_PRIMARY_COUNT) : [];
+  const itemFor = (name: GlobalViewName) => GLOBAL_VIEW_ITEMS.find((item) => item.id === name)!;
+  const barNames = isMobile ? phoneBarViews(preferences, flags) : visibleNames;
+  const visibleItems = barNames.map(itemFor);
+  const overflowItems = isMobile ? visibleNames.filter((name) => !barNames.includes(name)).map(itemFor) : [];
   // A destination hidden behind More still has to read as current, or the bar looks like nothing
   // is selected while the user is standing on Usage — or, now, in Settings.
   const overflowSelected = settingsSelected || overflowItems.some((item) => item.id === selected);
@@ -151,6 +160,14 @@ export function Rail({
   // overflows: Settings always lives there, so hiding every optional destination by experiment
   // must not strand it.
   const showMore = isMobile;
+
+  /**
+   * Focus returns to More only when the sheet was closed from the keyboard, so a keyboard user keeps
+   * their place (#1959). After a tap it did too, and the next page showed More ringed or filled
+   * beside the real current tab. Enter on a link or a button dispatches a click with no pointer
+   * press behind it, which is how a keyboard activation is told from a tap.
+   */
+  const closeMoreFrom = (event: React.MouseEvent) => more.close(event.detail === 0);
 
   /**
    * The parts every sheet row shares. Extracted so the Settings row cannot drift from the
@@ -166,9 +183,7 @@ export function Rail({
     onClick: (event: React.MouseEvent) => {
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
-      // close(true) restores focus to the trigger, which survives the
-      // teardown; close(false) left keyboard position on <body>.
-      more.close(true);
+      closeMoreFrom(event);
       onNavigate(resolve());
     },
     onKeyDown: (event: React.KeyboardEvent) => {
@@ -225,14 +240,20 @@ export function Rail({
                 onNavigate(item.id === "inbox" ? sessionsViewDestination() : destination);
               }}
             >
-              <Icon size={RAIL_ICON_SIZE} />
-              {item.id === "inbox" && blockedCount > 0 && (
-                <span className="rail-badge blocked" aria-hidden="true">{blockedCount}</span>
+              {railTab(
+                isMobile,
+                item.name,
+                <>
+                  <Icon size={isMobile ? TAB_ICON_SIZE : RAIL_ICON_SIZE} />
+                  {item.id === "inbox" && blockedCount > 0 && (
+                    <span className="rail-badge blocked" aria-hidden="true">{blockedCount}</span>
+                  )}
+                  {item.id === "inbox" && stalledCount > 0 && (
+                    <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
+                  )}
+                  {item.id === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
+                </>,
               )}
-              {item.id === "inbox" && stalledCount > 0 && (
-                <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
-              )}
-              {item.id === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
               {!isMobile && shortcutDigit !== null && (
                 <span className="rail-number" aria-hidden="true">{shortcutDigit}</span>
               )}
@@ -259,18 +280,38 @@ export function Rail({
                 : "More Destinations"}
               title="More Destinations"
             >
-              <MoreHorizontalIcon size={RAIL_ICON_SIZE} />
+              {railTab(true, "More", <MoreHorizontalIcon size={TAB_ICON_SIZE} />)}
             </button>
             {moreOpen && (
-              // The shared menu, a bottom sheet at this width (§15.1). Its backdrop is what the
-              // shell's Escape ladder clicks to peel one layer.
+              // The shared menu, a bottom sheet at this width (§15.1). Its backdrop is the scrim:
+              // a tap on it closes the sheet without handing focus back to More. It is also what
+              // the shell's Escape ladder clicks to peel one layer.
               <MenuSurface
                 surfaceRef={more.menuRef}
                 anchor={{ trigger: more.triggerRef }}
                 id={more.menuId}
                 label="More Destinations"
-                head={<div className="menu-head" aria-hidden="true">More</div>}
-                onDismiss={() => more.close(true)}
+                className={`rail-more-sheet${isShort ? " two-column" : ""}`}
+                tabIndex={-1}
+                // Close is a menuitem like the Model Settings sheet's, so every element the menu
+                // owns keeps a menu role.
+                head={
+                  <div className="menu-head persistent" role="presentation">
+                    <span className="menu-head-title">More</span>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="icon-btn rail-more-close"
+                      aria-label="Close More"
+                      data-menu-label="Close More"
+                      title="Close More"
+                      onClick={closeMoreFrom}
+                    >
+                      <CloseIcon size={SHEET_ICON_SIZE} />
+                    </button>
+                  </div>
+                }
+                onDismiss={() => more.close(false)}
                 onKeyDown={more.onMenuKeyDown}
               >
                 {overflowItems.map((item) => {
@@ -296,7 +337,7 @@ export function Rail({
                         item.id === "inbox" ? sessionsViewDestination : undefined,
                       )}
                     >
-                      <span className="menu-icon" aria-hidden="true"><Icon size={16} /></span>
+                      <span className="menu-icon" aria-hidden="true"><Icon size={SHEET_ICON_SIZE} /></span>
                       <span className="menu-body"><span className="menu-text">{item.name}</span></span>
                       {(blocked > 0 || stalled > 0 || online > 0) && (
                         <span className="menu-trail" aria-hidden="true">
@@ -317,7 +358,7 @@ export function Rail({
                   className={`menu-item${settingsSelected ? " is-active" : ""}`}
                   {...sheetItemProps({ name: "settings" }, settingsSelected)}
                 >
-                  <span className="menu-icon" aria-hidden="true"><SettingsIcon size={16} /></span>
+                  <span className="menu-icon" aria-hidden="true"><SettingsIcon size={SHEET_ICON_SIZE} /></span>
                   <span className="menu-body"><span className="menu-text">Settings</span></span>
                 </a>
               </MenuSurface>
@@ -346,5 +387,19 @@ export function Rail({
       {!isMobile && instanceControl && <div className="rail-instance">{instanceControl}</div>}
       {!isMobile && <div className="rail-settings">{settingsControl}</div>}
     </nav>
+  );
+}
+
+/**
+ * A phone tab: the icon in its pill over a one-line label (docs/design-system.md §15.1). The label
+ * ellipsizes; the accessible name stays the tab's full name. The desktop rail stays icon-only.
+ */
+function railTab(labelled: boolean, name: string, icon: ReactNode): ReactNode {
+  if (!labelled) return icon;
+  return (
+    <>
+      <span className="rail-tab-pill">{icon}</span>
+      <span className="rail-tab-label">{name}</span>
+    </>
   );
 }

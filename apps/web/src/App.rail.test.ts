@@ -49,13 +49,15 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   ]) assert.equal(combined.includes(retired), false, retired);
 
   assert.match(app, /<Rail[\s\S]*blockedCount=\{blockedSessions\}[\s\S]*stalledCount=\{stalledSessions\}[\s\S]*onlineConnections=\{onlineRunners\}/);
-  // The rail still renders every destination from the one canonical list; on a phone the tail moves
-  // behind "More" rather than being dropped. Behavioural coverage lives in Rail.dom.test.tsx.
+  // The rail still renders every destination from the one canonical list; on a phone the ones off
+  // the tab bar move behind "More" rather than being dropped. Behavioural coverage lives in
+  // Rail.dom.test.tsx.
   assert.match(rail, /visibleItems\.map/);
-  assert.match(rail, /visibleItems = isMobile[\s\S]*?GLOBAL_VIEW_ITEMS/);
-  assert.match(rail, /overflowItems = isMobile[\s\S]*?GLOBAL_VIEW_ITEMS/);
+  assert.match(rail, /const itemFor = [^\n]*GLOBAL_VIEW_ITEMS/);
+  assert.match(rail, /const barNames = isMobile \? phoneBarViews\(preferences, flags\) : visibleNames;/);
+  assert.match(rail, /overflowItems = isMobile \? visibleNames\.filter\(\(name\) => !barNames\.includes\(name\)\)/);
   // Creation is an Inbox action, never a navigation destination or breakpoint-specific shell action.
-  assert.match(rail, /const RAIL_ICON_SIZE = 26;[\s\S]*<Icon size=\{RAIL_ICON_SIZE\}/);
+  assert.match(rail, /const RAIL_ICON_SIZE = 26;[\s\S]*const TAB_ICON_SIZE = 24;[\s\S]*<Icon size=\{isMobile \? TAB_ICON_SIZE : RAIL_ICON_SIZE\}/);
   assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/);
   assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/);
   // On phones the instance switcher lives in the app bar: the page header on destinations (#1801)
@@ -262,10 +264,13 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
     "the project action highlights only its icon");
   assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*opacity:\s*1;[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*pointer-events:\s*auto;/,
     "touch users can reach project actions without first establishing hover");
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.rail-item\.active::before\s*\{[^}]*bottom:\s*-6px;[^}]*left:\s*6px;[^}]*width:\s*auto;[^}]*height:\s*3px/,
-    "the horizontal mobile rail uses a visible bottom-edge active indicator");
-  assert.match(css, /\.right-panel\s*\{[^}]*bottom:\s*calc\(56px \+ env\(safe-area-inset-bottom, 0px\)\)/,
-    "mobile overlays must stop above the enlarged bottom rail");
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.rail-item\.active::before\s*\{\s*content:\s*none;\s*\}[\s\S]*\.rail-item\.active \.rail-tab-pill\s*\{\s*background:\s*var\(--surface-selected\);/,
+    "the current phone tab is a tinted pill behind its icon, with nothing drawn below it (§15.1)");
+  assert.match(css, /--bottom-bar-h:\s*calc\(56px \+ env\(safe-area-inset-bottom, 0px\)\);/,
+    "the labelled tab bar is 56px plus the bottom safe area (§2.7)");
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.app-rail\s*\{[^}]*height:\s*var\(--bottom-bar-h\);/);
+  assert.match(css, /\.right-panel\s*\{[^}]*bottom:\s*var\(--bottom-bar-h\)/,
+    "mobile overlays must stop above the bottom tab bar");
 });
 
 test("Inbox unifies Session and Project creation while the shell exposes no duplicate action", () => {

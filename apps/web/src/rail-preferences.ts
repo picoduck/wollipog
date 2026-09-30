@@ -32,11 +32,26 @@ const KNOWN = new Set<string>(CANONICAL_ORDER);
 /** Sessions must stay recoverable from the rail itself, so it can never be hidden. */
 export const REQUIRED_RAIL_VIEWS: ReadonlySet<GlobalViewName> = new Set(["inbox"]);
 
+/** The phone tab bar holds four destinations, then More (docs/design-system.md §15.1). */
+export const PHONE_BAR_SLOTS = 4;
+
+/**
+ * The phone bar when the user has not chosen one: the places a phone is most often opened for, and
+ * whether this machine is online. Deliberately not the first four of the rail order, which let the
+ * desktop's ordering, and experiments, decide the phone's most valuable slots.
+ */
+export const DEFAULT_PHONE_BAR: readonly GlobalViewName[] = ["inbox", "projects", "runners", "automations"];
+
 export interface RailPreferences {
   /** Every known destination exactly once, in the user's configured order. */
   order: readonly GlobalViewName[];
   /** The hidden subset of `order`; required destinations never appear here. */
   hidden: ReadonlySet<GlobalViewName>;
+  /**
+   * The phone tab bar's destinations, in bar order, when the user chose them (#1959). Absent means
+   * `DEFAULT_PHONE_BAR`. Older clients ignore the field.
+   */
+  phoneBar?: readonly GlobalViewName[];
 }
 
 export function defaultRailPreferences(): RailPreferences {
@@ -45,6 +60,7 @@ export function defaultRailPreferences(): RailPreferences {
 
 export function railPreferencesAreDefault(preferences: RailPreferences): boolean {
   return preferences.hidden.size === 0 &&
+    preferences.phoneBar === undefined &&
     preferences.order.length === CANONICAL_ORDER.length &&
     preferences.order.every((name, index) => name === CANONICAL_ORDER[index]);
 }
@@ -79,7 +95,7 @@ export function reconcileRailOrder(saved: readonly string[]): GlobalViewName[] {
 export function parseRailPreferences(raw: string | null): RailPreferences {
   if (!raw) return defaultRailPreferences();
   try {
-    const value = JSON.parse(raw) as { v?: unknown; order?: unknown; hidden?: unknown };
+    const value = JSON.parse(raw) as { v?: unknown; order?: unknown; hidden?: unknown; phoneBar?: unknown };
     if (!value || typeof value !== "object" || Array.isArray(value)) return defaultRailPreferences();
     const savedOrder = Array.isArray(value.order) ? value.order.filter((name): name is string => typeof name === "string") : [];
     const savedHidden = Array.isArray(value.hidden) ? value.hidden.filter((name): name is string => typeof name === "string") : [];
@@ -88,7 +104,16 @@ export function parseRailPreferences(raw: string | null): RailPreferences {
     for (const name of savedHidden) {
       if (KNOWN.has(name) && !REQUIRED_RAIL_VIEWS.has(name as GlobalViewName)) hidden.add(name as GlobalViewName);
     }
-    return { order, hidden };
+    if (!Array.isArray(value.phoneBar)) return { order, hidden };
+    const phoneBar: GlobalViewName[] = [];
+    for (const name of value.phoneBar) {
+      if (typeof name === "string" && KNOWN.has(name) && !phoneBar.includes(name as GlobalViewName)) {
+        phoneBar.push(name as GlobalViewName);
+      }
+    }
+    // An empty choice is no choice: the bar would otherwise be whatever the top-up happened to pick.
+    if (phoneBar.length === 0) return { order, hidden };
+    return { order, hidden, phoneBar: phoneBar.slice(0, PHONE_BAR_SLOTS) };
   } catch {
     return defaultRailPreferences();
   }
@@ -126,8 +151,29 @@ export function railViewForDigit(visible: readonly GlobalViewName[], digit: stri
   return visible[index] ?? null;
 }
 
-/** The phone bar keeps the first four visible destinations; the rest overflow into More. */
-export const MOBILE_PRIMARY_COUNT = 4;
+/**
+ * The phone tab bar's destinations, in bar order: the one source for the bar, and for the Settings
+ * editor that marks them (#1959).
+ *
+ * A chosen or default slot whose destination is hidden or turned off is filled, in place, by the
+ * next visible destination in rail order that is not already on the bar. An experimental
+ * destination never fills a slot: it reaches the bar only when the user put it there. Everything
+ * visible and not returned here belongs to More, in rail order.
+ */
+export function phoneBarViews(preferences: RailPreferences, flags: ExperimentFlags): GlobalViewName[] {
+  const visible = visibleRailViews(preferences, flags);
+  const chosen = (preferences.phoneBar ?? DEFAULT_PHONE_BAR).slice(0, PHONE_BAR_SLOTS);
+  const slots = chosen.map((name) => visible.includes(name) ? name : null);
+  const fillers = visible.filter((name) => experimentForViewName(name) === null && !slots.includes(name));
+  // A chosen list shorter than the bar tops up the same way as a skipped slot.
+  while (slots.length < PHONE_BAR_SLOTS) slots.push(null);
+  const bar: GlobalViewName[] = [];
+  for (const slot of slots) {
+    const name = slot ?? fillers.shift();
+    if (name) bar.push(name);
+  }
+  return bar;
+}
 
 /* ----------------------- Module store, one per instance ----------------------- */
 
@@ -148,7 +194,12 @@ function commit(preferences: RailPreferences, instanceScope: string): void {
   // for this page's lifetime even when private mode rejects the write.
   saveInstanceStorageValue(
     RAIL_PREFERENCES_STORAGE_KEY,
-    JSON.stringify({ v: RAIL_PREFERENCES_SCHEMA_VERSION, order: preferences.order, hidden: [...preferences.hidden] }),
+    JSON.stringify({
+      v: RAIL_PREFERENCES_SCHEMA_VERSION,
+      order: preferences.order,
+      hidden: [...preferences.hidden],
+      ...(preferences.phoneBar ? { phoneBar: preferences.phoneBar } : {}),
+    }),
     instanceScope,
   );
   for (const listener of listeners) listener();
@@ -166,7 +217,7 @@ export function setRailViewHidden(
   if (hidden) nextHidden.add(name);
   else nextHidden.delete(name);
   // A hidden destination keeps its position in `order`, so restoring returns it to its place.
-  commit({ order: current.order, hidden: nextHidden }, instanceScope);
+  commit({ ...current, hidden: nextHidden }, instanceScope);
 }
 
 export function moveRailView(
@@ -180,7 +231,7 @@ export function moveRailView(
   if (index < 0 || target < 0 || target >= current.order.length) return;
   const order = [...current.order];
   [order[index], order[target]] = [order[target]!, order[index]!];
-  commit({ order, hidden: current.hidden }, instanceScope);
+  commit({ ...current, order }, instanceScope);
 }
 
 export function resetRailPreferences(instanceScope = LOCAL_INSTANCE_SCOPE): void {

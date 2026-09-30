@@ -437,6 +437,8 @@
   /* --- Layout (docs/design-system.md §2.7): every bar, the page gutter (16px on phones, below)
      and the three page-container widths. Containers are left-aligned and never centred. --- */
   --bar-h: 48px;
+  /* The labelled phone tab bar (§15.1) and every layer that has to stop above it. */
+  --bottom-bar-h: calc(56px + env(safe-area-inset-bottom, 0px));
   --page-gutter: 24px;
   --page-max: 960px;
   --page-max-wide: 1200px;
@@ -743,7 +745,11 @@ kbd {
 }
 .rail-brand img { width: 39px; height: 39px; border-radius: 10px; image-rendering: pixelated; }
 .rail-destinations { display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.rail-item:hover { color: var(--text); background: var(--bg-elev-2); }
+/* Hover only where a pointer can hover (§15.3): on touch a hover fill sticks to the last tapped
+   tab and reads as a second selection on the next page. */
+@media (hover: hover) {
+  .rail-item:hover { color: var(--text); background: var(--bg-elev-2); }
+}
 .rail-item.active {
   color: var(--accent);
   border-color: transparent;
@@ -790,7 +796,7 @@ kbd {
   left: -9px;
   background: var(--red);
 }
-/* --- Phone "More" sheet (see MOBILE_PRIMARY_VIEWS) --- */
+/* --- Phone "More" sheet (see phoneBarViews) --- */
 .rail-more { position: relative; display: none; }
 .rail-spacer { flex: 1; }
 .rail-instance,
@@ -12730,41 +12736,72 @@ body.shell-dock-dragging * {
   .app-rail {
     order: 2;
     width: 100%;
-    height: calc(56px + env(safe-area-inset-bottom, 0px));
+    height: var(--bottom-bar-h);
     flex-direction: row;
-    align-items: flex-start;
-    gap: 4px;
+    align-items: stretch;
+    gap: 0;
     overflow-x: auto;
     overflow-y: hidden;
     border-top: 1px solid var(--border);
     border-right: 0;
-    padding: 6px max(6px, env(safe-area-inset-right, 0px)) env(safe-area-inset-bottom, 0px)
+    padding: 0 max(6px, env(safe-area-inset-right, 0px)) env(safe-area-inset-bottom, 0px)
       max(6px, env(safe-area-inset-left, 0px));
     scrollbar-width: none;
   }
   .app-rail::-webkit-scrollbar { display: none; }
   .rail-brand { display: none; }
-  .rail-destinations { flex-direction: row; gap: 4px; }
   .rail-spacer { display: none; }
-  .rail-item,
-  .rail-instance .instance-selector-trigger,
-  .rail-settings .settings-trigger { width: 44px; height: 44px; flex-basis: 44px; }
-  .rail-instance,
-  .rail-settings { width: 44px; flex: 0 0 44px; }
-  .rail-item.active::before {
-    top: auto;
-    right: 6px;
-    bottom: -6px;
-    left: 6px;
-    width: auto;
-    height: 3px;
-    border-radius: 3px 3px 0 0;
-  }
 
-  /* Five items — four destinations plus More — fit a 375px bar with room to spare, so the bar
-     never scrolls and nothing can sit off-screen. */
-  .rail-more { display: block; }
-  .rail-destinations { flex: 1; justify-content: space-around; }
+  /* The labelled tab bar (§15.1): four destinations plus More share the width equally, so the bar
+     never scrolls and nothing can sit off-screen. Each tab is a 24px icon in a 56×28 pill over an
+     11px label; a label that cannot fit ellipsizes, and the accessible name stays the full name. */
+  .rail-destinations {
+    flex: 1;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 0;
+    min-width: 0;
+  }
+  .rail-more { display: flex; flex: 1 1 0; min-width: 0; }
+  .rail-destinations > .rail-item,
+  .rail-more > .rail-item {
+    flex: 1 1 0;
+    flex-direction: column;
+    gap: var(--space-0-5);
+    width: auto;
+    min-width: 0;
+    height: auto;
+    border: 0;
+    border-radius: var(--radius-sm);
+  }
+  .rail-tab-pill {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 28px;
+    border-radius: var(--radius-pill);
+  }
+  .rail-tab-label {
+    max-width: 100%;
+    padding: 0 var(--space-0-5);
+    overflow: hidden;
+    font: var(--type-micro);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* The current tab: accent icon and label over a tinted pill. Nothing is drawn below the icon. */
+  .rail-item.active::before { content: none; }
+  .rail-item.active .rail-tab-pill { background: var(--surface-selected); }
+  @media (hover: hover) {
+    .rail-destinations > .rail-item:hover,
+    .rail-more > .rail-item:hover { background: transparent; }
+    .rail-item:not(.active):hover .rail-tab-pill { background: var(--bg-elev-2); }
+  }
+  /* The bar clips its overflow, so the ring is drawn inside the tab. */
+  .rail-item:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
 
   /* While a text field is focused the software keyboard is up, and a tab bar directly above it is
      the difference between reading the transcript and reading three lines of it. The rail is
@@ -12790,6 +12827,48 @@ body.shell-dock-dragging * {
       display: none;
     }
   }
+
+  /* From 600px the five tabs would sit about 150px apart, so they keep a 480px centered measure. */
+  @media (min-width: 600px) {
+    .rail-destinations { max-width: 480px; margin: 0 auto; }
+  }
+
+  /* More is a real sheet (§15.1, §7.5): the menu sheet's scrim and grabber, a "More" title with a
+     44px Close, 48px rows with 20px icons, and Settings last after a full-width separator. The
+     sheet opens focused on itself, which draws no ring. */
+  .rail-more-sheet:focus { outline: 2px solid transparent; }
+  .rail-more-sheet .menu-head-title { font: var(--type-title); }
+  .rail-more-close {
+    width: 44px;
+    height: 44px;
+    margin-right: calc(-1 * var(--space-1));
+  }
+  .rail-more-sheet .menu-item { min-height: 48px; }
+  .rail-more-sheet .menu-icon,
+  .rail-more-sheet .menu-icon svg {
+    width: var(--icon-lg);
+    height: var(--icon-lg);
+  }
+  /* The current row has one treatment, the selected row's (§5.2): a tint, a 2px accent bar on the
+     leading edge and an accent icon, with the label left in --text. */
+  .rail-more-sheet .menu-item[aria-current="page"] {
+    background: var(--surface-selected);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .rail-more-sheet .menu-item[aria-current="page"] .menu-icon { color: var(--accent); }
+  .rail-more-sheet .menu-sep {
+    margin: var(--space-2) calc(-1 * max(var(--space-2), env(safe-area-inset-right)))
+      var(--space-2) calc(-1 * max(var(--space-2), env(safe-area-inset-left)));
+  }
+  /* A phone on its side (the two-column class, set at 420px tall and below): two columns of rows,
+     so every row, Settings included, fits a 568×320 screen without scrolling. */
+  .rail-more-sheet.two-column {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
+    column-gap: var(--space-2);
+  }
+  .rail-more-sheet.two-column > :is(.sheet-grabber, .menu-head, .menu-sep) { grid-column: 1 / -1; }
 
   /* Controls sit below the top safe-area inset (notch / Dynamic Island): 50px by default and
      40px on Session routes. Each right-panel anchor below must mirror its corresponding calc. */
@@ -13054,7 +13133,7 @@ body.shell-dock-dragging * {
     top: calc(50px + env(safe-area-inset-top, 0px)); /* the mobile topbar height above */
     left: 0;
     right: 0;
-    bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    bottom: var(--bottom-bar-h);
     width: auto !important;
     margin: 0;
     border-radius: 0;

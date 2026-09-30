@@ -5,7 +5,13 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { Rail } from "./Rail.js";
 import { saveSessionsViewMode } from "../sessions-view-mode.js";
-import { moveRailView, resetRailPreferencesForTest, setRailViewHidden } from "../rail-preferences.js";
+import {
+  RAIL_PREFERENCES_STORAGE_KEY,
+  moveRailView,
+  resetRailPreferencesForTest,
+  setRailViewHidden,
+} from "../rail-preferences.js";
+import { saveInstanceStorageValue } from "../instance-storage.js";
 import { GLOBAL_VIEW_ITEMS, type View } from "../navigation.js";
 import { withCapturedAnimationFrames } from "./test-clock-overrides.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -148,8 +154,8 @@ function stubPhoneWidth() {
 }
 
 test("the phone rail hosts destinations plus routed Settings and no nested layers", async () => {
-  // The phone bar carries four destinations plus More. Creation lives in the Inbox toolbar and the
-  // instance switcher lives in the top bar.
+  // The phone bar carries four labelled destinations plus More. Creation lives in the Inbox toolbar
+  // and the instance switcher lives in the top bar.
   //
   // An earlier revision put Instance and Settings inside the sheet; because those rendered their
   // own menu and dialog, their Tab and Escape events bubbled into the outer roving controller, so
@@ -183,8 +189,19 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
       "four destinations plus More — five is the platform convention");
     assert.deepEqual(
       [...bar.querySelectorAll<HTMLAnchorElement>("a.rail-item")].map((item) => item.getAttribute("href")),
-      ["/", "/automations", "/projects", "/runs"],
-      "the bar takes the first four visible destinations in configured order");
+      ["/", "/projects", "/connections/machines", "/automations"],
+      "the default bar is Sessions, Projects, Connections and Automations, even with every experiment on (#1959)");
+    // Every tab is labelled with its one name, the icon in its pill above it.
+    assert.deepEqual(
+      [...bar.querySelectorAll(".rail-item")].map((item) => item.querySelector(".rail-tab-label")?.textContent),
+      ["Sessions", "Projects", "Connections", "Automations", "More"]);
+    for (const item of bar.querySelectorAll(".rail-item")) {
+      assert.ok(item.querySelector(".rail-tab-pill > svg"), "the icon sits in the tab's pill");
+    }
+    const connections = bar.querySelector<HTMLAnchorElement>('a[href="/connections/machines"]')!;
+    assert.equal(connections.querySelector(".rail-badge")?.textContent, "1");
+    assert.match(connections.getAttribute("aria-label") ?? "", /^Connections, 1 Online$/,
+      "the accessible name stays the full name, however the label is clipped");
 
     // Nothing that owns its own overlay may live in the bar or the sheet.
     assertNoDomNode(container.querySelector(".rail-instance"));
@@ -197,23 +214,27 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     const moreTrigger = container.querySelector(".rail-more-trigger")! as unknown as HTMLButtonElement;
     await act(async () => { moreTrigger.click(); });
     const sheet = (domWindow.document as unknown as Document).querySelector(MORE_SHEET)!;
-    // The bar takes the first four VISIBLE destinations (#385), so with every experiment on the
-    // sheet holds the visible order past them, and Settings still trails everything.
+    // More holds every other visible destination in rail order, and Settings trails everything.
     assert.deepEqual([...sheet.querySelectorAll(".menu-item")].map((el) => el.querySelector(".menu-text")?.textContent),
-      ["Pods", "Connections", "Agent Skills", "Archived Sessions", "Usage and Cost",
+      ["Multi-Agent Runs", "Pods", "Agent Skills", "Archived Sessions", "Usage and Cost",
         "Settings"],
       "Settings is the trailing row, after every destination");
-    // The default order overflows Connections, so its online count overflows with it (#532
-    // round-1 finding): a moved destination must not shed its status.
-    const connectionsRow = [...sheet.querySelectorAll<HTMLElement>(".menu-item")]
-      .find((row) => row.querySelector(".menu-text")?.textContent === "Connections")!;
-    assert.equal(connectionsRow.querySelector(".rail-more-count")?.textContent, "1");
-    assert.match(connectionsRow.getAttribute("aria-label") ?? "", /1 Online/);
+    const sep = sheet.querySelector('[role="separator"]')!;
+    assert.equal(sep.nextElementSibling?.querySelector(".menu-text")?.textContent, "Settings",
+      "a separator stands between the destinations and Settings");
+    // A real sheet: a "More" title with a Close button, which closes it like the scrim.
+    assert.equal(sheet.querySelector(".menu-head-title")?.textContent, "More");
+    const close = sheet.querySelector<HTMLButtonElement>('button[aria-label="Close More"]')!;
+    assert.equal(close.getAttribute("role"), "menuitem", "every element the menu owns keeps a menu role");
     assertNoDomNode(sheet.querySelector(".rail-more-control"),
       "the sheet must contain no nested dialog or menu content");
     // Every child of a role=menu must be a menu item, or roving navigation silently skips it. The
-    // sheet's grabber and title row are decorative, and the separator is not focusable.
-    assert.equal(sheet.querySelectorAll(':scope > *:not([role="menuitem"], [role="separator"], [aria-hidden="true"])').length, 0);
+    // sheet's grabber is decorative, its title row is presentational around the Close item, and
+    // the separator is not focusable.
+    assert.equal(sheet.querySelectorAll(
+      ':scope > *:not([role="menuitem"], [role="separator"], [role="presentation"], [aria-hidden="true"])').length, 0);
+    await act(async () => { close.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, detail: 1 }) as never); });
+    assertNoDomNode((domWindow.document as unknown as Document).querySelector(MORE_SHEET), "Close closes the sheet");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -506,9 +527,9 @@ test("hiding and reordering renumber the surviving destinations", async () => {
 });
 
 test("overflowed destinations keep their status counts and Sessions keeps its saved mode", async () => {
-  // Round-1 review findings on #532: the default order puts Connections sixth on a phone, so its
-  // online count must overflow WITH it — and a Sessions row pushed into the sheet must open the
-  // persisted list/board mode exactly like the bar item and the digit do.
+  // Round-1 review findings on #532: a counted destination moved into the sheet takes its count
+  // WITH it — and a Sessions row pushed into the sheet must open the persisted list/board mode
+  // exactly like the bar item and the digit do.
   resetRailPreferencesForTest();
   const restore = stubPhoneWidth();
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -527,7 +548,10 @@ test("overflowed destinations keep their status counts and Sessions keeps its sa
     );
   });
   try {
-    for (let step = 0; step < 5; step += 1) moveRailView("inbox", "down");
+    // Sessions reaches the sheet only when the user leaves it off a chosen bar.
+    saveInstanceStorageValue(RAIL_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({ v: 1, order: [], hidden: [], phoneBar: ["projects", "automations", "skills", "usage"] }));
+    resetRailPreferencesForTest();
     await render();
     await act(async () => {
       (container.querySelector(".rail-more-trigger") as unknown as HTMLButtonElement).click();
@@ -538,6 +562,10 @@ test("overflowed destinations keep their status counts and Sessions keeps its sa
     assert.equal(sessionsRow.querySelector(".rail-more-count.blocked")?.textContent, "2");
     assert.equal(sessionsRow.querySelector(".rail-more-count.stalled")?.textContent, "1");
     assert.match(sessionsRow.getAttribute("aria-label") ?? "", /2 Blocked/);
+    const connectionsRow = [...sheet.querySelectorAll<HTMLElement>(".menu-item")]
+      .find((row) => row.querySelector(".menu-text")?.textContent === "Connections")!;
+    assert.equal(connectionsRow.querySelector(".rail-more-count")?.textContent, "3");
+    assert.match(connectionsRow.getAttribute("aria-label") ?? "", /3 Online/);
 
     saveSessionsViewMode("board");
     sessionsRow.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, button: 0 }) as never);
@@ -550,5 +578,190 @@ test("overflowed destinations keep their status counts and Sessions keeps its sa
     restore();
     resetRailPreferencesForTest();
     domWindow.localStorage.clear();
+  }
+});
+
+/** A phone of the given height class: every width query matches, and max-height only when short. */
+function stubPhone({ short }: { short: boolean }) {
+  const prior = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-height") ? short : true,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  return () => { domWindow.matchMedia = prior; };
+}
+
+async function mountPhoneRail(view: View, navigated: View[] = []) {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = () => act(async () => {
+    root.render(
+      <Rail
+        view={view}
+        blockedCount={0}
+        stalledCount={0}
+        onlineConnections={0}
+        onNavigate={(destination) => navigated.push(destination)}
+      />,
+    );
+  });
+  await render();
+  return {
+    container,
+    render,
+    trigger: () => container.querySelector(".rail-more-trigger") as unknown as HTMLButtonElement,
+    sheet: () => (domWindow.document as unknown as Document).querySelector<HTMLElement>(MORE_SHEET),
+    unmount: async () => {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    },
+  };
+}
+
+const flushFocusRestore = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+const focused = () => domWindow.document.activeElement as unknown;
+
+test("a hidden default tab is replaced in place by the next non-experimental destination", async () => {
+  resetRailPreferencesForTest();
+  const restore = stubPhone({ short: false });
+  const rail = await mountPhoneRail({ name: "inbox" });
+  try {
+    setRailViewHidden("projects", true);
+    await rail.render();
+    assert.deepEqual(
+      [...rail.container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a.rail-item")]
+        .map((item) => item.getAttribute("href")),
+      ["/", "/skills", "/connections/machines", "/automations"],
+      "Multi-Agent Runs and Pods come first in rail order, but an experiment never fills a slot");
+    await act(async () => { rail.trigger().click(); });
+    assert.deepEqual(
+      [...rail.sheet()!.querySelectorAll(".menu-item .menu-text")].map((text) => text.textContent),
+      ["Multi-Agent Runs", "Pods", "Archived Sessions", "Usage and Cost", "Settings"],
+      "the hidden destination is in neither the bar nor the sheet");
+  } finally {
+    await rail.unmount();
+    restore();
+    resetRailPreferencesForTest();
+    domWindow.localStorage.clear();
+  }
+});
+
+test("More opens focused on the sheet and hands focus back only after a keyboard close", async () => {
+  // A tap that closed the sheet used to return focus to More, so the next page showed More ringed
+  // or filled next to the real current tab (#1959).
+  const restore = stubPhone({ short: false });
+  const navigated: View[] = [];
+  const rail = await mountPhoneRail({ name: "inbox" }, navigated);
+  const doc = domWindow.document as unknown as Document;
+  const row = (name: string) => [...rail.sheet()!.querySelectorAll<HTMLElement>(".menu-item")]
+    .find((item) => item.querySelector(".menu-text")?.textContent === name)!;
+  const tap = (element: HTMLElement) => act(async () => {
+    element.dispatchEvent(
+      new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail: 1 }) as never);
+  });
+  const press = (element: HTMLElement, key: string) => act(async () => {
+    element.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }) as never);
+  });
+  try {
+    // Open with a tap: the sheet itself takes focus, so no row is ringed or filled.
+    await act(async () => { rail.trigger().focus(); rail.trigger().click(); });
+    assert.equal(rail.sheet()!.getAttribute("tabindex"), "-1");
+    assert.ok(focused() === rail.sheet(), "the sheet, not a row, holds focus on open");
+
+    // The arrow keys still rove from there.
+    await press(rail.sheet()!, "End");
+    assert.ok(focused() === row("Settings"), "End reaches the last row");
+    await press(rail.sheet()!, "Home");
+    assert.ok(focused() === doc.querySelector('[aria-label="Close More"]'), "Home reaches the first item");
+    await press(rail.sheet()!, "ArrowDown");
+    assert.ok(focused() === row("Multi-Agent Runs"), "ArrowDown moves to the first destination row");
+
+    // A tapped row navigates and leaves focus off More.
+    await tap(row("Usage and Cost"));
+    await flushFocusRestore();
+    assert.deepEqual(navigated.at(-1), { name: "usage" });
+    assertNoDomNode(rail.sheet());
+    assert.ok(focused() !== rail.trigger(), "a tap never hands focus back to More");
+
+    // A scrim tap closes without restoring either.
+    await act(async () => { rail.trigger().click(); });
+    await tap(doc.querySelector<HTMLElement>(".menu-backdrop")!);
+    await flushFocusRestore();
+    assertNoDomNode(rail.sheet());
+    assert.ok(focused() !== rail.trigger(), "the scrim never hands focus back to More");
+
+    // Nor does a tapped Close.
+    await act(async () => { rail.trigger().click(); });
+    await tap(doc.querySelector<HTMLElement>('[aria-label="Close More"]')!);
+    await flushFocusRestore();
+    assertNoDomNode(rail.sheet());
+    assert.ok(focused() !== rail.trigger(), "a tapped Close never hands focus back to More");
+
+    // Escape is a keyboard close: focus returns to More, where the keyboard user left it.
+    await act(async () => { rail.trigger().click(); });
+    await press(rail.sheet()!, "Escape");
+    await flushFocusRestore();
+    assertNoDomNode(rail.sheet());
+    assert.ok(focused() === rail.trigger(), "Escape returns focus to More");
+
+    // Enter on a row dispatches a click with no pointer press behind it (detail 0): also a
+    // keyboard close.
+    await act(async () => { rail.trigger().click(); });
+    await act(async () => {
+      row("Pods").dispatchEvent(
+        new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail: 0 }) as never);
+    });
+    await flushFocusRestore();
+    assert.deepEqual(navigated.at(-1), { name: "pods" });
+    assert.ok(focused() === rail.trigger(), "a keyboard activation keeps the user's place on More");
+
+    // Opening from the keyboard with an arrow key still lands on a row.
+    await press(rail.trigger(), "ArrowUp");
+    assert.ok(focused() === row("Settings"), "ArrowUp on More opens onto the last row");
+  } finally {
+    await rail.unmount();
+    restore();
+  }
+});
+
+test("the current More row carries the selected state, and More stands in for it on the bar", async () => {
+  const restore = stubPhone({ short: false });
+  const rail = await mountPhoneRail({ name: "usage" });
+  try {
+    const trigger = rail.trigger();
+    assert.ok(trigger.classList.contains("active"), "More is the current tab on an overflow page");
+    assert.equal(trigger.getAttribute("aria-current"), "page");
+    assert.equal(trigger.querySelector(".rail-tab-label")?.textContent, "More");
+    await act(async () => { trigger.click(); });
+    const current = [...rail.sheet()!.querySelectorAll('[aria-current="page"]')];
+    assert.equal(current.length, 1);
+    assert.equal(current[0]!.querySelector(".menu-text")?.textContent, "Usage and Cost");
+  } finally {
+    await rail.unmount();
+    restore();
+  }
+});
+
+test("on a short screen the More sheet lays its rows out in two columns", async () => {
+  // At 568x320 a single column pushed Settings out of view with no affordance (#1959).
+  for (const short of [false, true]) {
+    const restore = stubPhone({ short });
+    const rail = await mountPhoneRail({ name: "inbox" });
+    try {
+      await act(async () => { rail.trigger().click(); });
+      assert.ok(rail.sheet()!.classList.contains("rail-more-sheet"));
+      assert.equal(rail.sheet()!.classList.contains("two-column"), short,
+        short ? "a short viewport gets the two-column layout" : "a tall one keeps a single column");
+    } finally {
+      await rail.unmount();
+      restore();
+    }
   }
 });

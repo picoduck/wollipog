@@ -1,6 +1,6 @@
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
 import { GLOBAL_VIEW_ITEMS, viewPath, viewTitle, type View } from "../src/navigation.js";
-import { MOBILE_PRIMARY_COUNT, defaultRailPreferences, visibleRailViews } from "../src/rail-preferences.js";
+import { defaultRailPreferences, phoneBarViews } from "../src/rail-preferences.js";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../src/experiments.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../src/mobile-viewport.js";
 import { dialogMotionSettled } from "./dialog-motion.js";
@@ -327,6 +327,8 @@ interface Mark {
   /** How many solidly-painted-but-unreadable regions the mark is allowed. */
   illegibleCells: number;
   minContrast: number;
+  /** The legible share of the paint, when this mark's own measurement sets it (LEGIBLE_FRACTION otherwise). */
+  fraction?: number;
 }
 
 async function expectPainted(page: Page, locator: Locator, label: string, mark: Mark) {
@@ -349,7 +351,7 @@ async function expectPainted(page: Page, locator: Locator, label: string, mark: 
     .toBeGreaterThanOrEqual(mark.legible);
   expect(ink.legible / ink.paint,
     `only ${Math.round((100 * ink.legible) / ink.paint)}% of "${label}" reaches ${mark.minContrast}:1`)
-    .toBeGreaterThanOrEqual(LEGIBLE_FRACTION);
+    .toBeGreaterThanOrEqual(mark.fraction ?? LEGIBLE_FRACTION);
   // And the legible part has to be spread across the mark, not concentrated in it. The fraction is
   // a total, and a total cannot see a SMALL part of a mark go: fading the Inbox glyph's two inner
   // lines, or the last character of every overflow label, moves it by less than the spread between
@@ -388,45 +390,67 @@ const THEMES = ["dark", "light"] as const;
  *
  * `paint` sits near its measured value because geometry is antialiasing coverage, which barely
  * moves: the same label measures 408 pixels in both themes while its 4.5:1 count swings 184 to 285.
- * That closeness is the point — `moreTrigger` is three dots totalling 17 pixels, and a floor loose
- * enough to be theme-proof would accept two of them.
+ * That closeness is the point — `moreTrigger` is three small dots, and a floor loose enough to be
+ * theme-proof would accept two of them.
  *
  *   measured paint / legible at the device's own 2.625 ratio, both themes, portrait and landscape
- *   icon       1154-1547 / 944-1295      moreTrigger   101-108 / 71-86
- *   sheetIcon    297-979  / 177-883       sheetLabel   2084-3204 / 1363-2556
- *   (sheetIcon re-measured for the shared menu's 16px icon slot, #1803; it was 346-451 / 292-381
- *   at 20px, and the floors keep the same ratio to the measured minimum.)
- *   sheetShortLabel ("Settings" 1503-1769 / 1038-1229, "Projects" 1413-1588)
+ *   icon       1183-1285 / 977-1077      moreTrigger   275-284 / 218-232
+ *   sheetIcon    451-1503 / 317-1460      sheetLabel   2079-3483 / 1425-2417
+ *   (Re-measured when the labelled tab bar made the bar's icons 24px and the sheet's 20px, #1959.
+ *   The floors keep the same ratios to the measured minimum as before: paint about 0.86 and
+ *   legible about 0.47.)
+ *   sheetShortLabel ("Settings" 1526-1724 / 1055-1223)
  *
  * Short titles need their own floor because the sheetLabel range was measured against long
  * destination titles — words with half again the ink of "Settings". A floor loose enough to
  * cover both would sit under 1503 and stop catching a destination label that had lost a third of
  * itself, which is the mutation these floors exist for. The ratio to the measured minimum is the
- * same as sheetLabel's. "Projects" joined the short band when the phone bar became the first four
- * of the configured order (#385): measured 1413-1588, so the 1330 floor still catches a third of
- * it going (1413 × 2/3 = 942).
+ * same as sheetLabel's.
  *
  * "Pods" moved into the sheet when the default order put Projects third (#1945), and one
- * four-letter word has about half the ink of "Settings": measured 882-1001 paint / 610-721 legible
+ * four-letter word has about half the ink of "Settings": measured 875-1032 paint / 616-731 legible
  * across both themes and landscape. Its floors keep sheetShortLabel's ratios to the measured
- * minimum (830 / 290), so losing a third of it (882 × 2/3 = 588) still trips the paint floor.
+ * minimum (830 / 290), so losing a third of it (875 × 2/3 = 583) still trips the paint floor.
  */
-const SHORT_SHEET_TITLES = new Set(["Settings", "Projects"]);
+const SHORT_SHEET_TITLES = new Set(["Settings"]);
 const TINY_SHEET_TITLES = new Set(["Pods"]);
 const MARKS = {
   icon: { paint: 1000, legible: 450, illegibleCells: 0, minContrast: CONTRAST.icon },
   /* The Automations bolt joined the primary bar when Board became a mode of Sessions (#499).
-     It is one stroked path where the other primary glyphs are two or three, so it measures 895
-     paint / 716-746 legible against the icon family's 1154-1547 / 944-1295 — a floor calibrated
+     It is one stroked path where the other primary glyphs are two or three, so it measures 920-936
+     paint / 729-773 legible against the icon family's 1183-1285 / 977-1077 — a floor calibrated
      for the beefier marks would reject a bolt that is fully painted. Same ratios to the measured
      minimum as `icon`, so losing a third of the bolt still trips it. */
   boltIcon: { paint: 780, legible: 340, illegibleCells: 0, minContrast: CONTRAST.icon },
-  moreTrigger: { paint: 90, legible: 35, illegibleCells: 0, minContrast: CONTRAST.icon },
-  sheetIcon: { paint: 255, legible: 85, illegibleCells: 0, minContrast: CONTRAST.icon },
+  moreTrigger: { paint: 245, legible: 105, illegibleCells: 0, minContrast: CONTRAST.icon },
+  sheetIcon: { paint: 390, legible: 150, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetLabel: { paint: 1850, legible: 650, illegibleCells: 0, minContrast: CONTRAST.label },
   sheetShortLabel: { paint: 1330, legible: 490, illegibleCells: 0, minContrast: CONTRAST.label },
   sheetTinyLabel: { paint: 830, legible: 290, illegibleCells: 0, minContrast: CONTRAST.label },
 } as const satisfies Record<string, Mark>;
+
+/**
+ * The tab bar's labels (#1959): 11px text in `--text-dim`, or `--accent` on the current tab, on
+ * `--bg-elev` — 5.5:1 and 7.8:1 or better by the token table (docs/design-system.md §2.11).
+ *
+ *   measured paint / legible, both themes, portrait and landscape, with and without the keyboard
+ *   Sessions 1094-1101 / 529-654   Projects 1026-1030 / 462-546   Connections 1509-1517 / 672-803
+ *   Automations 1632-1640 / 725-864   More 719-723 / 318-422
+ *
+ * Glyphs this small are mostly antialiased edge, so the legible share measures 0.44 to 0.48 rather
+ * than the 0.55 the larger marks clear, and "Automations" leaves up to two edge cells with nothing
+ * at 4.5:1. The floors keep the other marks' ratios to the measured minimum (paint × 0.94, legible
+ * × 0.47), and the fraction floor sits where fading a third of a label (0.44 → about 0.29) trips it.
+ */
+const tabLabel = (paint: number, legible: number, illegibleCells = 0): Mark =>
+  ({ paint, legible, illegibleCells, minContrast: CONTRAST.label, fraction: 0.36 });
+const TAB_LABEL_MARKS: Record<string, Mark> = {
+  Sessions: tabLabel(1028, 249),
+  Projects: tabLabel(964, 217),
+  Connections: tabLabel(1418, 316),
+  Automations: tabLabel(1534, 341, 2),
+  More: tabLabel(676, 150),
+};
 
 interface HarnessOptions {
   theme?: (typeof THEMES)[number];
@@ -574,7 +598,7 @@ test("no two destinations render the same glyph", async ({ page }) => {
   };
   // The bar's glyphs are read before the sheet opens: the sheet's scrim dims the bar under it
   // (§15.1), and a dimmed glyph is not what a user compares.
-  await measure(page.locator(".rail-destinations > .rail-item > svg"));
+  await measure(page.locator(".rail-destinations > .rail-item > .rail-tab-pill > svg"));
   await openMoreSheet(page);
   await measure(page.locator(`${MORE_SHEET} .menu-icon > svg`));
   // Every destination plus the sheet's trailing Settings row. The gear is measured with them
@@ -599,7 +623,7 @@ test("no two destinations render the same glyph", async ({ page }) => {
   let closest = Number.MAX_SAFE_INTEGER;
   for (let a = 0; a < normalized.length; a += 1) {
     for (let b = a + 1; b < normalized.length; b += 1) {
-      // Different sizes are already different glyphs; the sheet's are 16px and the rail's 26px.
+      // Different sizes are already different glyphs; the sheet's are 20px and the bar's 24px.
       if (normalized[a]!.key !== normalized[b]!.key) continue;
       const [one, two] = [normalized[a]!.positions, normalized[b]!.positions];
       let differing = 0;
@@ -623,10 +647,9 @@ test("no two destinations render the same glyph", async ({ page }) => {
  * matched nothing — while in production, standing on Runs, Pods, Automations or Usage gives a blank
  * active More control and an erased current row inside the sheet.
  */
-// The harness enables every experiment, so the overflow set is the full default visible order
-// past the phone bar's first four (#385: the bar derives from configured order, not a fixed set).
-const MOBILE_PRIMARY_DEFAULTS = visibleRailViews(defaultRailPreferences(), { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true })
-  .slice(0, MOBILE_PRIMARY_COUNT);
+// The harness enables every experiment, so the overflow set is every destination off the default
+// phone bar, which experiments never change (#1959).
+const MOBILE_PRIMARY_DEFAULTS = phoneBarViews(defaultRailPreferences(), { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true });
 for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULTS.includes(item.id))) {
   test(`the More control reads as current on ${current.name}`, async ({ page }) => {
     await useHarness(page, { view: current.id });
@@ -818,26 +841,32 @@ async function expectEveryPrimaryDestinationUsable(page: Page) {
     const item = items.nth(index);
     const isMoreTrigger = (await item.getAttribute("class"))?.includes("rail-more-trigger") ?? false;
     const label = ((await item.getAttribute("aria-label")) ?? (await item.innerText())).trim() || `item ${index}`;
-    // The accessible name is the ONLY name a phone destination has — the rail shows no text — and
-    // reading it just to build a diagnostic proved nothing about it. `aria-label="Destination"` on
-    // every link left the suite green with the whole bar indistinguishable to a screen reader.
-    // Checked against production's canonical label, keyed by the link's own href, for the four
-    // primary destinations; the More trigger names itself and is checked where it is asserted.
+    // The accessible name and the visible label must both SAY the destination. Reading the name just
+    // to build a diagnostic proved nothing about it: `aria-label="Destination"` on every link left
+    // the suite green with the whole bar indistinguishable to a screen reader. Checked against
+    // production's canonical name, keyed by the link's own href, for the four primary destinations;
+    // the More trigger names itself and is checked where it is asserted.
+    let name = "More";
     if (!isMoreTrigger) {
       const path = await item.evaluate((element) => new URL((element as HTMLAnchorElement).href).pathname);
       const expected = GLOBAL_VIEW_ITEMS.find((entry) => viewPath({ name: entry.id } as View) === path);
       expect(expected, `no destination is served at ${path}`).toBeDefined();
       expect(label, `the destination at ${path} must be announced as "${expected!.name}"`)
         .toMatch(new RegExp(`^${expected!.name}\\b`));
+      name = expected!.name;
     }
-    // The icon, on its own. A phone destination carries no text, so the glyph IS the affordance —
-    // and measuring the item instead let its border, and on Connections its count badge, stand in
-    // for an icon that had been erased. The More trigger is three small dots inside the same 26px
-    // box as a full icon, so it clears a lower floor.
+    // The icon, on its own: measuring the item instead let its border, and on Connections its count
+    // badge, stand in for an icon that had been erased. The More trigger is three small dots inside
+    // the same 24px box as a full icon, so it clears a lower floor.
     const isAutomations = !isMoreTrigger &&
       (await item.evaluate((element) => new URL((element as HTMLAnchorElement).href).pathname)) === "/automations";
     await expectPainted(page, item.locator("svg"), `${label} icon`,
       isMoreTrigger ? MARKS.moreTrigger : isAutomations ? MARKS.boltIcon : MARKS.icon);
+    // And the label under it (#1959), measured like a sheet row's: the tab's own words, painted.
+    const tabLabel = item.locator(".rail-tab-label");
+    await expect(tabLabel, `the tab at "${label}" must be labelled "${name}"`).toHaveText(name);
+    await expectPlainText(tabLabel, `${name} tab label`);
+    await expectPainted(page, tabLabel, `${name} tab label`, TAB_LABEL_MARKS[name]!);
     await expectHittable(item, label);
   }
 }

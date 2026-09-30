@@ -1,8 +1,8 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Rail } from "../components/Rail.js";
 import { installMobileViewportFallback } from "../mobile-viewport.js";
-import type { View } from "../navigation.js";
+import { viewTitle, type View } from "../navigation.js";
 import "../styles.css";
 
 /**
@@ -101,10 +101,10 @@ declare global {
  * matching nothing in a fixture whose `<main>` is empty. The real Header needs the store and a live
  * control plane; its structural shape on a phone does not, and the shape is what a selector sees.
  */
-function Topbar() {
+function Topbar({ view }: { view: View }) {
   return (
     <header className="topbar">
-      <h1>Inbox</h1>
+      <h1>{viewTitle(view)}</h1>
       <div className="topbar-actions topbar-mobile-controls">
         {/* The instance switcher only, because that is what production renders here since Settings
             moved into the rail's More sheet (#458) — and class-for-class rather than approximately:
@@ -138,7 +138,9 @@ function Harness() {
   // active More trigger and the active overflow row — both real production states, reached by
   // visiting Runs, Pods, Automations or Usage — are never rendered, and a rule erasing them
   // matches nothing here.
-  const view = { name: query.get("view") ?? "inbox" } as View;
+  // Navigating moves it, as production's router does, so what a tap leaves behind on the NEXT page
+  // (a ring, a hover fill, a stale current tab) is rendered here too (#1959).
+  const [view, setView] = useState(() => ({ name: query.get("view") ?? "inbox" } as View));
   // How much the visual viewport is ALREADY occluded when the fallback installs. The fallback
   // calls `apply()` synchronously for exactly this case — a page loaded while the keyboard is
   // already open fires no resize and no scroll — and with the fixture always starting at full
@@ -232,10 +234,13 @@ function Harness() {
         onlineConnections={connections}
         // Recorded, not discarded. With a no-op the suite proved a destination could be tapped and
         // nothing about where the tap went: pointing every primary link at Inbox left it green.
-        onNavigate={(destination) => { window.navigations.push(destination.name); }}
+        onNavigate={(destination) => {
+          window.navigations.push(destination.name);
+          setView(destination);
+        }}
       />
       <main className="main">
-        <Topbar />
+        <Topbar view={view} />
         {/* Production's `<main>` is never just a header; every view renders a `.main-body` under
             it. A fixture that omits it is distinguishable by `.app:has(.main-body)`. */}
         <div className="main-body">
