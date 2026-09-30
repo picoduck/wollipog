@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { RunnerView } from "@wollipog/protocol";
 import {
   machineSkillAdoptionRecoveryRequirement,
@@ -39,6 +39,8 @@ import { useAccessibleMenu } from "./interactions.js";
 import { useIsMobile } from "./useIsMobile.js";
 
 type Candidate = MachineSkillDiscovery["candidates"][number];
+/** Runs one machine request and counts it while it runs (see `machineRequests`). */
+export type MachineRequestTracker = <T>(request: () => Promise<T>) => Promise<T>;
 type Outcome = { tone: "success" | "warning"; title?: string; text: string };
 
 /**
@@ -89,6 +91,19 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
   const [step, setStep] = useState<"list" | "review">("list");
   const [confirmingAdoption, setConfirmingAdoption] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
+  /** Refreshing the page and the folders after an adoption: the dialog stays locked meanwhile. */
+  const [settling, setSettling] = useState(false);
+  /**
+   * Machine requests still running, from this dialog and the dialogs stacked on it. The server
+   * serves one machine read at a time and refuses a second, and a request keeps running after the
+   * dialog that started it is cancelled, so nothing that reads the machine starts until this is 0.
+   */
+  const [machineRequests, setMachineRequests] = useState(0);
+  const track = useCallback(async <T,>(request: () => Promise<T>): Promise<T> => {
+    setMachineRequests((count) => count + 1);
+    try { return await request(); }
+    finally { setMachineRequests((count) => count - 1); }
+  }, []);
 
   // The discovery the server holds for us, read by close and by requests that finish after it.
   const discoveryRef = useRef<MachineSkillDiscovery | null>(null);
@@ -107,7 +122,9 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
     };
   }, []);
 
-  const busy = importing || confirmingAdoption;
+  const busy = importing || confirmingAdoption || settling;
+  /** A machine request other than the folder read in progress, which queues clicks itself. */
+  const machineBusy = machineRequests > (reading ? 1 : 0);
   const close = () => {
     if (importing) return;
     closed.current = true;
@@ -117,16 +134,17 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
 
   /** List the machine's skill folders. The server serializes machine reads, so the dialog never
    * starts one while another runs: the Machine select and Scan Again wait for it. */
-  const scan = async (targetRunnerId: string, keepOutcome = false) => {
+  const scan = async (targetRunnerId: string, keepMessages = false) => {
     const previous = discoveryRef.current;
     setScanning(true); setScanError(null); setSelectedId(null); setPreview(null); setPreviewError(null);
-    setResults({}); setAccepted(false); setError(null); setStep("list");
-    if (!keepOutcome) setOutcome(null);
+    setResults({}); setAccepted(false); setStep("list");
+    // A rescan after an adoption keeps what the adoption and the page refresh reported.
+    if (!keepMessages) { setOutcome(null); setError(null); }
     setDiscovery(null);
     discoveryRef.current = null;
     try {
       if (previous) await api.discardMachineSkillDiscovery(previous.discoveryId).catch(() => {});
-      const next = await api.discoverMachineSkills(targetRunnerId);
+      const next = await track(() => api.discoverMachineSkills(targetRunnerId));
       if (closed.current) { discard(next.discoveryId); return; }
       discoveryRef.current = next;
       setDiscovery(next);
@@ -172,7 +190,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
         if (!current || closed.current) break;
         setPreview(null); setPreviewError(null); setAccepted(false); setError(null);
         try {
-          const next = await api.previewMachineSkill(current.discoveryId, id);
+          const next = await track(() => api.previewMachineSkill(current.discoveryId, id));
           if (closed.current || discoveryRef.current !== current) break;
           setResults((known) => ({ ...known, [id]: next.disposition }));
           if (wanted.current === id) { setPreview(next); wanted.current = null; }
@@ -188,7 +206,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
     }
   };
   const select = (candidate: Candidate) => {
-    if (busy) return;
+    if (busy || machineBusy) return;
     if (candidate.id !== selectedId) setOutcome(null);
     setSelectedId(candidate.id);
     setStep("review");
@@ -207,18 +225,32 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
     setImporting(true); setError(null);
     try {
       // An update with no assignments deploys nothing, so reviewing it is the acceptance.
-      await api.importMachineSkill(discovery.discoveryId, shown.previewId, needsConsent ? accepted : shown.disposition === "update");
-      setOutcome({ tone: "success", text: `Imported ${shown.candidate.name} as ${shown.disposition === "new" ? "a new skill" : "a new version"}. The folder on ${machineName} was not changed.` });
-      setPreview(null); setAccepted(false);
-      await onImported();
-      // Read the folder again: it now matches the latest version, which may offer Replace with Link.
-      if (!closed.current) void read(shown.candidate.id);
-    } catch (cause) { setError(userFacingMachineError(cause, machineName)); }
-    finally { if (!closed.current) setImporting(false); }
+      await track(() => api.importMachineSkill(discovery.discoveryId, shown.previewId, needsConsent ? accepted : shown.disposition === "update"));
+    } catch (cause) {
+      setError(userFacingMachineError(cause, machineName));
+      setImporting(false);
+      return;
+    }
+    setOutcome({ tone: "success", text: `Imported ${shown.candidate.name} as ${shown.disposition === "new" ? "a new skill" : "a new version"}. The folder on ${machineName} was not changed.` });
+    setPreview(null); setAccepted(false);
+    await refreshPage();
+    setImporting(false);
+    // Read the folder again: it now matches the latest version, which may offer Replace with Link.
+    if (!closed.current) void read(shown.candidate.id);
+  };
+
+  /** Refresh the Skills page after a change. Its failure is reported, and never undoes the change. */
+  const refreshPage = async () => {
+    try { await onImported(); }
+    catch (cause) {
+      if (!closed.current) setError(`The change was made, but the Skills page didn't refresh: ${userFacingMachineError(cause, machineName)}`);
+    }
   };
 
   const adopted = async (result: MachineSkillAdoptionResult, candidate: Candidate) => {
     const name = candidate.name;
+    // The server has consumed this review either way: nothing may act on it again.
+    setPreview(null);
     setConfirmingAdoption(false);
     if (result.status === "rejected") {
       // The server drops a rejected adoption's review, so the folder is read again.
@@ -234,9 +266,12 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
       setOutcome({ tone: "warning", title: "Replacing Stopped Partway",
         text: `${name} needs attention. Open Adoption Recovery from the ⋯ menu to restore the original folder.` });
     }
-    await onImported();
+    // Locked until the folders are read again, so the machine cannot change underneath.
+    setSettling(true);
+    await refreshPage();
+    setSettling(false);
     // The folder changed on the machine, so the list is read again.
-    if (!closed.current && compatible) void scan(runnerId, true);
+    if (!closed.current) void scan(runnerId, true);
   };
 
   const reasonId = useId();
@@ -248,15 +283,16 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
 
   const menu = <DialogMoreMenu label="More Actions" items={[{
     label: "Adoption Recovery…",
-    disabled: !recoverySupported || busy,
+    disabled: !recoverySupported || busy || machineRequests > 0,
     reason: !runner ? "Choose a machine first." : !online ? `${machineName} is offline.`
-      : !recoverySupported ? `${machineName} needs a runner update.` : undefined,
+      : !recoverySupported ? `${machineName} needs a runner update.`
+        : busy || machineRequests > 0 ? "Wait for the current machine read to finish." : undefined,
     onSelect: () => setRecoveryOpen(true),
   }]} />;
 
   const machineField = <label className="field">
     <span>Machine</span>
-    <Select label="Machine" value={runnerId || null} placeholder="Choose a Machine" disabled={scanning || reading || busy}
+    <Select label="Machine" value={runnerId || null} placeholder="Choose a Machine" disabled={scanning || reading || busy || machineBusy}
       options={runners.map((entry) => ({
         value: entry.runnerId,
         label: nameOf(entry),
@@ -276,14 +312,14 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
       <div className="skeleton-row" /><div className="skeleton-row" /><div className="skeleton-row" />
     </div>
     : scanError ? <Notice tone="danger" title="Couldn't Read Skill Folders"
-      actions={<button className="btn sm" type="button" onClick={() => void scan(runnerId)}>Retry</button>}>{scanError}</Notice>
+      actions={<button className="btn sm" type="button" disabled={busy || machineBusy} onClick={() => void scan(runnerId)}>Retry</button>}>{scanError}</Notice>
     : !discovery ? null
     : discovery.candidates.length === 0 ? <p className="skill-machine-import-note">No skill folders were found on {machineName}.</p>
     : <div className="surface" role="group" aria-label="Skill Folders">
       {discovery.candidates.map((candidate) => {
         const isSelected = candidate.id === selectedId;
         return <button key={candidate.id} type="button" className={`row row-2${isSelected ? " is-selected" : ""}`}
-          aria-current={isSelected || undefined} disabled={busy} onClick={() => select(candidate)}>
+          aria-current={isSelected || undefined} disabled={busy || machineBusy} onClick={() => select(candidate)}>
           <span className="row-body">
             <span className="row-title">{candidate.name}</span>
             <span className="row-sub skill-machine-location" title={machineSkillLocation(candidate, runner)}>{machineSkillLocation(candidate, runner)}</span>
@@ -295,7 +331,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
 
   const matchNotice = shown?.disposition === "identical" && <Notice tone="info" title={MATCHING_FOLDER_TITLE}
     actions={shown.assignmentCount > 0 && adoptionSupported
-      ? <button className="btn sm" type="button" disabled={busy} onClick={() => setConfirmingAdoption(true)}>Replace with Link…</button>
+      ? <button className="btn sm" type="button" disabled={busy || machineRequests > 0} onClick={() => setConfirmingAdoption(true)}>Replace with Link…</button>
       : undefined}>
     {shown.assignmentCount === 0
       ? `Assign ${shown.candidate.name} to an agent on ${machineName} to replace this folder with a link to the library.`
@@ -308,7 +344,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
     {outcome && <Notice tone={outcome.tone} title={outcome.title} role="status">{outcome.text}</Notice>}
     {!selected ? (!outcome && <p className="skill-machine-import-note">Choose a folder to review it.</p>)
       : previewError ? <Notice tone="danger" title="Couldn't Read This Folder"
-        actions={<button className="btn sm" type="button" onClick={() => void read(selected.id)}>Retry</button>}>{previewError}</Notice>
+        actions={<button className="btn sm" type="button" disabled={busy || machineBusy} onClick={() => void read(selected.id)}>Retry</button>}>{previewError}</Notice>
       : !shown ? <p className="skill-machine-import-note" role="status">Reading {selected.name}…</p>
       : <>
         <h3 className="skill-machine-import-title">{shown.candidate.name}</h3>
@@ -325,13 +361,13 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
 
   return <>
     <Modal title="Import from Machine" size="lg" className="skill-machine-import" onClose={close} headerActions={menu}
-      back={phone && step === "review" && compatible ? { label: "Back to Skill Folders", onBack: () => setStep("list") } : undefined}
+      back={phone && step === "review" ? { label: "Back to Skill Folders", onBack: () => setStep("list") } : undefined}
       footer={<>
         {needsConsent && shown && <ReviewConsent label={deployToAssignmentsConsent(shown.assignmentCount)} checked={accepted} disabled={importing} onChange={setAccepted} />}
         {primaryReason && <p className="skill-machine-import-reason" id={reasonId}>{primaryReason}</p>}
         <button className="btn" type="button" disabled={importing} onClick={close}>Cancel</button>
         <BusyButton className="btn primary" busy={importing} progress={`Importing ${shown?.candidate.name ?? "the skill"}…`}
-          disabled={!importable || reading || confirmingAdoption || (needsConsent && !accepted)}
+          disabled={!importable || reading || confirmingAdoption || settling || (needsConsent && !accepted)}
           aria-describedby={primaryReason ? reasonId : undefined} onClick={() => void submit()}>
           {machineSkillImportLabel(shown?.disposition)}
         </BusyButton>
@@ -349,7 +385,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
             <div className="skill-machine-import-head">
               <h3 className="skill-machine-import-title">Skill Folders</h3>
               {compatible && <button type="button" className="icon-btn sm" aria-label="Scan Again" title="Scan Again"
-                disabled={scanning || reading || busy} onClick={() => void scan(runnerId)}><RefreshIcon /></button>}
+                disabled={scanning || reading || busy || machineBusy} onClick={() => void scan(runnerId)}><RefreshIcon /></button>}
             </div>
             {folderList}
           </div>}
@@ -357,10 +393,10 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
         </>}
     </Modal>
     {confirmingAdoption && discovery && shown && runner && <AdoptionConfirmation discovery={discovery} preview={shown}
-      runner={runner} machineName={machineName} onCancel={() => setConfirmingAdoption(false)}
+      runner={runner} machineName={machineName} track={track} onCancel={() => setConfirmingAdoption(false)}
       onDone={(result) => adopted(result, shown.candidate)} />}
-    {recoveryOpen && runner && <SkillAdoptionRecoveryDialog runner={runner} machineName={machineName}
-      onClose={() => setRecoveryOpen(false)} onRestored={onImported} />}
+    {recoveryOpen && runner && <SkillAdoptionRecoveryDialog runner={runner} machineName={machineName} track={track}
+      onClose={() => setRecoveryOpen(false)} onRestored={refreshPage} />}
   </>;
 }
 
@@ -374,7 +410,16 @@ function DialogMoreMenu({ label, items }: {
   return <>
     <button ref={menu.triggerRef} type="button" className="icon-btn" title={label} aria-label={label}
       aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menu.menuId : undefined}
-      onClick={menu.toggle} onKeyDown={menu.onTriggerKeyDown}>
+      onClick={menu.toggle} onKeyDown={(event) => {
+        // With every item disabled, focus stays here; Escape still belongs to the open menu.
+        if (open && event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          menu.close(true);
+          return;
+        }
+        menu.onTriggerKeyDown(event);
+      }}>
       <MoreHorizontalIcon />
     </button>
     {open && <MenuSurface surfaceRef={menu.menuRef} anchor={{ trigger: menu.triggerRef }} id={menu.menuId} label={label}
@@ -395,12 +440,14 @@ function DialogMoreMenu({ label, items }: {
  * opens and its findings are the body; confirming sends both acceptances the server requires, the
  * explicit confirmation and, when the check named other readers, the shared-folder impact.
  */
-function AdoptionConfirmation({ discovery, preview, runner, machineName, onCancel, onDone }: {
+function AdoptionConfirmation({ discovery, preview, runner, machineName, track, onCancel, onDone }: {
   discovery: MachineSkillDiscovery;
   preview: MachineSkillPreview;
   runner: RunnerView;
   machineName: string;
   onCancel: () => void;
+  /** Counts the request in the parent, which stays locked until it settles even if this closes. */
+  track: MachineRequestTracker;
   onDone: (result: MachineSkillAdoptionResult) => Promise<void>;
 }) {
   const api = useApi();
@@ -416,7 +463,7 @@ function AdoptionConfirmation({ discovery, preview, runner, machineName, onCance
   const check = async () => {
     setChecking(true); setError(null); setPreflight(null);
     try {
-      const result = await api.preflightMachineSkillAdoption(discovery.discoveryId, preview.previewId);
+      const result = await track(() => api.preflightMachineSkillAdoption(discovery.discoveryId, preview.previewId));
       if (!closed.current) setPreflight(result);
     } catch (cause) { if (!closed.current) setError(userFacingMachineError(cause, machineName)); }
     finally { if (!closed.current) setChecking(false); }
@@ -445,9 +492,10 @@ function AdoptionConfirmation({ discovery, preview, runner, machineName, onCance
     if (!ready || !preflight?.adoptionToken) return;
     setAdopting(true); setError(null);
     try {
-      const result = await api.adoptMachineSkill(discovery.discoveryId, {
-        previewId: preview.previewId, adoptionToken: preflight.adoptionToken, acceptSharedImpact: preflight.sharedReaders.length > 0,
-      });
+      const token = preflight.adoptionToken;
+      const result = await track(() => api.adoptMachineSkill(discovery.discoveryId, {
+        previewId: preview.previewId, adoptionToken: token, acceptSharedImpact: preflight.sharedReaders.length > 0,
+      }));
       await onDone(result);
     } catch (cause) {
       if (!closed.current) { setError(userFacingMachineError(cause, machineName)); setAdopting(false); }

@@ -348,3 +348,38 @@ test("Adoption Recovery is in the ⋯ menu, and Restore Original asks before res
   await recovery.getByRole("button", { name: "Done", exact: true }).click();
   await expect(dialog).toBeVisible();
 });
+
+test("a restore refusal phrased with protocol numbers is shown in the dialog's words", async ({ page }) => {
+  await routeMachine(page, [], {});
+  const operationId = "123e4567-e89b-42d3-a456-426614174000";
+  await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) => route.fulfill({ json: { truncated: false, operations: [{
+    operationId, backupDirectory: ".codex/skills/.x", sourceDirectory: ".codex/skills", name: "code-review", digest: "a",
+    state: "managed_linked", detail: "The managed link is active and the original is preserved." }] } }));
+  await page.route(`**/api/runners/runner-1/skill-adoption-recovery/${operationId}/restore`, (route) => route.fulfill({
+    status: 409, json: { error: "Machine skill adoption recovery requires runner protocol v116 or newer; this runner is v115." } }));
+  await page.goto("/skills-removals-e2e.html");
+  const dialog = await openImport(page);
+  await dialog.getByRole("button", { name: "More Actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Adoption Recovery…" }).click();
+  await page.getByRole("dialog", { name: "Adoption Recovery" }).getByRole("button", { name: "Restore Original…" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Restore Original" });
+  await confirmation.getByRole("button", { name: "Restore Original", exact: true }).click();
+  await expect(confirmation.getByText("Build Machine needs a runner update to do this.")).toBeVisible();
+  await expectNoProtocolWords(page);
+});
+
+test("Escape closes an open ⋯ menu whose only item is unavailable, and keeps the dialog", async ({ page }) => {
+  await routeMachine(page, [codeReview], { opaque: previewOf(codeReview, "update", 2) });
+  await page.goto("/skills-removals-e2e.html?legacyRecovery=1");
+  const dialog = await openImport(page);
+  const row = dialog.getByRole("button", { name: /^code-review/u });
+  await row.click();
+  await expect(dialog.locator(".facts")).toContainText("ResultNew Version");
+  await dialog.getByRole("button", { name: "More Actions", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Adoption Recovery…" })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  await expect(row).toHaveAttribute("aria-current", "true");
+  await expect(dialog.getByRole("button", { name: "More Actions", exact: true })).toBeFocused();
+});

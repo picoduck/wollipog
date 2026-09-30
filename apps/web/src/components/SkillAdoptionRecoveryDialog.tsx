@@ -6,6 +6,7 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { machineSkillLocation, userFacingMachineError } from "../skill-machine.js";
+import type { MachineRequestTracker } from "./SkillMachineImportDialog.js";
 
 /** A journal's state in words (§17.2): what a person sees, not the runner's enum. */
 export const RECOVERY_STATE_LABEL: Record<SkillAdoptionRecoveryOperation["state"], string> = {
@@ -24,9 +25,11 @@ const restorable = (operation: SkillAdoptionRecoveryOperation) =>
  * with links, stacked over Import from Machine. Restoring one asks for a non-destructive
  * confirmation; the request and its server-side confirmation are unchanged.
  */
-export function SkillAdoptionRecoveryDialog({ runner, machineName, onClose, onRestored }: {
+export function SkillAdoptionRecoveryDialog({ runner, machineName, track, onClose, onRestored }: {
   runner: RunnerView;
   machineName: string;
+  /** The import dialog's machine-request tracker: its reads wait until these settle. */
+  track: MachineRequestTracker;
   onClose: () => void;
   onRestored: () => Promise<void>;
 }) {
@@ -42,7 +45,7 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, onClose, onRe
   const inspect = async () => {
     setLoading(true); setError(null);
     try {
-      const next = await api.inspectMachineSkillRecovery(runner.runnerId);
+      const next = await track(() => api.inspectMachineSkillRecovery(runner.runnerId));
       if (!closed.current) setRecovery(next);
     } catch (cause) {
       if (!closed.current) { setRecovery(null); setError(userFacingMachineError(cause, machineName)); }
@@ -72,7 +75,13 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, onClose, onRe
       confirmLabel: "Restore Original",
       progress: "Restoring the original folder…",
       onConfirm: async () => {
-        const result = await api.restoreMachineSkillRecovery(runner.runnerId, operation.operationId);
+        let result: Awaited<ReturnType<typeof api.restoreMachineSkillRecovery>>;
+        try {
+          result = await track(() => api.restoreMachineSkillRecovery(runner.runnerId, operation.operationId));
+        } catch (cause) {
+          // The confirmation shows this text as is, so it is put in the dialog's words first (§17.2).
+          throw new Error(userFacingMachineError(cause, machineName));
+        }
         if (result.status === "restored" || result.status === "not_needed") {
           restored = result.status === "restored";
           setStatus({ tone: "success", text: restored
@@ -81,7 +90,9 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, onClose, onRe
           return;
         }
         void inspect();
-        throw new Error(result.error ?? "Restore stopped safely. Check the journal below before trying again.");
+        throw new Error(result.error
+          ? userFacingMachineError(new Error(result.error), machineName)
+          : "Restore stopped safely. Check the journal below before trying again.");
       },
     });
     if (!confirmed) return;
