@@ -23,6 +23,8 @@ export interface DesktopWindow {
   platform(): string;
   /** Null follows the operating system. */
   setTheme(theme: ResolvedTheme | null): Promise<void>;
+  /** The window's theme: the one set, or with none set the operating system's (null if unknown). */
+  theme(): Promise<ResolvedTheme | null>;
   setTitle(title: string): Promise<void>;
 }
 
@@ -31,6 +33,7 @@ const nativeWindow: DesktopWindow = {
   isTauri,
   platform: () => typeof navigator === "undefined" ? "" : navigator.platform,
   setTheme: (theme) => getCurrentWindow().setTheme(theme),
+  theme: () => getCurrentWindow().theme(),
   setTitle: (title) => getCurrentWindow().setTitle(title),
 };
 
@@ -71,6 +74,21 @@ export function nativeWindowTheme(preference: ThemePreference, resolved: Resolve
 }
 
 /**
+ * Ask the native window for `theme`, where null follows the operating system.
+ *
+ * On Linux, null alone does not: tao seeds GTK's dark preference from the desktop portal when the
+ * window opens, but clearing the theme sets that preference to light, so a dark desktop's window
+ * would turn light. Once nothing is set, though, the window's theme is the portal's, so it is read
+ * back and named. The portal still moves GTK's preference when the desktop changes theme.
+ */
+export async function applyNativeWindowTheme(theme: ResolvedTheme | null, desktop: DesktopWindow = nativeWindow, current: () => boolean = () => true): Promise<void> {
+  await desktop.setTheme(theme);
+  if (theme !== null || !/linux/i.test(desktop.platform())) return;
+  const system = await desktop.theme();
+  if (system && current()) await desktop.setTheme(system);
+}
+
+/**
  * Keep the native window's theme, and so its title bar on Windows and Linux, on the app's.
  *
  * A window that cannot follow is left as it is: a Linux window manager that draws its own title bar
@@ -81,7 +99,10 @@ export function useNativeWindowTheme(preference: ThemePreference, resolved: Reso
   const theme = nativeWindowTheme(preference, resolved);
   useEffect(() => {
     if (!desktop.isTauri()) return;
-    desktop.setTheme(theme).catch(() => {});
+    // A later choice supersedes this one: its Linux read-back must not name a stale system theme.
+    let current = true;
+    applyNativeWindowTheme(theme, desktop, () => current).catch(() => {});
+    return () => { current = false; };
   }, [desktop, theme]);
 }
 

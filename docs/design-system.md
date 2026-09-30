@@ -618,7 +618,8 @@ Rules
   not a control, drags the window (`data-tauri-drag-region`); buttons, links, inputs, tabs and other
   focusable controls in them stay clickable. Windows and Linux keep their native title bar, which
   follows the resolved theme (Tauri's `setTheme`; a System preference passes none, so the window
-  follows the operating system). The browser build is unchanged. #1979.
+  follows the operating system, and on Linux, where tao reads none as light, the desktop portal's
+  theme is then read back and named). The browser build is unchanged. #1979.
 - **Window title.** Every route sets `document.title` to "<Page> – Wollipog", with the page title
   from `viewTitle` ("Agent Skills – Wollipog"; a Session, Multi-Agent Run or Pod by its own title),
   and the desktop app copies it to the native window for the taskbar and window switcher.

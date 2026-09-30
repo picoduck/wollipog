@@ -54,12 +54,15 @@ afterEach(() => {
   domWindow.document.title = "";
 });
 
-function fakeWindow(options: { tauri?: boolean; platform?: string } = {}) {
+function fakeWindow(options: { tauri?: boolean; platform?: string; system?: ResolvedTheme | null } = {}) {
   const calls: Array<[string, unknown]> = [];
+  let set: ResolvedTheme | null = null;
   const desktop: DesktopWindow = {
     isTauri: () => options.tauri ?? true,
     platform: () => options.platform ?? "MacIntel",
-    setTheme: async (theme) => { calls.push(["setTheme", theme]); },
+    setTheme: async (theme) => { calls.push(["setTheme", theme]); set = theme; },
+    // As tao answers: the theme set, or with none set the desktop portal's.
+    theme: async () => { calls.push(["theme", null]); return set ?? options.system ?? null; },
     setTitle: async (title) => { calls.push(["setTitle", title]); },
   };
   return { desktop, calls };
@@ -178,6 +181,43 @@ test("switching the theme in Settings switches the native window's, without a re
     // system by itself.
     await view.rerender(<ThemeProbe preference="system" resolved="light" desktop={desktop} />);
     assert.deepEqual(calls, [["setTheme", "dark"], ["setTheme", "light"], ["setTheme", null]]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("on Linux a System preference names the desktop's theme, which clearing alone would turn light", async () => {
+  // tao clears GTK's dark preference for "no theme", so a dark GNOME desktop's title bar would go
+  // light; with nothing set the window's theme is the portal's, which is read back and named.
+  const { desktop, calls } = fakeWindow({ platform: "Linux x86_64", system: "dark" });
+  const view = await mount(<ThemeProbe preference="light" resolved="light" desktop={desktop} />);
+  try {
+    await view.rerender(<ThemeProbe preference="system" resolved="dark" desktop={desktop} />);
+    assert.deepEqual(calls, [["setTheme", "light"], ["setTheme", null], ["theme", null], ["setTheme", "dark"]]);
+  } finally {
+    await view.unmount();
+  }
+
+  // Without a portal to ask, tao has no answer to give, and the cleared preference stands.
+  const unknown = fakeWindow({ platform: "Linux x86_64", system: null });
+  const bare = await mount(<ThemeProbe preference="system" resolved="dark" desktop={unknown.desktop} />);
+  await bare.unmount();
+  assert.deepEqual(unknown.calls, [["setTheme", null], ["theme", null]]);
+});
+
+test("a choice made while Linux's read-back is in flight is not overwritten by it", async () => {
+  let answer!: (theme: ResolvedTheme) => void;
+  const calls: Array<[string, unknown]> = [];
+  const desktop: DesktopWindow = {
+    ...fakeWindow({ platform: "Linux x86_64" }).desktop,
+    setTheme: async (theme) => { calls.push(["setTheme", theme]); },
+    theme: () => new Promise<ResolvedTheme>((resolve) => { answer = resolve; }),
+  };
+  const view = await mount(<ThemeProbe preference="system" resolved="dark" desktop={desktop} />);
+  try {
+    await view.rerender(<ThemeProbe preference="light" resolved="light" desktop={desktop} />);
+    await act(async () => answer("dark"));
+    assert.deepEqual(calls, [["setTheme", null], ["setTheme", "light"]]);
   } finally {
     await view.unmount();
   }
