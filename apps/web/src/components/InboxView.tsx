@@ -64,6 +64,7 @@ import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
 import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
 import { ProjectSetupSuggestion } from "./WorktreeSetupNotice.js";
+import { CountBadge } from "./CountBadge.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -83,6 +84,14 @@ function SessionsToolbarOption({ icon, label, count }: {
       )}
     </span>
   );
+}
+
+/** A tab's attention counts in words ("2 Blocked, 1 Stalled"), naming only the nonzero ones. */
+function attentionWords({ blockedCount, stalledCount }: Pick<InboxSplit, "blockedCount" | "stalledCount">): string {
+  return [
+    blockedCount > 0 ? `${blockedCount} Blocked` : "",
+    stalledCount > 0 ? `${stalledCount} Stalled` : "",
+  ].filter(Boolean).join(", ");
 }
 
 export function filterInboxSplitsForReminderMode(
@@ -1297,6 +1306,7 @@ export function InboxView({
               const durableProjectId = split.project?.kind === "durable" ? split.project.project.id : undefined;
               const pinned = split.key !== null && (pinnedProjects.has(split.key) ||
                 (split.project?.kind === "durable" && split.project.legacyKeys.some((key) => pinnedProjects.has(key))));
+              const attention = attentionWords(split);
               return (
                 <div className={`inbox-tab-group${hasMenu ? " has-menu" : ""}`} role="presentation" key={split.key ?? "all"}>
                   <button
@@ -1317,17 +1327,10 @@ export function InboxView({
                     {split.name}
                     <span className="count">{split.count}</span>
                     {/* Attention counts are count badges (§10.1, §11.4): amber for blocked, red for
-                        stalled; the accessible name still says which. */}
-                    {split.blockedCount > 0 && (
-                      <span className="count-badge" aria-label={`${split.blockedCount} Blocked`}>
-                        {split.blockedCount}
-                      </span>
-                    )}
-                    {split.stalledCount > 0 && (
-                      <span className="count-badge danger" aria-label={`${split.stalledCount} Stalled`}>
-                        {split.stalledCount}
-                      </span>
-                    )}
+                        stalled. The badges are aria-hidden, so the tab's name says them in words. */}
+                    <CountBadge count={split.blockedCount} />
+                    <CountBadge count={split.stalledCount} tone="danger" />
+                    {attention && <span className="sr-only">, {attention}</span>}
                   </button>
                   {hasMenu && (
                     <ProjectSplitMenu

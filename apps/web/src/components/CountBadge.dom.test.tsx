@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -48,6 +51,14 @@ test("on an icon the badge adds on-icon, in either tone", () => {
 test("an owner class is kept alongside the badge's own", () => {
   assert.deepEqual(rendered(renderToStaticMarkup(<CountBadge count={2} className="rail-count" />)).classes,
     ["count-badge", "rail-count"]);
+});
+
+test("no component draws a count badge by hand (§11.4)", () => {
+  const components = fileURLToPath(new URL(".", import.meta.url));
+  const offenders = readdirSync(components, { recursive: true, encoding: "utf8" })
+    .filter((file) => /\.tsx?$/.test(file) && !/\.test\.tsx?$/.test(file) && basename(file) !== "CountBadge.tsx")
+    .filter((file) => readFileSync(join(components, file), "utf8").includes("count-badge"));
+  assert.deepEqual(offenders, []);
 });
 
 test("zero, a negative count and NaN render nothing, so zero is never shown in colour", () => {

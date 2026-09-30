@@ -476,6 +476,90 @@ test("Active and Snoozed badges follow the selected Project split and live remin
 
 });
 
+/** A tab's accessible name as a screen reader builds it: its text, skipping aria-hidden subtrees. */
+function accessibleText(node: Node): string {
+  if (node.nodeType === domWindow.Node.TEXT_NODE) return node.textContent ?? "";
+  if ((node as Element).getAttribute?.("aria-hidden") === "true") return "";
+  return [...node.childNodes].map(accessibleText).join("");
+}
+
+test("group tabs draw blocked and stalled counts as aria-hidden badges and name them in words (#2031)", async () => {
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-attention-tabs-test",
+    runtimeKey: "inbox-attention-tabs-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const project = (id: string, name: string, count: number): ProjectView => ({
+    id,
+    name,
+    hidden: false,
+    locations: [],
+    activeSessionCount: count,
+    unarchivedSessionCount: count,
+    totalSessionCount: count,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const alpha = project("alpha", "Alpha", 3);
+  const beta = project("beta", "Beta", 1);
+  const now = Date.now();
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false,
+        boundedDelivery: false,
+        paginatedSessionHistory: false,
+        projects: true,
+      },
+      runners: [],
+      boxes: [],
+      sessions: [
+        // Blocked is heartbeat-busy too, so these are recent enough not to count as stalled.
+        session("alpha-blocked-1", now, { projectId: alpha.id, status: "input_required" }),
+        session("alpha-blocked-2", now - 1, { projectId: alpha.id, status: "input_required" }),
+        // Running with nothing heard since the epoch: past the stall threshold at snapshot time.
+        session("alpha-stalled", 1, { projectId: alpha.id, status: "running", updatedAt: 1 }),
+        session("beta-idle", 10, { projectId: beta.id }),
+      ],
+      projects: [alpha, beta],
+      runs: [],
+      pods: [],
+    });
+  });
+  const tab = (name: string) => [...container.querySelectorAll<HTMLElement>(".inbox-tabs .tab")]
+    .find((candidate) => candidate.textContent?.startsWith(name))!;
+
+  const alphaTab = tab("Alpha");
+  const badges = [...alphaTab.querySelectorAll(".count-badge")].map((badge) => ({
+    classes: badge.className,
+    text: badge.textContent,
+    hidden: badge.getAttribute("aria-hidden"),
+    label: badge.getAttribute("aria-label"),
+  }));
+  assert.deepEqual(badges, [
+    { classes: "count-badge", text: "2", hidden: "true", label: null },
+    { classes: "count-badge danger", text: "1", hidden: "true", label: null },
+  ]);
+  assert.equal(accessibleText(alphaTab), "Alpha3, 2 Blocked, 1 Stalled");
+
+  const betaTab = tab("Beta");
+  assertNoDomNode(betaTab.querySelector(".count-badge"), "a tab with nothing blocked or stalled draws no badge");
+  assert.equal(accessibleText(betaTab), "Beta1");
+  assert.doesNotMatch(accessibleText(betaTab), /Blocked|Stalled/);
+});
+
 test("the tab the URL names survives widening from a phone to a desktop that remembered another", async () => {
   // Widening restores the desktop's remembered Inbox state, which can name another tab than the URL
   // does; the URL is what Back and reload return to, so the visible tab has to follow it (§10.1).
