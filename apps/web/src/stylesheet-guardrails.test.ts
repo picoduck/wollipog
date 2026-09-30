@@ -779,17 +779,44 @@ export function targetsIcon(selectorList: string): boolean {
   return selectorSubjects(selectorList).some(isIconSubject);
 }
 
+/**
+ * The style rule a declaration belongs to, its selector with native nesting resolved, and the
+ * at-rules between them.
+ *
+ * `&` stands for the parent rule's selector, and a nested member without one is relative to it, so
+ * `.app-icon { &:hover { … } }` and `svg { @media … { … } }` both size an icon.
+ */
+function declarationTarget(decl: postcss.Declaration): { rule: postcss.Rule; selector: string; conditions: string[] } | null {
+  const rules: postcss.Rule[] = [];
+  const conditions: string[] = [];
+  for (let node = decl.parent as postcss.Node | undefined; node; node = node.parent as postcss.Node | undefined) {
+    if (node.type === "rule") rules.unshift(node as postcss.Rule);
+    else if (node.type === "atrule" && rules.length === 0) {
+      conditions.unshift(`@${(node as postcss.AtRule).name} ${(node as postcss.AtRule).params}`.trim());
+    }
+  }
+  if (rules.length === 0) return null;
+  const selector = rules.map((rule) => rule.selector).reduce((parent, nested) => topLevelSelectorMembers(nested)
+    .map((member) => member.includes("&") ? member.replaceAll("&", `:is(${parent})`) : `:is(${parent}) ${member}`)
+    .join(", "));
+  return { rule: rules.at(-1)!, selector, conditions };
+}
+
 /** Every width or height declaration on an icon whose px literals are off the scale, by rule. */
 export function offScaleIconSizes(sheet: postcss.Root): { rule: string; declaration: string }[] {
   const found: { rule: string; declaration: string }[] = [];
   sheet.walkDecls((decl) => {
-    const rule = decl.parent;
-    if (rule?.type !== "rule" || !ICON_SIZE_PROPERTIES.test(decl.prop.toLowerCase())) return;
-    if (!targetsIcon((rule as postcss.Rule).selector)) return;
+    if (!ICON_SIZE_PROPERTIES.test(decl.prop.toLowerCase())) return;
+    const target = declarationTarget(decl);
+    if (!target || !targetsIcon(target.selector)) return;
     // Signed and exponent forms too: `calc(var(--icon) + -1px)` and `1.8e1px` are off the scale.
     const literals = [...stripComments(decl.value).matchAll(/(?<![\w.-])([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)px\b/gi)];
     if (literals.some(([, px]) => !ICON_SCALE_PX.has(Number(px)))) {
-      found.push({ rule: contextKey(rule as postcss.Rule), declaration: `${decl.prop}: ${decl.value}` });
+      const declaration = `${decl.prop}: ${decl.value}`;
+      found.push({
+        rule: contextKey(target.rule),
+        declaration: target.conditions.length ? `${target.conditions.join(" / ")} { ${declaration} }` : declaration,
+      });
     }
   });
   return found;
@@ -1831,7 +1858,9 @@ test("an icon sized off the scale fails, naming the rule and §18, and a stale e
     ".row:has(:is(svg, .app-icon)) { width: 36px; }\n.x[data-label=\".app-icon\"] { width: 36px; }\n" +
     ".x:is(.a, .b):not(.app-icon) { height: 36px; }\n.x svg:hover { width: var(--icon-sm); }\n" +
     // Strings and escapes do not end a compound or a member early.
-    "svg[data-label=\"6\\\" screen\"] .label { width: 18px; }\n.a[title=\"x, .app-icon\"] { width: 36px; }";
+    "svg[data-label=\"6\\\" screen\"] .label { width: 18px; }\n.a[title=\"x, .app-icon\"] { width: 36px; }\n" +
+    // Nested rules whose subject is not the icon: a descendant of it, or an ancestor-qualified parent.
+    ".app-icon { & .label { width: 36px; } }\n.bar { .app-icon & { width: 36px; } }";
   assert.deepEqual(sizesOf(clean), []);
   assert.doesNotThrow(() => assertIconSizesOnScale(sizesOf(clean), new Map()));
   for (const [rule, key] of [
@@ -1852,6 +1881,12 @@ test("an icon sized off the scale fails, naming the rule and §18, and a stale e
     [".app-icon/* glyph */:hover { width: 18px; }", "|.app-icon/* glyph */:hover"],
     [".row[data-label=\"6\\\" screen\"] svg { width: 18px; }", "|.row[data-label=\"6\\\" screen\"] svg"],
     [".f .app\\2d icon { height: 18px; }", "|.f .app\\2d icon"],
+    // Native nesting: `&` is the parent, a member without it is relative, and an at-rule between
+    // the declaration and its rule does not hide it.
+    [".app-icon { &:hover { width: 18px; } }", ".app-icon|&:hover"],
+    [".x { svg { height: 15px; } }", ".x|svg"],
+    ["svg { @media (max-width: 760px) { width: 18px; } }", "|svg"],
+    [".g { .h &, & > svg { max-width: 26px; } }", ".g|.h &,&>svg"],
   ] as const) {
     const found = sizesOf(`${clean}\n${rule}`);
     assert.deepEqual(found.map((entry) => entry.rule), [key], rule);
