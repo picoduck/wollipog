@@ -1092,6 +1092,17 @@ app.register(async (instance) => {
     terminate: () => socket.terminate(),
   };
 
+  let runtimeAttentionBatch: ReturnType<SessionsService["beginRunnerAttentionBatch"]> | undefined;
+  let runtimeAttentionFrames = 0;
+  let runtimeAttentionStarted = 0;
+  const currentSocket = () => Boolean(runnerId && socket.readyState === 1 &&
+    hub.isCurrentRunnerSocket(runnerId, runnerClient) && credentialId &&
+    db.isRunnerCredentialActive(runnerId, credentialId));
+  const flushRuntimeAttention = async () => {
+    if (!runtimeAttentionBatch || !runnerId) return;
+    await svc.flushRunnerAttention(runnerId, currentSocket);
+    runtimeAttentionBatch = undefined;
+  };
   const handleRunnerFrame = async (msg: RunnerToControlPlane) => {
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) or a
     // transient persistence error must not escape this listener: an uncaught throw here becomes a
@@ -1111,6 +1122,14 @@ app.register(async (instance) => {
         socket.close(1008, "runner credential is no longer active");
         return;
       }
+    }
+
+    if (runtimeAttentionBatch && !runnerFrameBypassesInventory(msg.type) &&
+        (msg.type !== "session_runtime_updated" || runtimeAttentionFrames >= 1024 ||
+          performance.now() - runtimeAttentionStarted >= 1000)) {
+      await flushRuntimeAttention();
+      // The socket may have been replaced while its campaign publications yielded.
+      if (msg.type !== "register" && !currentSocket()) return;
     }
 
     switch (msg.type) {
@@ -1208,9 +1227,7 @@ app.register(async (instance) => {
         // reconcile for pre-Phase-2 runners.
         if (msg.sessionSnapshots) {
           const completed = await svc.hydrateRunnerSessionsCooperatively(runnerId, msg.sessionSnapshots, {
-            isCurrent: () => Boolean(runnerId && socket.readyState === 1 &&
-              hub.isCurrentRunnerSocket(runnerId, runnerClient) && credentialId &&
-              db.isRunnerCredentialActive(runnerId, credentialId)),
+            isCurrent: currentSocket,
           });
           if (!completed) return;
         }
@@ -1300,7 +1317,13 @@ app.register(async (instance) => {
       case "session_runtime_updated":
         {
           const startedAt = performance.now();
-          svc.applySessionRuntimeUpdate(runnerId!, msg.snapshot);
+          if (!runtimeAttentionBatch) {
+            runtimeAttentionBatch = svc.beginRunnerAttentionBatch(runnerId!);
+            runtimeAttentionFrames = 0;
+            runtimeAttentionStarted = performance.now();
+          }
+          runtimeAttentionFrames++;
+          svc.applySessionRuntimeUpdate(runnerId!, msg.snapshot, runtimeAttentionBatch);
           const durationMs = performance.now() - startedAt;
           if (durationMs >= 250) {
             app.log.warn({
@@ -1654,7 +1677,7 @@ app.register(async (instance) => {
     app.log.warn({ event: "runner_frame_queue_closed", entryPoint: "runner_socket", runnerId },
       "runner replay exceeded its bounded queue or failed");
     socket.terminate();
-  });
+  }, undefined, flushRuntimeAttention);
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());
     if (!msg) return;

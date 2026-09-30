@@ -1,8 +1,41 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RunnerFrameQueue, runnerFrameBypassesInventory } from "./runner-frame-queue.js";
+import { MAX_RUNNER_CLIENT_MESSAGE_BYTES } from "./runner-channel.js";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("two maximum-sized legitimate frames fit behind a held registration", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const seen: number[] = [];
+  const queue = new RunnerFrameQueue<number>(async (n) => { seen.push(n); if (n === 0) await held; },
+    () => assert.fail("legitimate two-frame replay must fit"));
+  queue.enqueue(0, 1);
+  queue.enqueue(1, MAX_RUNNER_CLIENT_MESSAGE_BYTES);
+  queue.enqueue(2, MAX_RUNNER_CLIENT_MESSAGE_BYTES);
+  release();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.deepEqual(seen, [0, 1, 2]);
+});
+
+test("a frame arriving while attention flush yields is not stranded", async () => {
+  const seen: number[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let flushing = false;
+  let began!: () => void;
+  const started = new Promise<void>((resolve) => { began = resolve; });
+  const queue = new RunnerFrameQueue<number>(async (n) => { seen.push(n); }, () => assert.fail("queue failed"), undefined,
+    async () => { if (!flushing) { flushing = true; began(); await held; } });
+  queue.enqueue(1, 1);
+  await started;
+  assert.equal(flushing, true);
+  queue.enqueue(2, 1);
+  release();
+  for (let i = 0; i < 4; i++) await tick();
+  assert.deepEqual(seen, [1, 2]);
+});
 
 test("only liveness, credential handshakes, and correlated replies bypass inventory ordering", () => {
   for (const type of ["heartbeat", "agent_control_credential", "git_result", "session_history_page_result"])

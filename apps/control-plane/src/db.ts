@@ -12434,7 +12434,8 @@ export class ControlPlaneDb {
    * comparisons, not durable snapshot identities; never expose the pending-request contents. */
   private sessionReconciliationRows(kind: "runner" | "session", id: string): Array<{ id: string }> {
     return this.stmt(`SELECT id,status,updated_at,pending_approval,model,effort,service_tier,
-      permission_mode,archived,event_epoch FROM sessions WHERE ${kind === "runner" ? "runner_id" : "id"}=?`)
+      permission_mode,archived,event_epoch,worktree_path,worktrees,workspace_path,use_worktree,execution_target
+      FROM sessions WHERE ${kind === "runner" ? "runner_id" : "id"}=?`)
       .all(id) as Array<{ id: string }>;
   }
 

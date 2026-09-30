@@ -1,3 +1,5 @@
+import { MAX_RUNNER_CLIENT_MESSAGE_BYTES } from "./runner-channel.js";
+
 /** Stateful runner frames stay FIFO while registration yields. Liveness and correlated replies
  * bypass this queue at the authenticated route. Disconnected sockets drop unprocessed frames. */
 // These are liveness/credential handshakes and correlated request replies, not unsolicited
@@ -29,7 +31,8 @@ export class RunnerFrameQueue<T> {
   constructor(
     private readonly handle: (message: T) => Promise<void>,
     private readonly onFailure: () => void,
-    private readonly limits = { frames: 4096, bytes: 64 * 1024 * 1024 },
+    private readonly limits = { frames: 4096, bytes: 2 * MAX_RUNNER_CLIENT_MESSAGE_BYTES },
+    private readonly afterDrain: () => Promise<void> = async () => {},
   ) {}
 
   enqueue(message: T, bytes: number): void {
@@ -53,7 +56,12 @@ export class RunnerFrameQueue<T> {
   private async drain(): Promise<void> {
     this.draining = true;
     try {
-      while (!this.closed && this.pending.length) {
+      while (!this.closed) {
+        if (this.pending.length === 0) {
+          await this.afterDrain();
+          if (this.pending.length === 0) break;
+          continue;
+        }
         const next = this.pending.shift()!;
         this.bytes -= next.bytes;
         await this.handle(next.message);

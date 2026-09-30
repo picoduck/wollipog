@@ -266,6 +266,10 @@ const QUARANTINED_CONVERSATION_ERROR =
   "this conversation was quarantined — retrying and /compact cannot repair the provider's stored history; recover the session to continue";
 
 type Logger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
+export interface RunnerAttentionBatch {
+  capture(session: SessionView | null): SessionView | null;
+  defer(before: SessionView | null): void;
+}
 
 export const EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS = 30_000;
 export const EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS = 45_000;
@@ -6720,13 +6724,15 @@ export class SessionsService {
     return controller;
   }
 
-  private campaignAttentionController(session: SessionView | null): SessionView | null {
+  private campaignAttentionController(session: SessionView | null, batch?: RunnerAttentionBatch): SessionView | null {
+    if (batch) return batch.capture(session);
     return session?.parentSessionId
       ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
       : null;
   }
 
-  private publishCampaignAttentionTransition(before: SessionView | null): void {
+  private publishCampaignAttentionTransition(before: SessionView | null, batch?: RunnerAttentionBatch): void {
+    if (batch) { batch.defer(before); return; }
     if (!before) return;
     const now = Date.now();
     const humanRequests = this.descendantRequests(before.id, () => true, "human", false);
@@ -12443,6 +12449,43 @@ export class SessionsService {
     for (const _ of this.runnerSessionHydrationSteps(runnerId, snapshots)) { /* synchronous callers */ }
   }
 
+  /** Used only by a synchronous frame application, never a process-global deferral. HTTP and
+   * correlated reply handlers that run during a yield retain their normal publication semantics. */
+  beginRunnerAttentionBatch(runnerId: string): RunnerAttentionBatch {
+    let campaigns = this.registrationAttention.get(runnerId);
+    if (!campaigns) {
+      campaigns = new Map<string, SessionView>();
+      this.registrationAttention.set(runnerId, campaigns);
+    }
+    const parents = new Map<string, SessionView | null>();
+    const defer = (before: SessionView | null) => {
+      if (before && !campaigns.has(before.id)) campaigns.set(before.id, before);
+    };
+    return { defer, capture: (session) => {
+      if (!session?.parentSessionId) return null;
+      let before = parents.get(session.parentSessionId);
+      if (before === undefined) {
+        before = this.campaignAttentionController(session);
+        parents.set(session.parentSessionId, before);
+      }
+      defer(before);
+      return before;
+    } };
+  }
+
+  async flushRunnerAttention(runnerId: string, isCurrent: () => boolean): Promise<void> {
+    const campaigns = this.registrationAttention.get(runnerId);
+    if (!campaigns) return;
+    for (const before of campaigns.values()) {
+      if (!isCurrent()) return; // replacement inherits before-views for partially committed frames
+      this.publishCampaignAttentionTransition(before);
+      campaigns.delete(before.id);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    if (this.registrationAttention.get(runnerId) === campaigns && campaigns.size === 0)
+      this.registrationAttention.delete(runnerId);
+  }
+
   /** Socket registration uses this bounded drain; a superseded connection cannot finish an
    * inventory or write its remaining snapshots. No transaction is held across an event-loop yield. */
   async hydrateRunnerSessionsCooperatively(
@@ -12590,9 +12633,9 @@ export class SessionsService {
             if (!isTerminal(snap.status)) {
               this.sendStopCommand(runnerId, snap.id);
             }
-          this.hub.sessionChangedById(snap.id);
-          recordAppliedVersion(snap.id);
-          continue;
+            this.hub.sessionChangedById(snap.id);
+            recordAppliedVersion(snap.id);
+            continue;
           }
         }
         if (existing) {
@@ -12703,7 +12746,7 @@ export class SessionsService {
 
   /** Apply one live runner-authoritative snapshot without treating every other box session as
    * absent (the full-register hydrator intentionally performs that reconciliation). */
-  applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot): void {
+  applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot, batch?: RunnerAttentionBatch): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
     const runtimeSnapshot = snapshot.costUsd < existing.costUsd
@@ -12716,7 +12759,7 @@ export class SessionsService {
     // when this snapshot may park a new policy card, so its campaign receives the transition.
     const newPolicyAsk = repeated && existing.parentSessionId && policyGateMayRunBeforeUpdate &&
       this.pendingPolicyAsk({ ...existing, status: runtimeSnapshot.status, costUsd: runtimeSnapshot.costUsd });
-    const campaignBefore = repeated && !newPolicyAsk ? null : this.campaignAttentionController(existing);
+    const campaignBefore = repeated && !newPolicyAsk ? null : this.campaignAttentionController(existing, batch);
     if (existing.archived && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
       this.requestStop(existing, Date.now(), true);
       return;
@@ -12733,7 +12776,7 @@ export class SessionsService {
           this.sendStopCommand(runnerId, snapshot.id);
         }
         this.hub.sessionChangedById(snapshot.id);
-        this.publishCampaignAttentionTransition(campaignBefore);
+        this.publishCampaignAttentionTransition(campaignBefore, batch);
         return;
       }
     }
@@ -12767,7 +12810,7 @@ export class SessionsService {
     this.deliverHeldWorkflowDecisionResumes(snapshot.id, now);
     this.deliverHeldRestartNotices(snapshot.id, now);
     this.hub.sessionChangedById(snapshot.id);
-    this.publishCampaignAttentionTransition(campaignBefore);
+    this.publishCampaignAttentionTransition(campaignBefore, batch);
   }
 
   /** Lazy-hydrate a session's event timeline from the runner (the box owns the log). Called when a

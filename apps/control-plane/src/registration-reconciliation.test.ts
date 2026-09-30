@@ -78,6 +78,7 @@ test("Stop, deletion, and new-session intents arriving between batches remain au
         db.setPendingApproval("child-82", null);
         db.updateSessionStatus("child-83", "starting", Date.now());
         db.updateSessionStatus("campaign-0", "starting", Date.now());
+        db.setWorktreePath("child-84", "/synthetic/new-worktree");
         db.createSession({ id: "new", runnerId: "runner", workspaceId: "ws", agentId: "claude",
           title: "New", driver: "claude-code", useWorktree: false, config: {}, now: Date.now() });
         db.addTombstone("new-delete", "runner", Date.now());
@@ -90,8 +91,28 @@ test("Stop, deletion, and new-session intents arriving between batches remain au
     assert.equal(db.getSession("child-82")?.pendingApproval, null, "an answered request must not be resurrected");
     assert.equal(db.getSession("child-83")?.status, "starting", "an old snapshot must not end a newly admitted launch");
     assert.equal(db.getSession("campaign-0")?.status, "starting", "an absent row relaunched during reconciliation is not stopped");
+    assert.equal(db.getSession("child-84")?.worktreePath, "/synthetic/new-worktree", "worktree attachment has no updated_at bump but must survive");
     assert.equal(db.getSession("new")?.status, "queued");
     assert.ok(db.isTombstoned("new-delete"), "new deletion is not confirmed by an older inventory");
+  } finally { db.close(); }
+});
+
+test("post-negotiation runtime replay coalesces campaign attention without deferring unrelated HTTP work", async () => {
+  const { db, svc, snapshots } = fixture();
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    let scans = 0;
+    const original = svc.descendantRequests.bind(svc);
+    svc.descendantRequests = (...args) => { scans++; return original(...args); };
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    for (const snap of snapshots) svc.applySessionRuntimeUpdate("runner", { ...snap, preview: "Negotiated" }, batch);
+    assert.equal(scans, 0, "only this explicit frame batch defers campaign-wide scans");
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(scans, 20);
+    assert.equal(db.getSession("child-999")?.preview, "Negotiated");
+    scans = 0;
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, preview: "Live" });
+    assert.equal(scans, 2, "ordinary callers retain immediate campaign publication");
   } finally { db.close(); }
 });
 
@@ -114,5 +135,22 @@ test("cancelled registration carries the first campaign before-view into its rep
     svc.hydrateRunnerSessions("runner", snapshots);
     assert.deepEqual(db.raw().prepare("SELECT seq FROM sqlite_sequence WHERE name='orchestrator_campaign_events'").get(), beforeReplay,
       "duplicate continuation identities do not write or consume sequence numbers");
+  } finally { db.close(); }
+});
+
+test("cancelled runtime attention flush carries cleared blockers into replacement registration", async () => {
+  const { db, svc, snapshots } = fixture(100);
+  try {
+    db.setPendingApproval("child-0", { requestId: "q", kind: "question", title: "Private question", options: [],
+      questions: [{ id: "choice", question: "Private question", header: "Choice", options: [{ label: "Yes" }] }] });
+    assert.equal(db.getSession("campaign-0")?.orchestratorCampaign?.pendingRequests?.human, 1);
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", snapshots[0]!, batch);
+    await svc.flushRunnerAttention("runner", () => false);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE kind='human_blockers_cleared'")
+      .get()?.n, 0, "a stale socket cannot publish attention");
+    await svc.hydrateRunnerSessionsCooperatively("runner", snapshots, { isCurrent: () => true });
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE campaign_session_id=? AND kind='human_blockers_cleared'")
+      .get("campaign-0")?.n, 1, "replacement publishes the partially committed runtime transition exactly once");
   } finally { db.close(); }
 });
