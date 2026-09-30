@@ -53,6 +53,8 @@ function Harness({
         <button type="button">Approval Action</button>
         <div role="listbox" aria-label="Worktree" tabIndex={-1} />
         <input role="combobox" aria-label="Filter Worktrees" aria-expanded />
+        <div role="separator" aria-label="Resize Shell Panel" tabIndex={0} />
+        <input className="shell-input" aria-label="Pipe Shell" />
       </div>
       <div className="xterm"><textarea aria-label="Terminal" /></div>
       <nav data-focus-zone="rail"><button type="button">Inbox</button></nav>
@@ -291,8 +293,9 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
 
   fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=main] button")!.focus();
   for (const key of ["a", "j", " "]) dispatchKey(key);
-  // An open picker and a filter combobox move their own selection with Alt+arrows.
-  for (const label of ["Worktree", "Filter Worktrees"]) {
+  // An open picker, a filter combobox and a resize grip move their own value with Alt+arrows, and
+  // the pipe-mode shell input keeps its own ↑/↓ history like any terminal.
+  for (const label of ["Worktree", "Filter Worktrees", "Resize Shell Panel", "Pipe Shell"]) {
     fixture.container.querySelector<HTMLElement>(`[aria-label="${label}"]`)!.focus();
     const picked = dispatchKey("ArrowDown", { altKey: true });
     assert.equal(picked.defaultPrevented, false, label);

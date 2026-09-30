@@ -49,9 +49,10 @@ const ACTION_BINDINGS: ReadonlyArray<[
   ["session-reading-reply", "reply"],
 ];
 
-function xtermOwnsFocus(targetDocument: Document): boolean {
+/** A terminal owns every key: xterm, or the pipe-mode shell input with its own ↑/↓ history. */
+function terminalOwnsFocus(targetDocument: Document): boolean {
   const active = targetDocument.activeElement;
-  return active instanceof Element && Boolean(active.closest(".xterm"));
+  return active instanceof Element && Boolean(active.closest(".xterm, .shell-input"));
 }
 
 function nativeControlOwnsFocus(targetDocument: Document): boolean {
@@ -65,7 +66,7 @@ function nativeControlOwnsFocus(targetDocument: Document): boolean {
     'button, a[href], select, [role="button"], [role="link"], [role="radio"], [role="checkbox"], [role="switch"], ' +
       '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="listbox"], [role="option"], ' +
       '[role="combobox"][aria-expanded="true"], [role="tab"], [role="grid"], [role="tree"], [role="treeitem"], ' +
-      '[role="slider"], [role="spinbutton"]',
+      '[role="slider"], [role="spinbutton"], [role="separator"]',
   );
 }
 
@@ -108,7 +109,7 @@ export function useSessionReadingKeys({
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || shortcutLayerActive(document) || xtermOwnsFocus(document)) {
+      if (event.defaultPrevented || shortcutLayerActive(document) || terminalOwnsFocus(document)) {
         sequenceRef.current = null;
         return;
       }
