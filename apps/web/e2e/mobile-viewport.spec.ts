@@ -433,23 +433,30 @@ const MARKS = {
  * The tab bar's labels (#1959): 11px text in `--text-dim`, or `--accent` on the current tab, on
  * `--bg-elev` — 5.5:1 and 7.8:1 or better by the token table (docs/design-system.md §2.11).
  *
- *   measured paint / legible, both themes, portrait and landscape, with and without the keyboard
+ *   measured paint / legible on a developer machine, both themes, portrait and landscape, with and
+ *   without the keyboard
  *   Sessions 1094-1101 / 529-654   Projects 1026-1030 / 462-546   Connections 1509-1517 / 672-803
  *   Automations 1632-1640 / 725-864   More 719-723 / 318-422
  *
+ * These are text, so unlike the icons they follow the machine's font rasterisation: the CI runner
+ * renders text smaller (e2e/README.md), and "More" painted 668 there against 719 here, a factor of
+ * 0.93. The paint floors therefore sit at 0.86 of the local minimum rather than the icons' 0.94.
+ * That leaves room for CI and still trips when a third of a label goes (0.67). Legible floors
+ * keep the other marks' 0.47.
+ *
  * Glyphs this small are mostly antialiased edge, so the legible share measures 0.44 to 0.48 rather
  * than the 0.55 the larger marks clear, and "Automations" leaves up to two edge cells with nothing
- * at 4.5:1. The floors keep the other marks' ratios to the measured minimum (paint × 0.94, legible
- * × 0.47), and the fraction floor sits where fading a third of a label (0.44 → about 0.29) trips it.
+ * at 4.5:1. Every label is allowed those two cells: a faded character covers several. The fraction
+ * floor sits where fading a third of a label (0.44 → about 0.29) trips it.
  */
-const tabLabel = (paint: number, legible: number, illegibleCells = 0): Mark =>
-  ({ paint, legible, illegibleCells, minContrast: CONTRAST.label, fraction: 0.36 });
+const tabLabel = (paint: number, legible: number): Mark =>
+  ({ paint, legible, illegibleCells: 2, minContrast: CONTRAST.label, fraction: 0.36 });
 const TAB_LABEL_MARKS: Record<string, Mark> = {
-  Sessions: tabLabel(1028, 249),
-  Projects: tabLabel(964, 217),
-  Connections: tabLabel(1418, 316),
-  Automations: tabLabel(1534, 341, 2),
-  More: tabLabel(676, 150),
+  Sessions: tabLabel(941, 249),
+  Projects: tabLabel(882, 217),
+  Connections: tabLabel(1298, 316),
+  Automations: tabLabel(1403, 341),
+  More: tabLabel(618, 150),
 };
 
 interface HarnessOptions {
