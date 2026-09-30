@@ -49,7 +49,7 @@ Download installers from the [latest published release](https://github.com/picod
 | Windows | x64 and ARM64 | `.msi`, NSIS `.exe` |
 | Linux | x64 and ARM64 | `.AppImage`, `.deb`, `.rpm` |
 
-Published macOS bundles are Developer ID signed and notarized. Windows installers and executables, including standalone runners and control planes, are Authenticode signed through Azure Artifact Signing. SmartScreen may still warn until the signing certificate builds download reputation. Linux binaries have no platform code signature; desktop update packages on all three platforms carry a separate signature that the app verifies before installation. Local builds and unsigned branch test releases do not carry the same signing guarantees. See [Releasing](docs/RELEASING.md) for the signing and verification process.
+Current published releases have Developer ID signed and notarized macOS bundles. Their Windows installers and executables, including standalone runners and control planes, are Authenticode signed through Azure Artifact Signing. SmartScreen may still warn until the signing certificate builds download reputation. Linux binaries have no platform code signature; desktop update packages on all three platforms carry a separate signature that the app verifies before installing an update in place. Local builds and unsigned branch test releases do not carry the same signing guarantees. See [Releasing](docs/RELEASING.md) for the signing and verification process.
 
 The desktop application includes its control plane and a local runner; no separate Node.js installation is required. Open **Connections → Set Up This Machine** to provision the bundled runner and discover installed coding agents.
 
@@ -87,14 +87,14 @@ Desktop releases from v0.28.0 onward check for newer published stable releases t
 
 ### Headless Linux Installation
 
-Install the runner, CLI, control plane, and dashboard bundle on a Linux host with systemd:
+Run these commands as your ordinary, non-root user on a Linux host with systemd to install the runner, CLI, control plane, and dashboard bundle:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/picoduck/wollipog/main/scripts/install-runner.sh | sh -s -- --control-plane
-wollipog service install
+~/.local/bin/wollipog service install --user
 ```
 
-The installer places executables in `~/.local/bin`; add it to `PATH` if needed. `service install` uses user services when run without root and system services when run as root. See [Headless Deployment](docs/headless-deployment.md) for remote access, upgrades, backups, and recovery, and [Host Administration](docs/host-administration.md) for pairing devices and managing credentials from a terminal.
+The installer places executables in `~/.local/bin`; add it to `PATH` to use `wollipog` by name. The command above installs user services. System services run under a dedicated account that must be able to access the installed executables and dashboard bundle. See [Headless Deployment](docs/headless-deployment.md) for remote access, upgrades, backups, and recovery, and [Host Administration](docs/host-administration.md) for pairing devices and managing credentials from a terminal.
 
 ## Develop from Source
 
