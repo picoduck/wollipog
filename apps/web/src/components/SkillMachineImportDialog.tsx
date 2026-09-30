@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { RunnerView } from "@wollipog/protocol";
 import {
   machineSkillAdoptionRecoveryRequirement,
@@ -10,6 +10,7 @@ import { machineOptionLabels } from "../runners.js";
 import {
   adoptionAdvisoryText,
   adoptionBlockerText,
+  createRequestQueue,
   MACHINE_SKILL_RESULT_FACT,
   machineSkillImportLabel,
   machineSkillLocation,
@@ -39,7 +40,7 @@ import { useAccessibleMenu } from "./interactions.js";
 import { useIsMobile } from "./useIsMobile.js";
 
 type Candidate = MachineSkillDiscovery["candidates"][number];
-/** Runs one machine request and counts it while it runs (see `machineRequests`). */
+/** Runs one machine request after the ones before it, counting it until it settles. */
 export type MachineRequestTracker = <T>(request: () => Promise<T>) => Promise<T>;
 type Outcome = { tone: "success" | "warning"; title?: string; text: string };
 
@@ -94,16 +95,14 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
   /** Refreshing the page and the folders after an adoption: the dialog stays locked meanwhile. */
   const [settling, setSettling] = useState(false);
   /**
-   * Machine requests still running, from this dialog and the dialogs stacked on it. The server
-   * serves one machine read at a time and refuses a second, and a request keeps running after the
-   * dialog that started it is cancelled, so nothing that reads the machine starts until this is 0.
+   * Machine requests running or waiting, from this dialog and the dialogs stacked on it. The server
+   * serves one machine request at a time and refuses a second, and a request keeps running after
+   * the dialog that started it is cancelled. So every request goes through `track`, which starts
+   * each one only after the one before it has settled; the controls that start one also wait while
+   * this is above 0, so a person never queues work they cannot see.
    */
   const [machineRequests, setMachineRequests] = useState(0);
-  const track = useCallback(async <T,>(request: () => Promise<T>): Promise<T> => {
-    setMachineRequests((count) => count + 1);
-    try { return await request(); }
-    finally { setMachineRequests((count) => count - 1); }
-  }, []);
+  const [track] = useState(() => createRequestQueue((change) => setMachineRequests((count) => count + change)));
 
   // The discovery the server holds for us, read by close and by requests that finish after it.
   const discoveryRef = useRef<MachineSkillDiscovery | null>(null);
@@ -287,10 +286,10 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
 
   const menu = <DialogMoreMenu label="More Actions" items={[{
     label: "Adoption Recovery…",
-    disabled: !recoverySupported || busy || machineRequests > 0,
+    disabled: !recoverySupported || busy || scanning || machineRequests > 0,
     reason: !runner ? "Choose a machine first." : !online ? `${machineName} is offline.`
       : !recoverySupported ? `${machineName} needs a runner update.`
-        : busy || machineRequests > 0 ? "Wait for the current machine read to finish." : undefined,
+        : busy || scanning || machineRequests > 0 ? "Wait for the current machine read to finish." : undefined,
     onSelect: () => setRecoveryOpen(true),
   }]} />;
 
@@ -415,6 +414,12 @@ function DialogMoreMenu({ label, items }: {
   // Focus goes to the menu itself on open, so its Escape and Tab handling applies even when every
   // item is unavailable and none can take focus.
   const menu = useAccessibleMenu(open, setOpen, "dialog-more", "menu");
+  // Opening with an arrow key focuses the first or last item, and none can take focus when all are
+  // unavailable; the menu itself takes it then, or Escape would close the whole dialog.
+  useEffect(() => {
+    const surface = menu.menuRef.current;
+    if (open && surface && !surface.contains(document.activeElement)) surface.focus();
+  }, [open, menu.menuRef]);
   return <>
     <button ref={menu.triggerRef} type="button" className="icon-btn" title={label} aria-label={label}
       aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menu.menuId : undefined}

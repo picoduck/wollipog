@@ -8,6 +8,7 @@ import {
   MATCHING_FOLDER_TITLE,
   adoptionAdvisoryText,
   adoptionBlockerText,
+  createRequestQueue,
   machineSkillImportLabel,
   machineSkillLocation,
   machineSkillRowResult,
@@ -81,4 +82,36 @@ test("a server refusal phrased with runner protocol numbers becomes the runner-u
     "Build Machine needs a runner update to do this.",
   );
   assert.equal(userFacingMachineError(new Error("Source changed. Discover it again."), "Build Machine"), "Source changed. Discover it again.");
+});
+
+test("machine requests run one at a time, in order, even after a failure, and are counted until they settle", async () => {
+  let pending = 0;
+  const events: string[] = [];
+  const run = createRequestQueue((change) => { pending += change; });
+  const gate = (name: string, fail = false) => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const request = async () => {
+      events.push(`start ${name}`);
+      await released;
+      events.push(`end ${name}`);
+      if (fail) throw new Error(name);
+      return name;
+    };
+    return { request, release };
+  };
+  const first = gate("first", true);
+  const second = gate("second");
+  const firstRun = run(first.request).catch((cause: Error) => `failed ${cause.message}`);
+  const secondRun = run(second.request);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(pending, 2, "both are counted while one runs and one waits");
+  assert.deepEqual(events, ["start first"], "the second waits for the first");
+  first.release();
+  assert.equal(await firstRun, "failed first");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(events, ["start first", "end first", "start second"], "a failure still lets the next one start");
+  second.release();
+  assert.equal(await secondRun, "second");
+  assert.equal(pending, 0);
 });

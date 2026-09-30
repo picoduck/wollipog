@@ -119,3 +119,19 @@ export function userFacingMachineError(cause: unknown, machineName: string): str
   const message = cause instanceof Error ? cause.message : String(cause);
   return /\bprotocol\b/i.test(message) ? `${machineName} needs a runner update to do this.` : message;
 }
+
+/**
+ * One machine request at a time. The server serves a single machine request and refuses a second,
+ * and a request keeps running after whatever started it has gone, so each request starts only
+ * after the one before it has settled, whether that one succeeded or failed. `onPendingChange`
+ * hears +1 when a request is queued and -1 when it settles, so a caller can hold its controls.
+ */
+export function createRequestQueue(onPendingChange: (change: 1 | -1) => void) {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(request: () => Promise<T>): Promise<T> => {
+    onPendingChange(1);
+    const run = tail.then(request);
+    tail = run.catch(() => undefined);
+    return run.finally(() => onPendingChange(-1));
+  };
+}

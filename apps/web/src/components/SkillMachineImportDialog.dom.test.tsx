@@ -297,3 +297,89 @@ test("a restore still running after its confirmation is cancelled locks Restore 
   assert.equal(buttonNamed("Restore Original…", recovery).disabled, false);
   await unmount();
 });
+
+const MACHINE_REQUESTS = ["discoverMachineSkills", "previewMachineSkill", "preflightMachineSkillAdoption", "adoptMachineSkill",
+  "importMachineSkill", "inspectMachineSkillRecovery", "restoreMachineSkillRecovery"] as const;
+
+/** Wraps every machine request to record how many ran at once: the server refuses a second. */
+function probeConcurrency(client: ApiClient) {
+  const probe = { active: 0, most: 0 };
+  const wrapped = { ...client } as Record<string, unknown>;
+  for (const name of MACHINE_REQUESTS) {
+    const original = client[name] as (...args: unknown[]) => Promise<unknown>;
+    wrapped[name] = async (...args: unknown[]) => {
+      probe.active += 1;
+      probe.most = Math.max(probe.most, probe.active);
+      try { return await original(...args); } finally { probe.active -= 1; }
+    };
+  }
+  return { client: wrapped as unknown as ApiClient, probe };
+}
+
+test("Adoption Recovery waits through a rescan, even while the old discovery is being discarded", async () => {
+  const calls: Record<string, number> = {};
+  const discarding = deferred();
+  let discards = 0;
+  const { client, probe } = probeConcurrency({ ...fakeApi(calls),
+    discardMachineSkillDiscovery: () => (discards++ === 0 ? discarding.promise : Promise.resolve()),
+  } as ApiClient);
+  const unmount = await mountDialog(client, async () => undefined);
+  await act(async () => { buttonNamed("Scan Again").click(); });
+  await act(async () => { buttonNamed("More Actions").click(); });
+  assert.ok(buttonNamed("Adoption Recovery…").disabled, "recovery waits for the rescan");
+  await act(async () => { buttonNamed("More Actions").click(); });
+  await act(async () => { discarding.resolve(); });
+  await settle();
+  assert.equal(calls.discover, 2);
+  assert.equal(probe.most, 1, "never two machine requests at once");
+  await unmount();
+});
+
+test("cancelling a restore retry reads the journals only after the retry settles", async () => {
+  const calls: Record<string, number> = {};
+  const retry = deferred<Awaited<ReturnType<ApiClient["restoreMachineSkillRecovery"]>>>();
+  let restores = 0;
+  const { client, probe } = probeConcurrency({ ...fakeApi(calls),
+    restoreMachineSkillRecovery: async () => (restores++ === 0 ? { status: "blocked" as const, error: "The source path is occupied." } : retry.promise),
+  } as ApiClient);
+  const unmount = await mountDialog(client, async () => undefined);
+  await act(async () => { buttonNamed("More Actions").click(); });
+  await act(async () => { buttonNamed("Adoption Recovery…").click(); });
+  await settle();
+  await act(async () => { buttonNamed("Restore Original…", dialogTitled("Adoption Recovery")).click(); });
+  await settle();
+  const confirmation = dialogTitled("Restore Original");
+  await act(async () => { buttonNamed("Restore Original", confirmation).click(); });
+  await settle();
+  assert.match(confirmation.textContent ?? "", /The source path is occupied\./u, "the first attempt stopped");
+  await act(async () => { buttonNamed("Restore Original", confirmation).click(); });
+  await settle();
+  await act(async () => { buttonNamed("Cancel", confirmation).click(); });
+  await settle();
+  assert.equal(calls.recovery, 1, "no journal read while the retry runs");
+  await act(async () => { retry.resolve({ status: "blocked", error: "Still occupied." }); });
+  await settle();
+  assert.equal(calls.recovery, 2, "the journals are read once the retry settles");
+  assert.equal(probe.most, 1, "never two machine requests at once");
+  await unmount();
+});
+
+test("a restore that fails after its confirmation is cancelled still re-reads the journals", async () => {
+  const calls: Record<string, number> = {};
+  const restoring = deferred<Awaited<ReturnType<ApiClient["restoreMachineSkillRecovery"]>>>();
+  const { client } = probeConcurrency({ ...fakeApi(calls), restoreMachineSkillRecovery: () => restoring.promise } as ApiClient);
+  const unmount = await mountDialog(client, async () => undefined);
+  await act(async () => { buttonNamed("More Actions").click(); });
+  await act(async () => { buttonNamed("Adoption Recovery…").click(); });
+  await settle();
+  await act(async () => { buttonNamed("Restore Original…", dialogTitled("Adoption Recovery")).click(); });
+  await settle();
+  const confirmation = dialogTitled("Restore Original");
+  await act(async () => { buttonNamed("Restore Original", confirmation).click(); });
+  await act(async () => { buttonNamed("Cancel", confirmation).click(); });
+  await settle();
+  await act(async () => { restoring.reject(new Error("The restore result could not be verified.")); });
+  await settle();
+  assert.equal(calls.recovery, 2, "the journals are read again: the restore may have happened");
+  await unmount();
+});

@@ -79,38 +79,44 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, track, machin
       confirmLabel: "Restore Original",
       progress: "Restoring the original folder…",
       onConfirm: async (signal) => {
-        let result: Awaited<ReturnType<typeof api.restoreMachineSkillRecovery>>;
+        // Each attempt (the first, or a retry from the confirmation) starts afresh.
+        stopped = false;
+        let result: Awaited<ReturnType<typeof api.restoreMachineSkillRecovery>> | null = null;
+        let failure: string | null = null;
         try {
           result = await track(() => api.restoreMachineSkillRecovery(runner.runnerId, operation.operationId));
         } catch (cause) {
           // The confirmation shows this text as is, so it is put in the dialog's words first (§17.2).
-          throw new Error(userFacingMachineError(cause, machineName));
+          failure = userFacingMachineError(cause, machineName);
         }
-        // Cancelled while the machine was restoring: the confirmation has gone, but the restore may
-        // have finished, so the journals (and, after a restore, the page) are read again.
+        const done = result?.status === "restored" || result?.status === "not_needed";
+        if (done) {
+          restored = result?.status === "restored";
+          setStatus({ tone: "success", text: restored
+            ? `Restored the original ${result?.operation?.name ?? operation.name} folder. The link is kept in its recovery journal.`
+            : "The original folder was already in place; nothing needed restoring." });
+        } else {
+          stopped = true;
+          failure ??= result?.error
+            ? userFacingMachineError(new Error(result.error), machineName)
+            : "Restore stopped safely. Check the journal below before trying again.";
+        }
+        // Cancelled while the machine was restoring: the confirmation has gone, and whatever the
+        // restore did is unknown to the list, so the journals (and, after a restore, the page) are
+        // read again. `track` starts that read only after the restore has settled.
         if (signal.aborted) {
           void (async () => {
             await inspect();
-            if (result.status === "restored") await onRestored();
+            if (restored) await onRestored();
           })();
           return;
         }
-        if (result.status === "restored" || result.status === "not_needed") {
-          restored = result.status === "restored";
-          setStatus({ tone: "success", text: restored
-            ? `Restored the original ${result.operation?.name ?? operation.name} folder. The link is kept in its recovery journal.`
-            : "The original folder was already in place; nothing needed restoring." });
-          return;
-        }
-        // Read the journals again once the confirmation settles, not now: a retry from the
-        // confirmation must not meet a second machine request.
-        stopped = true;
-        throw new Error(result.error
-          ? userFacingMachineError(new Error(result.error), machineName)
-          : "Restore stopped safely. Check the journal below before trying again.");
+        if (!done) throw new Error(failure ?? undefined);
       },
     });
     if (!confirmed) {
+      // Cancelled after an attempt stopped: the journals are read again. (Cancelled while one was
+      // running is handled when it settles, above.)
       if (stopped) await inspect();
       return;
     }
