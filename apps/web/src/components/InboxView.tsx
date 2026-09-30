@@ -1536,9 +1536,9 @@ export function InboxView({
         {!boardMode && (
         <footer className="inbox-activity-footer" aria-label="Sessions Status and Shortcuts">
           <div className="inbox-activity-summary" aria-label="Sessions Activity Summary">
-            <span>{activityCounts.running} Running</span>
-            <span>{activityCounts.queued} Queued</span>
-            <span>{activityCounts.starting} Starting</span>
+            <span className="inbox-activity-minor">{activityCounts.running} Running</span>
+            <span className="inbox-activity-minor">{activityCounts.queued} Queued</span>
+            <span className="inbox-activity-minor">{activityCounts.starting} Starting</span>
             <span className="blocked">{activeSplit?.blockedCount ?? 0} Blocked</span>
             <span className="stalled" aria-live="polite">{activeSplit?.stalledCount ?? 0} Stalled</span>
           </div>

@@ -70,8 +70,28 @@ async function measureChrome(page: Page) {
       railItemsOutside: [...rail.querySelectorAll(".rail-item")]
         .filter((item) => box(item).top < 0 || box(item).bottom > window.innerHeight)
         .map((item) => item.getAttribute("aria-label")),
-      pane: pane ? { width: box(pane).width, scroll: pane.scrollWidth - pane.clientWidth } : null,
+      pane: pane ? {
+        width: box(pane).width,
+        scroll: pane.scrollWidth - pane.clientWidth,
+        // The visibility filter keeps the search field's inset on both sides.
+        filterInset: (() => {
+          const search = box(pane.querySelector(".project-manager-search")!);
+          const filter = box(pane.querySelector(".seg")!);
+          return [filter.left - search.left, search.right - filter.right];
+        })(),
+      } : null,
+      footerClipped: footerClipped(),
     };
+
+    /** Sessions footer shortcuts the footer's hidden-scrollbar strip cuts off, even partly. */
+    function footerClipped() {
+      const strip = document.querySelector(".inbox-shortcut-rail");
+      if (!strip || strip.getClientRects().length === 0) return [];
+      const edge = box(strip);
+      return [...strip.querySelectorAll("button")]
+        .filter((button) => box(button).left < edge.left - 0.5 || box(button).right > edge.right + 0.5)
+        .map((button) => button.getAttribute("aria-label"));
+    }
   });
 }
 
@@ -89,6 +109,7 @@ for (const width of [761, 834, 940, 1099]) {
         expect(chrome.mainScroll, `${where}: the main column scrolls sideways`).toBeLessThanOrEqual(0);
         expect(chrome.railOverflow, `${where}: the rail scrolls`).toBeLessThanOrEqual(0);
         expect(chrome.railItemsOutside, `${where}: rail items off screen`).toEqual([]);
+        expect(chrome.footerClipped, `${where}: Sessions footer shortcuts cut off`).toEqual([]);
         if (route.query.startsWith("view=")) {
           expect(chrome.bar, `${where}: a detail bar`).not.toBeNull();
           expect(chrome.bar!.height, `${where}: the detail bar is one 48px row`).toBe(48);
@@ -111,6 +132,7 @@ for (const width of [761, 834, 940, 1099]) {
           expect(chrome.pane, "the Projects list pane").not.toBeNull();
           expect(chrome.pane!.width, `the Projects list pane at ${width}px`).toBe(280);
           expect(chrome.pane!.scroll, "the Projects list pane scrolls sideways").toBeLessThanOrEqual(0);
+          expect(chrome.pane!.filterInset, "the visibility filter is inset like the search field").toEqual([0, 0]);
         }
       }
     });
@@ -118,11 +140,48 @@ for (const width of [761, 834, 940, 1099]) {
 }
 
 test.describe("either side of the tier", () => {
-  test("the Projects list pane is 310px from 1100px", async ({ page }) => {
+  test("the Projects list pane is 310px from 1100px, its filter inset like the search field", async ({ page }) => {
     await page.setViewportSize({ width: 1100, height: 860 });
     await open(page, "path=%2Fprojects", "Projects");
-    expect((await measureChrome(page)).pane!.width).toBe(310);
+    const chrome = await measureChrome(page);
+    expect(chrome.pane!.width).toBe(310);
+    expect(chrome.pane!.filterInset).toEqual([0, 0]);
   });
+
+  test("a footer with room keeps every keycap and count", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 860 });
+    await open(page, "path=%2Finbox", "Sessions");
+    await expect(page.locator(".inbox-activity-footer")).not.toHaveAttribute("data-fit");
+    await expect(page.locator(".inbox-shortcut-rail kbd").first()).toBeVisible();
+    await expect(page.locator(".inbox-activity-minor").first()).toBeVisible();
+  });
+});
+
+/**
+ * The Sessions footer's shortcuts sit in a strip with a hidden scrollbar, so one that does not fit
+ * is simply cut off. The labelled rail takes 144px of the footer's width, so both rails are checked.
+ */
+test.describe("the Sessions footer in the compact tier", () => {
+  for (const [width, labelled] of [[940, false], [940, true], [761, true]] as const) {
+    test(`no shortcut is cut off at ${width}px with the labelled rail ${labelled ? "on" : "off"}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 860 });
+      await open(page, "path=%2Finbox", "Sessions");
+      if (labelled) {
+        await page.getByRole("navigation", { name: "Primary Navigation" })
+          .getByRole("button", { name: "Expand Navigation", exact: true }).click();
+        await expect(page.locator(".app-rail.labelled")).toBeVisible();
+      }
+      const shortcuts = page.locator(".inbox-shortcut-rail button");
+      await expect(shortcuts.first()).toBeVisible();
+      expect(await shortcuts.count()).toBeGreaterThanOrEqual(6);
+      expect((await measureChrome(page)).footerClipped).toEqual([]);
+      // Whatever the footer gave up, every shortcut and count keeps its accessible name.
+      await expect(page.getByRole("group", { name: "Session Shortcuts" }).getByRole("button"))
+        .toHaveCount(await shortcuts.count());
+      await expect(page.getByLabel("Sessions Activity Summary")).toContainText("Running");
+      await expect(page.getByLabel("Sessions Activity Summary")).toContainText("Stalled");
+    });
+  }
 });
 
 test.describe("at 940×600 with a mouse, the desktop app's minimum window", () => {

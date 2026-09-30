@@ -10390,6 +10390,12 @@ body.shell-dock-dragging * {
   color: var(--text-faint);
   background: var(--bg);
 }
+/* The visibility filter keeps the search field's inset rather than running edge to edge, where it
+   met the list/detail divider (#1969). The column stretches it, so `.seg.block`'s 100% gives way. */
+.project-manager-list > .seg.block {
+  width: auto;
+  margin: 0 14px 10px;
+}
 .project-manager-search input {
   width: 100%;
   min-width: 0;
@@ -10864,6 +10870,17 @@ body.shell-dock-dragging * {
 }
 .inbox-shortcut-rail button:hover:not(:disabled) { color: var(--text); background: var(--bg-elev-2); }
 .inbox-shortcut-rail button:disabled { opacity: .45; cursor: wait; }
+/* A footer too narrow for every shortcut (InboxShortcutRail's useShortcutsFit, #1969) first drops
+   the keycaps, then the minor counts; those stay in the accessibility tree. */
+.inbox-activity-footer[data-fit] .inbox-shortcut-rail kbd { display: none; }
+.inbox-activity-footer[data-fit="counts"] .inbox-activity-minor {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 .inbox-row-shell {
   position: relative;
   margin: 4px 0;

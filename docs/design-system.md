@@ -1730,6 +1730,11 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   rail tightens to 36px items 2px apart, with 4px either side of a group hairline, so Search, every
   destination, the brand or instance tile and Settings fit at the desktop app's 600px minimum
   height. It does this by redefining `--control-h-lg` on the rail. Touch keeps 48px items (§15.3).
+- The Sessions activity footer never cuts off a shortcut. At any width, when the footer is too narrow
+  for all of them (the compact tier, or the labelled rail), it first drops the keycaps (each
+  button's tooltip keeps its key), then the Running, Queued and Starting counts, which stay in the
+  accessibility tree. Blocked and Stalled always show. This holds until the Sessions List epic
+  redesigns the footer.
 - Master-detail list pane 280px. Sessions is always stacked here (§6.3); its Preview Right option
   applies at 1100px and wider.
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
