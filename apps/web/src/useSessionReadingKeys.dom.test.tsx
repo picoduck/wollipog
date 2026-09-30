@@ -49,8 +49,10 @@ function Harness({
           Transcript
           <button type="button">Transcript Control</button>
         </div>
-        <textarea aria-label="Composer" />
+        <textarea aria-label="Composer" role="combobox" aria-expanded={false} />
         <button type="button">Approval Action</button>
+        <div role="listbox" aria-label="Worktree" tabIndex={-1} />
+        <input role="combobox" aria-label="Filter Worktrees" aria-expanded />
       </div>
       <div className="xterm"><textarea aria-label="Terminal" /></div>
       <nav data-focus-zone="rail"><button type="button">Inbox</button></nav>
@@ -289,6 +291,13 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
 
   fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=main] button")!.focus();
   for (const key of ["a", "j", " "]) dispatchKey(key);
+  // An open picker and a filter combobox move their own selection with Alt+arrows.
+  for (const label of ["Worktree", "Filter Worktrees"]) {
+    fixture.container.querySelector<HTMLElement>(`[aria-label="${label}"]`)!.focus();
+    const picked = dispatchKey("ArrowDown", { altKey: true });
+    assert.equal(picked.defaultPrevented, false, label);
+    dispatchKey("a");
+  }
   fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Terminal"]')!.focus();
   dispatchKey("ArrowDown", { altKey: true });
   fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=rail] button")!.focus();

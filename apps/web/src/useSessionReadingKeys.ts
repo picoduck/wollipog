@@ -58,9 +58,14 @@ function nativeControlOwnsFocus(targetDocument: Document): boolean {
   const active = targetDocument.activeElement;
   if (!(active instanceof HTMLElement)) return false;
   // Text inputs deliberately remain eligible for modifier bindings (Alt+↑/↓); bare bindings
-  // are rejected by matchesShortcut's typing-context guard. Other controls keep all keys.
+  // are rejected by matchesShortcut's typing-context guard. Other controls keep all keys,
+  // including composite widgets that move their own selection with Alt+arrows. A combobox (the
+  // composer is one) owns its keys only while its list is open.
   return active.matches(
-    'button, a[href], select, [role="button"], [role="link"], [role="radio"], [role="checkbox"], [role="switch"], [role="menuitem"]',
+    'button, a[href], select, [role="button"], [role="link"], [role="radio"], [role="checkbox"], [role="switch"], ' +
+      '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="listbox"], [role="option"], ' +
+      '[role="combobox"][aria-expanded="true"], [role="tab"], [role="grid"], [role="tree"], [role="treeitem"], ' +
+      '[role="slider"], [role="spinbutton"]',
   );
 }
 

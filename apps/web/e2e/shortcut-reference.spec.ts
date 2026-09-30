@@ -106,6 +106,20 @@ test.describe("at 1440×900", () => {
     await page.keyboard.press("Alt+ArrowUp");
     await expect(title).toHaveText("Alpha Session");
 
+    // The composer hops too. From an empty composer at the first session, Alt+↑ has nowhere to go
+    // and recalls nothing; only a plain ↑ recalls the last prompt.
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage("session-alpha", "earlier prompt", "turn-earlier"));
+    const composer = page.locator(".composer-input");
+    await composer.focus();
+    await page.keyboard.press("Alt+ArrowUp");
+    await expect(title).toHaveText("Alpha Session");
+    await expect(composer).toHaveValue("");
+    await page.keyboard.press("ArrowUp");
+    await expect(composer).toHaveValue("earlier prompt");
+    await composer.fill("");
+    await page.keyboard.press("Alt+ArrowDown");
+    await expect(title).not.toHaveText("Alpha Session");
+
     const reference = await openWithKey(page, SESSION);
     const reading = reference.locator(".shortcut-group").filter({ has: page.getByRole("heading", { name: /^Session Reading/ }) });
     await expect(reading.locator(".shortcut-row", { hasText: "Next Session" }).locator("kbd")).toHaveText("Alt+↓");

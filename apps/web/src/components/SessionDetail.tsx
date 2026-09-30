@@ -4859,7 +4859,8 @@ function SessionDetailLoaded({
     }
     // ↑/↓ recall previous prompts (palette closed, no modifiers). ↑ engages only when the box is
     // empty or already browsing history, so a multi-line draft's caret navigation isn't hijacked.
-    if (!queuedEdit && !paletteOpen && !e.shiftKey && !e.metaKey && !e.ctrlKey && userPrompts.length) {
+    // Alt+↑/↓ is Session Reading's Previous/Next Session, never a recall.
+    if (!queuedEdit && !paletteOpen && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && userPrompts.length) {
       if (e.key === "ArrowUp" && (histIdx !== -1 || text === "")) {
         e.preventDefault();
         const idx = histIdx === -1 ? userPrompts.length - 1 : Math.max(0, histIdx - 1);
