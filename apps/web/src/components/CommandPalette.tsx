@@ -49,6 +49,9 @@ export function useCommandPaletteFocus(
       if (target) {
         restoreFocusTimerRef.current = window.setTimeout(() => {
           restoreFocusTimerRef.current = null;
+          // A palette reopened before this ran (Ctrl+K pressed again at once) already holds focus in
+          // its field; taking it back to the old opener would strand Escape outside the dialog.
+          if (document.activeElement?.closest('[aria-modal="true"]')) return;
           target.focus();
         }, 0);
       }
