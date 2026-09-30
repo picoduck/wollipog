@@ -303,19 +303,21 @@ for (const [label, device] of [
     }
 
     // A count's width depends on the face system-ui resolves to: "15" is 16.4px in Ubuntu or Arial
-    // and 19.3px in DejaVu Sans, which CI's runner uses. Widening one badge by its padding sweeps
-    // every width a one- to four-digit count reaches in any of them, so no face can find a gap.
+    // and 19.3px in DejaVu Sans, which CI's runner uses. The one-digit badge, whose text is narrower
+    // than 16px in any face, is set to every width from 16px to 36px through its min-width with no
+    // padding, so the sweep covers every one- to four-digit count in any face and does not itself
+    // depend on the face.
     test("a badge of any width stays inside the rail and clear of the glyph (#2110)", async ({ page }) => {
-      await page.goto(`${fullShell("/projects")}&more-blocked=7`);
+      await page.goto(fullShell("/projects"));
       const badge = sessionsItem(page).locator(".count-badge");
-      await expect(badge).toHaveText("15");
-      const widths: number[] = [];
-      for (let side = 2; side <= 12; side += 0.5) {
-        await badge.evaluate((element, px) => { (element as HTMLElement).style.padding = `0 ${px}px`; }, side);
-        widths.push((await expectPlaced(page, `${side}px sides`)).width);
+      await expect(badge).toHaveText("8");
+      for (let width = 16; width <= 36; width += 0.5) {
+        await badge.evaluate((element, px) => {
+          (element as HTMLElement).style.padding = "0";
+          (element as HTMLElement).style.minWidth = `${px}px`;
+        }, width);
+        expect((await expectPlaced(page, `${width}px wide`)).width).toBeCloseTo(width, 1);
       }
-      expect(Math.min(...widths)).toBeLessThanOrEqual(17);
-      expect(Math.max(...widths)).toBeGreaterThanOrEqual(35);
     });
   });
 }
