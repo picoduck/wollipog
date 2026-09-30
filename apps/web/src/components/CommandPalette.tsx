@@ -126,7 +126,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   // The active row by key, so a section arriving above it (late transcript hits) does not move it.
   const [activeKey, setActiveKey] = useState<string | null>(null);
   // The hits and the query they answer. Earlier hits stay on screen until the next ones replace them.
-  const [hits, setHits] = useState<{ query: string; results: TranscriptHit[]; failed?: boolean }>({ query: "", results: [] });
+  const [hits, setHits] = useState<{ query: string; results: TranscriptHit[] }>({ query: "", results: [] });
   const inputRef = useRef<HTMLInputElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(
     typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null,
@@ -160,35 +160,37 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   const query = q.trim();
   const transcriptQuery = query.length >= TRANSCRIPT_QUERY_MIN ? query : "";
   // Debounced transcript search: each keystroke restarts the wait, and only the latest query's
-  // answer is kept. A query too short to search clears the hits (the hint row says why). A query
-  // that returns to the one already answered (login, loginx, login) reuses that answer rather than
-  // asking again, so "Searching" is never hidden while a request is still out. A failed request is
-  // not an answer: returning to its query asks again.
-  const hitsRef = useRef(hits);
-  hitsRef.current = hits;
+  // answer is kept. A query too short to search clears the hits (the hint row says why).
+  //
+  // Every searchable query is one attempt, and "Searching" shows until that attempt settles, whether
+  // it answers or fails. Earlier hits stay on screen meanwhile. The attempt is keyed by query and
+  // started during render, so the first frame of a new query already shows it pending, including a
+  // query that returns to one answered or failed before (login, loginx, login).
+  const [attempt, setAttempt] = useState({ query: "", settled: true });
+  if (attempt.query !== transcriptQuery) setAttempt({ query: transcriptQuery, settled: transcriptQuery === "" });
   useEffect(() => {
     if (!transcriptQuery) {
       setHits({ query: "", results: [] });
       return;
     }
-    if (hitsRef.current.query === transcriptQuery && !hitsRef.current.failed) return;
     let cancelled = false;
+    const settle = (results: TranscriptHit[]) => {
+      if (cancelled) return;
+      setHits({ query: transcriptQuery, results });
+      setAttempt({ query: transcriptQuery, settled: true });
+    };
     const t = setTimeout(() => {
       api
         .search(transcriptQuery)
-        .then((r) => {
-          if (!cancelled) setHits({ query: transcriptQuery, results: r.results });
-        })
-        .catch(() => {
-          if (!cancelled) setHits({ query: transcriptQuery, results: [], failed: true });
-        });
+        .then((r) => settle(r.results))
+        .catch(() => settle([]));
     }, 200);
     return () => {
       cancelled = true;
       clearTimeout(t);
     };
   }, [api, transcriptQuery]);
-  const searching = transcriptQuery !== "" && hits.query !== transcriptQuery;
+  const searching = transcriptQuery !== "" && !(attempt.query === transcriptQuery && attempt.settled);
 
   const { flags } = useExperiments();
   const sessionsMode = view.name === "board" || (view.name !== "inbox" && loadSessionsViewMode(instanceScope) === "board")

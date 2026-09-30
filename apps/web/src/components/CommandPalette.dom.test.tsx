@@ -384,7 +384,7 @@ test("a field blurred on purpose stays blurred when results arrive (Android Back
   assert.ok(ui.doc.activeElement !== ui.input(), "focusing the field again would reopen the keyboard");
 });
 
-test("returning to the query already answered reuses its hits instead of searching again", async () => {
+test("returning to a query already answered searches again, keeping its hits and showing Searching", async () => {
   const ui = await mount();
   await ui.key(ui.doc.body, "k", { ctrlKey: true });
   await ui.type("login");
@@ -392,23 +392,34 @@ test("returning to the query already answered reuses its hits instead of searchi
   await act(async () => { ui.searches.at(-1)!.resolve([{ sessionId: "s-docs", title: "Write the docs", snippet: "the ⟪login⟫ flow" }]); });
   await ui.type("loginx");
   await ui.type("login");
+  assert.match(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching transcripts…/,
+    "pending from the first frame of the returned query");
+  assert.deepEqual(ui.sections()[1], ["In Transcripts", ["Write the docs"]], "the earlier hits stay meanwhile");
   await settle(250);
-  assert.equal(ui.searches.length, 1, "no second request for the query already answered");
+  assert.deepEqual(ui.searches.map((call) => call.query), ["login", "login"]);
+  assert.match(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching transcripts…/,
+    "still pending while the request is out");
+  await act(async () => { ui.searches.at(-1)!.resolve([{ sessionId: "s-docs", title: "Write the docs", snippet: "the ⟪login⟫ flow" }]); });
   assert.doesNotMatch(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching/);
-  assert.deepEqual(ui.sections()[1], ["In Transcripts", ["Write the docs"]]);
 });
 
-test("a failed transcript search is asked again when its query returns", async () => {
+test("a failed transcript search is asked again when its query returns, and shows Searching meanwhile", async () => {
   const ui = await mount();
   await ui.key(ui.doc.body, "k", { ctrlKey: true });
-  await ui.type("login");
+  await ui.type("zzzz");
   await settle(250);
   await act(async () => { ui.searches.at(-1)!.reject(new Error("offline")); });
-  await ui.type("loginx");
-  await ui.type("login");
+  assert.doesNotMatch(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching/,
+    "a failure ends the Searching row");
+  assert.ok(ui.doc.querySelector(".palette-empty"), "and no results is the answer shown");
+  await ui.type("zzzzx");
+  await ui.type("zzzz");
   await settle(250);
-  assert.deepEqual(ui.searches.map((call) => call.query), ["login", "login"],
+  assert.deepEqual(ui.searches.map((call) => call.query), ["zzzz", "zzzz"],
     "a failure is not an answer, so the restored query searches again");
-  await act(async () => { ui.searches.at(-1)!.resolve([{ sessionId: "s-docs", title: "Write the docs", snippet: "the ⟪login⟫ flow" }]); });
-  assert.deepEqual(ui.sections()[1], ["In Transcripts", ["Write the docs"]]);
+  assert.match(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching transcripts…/);
+  assertNoDomNode(ui.doc.querySelector(".palette-empty"), "no results is not claimed while the retry is out");
+  await act(async () => { ui.searches.at(-1)!.reject(new Error("offline again")); });
+  assert.doesNotMatch(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching/,
+    "the spinner does not run on after the retry fails");
 });
