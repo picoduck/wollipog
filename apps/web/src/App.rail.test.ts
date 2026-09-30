@@ -411,8 +411,8 @@ test("Inbox Search is compact by default and expands for keyboard or populated u
   assert.match(css, /\.inbox-search:focus-within,\s*\.inbox-search\.has-query\s*\{[^}]*width:\s*min\(250px, 28vw\);[^}]*min-width:\s*150px;/,
     "focus and a retained query both keep Search expanded");
   assert.match(css, /\.inbox-search:focus-within input,\s*\.inbox-search\.has-query input\s*\{[^}]*opacity:\s*1;[^}]*pointer-events:\s*auto;/);
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.inbox-search\s*\{[^}]*width:\s*100%;[^}]*flex:\s*1;/,
-    "small screens retain the full-width Search control");
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.inbox-toolbar-actions\s*\{[^}]*flex-wrap:\s*wrap;[^}]*\}\s*\.inbox-search\s*\{[^}]*width:\s*100%;[^}]*flex:\s*1 0 100%;/,
+    "small screens give Search a full-width row of its own below the toolbar controls (#2082)");
 });
 
 /**

@@ -28,10 +28,12 @@ function toolbarGeometry(page: Page) {
     const options = [...actions.querySelectorAll<HTMLElement>(".seg-option")]
       .map((option) => option.getBoundingClientRect());
     // An input's scrollWidth ignores its placeholder, so the placeholder is measured in the input's font.
+    const style = getComputedStyle(input);
     const context = document.createElement("canvas").getContext("2d")!;
-    context.font = getComputedStyle(input).font;
+    context.font = style.font;
     return {
-      inputWidth: input.clientWidth,
+      // The content box: the placeholder cannot draw into the input's own padding.
+      inputWidth: input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
       placeholderWidth: context.measureText(input.placeholder).width,
       optionsOneLine: options.every((option) => Math.abs(option.top - options[0]!.top) < 1),
       searchBelowControls: options.every((option) => search.top >= option.bottom),
