@@ -639,6 +639,18 @@ function HunkView({
       onChange={() => toggleReferenceLine(row)}
     />
   ) : null;
+  /** The box that picks one changed line for Stage Selected; a refusal disables it and says why. */
+  const lineCheckbox = (row: DiffHunkRow) => lineDirection && row.status !== " " ? (
+    <Checkbox
+      labelHidden
+      checked={selectedLines.has(row.sourceIndex)}
+      disabled={disabled}
+      title={refusal?.reason}
+      describedBy={refusal?.id}
+      label={row.status === "+" ? `Select Added Line ${row.anchor.line}` : `Select Removed Line ${row.anchor.line}`}
+      onChange={() => toggleLine(row.sourceIndex)}
+    />
+  ) : null;
 
   const syntax = (text: string) => highlightDiffLine(filePath, text).map((segment, segmentIndex) => (
     <span className={`diff-syntax-${segment.kind}`} key={segmentIndex}>{segment.text}</span>
@@ -795,9 +807,7 @@ function HunkView({
             <div className={`diff-line diff-line-${row.status === "+" ? "add" : row.status === "-" ? "del" : "ctx"}`}>
               <span className="diff-line-select">
                 {referenceCheckbox(row)}
-                {lineDirection && row.status !== " " && (
-                  <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} title={refusal?.reason} aria-describedby={refusal?.id} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
-                )}
+                {lineCheckbox(row)}
               </span>
               <span className="diff-gutter diff-gutter-old">{row.oldNo}</span>
               {sourceGutter(row, row.newNo, "diff-gutter diff-gutter-new")}
@@ -817,9 +827,7 @@ function HunkView({
                 <div className={`diff-split-cell diff-line-${row.status === "+" ? "add" : row.status === "-" ? "del" : "ctx"}`} key={sideIndex}>
                   <span className="diff-line-select">
                     {referenceCheckbox(row)}
-                    {lineDirection && row.status !== " " && (
-                      <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} title={refusal?.reason} aria-describedby={refusal?.id} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
-                    )}
+                    {lineCheckbox(row)}
                   </span>
                   {sourceGutter(row, sideIndex === 0 ? row.oldNo : row.newNo, "diff-gutter")}
                   <span className="diff-sign">{row.status === " " ? "" : row.status}</span>

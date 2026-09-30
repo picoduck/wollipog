@@ -370,6 +370,8 @@ test("consent checkbox labels are sentences, and every other checkbox label is T
   const failures: string[] = [];
   let consents = 0;
   let labels = 0;
+  // Every label read, with its data holes as `#`, so the icon-only names below are known to be scanned.
+  const scanned = new Set<string>();
   for (const file of sourceFiles(SOURCE_ROOT)) {
     const source = readFileSync(file, "utf8");
     if (!source.includes("<Checkbox")) continue;
@@ -391,6 +393,7 @@ test("consent checkbox labels are sentences, and every other checkbox label is T
             : expression ? staticBranches(expression) : null;
           for (const branch of branches ?? []) {
             labels += 1;
+            scanned.add(branch.replace(/\b(?:x|Name)\b/g, "#").replace(/\s+/g, " ").trim());
             if (consent) {
               consents += 1;
               if (!isSentenceCase(branch)) failures.push(`${where} consent label is not a sentence: ${JSON.stringify(branch)}`);
@@ -408,6 +411,14 @@ test("consent checkbox labels are sentences, and every other checkbox label is T
   // Not vacuous: the scan found the consent labels in the Skills review dialogs and ordinary ones.
   assert.ok(consents >= 8, `found ${consents} consent labels`);
   assert.ok(labels - consents >= 8, `found ${labels - consents} ordinary checkbox labels`);
+  // An icon-only box's label is its accessible name, held to the same convention (#2044): the diff's
+  // line selectors and the review findings' selectors.
+  for (const name of [
+    "Select Added Line #", "Select Removed Line #",
+    "Select Finding on # Line #", "Select File-Level Finding on #", "Select Remote Discussion",
+  ]) {
+    assert.ok(scanned.has(name), `${name} is one of the scanned checkbox labels`);
+  }
 });
 
 /**

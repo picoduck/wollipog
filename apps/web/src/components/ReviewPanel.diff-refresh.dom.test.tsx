@@ -930,7 +930,7 @@ test("per-hunk line selections do not survive a pane switch, even where the file
   try {
     await act(async () => { fireDomEvent.click(paneButton(harness.container, "Unstaged")); });
     const selectable = harness.container.querySelectorAll<HTMLInputElement>(
-      'input[type="checkbox"][aria-label^="Select removed line"], input[type="checkbox"][aria-label^="Select added line"]',
+      'input[type="checkbox"][aria-label^="Select Removed Line"], input[type="checkbox"][aria-label^="Select Added Line"]',
     );
     assert.ok(selectable.length > 0, "the unstaged pane offers line staging");
     await act(async () => { fireDomEvent.change(selectable[0]!, { target: { checked: true } }); });

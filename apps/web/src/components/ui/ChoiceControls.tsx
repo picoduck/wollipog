@@ -133,6 +133,7 @@ export function Checkbox({
   labelHidden,
   className,
   title,
+  describedBy,
   onChange,
 }: {
   checked: boolean;
@@ -152,6 +153,11 @@ export function Checkbox({
   labelHidden?: boolean;
   className?: string;
   title?: string;
+  /**
+   * The id of text elsewhere that describes the box, such as why it is unavailable. An icon-only
+   * box has no helper line of its own, so a refusal is announced through this and `title`.
+   */
+  describedBy?: string;
   onChange: (checked: boolean) => void;
 }) {
   const ids = useId();
@@ -164,6 +170,7 @@ export function Checkbox({
         checked={checked}
         disabled={disabled}
         aria-label={ariaLabel ?? label}
+        aria-describedby={describedBy}
         title={title}
         onChange={change}
       />
@@ -182,7 +189,7 @@ export function Checkbox({
         disabled={disabled}
         aria-label={ariaLabel}
         aria-labelledby={ariaLabel ? undefined : labelId}
-        aria-describedby={helper ? helperId : undefined}
+        aria-describedby={[helper ? helperId : undefined, describedBy].filter(Boolean).join(" ") || undefined}
         onChange={change}
       />
       <span className="checkbox-label" id={labelId}>{label}</span>

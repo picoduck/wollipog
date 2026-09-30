@@ -110,10 +110,8 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
      semantics inside the primitives file. The entry came off with the control, which is the
      ratchet working rather than an exemption being granted. */
   ["components/AgentSessionDiscoveryDialog.tsx", "raw-radiogroup", 1],
-  /* Down from 9 with #1803: the diff scope, index pane and diff layout groups became the shared
-     SegmentedControl, as did the Browser, Files and runner-host groups above, whose entries came
-     off. The one left is the findings list's selection checkbox. */
-  ["components/ReviewPanel.tsx", "raw-radiogroup", 1],
+  /* ReviewPanel's findings selector and GitDiffViewer's line selectors became `Checkbox` with
+     #2044, which took both files' last raw-choice entries off. */
   ["components/SessionApproval.tsx", "raw-radiogroup", 2],
   ["components/CommandPalette.tsx", "raw-radiogroup", 2],
   // Like CommandPalette, this is transient command navigation rather than a persisted setting or
@@ -121,7 +119,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/SlashCommandMenu.tsx", "raw-radiogroup", 2],
   ["components/ComposerControls.tsx", "raw-radiogroup", 2],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
-  ["components/GitDiffViewer.tsx", "raw-radiogroup", 2],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],
   /* Down from 6 on 2026-08-12: the Move to Project dialog adopted ChoiceCards (now ChoiceRows),

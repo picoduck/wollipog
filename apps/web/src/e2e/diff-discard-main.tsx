@@ -34,11 +34,22 @@ const diff: GitDiffInfo = {
 
 const noop = () => {};
 
+// `?pane=unstaged` adds the per-line selectors (#2044), `?layout=split` the split view,
+// `?refused=1` a person who may not run Git actions, and `?references=1` the prompt-line boxes.
+const pane = query.get("pane") === "unstaged" ? "unstaged" : "combined";
+const layout = query.get("layout") === "split" ? "split" : "unified";
+const refusal = query.get("refused") === "1"
+  ? { reason: "Viewers can read this session's changes but cannot stage them.", id: "harness-git-refusal" }
+  : null;
+
 createRoot(document.getElementById("root")!).render(
   <main style={{ maxWidth: 720, margin: "0 auto", padding: 24 }}>
+    {refusal && <p id={refusal.id} className="muted">{refusal.reason}</p>}
     <GitDiffViewer
       diff={diff}
-      staging={{ onHunk: noop, onLines: noop, onDiscard: noop, pane: "combined", fineGrained: true, busyKey: null }}
+      layout={layout}
+      onAttachWorkspaceReference={query.get("references") === "1" ? async () => {} : undefined}
+      staging={{ onHunk: noop, onLines: noop, onDiscard: noop, pane, fineGrained: true, busyKey: null, refusal }}
     />
   </main>,
 );

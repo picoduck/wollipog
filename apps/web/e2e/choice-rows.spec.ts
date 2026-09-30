@@ -235,4 +235,30 @@ test.describe("with a coarse pointer at 390px", () => {
       expect(hit.edges, `${hit.name} owns its top, bottom, left and right edges`).toEqual([true, true, true, true]);
     }
   });
+
+  test("a wrapped checkbox label keeps its box on the first line, and a one-line row stays centred (#2044)", async ({ page }) => {
+    await page.goto("/choice-rows-e2e.html");
+    const rows = await group(page, "checks").locator("label.checkbox").evaluateAll((elements) => elements.map((row) => {
+      const marker = row.querySelector("input")!.getBoundingClientRect();
+      const label = row.querySelector<HTMLElement>(".checkbox-label")!;
+      const labelBox = label.getBoundingClientRect();
+      const box = row.getBoundingClientRect();
+      return {
+        name: label.textContent,
+        markerCentre: marker.top + marker.height / 2,
+        firstLineCentre: labelBox.top + parseFloat(getComputedStyle(label).lineHeight) / 2,
+        lines: Math.round(labelBox.height / parseFloat(getComputedStyle(label).lineHeight)),
+        rowCentre: box.top + box.height / 2,
+      };
+    }));
+    const consent = rows.find((row) => row.name?.startsWith("Accept version diff"))!;
+    // Not vacuous: at this width the consent sentence really does wrap.
+    expect(consent.lines).toBe(2);
+    expect(Math.abs(consent.markerCentre - consent.firstLineCentre), "the box sits on the first line").toBeLessThanOrEqual(0.5);
+    for (const name of ["Started", "Succeeded", "Expired"]) {
+      const row = rows.find((candidate) => candidate.name === name)!;
+      expect(row.lines).toBe(1);
+      expect(Math.abs(row.markerCentre - row.rowCentre), `${name}: the box is centred in its row`).toBeLessThanOrEqual(0.5);
+    }
+  });
 });

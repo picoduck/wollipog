@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Notice } from "./Notice.js";
-import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { Checkbox, SegmentedControl } from "./ui/ChoiceControls.js";
 import { StatusBadge } from "./StatusBadge.js";
 import {
   isTerminal,
@@ -925,18 +925,18 @@ export function ReviewPanel({
                 : `${finding.filePath}${finding.remote?.subjectType === "file" ? " (file comment)" : `:${finding.line}`}`;
               return (
                 <article className="review-finding-row" key={finding.findingId}>
-                  <input
-                    type="checkbox"
-                    aria-label={remoteOnly
+                  <Checkbox
+                    labelHidden
+                    label={remoteOnly
                       ? "Select Remote Discussion"
                       : finding.remote?.subjectType === "file"
-                      ? `Select file-level finding on ${finding.filePath}`
-                      : `Select finding on ${finding.filePath} line ${finding.line}`}
+                      ? `Select File-Level Finding on ${finding.filePath}`
+                      : `Select Finding on ${finding.filePath} Line ${finding.line}`}
                     checked={selectedFindings.has(finding.findingId)}
                     disabled={bundlingFindings}
-                    onChange={(event) => setSelectedFindings((prior) => {
+                    onChange={(checked) => setSelectedFindings((prior) => {
                       const next = new Set(prior);
-                      if (event.target.checked) next.add(finding.findingId); else next.delete(finding.findingId);
+                      if (checked) next.add(finding.findingId); else next.delete(finding.findingId);
                       return next;
                     })}
                   />

@@ -265,7 +265,7 @@ function combinedControls(container: HTMLElement): Array<[string, HTMLButtonElem
 /** The Git actions on the Unstaged pane: line staging and the selection boxes that feed it. */
 function lineControls(container: HTMLElement): Array<[string, HTMLButtonElement | HTMLInputElement]> {
   const boxes = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"][aria-label^="Select "]')]
-    .filter((box) => /^Select (added|removed) line /u.test(box.getAttribute("aria-label")!));
+    .filter((box) => /^Select (Added|Removed) Line /u.test(box.getAttribute("aria-label")!));
   assert.equal(boxes.length, 2, "each changed line can be selected");
   return [
     ["Stage hunk", onlyButton(container, "Stage hunk")],
