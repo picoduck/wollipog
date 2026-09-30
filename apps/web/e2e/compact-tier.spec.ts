@@ -229,7 +229,8 @@ test.describe("at 940×600 with a mouse, the desktop app's minimum window", () =
       };
       return [
         centre(document.querySelector(".rail-brand")!),
-        ...[...document.querySelectorAll(".app-rail .rail-item > svg")].map(centre),
+        // A destination's glyph sits in its icon box in the 64px rail (#1967).
+        ...[...document.querySelectorAll(".app-rail .rail-item > svg, .app-rail .rail-item > .rail-icon > svg")].map(centre),
         centre(document.querySelector(".rail-foot > button")!),
       ];
     });

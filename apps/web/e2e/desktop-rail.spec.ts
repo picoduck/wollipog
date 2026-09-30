@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { glyphUnderMark } from "./rail-marks.js";
+import { railAttention } from "../src/rail-attention.js";
 
 /** The desktop rail (#1958; docs/design-system.md §4.1, §9.3, §15.3), in the real Shell. */
 const shell = (path: string) => `/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent(path)}`;
@@ -175,6 +176,34 @@ test.describe("at 1440×900 with a mouse", () => {
     await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
     await expect(connections.locator(".rail-attention-dot")).toHaveCount(0);
     await expect(tooltip(page).locator(".rail-tooltip-note")).toHaveCount(0);
+
+    // The longest note railAttention writes, for machines needing the user for both reasons, wraps
+    // inside the 280px tooltip instead of painting past it. The fixture has one machine, so the note
+    // is set on the item before hovering it, as Rail does.
+    const longest = railAttention("runners", {
+      blocked: 0,
+      stalled: 0,
+      machines: { offlineWithActiveSessions: 12, updateRequired: 13 },
+    })!.note;
+    await page.locator(".main").hover();
+    await expect(tooltip(page)).toBeHidden();
+    await connections.evaluate((element, note) => element.setAttribute("data-rail-note", note), longest);
+    await connections.hover();
+    await expect(tooltip(page).locator(".rail-tooltip-note")).toHaveText(longest);
+    const fit = await tooltip(page).evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const note = element.querySelector(".rail-tooltip-note")!;
+      const noteBox = note.getBoundingClientRect();
+      return {
+        width: box.width,
+        overflow: element.scrollWidth > element.clientWidth,
+        inside: noteBox.right <= box.right && noteBox.bottom <= box.bottom,
+        wrapped: noteBox.height > parseFloat(getComputedStyle(note).lineHeight) * 1.5,
+        keysAtEdge: box.right - element.querySelector("kbd")!.getBoundingClientRect().right < 12,
+      };
+    });
+    expect(fit.width).toBeLessThanOrEqual(280);
+    expect(fit).toMatchObject({ overflow: false, inside: true, wrapped: true, keysAtEdge: true });
   });
 
   test("the brand is decoration and Tab skips it", async ({ page }) => {

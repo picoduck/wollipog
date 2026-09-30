@@ -837,15 +837,16 @@ kbd {
 .rail-tooltip-detail { color: var(--text-dim); }
 /* A destination's attention in words, on a second line under the name and keycap (#1967). A grid,
    so the tooltip is as wide as its longer line rather than as both lines laid end to end, with the
-   keycap kept at the trailing edge. */
+   keycap kept at the trailing edge. A note longer than the tooltip's 280px wraps inside it. */
 .rail-tooltip.with-note {
   display: inline-grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   row-gap: var(--space-0-5);
 }
 .rail-tooltip-note {
   grid-column: 1 / -1;
   color: var(--text-dim);
+  white-space: normal;
 }
 /* Covers the gap back to the item (the rail's side padding plus the 8px offset in RailTooltip.tsx),
    so the pointer can move onto the tooltip without closing it. */
