@@ -835,6 +835,18 @@ kbd {
 }
 /* The instance tile's status after its name (#1970). */
 .rail-tooltip-detail { color: var(--text-dim); }
+/* A destination's attention in words, on a second line under the name and keycap (#1967). A grid,
+   so the tooltip is as wide as its longer line rather than as both lines laid end to end, with the
+   keycap kept at the trailing edge. */
+.rail-tooltip.with-note {
+  display: inline-grid;
+  grid-template-columns: 1fr auto;
+  row-gap: var(--space-0-5);
+}
+.rail-tooltip-note {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+}
 /* Covers the gap back to the item (the rail's side padding plus the 8px offset in RailTooltip.tsx),
    so the pointer can move onto the tooltip without closing it. */
 .rail-tooltip::before {
@@ -845,24 +857,42 @@ kbd {
   bottom: 0;
   width: calc((var(--rail-w) - 1px - var(--control-h-lg)) / 2 + 1px + var(--space-2));
 }
-.rail-badge {
-  position: absolute;
-  top: 2px;
-  right: -9px;
-  min-width: 16px;
-  padding: 1px 4px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--bg);
-  font-size: 9px;
-  font-weight: 750;
-  text-align: center;
+/* The 64px rail's icon box, which a destination's attention sits on (§11.4, #1967). It is wider and
+   taller than the 20px glyph, with the glyph centred in it, so the badge on its shoulder clears the
+   glyph's stroke rather than covering its corner. The ring takes the item's own fill. */
+.rail-icon {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--icon-lg) + 18px);
+  height: calc(var(--icon-lg) + 6px);
 }
-.rail-badge.blocked { background: var(--accent-2); }
-.rail-badge.stalled {
-  right: auto;
-  left: -9px;
-  background: var(--red);
+@media (hover: hover) {
+  .rail-item:hover { --count-badge-ring: var(--bg-elev-2); }
+}
+.rail-item[aria-current="page"] { --count-badge-ring: var(--surface-selected); }
+/* A machine needs the user (#1967): an 8px dot in the warning tone rather than a count, inline after
+   a name or on an icon's shoulder with the count badge's ring. Drawn as a border, which forced colors
+   keeps in a system colour, where it would repaint a background as Canvas and erase the dot. */
+.rail-attention-dot {
+  flex: none;
+  box-sizing: border-box;
+  width: 8px;
+  height: 8px;
+  border: 4px solid var(--tone);
+  border-radius: var(--radius-pill);
+}
+.rail-attention-dot.on-icon {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  box-shadow: 0 0 0 2px var(--count-badge-ring);
+}
+/* Forced colors drops the ring's box-shadow; an outline in Canvas redraws it, as for the badge. */
+@media (forced-colors: active) {
+  .rail-attention-dot.on-icon { outline: 2px solid Canvas; }
 }
 /* The labelled rail (#1968, §4.1): 208px, each item's name after its icon. Every icon stays where
    the 64px rail centres it, so switching moves nothing but the rail's edge. Rail.tsx never sets the
@@ -896,8 +926,6 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Counts sit inline after the name instead of on the icon's corner. */
-.app-rail.labelled .rail-badge { position: static; flex: none; }
 /* The digit shows where the tooltip would have: on hover with a mouse, and on keyboard focus. */
 .rail-item-keys { display: none; }
 @media (hover: hover) and (pointer: fine) {
@@ -13022,6 +13050,15 @@ body.shell-dock-dragging * {
   /* The current tab: accent icon and label over a tinted pill. Nothing is drawn below the icon. */
   .rail-item.active::before { content: none; }
   .rail-item.active .rail-tab-pill { background: var(--surface-selected); }
+  /* A tab's icon box (#1967): wide enough that the badge on its shoulder clears the 24px glyph, and
+     4px shorter than the glyph, which overflows it evenly, so the badge and its ring stay under the
+     bar's top edge, which clips. The badge straddles the pill's corner, so it rings in the bar's
+     fill whatever the item or the pill shows. */
+  .rail-tab-pill > .rail-icon {
+    width: 42px;
+    height: 20px;
+  }
+  .rail-tab-pill { --count-badge-ring: var(--bg-elev); }
   @media (hover: hover) {
     .rail-destinations > .rail-item:hover,
     .rail-more > .rail-item:hover { background: transparent; }
@@ -14872,19 +14909,6 @@ body.shell-dock-dragging * {
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
 
 /* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385). */
-.rail-more-count {
-  margin-left: 0;
-  min-width: 18px;
-  padding: 1px 6px;
-  border-radius: var(--radius-pill);
-  font-size: var(--text-xs);
-  text-align: center;
-}
-/* The bar badges' solid palette, not a 16% wash: the wash measured 4.42:1 in wollipog dark. */
-.rail-more-count { background: var(--accent); color: var(--bg); }
-.rail-more-count.blocked { background: var(--accent-2); color: var(--bg); }
-.rail-more-count.stalled { background: var(--red); color: var(--bg); }
-
 .rail-order-list {
   margin: 0;
   padding: 0;

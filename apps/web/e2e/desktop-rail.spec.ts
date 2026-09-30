@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { glyphUnderMark } from "./rail-marks.js";
 
 /** The desktop rail (#1958; docs/design-system.md §4.1, §9.3, §15.3), in the real Shell. */
 const shell = (path: string) => `/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent(path)}`;
@@ -133,6 +135,48 @@ test.describe("at 1440×900 with a mouse", () => {
     await expect(page.locator('.app-rail [aria-current="page"]')).toHaveCount(1);
   });
 
+  test("Connections shows a dot only while a machine needs the user, and says why (#1967)", async ({ page }) => {
+    // A session is running on the fixture's one machine.
+    await page.goto(`${shell("/projects")}&scenario=conversation-steering`);
+    await expect(page.locator(".app-rail .rail-destinations")).toBeVisible();
+    const connections = rail(page).getByRole("link", { name: "Connections", exact: true });
+    // One machine online on the current protocol is the normal state: nothing to count.
+    await expect(connections.locator(".count-badge, .rail-attention-dot")).toHaveCount(0);
+    await expect(connections).not.toHaveAttribute("aria-describedby", /./);
+
+    // Offline while its sessions are running: the work is not progressing.
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
+    await expect(connections.locator(".rail-attention-dot.t-warning.on-icon")).toHaveCount(1);
+    await expect(connections.locator(".count-badge")).toHaveCount(0);
+    await expect(connections).toHaveAccessibleName("Connections");
+    await expect(connections).toHaveAccessibleDescription("1 machine is offline with active sessions");
+    expect(await glyphUnderMark(page, connections), "the dot and its ring cover none of the glyph").toBe(0);
+    const dot = await connections.locator(".rail-attention-dot").evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const probe = document.createElement("span");
+      probe.style.background = "var(--amber)";
+      document.body.append(probe);
+      const amber = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return { size: `${box.width}x${box.height}`, amber: getComputedStyle(element).borderTopColor === amber };
+    });
+    expect(dot).toEqual({ size: "8x8", amber: true });
+    await connections.hover();
+    await expect(tooltip(page).locator(".rail-tooltip-note")).toHaveText("1 machine is offline with active sessions");
+
+    // Back online, but on an older protocol: Update Required.
+    await page.evaluate((version) => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("online");
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version);
+    }, PROTOCOL_VERSION - 1);
+    await expect(connections).toHaveAccessibleDescription("1 machine needs an update");
+    await expect(tooltip(page).locator(".rail-tooltip-note")).toHaveText("1 machine needs an update");
+
+    await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
+    await expect(connections.locator(".rail-attention-dot")).toHaveCount(0);
+    await expect(tooltip(page).locator(".rail-tooltip-note")).toHaveCount(0);
+  });
+
   test("the brand is decoration and Tab skips it", async ({ page }) => {
     await openShell(page);
     const brand = page.locator(".rail-brand");
@@ -153,7 +197,7 @@ async function iconCentres(page: Page) {
     };
     return [
       centre(document.querySelector(".rail-brand")!),
-      ...[...document.querySelectorAll(".app-rail .rail-item > svg")].map(centre),
+      ...[...document.querySelectorAll(".app-rail .rail-item > svg, .app-rail .rail-item > .rail-icon > svg")].map(centre),
       centre(document.querySelector(".rail-foot > button")!),
     ];
   });
@@ -202,7 +246,7 @@ test.describe("the labelled rail at 1440×900 (#1968)", () => {
     expect(await iconCentres(page)).toEqual(before);
   });
 
-  test("a hover shows the digit at the trailing edge, not a tooltip, and counts sit inline", async ({ page }) => {
+  test("a hover shows the digit at the trailing edge, not a tooltip, and the attention mark sits inline", async ({ page }) => {
     await openShell(page);
     await rail(page).getByRole("button", { name: "Expand Navigation", exact: true }).click();
     const runs = rail(page).getByRole("link", { name: "Multi-Agent Runs", exact: true });
@@ -222,15 +266,24 @@ test.describe("the labelled rail at 1440×900 (#1968)", () => {
     });
     expect(hovered).toEqual({ keysRightInset: 8, separated: true, clipped: false });
 
-    // The fixture's one online machine: its count follows the name instead of covering the icon.
+    // A machine needing an update: Connections' dot follows the name instead of sitting on the icon
+    // (#1967).
+    await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION - 1);
     const connections = rail(page).getByRole("link", { name: "Connections", exact: true });
-    const counted = await connections.evaluate((item) => {
+    await expect(connections.locator(".rail-attention-dot")).toHaveCount(1);
+    const marked = await connections.evaluate((item) => {
       const label = item.querySelector(".rail-item-label")!.getBoundingClientRect();
-      const badge = item.querySelector(".rail-badge")!.getBoundingClientRect();
+      const dot = item.querySelector(".rail-attention-dot")!;
+      const box = dot.getBoundingClientRect();
       const itemBox = item.getBoundingClientRect();
-      return { after: badge.left >= label.right, inside: badge.right <= itemBox.right, text: item.querySelector(".rail-badge")!.textContent };
+      return {
+        after: box.left >= label.right,
+        inside: box.right <= itemBox.right,
+        centred: Math.abs((box.top + box.height / 2) - (itemBox.top + itemBox.height / 2)) <= 1,
+        onIcon: dot.classList.contains("on-icon"),
+      };
     });
-    expect(counted).toEqual({ after: true, inside: true, text: "1" });
+    expect(marked).toEqual({ after: true, inside: true, centred: true, onIcon: false });
   });
 
   test("narrowing to a phone while the foot button has focus hands focus to the page heading", async ({ page }) => {

@@ -366,7 +366,6 @@ function HarnessShell() {
         view={view}
         blockedCount={0}
         stalledCount={0}
-        onlineConnections={1}
         onNavigate={navigate}
       />
       <main className="main">

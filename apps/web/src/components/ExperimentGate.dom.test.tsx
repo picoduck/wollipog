@@ -77,7 +77,6 @@ for (const { experiment, view, path, content } of cases) {
           view={view}
           blockedCount={0}
           stalledCount={0}
-          onlineConnections={1}
           onNavigate={(destination) => navigated.push(destination)}
           instanceControl={<button type="button">Switch Instance</button>}
           settingsControl={<button type="button">Settings</button>}

@@ -233,7 +233,6 @@ test("the tile takes the brand's place in the desktop rail, and its menu flies o
         view={{ name: "inbox" }}
         blockedCount={0}
         stalledCount={0}
-        onlineConnections={1}
         onNavigate={() => undefined}
         instanceControl={<InstanceSelector />}
         settingsControl={<button type="button">Settings</button>}
@@ -302,7 +301,6 @@ test("the browser build shows no tile, and the rail keeps its decorative brand",
       view={{ name: "inbox" }}
       blockedCount={0}
       stalledCount={0}
-      onlineConnections={0}
       onNavigate={() => undefined}
       settingsControl={<button type="button">Settings</button>}
     />,

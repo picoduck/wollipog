@@ -120,11 +120,11 @@ function Harness() {
   const query = new URLSearchParams(window.location.search);
   const theme = query.get("theme") === "light" ? "light" : "dark";
   document.documentElement.setAttribute("data-theme", theme);
-  // Connections renders a count badge when any runner is online. The badge is not the destination:
-  // with one online, a capture of the whole item clears an ink floor with the icon erased, and the
-  // zero case — which is what a new install renders — would be a blank square. The measurements
-  // below target each icon directly, and this runs both ways so the badge-absent layout is real.
-  const connections = Number(query.get("connections") ?? 1);
+  // Connections renders a warning dot while a machine needs the user (#1967). The dot is not the
+  // destination: a capture of the whole item could clear an ink floor with the icon erased, and the
+  // zero case — which is what a healthy install renders — would be a blank square. The measurements
+  // below target each icon directly, and this runs both ways so the dot-absent layout is real.
+  const machines = Number(query.get("machines") ?? 1);
   // Which destination is current. Inbox is a PRIMARY destination, so with only that case the
   // active More trigger and the active overflow row — both real production states, reached by
   // visiting Runs, Pods, Automations or Usage — are never rendered, and a rule erasing them
@@ -137,8 +137,8 @@ function Harness() {
   // already open fires no resize and no scroll — and with the fixture always starting at full
   // height, deleting that call changed nothing.
   const occludedAtInstall = Number(query.get("keyboard") ?? 0);
-  // Production passes live session counts, which render badges on Inbox. Hardcoding zero meant
-  // `.app-rail:has(.rail-badge.blocked) { opacity: 0 }` — any blocked session at all — erased the
+  // Production passes live session counts, which render a badge on Sessions. Hardcoding zero meant
+  // `.app-rail:has(.count-badge) { opacity: 0 }` — any blocked session at all — erased the
   // production navigation while matching nothing here.
   const blocked = Number(query.get("blocked") ?? 0);
   const stalled = Number(query.get("stalled") ?? 0);
@@ -222,7 +222,7 @@ function Harness() {
         view={view}
         blockedCount={blocked}
         stalledCount={stalled}
-        onlineConnections={connections}
+        machines={{ offlineWithActiveSessions: 0, updateRequired: machines }}
         // Recorded, not discarded. With a no-op the suite proved a destination could be tapped and
         // nothing about where the tap went: pointing every primary link at Inbox left it green.
         onNavigate={(destination) => {

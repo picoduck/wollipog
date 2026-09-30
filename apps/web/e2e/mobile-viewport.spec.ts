@@ -4,6 +4,7 @@ import { defaultRailPreferences, phoneBarViews } from "../src/rail-preferences.j
 import { DEFAULT_EXPERIMENT_FLAGS } from "../src/experiments.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../src/mobile-viewport.js";
 import { dialogMotionSettled } from "./dialog-motion.js";
+import { glyphUnderMark } from "./rail-marks.js";
 
 /** The More sheet: the shared menu surface (docs/design-system.md §9), portalled to <body>. */
 const MORE_SHEET = '.menu[aria-label="More Destinations"]';
@@ -461,19 +462,20 @@ const TAB_LABEL_MARKS: Record<string, Mark> = {
 
 interface HarnessOptions {
   theme?: (typeof THEMES)[number];
-  connections?: number;
+  /** Machines needing an update, which put the warning dot on Connections (#1967). */
+  machines?: number;
   /** Which destination is current. An overflow name makes the More trigger and one sheet row active. */
   view?: string;
   /** Occlusion already present when the fallback installs, firing no event at all. */
   keyboard?: number;
-  /** Session counts, which render badges on Inbox as production's live counts do. */
+  /** Session counts, which render a badge on Sessions as production's live counts do. */
   blocked?: number;
   stalled?: number;
 }
 
 async function useHarness(page: Page, options: HarnessOptions = {}) {
-  const { theme = "dark", connections = 1, view = "inbox", keyboard = 0, blocked = 0, stalled = 0 } = options;
-  await page.goto(`/mobile-viewport-e2e.html?theme=${theme}&connections=${connections}&view=${view}`
+  const { theme = "dark", machines = 1, view = "inbox", keyboard = 0, blocked = 0, stalled = 0 } = options;
+  await page.goto(`/mobile-viewport-e2e.html?theme=${theme}&machines=${machines}&view=${view}`
     + `&keyboard=${keyboard}&blocked=${blocked}&stalled=${stalled}`);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await expect(page.locator(".app-rail")).toBeVisible();
@@ -546,15 +548,15 @@ for (const theme of THEMES) {
 }
 
 /**
- * The state a fresh install renders in, where Connections has no count badge.
+ * The state a healthy install renders in, where Connections has no dot.
  *
- * With one runner online that destination paints a badge, and a measurement of the whole item let
- * the badge stand in for the icon. Zero is both the honest default and the case with nothing else
- * in the box.
+ * With a machine needing the user that destination paints a dot, and a measurement of the whole
+ * item could let the dot stand in for the icon. Zero is both the usual state and the case with
+ * nothing else in the box.
  */
-test("every destination is painted with no connections online", async ({ page }) => {
-  await useHarness(page, { connections: 0 });
-  await expect(page.locator(".rail-badge")).toHaveCount(0);
+test("every destination is painted with no machine needing attention", async ({ page }) => {
+  await useHarness(page, { machines: 0 });
+  await expect(page.locator(".rail-attention-dot")).toHaveCount(0);
   await openKeyboard(page);
   await expectEveryPrimaryDestinationUsable(page);
 });
@@ -562,16 +564,45 @@ test("every destination is painted with no connections online", async ({ page })
 /**
  * The counted state, which production reaches whenever a session needs attention.
  *
- * The fixture hardcoded zero for both, so `.app-rail:has(.rail-badge.blocked) { opacity: 0 }` —
+ * The fixture hardcoded zero for both, so `.app-rail:has(.count-badge) { opacity: 0 }` —
  * any blocked session at all — erased the production navigation and matched nothing here.
  */
 test("every destination is painted with blocked and stalled sessions", async ({ page }) => {
   await useHarness(page, { blocked: 3, stalled: 2 });
-  await expect(page.locator(".rail-badge.blocked")).toHaveCount(1);
-  await expect(page.locator(".rail-badge.stalled")).toHaveCount(1);
+  // One badge for the destination: the total, red because a session is stalled (#1967).
+  await expect(page.locator(".app-rail .count-badge")).toHaveCount(1);
+  await expect(page.locator(".app-rail .count-badge.danger.on-icon")).toHaveText("5");
   await openKeyboard(page);
   await expectEveryPrimaryDestinationUsable(page);
 });
+
+/**
+ * The tab bar draws the desktop rail's marks on each icon's shoulder (#1967): the badge and the dot
+ * clear the 24px glyph, and the bar, which clips its overflow, cuts off neither.
+ */
+for (const theme of THEMES) {
+  test(`a tab's badge and dot sit on its icon, clear of the glyph and inside the bar, in ${theme}`, async ({ page }) => {
+    await useHarness(page, { theme, blocked: 12, stalled: 3, machines: 1 });
+    const bar = page.getByRole("navigation", { name: "Primary Navigation" });
+    const sessions = bar.getByRole("link", { name: "Sessions", exact: true });
+    const connections = bar.getByRole("link", { name: "Connections", exact: true });
+    await expect(sessions.locator(".rail-tab-pill .count-badge.danger.on-icon")).toHaveText("15");
+    await expect(sessions).toHaveAccessibleDescription("12 waiting on you, 3 stalled");
+    await expect(connections.locator(".rail-tab-pill .rail-attention-dot.on-icon")).toHaveCount(1);
+    await expect(connections).toHaveAccessibleDescription("1 machine needs an update");
+    for (const tab of [sessions, connections]) {
+      expect(await glyphUnderMark(page, tab)).toBe(0);
+      const inside = await tab.evaluate((element) => {
+        const mark = element.querySelector(".count-badge, .rail-attention-dot")!.getBoundingClientRect();
+        const rail = element.closest(".app-rail")!;
+        const edge = rail.getBoundingClientRect().top + parseFloat(getComputedStyle(rail).borderTopWidth);
+        // The ring is 2px outside the mark.
+        return mark.top - 2 >= edge;
+      });
+      expect(inside, "the bar clips its overflow, so the mark and its ring must fit under its top edge").toBe(true);
+    }
+  });
+}
 
 /**
  * No two destinations look the same.
@@ -605,7 +636,7 @@ test("no two destinations render the same glyph", async ({ page }) => {
   };
   // The bar's glyphs are read before the sheet opens: the sheet's scrim dims the bar under it
   // (§15.1), and a dimmed glyph is not what a user compares.
-  await measure(page.locator(".rail-destinations > .rail-item > .rail-tab-pill > svg"));
+  await measure(page.locator(".rail-destinations > .rail-item > .rail-tab-pill > .rail-icon > svg"));
   await openMoreSheet(page);
   await measure(page.locator(`${MORE_SHEET} .menu-icon > svg`));
   // Every destination plus the sheet's trailing Settings row. The gear is measured with them

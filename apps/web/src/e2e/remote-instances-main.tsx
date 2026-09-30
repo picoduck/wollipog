@@ -139,7 +139,6 @@ function Shell() {
         view={{ name: "inbox" }}
         blockedCount={0}
         stalledCount={0}
-        onlineConnections={1}
         onNavigate={() => undefined}
         instanceControl={<InstanceSelector connection={connection} labelled={labels} />}
         // The shell's own Settings item and page container, so captures show what production draws.

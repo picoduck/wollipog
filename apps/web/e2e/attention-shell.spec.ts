@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { glyphUnderMark, ringAndFill } from "./rail-marks.js";
 test.use({ video: "on" });
 
 /** The app's opaque route segment: UTF-16LE, base64url, no padding (navigation.ts encodeOpaque). */
@@ -77,8 +78,11 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   await expect(grid.locator(".inbox-row-shell", { hasText: "Snoozed Session" })).toHaveCount(0);
   await expect(grid.locator(".status-count")).toHaveCount(3);
   await expect(grid.locator(".status-count").first()).toHaveText("2");
-  await expect(page.locator(".rail-badge.blocked")).toHaveText("4");
-  await expect(page.locator(".rail-badge.stalled")).toHaveText("4");
+  // One rail badge for Sessions: 4 blocked plus 4 stalled, red because a session is stalled (#1967).
+  const sessions = page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: "Sessions", exact: true });
+  await expect(sessions.locator(".count-badge")).toHaveCount(1);
+  await expect(sessions.locator(".count-badge.danger.on-icon")).toHaveText("8");
+  await expect(sessions).toHaveAccessibleDescription("4 waiting on you, 4 stalled");
   await grid.focus();
   // The primary requests in this fixture offer no options, so one-key approval has nothing safe to pick.
   await grid.press("a");
@@ -206,4 +210,55 @@ for (const width of [390, 1280]) test(`real shell threads an exact attention rou
     await expect(panel).toBeVisible();
   }
   await page.screenshot({ path: `.agents/tmp/attention-followup/shell-route-${width}.png`, fullPage: true });
+});
+
+for (const [label, device] of [
+  ["at 1440×900 with a mouse", { viewport: { width: 1440, height: 900 } }],
+  ["on an 834px coarse-pointer tablet", { viewport: { width: 834, height: 1112 }, hasTouch: true, isMobile: true }],
+] as const) {
+  test.describe(label, () => {
+    test.use(device);
+
+    test("Sessions carries one badge on the icon's shoulder, clear of the glyph and ringed in the item's fill (#1967)", async ({ page }) => {
+      await page.goto(fullShell("/projects"));
+      const rail = page.getByRole("navigation", { name: "Primary Navigation" });
+      const sessions = rail.getByRole("link", { name: "Sessions", exact: true });
+      // 4 blocked and 4 stalled: one red total, never two badges.
+      await expect(sessions.locator(".count-badge")).toHaveCount(1);
+      await expect(sessions.locator(".count-badge.danger.on-icon")).toHaveText("8");
+      await expect(sessions).toHaveAccessibleName("Sessions");
+      await expect(sessions).toHaveAccessibleDescription("4 waiting on you, 4 stalled");
+      expect(await glyphUnderMark(page, sessions), "the badge and its ring cover none of the glyph").toBe(0);
+      const rest = await ringAndFill(sessions);
+      expect(rest.ring).toBe(`${rest.fill} 0px 0px 0px 2px`);
+
+      // On the current item the ring follows the selected fill.
+      await page.goto(fullShell());
+      await expect(sessions).toHaveAttribute("aria-current", "page");
+      expect(await glyphUnderMark(page, sessions)).toBe(0);
+      const current = await ringAndFill(sessions);
+      expect(current.ring).toBe(`${current.fill} 0px 0px 0px 2px`);
+      expect(current.fill).not.toBe(rest.fill);
+    });
+  });
+}
+
+test.describe("the rail tooltip at 1440×900", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("states the Sessions breakdown on a second line (#1967)", async ({ page }) => {
+    await page.goto(fullShell("/projects"));
+    const sessions = page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: "Sessions", exact: true });
+    await sessions.hover();
+    const tooltip = page.locator(".rail-tooltip");
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip.locator(".rail-tooltip-note")).toHaveText("4 waiting on you, 4 stalled");
+    const lines = await tooltip.evaluate((element) => {
+      const note = element.querySelector(".rail-tooltip-note")!.getBoundingClientRect();
+      const keys = element.querySelector("kbd")!.getBoundingClientRect();
+      return { below: note.top >= keys.bottom - 1, width: element.getBoundingClientRect().width };
+    });
+    expect(lines.below, "the breakdown is a second line under the name and keycap").toBe(true);
+    expect(lines.width).toBeLessThanOrEqual(280);
+  });
 });

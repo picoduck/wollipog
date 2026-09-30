@@ -28,6 +28,8 @@ import { useInstanceScope } from "../instance-scope.js";
 import { sessionsDestination } from "../sessions-view-mode.js";
 import { phoneBarViews, railDigits, setRailLabels, visibleRailViews } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
+import { NO_MACHINE_ATTENTION, railAttention, type MachineAttention, type RailAttention } from "../rail-attention.js";
+import { CountBadge } from "./CountBadge.js";
 
 /** Shared with Settings → Appearance → Navigation, whose rows show the same glyphs (#385). */
 export const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: string }) => ReactNode> = {
@@ -50,9 +52,9 @@ const TAB_ICON_SIZE = 24;
 const SHEET_ICON_SIZE = 20;
 
 /**
- * What follows an item's icon (#1968). In the labelled rail: the name, the counts inline after it,
- * and the keycap at the trailing edge, shown on hover or keyboard focus. In the 64px rail only the
- * counts, which sit on the icon's corner; the tooltip carries the name and the keycap.
+ * What follows an item's icon (#1968). In the labelled rail: the name, its attention inline after
+ * it, and the keycap at the trailing edge, shown on hover or keyboard focus. The 64px rail puts the
+ * attention on the icon's corner instead, and its tooltip carries the name and the keycap.
  */
 export function RailItemText({
   labelled,
@@ -73,6 +75,18 @@ export function RailItemText({
       {keys && <kbd className="rail-item-keys" aria-hidden="true">{keys}</kbd>}
     </>
   );
+}
+
+/**
+ * A destination's one attention mark (§11.4, #1967): a count through the shared `CountBadge`, or
+ * the 8px warning dot that says a machine needs the user. `onIcon` sets either on the icon's
+ * top-right shoulder; otherwise it sits inline. Hidden from assistive technology: the item states
+ * the same thing as its description.
+ */
+export function AttentionMark({ attention, onIcon = false }: { attention: RailAttention | null; onIcon?: boolean }) {
+  if (!attention) return null;
+  if (attention.kind === "count") return <CountBadge count={attention.count} tone={attention.tone} onIcon={onIcon} />;
+  return <span className={onIcon ? "rail-attention-dot t-warning on-icon" : "rail-attention-dot t-warning"} aria-hidden="true" />;
 }
 
 /** The desktop rail's Search item: first in the Work group, and not a destination. */
@@ -110,7 +124,7 @@ export function Rail({
   view,
   blockedCount,
   stalledCount,
-  onlineConnections,
+  machines = NO_MACHINE_ATTENTION,
   onNavigate,
   instanceControl,
   settingsControl,
@@ -119,7 +133,8 @@ export function Rail({
   view: View;
   blockedCount: number;
   stalledCount: number;
-  onlineConnections: number;
+  /** Machines that need the user; Connections shows a dot while any does (#1967). */
+  machines?: MachineAttention;
   onNavigate: (view: View) => void;
   /** Desktop app only: the current instance's tile, drawn in the brand's place at the top. */
   instanceControl?: ReactNode;
@@ -225,6 +240,7 @@ export function Rail({
   }
   const separatorsBefore = isMobile ? entries.map(() => false) : railSeparatorsBefore(entries.map(entryGroup));
   const descriptionPrefix = useId();
+  const attentionState = { blocked: blockedCount, stalled: stalledCount, machines };
   // The labelled rail already shows every name, so it shows no tooltip.
   const tooltip = useRailTooltip(!isMobile && !labelled);
   // The sheet is rendered for the whole phone breakpoint rather than only when a destination
@@ -293,28 +309,23 @@ export function Rail({
     const shortcutDigit = isMobile ? null : digits.get(item.id) ?? null;
     const Icon = VIEW_ICONS[item.id];
     const active = selected === item.id;
-    const badge = item.id === "runners" ? onlineConnections : 0;
     const destination = { name: item.id } as View;
-    const counts = item.id === "inbox"
-      ? [blockedCount > 0 ? `${blockedCount} Blocked` : "", stalledCount > 0 ? `${stalledCount} Stalled` : ""]
-        .filter(Boolean).join(", ")
-      : item.id === "runners" && badge > 0
-        ? `${badge} Online`
-        : "";
-    // On the desktop rail the accessible name is the destination's name alone, matching its tooltip,
-    // and the counts are its description. A phone tab keeps them in its name (#1959).
-    const countDescription = isMobile ? "" : counts;
+    const attention = railAttention(item.id, attentionState);
     const descriptionId = `${descriptionPrefix}-${item.id}`;
+    const glyph = <Icon size={isMobile ? TAB_ICON_SIZE : RAIL_ICON_SIZE} />;
     return (
       <a
         className={`rail-item${active ? " active" : ""}`}
         href={viewPath(destination)}
         aria-current={active ? "page" : undefined}
-        aria-label={isMobile && counts ? `${item.name}, ${counts}` : item.name}
-        aria-describedby={countDescription ? descriptionId : undefined}
+        // The name is the destination alone on every surface; the attention is its description
+        // and, on the desktop rail, the tooltip's second line (#1967).
+        aria-label={item.name}
+        aria-describedby={attention ? descriptionId : undefined}
         aria-keyshortcuts={shortcutDigit ?? undefined}
         data-rail-tip={isMobile ? undefined : item.name}
         data-rail-keys={shortcutDigit ?? undefined}
+        data-rail-note={isMobile ? undefined : attention?.note}
         onClick={(event) => {
           if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
@@ -323,23 +334,27 @@ export function Rail({
           onNavigate(item.id === "inbox" ? sessionsViewDestination() : destination);
         }}
       >
-        {railTab(
-          isMobile,
-          item.name,
+        {isMobile ? (
+          railTab(true, item.name, (
+            <span className="rail-icon">
+              {glyph}
+              <AttentionMark attention={attention} onIcon />
+            </span>
+          ))
+        ) : labelled ? (
           <>
-            <Icon size={isMobile ? TAB_ICON_SIZE : RAIL_ICON_SIZE} />
-            <RailItemText labelled={labelled} name={item.name} keys={shortcutDigit}>
-              {item.id === "inbox" && blockedCount > 0 && (
-                <span className="rail-badge blocked" aria-hidden="true">{blockedCount}</span>
-              )}
-              {item.id === "inbox" && stalledCount > 0 && (
-                <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
-              )}
-              {item.id === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
+            {glyph}
+            <RailItemText labelled name={item.name} keys={shortcutDigit}>
+              <AttentionMark attention={attention} />
             </RailItemText>
-          </>,
+          </>
+        ) : (
+          <span className="rail-icon">
+            {glyph}
+            <AttentionMark attention={attention} onIcon />
+          </span>
         )}
-        {countDescription && <span id={descriptionId} className="sr-only">{countDescription}</span>}
+        {attention && <span id={descriptionId} className="sr-only">{attention.note}</span>}
       </a>
     );
   };
@@ -419,20 +434,16 @@ export function Rail({
                 {overflowItems.map((item) => {
                   const Icon = VIEW_ICONS[item.id];
                   const destination = { name: item.id } as View;
-                  // A reordered rail can push a counted destination into the sheet; its status
-                  // must overflow WITH it, or moving Connections fifth silently hides the
-                  // online count and moving Sessions hides its blocked/stalled attention.
-                  const blocked = item.id === "inbox" ? blockedCount : 0;
-                  const stalled = item.id === "inbox" ? stalledCount : 0;
-                  const online = item.id === "runners" ? onlineConnections : 0;
-                  const countLabel = item.id === "inbox"
-                    ? `${blocked > 0 ? `, ${blocked} Blocked` : ""}${stalled > 0 ? `, ${stalled} Stalled` : ""}`
-                    : online > 0 ? `, ${online} Online` : "";
+                  // A reordered rail can push a destination into the sheet; its attention must
+                  // overflow WITH it, or moving Sessions fifth silently hides what is waiting.
+                  const attention = railAttention(item.id, attentionState);
+                  const descriptionId = `${descriptionPrefix}-more-${item.id}`;
                   return (
                     <a
                       key={item.id}
                       className={`menu-item${selected === item.id ? " is-active" : ""}`}
-                      aria-label={`${item.name}${countLabel}`}
+                      aria-label={item.name}
+                      aria-describedby={attention ? descriptionId : undefined}
                       {...sheetItemProps(
                         destination,
                         selected === item.id,
@@ -441,13 +452,10 @@ export function Rail({
                     >
                       <span className="menu-icon" aria-hidden="true"><Icon size={SHEET_ICON_SIZE} /></span>
                       <span className="menu-body"><span className="menu-text">{item.name}</span></span>
-                      {(blocked > 0 || stalled > 0 || online > 0) && (
-                        <span className="menu-trail" aria-hidden="true">
-                          {blocked > 0 && <span className="rail-more-count blocked">{blocked}</span>}
-                          {stalled > 0 && <span className="rail-more-count stalled">{stalled}</span>}
-                          {online > 0 && <span className="rail-more-count">{online}</span>}
-                        </span>
+                      {attention && (
+                        <span className="menu-trail" aria-hidden="true"><AttentionMark attention={attention} /></span>
                       )}
+                      {attention && <span id={descriptionId} className="sr-only">{attention.note}</span>}
                     </a>
                   );
                 })}

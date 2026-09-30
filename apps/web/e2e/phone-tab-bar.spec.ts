@@ -69,7 +69,7 @@ for (const theme of ["dark", "light"] as const) {
     await expect(tabs.locator(".rail-tab-label")).toHaveText(["Sessions", "Projects", "Connections", "Automations", "More"]);
     for (let index = 0; index < 5; index += 1) {
       const tab = tabs.nth(index);
-      const icon = await box(tab.locator(".rail-tab-pill > svg"));
+      const icon = await box(tab.locator(".rail-tab-pill svg"));
       const label = await box(tab.locator(".rail-tab-label"));
       expect(Math.round(icon.width), "a 24px icon").toBe(24);
       expectGeometry(label.y - (icon.y + icon.height), "the label sits under the icon").toBeGreaterThanOrEqual(0);

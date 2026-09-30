@@ -55,7 +55,10 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
     ["mam", "projects", "collapsed"].join("."),
   ]) assert.equal(combined.includes(retired), false, retired);
 
-  assert.match(app, /<Rail[\s\S]*blockedCount=\{blockedSessions\}[\s\S]*stalledCount=\{stalledSessions\}[\s\S]*onlineConnections=\{onlineRunners\}/);
+  assert.match(app, /<Rail[\s\S]*blockedCount=\{blockedSessions\}[\s\S]*stalledCount=\{stalledSessions\}[\s\S]*machines=\{railMachines\}/);
+  assert.match(app, /machineAttention\(runners\.values\(\), sessions\.values\(\)\)/,
+    "Connections reads machines that need the user, never a count of online ones (#1967)");
+  assert.doesNotMatch(app, /onlineRunners|onlineConnections/);
   // The rail still renders every destination from the one canonical list; on a phone the ones off
   // the tab bar move behind "More" rather than being dropped. Behavioural coverage lives in
   // Rail.dom.test.tsx.
@@ -83,7 +86,12 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.rail-item\[aria-current="page"\] \{ background: transparent; \}/);
   assert.match(css, /\.rail-item\.active::before\s*\{[^}]*left:\s*calc\(\(var\(--rail-w\) - 1px - var\(--control-h-lg\)\) \/ -2\);[^}]*width:\s*3px;[^}]*background:\s*var\(--accent\)/);
   assert.doesNotMatch(css, /\.rail-number/, "the digit superscript is replaced by the tooltip");
-  assert.match(css, /\.rail-badge\s*\{[^}]*top:\s*2px;[^}]*right:\s*-9px/);
+  // One attention mark per destination, drawn by the shared CountBadge (§11.4, #1967): no rail-only
+  // badge rule survives, and brand orange never marks a count.
+  assert.doesNotMatch(css, /\.rail-badge|\.rail-more-count/);
+  assert.doesNotMatch(rail, /rail-badge|rail-more-count|accent-2/);
+  assert.match(rail, /<CountBadge count=\{attention\.count\} tone=\{attention\.tone\} onIcon=\{onIcon\} \/>/);
+  assert.match(css, /\.rail-item\[aria-current="page"\] \{ --count-badge-ring: var\(--surface-selected\); \}/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.app-rail\s*\{[\s\S]*width:\s*100%[\s\S]*flex-direction: row/);
 });
 
@@ -98,11 +106,10 @@ test("the desktop rail is grouped, searchable and has one current-page treatment
 
   // Tooltip naming: the name alone is the accessible name, the digit is aria-keyshortcuts, and the
   // tooltip shows both but is hidden from assistive technology.
-  assert.match(rail, /aria-label=\{isMobile && counts \? `\$\{item\.name\}, \$\{counts\}` : item\.name\}/,
-    "the desktop name is the destination alone; a phone tab keeps its counts (#1959)");
-  assert.match(rail, /const countDescription = isMobile \? "" : counts;/);
+  assert.match(rail, /aria-label=\{item\.name\}\s*aria-describedby=\{attention \? descriptionId : undefined\}/,
+    "the name is the destination alone on the rail, the phone bar and the More sheet; the attention is its description (#1967)");
   assert.match(rail, /aria-keyshortcuts=\{shortcutDigit \?\? undefined\}/);
-  assert.match(railTooltip, /className="rail-tooltip"\s*aria-hidden="true"/);
+  assert.match(railTooltip, /className=\{tip\.note \? "rail-tooltip with-note" : "rail-tooltip"\}\s*aria-hidden="true"/);
   assert.match(railTooltip, /event\.pointerType !== "mouse"/, "touch never opens the tooltip");
   assert.match(railTooltip, /RAIL_TOOLTIP_DELAY_MS = 500;/);
   assert.match(railTooltip, /RAIL_TOOLTIP_WARM_MS = 1000;/);
@@ -140,7 +147,8 @@ test("heartbeat activity feeds cards, preview, split/footer counts, and independ
   assert.match(detail, /<ActivityStrip activity=\{activity\} now=\{activityNow\}/);
   assert.match(app, /sessionVisibleForReminderMode\(session, reminders\.get\(session\.id\), "ordinary"\)[\s\S]*activeSessions\.filter\(isInboxBlocked\)[\s\S]*activeSessions\.filter\(\(session\) => stalledSessionIds\.has\(session\.id\)\)/,
     "the rail's Blocked and Stalled badges must derive from the same Active membership as Sessions");
-  assert.match(rail, /rail-badge blocked[\s\S]*rail-badge stalled/);
+  assert.match(rail, /const attentionState = \{ blocked: blockedCount, stalled: stalledCount, machines \};/,
+    "the Sessions badge derives from the same Blocked and Stalled counts");
   assert.match(css, /prefers-reduced-motion: reduce[\s\S]*activity-strip/);
 });
 

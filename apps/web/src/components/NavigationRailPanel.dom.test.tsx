@@ -112,7 +112,6 @@ test("Show Labels in Rail, the rail's foot button and the stored preference stay
           view={{ name: "settings", section: "appearance" }}
           blockedCount={0}
           stalledCount={0}
-          onlineConnections={0}
           onNavigate={() => undefined}
         />
         <NavigationRailPanel />

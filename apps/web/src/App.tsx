@@ -83,6 +83,7 @@ import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js
 import { useInstanceScope } from "./instance-scope.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
 import { railViewForDigit, visibleRailViews } from "./rail-preferences.js";
+import { machineAttention } from "./rail-attention.js";
 import { useRailPreferences } from "./use-rail-preferences.js";
 import { useSessionsViewModeMemory } from "./use-sessions-view-mode-memory.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
@@ -656,9 +657,10 @@ export function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const onlineRunners = useMemo(
-    () => [...runners.values()].filter((r) => r.status === "online").length,
-    [runners],
+  // Connections shows a dot only while a machine needs the user, never a count of online ones (#1967).
+  const railMachines = useMemo(
+    () => machineAttention(runners.values(), sessions.values()),
+    [runners, sessions],
   );
   const activeSessions = useMemo(
     () => [...sessions.values()].filter((session) =>
@@ -726,7 +728,7 @@ export function Shell() {
         view={view}
         blockedCount={blockedSessions}
         stalledCount={stalledSessions}
-        onlineConnections={onlineRunners}
+        machines={railMachines}
         onNavigate={navigate}
         {...(isMobile ? {} : {
           // The desktop app's tile; the browser build keeps the brand (§4.1).

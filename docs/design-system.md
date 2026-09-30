@@ -584,7 +584,7 @@ Rules
   Usage and Cost). That is also the default rail order and digit order; a saved order is kept. Settings is pinned
   at the bottom. Active: `--accent` icon, 3px `--accent` bar on the left edge, `--surface-selected`
   fill. Hover: `--bg-elev-2`. Digit hints appear only in the tooltip ("Automations  2"), not as
-  8px superscripts. One count badge per item (§11.4). Archived uses an outline archive-box glyph.
+  8px superscripts. One attention mark per item (§11.4). Archived uses an outline archive-box glyph.
   The instance switcher (Tauri) replaces the brand tile at the top as a 32px monogram tile with a
   status corner dot.
 - **Labelled rail (desktop, opt-in).** Off by default. Turned on, the rail is 208px and each item
@@ -1392,6 +1392,25 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
 - Count badge (needs attention): 16px pill, min-width 16px, 11px/600 tabular, `--amber` fill with `--count-warning-fg` (9.47:1 dark, 4.87:1 light); danger variant uses
   `--danger-bg` with `--danger-fg`. `--accent` and `--accent-2` never fill a count.
   One per rail item, showing the highest-severity tone and the total.
+- **Rail attention (`railAttention`, #1967).** Each destination carries at most one mark, and the
+  same one on the desktop rail, the phone tab bar and a More sheet row, so a reordered destination
+  carries it with it:
+  - Sessions: one count badge of blocked plus stalled sessions, danger when any is stalled and
+    warning otherwise.
+  - Connections: never a count. An 8px dot in the warning tone (`.rail-attention-dot`) while a
+    machine needs the user: it is offline while a session assigned to it has work in flight, or its
+    runner is outdated (Update Required). Machines that are online, idle, or offline with nothing
+    running are normal and draw nothing.
+  - Every other destination: nothing.
+
+  The mark sits on the icon's shoulder in the 64px rail and on a phone tab, and inline after the
+  name in the labelled rail and the More sheet. Its icon box (`.rail-icon`) is wider than the glyph,
+  so neither the badge nor its ring covers the glyph's stroke; on a phone tab it is also shorter
+  than the glyph, so the badge stays under the bar's clipped top edge. The ring is the item's fill:
+  `--bg-elev` at rest, `--bg-elev-2` on hover, `--surface-selected` on the current item, and the
+  bar's `--bg-elev` on a phone tab. The accessible name stays the destination's name; the
+  breakdown in sentence case ("12 waiting on you, 3 stalled", "1 machine needs an update") is the
+  item's description and the rail tooltip's second line.
 - Inline by default, in the text flow of a list-foot row, a menu row or a tab. `.count-badge.on-icon`
   places it on an icon's top-right shoulder (the icon's wrapper is the positioned box), growing
   away from the icon, with a 2px ring in `--count-badge-ring`. That property defaults to
@@ -1915,7 +1934,8 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `ConfirmationDialog` sentence-case question titles, default "Continue" | Title Case action titles, verb-matched confirm label; `.modal.sm` |
 | `.status-badge`, `.inbox-status-pill`, `.background-work-badge`, `.automation-state`, `.pod-status`, `.pod-orchestration-status`, `.workflow-status`, `.connection-status`, `.subscription-state`, `.loc-kind`, `.project-availability`, `.access-role-badge`, tool-row uppercase pills, receipt rectangles | `.status` (`.sm`/`.md`, `.inline`, tone classes `.t-info/.t-success/.t-warning/.t-danger/.t-neutral`) |
 | `.tag`, `.tag-machine`, `.tag-agent`, `.tag-wt`, `.atag`, `.os-badge`, `.cctx-chip` | plain meta (`.meta-item`) or `.chip` (neutral) |
-| `.tab-count`, `.group-count`, rail `.rail-badge` | `.count` (plain) or `.count-badge` (attention) |
+| `.tab-count`, `.group-count` | `.count` (plain) or `.count-badge` (attention) |
+| rail `.rail-badge`, More sheet `.rail-more-count` (removed, #1967) | `CountBadge`, or `.rail-attention-dot` for Connections (§11.4) |
 | `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`, `.campaign-continuation-notice`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`, `.queued-error`, `.settings-inline-error`, `.settings-pending-reason`, `.skills-git-held`, `.error-boundary` | `.notice` (`.t-*`, `.compact`) |
 | `.toast` + 4px left stripe, `.toast-region` under the bar | `.toast` + tone icon; `.toast-region` bottom right (bottom center on phones) above `--toast-clear` (§13.1) |
 | offline banner, pairing banner | `.notice.page-banner` |
