@@ -256,6 +256,49 @@ test("three conditions show one notice, the most severe, with the rest behind +2
   }
 });
 
+test("an invalid setup configuration shows only in the slot, ordered by severity, then rank (#2036)", async () => {
+  const invalidConfig: NonNullable<SessionView["worktrees"]>[number] = {
+    id: "worktree-two", path: worktreePath, branch: "agent/config", source: "created", baseCommit: "c".repeat(40),
+    setupConfig: { status: "invalid", error: ".wollipog.json.version must be 1" },
+  };
+  // A failed setup is on another of the session's worktrees; the invalid configuration is on the
+  // active one.
+  const otherSetupFailure = { ...setupFailure, id: "worktree-three", path: "/repos/demo/other" };
+  const session = sessionView({
+    worktrees: [invalidConfig, otherSetupFailure],
+    providerAccountSwitchFailure: accountFailure("Work"),
+  });
+  const fixture = await mount(session);
+  const notice = () => fixture.container.querySelector('[aria-label="Invalid Worktree Setup Configuration"]');
+  try {
+    assert.equal(fixture.container.querySelectorAll(".notice").length, 1, "no banner renders outside the slot");
+    assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Worktree Setup Failed",
+      "danger, rank 3, shows over danger, rank 4");
+    await act(async () => { fixture.button("+2 More")!.click(); });
+    const items = [...domWindow.document.querySelectorAll('[role="menu"] [role="menuitem"]')] as unknown as HTMLButtonElement[];
+    assert.deepEqual(items.map((item) => item.textContent),
+      ["Invalid Worktree Setup Configuration", "Account Switch Failed"], "danger before warning");
+    await act(async () => { items[0]!.click(); });
+    await flush();
+    assert.equal(fixture.notices().length, 1);
+    assert.equal(fixture.notices()[0], notice());
+
+    // Without the setup failure it ranks first, over the warning.
+    await fixture.update({ ...session, updatedAt: 2, worktrees: [invalidConfig] });
+    assert.equal(fixture.container.querySelectorAll(".notice").length, 1);
+    assert.equal(fixture.notices()[0], notice());
+    assert.ok(fixture.button("+1 More"));
+    assert.equal(notice()!.querySelector(".notice-body p")?.textContent,
+      "Wollipog can’t read the setup configuration this worktree was created from, so its setup didn’t run.");
+    assertNoDomNode(notice()!.querySelector("code"), "the configuration error waits behind Show Details");
+    await act(async () => { fixture.button("Show Details")!.click(); });
+    assert.equal(notice()!.querySelector(".notice-details-body .code-well code")?.textContent,
+      ".wollipog.json.version must be 1");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a single condition shows no +N More", async () => {
   const fixture = await mount(sessionView({ worktrees: [setupFailure] }));
   try {

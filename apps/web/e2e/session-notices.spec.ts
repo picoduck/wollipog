@@ -77,3 +77,22 @@ test("+2 More lists the others and shows the chosen one", async ({ page }) => {
   await expect(slot.getByRole("button", { name: "+2 More" })).toBeFocused();
   await expect(slot.locator(".notice")).toHaveCount(1);
 });
+
+for (const [width, height] of [[1440, 900], [390, 844]] as const) {
+  test(`an invalid setup configuration shows in the slot, not under the session bar, at ${width}px (#2036)`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    const url = "/command-inbox-projects-e2e.html?scenario=invalid-setup-config";
+    await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    const expand = page.getByRole("button", { name: "Expand Session" });
+    if (await expand.isVisible()) await expand.click();
+    const slot = page.locator(".session-notice-slot");
+    await expect(slot.locator('[aria-label="Invalid Worktree Setup Configuration"]')).toBeVisible();
+    await expect(page.locator(".notice")).toHaveCount(1);
+    await expect(slot.getByRole("button", { name: "+1 More" })).toBeVisible();
+    await expect(slot.locator("code")).toHaveCount(0);
+    await slot.getByRole("button", { name: "Show Details" }).click();
+    await expect(slot.locator(".code-well code")).toHaveText(".wollipog.json.version must be 1");
+    expect(await page.locator("html").evaluate((element) => element.scrollWidth)).toBe(width);
+  });
+}

@@ -3804,6 +3804,23 @@ function SessionDetailLoaded({
       ),
     });
   }
+  if (activeWorktreeSetupConfig?.status === "invalid") {
+    const configError = activeWorktreeSetupConfig.error;
+    sessionNotices.push({
+      key: `worktree-setup-config-invalid:${session.worktreePath}`,
+      severity: "danger",
+      rank: SESSION_NOTICE_RANK.worktreeSetupConfigInvalid,
+      title: "Invalid Worktree Setup Configuration",
+      render: ({ trailing }) => (
+        <Notice tone="danger" role="status" ariaLabel="Invalid Worktree Setup Configuration"
+          title="Invalid Worktree Setup Configuration"
+          trailing={trailing}
+          details={<div className="code-well"><code>{configError}</code></div>}>
+          <p>Wollipog can&rsquo;t read the setup configuration this worktree was created from, so its setup didn&rsquo;t run.</p>
+        </Notice>
+      ),
+    });
+  }
   if (accountSwitchFailure && accountSwitchFailedOrder) {
     const failure = accountSwitchFailure;
     // A personal identifier is never inlined, masked or not: the sentence names the account by role.
@@ -5023,11 +5040,6 @@ function SessionDetailLoaded({
             recoveryAction={heldChildRecoveryAction}
             onOpenChild={(childSessionId) => navigate({ name: "session", id: childSessionId })}
           />
-        )}
-        {activeWorktreeSetupConfig?.status === "invalid" && (
-          <Notice tone="danger" role="alert" title="Invalid Worktree Setup Configuration">
-            <code>{activeWorktreeSetupConfig.error}</code>
-          </Notice>
         )}
         </>
       ) : (

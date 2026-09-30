@@ -39,11 +39,13 @@ function entry(key: string, severity: SessionNoticeSeverity, rank: number, title
   };
 }
 
-/** The issue's conditions, most severe and lowest rank first (#1966). */
+/** The issue's conditions, most severe and lowest rank first (#1966, #2036). */
 const ORDERED = [
   entry("worktree-missing", "danger", SESSION_NOTICE_RANK.worktreeMissing, "Worktree Missing"),
   entry("history-quarantine", "danger", SESSION_NOTICE_RANK.historyQuarantine, "Conversation Quarantined"),
   entry("worktree-setup-failed", "danger", SESSION_NOTICE_RANK.worktreeSetupFailed, "Worktree Setup Failed"),
+  entry("worktree-setup-config-invalid", "danger", SESSION_NOTICE_RANK.worktreeSetupConfigInvalid,
+    "Invalid Worktree Setup Configuration"),
   entry("account-switch-failed", "warning", SESSION_NOTICE_RANK.accountSwitchFailed, "Account Switch Failed"),
   entry("skills-unavailable", "warning", SESSION_NOTICE_RANK.skillsUnavailable, "Skills Unavailable"),
   entry("setup-suggestion", "info", SESSION_NOTICE_RANK.setupSuggestion, "Set Up This Project"),
@@ -118,7 +120,7 @@ test("a choice holds while the conditions are unchanged, and focus follows +N Mo
     await slot.draw([...entries].reverse());
     assert.deepEqual(slot.shown(), ["Worktree Setup Failed"]);
     // A new condition resets it.
-    await slot.draw([...entries, ORDERED[4]!]);
+    await slot.draw([...entries, ORDERED[5]!]);
     assert.deepEqual(slot.shown(), ["Conversation Quarantined"]);
   } finally {
     await slot.unmount();
@@ -126,7 +128,7 @@ test("a choice holds while the conditions are unchanged, and focus follows +N Mo
 });
 
 test("focus stays in the slot when the condition it was on resolves while the menu is open", async () => {
-  const [first, second, third] = [ORDERED[1]!, ORDERED[2]!, ORDERED[3]!];
+  const [first, second, third] = [ORDERED[1]!, ORDERED[2]!, ORDERED[4]!];
   const slot = await render("resolve-open", [first, second, third]);
   try {
     await act(async () => { (slot.container.querySelector(".session-notice-more") as HTMLButtonElement).click(); });
@@ -169,8 +171,8 @@ test("when every condition resolves at once with the menu open, focus goes to th
 });
 
 test("only info conditions are dismissible, and a dismissal lasts for the session", async () => {
-  const info = ORDERED[5]!;
-  const warning = ORDERED[3]!;
+  const info = ORDERED[6]!;
+  const warning = ORDERED[4]!;
   const slot = await render("dismiss-a", [info]);
   try {
     assert.ok(slot.container.querySelector(".notice-head .notice-dismiss"), "an info notice has a dismiss in its title row");

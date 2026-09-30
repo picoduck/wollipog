@@ -388,6 +388,26 @@ function initialModel(): FixtureModel {
       }],
     });
   }
+  if (SCENARIO === "invalid-setup-config") {
+    // An invalid setup configuration and a failed account switch at once (#2036): the slot shows
+    // the configuration, the account switch behind +1 More.
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      status: "failed", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+      providerAccountId: "acct-personal",
+      providerAccountLabel: "Personal",
+      providerAccountSwitchFailure: {
+        providerAccountId: "acct-work",
+        providerAccountLabel: "work@example.com",
+        reason: "the provider conversation cannot be resumed under another account",
+        detectedAt: 2,
+      },
+      worktrees: [{
+        id: "wt-checkpoint", path: "/repos/alpha/checkpoint", branch: "agent/alpha", baseRef: "origin/main",
+        baseCommit: "a".repeat(40), source: "created",
+        setupConfig: { status: "invalid", error: ".wollipog.json.version must be 1" },
+      }],
+    });
+  }
   if (SCENARIO === "composer-restart") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       status: "stopped",

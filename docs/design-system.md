@@ -1565,8 +1565,8 @@ session conditions `{ key, severity: "danger" | "warning" | "info", rank, title,
 exactly one: the most severe, then the lowest rank.
 
 - Ranks live in one table, `SESSION_NOTICE_RANK`: worktree missing 1, conversation quarantined 2,
-  worktree setup failed 3, account switch failed 4, skills unavailable 8, setup suggestion 9. A new
-  entry adds its rank there.
+  worktree setup failed 3, invalid worktree setup configuration 4, account switch failed 5, skills
+  unavailable 8, setup suggestion 9. A new entry adds its rank there.
 - The others are a `.btn.sm.ghost` "+N More" in the shown notice's title row. It opens a menu (§9.1)
   of their tone icons and one-line titles; choosing one shows it until the set of conditions changes,
   and focus moves to the new notice's "+N More".

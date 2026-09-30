@@ -54,7 +54,8 @@ export const SESSION_NOTICE_RANK = {
   worktreeMissing: 1,
   historyQuarantine: 2,
   worktreeSetupFailed: 3,
-  accountSwitchFailed: 4,
+  worktreeSetupConfigInvalid: 4,
+  accountSwitchFailed: 5,
   skillsUnavailable: 8,
   setupSuggestion: 9,
 } as const;
