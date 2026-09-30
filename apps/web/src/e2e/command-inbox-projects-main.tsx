@@ -40,6 +40,7 @@ import {
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider, useFeedback, type ToastOptions } from "../components/FeedbackProvider.js";
+import { DockBottomIcon, PanelRightIcon, PinnedPanelIcon } from "../components/Icons.js";
 import { InboxView } from "../components/InboxView.js";
 import { NewSessionDialog, type NewSessionPreset } from "../components/NewSessionDialog.js";
 import { PodDetail } from "../components/PodsView.js";
@@ -2177,9 +2178,10 @@ function FixtureSurface() {
       mobileInstanceControl={<button type="button" className="instance-selector-trigger" aria-label="Switch Instance">I</button>}
       sessionActions={(
         <>
-          <button type="button" className="icon-btn" aria-label="Toggle Pinned Summary">P</button>
-          <button type="button" className="icon-btn" aria-label="Show Terminal">T</button>
-          <button type="button" className="icon-btn" aria-label="Show Side Panel">F</button>
+          {/* Production's glyphs, so the phone top bar's icon rule has an icon to size (#2081). */}
+          <button type="button" className="icon-btn" aria-label="Toggle Pinned Summary"><PinnedPanelIcon size={16} /></button>
+          <button type="button" className="icon-btn" aria-label="Show Terminal"><DockBottomIcon size={16} /></button>
+          <button type="button" className="icon-btn" aria-label="Show Side Panel"><PanelRightIcon size={16} /></button>
         </>
       )}
       sessionTitle={sessions.get(view.id)?.title ?? "Session"}
