@@ -3,6 +3,7 @@ import { isTerminal } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
 import { Modal } from "./common.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { sessionAgentLabel } from "./agent-options.js";
 
@@ -58,15 +59,17 @@ export function NewPodDialog({ onClose }: { onClose: () => void }) {
         <>
           {error && <span className="form-error">{error}</span>}
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={busy || !title.trim() || selected.length < 2} onClick={() => void submit()}>
-            {busy ? "Creating…" : `Create pod · ${selected.length} members`}
-          </button>
+          {/* "New Pod" opens the dialog; creating is its confirm, as "New Session" → "Create Session". */}
+          <BusyButton className="btn primary" busy={busy} progress="Creating the pod…"
+            disabled={!title.trim() || selected.length < 2} onClick={() => void submit()}>
+            Create Pod
+          </BusyButton>
         </>
       }
     >
       <div className="form">
         <p className="muted">
-          Pods group existing sessions across agents and runners. Only isolated worktree sessions are eligible.
+          Pods group two or more existing sessions across agents and runners. Only isolated worktree sessions are eligible.
         </p>
         <label className="field">
           <span>Title</span>

@@ -11,6 +11,7 @@ import { viewTitle, type View, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
+import { NewPodDialog } from "./NewPodDialog.js";
 import { PodDetail, PodsView } from "./PodsView.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -294,4 +295,50 @@ test("only a loaded snapshot with no pods shows the empty state and its create a
   const listed = await renderPodsList((socket) => socket.push(snapshotWithPods([podA])));
   assert.match(listed.text, /Pod A/u);
   assert.doesNotMatch(listed.text, /No Pods Yet|Loading/u);
+});
+
+test("the New Pod dialog confirms with Create Pod at every selection count and keeps it while creating", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "new-pod", runtimeKey: "new-pod:1", createSocket: () => socket, close() {},
+  };
+  const client = { ...api, createPod: pending } as unknown as ApiClient;
+  const navigation: ViewNavigation = { current: () => ({ name: "pods" }), push() {}, listen: () => () => {} };
+  const dialog = () => domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+  const confirm = () => buttonNamed(dialog(), /^Create Pod$/u);
+  const sessionBox = (id: string) => [...dialog().querySelectorAll('input[type="checkbox"]')]
+    .find((box) => box.closest("label")?.textContent?.includes(`Session ${id}`)) as HTMLInputElement;
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <NewPodDialog onClose={() => {}} />
+        </StoreProvider>
+      </ApiProvider>,
+    ));
+    await act(async () => socket.push({ ...snapshotWithPods([]), sessions: ["one", "two"].map(session) }));
+    const titleField = dialog().querySelector("input:not([type])") as HTMLInputElement;
+    await act(async () => fireDomEvent.change(titleField, { target: { value: "Release Pod" } }));
+
+    // One verb across the "New Pod" trigger, the "New Pod" title and this confirm (§17.2), and no
+    // count in the label, so it never reads "1 members".
+    assert.equal(confirm().disabled, true, "0 selected");
+    await act(async () => sessionBox("one").click());
+    assert.equal(confirm().disabled, true, "1 selected");
+    await act(async () => sessionBox("two").click());
+    assert.equal(confirm().disabled, false, "2 selected");
+    assert.doesNotMatch(dialog().textContent ?? "", /members/u);
+
+    // Creating keeps the label and shows the spinner instead (§3.1), announcing progress aside.
+    await act(async () => confirm().click());
+    assert.equal(confirm().getAttribute("aria-busy"), "true");
+    assert.equal(dialog().querySelector('[role="status"]')?.textContent, "Creating the pod…");
+    assert.doesNotMatch(dialog().textContent ?? "", /Creating…/u);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
