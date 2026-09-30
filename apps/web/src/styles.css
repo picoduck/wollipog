@@ -444,8 +444,10 @@
   --page-max-wide: 1200px;
   --page-max-form: 760px;
   --rail-w: 64px;
-  /* The labelled rail (#1968): opt-in, desktop only. */
+  /* The labelled rail (#1968): opt-in, desktop only. Its items keep the space the 64px rail leaves
+     between its edge and an item, at the item size in force. */
   --rail-w-labelled: 208px;
+  --rail-inset: calc((var(--rail-w) - 1px - var(--control-h-lg)) / 2);
 
   /* The two mobile Session-header rows share these trailing-column metrics. The inset includes the
      physical right safe area because the interface currently has a left-to-right layout. */
@@ -839,8 +841,6 @@ kbd {
    the 64px rail centres it, so switching moves nothing but the rail's edge. Rail.tsx never sets the
    class at 760px and below. */
 .app-rail.labelled {
-  /* The space between the rail's edge and a 64px-rail item, at the item size in force. */
-  --rail-inset: calc((var(--rail-w) - 1px - var(--control-h-lg)) / 2);
   width: var(--rail-w-labelled);
   align-items: stretch;
 }

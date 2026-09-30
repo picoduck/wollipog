@@ -82,6 +82,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PinnedPanelIcon` | Lucide | `PictureInPicture2` | The Pinned Summary card floating over the transcript; distinct from the list layout and the side panel. |
 | `DockBottomIcon` | Lucide | `PanelBottom` | Bottom dock placement. |
 | `PanelRightIcon` | Lucide | `PanelRight` | Right panel placement. |
+| `PanelLeftOpenIcon` | Lucide | `PanelLeftOpen` | Expand Navigation: show names in the desktop rail. |
+| `PanelLeftCloseIcon` | Lucide | `PanelLeftClose` | Collapse Navigation: return the desktop rail to icons. |
 | `CommandLineIcon` | Lucide | `SquareTerminal` | Command-line destination. |
 | `GlobeIcon` | Lucide | `Globe` | Remote host. |
 | `FolderIcon` | Lucide | `Folder` | Generic directory. |

@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import { getRailPreferences, resetRailPreferencesForTest, setRailLabels } from "../rail-preferences.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { Rail } from "./Rail.js";
 import { NavigationRailPanel } from "./SettingsView.js";
 
@@ -162,7 +163,7 @@ test("a phone offers no Show Labels in Rail row", async () => {
   setRailLabels(true, "rail-panel-test");
   const { container, root } = await mount();
   try {
-    assert.equal(container.querySelector('[role="switch"]'), null);
+    assertNoDomNode(container.querySelector('[role="switch"]'));
     assert.equal(container.textContent?.includes("Show Labels in Rail"), false);
     assert.equal(rows(container).length, 9, "the destination editor is unchanged");
   } finally {
