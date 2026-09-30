@@ -35,13 +35,14 @@ function setup() {
 function shell(window: Window, page: string, { current = "skills" }: { current?: string } = {}) {
   window.document.body.innerHTML = `
     <nav class="app-rail" data-focus-zone="rail" tabindex="-1">
-      <a class="rail-brand" href="/" aria-label="Wollipog Sessions"></a>
+      <div class="rail-brand" aria-hidden="true"><img alt=""></div>
       <div class="rail-destinations">
+        <button class="rail-item" id="rail-search" type="button" aria-label="Search"></button>
         ${["inbox", "projects", "skills", "usage"].map((name) =>
           `<a class="rail-item" id="rail-${name}" href="/${name}"${name === current ? ' aria-current="page"' : ""}></a>`).join("")}
       </div>
       <div class="rail-settings">
-        <button class="settings-trigger" type="button"${current === "settings" ? ' aria-current="page"' : ""}></button>
+        <button class="rail-item" id="rail-settings" type="button"${current === "settings" ? ' aria-current="page"' : ""}></button>
       </div>
     </nav>
     <main class="main">
@@ -116,12 +117,13 @@ test("F6 into the rail lands on the current destination, never the brand", () =>
 
   find = shell(window, "<div class='page'></div>", { current: "settings" });
   assert.equal(focusZone(window.document, "rail"), "rail");
-  assert.equal(window.document.activeElement, find(".settings-trigger"), "Settings lands on the Settings control");
+  assert.equal(window.document.activeElement, find("#rail-settings"), "Settings lands on the Settings control");
 
-  // A route with no rail destination (the recovery screen) falls back to the first destination.
+  // A route with no rail destination (the recovery screen) falls back to the first rail item, which
+  // is Search at the head of the Work group (#1958); the brand is decoration and never a target.
   find = shell(window, "<div class='page'></div>", { current: "none" });
   assert.equal(focusZone(window.document, "rail"), "rail");
-  assert.equal(window.document.activeElement, find("#rail-inbox"));
+  assert.equal(window.document.activeElement, find("#rail-search"));
   assert.notEqual(window.document.activeElement, find(".rail-brand"));
 
   for (const [zone, selectors] of Object.entries(ZONE_TARGETS)) {
