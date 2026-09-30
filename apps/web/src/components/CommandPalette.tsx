@@ -126,7 +126,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   // The active row by key, so a section arriving above it (late transcript hits) does not move it.
   const [activeKey, setActiveKey] = useState<string | null>(null);
   // The hits and the query they answer. Earlier hits stay on screen until the next ones replace them.
-  const [hits, setHits] = useState<{ query: string; results: TranscriptHit[] }>({ query: "", results: [] });
+  const [hits, setHits] = useState<{ query: string; results: TranscriptHit[]; failed?: boolean }>({ query: "", results: [] });
   const inputRef = useRef<HTMLInputElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(
     typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null,
@@ -162,7 +162,8 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   // Debounced transcript search: each keystroke restarts the wait, and only the latest query's
   // answer is kept. A query too short to search clears the hits (the hint row says why). A query
   // that returns to the one already answered (login, loginx, login) reuses that answer rather than
-  // asking again, so "Searching" is never hidden while a request is still out.
+  // asking again, so "Searching" is never hidden while a request is still out. A failed request is
+  // not an answer: returning to its query asks again.
   const hitsRef = useRef(hits);
   hitsRef.current = hits;
   useEffect(() => {
@@ -170,7 +171,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       setHits({ query: "", results: [] });
       return;
     }
-    if (hitsRef.current.query === transcriptQuery) return;
+    if (hitsRef.current.query === transcriptQuery && !hitsRef.current.failed) return;
     let cancelled = false;
     const t = setTimeout(() => {
       api
@@ -179,7 +180,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
           if (!cancelled) setHits({ query: transcriptQuery, results: r.results });
         })
         .catch(() => {
-          if (!cancelled) setHits({ query: transcriptQuery, results: [] });
+          if (!cancelled) setHits({ query: transcriptQuery, results: [], failed: true });
         });
     }, 200);
     return () => {

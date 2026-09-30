@@ -75,7 +75,11 @@ const SESSIONS = [
   session("s-other", "Other work", { updatedAt: 1 }),
 ];
 
-interface SearchCall { query: string; resolve: (results: { sessionId: string; snippet: string; title: string }[]) => void }
+interface SearchCall {
+  query: string;
+  resolve: (results: { sessionId: string; snippet: string; title: string }[]) => void;
+  reject: (error: Error) => void;
+}
 
 let sequence = 0;
 
@@ -99,8 +103,8 @@ async function mount(options: {
   const searches: SearchCall[] = [];
   const client = {
     listAllSessions: options.catalog ?? (async () => ({ sessions: SESSIONS })),
-    search: (query: string) => new Promise((resolve) => {
-      searches.push({ query, resolve: (results) => resolve({ results }) });
+    search: (query: string) => new Promise((resolve, reject) => {
+      searches.push({ query, resolve: (results) => resolve({ results }), reject });
     }),
   } as unknown as ApiClient;
   let currentView: View | null = null;
@@ -391,5 +395,20 @@ test("returning to the query already answered reuses its hits instead of searchi
   await settle(250);
   assert.equal(ui.searches.length, 1, "no second request for the query already answered");
   assert.doesNotMatch(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching/);
+  assert.deepEqual(ui.sections()[1], ["In Transcripts", ["Write the docs"]]);
+});
+
+test("a failed transcript search is asked again when its query returns", async () => {
+  const ui = await mount();
+  await ui.key(ui.doc.body, "k", { ctrlKey: true });
+  await ui.type("login");
+  await settle(250);
+  await act(async () => { ui.searches.at(-1)!.reject(new Error("offline")); });
+  await ui.type("loginx");
+  await ui.type("login");
+  await settle(250);
+  assert.deepEqual(ui.searches.map((call) => call.query), ["login", "login"],
+    "a failure is not an answer, so the restored query searches again");
+  await act(async () => { ui.searches.at(-1)!.resolve([{ sessionId: "s-docs", title: "Write the docs", snippet: "the ⟪login⟫ flow" }]); });
   assert.deepEqual(ui.sections()[1], ["In Transcripts", ["Write the docs"]]);
 });
