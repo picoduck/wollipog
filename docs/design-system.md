@@ -1840,6 +1840,14 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 `@media (pointer: coarse)` applies the control and row sizes in §2.8 regardless of width (tablets at
 834px get 44px targets). Hover styles are wrapped in `@media (hover: hover)`.
 
+The browser's tap highlight is off on the phone tab bar and the More sheet (its rows, Close and
+scrim), and nowhere else (#2084). Chromium paints it above every layer, so a tap on More left a
+translucent rectangle over the sheet it had just opened. A tab gives its own feedback instead: the
+current tab's pill and `aria-current`, and a pressed tab on a coarse pointer fills its pill with
+`--bg-elev-2`, as hover does for a mouse. Every other control keeps the browser's highlight, which
+is its only tap feedback until it draws a pressed state of its own; turning it off is a decision
+per control, not a global reset. Focus rings are unaffected (§16.1).
+
 ---
 
 ## 16. Focus, Keyboard and Motion

@@ -170,7 +170,8 @@ export const CSS_SURFACE = {
   ],
   properties: [
   "-webkit-box-orient", "-webkit-font-smoothing", "-webkit-line-clamp", "-webkit-mask-image",
-  "-webkit-overflow-scrolling", "accent-color", "align-content", "align-items", "align-self",
+  "-webkit-overflow-scrolling", "-webkit-tap-highlight-color", "accent-color", "align-content",
+  "align-items", "align-self",
   "animation", "animation-delay", "animation-duration", "animation-iteration-count",
   "appearance", "background", "background-clip", "background-position",
   "background-size", "border", "border-bottom", "border-bottom-left-radius",

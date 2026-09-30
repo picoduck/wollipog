@@ -13234,6 +13234,17 @@ body.shell-dock-dragging * {
   /* The bar clips its overflow, so the ring is drawn inside the tab. */
   .rail-item:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
 
+  /* No browser tap highlight on the bar or the More sheet (#2084, §15.3). Chromium paints it above
+     every layer, so a tap on More left a rectangle over the sheet it opened. The property inherits,
+     so this reaches every tab, row and the sheet's Close; the scrim is a sibling of the sheet. A tab
+     gives its own feedback instead: the pill fills while pressed, as it does under a mouse. */
+  .app-rail,
+  .rail-more-sheet,
+  .menu-backdrop:has(+ .rail-more-sheet) { -webkit-tap-highlight-color: transparent; }
+  @media (pointer: coarse) {
+    .rail-item:not(.active):active .rail-tab-pill { background: var(--bg-elev-2); }
+  }
+
   /* While a text field is focused the software keyboard is up, and a tab bar directly above it is
      the difference between reading the transcript and reading three lines of it. The rail is
      removed for the duration and returns on blur — including the blur mobile-viewport.ts issues

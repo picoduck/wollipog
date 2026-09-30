@@ -137,6 +137,51 @@ test("a tap through More leaves More current with no ring and no hover fill", as
   await expectStyle(projects.locator(".rail-tab-pill"), "background-color", TRANSPARENT);
 });
 
+test("a tap paints no browser highlight on the bar or the More sheet, and a pressed tab fills its pill", async ({ page }) => {
+  // Chromium paints its tap highlight above every layer, so without this a tap on More left a
+  // rectangle over the sheet it opened (#2084, §15.3).
+  const highlight = (locator: Locator) => style(locator, "-webkit-tap-highlight-color");
+  await open(page);
+  const tabs = page.locator(TABS);
+  for (let index = 0; index < 5; index += 1) {
+    expect(await highlight(tabs.nth(index)), `tab ${index + 1}`).toBe(TRANSPARENT);
+  }
+  await openMore(page);
+  const sheet = page.locator(MORE_SHEET);
+  expect(await highlight(page.locator(".menu-backdrop")), "the scrim").toBe(TRANSPARENT);
+  expect(await highlight(sheet.getByRole("menuitem", { name: "Close More" })), "Close More").toBe(TRANSPARENT);
+  const rows = sheet.locator(".menu-item");
+  for (let index = 0; index < await rows.count(); index += 1) {
+    expect(await highlight(rows.nth(index)), `row ${index + 1}`).toBe(TRANSPARENT);
+  }
+  await sheet.getByRole("menuitem", { name: "Close More" }).tap();
+  await expect(sheet).toHaveCount(0);
+  // The scope is the bar and the sheet: a control elsewhere keeps the browser's default.
+  await page.locator(".main").evaluate((main) => {
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.id = "outside-the-bar";
+    main.append(button);
+  });
+  expect(await highlight(page.locator("#outside-the-bar")), "a control outside the bar").not.toBe(TRANSPARENT);
+
+  // Touch emulation never sets :active, so the press comes from a pointer on the same coarse screen.
+  const pressAndHold = async (index: number) => {
+    const target = await box(tabs.nth(index));
+    await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2);
+    await page.mouse.down();
+  };
+  expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+  await pressAndHold(1);
+  await expectStyle(tabs.nth(1).locator(".rail-tab-pill"), "background-color", await tokenColor(page, "--bg-elev-2"));
+  await page.mouse.up();
+  await expect(page.locator(".topbar h1")).toHaveText("Projects");
+  // The current tab keeps its own pill under a press.
+  await pressAndHold(1);
+  await expectStyle(tabs.nth(1).locator(".rail-tab-pill"), "background-color", await tokenColor(page, "--surface-selected"));
+  await page.mouse.up();
+});
+
 for (const theme of ["dark", "light"] as const) {
   test(`More is a sheet with a scrim, a title, a Close button and one current-row treatment (${theme})`, async ({ page }) => {
     await open(page, { theme, view: "usage" });
