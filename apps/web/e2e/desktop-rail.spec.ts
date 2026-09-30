@@ -233,6 +233,19 @@ test.describe("the labelled rail at 1440×900 (#1968)", () => {
     expect(counted).toEqual({ after: true, inside: true, text: "1" });
   });
 
+  test("narrowing to a phone while the foot button has focus hands focus to the page heading", async ({ page }) => {
+    // The foot button is desktop only, like Search and Settings, so the crossing unmounts it. The
+    // shell's breakpoint rescue (App.tsx) catches the dropped focus, as it does for those.
+    await openShell(page, "/automations");
+    const expand = rail(page).getByRole("button", { name: "Expand Navigation", exact: true });
+    await expand.focus();
+    await page.keyboard.press("Enter");
+    await expect(rail(page).getByRole("button", { name: "Collapse Navigation", exact: true })).toBeFocused();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(rail(page).locator(".rail-foot")).toHaveCount(0);
+    await expect(page.locator("#page-title")).toBeFocused();
+  });
+
   test("Show Labels in Rail and the foot button drive the same preference", async ({ page }) => {
     await openShell(page, "/settings/appearance");
     const row = page.getByRole("switch", { name: /Show Labels in Rail/ });
