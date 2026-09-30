@@ -443,6 +443,7 @@
   --page-max: 960px;
   --page-max-wide: 1200px;
   --page-max-form: 760px;
+  --rail-w: 64px;
 
   /* The two mobile Session-header rows share these trailing-column metrics. The inset includes the
      physical right safe area because the interface currently has a left-to-right layout. */
@@ -704,8 +705,11 @@ kbd {
   display: flex;
   height: 100%;
 }
+/* The desktop rail (docs/design-system.md §4.1): 64px, square --control-h-lg items (48px on touch)
+   with 20px outline glyphs, 4px apart, and a hairline between the Work, Oversight and Records
+   groups. */
 .app-rail {
-  width: 66px;
+  width: var(--rail-w);
 }
 .app-rail,
 .instance-recovery-nav {
@@ -718,64 +722,97 @@ kbd {
   padding: 6px 0;
   gap: 4px;
 }
-.app-rail { gap: 2px; }
 .instance-recovery-nav {
   width: 260px;
   align-items: stretch;
   padding: 12px 10px;
 }
-.rail-brand,
+/* Decoration since #1958: Sessions is the item directly below it. */
+.rail-brand {
+  display: inline-flex;
+  width: var(--control-h-lg);
+  height: var(--control-h-lg);
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 2px;
+}
+.rail-brand img { width: 39px; height: 39px; border-radius: 10px; image-rendering: pixelated; }
 .rail-item {
   position: relative;
   display: inline-flex;
-  width: 44px;
-  height: 44px;
-  flex: 0 0 44px;
+  width: var(--control-h-lg);
+  height: var(--control-h-lg);
+  flex: 0 0 var(--control-h-lg);
   align-items: center;
   justify-content: center;
-  border: 1px solid transparent;
-  border-radius: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
   text-decoration: none;
   cursor: pointer;
 }
-.rail-brand {
-  margin-bottom: 2px;
+.rail-destinations { display: flex; flex-direction: column; align-items: center; gap: var(--space-1); }
+/* Between groups: the 4px gap on each side plus this margin makes 12px of space around the line. */
+.rail-separator {
+  flex: none;
+  width: 24px;
+  height: 1px;
+  margin: 2px 0;
+  background: var(--border);
 }
-.rail-brand img { width: 39px; height: 39px; border-radius: 10px; image-rendering: pixelated; }
-.rail-destinations { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 /* Hover only where a pointer can hover (§15.3): on touch a hover fill sticks to the last tapped
-   tab and reads as a second selection on the next page. */
+   item and reads as a second selection on the next page. */
 @media (hover: hover) {
   .rail-item:hover { color: var(--text); background: var(--bg-elev-2); }
 }
-.rail-item.active {
-  color: var(--accent);
-  border-color: transparent;
-  background: transparent;
-}
+/* One current-page treatment for destinations and Settings alike: accent glyph, selected fill and
+   a 3px accent bar on the rail's left edge. The fill is its own rule because the scheme generator
+   reads a colour and a fill in one rule as a text pair and cannot resolve --surface-selected; the
+   glyph clears 4.5:1 on it in every scheme and theme (#1958). */
+.rail-item.active { color: var(--accent); }
+.rail-item[aria-current="page"] { background: var(--surface-selected); }
 .rail-item.active::before {
   content: "";
   position: absolute;
-  top: 5px;
-  bottom: 5px;
-  left: -11px;
+  top: var(--space-2);
+  bottom: var(--space-2);
+  /* The rail's 1px right border narrows the box the item is centred in. */
+  left: calc((var(--rail-w) - 1px - var(--control-h-lg)) / -2);
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--accent);
   pointer-events: none;
 }
-.rail-item:focus-visible,
-.rail-brand:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
-.rail-number {
+/* The rail's tooltip (§9.3): the name and its keycap, to the right of the rail. */
+.rail-tooltip {
+  position: fixed;
+  z-index: var(--z-popover);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 280px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elev-3);
+  box-shadow: var(--elev-2);
+  color: var(--text);
+  font: var(--type-small);
+  white-space: nowrap;
+  transform: translateY(-50%);
+}
+/* Covers the gap back to the item (the rail's side padding plus the 8px offset in RailTooltip.tsx),
+   so the pointer can move onto the tooltip without closing it. */
+.rail-tooltip::before {
+  content: "";
   position: absolute;
-  right: -7px;
-  bottom: 2px;
-  min-width: 8px;
-  color: var(--text-faint);
-  font: 8px/1 "Cascadia Code", "Consolas", monospace;
-  text-align: center;
+  top: 0;
+  right: 100%;
+  bottom: 0;
+  width: calc((var(--rail-w) - 1px - var(--control-h-lg)) / 2 + 1px + var(--space-2));
 }
 .rail-badge {
   position: absolute;
@@ -811,7 +848,6 @@ kbd {
 .rail-instance .instance-status-dot { width: 12px; height: 12px; }
 .rail-instance .instance-selector-label,
 .rail-instance .instance-selector-chevron { display: none; }
-.rail-settings .settings-trigger { width: 44px; height: 44px; }
 
 /* The phone topbar carries the instance trigger and the view's own actions in one fixed-height
    non-wrapping row. The instance trigger grew with the instance NAME, so a long name pushed the
@@ -842,8 +878,6 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.app-rail .rail-item > .app-icon,
-.rail-settings .settings-trigger svg { width: 26px; height: 26px; }
 /* Hold-to-talk mic in the composer bar (hidden when SpeechRecognition is unsupported). */
 .voice-btn {
   width: 30px;
@@ -1031,27 +1065,6 @@ kbd {
 }
 .sdot-failed {
   background: var(--red);
-}
-/* Compact icon trigger for the focus-managed Settings dialog. */
-.settings-trigger {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-size: 13px;
-  padding: 0;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  text-align: left;
-}
-.settings-trigger:hover,
-.settings-trigger[aria-current="page"] {
-  background: var(--bg-elev-2);
-  color: var(--text);
 }
 .settings-options {
   display: grid;
@@ -12776,6 +12789,8 @@ body.shell-dock-dragging * {
   .app-rail::-webkit-scrollbar { display: none; }
   .rail-brand { display: none; }
   .rail-spacer { display: none; }
+  /* The desktop rail's selected fill; a phone tab marks the current page on its pill instead. */
+  .rail-item[aria-current="page"] { background: transparent; }
 
   /* The labelled tab bar (§15.1): four destinations plus More share the width equally, so the bar
      never scrolls and nothing can sit off-screen. Each tab is a 24px icon in a 56×28 pill over an

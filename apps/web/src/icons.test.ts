@@ -148,11 +148,7 @@ test("every exported icon is inventoried and follows its documented ownership de
  * Exports that may render another export's glyph, each with the export it duplicates. A shared glyph
  * reads as a shared meaning (docs/design-system.md §18), so this list only ever shrinks.
  */
-const SHARED_GLYPHS: Readonly<Record<string, string>> = {
-  // The rail's archived destination, filled; #1958 replaces it, and whichever of #1958 and #1955
-  // lands second deletes the export.
-  FolderSolidIcon: "FolderIcon",
-};
+const SHARED_GLYPHS: Readonly<Record<string, string>> = {};
 
 test("no two icon exports render the same Lucide glyph except the documented exceptions", () => {
   const docs = readFileSync(INVENTORY_PATH, "utf8");
@@ -168,17 +164,14 @@ test("no two icon exports render the same Lucide glyph except the documented exc
 
 test("the retired icon aliases stay deleted", () => {
   const source = readFileSync(ICONS_PATH, "utf8");
-  for (const name of ["WarningTriangleIcon", "GearIcon", "FolderOutlineIcon"]) {
+  for (const name of ["WarningTriangleIcon", "GearIcon", "FolderOutlineIcon", "FolderSolidIcon"]) {
     assert.doesNotMatch(source, new RegExp(`export function ${name}\\(`), `${name} was merged into one export per meaning`);
   }
 });
 
-/**
- * Components whose `size` is not an interface icon size: product and vendor marks keep their own
- * geometry, and the rail's glyph size belongs to the App Shell rail unit (#1958).
- */
+/** Components whose `size` is not an interface icon size: product and vendor marks keep their own geometry. */
 const SIZE_EXEMPT_TAGS = new Set(["AgentIcon", "CursorEditorIcon", "DevinDesktopIcon", "GitHubIcon", "VisualStudioCodeIcon", "ZedEditorIcon"]);
-const SIZE_EXEMPT_FILES = new Set(["components/Rail.tsx"]);
+const SIZE_EXEMPT_FILES = new Set<string>();
 
 /** Every `<…Icon size={N}>` whose literal N is off the §18 scale, as `file:line <Tag size={N}>`. */
 export function offScaleIconSizes(source: string, file: string): string[] {

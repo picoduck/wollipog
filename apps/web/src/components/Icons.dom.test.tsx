@@ -78,8 +78,9 @@ test("an icon drawn off the scale warns in development, once per size, and still
   assert.equal(svg.getAttribute("width"), "15");
 });
 
-test("the rail's recorded 26px size does not warn, and the default size is on the scale", () => {
-  assert.deepEqual(warningsWhileRendering(<GridIcon size={26} />), []);
+test("the rail's old 26px size warns like any off-scale size, and the default size is on the scale", () => {
+  // #1958 moved the rail to 20px glyphs, so 26px has no owner left.
+  assert.equal(warningsWhileRendering(<GridIcon size={26} />).length, 1);
   assert.deepEqual(warningsWhileRendering(<GridIcon />), []);
 });
 

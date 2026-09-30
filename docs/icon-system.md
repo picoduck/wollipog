@@ -14,17 +14,16 @@ exports.
 ## One Glyph per Meaning
 
 Each export renders its own Lucide glyph, and each meaning has one export (docs/design-system.md
-§18). The only shared glyph is `FolderSolidIcon`, listed below with the unit that retires it. The
-ownership test in `apps/web/src/icons.test.ts` fails when two rows map to the same glyph without
-that exception.
+§18). No two exports share a glyph: the ownership test in `apps/web/src/icons.test.ts` fails when
+two rows map to the same one.
 
 ## Sizes
 
 `LibraryIcon` draws at 14, 16, 20 or 24px (`ICON_SIZES` in `Icons.tsx`): 14 beside small text, 16 by
 default, 20 for prominent toolbar icons, and 24 for empty-state tiles and the phone tab bar. Any other
-size logs a warning in development. The desktop rail's 26px glyphs are the one recorded exception,
-owned by the App Shell rail unit (#1958); product and vendor marks (`AgentIcon` and the custom
-exceptions below) keep their own sizes. A unit test fails when a production component passes an
+size logs a warning in development, the desktop rail's included: it draws at 20px, and its phone
+tabs at 24px. Product and vendor marks (`AgentIcon` and the custom exceptions below) keep their own
+sizes. A unit test fails when a production component passes an
 icon a literal size off the scale.
 
 ## Text Glyphs
@@ -50,6 +49,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
 | `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability. |
+| `ArchiveIcon` | Lucide | `Archive` | Archived Sessions destination, outline like every rail glyph. |
 | `UsageIcon` | Lucide | `ChartNoAxesColumn` | Usage metrics. |
 | `ChevronDownIcon` | Lucide | `ChevronDown` | Directional disclosure. |
 | `ChevronRightIcon` | Lucide | `ChevronRight` | Directional disclosure. |
@@ -101,7 +101,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance. |
 | `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning. |
 | `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |
-| `FolderSolidIcon` | Lucide | `Folder` | The rail's archived destination, filled; a documented duplicate of `FolderIcon`'s glyph until the rail unit (#1958) replaces it. Whichever of #1958 and #1955 lands second deletes this export. |
 | `NotesIcon` | Lucide | `NotebookText` | Notes summary. |
 | `ComputerIcon` | Lucide | `Monitor` | Local computer. |
 | `BranchIcon` | Lucide | `GitBranch` | Git branch. |

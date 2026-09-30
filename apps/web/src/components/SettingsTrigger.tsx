@@ -1,25 +1,31 @@
-import { useId } from "react";
+import React, { useId } from "react";
 import { shortcutDisplay } from "../shortcuts.js";
 import { SettingsIcon } from "./Icons.js";
+import { RAIL_ICON_SIZE } from "./Rail.js";
 
-/** A routed destination shared by the responsive rail/header layouts, never a dialog trigger. */
+/**
+ * The desktop rail's Settings item: a routed destination, never a dialog trigger. It is a
+ * `.rail-item` like every destination, so it has the same rest, hover, focus and current-page
+ * treatment and the same tooltip (§4.1).
+ */
 export function SettingsTrigger({ active, onOpen }: { active: boolean; onOpen: () => void }) {
   const descriptionId = useId();
   const binding = shortcutDisplay("open-settings");
   return (
-    <div className="settings-control">
+    <>
       <button
         type="button"
-        className="settings-trigger"
-        title={`Settings (${binding})`}
+        className={`rail-item${active ? " active" : ""}`}
         aria-label="Settings"
         aria-describedby={descriptionId}
-        onClick={onOpen}
         aria-current={active ? "page" : undefined}
+        data-rail-tip="Settings"
+        data-rail-keys={binding}
+        onClick={onOpen}
       >
-        <SettingsIcon size={14} />
+        <SettingsIcon size={RAIL_ICON_SIZE} />
       </button>
       <span id={descriptionId} className="sr-only">Open Settings. Keyboard shortcut: {binding}</span>
-    </div>
+    </>
   );
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -12,8 +12,11 @@ import {
   setRailViewHidden,
 } from "../rail-preferences.js";
 import { saveInstanceStorageValue } from "../instance-storage.js";
-import { GLOBAL_VIEW_ITEMS, type View } from "../navigation.js";
-import { withCapturedAnimationFrames } from "./test-clock-overrides.js";
+import { GLOBAL_VIEW_ITEMS, type DestinationGroup, type View } from "../navigation.js";
+import { railSeparatorsBefore } from "./Rail.js";
+import { SettingsTrigger } from "./SettingsTrigger.js";
+import { RAIL_TOOLTIP_DELAY_MS, RAIL_TOOLTIP_GRACE_MS, RAIL_TOOLTIP_WARM_MS } from "./RailTooltip.js";
+import { withCapturedAnimationFrames, withScopedClockOverrides } from "./test-clock-overrides.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
@@ -28,6 +31,7 @@ const priorElementGlobals = {
   HTMLElement: (globalThis as Record<string, unknown>)["HTMLElement"],
   HTMLButtonElement: (globalThis as Record<string, unknown>)["HTMLButtonElement"],
   KeyboardEvent: (globalThis as Record<string, unknown>)["KeyboardEvent"],
+  Element: (globalThis as Record<string, unknown>)["Element"],
 };
 const priorLocalStorage = (globalThis as Record<string, unknown>)["localStorage"];
 
@@ -38,6 +42,7 @@ before(() => {
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: domWindow.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: domWindow.HTMLButtonElement });
   Object.defineProperty(globalThis, "KeyboardEvent", { configurable: true, writable: true, value: domWindow.KeyboardEvent });
+  Object.defineProperty(globalThis, "Element", { configurable: true, writable: true, value: domWindow.Element });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
   // The Sessions item resolves its persisted list/board mode from instance storage at click time.
   Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: domWindow.localStorage });
@@ -50,6 +55,7 @@ after(() => {
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLButtonElement });
   Object.defineProperty(globalThis, "KeyboardEvent", { configurable: true, writable: true, value: priorElementGlobals.KeyboardEvent });
+  Object.defineProperty(globalThis, "Element", { configurable: true, writable: true, value: priorElementGlobals.Element });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: priorActEnvironment });
   Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: priorLocalStorage });
 });
@@ -89,22 +95,25 @@ test("rail exposes every destination, nested active states, live badges, and per
   assert.deepEqual(links.map((link) => link.getAttribute("href")), [
     "/", "/automations", "/projects", "/runs", "/pods", "/connections/machines", "/skills", "/archived", "/usage",
   ]);
-  // With Board folded into Sessions (#499), all nine destinations carry a digit keycap.
-  assert.equal(links[8]!.querySelector(".rail-number")?.textContent, "9",
-    "the Records group ends at Usage and Cost with the ninth digit");
-  // One name per destination: the accessible name begins with the name the tooltip shows, so a
-  // screen-reader user hears the words on screen (label in name).
-  assert.deepEqual(links.map((link) => link.getAttribute("title")), [
-    "Sessions (1)", "Automations (2)", "Projects (3)", "Multi-Agent Runs (4)", "Pods (5)", "Connections (6)",
-    "Agent Skills (7)", "Archived Sessions (8)", "Usage and Cost (9)",
-  ]);
+  // With Board folded into Sessions (#499), all nine destinations carry a digit, which is exposed
+  // as aria-keyshortcuts and shown in the tooltip rather than as a superscript (#1958).
+  assert.deepEqual(links.map((link) => link.getAttribute("aria-keyshortcuts")),
+    ["1", "2", "3", "4", "5", "6", "7", "8", "9"], "the Records group ends at Usage and Cost with the ninth digit");
+  assertNoDomNode(container.querySelector(".rail-number"));
+  // One name per destination: the accessible name IS the name the tooltip shows, and there is no
+  // browser title to show a second, delayed one.
   for (const [index, item] of GLOBAL_VIEW_ITEMS.entries()) {
-    assert.ok(links[index]!.getAttribute("aria-label")!.startsWith(`${item.name} (${index + 1})`), item.name);
+    assert.equal(links[index]!.getAttribute("aria-label"), item.name);
+    assert.equal(links[index]!.getAttribute("data-rail-tip"), item.name);
+    assert.equal(links[index]!.getAttribute("data-rail-keys"), String(index + 1));
+    assert.equal(links[index]!.hasAttribute("title"), false, item.name);
   }
-  assert.match(links[0]!.getAttribute("aria-label") ?? "", /^Sessions/);
-  assert.match(links[0]!.getAttribute("aria-label") ?? "", /2 Blocked/);
-  assert.match(links[0]!.getAttribute("aria-label") ?? "", /1 Stalled/);
-  assert.match(links[5]!.getAttribute("aria-label") ?? "", /3 Online/);
+  // The counts are the item's description, not part of its name.
+  const described = (link: HTMLAnchorElement) =>
+    container.querySelector(`[id="${link.getAttribute("aria-describedby")}"]`)?.textContent;
+  assert.equal(described(links[0]!), "2 Blocked, 1 Stalled");
+  assert.equal(described(links[5]!), "3 Online");
+  assert.equal(links[1]!.hasAttribute("aria-describedby"), false, "an item with no counts has no description");
   assert.equal(links[0]!.getAttribute("aria-current"), "page", "session detail belongs to Sessions");
   assert.equal(links[0]!.querySelector(".rail-badge.blocked")?.getAttribute("aria-hidden"), "true");
   assert.equal(links[0]!.querySelector(".rail-badge.stalled")?.getAttribute("aria-hidden"), "true");
@@ -209,7 +218,9 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     assertNoDomNode(container.querySelector(".rail-action"));
     assertNoDomNode(container.querySelector(".rail-fab"),
       "no floating button: that band is occupied by the shell dock and the toast stack");
-    assert.equal(container.querySelectorAll(".rail-number").length, 0);
+    assert.equal(container.querySelectorAll(".rail-number, .rail-separator, [data-rail-tip]").length, 0,
+      "the phone bar keeps its own treatment until #1959: no separators, digits or tooltips");
+    assertNoDomNode(container.querySelector('[aria-label="Search"]'));
 
     const moreTrigger = container.querySelector(".rail-more-trigger")! as unknown as HTMLButtonElement;
     await act(async () => { moreTrigger.click(); });
@@ -417,7 +428,6 @@ test("the phone More trigger reads as current on the Settings route and the row 
   }
 });
 
-
 test("crossing to desktop from the Settings row hands focus to the desktop gear", async () => {
   // Settings has no rail-item on either side of the crossing, so the destination selector had
   // nothing active to match and dropped focus on Inbox — rotating a phone into landscape while
@@ -446,7 +456,7 @@ test("crossing to desktop from the Settings row hands focus to the desktop gear"
         stalledCount={0}
         onlineConnections={0}
         onNavigate={() => undefined}
-        settingsControl={<button type="button" className="settings-trigger">Settings</button>}
+        settingsControl={<button type="button" className="rail-item">Settings</button>}
       />,
     );
   });
@@ -467,7 +477,7 @@ test("crossing to desktop from the Settings row hands focus to the desktop gear"
       await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
       await render();
       assert.ok(frames.pending() > 0, "the viewport handoff schedules a focus frame");
-      const gear = container.querySelector(".rail-settings .settings-trigger");
+      const gear = container.querySelector(".rail-settings .rail-item");
       assert.ok(gear, "the desktop layout mounts the gear");
       assert.ok(domWindow.document.activeElement !== (gear as never), "focus waits for the frame");
       await act(async () => { frames.flush(); });
@@ -507,16 +517,15 @@ test("hiding and reordering renumber the surviving destinations", async () => {
     let links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
     assert.equal(links.length, 8, "a hidden destination leaves the rail");
     assert.equal(links[1]!.getAttribute("href"), "/projects");
-    assert.equal(links[1]!.querySelector(".rail-number")?.textContent, "2",
-      "the survivor inherits the digit; nothing goes dead");
-    assert.match(links[1]!.getAttribute("aria-label") ?? "", /\(2\)/);
+    assert.equal(links[1]!.getAttribute("aria-keyshortcuts"), "2", "the survivor inherits the digit; nothing goes dead");
+    assert.equal(links[1]!.getAttribute("data-rail-keys"), "2", "and its tooltip shows it");
 
     setRailViewHidden("automations", false);
     moveRailView("usage", "up");
     await render();
     links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
     assert.equal(links[7]!.getAttribute("href"), "/usage");
-    assert.equal(links[7]!.querySelector(".rail-number")?.textContent, "8");
+    assert.equal(links[7]!.getAttribute("aria-keyshortcuts"), "8");
     assert.equal(links[8]!.getAttribute("href"), "/archived");
   } finally {
     await act(async () => { root.unmount(); });
@@ -764,4 +773,216 @@ test("on a short screen the More sheet lays its rows out in two columns", async 
       restore();
     }
   }
+});
+
+/** A desktop rail with Search and the real Settings item, as the shell mounts it. */
+async function mountDesktopRail(view: View = { name: "inbox" }) {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const searches: number[] = [];
+  const render = (next: View) => act(async () => {
+    root.render(
+      <Rail
+        view={next}
+        blockedCount={0}
+        stalledCount={0}
+        onlineConnections={0}
+        onNavigate={() => undefined}
+        settingsControl={<SettingsTrigger active={next.name === "settings"} onOpen={() => undefined} />}
+        onSearch={() => searches.push(1)}
+      />,
+    );
+  });
+  await render(view);
+  const items = () => [...container.querySelectorAll<HTMLElement>(".rail-destinations > .rail-item")];
+  const dispose = async () => {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  };
+  return { container, render, items, searches, dispose };
+}
+
+test("Search leads the Work group, opens the palette and takes no digit", async () => {
+  resetRailPreferencesForTest();
+  const rail = await mountDesktopRail();
+  try {
+    const [search, sessions] = rail.items();
+    assert.equal(search!.tagName, "BUTTON");
+    assert.equal(search!.getAttribute("aria-label"), "Search", "Search is the first rail item");
+    assert.equal(search!.getAttribute("data-rail-tip"), "Search");
+    assert.match(search!.getAttribute("data-rail-keys") ?? "", /^(Ctrl\+K|⌘K)$/);
+    assert.match(search!.getAttribute("aria-keyshortcuts") ?? "", /^(Control|Meta)\+K$/);
+    assert.equal(search!.hasAttribute("aria-current"), false, "Search is not a destination");
+    assert.equal(sessions!.getAttribute("aria-keyshortcuts"), "1", "and it does not renumber the destinations");
+
+    await act(async () => { (search as HTMLButtonElement).click(); });
+    assert.equal(rail.searches.length, 1, "activating Search opens the palette");
+    assert.equal(domWindow.document.activeElement, search as never,
+      "Search holds focus, which is where the palette returns it on close");
+
+    // A saved order that puts another group first keeps Search at the head of the Work group.
+    moveRailView("inbox", "down");
+    moveRailView("automations", "down");
+    moveRailView("projects", "down");
+    for (let step = 0; step < 4; step += 1) moveRailView("runs", "up");
+    await rail.render({ name: "inbox" });
+    const labels = rail.items().map((item) => item.getAttribute("aria-label"));
+    assert.equal(labels[0], "Multi-Agent Runs");
+    assert.equal(labels[labels.indexOf("Search") + 1], "Sessions", "Search sits immediately before the first Work item");
+  } finally {
+    await rail.dispose();
+    resetRailPreferencesForTest();
+    domWindow.localStorage.clear();
+  }
+});
+
+test("a hairline separates contiguous groups, and an interleaved order has none", async () => {
+  const groups = (...list: DestinationGroup[]) => railSeparatorsBefore(list);
+  assert.deepEqual(groups("work", "work", "oversight", "records"), [false, false, true, true]);
+  assert.deepEqual(groups("records", "work", "work", "oversight"), [false, true, false, true],
+    "reordered but contiguous groups keep their separators");
+  assert.deepEqual(groups("work", "oversight", "work", "records"), [false, false, false, false],
+    "an order that returns to a group has no groups left to separate");
+  assert.deepEqual(groups(), []);
+
+  resetRailPreferencesForTest();
+  const rail = await mountDesktopRail();
+  try {
+    const destinations = rail.container.querySelector(".rail-destinations")!;
+    const before = (label: string) => {
+      const item = destinations.querySelector(`[aria-label="${label}"]`)!;
+      return item.previousElementSibling?.classList.contains("rail-separator") ?? false;
+    };
+    assert.equal(destinations.querySelectorAll(".rail-separator").length, 2, "three groups, two hairlines");
+    assert.ok(before("Multi-Agent Runs"), "Oversight starts after a hairline");
+    assert.ok(before("Archived Sessions"), "and so does Records");
+    assert.equal(destinations.querySelector(".rail-separator")!.getAttribute("aria-hidden"), "true");
+
+    // Archived Sessions moved up between Projects and Multi-Agent Runs splits Records in two.
+    for (let step = 0; step < 4; step += 1) moveRailView("archived", "up");
+    await rail.render({ name: "inbox" });
+    assert.equal(destinations.querySelectorAll(".rail-separator").length, 0, "an interleaved order draws no separators");
+    const links = [...destinations.querySelectorAll<HTMLAnchorElement>("a.rail-item")];
+    assert.deepEqual(links.map((link) => link.getAttribute("aria-keyshortcuts")),
+      ["1", "2", "3", "4", "5", "6", "7", "8", "9"], "and the digits still follow the visible order");
+    assert.equal(links[3]!.getAttribute("aria-label"), "Archived Sessions");
+  } finally {
+    await rail.dispose();
+    resetRailPreferencesForTest();
+    domWindow.localStorage.clear();
+  }
+});
+
+test("Settings is a rail item with the same current-page treatment and tooltip", async () => {
+  const rail = await mountDesktopRail({ name: "inbox" });
+  try {
+    const settings = () => rail.container.querySelector<HTMLButtonElement>(".rail-settings > .rail-item")!;
+    assert.equal(settings().getAttribute("aria-label"), "Settings");
+    assert.equal(settings().hasAttribute("aria-current"), false);
+    assert.equal(settings().classList.contains("active"), false);
+    assert.equal(settings().getAttribute("data-rail-tip"), "Settings");
+    assert.match(settings().getAttribute("data-rail-keys") ?? "", /^(Shift\+,|⇧,)$/);
+    assert.ok(settings().querySelector("svg.app-icon[width=\"20\"]"), "a 20px gear");
+
+    await rail.render({ name: "settings", section: "appearance" });
+    assert.equal(settings().getAttribute("aria-current"), "page");
+    assert.ok(settings().classList.contains("active"));
+    assert.equal(rail.container.querySelectorAll('[aria-current="page"]').length, 1,
+      "Settings is the only current item while it is open");
+  } finally {
+    await rail.dispose();
+  }
+});
+
+test("the tooltip names the item and its keys, after a delay for a mouse and at once for keyboard focus", async () => {
+  resetRailPreferencesForTest();
+  let now = 10_000;
+  const timeouts = new Map<number, { at: number; run: () => void }>();
+  let nextId = 1;
+  const advance = async (ms: number) => {
+    const until = now + ms;
+    for (;;) {
+      const due = [...timeouts].filter(([, timeout]) => timeout.at <= until).sort(([, a], [, b]) => a.at - b.at)[0];
+      if (!due) break;
+      timeouts.delete(due[0]);
+      now = due[1].at;
+      await act(async () => { due[1].run(); });
+    }
+    now = until;
+  };
+  const dateNow = mock.method(Date, "now", () => now);
+  await withScopedClockOverrides(domWindow, {
+    setTimeout: (run: () => void, delay = 0) => {
+      const id = nextId++;
+      timeouts.set(id, { at: now + delay, run });
+      return id;
+    },
+    clearTimeout: (id: number) => { timeouts.delete(id); },
+  }, async () => {
+    const rail = await mountDesktopRail();
+    const tooltip = () => rail.container.querySelector<HTMLElement>(".rail-tooltip");
+    const item = (label: string) => rail.container.querySelector<HTMLElement>(`[aria-label="${label}"]`)!;
+    const pointer = (type: string, target: Element, pointerType = "mouse", relatedTarget: Element | null = null) =>
+      act(async () => {
+        target.dispatchEvent(new domWindow.PointerEvent(type, { bubbles: true, pointerType, relatedTarget: relatedTarget as never }) as never);
+      });
+    try {
+      await pointer("pointerover", item("Automations"));
+      assertNoDomNode(tooltip(), "nothing before the delay");
+      await advance(RAIL_TOOLTIP_DELAY_MS - 1);
+      assertNoDomNode(tooltip());
+      await advance(1);
+      assert.equal(tooltip()?.textContent, "Automations2", "the name and the digit keycap");
+      assert.equal(tooltip()!.querySelector("kbd")?.textContent, "2");
+      assert.equal(tooltip()!.getAttribute("aria-hidden"), "true", "the item already carries the name and keys");
+
+      // Moving to the next item swaps the tooltip at once.
+      await pointer("pointerover", item("Projects"));
+      assert.equal(tooltip()?.textContent, "Projects3");
+
+      // Leaving closes it after the grace that lets the pointer reach the tooltip...
+      await pointer("pointerout", item("Projects"), "mouse", domWindow.document.body as never);
+      assert.ok(tooltip(), "not before the grace");
+      await advance(RAIL_TOOLTIP_GRACE_MS);
+      assertNoDomNode(tooltip());
+      // ...and within the warm window the next item's opens at once.
+      await advance(RAIL_TOOLTIP_WARM_MS - RAIL_TOOLTIP_GRACE_MS);
+      await pointer("pointerover", item("Pods"));
+      assert.equal(tooltip()?.textContent, "Pods5");
+      await pointer("pointerout", item("Pods"), "mouse", domWindow.document.body as never);
+      await advance(RAIL_TOOLTIP_GRACE_MS);
+
+      // Once the warm window has passed, the delay applies again.
+      await advance(RAIL_TOOLTIP_WARM_MS);
+      await pointer("pointerover", item("Search"));
+      assertNoDomNode(tooltip());
+      await advance(RAIL_TOOLTIP_DELAY_MS);
+      assert.match(tooltip()?.textContent ?? "", /^Search(Ctrl\+K|⌘K)$/);
+      await pointer("pointerout", item("Search"), "mouse", domWindow.document.body as never);
+      await advance(RAIL_TOOLTIP_GRACE_MS + RAIL_TOOLTIP_WARM_MS);
+
+      // Touch never opens it.
+      await pointer("pointerover", item("Pods"), "touch");
+      await advance(RAIL_TOOLTIP_DELAY_MS * 2);
+      assertNoDomNode(tooltip(), "a tap never leaves a tooltip behind");
+
+      // Keyboard focus opens it at once, Escape dismisses it, and blur closes it.
+      await act(async () => { item("Settings").focus(); });
+      assert.match(tooltip()?.textContent ?? "", /^Settings(Shift\+,|⇧,)$/);
+      await act(async () => {
+        domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+      });
+      assertNoDomNode(tooltip(), "Escape dismisses it without moving focus");
+      await act(async () => { item("Connections").focus(); });
+      assert.equal(tooltip()?.textContent, "Connections6");
+      await act(async () => { item("Connections").blur(); });
+      assertNoDomNode(tooltip());
+    } finally {
+      await rail.dispose();
+      resetRailPreferencesForTest();
+      domWindow.localStorage.clear();
+    }
+  });
+  dateNow.mock.restore();
 });

@@ -319,7 +319,7 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 
 | Token | Value | Notes |
 | --- | --- | --- |
-| `--rail-w` | 64px | Today 66px (off-grid). |
+| `--rail-w` | 64px | The desktop rail (§4.1). |
 | `--bar-h` | 48px | Every bar: desktop session bar, detail bar, phone app bar, compact page header. §4.4. |
 | `--page-gutter` | 24px (16px phone) | Left and right padding of the page container. |
 | `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Pods. Left-aligned. |

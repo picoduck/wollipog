@@ -594,6 +594,18 @@ export function shortcutBindingDisplay(binding: ShortcutDefinition["binding"], m
   return mac && !binding.ctrl ? parts.join("") : parts.join("+");
 }
 
+/** The binding as an `aria-keyshortcuts` value: UI Events modifier names joined by "+". */
+export function shortcutAriaKeys(id: ShortcutId, mac = isMacPlatform()): string {
+  const { binding } = shortcut(id);
+  const parts: string[] = [];
+  if (binding.ctrl) parts.push("Control");
+  else if (binding.primary) parts.push(mac ? "Meta" : "Control");
+  if (binding.alt) parts.push("Alt");
+  if (binding.shift) parts.push("Shift");
+  parts.push(binding.key === " " ? "Space" : binding.key.length === 1 ? binding.key.toUpperCase() : binding.key);
+  return parts.join("+");
+}
+
 function displayKey(key: string): string {
   if (key === " ") return "Space";
   if (key === "Escape") return "Esc";

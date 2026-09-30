@@ -135,7 +135,7 @@ test.describe("at 1440×900", () => {
     // A digit shortcut from <body> changes the route with nothing focused, so the shell's rescue
     // puts focus on the new page's title (a clicked rail link keeps focus, by design).
     await page.locator("body").evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-    const digit = await page.getByRole("link", { name: /^Archived/ }).locator(".rail-number").textContent();
+    const digit = await page.getByRole("link", { name: "Archived Sessions", exact: true }).getAttribute("aria-keyshortcuts");
     await page.keyboard.press(digit!.trim());
     const title = page.getByRole("heading", { level: 1, name: "Archived Sessions" });
     await expect(title).toBeFocused();

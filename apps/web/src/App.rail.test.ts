@@ -6,6 +6,8 @@ const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const offlineBanner = readFileSync(new URL("./components/OfflineBanner.tsx", import.meta.url), "utf8");
 const feedbackProvider = readFileSync(new URL("./components/FeedbackProvider.tsx", import.meta.url), "utf8");
 const rail = readFileSync(new URL("./components/Rail.tsx", import.meta.url), "utf8");
+const railTooltip = readFileSync(new URL("./components/RailTooltip.tsx", import.meta.url), "utf8");
+const settingsTrigger = readFileSync(new URL("./components/SettingsTrigger.tsx", import.meta.url), "utf8");
 const inbox = readFileSync(new URL("./components/InboxView.tsx", import.meta.url), "utf8");
 const inboxCreateMenu = readFileSync(new URL("./components/InboxCreateMenu.tsx", import.meta.url), "utf8");
 const inboxList = readFileSync(new URL("./components/InboxList.tsx", import.meta.url), "utf8");
@@ -52,12 +54,12 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   // The rail still renders every destination from the one canonical list; on a phone the ones off
   // the tab bar move behind "More" rather than being dropped. Behavioural coverage lives in
   // Rail.dom.test.tsx.
-  assert.match(rail, /visibleItems\.map/);
+  assert.match(rail, /const entries: RailEntry\[\] = \[...visibleItems\];[\s\S]*?entries\.map\(/);
   assert.match(rail, /const itemFor = [^\n]*GLOBAL_VIEW_ITEMS/);
   assert.match(rail, /const barNames = isMobile \? phoneBarViews\(preferences, flags\) : visibleNames;/);
   assert.match(rail, /overflowItems = isMobile \? visibleNames\.filter\(\(name\) => !barNames\.includes\(name\)\)/);
   // Creation is an Inbox action, never a navigation destination or breakpoint-specific shell action.
-  assert.match(rail, /const RAIL_ICON_SIZE = 26;[\s\S]*const TAB_ICON_SIZE = 24;[\s\S]*<Icon size=\{isMobile \? TAB_ICON_SIZE : RAIL_ICON_SIZE\}/);
+  assert.match(rail, /export const RAIL_ICON_SIZE = 20;[\s\S]*const TAB_ICON_SIZE = 24;[\s\S]*<Icon size=\{isMobile \? TAB_ICON_SIZE : RAIL_ICON_SIZE\}/);
   assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/);
   assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/);
   // On phones the instance switcher lives in the app bar: the page header on destinations (#1801)
@@ -67,14 +69,62 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.match(app, /mobileInstanceControl=\{appBarControl\}/);
   assert.doesNotMatch(app, /mobileSettingsControl/,
     "Settings left the phone topbar for the rail's More sheet");
-  assert.match(css, /\.app-rail\s*\{\s*width:\s*66px/);
+  assert.match(css, /--rail-w: 64px;/);
+  assert.match(css, /\.app-rail\s*\{\s*width:\s*var\(--rail-w\)/);
   assert.match(css, /\.rail-brand img\s*\{[^}]*width:\s*39px;[^}]*height:\s*39px/);
-  assert.match(css, /\.app-rail \.rail-item > \.app-icon,[\s\S]*?\.rail-settings \.settings-trigger svg\s*\{[^}]*width:\s*26px;[^}]*height:\s*26px/);
-  assert.match(css, /\.rail-item\.active\s*\{[^}]*border-color:\s*transparent;[^}]*background:\s*transparent/);
-  assert.match(css, /\.rail-item\.active::before\s*\{[^}]*left:\s*-11px;[^}]*width:\s*3px;[^}]*background:\s*var\(--accent\)/);
-  assert.match(css, /\.rail-number\s*\{[^}]*right:\s*-7px;[^}]*bottom:\s*2px/);
+  assert.match(css, /\.rail-item\s*\{[^}]*width:\s*var\(--control-h-lg\);[^}]*height:\s*var\(--control-h-lg\)/);
+  // A phone tab marks the current page on its pill, not with the desktop rail's selected fill.
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.rail-item\[aria-current="page"\] \{ background: transparent; \}/);
+  assert.match(css, /\.rail-item\.active::before\s*\{[^}]*left:\s*calc\(\(var\(--rail-w\) - 1px - var\(--control-h-lg\)\) \/ -2\);[^}]*width:\s*3px;[^}]*background:\s*var\(--accent\)/);
+  assert.doesNotMatch(css, /\.rail-number/, "the digit superscript is replaced by the tooltip");
   assert.match(css, /\.rail-badge\s*\{[^}]*top:\s*2px;[^}]*right:\s*-9px/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.app-rail\s*\{[\s\S]*width:\s*100%[\s\S]*flex-direction: row/);
+});
+
+test("the desktop rail is grouped, searchable and has one current-page treatment (#1958)", () => {
+  // Search: the first Work item, opening the same palette as Ctrl/Cmd+K, never a destination.
+  assert.match(app, /onSearch: \(\) => setPaletteOpen\(true\),/);
+  assert.match(rail, /entries\.splice\(Math\.max\(0, entries\.findIndex\(\(entry\) => entryGroup\(entry\) === "work"\)\), 0, "search"\)/);
+  assert.match(rail, /aria-label="Search"[\s\S]*?aria-keyshortcuts=\{shortcutAriaKeys\("search"\)\}[\s\S]*?data-rail-tip="Search"[\s\S]*?data-rail-keys=\{shortcutDisplay\("search"\)\}/);
+  assert.match(rail, /event\.currentTarget\.focus\(\);\s*onSearch\?\.\(\);/,
+    "a clicked Search holds focus, so the palette returns focus to it when it closes");
+  assert.match(commandPalette, /document\.activeElement instanceof HTMLElement \? document\.activeElement : null/);
+
+  // Tooltip naming: the name alone is the accessible name, the digit is aria-keyshortcuts, and the
+  // tooltip shows both but is hidden from assistive technology.
+  assert.match(rail, /aria-label=\{isMobile && counts \? `\$\{item\.name\}, \$\{counts\}` : item\.name\}/,
+    "the desktop name is the destination alone; a phone tab keeps its counts (#1959)");
+  assert.match(rail, /const countDescription = isMobile \? "" : counts;/);
+  assert.match(rail, /aria-keyshortcuts=\{shortcutDigit \?\? undefined\}/);
+  assert.match(railTooltip, /className="rail-tooltip"\s*aria-hidden="true"/);
+  assert.match(railTooltip, /event\.pointerType !== "mouse"/, "touch never opens the tooltip");
+  assert.match(railTooltip, /RAIL_TOOLTIP_DELAY_MS = 500;/);
+  assert.match(railTooltip, /RAIL_TOOLTIP_WARM_MS = 1000;/);
+  assert.match(railTooltip, /focusVisible\(anchor\)/, "keyboard focus opens it, a click does not");
+  assert.match(css, /\.rail-tooltip\s*\{[^}]*position:\s*fixed;[^}]*background:\s*var\(--bg-elev-3\);[^}]*font:\s*var\(--type-small\);/);
+  assert.doesNotMatch(css, /\.rail-tooltip kbd/, "the tooltip places the shared keycap and never restyles it (§11.5)");
+
+  // Settings uses the destination recipe: a .rail-item with aria-current and the same tooltip.
+  assert.match(settingsTrigger, /className=\{`rail-item\$\{active \? " active" : ""\}`\}/);
+  assert.match(settingsTrigger, /aria-current=\{active \? "page" : undefined\}/);
+  assert.match(settingsTrigger, /data-rail-tip="Settings"\s*data-rail-keys=\{binding\}/);
+  assert.match(settingsTrigger, /<SettingsIcon size=\{RAIL_ICON_SIZE\} \/>/);
+  assert.doesNotMatch(css, /\.settings-trigger/, "no Settings-only sizing survives");
+  assert.match(css, /\.rail-item\.active \{ color: var\(--accent\); \}/);
+  assert.match(css, /\.rail-item\[aria-current="page"\] \{ background: var\(--surface-selected\); \}/);
+
+  // Hover exists only where hover does, so a tap leaves no fill behind (§15.3).
+  assert.match(css, /@media \(hover: hover\) \{\s*\.rail-item:hover \{ color: var\(--text\); background: var\(--bg-elev-2\); \}/);
+  assert.doesNotMatch(css.replace(/@media \(hover: hover\) \{[^}]*\}/g, ""), /\.rail-item:hover/);
+
+  // Separators: a 24px hairline between contiguous groups only.
+  assert.match(rail, /separatorsBefore\[index\] && <span className="rail-separator" aria-hidden="true" \/>/);
+  assert.match(css, /\.rail-separator\s*\{[^}]*width:\s*24px;[^}]*height:\s*1px;[^}]*background:\s*var\(--border\)/);
+
+  // The brand is decoration: not a link and not in the tab order.
+  assert.match(rail, /<div className="rail-brand" aria-hidden="true">/);
+  assert.doesNotMatch(rail, /<a\s+className="rail-brand"/);
+  assert.doesNotMatch(rail, /FolderSolidIcon/, "no rail glyph is filled");
 });
 
 test("heartbeat activity feeds cards, preview, split/footer counts, and independent rail badges", () => {

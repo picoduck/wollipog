@@ -6,7 +6,10 @@ test("Shift+, is discoverable and returns from Settings after nested layers and 
   await page.goto(PAGE);
   const shortcutLabel = await page.evaluate(() => /mac|iphone|ipad|ipod/i.test(navigator.platform) ? "⇧," : "Shift+,");
   const settings = page.getByRole("button", { name: "Settings", exact: true });
-  await expect(settings).toHaveAttribute("title", `Settings (${shortcutLabel})`);
+  // The rail tooltip names it and its shortcut; there is no second, delayed browser title.
+  await expect(settings).toHaveAttribute("data-rail-tip", "Settings");
+  await expect(settings).toHaveAttribute("data-rail-keys", shortcutLabel);
+  await expect(settings).not.toHaveAttribute("title", /.*/);
   await expect(settings).toHaveAccessibleDescription(`Open Settings. Keyboard shortcut: ${shortcutLabel}`);
 
   await page.keyboard.press("Shift+Comma");

@@ -338,8 +338,8 @@ export function Shell() {
     // Keyboard row, then Back while the reference is still open: the row is gone, and a selector
     // that only knew about the gear resolved to null. The page heading is the last resort and
     // always exists, so closing the reference can never drop focus on <body>.
-    shortcutReturnSelectorRef.current = target?.closest(".settings-control")
-      ? ".settings-trigger"
+    shortcutReturnSelectorRef.current = target?.closest(".rail-settings")
+      ? ".rail-settings .rail-item"
       : target?.closest(".settings-view")
       ? ".settings-view .ui-row-nav"
       : null;
@@ -725,6 +725,7 @@ export function Shell() {
         {...(isMobile ? {} : {
           instanceControl: <InstanceSelector compact />,
           settingsControl: <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />,
+          onSearch: () => setPaletteOpen(true),
         })}
       />
       <main className="main">

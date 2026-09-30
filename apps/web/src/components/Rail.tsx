@@ -1,20 +1,23 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import React, { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { View } from "../navigation.js";
-import { GLOBAL_VIEW_ITEMS, viewPath, type GlobalViewName } from "../navigation.js";
+import { GLOBAL_VIEW_ITEMS, viewPath, type DestinationGroup, type GlobalViewItem, type GlobalViewName } from "../navigation.js";
 import {
+  ArchiveIcon,
   AutomationsIcon,
   CloseIcon,
   ConnectionsIcon,
   InboxIcon,
-  FolderSolidIcon,
   MoreHorizontalIcon,
   PodsIcon,
   ProjectsIcon,
   RunsIcon,
+  SearchIcon,
   SettingsIcon,
   SkillsIcon,
   UsageIcon,
 } from "./Icons.js";
+import { useRailTooltip } from "./RailTooltip.js";
+import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuSeparator, MenuSurface } from "./Menu.js";
 import { useIsMobile, useIsShortViewport } from "./useIsMobile.js";
@@ -33,15 +36,39 @@ export const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; classNa
   automations: AutomationsIcon,
   usage: UsageIcon,
   runners: ConnectionsIcon,
-  archived: FolderSolidIcon,
+  archived: ArchiveIcon,
   skills: SkillsIcon,
 };
 
-const RAIL_ICON_SIZE = 26;
+/** §4.1: the desktop rail's 20px outline glyphs. */
+export const RAIL_ICON_SIZE = 20;
 /** A phone tab's icon sits over its label (docs/design-system.md §15.1). */
 const TAB_ICON_SIZE = 24;
 /** More sheet rows are 48px with 20px icons (#1959). */
 const SHEET_ICON_SIZE = 20;
+
+/** The desktop rail's Search item: first in the Work group, and not a destination. */
+type RailEntry = GlobalViewItem | "search";
+
+function entryGroup(entry: RailEntry): DestinationGroup {
+  return entry === "search" ? "work" : entry.group;
+}
+
+/**
+ * Which entries a group separator precedes (§4.1). A hairline is drawn between neighbours of
+ * different groups only while every group's entries are contiguous: a saved order that interleaves
+ * groups has no groups left to separate, so it renders as one run with no separators at all.
+ */
+export function railSeparatorsBefore(groups: readonly DestinationGroup[]): boolean[] {
+  const closed = new Set<DestinationGroup>();
+  for (const [index, group] of groups.entries()) {
+    const previous = groups[index - 1];
+    if (previous === undefined || previous === group) continue;
+    closed.add(previous);
+    if (closed.has(group)) return groups.map(() => false);
+  }
+  return groups.map((group, index) => index > 0 && groups[index - 1] !== group);
+}
 
 function selectedRailView(view: View): GlobalViewName | null {
   // Board mode and an expanded session are both the Sessions destination.
@@ -59,6 +86,7 @@ export function Rail({
   onNavigate,
   instanceControl,
   settingsControl,
+  onSearch,
 }: {
   view: View;
   blockedCount: number;
@@ -68,6 +96,8 @@ export function Rail({
   instanceControl?: ReactNode;
   /** Desktop only. On a phone Settings is a row in the More sheet (see the note by .rail-spacer). */
   settingsControl?: ReactNode;
+  /** Desktop only: opens the command palette, as Ctrl/Cmd+K does. */
+  onSearch?: () => void;
 }) {
   const selected = selectedRailView(view);
   const instanceScope = useInstanceScope();
@@ -128,8 +158,8 @@ export function Rail({
     // `.rail-settings` and any active item, so a list silently resolved to the first destination
     // and the preference expressed by the ordering never applied.
     const survivors = settingsSelected
-      ? [".rail-settings .settings-trigger", ".rail-destinations .rail-item"]
-      : [".rail-destinations .rail-item.active", ".rail-destinations .rail-item"];
+      ? [".rail-settings .rail-item", ".rail-destinations a.rail-item"]
+      : [".rail-destinations .rail-item.active", ".rail-destinations a.rail-item"];
     window.requestAnimationFrame(() => {
       for (const selector of survivors) {
         const target = document.querySelector<HTMLElement>(selector);
@@ -156,6 +186,15 @@ export function Rail({
   const overflowSelectedTitle = settingsSelected
     ? "Settings"
     : GLOBAL_VIEW_ITEMS.find((item) => item.id === selected)?.name ?? "";
+  // Search opens the palette rather than a page, so it takes no digit and renumbers nothing. It
+  // leads the Work group wherever a saved order put that group.
+  const entries: RailEntry[] = [...visibleItems];
+  if (!isMobile && onSearch) {
+    entries.splice(Math.max(0, entries.findIndex((entry) => entryGroup(entry) === "work")), 0, "search");
+  }
+  const separatorsBefore = isMobile ? entries.map(() => false) : railSeparatorsBefore(entries.map(entryGroup));
+  const descriptionPrefix = useId();
+  const tooltip = useRailTooltip(!isMobile);
   // The sheet is rendered for the whole phone breakpoint rather than only when a destination
   // overflows: Settings always lives there, so hiding every optional destination by experiment
   // must not strand it.
@@ -196,70 +235,93 @@ export function Rail({
     },
   });
 
-  return (
-    <nav className="app-rail" aria-label="Primary Navigation" data-focus-zone="rail" tabIndex={-1}>
+  const renderEntry = (entry: RailEntry) => {
+    if (entry === "search") {
+      return (
+        <button
+          type="button"
+          className="rail-item"
+          aria-label="Search"
+          aria-keyshortcuts={shortcutAriaKeys("search")}
+          data-rail-tip="Search"
+          data-rail-keys={shortcutDisplay("search")}
+          onClick={(event) => {
+            // Safari does not focus a clicked button, and the palette returns focus to whatever
+            // held it when it opened.
+            event.currentTarget.focus();
+            onSearch?.();
+          }}
+        >
+          <SearchIcon size={RAIL_ICON_SIZE} />
+        </button>
+      );
+    }
+    const item = entry;
+    const shortcutDigit = isMobile ? null : digits.get(item.id) ?? null;
+    const Icon = VIEW_ICONS[item.id];
+    const active = selected === item.id;
+    const badge = item.id === "runners" ? onlineConnections : 0;
+    const destination = { name: item.id } as View;
+    const counts = item.id === "inbox"
+      ? [blockedCount > 0 ? `${blockedCount} Blocked` : "", stalledCount > 0 ? `${stalledCount} Stalled` : ""]
+        .filter(Boolean).join(", ")
+      : item.id === "runners" && badge > 0
+        ? `${badge} Online`
+        : "";
+    // On the desktop rail the accessible name is the destination's name alone, matching its tooltip,
+    // and the counts are its description. A phone tab keeps them in its name (#1959).
+    const countDescription = isMobile ? "" : counts;
+    const descriptionId = `${descriptionPrefix}-${item.id}`;
+    return (
       <a
-        className="rail-brand"
-        href={viewPath({ name: "inbox" })}
+        className={`rail-item${active ? " active" : ""}`}
+        href={viewPath(destination)}
+        aria-current={active ? "page" : undefined}
+        aria-label={isMobile && counts ? `${item.name}, ${counts}` : item.name}
+        aria-describedby={countDescription ? descriptionId : undefined}
+        aria-keyshortcuts={shortcutDigit ?? undefined}
+        data-rail-tip={isMobile ? undefined : item.name}
+        data-rail-keys={shortcutDigit ?? undefined}
         onClick={(event) => {
           if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
-          onNavigate(sessionsViewDestination());
+          // Activating Sessions opens its persisted list/board mode; the href stays the
+          // canonical "/" so copied links deep-link the explicit list mode.
+          onNavigate(item.id === "inbox" ? sessionsViewDestination() : destination);
         }}
-        title="Wollipog Sessions"
-        aria-label="Wollipog Sessions"
       >
-        <img src="/icons/icon-192.png" alt="" aria-hidden="true" />
+        {railTab(
+          isMobile,
+          item.name,
+          <>
+            <Icon size={isMobile ? TAB_ICON_SIZE : RAIL_ICON_SIZE} />
+            {item.id === "inbox" && blockedCount > 0 && (
+              <span className="rail-badge blocked" aria-hidden="true">{blockedCount}</span>
+            )}
+            {item.id === "inbox" && stalledCount > 0 && (
+              <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
+            )}
+            {item.id === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
+          </>,
+        )}
+        {countDescription && <span id={descriptionId} className="sr-only">{countDescription}</span>}
       </a>
+    );
+  };
+
+  return (
+    <nav className="app-rail" aria-label="Primary Navigation" data-focus-zone="rail" tabIndex={-1} {...tooltip.handlers}>
+      {/* Decoration, not a second link to Sessions directly above the Sessions item (#1958). */}
+      <div className="rail-brand" aria-hidden="true">
+        <img src="/icons/icon-192.png" alt="" />
+      </div>
       <div className="rail-destinations">
-        {visibleItems.map((item) => {
-          const shortcutDigit = digits.get(item.id) ?? null;
-          const shortcutSuffix = isMobile || shortcutDigit === null ? "" : ` (${shortcutDigit})`;
-          const Icon = VIEW_ICONS[item.id];
-          const active = selected === item.id;
-          const badge = item.id === "runners" ? onlineConnections : 0;
-          const destination = { name: item.id } as View;
-          const countLabel = item.id === "inbox"
-            ? `${blockedCount > 0 ? `, ${blockedCount} Blocked` : ""}${stalledCount > 0 ? `, ${stalledCount} Stalled` : ""}`
-            : item.id === "runners" && badge > 0
-              ? `, ${badge} Online`
-              : "";
-          return (
-            <a
-              key={item.id}
-              className={`rail-item${active ? " active" : ""}`}
-              href={viewPath(destination)}
-              aria-current={active ? "page" : undefined}
-              aria-label={`${item.name}${shortcutSuffix}${countLabel}`}
-              title={`${item.name}${shortcutSuffix}`}
-              onClick={(event) => {
-                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                event.preventDefault();
-                // Activating Sessions opens its persisted list/board mode; the href stays the
-                // canonical "/" so copied links deep-link the explicit list mode.
-                onNavigate(item.id === "inbox" ? sessionsViewDestination() : destination);
-              }}
-            >
-              {railTab(
-                isMobile,
-                item.name,
-                <>
-                  <Icon size={isMobile ? TAB_ICON_SIZE : RAIL_ICON_SIZE} />
-                  {item.id === "inbox" && blockedCount > 0 && (
-                    <span className="rail-badge blocked" aria-hidden="true">{blockedCount}</span>
-                  )}
-                  {item.id === "inbox" && stalledCount > 0 && (
-                    <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
-                  )}
-                  {item.id === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
-                </>,
-              )}
-              {!isMobile && shortcutDigit !== null && (
-                <span className="rail-number" aria-hidden="true">{shortcutDigit}</span>
-              )}
-            </a>
-          );
-        })}
+        {entries.map((entry, index) => (
+          <React.Fragment key={entry === "search" ? "search" : entry.id}>
+            {separatorsBefore[index] && <span className="rail-separator" aria-hidden="true" />}
+            {renderEntry(entry)}
+          </React.Fragment>
+        ))}
         {showMore && (
           <div className="rail-more">
             <button
@@ -386,6 +448,7 @@ export function Rail({
           toast stack. */}
       {!isMobile && instanceControl && <div className="rail-instance">{instanceControl}</div>}
       {!isMobile && <div className="rail-settings">{settingsControl}</div>}
+      {tooltip.tooltip}
     </nav>
   );
 }

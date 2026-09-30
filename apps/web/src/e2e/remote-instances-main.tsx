@@ -144,7 +144,7 @@ createRoot(root).render(
             onlineConnections={1}
             onNavigate={() => undefined}
             instanceControl={<InstanceSelector compact />}
-            settingsControl={<button type="button" className="settings-trigger">Settings</button>}
+            settingsControl={<button type="button" className="rail-item">Settings</button>}
           />
           <main className="main">
             <div className="main-body"><InstancesPanel /></div>

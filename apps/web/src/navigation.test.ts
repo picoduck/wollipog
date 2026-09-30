@@ -160,8 +160,8 @@ test("every surface that names a destination reads the registry's one name", () 
   // apart again, which is what put "Multi-Agent" in the rail and "Multi-Agent Runs" in the title.
   const consumers: ReadonlyArray<[string, RegExp[]]> = [
     ["./components/Rail.tsx", [
-      /aria-label=\{`\$\{item\.name\}\$\{shortcutSuffix\}\$\{countLabel\}`\}/,
-      /title=\{`\$\{item\.name\}\$\{shortcutSuffix\}`\}/,
+      /aria-label=\{isMobile && counts \? `\$\{item\.name\}, \$\{counts\}` : item\.name\}/,
+      /data-rail-tip=\{isMobile \? undefined : item\.name\}/,
       /aria-label=\{`\$\{item\.name\}\$\{countLabel\}`\}/,
       /<span className="menu-text">\{item\.name\}<\/span>/,
     ]],
