@@ -443,6 +443,8 @@
   --page-max: 960px;
   --page-max-wide: 1200px;
   --page-max-form: 760px;
+  /* The side-by-side master-detail list pane (§6); the compact tier narrows it to 280px. */
+  --list-pane-w: 320px;
   --rail-w: 64px;
   /* The labelled rail (#1968): opt-in, desktop only. Its items keep the space the 64px rail leaves
      between its edge and an item, at the item size in force. */
@@ -1525,6 +1527,90 @@ kbd {
   /* A connection banner above the page takes the safe area instead. */
   .main:has(> .notice.page-banner) :is(.page-header, .detail-bar) { padding-top: 0; }
   .main:has(> .notice.page-banner) .detail-bar { height: var(--bar-h); }
+}
+
+/* ----------------------------- Master-detail ------------------------------
+   docs/design-system.md §6: a list pane beside the selected item's detail, filling the height under
+   the page header inside a `.page.full.fill` page. Agent Skills is the first consumer; Projects and
+   Connections adopt the same classes.
+
+   - `.master-detail-list` is the flush list pane, with the hairline divider on its trailing edge.
+     An optional `.master-detail-list-head` stays put above `.master-detail-list-body`, which is the
+     pane's one scroll container.
+   - `.master-detail-detail` scrolls on its own. It is a `minmax(0, 1fr)` track and an inline-size
+     container, and it lays its children in a reading column of at most 920px whose track may
+     shrink to nothing: a wide child (an assignments table) overflows inside the pane, never the
+     page.
+   - On a phone the list and the detail are two routes (§6.2): `data-detail-open` marks a route that
+     opens a detail, which then takes the whole column, and the list takes it otherwise.
+   - `.master-detail-state` takes the panes' place for a state that spans both (§6.1, §12): an
+     empty collection or a load error.
+
+   The page gutter is the list's leading edge, so rows line up under the title; the detail runs to
+   the column's edge and pads itself. */
+.master-detail {
+  display: grid;
+  grid-template-columns: var(--list-pane-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  margin-left: var(--page-gutter);
+}
+/* The compact tier's list pane (§2.10, §15.2), measured on the main column: the labelled rail and a
+   docked panel take width a viewport query cannot see. */
+@container app (max-width: 1099px) {
+  .master-detail { --list-pane-w: 280px; }
+}
+.master-detail-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+.master-detail-list-head {
+  flex: none;
+  padding: var(--space-2) var(--space-2) 0 0;
+}
+.master-detail-list-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-2) var(--space-6) 0;
+}
+.master-detail-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 920px);
+  align-content: start;
+  gap: var(--space-4);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-5) var(--page-gutter) var(--space-12) var(--space-6);
+  container-type: inline-size;
+}
+.master-detail-detail > * { min-width: 0; }
+.master-detail-state {
+  min-height: 0;
+  margin: 0 var(--page-gutter);
+  overflow-y: auto;
+  padding-bottom: var(--space-12);
+}
+/* A page-level notice above the panes keeps its own height; the panes take the rest. */
+.page.fill > .notice {
+  flex: none;
+  margin: var(--space-3) var(--page-gutter) 0;
+}
+@media (max-width: 760px) {
+  .master-detail {
+    grid-template-columns: minmax(0, 1fr);
+    margin-left: 0;
+  }
+  .master-detail-list { border-right: 0; }
+  .master-detail-list-head { padding: var(--space-2) var(--page-gutter) 0; }
+  .master-detail-list-body { padding: var(--space-2) var(--page-gutter) var(--space-6); }
+  .master-detail-detail { padding: var(--space-4) var(--page-gutter) var(--space-12); }
+  .master-detail[data-detail-open] > .master-detail-list,
+  .master-detail:not([data-detail-open]) > .master-detail-detail { display: none; }
 }
 /* Labeled session-root destination split button: the shared `.split` of two `.btn`s. The wrapper
    also anchors the launch note. */
@@ -13837,9 +13923,8 @@ body.shell-dock-dragging * {
 }
 
 /* ------------------------------ Agent skills ------------------------------ */
-.skills-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 18px; align-items: start; }
-.skills-list { display: grid; gap: 14px; min-width: 0; align-content: start; }
 .skills-group { display: grid; }
+.skills-group + .skills-group { margin-top: var(--space-3); }
 /* Group headers inside a list (§5.2): --type-label in --text-dim, 32px, Title Case as written. */
 .skills-group-title {
   display: flex;
@@ -13850,8 +13935,28 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   font: var(--type-label);
 }
-.skills-detail { min-width: 0; display: grid; gap: 18px; align-content: start; }
-.skills-empty { color: var(--text-dim); padding: 24px 0; text-align: center; }
+/* The empty library (§12.1): the spanning state, then "How Skills Work" as three short steps. */
+.skills-how {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 720px;
+  margin-top: var(--space-8);
+}
+.skills-how-title {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-label);
+}
+.skills-how .steps > li {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--text-dim);
+}
+.skills-how .steps > li > strong { color: var(--text); font: var(--type-body-strong); }
+.master-detail-state > .notice {
+  max-width: 480px;
+  margin-top: var(--space-6);
+}
 .skills-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
 .skills-detail-head h3 { margin: 0; overflow-wrap: anywhere; }
 .skills-meta { margin: 5px 0 0; }
@@ -13956,9 +14061,6 @@ body.shell-dock-dragging * {
 .skills-hint { color: var(--text-dim); font-size: var(--text-sm); line-height: 1.5; margin: 0; }
 .skills-target-unavailable { border-left: 2px solid var(--warning); padding-left: 8px; overflow-wrap: anywhere; }
 
-@media (max-width: 760px) {
-  .skills-layout { grid-template-columns: minmax(0, 1fr); }
-}
 
 /* --------------------------- Durable automations -------------------------- */
 .automation-editor h3, .automation-card h3 { margin: 0; }
@@ -14645,6 +14747,13 @@ body.shell-dock-dragging * {
 .project-manager-grid > .skeleton {
   grid-column: 1 / -1;
 }
+/* A detail pane's placeholder (§12.3): a title bar over two section blocks, in the pane's own
+   padding. */
+.skeleton.detail-skeleton {
+  gap: var(--space-4);
+  min-height: 0;
+  padding: 0;
+}
 /* Skeleton rows are the real row's height (§5.2, §12.3): the lists that load this way are
    two-line rows. */
 .skeleton-row {
@@ -14654,6 +14763,11 @@ body.shell-dock-dragging * {
   background-size: 200% 100%;
   animation: skeleton-sweep 1.4s var(--ease-out) infinite;
 }
+.skeleton-row.skeleton-title {
+  width: 40%;
+  height: var(--space-6);
+}
+.skeleton-row.skeleton-block { height: 160px; }
 @keyframes skeleton-sweep {
   from { background-position: 200% 0; }
   to { background-position: -200% 0; }

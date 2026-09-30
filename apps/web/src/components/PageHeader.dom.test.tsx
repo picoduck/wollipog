@@ -171,6 +171,96 @@ test("⋯ lists exactly the secondaries whose buttons the header hid, plus its o
   }
 });
 
+test("a menu-button secondary opens its own menu, and folds into ⋯ as its items, in order", async () => {
+  const calls: string[] = [];
+  const secondary = [
+    { label: "Manage Groups…", variant: "ghost" as const, onClick: () => calls.push("groups") },
+    {
+      label: "Import",
+      items: [
+        { label: "Import from Git…", description: "From a repository.", onClick: () => calls.push("git") },
+        { label: "Import from Machine…", description: "From a machine.", onClick: () => calls.push("machine") },
+      ],
+    },
+  ];
+  const view = await mount(<PageHeader title="Agent Skills" secondary={secondary} primary={{ label: "New Skill", onClick: () => undefined }} />);
+  try {
+    const { container } = view;
+    const [groups, importButton] = [...container.querySelectorAll<HTMLButtonElement>(".page-action")];
+    assert.equal(groups!.className, "btn ghost page-action", "a ghost secondary keeps the slot recipe");
+    assert.equal(importButton!.className, "btn page-action");
+    assert.equal(importButton!.textContent, "Import", "the caret is decorative, so the name is the label");
+    assert.ok(importButton!.querySelector('svg[aria-hidden="true"]'), "the caret marks a menu button");
+    assert.equal(importButton!.getAttribute("aria-haspopup"), "menu");
+    assert.equal(importButton!.getAttribute("aria-expanded"), "false");
+
+    await act(async () => importButton!.click());
+    const menu = domWindow.document.querySelector('[role="menu"][aria-label="Import"]') as unknown as Element;
+    assert.ok(menu, "the menu is named by its button");
+    assert.equal(importButton!.getAttribute("aria-expanded"), "true");
+    assert.equal(importButton!.getAttribute("aria-controls"), menu.id);
+    const items = [...menu.querySelectorAll('[role="menuitem"]')];
+    assert.deepEqual(items.map((item) => [item.querySelector(".menu-text")?.textContent, item.querySelector(".menu-desc")?.textContent]), [
+      ["Import from Git…", "From a repository."],
+      ["Import from Machine…", "From a machine."],
+    ]);
+    assert.equal(domWindow.document.activeElement?.querySelector(".menu-text")?.textContent, "Import from Git…");
+    await press(menu, "ArrowDown");
+    assert.equal(domWindow.document.activeElement?.querySelector(".menu-text")?.textContent, "Import from Machine…");
+    await press(menu, "Escape");
+    assert.ok(domWindow.document.querySelector('[role="menu"]') === null, "Escape closes the menu");
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 5)); });
+    assert.ok(domWindow.document.activeElement === (importButton as never), "Escape returns focus to Import");
+
+    await act(async () => importButton!.click());
+    const again = domWindow.document.querySelector('[role="menu"][aria-label="Import"]') as unknown as Element;
+    await act(async () => (again.querySelectorAll('[role="menuitem"]')[1] as unknown as HTMLButtonElement).click());
+    assert.deepEqual(calls, ["machine"]);
+    assert.ok(domWindow.document.activeElement === (importButton as never), "choosing an item returns focus to Import");
+
+    // Both buttons showing: ⋯ has nothing to add, so the stylesheet keeps it hidden.
+    assert.equal(container.querySelector(".page-more")!.getAttribute("data-overflow"), "2");
+  } finally {
+    await view.unmount();
+  }
+
+  // A phone (or a header under 440px): every secondary button is hidden, and ⋯ lists Manage Groups…
+  // and then each import individually, never a nested Import menu.
+  const style = domWindow.document.createElement("style");
+  style.textContent = ".page-actions > .page-action { display: none; }";
+  domWindow.document.head.append(style);
+  const folded = await mount(<PageHeader title="Agent Skills" secondary={secondary} primary={{ label: "New Skill", onClick: () => undefined }} />);
+  try {
+    const more = folded.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!;
+    await act(async () => more.click());
+    const menu = domWindow.document.querySelector('[role="menu"][aria-label="More Actions"]') as unknown as Element;
+    const items = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    assert.deepEqual(items.map((item) => item.querySelector(".menu-text")?.textContent),
+      ["Manage Groups…", "Import from Git…", "Import from Machine…"]);
+    assert.equal(items[1]!.querySelector(".menu-desc")?.textContent, "From a repository.", "a folded item keeps its description");
+    assert.deepEqual(items.map((item) => item.getAttribute("data-slot")), ["2", "1", "1"]);
+    assertNoDomNode(menu.querySelector('[aria-haspopup="menu"]'), "⋯ never nests a menu");
+    await act(async () => items[1]!.click());
+    assert.deepEqual(calls, ["machine", "git"]);
+  } finally {
+    await folded.unmount();
+  }
+
+  // The compact tier: slot 2 (Manage Groups…) is hidden, so ⋯ lists only it; Import stays a button.
+  style.textContent = '.page-actions > .page-action[data-slot="2"] { display: none; }';
+  const compact = await mount(<PageHeader title="Agent Skills" secondary={secondary} primary={{ label: "New Skill", onClick: () => undefined }} />);
+  try {
+    const more = compact.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!;
+    await act(async () => more.click());
+    const menu = domWindow.document.querySelector('[role="menu"][aria-label="More Actions"]') as unknown as Element;
+    assert.deepEqual([...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.querySelector(".menu-text")?.textContent),
+      ["Manage Groups…"]);
+  } finally {
+    await compact.unmount();
+    style.remove();
+  }
+});
+
 test("the detail bar names Back for its destination and keeps destructive actions last in ⋯", async () => {
   const calls: string[] = [];
   const view = await mount(

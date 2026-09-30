@@ -687,6 +687,12 @@ Replaces both the 54px `.topbar` and every in-page `h2` (`.view-heading`, `.skil
 Phones: the page header becomes the **app bar** (§15.1): 48px, title `--type-title` (16/600), a
 search icon, the primary as a 44px `+` icon button, and ⋯.
 
+A secondary may be a **menu button** (`PageHeader`'s `items`): its label and a 14px caret open the
+shared menu, one item per choice with a one-line description (Agent Skills' Import). A secondary
+may also use the ghost variant (`variant: "ghost"`) for destination-level configuration such as
+Manage Groups…. A menu button takes one slot like any secondary. When it folds into ⋯, its items
+appear there individually and in order, never as a nested menu (#1947).
+
 ### 4.3 Detail Bar (Entity Pages and the Session)
 
 Every entity view (Session, Run, Pod, Project, a Skill or Automation on phone) uses the same bar,
@@ -916,6 +922,16 @@ variant by default and offers side by side as a user preference (§6.3).
 - **Class names.** Production uses `.master-detail` (`.master-detail-list`,
   `.master-detail-list-head`, `.master-detail-list-body`, `.master-detail-detail`,
   `.master-detail-resize`). `.md` stays reserved for rendered markdown, which production already uses.
+- **Built (#1947), Agent Skills first.** The grid sits in a `.page.full.fill` page, starting at the
+  page gutter so rows line up under the title. `--list-pane-w` is 320px, and 280px in the compact
+  tier (`@container app (max-width: 1099px)`). `.master-detail-list-body` is the list's scroll
+  container, under an optional `.master-detail-list-head` that stays put. The detail lays its
+  children in a reading column of at most 920px. `data-detail-open` on `.master-detail` marks a
+  route that opens something in the detail, and at 760px and below that route shows only the detail
+  (§6.2). `.master-detail-state` takes both panes' place for an empty collection or a load error
+  (§6.1, §12). `DetailSkeleton` (`common.tsx`) is the detail's loading state. The page resets the
+  detail's `scrollTop` on each route, and on a phone it restores the list's position on Back. The
+  resize handle is not built yet.
 
 ### 6.1 The Default Detail State (No Selection)
 

@@ -35,6 +35,8 @@ const routes: Array<[View, string]> = [
   [{ name: "automations" }, "/automations"],
   [{ name: "skills" }, "/skills"],
   [{ name: "skills", id: "skill_abc" }, `/skills/~${encodeResourceId("skill_abc")}`],
+  [{ name: "skills", pane: "orphans" }, "/skills/orphans"],
+  [{ name: "skills", pane: "overview" }, "/skills/overview"],
   [{ name: "usage" }, "/usage"],
   [{ name: "projects" }, "/projects"],
   [{ name: "projects", id: "project / unicode ✅" }, `/projects/~${encodeResourceId("project / unicode ✅")}`],
@@ -59,6 +61,17 @@ test("attention routes retain exact opaque request identity and epoch through re
     assert.equal(viewFromPath(path, query), null);
   }
   assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/attention/~!`, "?epoch=0"), null);
+});
+
+test("Agent Skills panes have their own routes, and a skill id wins over a pane", () => {
+  // Existing links keep their meaning (#1947): the bare route and a skill deep link.
+  assert.deepEqual(viewFromPath("/skills"), { name: "skills" });
+  assert.deepEqual(viewFromPath(`/skills/~${encodeResourceId("orphans")}`), { name: "skills", id: "orphans" },
+    "a skill named like a pane is still a skill");
+  assert.equal(viewPath({ name: "skills", id: "skill_abc", pane: "orphans" }), `/skills/~${encodeResourceId("skill_abc")}`);
+  assert.equal(viewFromPath("/skills/unknown"), null);
+  assert.equal(viewFromPath("/skills/Orphans"), null);
+  assert.equal(sameView({ name: "skills", pane: "orphans" }, { name: "skills" }), false, "Back can leave the pane");
 });
 
 test("every dashboard view has a canonical round-tripping path", () => {

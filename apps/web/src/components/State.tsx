@@ -86,9 +86,10 @@ export function State({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = `state-details-${useId().replace(/:/g, "")}`;
   if (variant === "error") {
-    // §12.4: an error is a danger notice in place of the content, with its recovery as the action.
+    // §12.4: an error is a danger notice in place of the content, with its recovery as the action
+    // and the raw detail behind the notice's own Show Details.
     return (
-      <Notice tone="danger" role="alert" title={title} actions={actions}
+      <Notice tone="danger" role="alert" title={title} actions={actions} details={details}
         className={["state-error", compact ? "compact-state" : "", className ?? ""].filter(Boolean).join(" ")}>
         {children}
       </Notice>

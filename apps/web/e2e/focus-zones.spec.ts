@@ -65,7 +65,7 @@ for (const route of ROUTES) {
 
 test("Agent Skills and Projects land on their pane roots with no ring", async ({ page }) => {
   for (const [path, list, detail] of [
-    ["/skills", ".skills-list", ".skills-detail"],
+    ["/skills", ".master-detail-list", ".master-detail-detail"],
     ["/projects", ".project-manager-list", ".project-manager-detail"],
   ] as const) {
     await openShell(page, shell(path));
@@ -115,7 +115,7 @@ async function f6IntoSkillsDetail(page: Page) {
   await page.keyboard.press("F6");
   await page.keyboard.press("F6");
   await page.keyboard.press("F6");
-  await expect(page.locator(".skills-detail")).toBeFocused();
+  await expect(page.locator(".master-detail-detail")).toBeFocused();
 }
 
 for (const theme of ["dark", "light"] as const) {
@@ -125,7 +125,7 @@ for (const theme of ["dark", "light"] as const) {
     await f6IntoSkillsDetail(page);
     const line = await zoneLine(page);
     expect(line.count).toBe(1);
-    expect(line.className).toContain("skills-detail");
+    expect(line.className).toContain("master-detail-detail");
     expect(line).toMatchObject({ position: "fixed", top: 0, left: 0, width: 0, thickness: "2px", animation: "zone-line-fade" });
     expect(line.color).toBe(line.focus);
     expect(line.color).not.toBe(line.accent);
@@ -157,9 +157,11 @@ test("any other key puts the zone line out, including a digit that changes the r
 });
 
 test("the zone line follows its zone when landing focus scrolls the page, and on scroll or resize", async ({ page }) => {
-  await openShell(page, shell("/skills"));
+  // Projects, whose panes grow with the page: Agent Skills' panes each scroll on their own (#1947), so
+  // landing focus there never scrolls the page.
+  await openShell(page, shell("/projects"));
   // A long list: focusing its last control scrolls the page, and F6 into the detail scrolls it back.
-  await page.locator(".skills-list").evaluate((list) => {
+  await page.locator(".project-manager-list").evaluate((list) => {
     const spacer = document.createElement("div");
     spacer.style.height = "2400px";
     const last = document.createElement("button");
@@ -170,7 +172,7 @@ test("the zone line follows its zone when landing focus scrolls the page, and on
   await page.getByRole("button", { name: "Last Row" }).focus();
   expect(await page.locator(".main-body").evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await page.keyboard.press("F6");
-  await expect(page.locator(".skills-detail")).toBeFocused();
+  await expect(page.locator(".project-manager-detail")).toBeFocused();
   await expect.poll(() => zoneLine(page)).toMatchObject({ count: 1, top: 0, left: 0, width: 0 });
 
   await page.locator(".main-body").evaluate((element) => { element.scrollTop = 300; });

@@ -51,7 +51,7 @@ async function openDrift(page: Page, width: number, theme: string, assignmentCou
   });
   await page.goto("/skills-removals-e2e.html?drift=1");
   await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-  await expect(page.locator(".skills-list .row").getByText("Edited", { exact: true })).toBeVisible();
+  await expect(page.locator(".master-detail-list .row").getByText("Edited", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /code-review/i }).click();
   return { requests };
 }
@@ -95,7 +95,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await importButton.click();
     await expect(dialog).toBeHidden();
     await expect(machine.locator(".status")).toHaveText("Linked");
-    await expect(page.locator(".skills-list .row").getByText("Edited", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".master-detail-list .row").getByText("Edited", { exact: true })).toHaveCount(0);
     expect(requests).toEqual([
       { url: "preview", body: { name: "code-review", digest, variant: "agent" } },
       { url: "import", body: { acceptUpdate: true } },

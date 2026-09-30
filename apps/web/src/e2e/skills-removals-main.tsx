@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { RUNNER_CAPABILITY_MIN_PROTOCOL, type ControlPlaneToUi, type ExecutionTargetDefinition, type RunnerView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import type { ViewNavigation } from "../navigation.js";
+import { viewFromPath, type View, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import type { RunnerSkillsResponse } from "../skills.js";
@@ -141,10 +141,18 @@ const connection: UiConnectionRuntime = {
   close() {},
 };
 
+// The route is the view's only selection (#1947), so navigation is real history: a row pushes an
+// entry and the browser's Back pops it. `?route=/skills/orphans` opens a route directly.
+const initialRoute = viewFromPath(new URLSearchParams(location.search).get("route") ?? "/skills") ?? { name: "skills" };
+const historyView = (state: unknown): View => (state as { view?: View } | null)?.view ?? initialRoute;
 const navigation: ViewNavigation = {
-  current: () => ({ name: "skills" }),
-  push() {},
-  listen: () => () => {},
+  current: () => historyView(history.state),
+  push(view) { history.pushState({ view }, ""); },
+  listen(onView) {
+    const listener = (event: PopStateEvent) => onView(historyView(event.state));
+    window.addEventListener("popstate", listener);
+    return () => window.removeEventListener("popstate", listener);
+  },
 };
 
 const reportedAt = 1_700_000_000_000;
@@ -241,7 +249,8 @@ const client = {
 
 function SkillsWhenReady() {
   const ready = useStoreSelector((state) => state.snapshotLoaded);
-  return ready ? <SkillsView /> : null;
+  const view = useStoreSelector((state) => state.view);
+  return ready ? <SkillsView route={view.name === "skills" ? view : undefined} /> : null;
 }
 
 const view = (

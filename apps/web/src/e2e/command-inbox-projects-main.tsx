@@ -54,7 +54,7 @@ import { Header, Shell } from "../App.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import { browserInstanceManager, InstancesContextProvider } from "../instances-context.js";
-import { viewFromPath, type ViewNavigation } from "../navigation.js";
+import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { useNewSessionShortcut } from "../useNewSessionShortcut.js";
@@ -851,8 +851,21 @@ const navigation: ViewNavigation = {
     const fixturePath = new URLSearchParams(window.location.search).get("path");
     return (fixturePath ? viewFromPath(fixturePath) : null) ?? { name: "inbox" };
   },
-  push() {},
-  listen: () => () => {},
+  // `&history=1` makes navigation real history (#1947): a push rewrites `path=` in a new entry, and
+  // the browser's Back returns to the previous one.
+  push(view) {
+    if (FIXTURE_QUERY.get("history") !== "1") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("view");
+    url.searchParams.set("path", viewPath(view));
+    window.history.pushState(null, "", url);
+  },
+  listen(onView) {
+    if (FIXTURE_QUERY.get("history") !== "1") return () => {};
+    const listener = () => onView(navigation.current());
+    window.addEventListener("popstate", listener);
+    return () => window.removeEventListener("popstate", listener);
+  },
 };
 
 function pushSession(value: SessionView): void {
@@ -959,8 +972,55 @@ function descendantRequestFixture(): DescendantRequestView {
   };
 }
 
+/**
+ * Agent Skills in the real Shell (#1947). `?skills=` picks the library: the default is a small one
+ * whose first skill has a SKILL.md long enough to scroll and an assignments table as its widest
+ * child; `many` has 40 skills, so the list scrolls on its own; `empty`, `loading` and `error` are the
+ * §12 states.
+ */
+const SHELL_SKILLS_MODE = FIXTURE_QUERY.get("skills");
+const SHELL_SKILL_NAMES = ["code-review", "release-notes", "triage-helper", "using-wollipog", "dependency-audit", "writing-tests"];
+const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : Array.from(
+  { length: SHELL_SKILLS_MODE === "many" ? 40 : SHELL_SKILL_NAMES.length },
+  (_, index) => ({
+    id: `skill-${index + 1}`,
+    name: SHELL_SKILL_NAMES[index] ?? `team-skill-${String(index + 1).padStart(2, "0")}`,
+    description: index % 3 === 2 ? undefined : `Guides an agent through ${SHELL_SKILL_NAMES[index] ?? "a team task"} the way this team does it.`,
+    latestVersion: { id: `v${index + 1}`, digest: `${(index + 1).toString(16).padStart(4, "0")}`.padEnd(64, "a"), createdAt: 1_700_000_000_000 },
+    assignmentCount: index === 0 ? 3 : 0,
+  }));
+const shellSkillMarkdown = (name: string) => [
+  "---", `name: ${name}`, "---", "",
+  ...Array.from({ length: 24 }, (_, index) => `${index + 1}. Step ${index + 1}: read the change, check it against the team's conventions, and write down what you found before moving on.`),
+].join("\n");
+const shellSkillsApi = {
+  listSkills: async () => {
+    if (SHELL_SKILLS_MODE === "loading") return new Promise<never>(() => {});
+    if (SHELL_SKILLS_MODE === "error") throw new Error("HTTP 503: skill library unavailable (GET /api/skills)");
+    return { skills: structuredClone(shellSkills) };
+  },
+  listSkillGroups: async () => ({ groups: [] }),
+  getSkill: async (id: string) => {
+    const skill = shellSkills.find((candidate) => candidate.id === id);
+    if (!skill) throw new Error("HTTP 404: skill not found");
+    return {
+      skill: structuredClone(skill),
+      latestVersion: { ...skill.latestVersion, files: [{ path: "SKILL.md", content: shellSkillMarkdown(skill.name), encoding: "utf8" as const }] },
+    };
+  },
+  listSkillAssignments: async (skillId?: string) => ({ assignments: skillId !== "skill-1" ? [] : [
+    { id: "assignment-1", skillId, scopeKind: "instance" as const, agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const },
+    { id: "assignment-2", skillId, scopeKind: "runner" as const, runnerId: "runner-1",
+      agentSelector: { kind: "driver" as const, driver: "claude-code" }, enabled: true, invocation: "manual" as const },
+    { id: "assignment-3", skillId, scopeKind: "runner" as const, runnerId: "runner-1",
+      agentSelector: { kind: "all" as const }, enabled: false, invocation: "agent" as const },
+  ] }),
+  runnerSkills: async () => ({ desired: [], reported: null, removalReporting: "unknown" as const }),
+};
+
 const client = {
   ...api,
+  ...shellSkillsApi,
   // One page of the fixture's sessions as the Archived Sessions table lists them. The Archived
   // filter shows every session as archived, so the table has rows to lay out.
   archiveSessionPage: async (input: Parameters<typeof api.archiveSessionPage>[0]) => {

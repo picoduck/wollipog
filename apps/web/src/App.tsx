@@ -815,7 +815,7 @@ export function Shell() {
             </ExperimentGate>
           )}
           {view.name === "automations" && <AutomationsView />}
-          {view.name === "skills" && <SkillsView selectedSkillId={view.id} />}
+          {view.name === "skills" && <SkillsView route={view} />}
           {view.name === "usage" && <UsageView />}
           {view.name === "archived" && <ArchivedSessionsView />}
           {view.name === "settings" && (

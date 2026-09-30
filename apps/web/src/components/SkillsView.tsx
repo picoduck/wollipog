@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
@@ -7,13 +7,16 @@ import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { Modal, Skeleton } from "./common.js";
+import { DetailSkeleton, Modal, Skeleton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { Select } from "./ui/ChoiceControls.js";
-import { SkillsIcon } from "./Icons.js";
+import { PlusIcon, SkillsIcon } from "./Icons.js";
 import { Markdown } from "./Markdown.js";
-import { PageHeader } from "./PageHeader.js";
-import { destination } from "../navigation.js";
+import { Notice } from "./Notice.js";
+import { DetailBar, PageHeader } from "./PageHeader.js";
+import { Steps } from "./Steps.js";
+import { useIsMobile } from "./useIsMobile.js";
+import { backLabel, destination, viewPath, type SkillsPane, type View } from "../navigation.js";
 import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
 import { SkillGitAutoUpdateControls } from "./SkillGitAutoUpdate.js";
 import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
@@ -182,9 +185,16 @@ function NewSkillDialog({ onClose, onCreate, busy }: {
 }
 
 
-export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {}) {
+/** An Agent Skills route: a skill, a pane (Orphaned Copies, Library Overview), or the bare list. */
+export type SkillsRoute = Extract<View, { name: "skills" }>;
+
+/** The route's detail title on a phone, where the open detail takes the app bar (§6.2). */
+const PANE_TITLES: Record<SkillsPane, string> = { orphans: "Orphaned Copies", overview: "Library Overview" };
+
+export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute } = {}) {
   const api = useApi();
   const { navigate } = useStoreActions();
+  const isMobile = useIsMobile();
   const { confirm, showToast } = useFeedback();
   const runnersMap = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
@@ -194,38 +204,69 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
     return machineOptionLabels(runners, (id) => boxByRunner.get(id));
   }, [boxes, runners]);
 
+  // The route is the only source of selection (§6): `/skills/~<id>` a skill, `/skills/orphans` the
+  // Orphaned Copies pane, `/skills` and `/skills/overview` the default detail.
+  const selectedId = route.id ?? null;
+  const showOrphans = !route.id && route.pane === "orphans";
+  /** Whether the route opens something in the detail pane, which on a phone is its own screen. */
+  const detailOpen = Boolean(route.id || route.pane);
+  const routeKey = viewPath(route);
+
   const [skills, setSkills] = useState<SkillSummary[] | null>(null);
   const [groups, setGroups] = useState<SkillGroupView[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(selectedSkillId ?? null);
-  const [detail, setDetail] = useState<SkillSummary | null>(null);
+  const [loadedDetail, setDetail] = useState<SkillSummary | null>(null);
+  // A detail loaded for an earlier selection is never shown under the current one.
+  const detail = loadedDetail && loadedDetail.id === selectedId ? loadedDetail : null;
   const [assignments, setAssignments] = useState<SkillAssignmentView[]>([]);
   const [machineSkills, setMachineSkills] = useState<Record<string, RunnerSkillsResponse>>({});
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
   const [versionRunnerId, setVersionRunnerId] = useState<string | undefined>();
   const [driftImport, setDriftImport] = useState<{ runnerId: string; copy: SkillDriftCopy } | null>(null);
-  const [showOrphans, setShowOrphans] = useState(false);
   const [orphanImport, setOrphanImport] = useState<{ runnerId: string; copy: OrphanedSkillCopy } | null>(null);
+  /** A failed action (or machine refresh): a notice above the panes, not a load failure. */
   const [error, setError] = useState<string | null>(null);
+  /** The library could not be read: its notice replaces both panes, with Retry (§12.4). */
+  const [listError, setListError] = useState<string | null>(null);
+  /** The selected skill could not be read: its notice replaces the detail. */
+  const [detailError, setDetailError] = useState<{ skillId: string; message: string } | null>(null);
   const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | "built-in-review" | null>(null);
 
   /** The selection as of now, for async work that finishes after the user moved on. */
   const selectedRef = useRef(selectedId);
-  const choose = useCallback((skillId: string | null) => {
-    selectedRef.current = skillId;
-    setSelectedId(skillId);
-  }, []);
+  useLayoutEffect(() => {
+    selectedRef.current = selectedId;
+  }, [selectedId]);
 
-  // The route names the selected skill, so a link such as onboarding's Open Skills selects it, and
-  // returning to the bare Skills route (the rail, or history) clears the selection.
+  // Selecting pushes the route, so a link such as onboarding's Open Skills selects its skill, Back
+  // returns to the previous selection, and the bare Skills route (the rail) clears it. The ref moves
+  // at once, so work that finishes before the route re-renders already sees the new selection.
   const select = useCallback((skillId: string | null) => {
-    choose(skillId);
+    selectedRef.current = skillId;
     navigate(skillId ? { name: "skills", id: skillId } : { name: "skills" });
-  }, [choose, navigate]);
-  useEffect(() => {
-    if (selectedSkillId) setShowOrphans(false);
-    choose(selectedSkillId ?? null);
-  }, [choose, selectedSkillId]);
+  }, [navigate]);
+  const openPane = useCallback((pane: SkillsPane) => {
+    selectedRef.current = null;
+    navigate({ name: "skills", pane });
+  }, [navigate]);
+
+  // Each pane scrolls on its own (§6). A new route starts the detail at its top; on a phone, where
+  // the route swaps the whole screen, focus moves to the new page title, which shows no ring (§16.1).
+  const listBodyRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const previousRouteKey = useRef(routeKey);
+  useLayoutEffect(() => {
+    if (previousRouteKey.current === routeKey) return;
+    previousRouteKey.current = routeKey;
+    if (detailRef.current) detailRef.current.scrollTop = 0;
+    if (isMobile) document.getElementById("page-title")?.focus({ preventScroll: true });
+  }, [routeKey, isMobile]);
+  // A phone hides the list while a detail is open, which loses its scroll position; Back puts the
+  // list back where it was (§6.2). Recorded only while the list is on screen.
+  const listScrollTop = useRef(0);
+  useLayoutEffect(() => {
+    if (!detailOpen && listBodyRef.current) listBodyRef.current.scrollTop = listScrollTop.current;
+  }, [detailOpen]);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
   const listGeneration = useRef(0);
@@ -273,13 +314,22 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
     setMachineSkills(Object.fromEntries(loaded));
   }, [api, runners]);
 
-  useEffect(() => {
-    refreshList().catch((cause) => setError((cause as Error).message));
+  const loadList = useCallback(() => {
+    setListError(null);
+    refreshList().catch((cause) => setListError((cause as Error).message));
   }, [refreshList]);
+  useEffect(loadList, [loadList]);
 
   useEffect(() => {
     refreshMachines().catch((cause) => setError((cause as Error).message));
   }, [refreshMachines]);
+
+  const loadDetail = useCallback((skillId: string) => {
+    setDetailError(null);
+    refreshDetail(skillId).catch((cause) => {
+      if (selectedRef.current === skillId) setDetailError({ skillId, message: (cause as Error).message });
+    });
+  }, [refreshDetail]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -289,10 +339,8 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
       setAssignments([]);
       return;
     }
-    // Selecting a skill from anywhere (including creating one) leaves the orphaned-copy list.
-    setShowOrphans(false);
-    refreshDetail(selectedId).catch((cause) => setError((cause as Error).message));
-  }, [selectedId, refreshDetail]);
+    loadDetail(selectedId);
+  }, [selectedId, loadDetail]);
 
   const grouped = useMemo(() => groupSkillList(skills ?? [], groups), [skills, groups]);
 
@@ -475,84 +523,151 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
   const heldUpdate = detail?.gitAutoUpdate?.enabled ? detail.gitAutoUpdate.held : null;
   const skillMd = latest?.files?.find((file) => file.path === "SKILL.md" && file.encoding === "utf8");
 
-  return (
-    <section className="page full">
-      <PageHeader
-        title={destination("skills").name}
-        description={destination("skills").description}
-        // Left to right; the leftmost moves into ⋯ first, so Import from Git is the last to go.
-        secondary={[
-          { label: "Import from Machine", onClick: () => setDialog("machine-import") },
-          { label: "Manage Groups", onClick: () => setDialog("groups") },
-          { label: "Import from Git", onClick: () => setDialog("git-import") },
-        ]}
-        primary={{ label: "New Skill", onClick: () => setDialog("new-skill") }}
-      />
-      {error && <div className="form-error" role="alert">{error}</div>}
+  const howId = `skills-how-${useId().replace(/:/g, "")}`;
+  const skillName = detail?.name ?? skills?.find((skill) => skill.id === selectedId)?.name;
+  // On a phone the list and the open detail are two screens (§6.2): the detail takes the app bar,
+  // as the shared detail bar with Back, and the list is hidden until Back.
+  const phoneDetail = isMobile && detailOpen;
+  const showOrphanEntry = orphanCount > 0 || showOrphans || keptAsideUnreported;
+  // An empty library is one state across both panes (§6.1, §12.1), and that state offers creation,
+  // so the header keeps only Manage Groups…. A route into a skill or the orphaned copies still
+  // opens its pane: deleting every skill is exactly when orphaned copies appear.
+  const spanningEmpty = skills !== null && skills.length === 0 && !route.id && !showOrphans;
+  const manageGroups = { label: "Manage Groups…", variant: "ghost" as const, onClick: () => setDialog("groups") };
+  const importItems = [
+    { label: "Import from Git…", description: "Copy a skill from a Git repository and keep its source.", onClick: () => setDialog("git-import") },
+    { label: "Import from Machine…", description: "Snapshot a skill that already lives on a connected machine.", onClick: () => setDialog("machine-import") },
+  ];
 
-      <div className="skills-layout">
-        <aside className="skills-list clip-focus" aria-label="Skills" data-focus-zone="list" tabIndex={-1}>
-          {(orphanCount > 0 || showOrphans || keptAsideUnreported) && (
-            <button
-              type="button"
-              className={`row row-2${showOrphans ? " is-selected" : ""}`}
-              aria-current={showOrphans ? "true" : undefined}
-              onClick={() => { select(null); setShowOrphans(true); }}
-            >
-              <span className="row-body">
-                <span className="row-line">
-                  <span className="row-title">Orphaned Copies</span>
-                  {orphanCount > 0 && <StatusBadge tone="warning" noDot label={orphanCount} />}
-                </span>
-                <span className="row-sub">Edited copies on machines that no library skill shows</span>
-              </span>
-            </button>
-          )}
-          {/* A failed load reports its error above; it must not also spin as if it were still loading. */}
-          {skills === null && !error && <Skeleton rows={4} announce="Loading skills" />}
-          {skills !== null && skills.length === 0 && (
-            <State
-              compact
-              icon={<SkillsIcon />}
-              title={`No ${destination("skills").name} Yet`}
-              headingLevel={3}
-              actions={
-                <button type="button" className="btn primary" onClick={() => setDialog("new-skill")}>
+  return (
+    <>
+    {phoneDetail && (
+      <DetailBar
+        title={route.id ? skillName ?? "Skill" : PANE_TITLES[route.pane!]}
+        backLabel={backLabel("skills")}
+        onBack={() => select(null)}
+      />
+    )}
+    <section className="page full fill">
+      {!phoneDetail && (
+        <PageHeader
+          title={destination("skills").name}
+          description={destination("skills").description}
+          // §4.2, left to right: [Manage Groups…] [Import ▾] [+ New Skill]. Manage Groups… is the first
+          // into ⋯ as the header narrows; on a phone ⋯ holds it and both imports, one item each.
+          secondary={spanningEmpty ? [manageGroups] : [manageGroups, { label: "Import", items: importItems }]}
+          primary={spanningEmpty ? undefined : { label: "New Skill", onClick: () => setDialog("new-skill") }}
+        />
+      )}
+      {error && <Notice tone="danger" role="alert" onDismiss={() => setError(null)}>{error}</Notice>}
+
+      {listError ? (
+        <div className="master-detail-state">
+          <State
+            variant="error"
+            title="Couldn't Load Skills"
+            actions={<button type="button" className="btn sm" onClick={loadList}>Retry</button>}
+            details={<div className="code-well"><code>{listError}</code></div>}
+          >
+            The skill library could not be read. Check the connection to Wollipog, then retry.
+          </State>
+        </div>
+      ) : spanningEmpty ? (
+        <div className="master-detail-state">
+          <State
+            icon={<SkillsIcon />}
+            title={`No ${destination("skills").name} Yet`}
+            headingLevel={2}
+            actions={
+              <>
+                <button type="button" className="btn primary lg" onClick={() => setDialog("new-skill")}>
+                  <PlusIcon />
                   New Skill
                 </button>
-              }
+                <button type="button" className="btn" onClick={() => setDialog("git-import")}>Import from Git…</button>
+                <button type="button" className="btn" onClick={() => setDialog("machine-import")}>Import from Machine…</button>
+              </>
+            }
+          >
+            Skills teach an agent a repeatable task. Write one here, or import one from Git or from a machine.
+          </State>
+          {showOrphanEntry && (
+            <Notice
+              tone="warning"
+              title="Orphaned Copies"
+              actions={<button type="button" className="btn sm" onClick={() => openPane("orphans")}>Review Orphaned Copies</button>}
             >
-              Create a skill to share reusable instructions with the agents on your machines.
-            </State>
+              Your machines still hold edited copies that no library skill shows.
+            </Notice>
           )}
-          {grouped.map((group) => (
-            <div className="skills-group" key={group.id ?? "ungrouped"}>
-              <h3 className="skills-group-title">{group.name}</h3>
-              {group.skills.map((skill) => (
-                <button
-                  key={skill.id}
-                  type="button"
-                  className={`row${skill.description ? " row-2" : ""}${selectedId === skill.id ? " is-selected" : ""}`}
-                  aria-current={selectedId === skill.id ? "true" : undefined}
-                  onClick={() => { setShowOrphans(false); select(skill.id); }}
-                >
-                  <span className="row-body">
-                    <span className="row-line">
-                      <span className="row-title">{skill.name}</span>
-                      {driftedSkillNames.has(skill.name) && <StatusBadge meta={statusMeta("skill", "edited")} />}
-                      {skill.builtIn && <StatusBadge tone="neutral" noDot label="Built-In" />}
-                      {skillRecommended(skill) && <StatusBadge tone="neutral" noDot label="Recommended" />}
-                    </span>
-                    {skill.description && <span className="row-sub">{skill.description}</span>}
+          <section className="skills-how" aria-labelledby={howId}>
+            <h3 id={howId} className="skills-how-title">How Skills Work</h3>
+            <Steps horizontal>
+              <li><strong>Write or Import</strong><span>Write a skill here, or bring one in from Git or a machine.</span></li>
+              <li><strong>Assign</strong><span>Choose which machines and agents get it.</span></li>
+              <li><strong>Deploy</strong><span>Each machine installs its assigned skills when it next syncs.</span></li>
+            </Steps>
+          </section>
+        </div>
+      ) : (
+      <div className="master-detail" data-detail-open={detailOpen ? "" : undefined}>
+        <aside className="master-detail-list" aria-label="Skills" data-focus-zone="list" tabIndex={-1}>
+          {showOrphanEntry && (
+            <div className="master-detail-list-head clip-focus">
+              <button
+                type="button"
+                className={`row row-2${showOrphans ? " is-selected" : ""}`}
+                aria-current={showOrphans ? "true" : undefined}
+                onClick={() => openPane("orphans")}
+              >
+                <span className="row-body">
+                  <span className="row-line">
+                    <span className="row-title">Orphaned Copies</span>
+                    {orphanCount > 0 && <StatusBadge tone="warning" noDot label={orphanCount} />}
                   </span>
-                </button>
-              ))}
+                  <span className="row-sub">Edited copies on machines that no library skill shows</span>
+                </span>
+              </button>
             </div>
-          ))}
+          )}
+          <div
+            ref={listBodyRef}
+            className="master-detail-list-body clip-focus"
+            onScroll={(event) => {
+              // A hidden list reports 0; that is not where the person left it.
+              if (event.currentTarget.clientHeight > 0) listScrollTop.current = event.currentTarget.scrollTop;
+            }}
+          >
+            {skills === null && <Skeleton rows={5} announce="Loading skills" />}
+            {grouped.map((group) => (
+              <div className="skills-group" key={group.id ?? "ungrouped"}>
+                <h3 className="skills-group-title">{group.name}</h3>
+                {group.skills.map((skill) => (
+                  <button
+                    key={skill.id}
+                    type="button"
+                    className={`row${skill.description ? " row-2" : ""}${selectedId === skill.id ? " is-selected" : ""}`}
+                    aria-current={selectedId === skill.id ? "true" : undefined}
+                    onClick={() => select(skill.id)}
+                  >
+                    <span className="row-body">
+                      <span className="row-line">
+                        <span className="row-title">{skill.name}</span>
+                        {driftedSkillNames.has(skill.name) && <StatusBadge meta={statusMeta("skill", "edited")} />}
+                        {skill.builtIn && <StatusBadge tone="neutral" noDot label="Built-In" />}
+                        {skillRecommended(skill) && <StatusBadge tone="neutral" noDot label="Recommended" />}
+                      </span>
+                      {skill.description && <span className="row-sub">{skill.description}</span>}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
         </aside>
 
-        <div className="skills-detail" data-focus-zone="main" tabIndex={-1}>
-          {showOrphans && (
+        <div ref={detailRef} className="master-detail-detail" data-focus-zone="main" tabIndex={-1}>
+          {showOrphans ? (
             <SkillOrphanedCopies
               runners={runners}
               machineLabels={machineLabels}
@@ -563,14 +678,27 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
               onReview={(runner, copy) => setOrphanImport({ runnerId: runner.runnerId, copy })}
               onDiscard={(runner, copy) => void discardOrphan(runner, copy)}
             />
-          )}
-          {!showOrphans && !detail && (
-            /* Not an empty-state card: nothing is missing here — the pane is simply waiting for a
-               list selection, like the Projects manager's own unselected detail column. */
-            <div className="skills-empty">
+          ) : skills === null ? (
+            <DetailSkeleton />
+          ) : !selectedId ? (
+            /* The default detail (/skills, /skills/overview) until the Library Overview (#1971)
+               replaces it. */
+            <p className="skills-hint">
               Select a skill to see its content, assignments, and per-machine deployment.
-            </div>
-          )}
+            </p>
+          ) : detailError?.skillId === selectedId ? (
+            <State
+              variant="error"
+              compact
+              title="Couldn't Load This Skill"
+              actions={<button type="button" className="btn sm" onClick={() => loadDetail(selectedId)}>Retry</button>}
+              details={<div className="code-well"><code>{detailError.message}</code></div>}
+            >
+              It may have been deleted, or Wollipog could not be reached.
+            </State>
+          ) : !detail ? (
+            <DetailSkeleton announce="Loading skill" />
+          ) : null}
           {!showOrphans && detail && (
             <>
               <div className="skills-detail-head">
@@ -872,6 +1000,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
           )}
         </div>
       </div>
+      )}
 
       {dialog === "groups" && <SkillGroupsDialog runners={runners} machineLabels={machineLabels} onClose={() => setDialog(null)} onChanged={async () => {
         await refreshList();
@@ -951,5 +1080,6 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
         />
       )}
     </section>
+    </>
   );
 }

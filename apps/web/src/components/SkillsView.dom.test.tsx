@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type RunnerView, type UiSnapshotMessage } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import type { ViewNavigation } from "../navigation.js";
+import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import type { RunnerSkillsResponse } from "../skills.js";
@@ -72,9 +72,11 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
+/** The route is the view's only selection, so the harness renders the store's current route. */
 function SkillsWhenReady() {
   const ready = useStoreSelector((state) => state.snapshotLoaded);
-  return ready ? <SkillsView /> : null;
+  const view = useStoreSelector((state) => state.view);
+  return ready ? <SkillsView route={view.name === "skills" ? view : undefined} /> : null;
 }
 
 const settle = async () => {
@@ -171,7 +173,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
 
   const pageText = () => container.textContent ?? "";
   assert.match(pageText(), /Agent Skills/);
-  const item = [...container.querySelectorAll<HTMLButtonElement>(".skills-list .row")]
+  const item = [...container.querySelectorAll<HTMLButtonElement>(".master-detail-list .row")]
     .find((candidate) => candidate.textContent?.includes("code-review"));
   assert.ok(item, "the grouped list renders the skill");
 
@@ -356,7 +358,7 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
     });
   });
   await act(settle);
-  const item = container.querySelector<HTMLButtonElement>(".skills-list .row");
+  const item = container.querySelector<HTMLButtonElement>(".master-detail-list .row");
   assert.match(item?.textContent ?? "", /Edited/, "the skill list marks a skill with an edited copy");
   await act(async () => { item!.click(); });
   await act(settle);
@@ -491,7 +493,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   await act(settle);
   const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
     .filter((candidate) => candidate.textContent?.trim() === label);
-  const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-list .row")]
+  const entry = [...container.querySelectorAll<HTMLButtonElement>(".master-detail-list .row")]
     .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
   assert.ok(entry, "the skill list offers the orphaned copies independent of any library skill");
   assert.match(entry!.textContent ?? "", /Orphaned Copies5/, "copies beyond the runner's bound are counted");
@@ -573,12 +575,17 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
     });
   });
   await act(settle);
-  const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-list .row")]
-    .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
-  assert.ok(entry, "an older runner's unreported copies are not hidden behind an empty list");
-  assertNoDomNode(entry!.querySelector(".status"), "no count is claimed");
-  await act(async () => { entry!.click(); });
+  // The library is empty, so one state spans both panes (§6.1); the copies stay one action away.
+  assert.match(container.querySelector(".master-detail-state h2")?.textContent ?? "", /Yet$/);
+  const review = [...container.querySelectorAll<HTMLButtonElement>(".master-detail-state .notice button")]
+    .find((candidate) => candidate.textContent === "Review Orphaned Copies");
+  assert.ok(review, "an older runner's unreported copies are not hidden behind an empty library");
+  await act(async () => { review!.click(); });
   await act(settle);
+  const entry = [...container.querySelectorAll<HTMLButtonElement>(".master-detail-list .row")]
+    .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
+  assert.equal(entry?.getAttribute("aria-current"), "true", "/skills/orphans opens the panes on the entry");
+  assertNoDomNode(entry!.querySelector(".status"), "no count is claimed");
   assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "",
     /This runner version cannot report copies a restore kept aside\. Update it to list them here\./);
 
@@ -619,7 +626,7 @@ async function mountSkills(client: ApiClient, instanceId: string) {
   await act(settle);
   const button = (label: string, scope: ParentNode = container) => [...scope.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === label);
-  const listItem = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".skills-list .row")]
+  const listItem = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".master-detail-list .row")]
     .find((candidate) => candidate.querySelector(".row-title")?.textContent === name);
   return {
     container, button, listItem,
@@ -863,7 +870,7 @@ test("SkillsView follows the route's selected skill, including back to no select
     const [id, setId] = React.useState<string | undefined>("skill-1");
     route = setId;
     const ready = useStoreSelector((state) => state.snapshotLoaded);
-    return ready ? <SkillsView selectedSkillId={id} /> : null;
+    return ready ? <SkillsView route={{ name: "skills", ...(id ? { id } : {}) }} /> : null;
   }
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -893,7 +900,7 @@ test("SkillsView follows the route's selected skill, including back to no select
   await act(async () => { route(undefined); });
   await act(settle);
   assertNoDomNode(container.querySelector(".skills-detail-head"), "the bare Skills route clears the selection");
-  assert.match(container.querySelector(".skills-empty")?.textContent ?? "", /Select a skill/);
+  assert.match(container.querySelector(".master-detail-detail")?.textContent ?? "", /Select a skill/);
 
   // A detail load still pending when the route clears never repopulates the pane.
   let release!: () => void;
@@ -933,7 +940,7 @@ test("SkillsView keeps following the selection when a mutation finishes after th
     const [id, setId] = React.useState<string | undefined>(builtIn.id);
     route = setId;
     const ready = useStoreSelector((state) => state.snapshotLoaded);
-    return ready ? <SkillsView selectedSkillId={id} /> : null;
+    return ready ? <SkillsView route={{ name: "skills", ...(id ? { id } : {}) }} /> : null;
   }
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -972,4 +979,216 @@ test("SkillsView keeps following the selection when a mutation finishes after th
   assert.equal(heading(), "code-review", "the finished mutation does not bring back the skill the user left");
   await act(async () => root.unmount());
   mountPoint.remove();
+});
+
+const oneSkill = { id: "skill-1", name: "code-review", description: "Reviews code", latestVersion: { id: "v1", digest: "d1" } };
+const oneSkillClient = (overrides: Record<string, unknown> = {}) => ({
+  ...api,
+  listSkills: async () => ({ skills: [oneSkill] }),
+  listSkillGroups: async () => ({ groups: [] }),
+  getSkill: async () => ({ skill: oneSkill, latestVersion: { id: "v1", digest: "d1", files: [] } }),
+  listSkillAssignments: async () => ({ assignments: [] }),
+  runnerSkills: async () => ({ desired: [], reported: null }),
+  ...overrides,
+}) as unknown as ApiClient;
+
+/** A phone viewport for useIsMobile (≤ 760px); every other width query stays false. */
+function stubPhone(): () => void {
+  const prior = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  return () => { domWindow.matchMedia = prior; };
+}
+
+/** Mounts the view on a route through a store whose navigation records every push. */
+async function mountRouted(client: ApiClient, key: string, view: View = { name: "skills" }) {
+  const pushed: View[] = [];
+  const routed: ViewNavigation = { current: () => view, push: (next) => { pushed.push(next); }, listen: () => () => {} };
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  const root = createRoot(mountPoint);
+  const socket = new FakeSocket();
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={{ instanceId: key, runtimeKey: `${key}:1`, createSocket: () => socket, close() {} }} navigation={routed}>
+          <SkillsWhenReady />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+    });
+  });
+  await act(settle);
+  return {
+    // Menus and dialogs are portalled to <body>, so queries read the body.
+    container: domWindow.document.body as unknown as HTMLElement,
+    pushed,
+    async unmount() {
+      await act(async () => root.unmount());
+      mountPoint.remove();
+    },
+  };
+}
+
+const buttonNamed = (scope: ParentNode, name: string) =>
+  [...scope.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.trim() === name);
+
+test("the Skills header is one row: Manage Groups…, an Import menu, then New Skill", async () => {
+  const view = await mountRouted(oneSkillClient(), "skills-header");
+  try {
+    const { container } = view;
+    const actions = [...container.querySelector(".page-actions")!.children];
+    assert.deepEqual(actions.map((element) => [element.className, element.textContent]), [
+      ["btn ghost page-action", "Manage Groups…"],
+      ["btn page-action", "Import"],
+      ["overflow-menu page-more", ""],
+      ["btn primary page-primary", "New Skill"],
+    ]);
+    // Below 1100px Manage Groups… is slot 2, the first into ⋯; Import is the last secondary to go.
+    assert.deepEqual([...container.querySelectorAll(".page-action")].map((button) => button.getAttribute("data-slot")), ["2", "1"]);
+    const importButton = buttonNamed(container, "Import")[0]!;
+    assert.equal(importButton.getAttribute("aria-haspopup"), "menu");
+
+    await act(async () => importButton.click());
+    const menu = container.querySelector('[role="menu"][aria-label="Import"]')!;
+    assert.ok(menu, "Import opens its own menu");
+    const items = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    assert.deepEqual(items.map((item) => item.querySelector(".menu-text")?.textContent), ["Import from Git…", "Import from Machine…"]);
+    assert.ok(items.every((item) => item.querySelector(".menu-desc")?.textContent), "each import has a description line");
+    await act(async () => items[0]!.click());
+    await act(settle);
+    assertNoDomNode(container.querySelector('[role="menu"]'), "choosing an import closes the menu");
+    assert.match(container.querySelector('[role="dialog"]')?.textContent ?? "", /Import Skills from Git/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an empty library is one state across both panes, and the header keeps only Manage Groups…", async () => {
+  const view = await mountRouted(oneSkillClient({ listSkills: async () => ({ skills: [] }) }), "skills-empty");
+  try {
+    const { container } = view;
+    assertNoDomNode(container.querySelector(".master-detail"), "no empty list beside a void (§6.1)");
+    const state = container.querySelector(".master-detail-state")!;
+    assert.equal(state.querySelector("h2.state-title")?.textContent, "No Agent Skills Yet");
+    assert.ok(state.querySelector(".state-icon svg"), "the Skills icon tile");
+    assert.equal(buttonNamed(container, "New Skill").length, 1, "one New Skill button, in the state");
+    assert.equal(buttonNamed(state, "New Skill")[0]!.className, "btn primary lg");
+    assert.equal(buttonNamed(state, "Import from Git…").length, 1);
+    assert.equal(buttonNamed(state, "Import from Machine…").length, 1);
+    assertNoDomNode(container.querySelector(".page-primary"), "the header hides New Skill");
+    assert.deepEqual([...container.querySelectorAll(".page-action")].map((button) => button.textContent), ["Manage Groups…"]);
+    assert.equal(state.querySelector(".skills-how-title")?.textContent, "How Skills Work");
+    const steps = state.querySelector("ol.steps.horizontal")!;
+    assert.deepEqual([...steps.querySelectorAll("li > strong")].map((step) => step.textContent), ["Write or Import", "Assign", "Deploy"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a loading library shows skeleton rows in the list and a skeleton detail", async () => {
+  const view = await mountRouted(oneSkillClient({ listSkills: () => new Promise(() => {}) }), "skills-loading");
+  try {
+    const { container } = view;
+    assert.equal(container.querySelectorAll(".master-detail-list .skeleton-row").length, 5);
+    const detail = container.querySelector(".master-detail-detail .detail-skeleton")!;
+    assert.ok(detail, "the detail pane holds a skeleton title and two section blocks");
+    assert.equal(detail.querySelectorAll(".skeleton-title").length, 1);
+    assert.equal(detail.querySelectorAll(".skeleton-block").length, 2);
+    assert.equal(detail.getAttribute("role"), null, "the list's skeleton is the one announcement");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a failed load is a Couldn't Load Skills notice whose Retry reloads the list", async () => {
+  let calls = 0;
+  const view = await mountRouted(oneSkillClient({
+    listSkills: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("HTTP 503 from /api/skills");
+      return { skills: [oneSkill] };
+    },
+  }), "skills-error");
+  try {
+    const { container } = view;
+    assertNoDomNode(container.querySelector(".form-error"), "no bare error line");
+    assertNoDomNode(container.querySelector(".master-detail"), "the notice replaces both panes");
+    const notice = container.querySelector(".master-detail-state .notice.t-danger")!;
+    assert.equal(notice.getAttribute("role"), "alert");
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Load Skills");
+    assert.doesNotMatch(notice.textContent ?? "", /HTTP 503/, "the raw message waits behind Show Details");
+    await act(async () => buttonNamed(notice, "Show Details")[0]!.click());
+    assert.match(notice.querySelector(".code-well")?.textContent ?? "", /HTTP 503 from \/api\/skills/);
+    await act(async () => buttonNamed(notice, "Retry")[0]!.click());
+    await act(settle);
+    assert.equal(calls, 2);
+    assertNoDomNode(container.querySelector(".master-detail-state"), "the retried load replaces the notice");
+    assert.match(container.querySelector(".master-detail-list-body")?.textContent ?? "", /code-review/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("/skills/orphans opens the Orphaned Copies pane from the route, and a row replaces it", async () => {
+  const view = await mountRouted(oneSkillClient(), "skills-orphans", { name: "skills", pane: "orphans" });
+  try {
+    const { container } = view;
+    assert.ok(container.querySelector('.master-detail-detail [aria-label="Orphaned Copies"]'));
+    const entry = container.querySelector<HTMLButtonElement>(".master-detail-list-head .row")!;
+    assert.equal(entry.getAttribute("aria-current"), "true");
+    await act(async () => container.querySelector<HTMLButtonElement>(".master-detail-list-body .row")!.click());
+    await act(settle);
+    assert.deepEqual(view.pushed.at(-1), { name: "skills", id: "skill-1" }, "a row pushes its route");
+    assertNoDomNode(container.querySelector('.master-detail-detail [aria-label="Orphaned Copies"]'), "the route is the only selection");
+    assert.notEqual(container.querySelector(".master-detail-list-head .row")?.getAttribute("aria-current"), "true");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("on a phone a skill route is its own screen with Back, and Back returns to a list with no selection", async () => {
+  const restore = stubPhone();
+  const view = await mountRouted(oneSkillClient(), "skills-phone", { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    assertNoDomNode(container.querySelector(".page-header"), "the detail bar is the app bar");
+    const bar = container.querySelector(".detail-bar")!;
+    assert.equal(bar.querySelector("h1#page-title")?.textContent, "code-review");
+    const back = bar.querySelector<HTMLButtonElement>(".detail-bar-back")!;
+    assert.equal(back.getAttribute("aria-label"), "Back to Agent Skills");
+    assert.ok(container.querySelector(".master-detail[data-detail-open]"), "the stylesheet shows only the detail");
+
+    await act(async () => back.click());
+    await act(settle);
+    assert.deepEqual(view.pushed.at(-1), { name: "skills" });
+    assertNoDomNode(container.querySelector(".detail-bar"), "the list route has the page header back");
+    assert.equal(container.querySelector(".master-detail")?.hasAttribute("data-detail-open"), false);
+    assertNoDomNode(container.querySelector(".master-detail-list .is-selected"), "a phone list shows no selected row (§5.2)");
+    assert.ok(domWindow.document.activeElement === container.querySelector("#page-title") as never,
+      "the route change moves focus to the new page title");
+
+    const row = container.querySelector<HTMLButtonElement>(".master-detail-list-body .row")!;
+    await act(async () => row.click());
+    await act(settle);
+    assert.equal(container.querySelector(".detail-bar h1")?.textContent, "code-review");
+    assert.ok(domWindow.document.activeElement === container.querySelector(".detail-bar #page-title") as never);
+  } finally {
+    await view.unmount();
+    restore();
+  }
 });

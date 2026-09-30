@@ -47,7 +47,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await page.route("**/api/skill-git/preview/preview-1", (route) => route.fulfill({ status: 204 }));
     await page.goto("/skills-removals-e2e.html");
     await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-    await choosePageAction(page, "Import from Git");
+    await choosePageAction(page, "Import from Git…", "Import");
     await page.getByLabel("Git Repository", { exact: true }).fill("example/skills");
     await page.getByRole("button", { name: "Preview Skills" }).click();
     await expect(page.getByText("New version · 2 existing assignments")).toBeVisible();

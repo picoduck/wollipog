@@ -15,7 +15,7 @@ export type View =
   | { name: "runs" }
   | { name: "pods" }
   | { name: "automations" }
-  | { name: "skills"; id?: string }
+  | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage" }
   | { name: "archived" }
   | { name: "projects"; id?: string }
@@ -46,6 +46,14 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; title: stri
 ];
 
 export type ConnectionSection = "instances" | "machines" | "people";
+
+/**
+ * Agent Skills panes that are not a skill (docs/design-system.md §6): the Orphaned Copies pane and
+ * the Library Overview. A skill id wins over a pane, so a view never names both. `/skills` itself
+ * shows the list with the default detail; `/skills/overview` is the same content as its own route,
+ * which is what a phone opens from the list (§6.2).
+ */
+export type SkillsPane = "orphans" | "overview";
 
 export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
@@ -297,7 +305,7 @@ export function viewPath(view: View): string {
     case "runs": return "/runs";
     case "pods": return "/pods";
     case "automations": return "/automations";
-    case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : "/skills";
+    case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return "/usage";
     case "archived": return "/archived";
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : "/projects";
@@ -360,6 +368,8 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
   if (path === "/skills") return { name: "skills" };
+  const skillsPaneMatch = /^\/skills\/(orphans|overview)$/.exec(path);
+  if (skillsPaneMatch) return { name: "skills", pane: skillsPaneMatch[1] as SkillsPane };
   const skillMatch = /^\/skills\/~([^/]+)$/.exec(path);
   if (skillMatch) {
     const id = decodeResourceId(skillMatch[1]!);

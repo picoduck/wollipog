@@ -153,7 +153,9 @@ test.describe("page header actions follow the width tiers", () => {
   const menuItems = async (page: Page) => {
     await page.locator(".page-header").getByRole("button", { name: "More Actions", exact: true }).click();
     const items = await page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem").evaluateAll((elements) =>
-      elements.filter((element) => getComputedStyle(element).display !== "none").map((element) => element.textContent));
+      elements.filter((element) => getComputedStyle(element).display !== "none")
+        // A folded menu-button item has a description line; its name is the label (#1947).
+        .map((element) => element.querySelector(".menu-text")?.textContent ?? element.textContent));
     await page.keyboard.press("Escape");
     return items;
   };
@@ -161,13 +163,14 @@ test.describe("page header actions follow the width tiers", () => {
   test("desktop shows two secondaries, compact one, and the rest move into ⋯ from the left", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await openDestination(page, "/skills", "Agent Skills");
-    await expect(visibleSecondaries(page)).toHaveText(["Manage Groups", "Import from Git"]);
-    expect(await menuItems(page)).toEqual(["Import from Machine"]);
+    // Agent Skills (#1947): [Manage Groups…] [Import ▾] [+ New Skill], with nothing left for ⋯.
+    await expect(visibleSecondaries(page)).toHaveText(["Manage Groups…", "Import"]);
+    await expect(page.locator(".page-header .page-more")).toBeHidden();
     expect(await primaryRight(page)).toBe(0);
 
     await page.setViewportSize({ width: 900, height: 800 });
-    await expect(visibleSecondaries(page)).toHaveText(["Import from Git"]);
-    expect(await menuItems(page)).toEqual(["Import from Machine", "Manage Groups"]);
+    await expect(visibleSecondaries(page)).toHaveText(["Import"]);
+    expect(await menuItems(page)).toEqual(["Manage Groups…"]);
     expect(await primaryRight(page)).toBe(0);
     const heights = await page.locator(".page-header .page-actions > :visible").evaluateAll((elements) =>
       elements.map((element) => Math.round(element.getBoundingClientRect().height)));
@@ -206,13 +209,20 @@ test.describe("page header actions follow the width tiers", () => {
     await trigger.focus();
     await page.keyboard.press("Enter");
     const items = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem");
-    await expect(items).toHaveText(["Import from Machine", "Manage Groups", "Import from Git"]);
+    const labels = items.locator(".menu-text");
+    // The Import menu button folds into ⋯ as its two items, in order (#1947).
+    await expect(labels).toHaveText(["Manage Groups…", "Import from Git…", "Import from Machine…"]);
     await page.keyboard.press("End");
     await expect(items.last()).toBeFocused();
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await expect(items).toHaveText(["Import from Machine"]);
+    await page.setViewportSize({ width: 900, height: 800 });
+    await expect(labels).toHaveText(["Manage Groups…"]);
     // The focused item left the list; focus stays in the menu instead of falling to <body>.
     await expect(items.first()).toBeFocused();
+    // Wider still, ⋯ has nothing left: it closes, and focus moves to the button that now stands for
+    // the item it was on.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(page.getByRole("menu", { name: "More Actions" })).toHaveCount(0);
+    await expect(page.locator(".page-header").getByRole("button", { name: "Manage Groups…", exact: true })).toBeFocused();
 
     // Connections has one secondary, so ⋯ exists only while that button is hidden: widening past
     // the phone tier hides ⋯ itself, and its menu and backdrop must go with it.
@@ -259,7 +269,7 @@ test.describe("page header actions follow the width tiers", () => {
       const box = await primary.boundingBox();
       expect([box!.width, box!.height]).toEqual([44, 44]);
       await expect(primary).toHaveAccessibleName("New Skill");
-      expect(await menuItems(page)).toEqual(["Import from Machine", "Manage Groups", "Import from Git"]);
+      expect(await menuItems(page)).toEqual(["Manage Groups…", "Import from Git…", "Import from Machine…"]);
     });
 
     test("Pods is a 44px plus named New Pod, and no destination shows its description", async ({ page }) => {

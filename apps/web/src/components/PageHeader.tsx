@@ -1,5 +1,5 @@
 import React, { createContext, Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
-import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon, SearchIcon } from "./Icons.js";
+import { ChevronDownIcon, ChevronLeftIcon, MoreHorizontalIcon, PlusIcon, SearchIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useIsCompact } from "./useIsMobile.js";
@@ -30,6 +30,21 @@ export interface PageMenuAction extends PageAction {
   /** Destructive: drawn last, after a separator, in the danger text colour (§3.3). */
   danger?: boolean;
 }
+
+/** One item of a menu-button secondary: a label and an optional one-line description (§9.1). */
+export interface PageMenuButtonItem extends PageAction {
+  description?: string;
+}
+
+/**
+ * A page-header secondary. `variant: "ghost"` draws it at the ghost weight, for destination-level
+ * configuration beside the create and import actions (§3.1). A secondary with `items` is a menu
+ * button: its label and a caret open a menu of those items, and when it folds into ⋯ the items
+ * appear there individually, in order, instead of as a nested menu.
+ */
+export type PageSecondaryAction =
+  | (PageAction & { variant?: "ghost"; items?: undefined })
+  | (Omit<PageAction, "onClick"> & { variant?: "ghost"; items: PageMenuButtonItem[]; onClick?: undefined });
 
 /**
  * On phones the page header and the detail bar are the app bar, and it carries a Search icon that
@@ -82,7 +97,7 @@ export function PageHeader({
    * Secondaries in display order. The two nearest the primary are buttons on the widest header;
    * as the header narrows they move into ⋯ from the left, and on phones all of them are there.
    */
-  secondary?: PageAction[];
+  secondary?: PageSecondaryAction[];
   /** Actions that only ever appear in ⋯. */
   menu?: PageMenuAction[];
   /** Optional underline tabs, drawn as the header's last row. */
@@ -103,11 +118,13 @@ export function PageHeader({
         {(onSearch || primary || secondary.length > 0 || menu.length > 0) && (
           <div className="page-actions">
             {onSearch && <AppBarSearch onSearch={onSearch} />}
-            {slots.filter(({ slot }) => slot <= PAGE_HEADER_VISIBLE_SECONDARIES).map(({ action, slot }) => (
+            {slots.filter(({ slot }) => slot <= PAGE_HEADER_VISIBLE_SECONDARIES).map(({ action, slot }) => action.items ? (
+              <PageMenuButton key={action.label} action={action} items={action.items} slot={slot} />
+            ) : (
               <button
                 key={action.label}
                 type="button"
-                className="btn page-action"
+                className={`btn${action.variant === "ghost" ? " ghost" : ""} page-action`}
                 data-slot={slot}
                 disabled={action.disabled}
                 title={action.title}
@@ -121,7 +138,10 @@ export function PageHeader({
                 className="page-more"
                 overflow={overflow ? "always" : String(secondary.length)}
                 items={[
-                  ...slots.map(({ action, slot }) => ({ ...action, slot })),
+                  // A menu button folds into ⋯ as its own items, in order: ⋯ never nests a menu.
+                  ...slots.flatMap(({ action, slot }): ActionsMenuItem[] => action.items
+                    ? action.items.map((item) => ({ ...item, disabled: action.disabled || item.disabled, slot }))
+                    : [{ label: action.label, onClick: action.onClick, disabled: action.disabled, title: action.title, slot }]),
                   ...menu,
                 ]}
               />
@@ -245,6 +265,85 @@ export function DetailBar({
 interface ActionsMenuItem extends PageMenuAction {
   /** A page-header secondary that also has a button; ⋯ lists it only while that button is hidden. */
   slot?: number;
+  /** A folded menu button's item keeps its description line. */
+  description?: string;
+}
+
+/**
+ * A menu-button secondary (§3.2, §9.1): its label and a caret open the shared MenuSurface with
+ * one item per choice. It is a direct child of `.page-actions`, so the priority+ rules hide it by
+ * slot like any other secondary; while hidden, ⋯ lists its items instead.
+ */
+function PageMenuButton({ action, items, slot }: { action: PageSecondaryAction; items: PageMenuButtonItem[]; slot: number }) {
+  const [open, setOpen] = useState(false);
+  const menu = useAccessibleMenu(open, setOpen, "page-action-menu");
+  const { close, triggerRef } = menu;
+  // A width change that hides this button (it folded into ⋯) takes its menu with it. Focus that
+  // was in the menu moves to ⋯, which now holds the same items, or else to the page title (§16.1).
+  useEffect(() => {
+    const trigger = triggerRef.current;
+    if (!open || !trigger || typeof ResizeObserver === "undefined") return;
+    const row = trigger.closest<HTMLElement>(".page-actions");
+    const observer = new ResizeObserver(() => {
+      if (trigger.getClientRects().length > 0) return;
+      const active = trigger.ownerDocument.activeElement;
+      const hadFocus = Boolean(active && menu.menuRef.current?.contains(active));
+      close(false);
+      if (!hadFocus) return;
+      const more = row?.querySelector<HTMLElement>(".page-more > .icon-btn");
+      (more && more.getClientRects().length > 0 ? more : trigger.ownerDocument.getElementById("page-title"))?.focus();
+    });
+    observer.observe(trigger);
+    if (row) observer.observe(row);
+    return () => observer.disconnect();
+  }, [open, close, triggerRef, menu.menuRef]);
+  return (
+    <>
+      <button
+        ref={menu.triggerRef}
+        type="button"
+        className={`btn${action.variant === "ghost" ? " ghost" : ""} page-action`}
+        data-slot={slot}
+        disabled={action.disabled}
+        title={action.title}
+        onClick={menu.toggle}
+        onKeyDown={menu.onTriggerKeyDown}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menu.menuId : undefined}
+      >
+        {action.label}
+        <ChevronDownIcon size={14} />
+      </button>
+      {open && (
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label={action.label}
+          align="end"
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          {items.map((item) => (
+            <MenuItem
+              key={item.label}
+              description={item.description}
+              disabled={item.disabled}
+              title={item.title}
+              onClick={() => {
+                menu.close(false);
+                menu.triggerRef.current?.focus();
+                item.onClick();
+              }}
+            >
+              {item.label}
+            </MenuItem>
+          ))}
+        </MenuSurface>
+      )}
+    </>
+  );
 }
 
 /** Whether a header secondary's own button is showing; the stylesheet hides it by width (§3.3). */
@@ -372,6 +471,7 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
                 data-slot={item.slot}
                 disabled={item.disabled}
                 title={item.title}
+                description={item.description}
                 onClick={() => choose(item.onClick)}
               >
                 {item.label}

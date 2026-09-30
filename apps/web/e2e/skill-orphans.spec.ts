@@ -60,7 +60,7 @@ async function openOrphans(page: Page, width: number, theme: string) {
   });
   await page.goto("/skills-removals-e2e.html?orphans=1");
   await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-  const entry = page.locator(".skills-list .row", { hasText: "Orphaned Copies" });
+  const entry = page.locator(".master-detail-list .row", { hasText: "Orphaned Copies" });
   await expect(entry).toContainText("4");
   return { requests, entry };
 }

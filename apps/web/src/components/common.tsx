@@ -590,6 +590,22 @@ export function Spinner({ decorative = false }: { decorative?: boolean } = {}) {
  * a status message in sentence case, not a UI label in Title Case, and naming it `label` put it
  * under the wrong copy convention.
  */
+/**
+ * A master-detail pane's placeholder (§12.3): a skeleton title over two section blocks. Silent
+ * unless given `announce`, because while the whole collection loads the list's Skeleton beside it
+ * already says so.
+ */
+export function DetailSkeleton({ announce }: { announce?: string } = {}) {
+  return (
+    <div className="skeleton detail-skeleton" role={announce ? "status" : undefined} aria-live={announce ? "polite" : undefined}>
+      {announce && <span className="sr-only">{announce}</span>}
+      <div aria-hidden="true" className="skeleton-row skeleton-title" />
+      <div aria-hidden="true" className="skeleton-row skeleton-block" />
+      <div aria-hidden="true" className="skeleton-row skeleton-block" />
+    </div>
+  );
+}
+
 export function Skeleton({ rows = 3, announce }: { rows?: number; announce: string }) {
   return (
     <div className="skeleton" role="status" aria-live="polite">
