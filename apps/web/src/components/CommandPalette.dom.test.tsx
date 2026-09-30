@@ -19,6 +19,7 @@ import { takeArchiveSearch } from "../archive-search-handoff.js";
 import { CommandPalette, useSearchShortcut } from "./CommandPalette.js";
 import { AppBarSearchProvider, DetailBar, PageHeader } from "./PageHeader.js";
 import { Rail } from "./Rail.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 /**
  * The command palette in the DOM (#1978): each trigger gets focus back when the palette closes,
@@ -78,7 +79,7 @@ interface SearchCall { query: string; resolve: (results: { sessionId: string; sn
 
 let sequence = 0;
 
-async function mount(options: { view?: View } = {}) {
+async function mount(options: { view?: View; appBarSearchOnPhoneOnly?: boolean } = {}) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -108,6 +109,9 @@ async function mount(options: { view?: View } = {}) {
     const openPalette = useCallback(() => setOpen(true), []);
     const toggle = useCallback(() => setOpen((value) => !value), []);
     useSearchShortcut(toggle);
+    // As in App: the app bar's Search exists only at 760px and below.
+    const isMobile = useIsMobile();
+    const appBarSearch = options.appBarSearchOnPhoneOnly && !isMobile ? undefined : openPalette;
     return (
       <>
         <Rail
@@ -118,7 +122,7 @@ async function mount(options: { view?: View } = {}) {
           onNavigate={() => {}}
           onSearch={openPalette}
         />
-        <AppBarSearchProvider onSearch={openPalette}>
+        <AppBarSearchProvider onSearch={appBarSearch}>
           <div className="page-app-bar"><PageHeader title="Projects" /></div>
           <div className="entity-app-bar"><DetailBar title="A Pod" backLabel="Back to Pods" onBack={() => {}} /></div>
         </AppBarSearchProvider>
@@ -173,7 +177,8 @@ async function mount(options: { view?: View } = {}) {
 
 /** Wait out the palette's restore timer (a zero-delay timeout after it unmounts). */
 async function settle(ms = 0) {
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, ms)); });
+  // On the window's own timer queue, so it runs after the palette's zero-delay restore timer.
+  await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, ms)); });
 }
 
 test("closing the palette returns focus to whichever trigger opened it", async () => {
@@ -320,6 +325,22 @@ test("at 760px and below: Cancel closes, and the labelled rail is not offered", 
     const cancel = [...ui.doc.querySelectorAll<HTMLButtonElement>(".palette button")].find((button) => button.textContent === "Cancel")!;
     await act(async () => { cancel.click(); });
     assertNoDomNode(ui.palette());
+  } finally {
+    await act(async () => { domWindow.happyDOM.setViewport({ width: 1440, height: 900 }); });
+  }
+});
+
+test("crossing 760px with Cancel focused keeps focus in the palette, so Escape still closes it", async () => {
+  await act(async () => { domWindow.happyDOM.setViewport({ width: 390, height: 844 }); });
+  try {
+    const ui = await mount({ appBarSearchOnPhoneOnly: true });
+    await act(async () => { ui.doc.querySelector<HTMLElement>('.page-app-bar [aria-label="Search"]')!.click(); });
+    const cancel = [...ui.doc.querySelectorAll<HTMLButtonElement>(".palette button")].find((button) => button.textContent === "Cancel")!;
+    await act(async () => { cancel.focus(); });
+    await act(async () => { domWindow.happyDOM.setViewport({ width: 1440, height: 900 }); });
+    assert.ok(ui.doc.activeElement === ui.input(), `Cancel went with the phone layout, so focus moves to the field (found ${ui.doc.activeElement?.tagName})`);
+    await ui.key(ui.input(), "Escape");
+    assertNoDomNode(ui.palette(), "Escape still reaches the palette");
   } finally {
     await act(async () => { domWindow.happyDOM.setViewport({ width: 1440, height: 900 }); });
   }

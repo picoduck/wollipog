@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector, type View } from "../store.js";
 import {
@@ -41,8 +41,12 @@ export function useCommandPaletteFocus(
     restoreFocusTimerRef.current = null;
     inputRef.current?.focus();
     return () => {
-      const target = returnFocusRef.current;
-      if (target?.isConnected) {
+      // An opener that a breakpoint crossing removed (the phone app bar's Search) hands focus to the
+      // page title, the shell's rescue target, rather than leaving it on <body>.
+      const target = returnFocusRef.current?.isConnected
+        ? returnFocusRef.current
+        : returnFocusRef.current ? document.getElementById("page-title") : null;
+      if (target) {
         restoreFocusTimerRef.current = window.setTimeout(() => {
           restoreFocusTimerRef.current = null;
           target.focus();
@@ -126,6 +130,13 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   );
   const listboxId = `command-palette-${useId().replace(/:/g, "")}`;
   useCommandPaletteFocus(inputRef, returnFocusRef);
+  // Crossing 760px removes Cancel. If it held focus, focus stays in the dialog, on the field, so Tab
+  // and Escape still reach the palette.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) inputRef.current?.focus();
+  }, [isMobile]);
 
   useEffect(() => {
     let cancelled = false;
@@ -261,6 +272,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   return (
     <div className="palette-backdrop" onClick={onClose}>
       <div
+        ref={dialogRef}
         className="palette"
         role="dialog"
         aria-modal="true"

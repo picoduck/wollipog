@@ -145,6 +145,22 @@ test.describe("at 390×844 on a touch phone", () => {
     expect(layout.placeholderFits, "the placeholder fits a 390px phone").toBe(true);
     await expect(palette(page).getByRole("option", { name: /Navigation Labels/ })).toHaveCount(0);
 
+    // With a software keyboard that only shrinks the visual viewport, the palette ends above it and
+    // its last row can still scroll into view (mobile-viewport.ts publishes the occlusion).
+    await page.evaluate(() => document.documentElement.style.setProperty("--keyboard-inset", "300px"));
+    const occluded = await page.evaluate(() => {
+      const results = document.querySelector(".palette-results")!;
+      results.scrollTop = results.scrollHeight;
+      const rows = document.querySelectorAll(".palette-item");
+      return {
+        card: document.querySelector(".palette")!.getBoundingClientRect().bottom,
+        last: rows[rows.length - 1]!.getBoundingClientRect().bottom,
+      };
+    });
+    expect(occluded.card).toBe(544);
+    expect(occluded.last).toBeLessThanOrEqual(544);
+    await page.evaluate(() => document.documentElement.style.removeProperty("--keyboard-inset"));
+
     await palette(page).getByRole("button", { name: "Cancel" }).tap();
     await expect(palette(page)).toBeHidden();
     await expect(trigger).toBeFocused();
