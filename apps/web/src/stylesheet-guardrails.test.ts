@@ -802,16 +802,36 @@ function declarationTarget(decl: postcss.Declaration): { rule: postcss.Rule; sel
   return { rule: rules.at(-1)!, selector, conditions };
 }
 
+/**
+ * Every px literal a value can resolve to, through the custom properties it reads.
+ *
+ * A property declared anywhere in the sheet counts with every value it is given, so
+ * `--phone-glyph: 15px` read as `width: var(--phone-glyph)` is as off the scale as `width: 15px`.
+ * Signed and exponent forms count too: `calc(var(--icon) + -1px)` and `1.8e1px` are sizes.
+ */
+function resolvedPxSizes(value: string, declared: ReadonlyMap<string, string[]>, seen = new Set<string>()): number[] {
+  const literals = [...stripComments(value).matchAll(/(?<![\w.-])([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)px\b/gi)]
+    .map(([, px]) => Number(px));
+  for (const { name } of varReads(value)) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    for (const assigned of declared.get(name) ?? []) literals.push(...resolvedPxSizes(assigned, declared, seen));
+  }
+  return literals;
+}
+
 /** Every width or height declaration on an icon whose px literals are off the scale, by rule. */
 export function offScaleIconSizes(sheet: postcss.Root): { rule: string; declaration: string }[] {
+  const declared = new Map<string, string[]>();
+  sheet.walkDecls((decl) => {
+    if (decl.prop.startsWith("--")) declared.set(decl.prop, [...(declared.get(decl.prop) ?? []), decl.value]);
+  });
   const found: { rule: string; declaration: string }[] = [];
   sheet.walkDecls((decl) => {
     if (!ICON_SIZE_PROPERTIES.test(decl.prop.toLowerCase())) return;
     const target = declarationTarget(decl);
     if (!target || !targetsIcon(target.selector)) return;
-    // Signed and exponent forms too: `calc(var(--icon) + -1px)` and `1.8e1px` are off the scale.
-    const literals = [...stripComments(decl.value).matchAll(/(?<![\w.-])([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)px\b/gi)];
-    if (literals.some(([, px]) => !ICON_SCALE_PX.has(Number(px)))) {
+    if (resolvedPxSizes(decl.value, declared).some((px) => !ICON_SCALE_PX.has(px))) {
       const declaration = `${decl.prop}: ${decl.value}`;
       found.push({
         rule: contextKey(target.rule),
@@ -1850,7 +1870,8 @@ test("an emoji in a clean component fails, and glyphs, comments and escapes are 
 
 test("an icon sized off the scale fails, naming the rule and §18, and a stale exemption fails", () => {
   const sizesOf = (sheet: string) => offScaleIconSizes(postcss.parse(sheet));
-  const clean = ".notice-icon svg { width: var(--icon); height: var(--icon); }\n" +
+  const clean = ":root { --icon: 16px; --icon-lg: 20px; --pad: 6px; }\n" +
+    ".notice-icon svg { width: var(--icon); height: var(--icon); }\n.big svg { width: var(--missing, var(--icon-lg)); }\n" +
     ".state-icon svg { width: 24px; height: 24px; }\n.menu-icon, .menu-icon svg { width: 20px; }\n" +
     ".usage-chart-svg { height: 260px; }\n.qr svg { width: 100%; height: auto; }\n" +
     ".row:has(> svg) { height: 36px; }\n.icon-btn:not(svg) { width: 36px; }\n.app-icon-tile { width: 40px; }\n" +
@@ -1887,6 +1908,12 @@ test("an icon sized off the scale fails, naming the rule and §18, and a stale e
     [".x { svg { height: 15px; } }", ".x|svg"],
     ["svg { @media (max-width: 760px) { width: 18px; } }", "|svg"],
     [".g { .h &, & > svg { max-width: 26px; } }", ".g|.h &,&>svg"],
+    // A custom property carries its value: declared anywhere, read directly, as a fallback, or through
+    // another property.
+    [":root { --phone-glyph: 15px; }\n.i svg { width: var(--phone-glyph); }", "|.i svg"],
+    [".j svg { height: var(--nope, 18px); }", "|.j svg"],
+    [":root { --a: var(--b); --b: 18px; }\n.k svg { width: var(--a); }", "|.k svg"],
+    [":root { --glyph: 16px; }\n@media (pointer: coarse) { :root { --glyph: 18px; } }\n.l svg { width: var(--glyph); }", "|.l svg"],
   ] as const) {
     const found = sizesOf(`${clean}\n${rule}`);
     assert.deepEqual(found.map((entry) => entry.rule), [key], rule);
