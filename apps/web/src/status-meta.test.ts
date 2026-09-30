@@ -42,6 +42,7 @@ const TABLE: readonly Row[] = [
   ["skill", "linked", "Linked", "success"],
   ["skill", "pending", "Pending", "neutral"],
   ["skill", "edited", "Edited", "warning"],
+  ["skill", "update_held", "Update Held", "warning"],
   ["skill", "error", "Error", "danger"],
   // Automation and run
   ["automation", "enabled", "Enabled", "success"],

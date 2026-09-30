@@ -93,6 +93,8 @@ const VOCABULARY = {
     linked: success("Linked"),
     pending: neutral("Pending"),
     edited: warning("Edited"),
+    /** A Git or built-in update waits for review before it becomes the library's version. */
+    update_held: warning("Update Held"),
     conflict: warning("Conflict"),
     error: danger("Error"),
     offline: neutral("Offline", { hollow: true }),

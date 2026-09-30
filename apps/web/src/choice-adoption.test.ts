@@ -118,6 +118,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // one-of-N form choice. Listbox/option is the correct combobox popup contract for its textarea.
   ["components/SlashCommandMenu.tsx", "raw-radiogroup", 2],
   ["components/ComposerControls.tsx", "raw-radiogroup", 2],
+  // View Options (#1961) is §9.1's radio-like menu: MenuItem rows with the trailing check, one per
+  // Show and Group By choice, which reset with the page. A view switch in a menu, not a form choice.
+  ["components/SkillList.tsx", "raw-radiogroup", 2],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],

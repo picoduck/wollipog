@@ -13,6 +13,7 @@ import {
   type AgentContext,
   type ResourceScope,
   type DeployedSkillState,
+  type RunnerView,
   type SkillDriftState,
   type SkillFile,
   type SkillInvocationPolicy,
@@ -22,6 +23,9 @@ import {
 } from "@wollipog/protocol";
 import { accountLabelText } from "./personal-identifiers.js";
 import { driverKindLabel } from "./agent-presentation.js";
+// A cycle (the matrix reads invocationLabel and skillEligibleAgents from here) that only function
+// declarations cross, so neither module reads the other while it is still evaluating.
+import { skillAgentMatrixCell } from "./skill-assignment-matrix.js";
 
 /* --- Response DTOs. Every field beyond identity is optional on purpose: the control-plane routes
  * are versioned separately from this dashboard, so a shape difference must degrade to a blank
@@ -357,27 +361,114 @@ export function skillFromPayload(payload: SkillDetailPayload | unknown): SkillSu
   return candidate;
 }
 
-/* --- Grouping --- */
+/* --- The list --- */
+
+/** What a skill needs from the user, most urgent first. Built-In and Recommended are not here: a
+ * skill that needs nothing shows no status (§5.2, §11.1). */
+export type SkillAttention = "error" | "edited" | "update_held";
+
+/**
+ * The one status a skill shows in the list, and the reason the Library Overview (#1971) lists it:
+ * Error when any eligible agent reports a deployment error for it (the Machine × Agents model), then
+ * Edited when a machine reports an edited copy, then Update Held for a held Git or built-in update.
+ * Machines whose report has not loaded say nothing.
+ */
+export function skillAttention(
+  skill: Pick<SkillSummary, "name" | "gitAutoUpdate" | "builtIn">,
+  runners: ReadonlyArray<RunnerView>,
+  machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
+): SkillAttention | null {
+  let edited = false;
+  for (const runner of runners) {
+    const state = machineSkills[runner.runnerId];
+    if (!state || state.loadError) continue;
+    // A machine-wide sync error is this skill's only on a machine that deploys it.
+    const deploys = state.desired.some((entry) => entry.name === skill.name) ||
+      Boolean(state.reported?.deployed?.some((entry) => entry.name === skill.name));
+    if (deploys && runner.agents.some((agent) => {
+      const cell = skillAgentMatrixCell(runner, agent, skill.name, state);
+      return cell.desired !== "Unavailable" && cell.reported === "Error";
+    })) return "error";
+    if (reportedSkillDrift(state.reported, skill.name).length) edited = true;
+  }
+  if (edited) return "edited";
+  return skill.gitAutoUpdate?.held || skill.builtIn?.heldUpdate ? "update_held" : null;
+}
+
+const oneLine = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
+
+/**
+ * A row's second line: the description with its line breaks collapsed to spaces, "" when the skill
+ * has none (the row says "No description"), or null when it only repeats the name (§5.2).
+ */
+export function skillListDescription(skill: Pick<SkillSummary, "name" | "description">): string | null {
+  const text = oneLine(skill.description);
+  return text.toLocaleLowerCase() === skill.name.toLocaleLowerCase() ? null : text;
+}
+
+/** View Options › Show. */
+export type SkillListShow = "all" | "attention" | "git" | "built_in" | "unassigned";
+/** View Options › Group By. */
+export type SkillListGrouping = "group" | "none";
+
+/** The skills a filter keeps: the query matches the name or the full description, not only what a
+ * row has room for, and Show narrows by attention, source or assignment. */
+export function filterSkillList(
+  skills: ReadonlyArray<SkillSummary>,
+  { query, show, attention }: {
+    query: string;
+    show: SkillListShow;
+    attention: (skill: SkillSummary) => SkillAttention | null;
+  },
+): SkillSummary[] {
+  const needle = oneLine(query).toLocaleLowerCase();
+  return skills.filter((skill) => {
+    if (needle && !skill.name.toLocaleLowerCase().includes(needle) &&
+      !oneLine(skill.description).toLocaleLowerCase().includes(needle)) return false;
+    switch (show) {
+      case "attention": return attention(skill) !== null;
+      case "git": return Boolean(skill.gitSource ?? skill.latestVersion?.gitSource);
+      case "built_in": return Boolean(skill.builtIn);
+      case "unassigned": return !skill.assignmentCount;
+      default: return true;
+    }
+  });
+}
 
 export interface SkillListGroup {
+  /** A stable key: `recommended`, `no-group`, `all`, or `group:<id>`. */
+  key: string;
+  /** The library group's id; null for the list's own groups. */
   id: string | null;
-  name: string;
+  /** The label, or null for Group By › None's one flat list, which has none. */
+  name: string | null;
   skills: SkillSummary[];
 }
 
-/** Grouped, alphabetical list; groups in their sort order, ungrouped skills last under one
- * heading. Empty groups are omitted — the list is a reading surface, not the group manager. */
-export function groupSkillList(skills: SkillSummary[], groups: SkillGroupView[]): SkillListGroup[] {
-  const byName = (a: SkillSummary, b: SkillSummary) => a.name.localeCompare(b.name);
-  const ordered = [...groups].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name));
+/**
+ * The list's groups, each alphabetical: Recommended first (built-in skills offered to this user,
+ * which leave it once assigned or dismissed), then No Group, then the library's groups in their sort
+ * order. A skill in a group that no longer exists is in No Group. Empty groups are omitted: the list
+ * is a reading surface, not the group manager. Group By › None is one flat list with no label.
+ */
+export function groupSkillList(
+  skills: ReadonlyArray<SkillSummary>,
+  groups: ReadonlyArray<SkillGroupView>,
+  grouping: SkillListGrouping = "group",
+): SkillListGroup[] {
+  const sorted = [...skills].sort((a, b) => a.name.localeCompare(b.name));
+  if (grouping === "none") return sorted.length ? [{ key: "all", id: null, name: null, skills: sorted }] : [];
   const out: SkillListGroup[] = [];
-  for (const group of ordered) {
-    const members = skills.filter((skill) => skill.groupId === group.id).sort(byName);
-    if (members.length) out.push({ id: group.id, name: group.name, skills: members });
-  }
+  const push = (group: SkillListGroup) => { if (group.skills.length) out.push(group); };
+  const recommended = sorted.filter(skillRecommended);
+  const rest = sorted.filter((skill) => !skillRecommended(skill));
   const groupIds = new Set(groups.map((group) => group.id));
-  const ungrouped = skills.filter((skill) => !skill.groupId || !groupIds.has(skill.groupId)).sort(byName);
-  if (ungrouped.length) out.push({ id: null, name: out.length ? "Ungrouped" : "All Skills", skills: ungrouped });
+  push({ key: "recommended", id: null, name: "Recommended", skills: recommended });
+  push({ key: "no-group", id: null, name: "No Group", skills: rest.filter((skill) => !skill.groupId || !groupIds.has(skill.groupId)) });
+  const ordered = [...groups].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name));
+  for (const group of ordered) {
+    push({ key: `group:${group.id}`, id: group.id, name: group.name, skills: rest.filter((skill) => skill.groupId === group.id) });
+  }
   return out;
 }
 

@@ -585,7 +585,7 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
   const entry = [...container.querySelectorAll<HTMLButtonElement>(".master-detail-list .row")]
     .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
   assert.equal(entry?.getAttribute("aria-current"), "true", "/skills/orphans opens the panes on the entry");
-  assertNoDomNode(entry!.querySelector(".status"), "no count is claimed");
+  assertNoDomNode(entry!.querySelector(".count-badge"), "no count is claimed");
   assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "",
     /This runner version cannot report copies a restore kept aside\. Update it to list them here\./);
 
@@ -628,8 +628,10 @@ async function mountSkills(client: ApiClient, instanceId: string) {
     .find((candidate) => candidate.textContent?.trim() === label);
   const listItem = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".master-detail-list .row")]
     .find((candidate) => candidate.querySelector(".row-title")?.textContent === name);
+  /** The label of the list group a skill's row is in. */
+  const groupOf = (name: string) => listItem(name)?.closest(".skill-list-group")?.getAttribute("aria-label");
   return {
-    container, button, listItem,
+    container, button, listItem, groupOf,
     async click(target: HTMLElement | undefined) {
       assert.ok(target);
       await act(async () => { target.click(); });
@@ -680,7 +682,9 @@ test("SkillsView marks built-in skills recommended, assigns one in a step, and d
   } as unknown as ApiClient;
   const view = await mountSkills(client, "skills-built-in");
   const badges = () => [...view.listItem("using-wollipog")!.querySelectorAll(".status")].map((badge) => badge.textContent);
-  assert.deepEqual(badges(), ["Built-In", "Recommended"]);
+  // Recommended is an offer, not a state: its own group at the top, and the row keeps only the flag.
+  assert.deepEqual(badges(), ["Built-In"]);
+  assert.equal(view.groupOf("using-wollipog"), "Recommended");
 
   await view.click(view.listItem("using-wollipog"));
   const section = () => view.container.querySelector('[aria-label="Built-In Skill"]');
@@ -689,12 +693,13 @@ test("SkillsView marks built-in skills recommended, assigns one in a step, and d
 
   await view.click(view.button("Assign to All Machines"));
   assert.deepEqual(calls.at(-1), { skillId: "skill-builtin", scopeKind: "instance", agentSelector: { kind: "all" }, invocation: "agent" });
-  assert.deepEqual(badges(), ["Built-In"], "an assigned built-in skill is no longer recommended");
+  assert.equal(view.groupOf("using-wollipog"), "No Group", "an assigned built-in skill is no longer recommended");
+  assert.deepEqual(badges(), ["Built-In"]);
   assert.equal(view.button("Assign to All Machines"), undefined);
 
   // Removing the assignment brings the recommendation back; a machine can be chosen instead.
   await view.click(view.button("Delete"));
-  assert.deepEqual(badges(), ["Built-In", "Recommended"]);
+  assert.equal(view.groupOf("using-wollipog"), "Recommended");
   await view.click(view.button("Assign to Machine"));
   assert.deepEqual(calls.at(-1), {
     skillId: "skill-builtin", scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "all" }, invocation: "agent",
@@ -703,13 +708,14 @@ test("SkillsView marks built-in skills recommended, assigns one in a step, and d
   await view.click(view.button("Delete"));
   await view.click(view.button("Dismiss Recommendation"));
   assert.deepEqual(calls.at(-1), { id: "skill-builtin", dismissed: true });
-  assert.deepEqual(badges(), ["Built-In"], "a dismissed recommendation is hidden and the library entry stays");
+  assert.equal(view.groupOf("using-wollipog"), "No Group", "a dismissed recommendation is hidden and the library entry stays");
   assert.match(section()?.textContent ?? "", /You dismissed this recommendation\./);
   // Release content held by local library changes waits for review.
   skill.builtIn.heldUpdate = { release: "0.29.0", digest: "d2" };
   await view.click(view.button("Show Recommendation"));
   assert.deepEqual(calls.at(-1), { id: "skill-builtin", dismissed: false });
-  assert.deepEqual(badges(), ["Built-In", "Recommended"]);
+  assert.equal(view.groupOf("using-wollipog"), "Recommended");
+  assert.deepEqual(badges(), ["Built-In", "Update Held"], "a held built-in update is the row's one status");
   assert.match(section()?.textContent ?? "", /Wollipog 0\.29\.0 includes an updated version/);
   assert.ok(view.button("Review Built-In Update"));
   await view.unmount();
@@ -992,6 +998,12 @@ const oneSkillClient = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 }) as unknown as ApiClient;
 
+/** One machine holding one edited copy of a deleted skill. */
+const oneOrphan: RunnerSkillsResponse = {
+  desired: [], reported: { deployed: [], updatedAt: 1 }, keptAsideReporting: "supported",
+  orphaned: [{ kind: "deleted_skill", name: "retired", digest: "d0", variant: "agent", observedDigest: "d9" }],
+};
+
 /** A phone viewport for useIsMobile (≤ 760px); every other width query stays false. */
 function stubPhone(): () => void {
   const prior = domWindow.matchMedia;
@@ -1104,7 +1116,11 @@ test("a loading library shows skeleton rows in the list and a skeleton detail", 
   const view = await mountRouted(oneSkillClient({ listSkills: () => new Promise(() => {}) }), "skills-loading");
   try {
     const { container } = view;
-    assert.equal(container.querySelectorAll(".master-detail-list .skeleton-row").length, 5);
+    const skeletonRows = container.querySelectorAll(".master-detail-list .skill-row-skeleton");
+    assert.equal(skeletonRows.length, 5);
+    assert.ok([...skeletonRows].every((row) => row.matches(".row.row-2") && row.querySelectorAll(".skeleton-bar").length === 2),
+      "each skeleton row is a two-line row holding a title bar and a meta bar");
+    assertNoDomNode(container.querySelector(".master-detail-list .list-foot"), "the list shows only its loading state");
     const detail = container.querySelector(".master-detail-detail .detail-skeleton")!;
     assert.ok(detail, "the detail pane holds a skeleton title and two section blocks");
     assert.equal(detail.querySelectorAll(".skeleton-title").length, 1);
@@ -1145,17 +1161,18 @@ test("a failed load is a Couldn't Load Skills notice whose Retry reloads the lis
 });
 
 test("/skills/orphans opens the Orphaned Copies pane from the route, and a row replaces it", async () => {
-  const view = await mountRouted(oneSkillClient(), "skills-orphans", { name: "skills", pane: "orphans" });
+  const view = await mountRouted(oneSkillClient({ runnerSkills: async () => oneOrphan }), "skills-orphans", { name: "skills", pane: "orphans" });
   try {
     const { container } = view;
     assert.ok(container.querySelector('.master-detail-detail [aria-label="Orphaned Copies"]'));
-    const entry = container.querySelector<HTMLButtonElement>(".master-detail-list-head .row")!;
+    const entry = container.querySelector<HTMLButtonElement>(".list-foot .row")!;
+    assert.equal(entry.textContent, "Orphaned Copies1");
     assert.equal(entry.getAttribute("aria-current"), "true");
-    await act(async () => container.querySelector<HTMLButtonElement>(".master-detail-list-body .row")!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>(".master-detail-list-body .skill-row")!.click());
     await act(settle);
     assert.deepEqual(view.pushed.at(-1), { name: "skills", id: "skill-1" }, "a row pushes its route");
     assertNoDomNode(container.querySelector('.master-detail-detail [aria-label="Orphaned Copies"]'), "the route is the only selection");
-    assert.notEqual(container.querySelector(".master-detail-list-head .row")?.getAttribute("aria-current"), "true");
+    assert.notEqual(container.querySelector(".list-foot .row")?.getAttribute("aria-current"), "true");
   } finally {
     await view.unmount();
   }

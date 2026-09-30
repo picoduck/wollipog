@@ -980,7 +980,56 @@ function descendantRequestFixture(): DescendantRequestView {
  */
 const SHELL_SKILLS_MODE = FIXTURE_QUERY.get("skills");
 const SHELL_SKILL_NAMES = ["code-review", "release-notes", "triage-helper", "using-wollipog", "dependency-audit", "writing-tests"];
-const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : Array.from(
+/**
+ * `list` (#1961): descriptions that are empty, 20 characters, the built-in `orchestrate-issues`
+ * description and 1,024 characters with line breaks, one equal to its name, and every attention
+ * state (a failed link, an edited copy, a held Git update), a Platform group and orphaned copies.
+ */
+const SHELL_LIST_GIT_SOURCE = { url: "https://github.com/example/skills.git", ref: "main", subdirectory: "lint-rules", path: "lint-rules", commit: "4c1d".padEnd(40, "0") };
+const SHELL_LIST_LONG_END = "\nFinally, it archives the run.";
+const SHELL_LIST_LONG = Array.from({ length: 16 }, (_, index) =>
+  `Step ${index + 1}: read the whole change, then check it against the team's written conventions.`)
+  .join("\n").slice(0, 1_024 - SHELL_LIST_LONG_END.length) + SHELL_LIST_LONG_END;
+const SHELL_LIST_SKILLS = [
+  { name: "orchestrate-issues", description: "Coordinate explicitly requested Wollipog child-session issue campaigns through merge, cleanup, recursive follow-ups, and archival. Use only when the user invokes this skill or explicitly asks to orchestrate or delegate issue implementation across sessions. A request to claim, implement, or fix multiple issues alone stays in the current session and does not trigger this skill. Do not trigger merely because the issues concern Orchestrator features.",
+    builtIn: { release: "0.29.1", heldUpdate: null }, recommendation: { dismissed: false }, assignmentCount: 0 },
+  { name: "using-wollipog", description: "Operate Wollipog sessions from inside an agent session.", builtIn: { release: "0.29.1", heldUpdate: null },
+    recommendation: { dismissed: true }, assignmentCount: 0 },
+  { name: "code-review", description: "", assignmentCount: 1 },
+  { name: "deploy-bot", description: "Ships signed builds", assignmentCount: 1, groupId: "group-platform" },
+  { name: "review-checklist", description: SHELL_LIST_LONG, assignmentCount: 1 },
+  { name: "release-notes", description: "Writes release notes from merged pull requests.", assignmentCount: 1 },
+  { name: "lint-rules", description: "Keeps the team's lint rules current.", assignmentCount: 2, groupId: "group-platform",
+    gitSource: SHELL_LIST_GIT_SOURCE,
+    gitAutoUpdate: { enabled: true, held: { commit: "9e2a".padEnd(40, "0"), reason: "scripts" as const, scriptPaths: ["scripts/fix.sh"], heldAt: 1_700_000_000_000 } } },
+  { name: "qa", description: "QA", assignmentCount: 0 },
+].map((skill, index) => ({
+  id: `skill-${index + 1}`,
+  latestVersion: { id: `v${index + 1}`, digest: `${(index + 1).toString(16).padStart(4, "0")}`.padEnd(64, "a"), createdAt: 1_700_000_000_000 },
+  ...skill,
+}));
+const shellListTarget = (name: string) => ({ name, versionDigest: "d1", targets: [{ agentId: "codex", invocation: "agent" as const }] });
+const SHELL_LIST_MACHINE = {
+  removalReporting: "supported" as const, driftReporting: "supported" as const, keptAsideReporting: "supported" as const,
+  desired: ["deploy-bot", "release-notes", "code-review", "review-checklist", "lint-rules"].map(shellListTarget),
+  reported: {
+    deployed: [
+      { name: "deploy-bot", digest: "d1", links: [{ agentId: "codex", status: "error" as const, detail: "Permission denied" }] },
+      ...["release-notes", "code-review", "review-checklist", "lint-rules"].map((name) => ({ name, digest: "d1", links: [{ agentId: "codex", status: "linked" as const }] })),
+    ],
+    drift: [
+      { name: "release-notes", digest: "d1", variant: "agent" as const, observedDigest: "e1".padEnd(64, "0") },
+      { name: "deploy-bot", digest: "d1", variant: "agent" as const, observedDigest: "e2".padEnd(64, "0") },
+    ],
+    unmanaged: [],
+    updatedAt: 1_700_000_000_000,
+  },
+  orphaned: [
+    { kind: "deleted_skill" as const, name: "retired-lint", digest: "d0".padEnd(64, "0"), variant: "agent" as const, observedDigest: "e3".padEnd(64, "0") },
+    { kind: "deleted_skill" as const, name: "old-triage", digest: "d0".padEnd(64, "0"), variant: "manual" as const, observedDigest: "e4".padEnd(64, "0") },
+  ],
+};
+const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : SHELL_SKILLS_MODE === "list" ? SHELL_LIST_SKILLS : Array.from(
   { length: SHELL_SKILLS_MODE === "many" ? 40 : SHELL_SKILL_NAMES.length },
   (_, index) => ({
     id: `skill-${index + 1}`,
@@ -999,7 +1048,7 @@ const shellSkillsApi = {
     if (SHELL_SKILLS_MODE === "error") throw new Error("HTTP 503: skill library unavailable (GET /api/skills)");
     return { skills: structuredClone(shellSkills) };
   },
-  listSkillGroups: async () => ({ groups: [] }),
+  listSkillGroups: async () => ({ groups: SHELL_SKILLS_MODE === "list" ? [{ id: "group-platform", name: "Platform", sortOrder: 1 }] : [] }),
   getSkill: async (id: string) => {
     const skill = shellSkills.find((candidate) => candidate.id === id);
     if (!skill) throw new Error("HTTP 404: skill not found");
@@ -1015,7 +1064,9 @@ const shellSkillsApi = {
     { id: "assignment-3", skillId, scopeKind: "runner" as const, runnerId: "runner-1",
       agentSelector: { kind: "all" as const }, enabled: false, invocation: "agent" as const },
   ] }),
-  runnerSkills: async () => ({ desired: [], reported: null, removalReporting: "unknown" as const }),
+  runnerSkills: async () => SHELL_SKILLS_MODE === "list"
+    ? structuredClone(SHELL_LIST_MACHINE)
+    : { desired: [], reported: null, removalReporting: "unknown" as const },
 };
 
 const client = {

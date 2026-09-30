@@ -120,10 +120,10 @@ test.describe("at desktop widths", () => {
   });
 
   test("/skills/orphans opens the Orphaned Copies pane, and Back leaves it", async ({ page }) => {
-    await open(page, "/skills");
-    await page.goto(shell("/skills/orphans"));
+    await open(page, "/skills", "&skills=list");
+    await page.goto(shell("/skills/orphans", "&skills=list"));
     await expect(page.locator('.master-detail-detail [aria-label="Orphaned Copies"]')).toBeVisible();
-    await expect(page.locator(".master-detail-list-head .row")).toHaveAttribute("aria-current", "true");
+    await expect(page.locator(".list-foot .row")).toHaveAttribute("aria-current", "true");
     await page.goBack();
     await expect(page.locator('[aria-label="Orphaned Copies"]')).toHaveCount(0);
     await expect(page.locator(".master-detail-detail")).toContainText("Select a skill");
@@ -147,9 +147,9 @@ test.describe("at desktop widths", () => {
 
   test("loading shows skeleton rows and a skeleton detail; a failed load shows Couldn't Load Skills", async ({ page }) => {
     await open(page, "/skills", "&skills=loading");
-    await expect(page.locator(".master-detail-list .skeleton-row")).toHaveCount(5);
+    await expect(page.locator(".master-detail-list .skill-row-skeleton")).toHaveCount(5);
     await expect(page.locator(".master-detail-detail .detail-skeleton")).toBeVisible();
-    const rowHeight = await page.locator(".master-detail-list .skeleton-row").first().evaluate((element) => element.getBoundingClientRect().height);
+    const rowHeight = await page.locator(".master-detail-list .skill-row-skeleton").first().evaluate((element) => element.getBoundingClientRect().height);
     expect(rowHeight, "a skeleton row is the two-line row's height").toBe(56);
 
     await open(page, "/skills", "&skills=error");

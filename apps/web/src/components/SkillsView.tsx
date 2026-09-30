@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { statusMeta } from "../status-meta.js";
 import { SKILL_DESCRIPTION_MAX_CHARS, runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { DetailSkeleton, Modal, Skeleton } from "./common.js";
+import { DetailSkeleton, Modal } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { PlusIcon, SkillsIcon } from "./Icons.js";
@@ -31,11 +30,11 @@ import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
 import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
 import { SkillBuiltInSection } from "./SkillBuiltInSection.js";
 import { SkillBuiltInReviewDialog } from "./SkillBuiltInReviewDialog.js";
+import { SkillList } from "./SkillList.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
   driftVariantLabel,
-  groupSkillList,
   invocationLabel,
   normalizeRemovalReporting,
   omittedKeptAsideCopies,
@@ -52,7 +51,6 @@ import {
   skillGroupsFromPayload,
   skillMarkdownBody,
   skillMarkdownTemplate,
-  skillRecommended,
   skillsFromPayload,
   validateSkillDraft,
   type RunnerSkillsResponse,
@@ -356,8 +354,6 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
-  const grouped = useMemo(() => groupSkillList(skills ?? [], groups), [skills, groups]);
-
   const mutate = async (work: () => Promise<unknown>, after?: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -462,10 +458,6 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     }
   };
 
-  /** Names with a reported edited copy on any machine, so the list can point at them. */
-  const driftedSkillNames = useMemo(() => new Set(Object.values(machineSkills)
-    .flatMap((machine) => machine.reported?.drift ?? []).map((entry) => entry.name)), [machineSkills]);
-
   const driftResolved = async (result: SkillDriftResolution) => {
     if (result.warning) showToast(result.warning, { tone: "error" });
     await refreshList();
@@ -542,7 +534,9 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   // On a phone the list and the open detail are two screens (§6.2): the detail takes the app bar,
   // as the shared detail bar with Back, and the list is hidden until Back.
   const phoneDetail = isMobile && detailOpen;
-  const showOrphanEntry = orphanCount > 0 || showOrphans || keptAsideUnreported;
+  // The list's foot entry and the empty library's notice appear only while there is something to
+  // review, even on /skills/orphans (#1974): the pane itself says when everything is resolved.
+  const showOrphanEntry = orphanCount > 0 || keptAsideUnreported;
   // An empty library is one state across both panes (§6.1, §12.1), and that state offers creation,
   // so the header keeps only Manage Groups…. A route into a skill or the orphaned copies still
   // opens its pane: deleting every skill is exactly when orphaned copies appear.
@@ -626,60 +620,20 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
         </div>
       ) : (
       <div className="master-detail" data-detail-open={detailOpen ? "" : undefined}>
-        <aside className="master-detail-list" aria-label="Skills" data-focus-zone="list" tabIndex={-1}>
-          {showOrphanEntry && (
-            <div className="master-detail-list-head clip-focus">
-              <button
-                type="button"
-                className={`row row-2${showOrphans ? " is-selected" : ""}`}
-                aria-current={showOrphans ? "true" : undefined}
-                onClick={() => openPane("orphans")}
-              >
-                <span className="row-body">
-                  <span className="row-line">
-                    <span className="row-title">Orphaned Copies</span>
-                    {orphanCount > 0 && <StatusBadge tone="warning" noDot label={orphanCount} />}
-                  </span>
-                  <span className="row-sub">Edited copies on machines that no library skill shows</span>
-                </span>
-              </button>
-            </div>
-          )}
-          <div
-            ref={listBodyRef}
-            className="master-detail-list-body clip-focus"
-            onScroll={(event) => {
-              // A hidden list reports 0; that is not where the person left it.
-              if (event.currentTarget.clientHeight > 0) listScrollTop.current = event.currentTarget.scrollTop;
-            }}
-          >
-            {skills === null && <Skeleton rows={5} announce="Loading skills" />}
-            {grouped.map((group) => (
-              <div className="skills-group" key={group.id ?? "ungrouped"}>
-                <h3 className="skills-group-title">{group.name}</h3>
-                {group.skills.map((skill) => (
-                  <button
-                    key={skill.id}
-                    type="button"
-                    className={`row${skill.description ? " row-2" : ""}${selectedId === skill.id ? " is-selected" : ""}`}
-                    aria-current={selectedId === skill.id ? "true" : undefined}
-                    onClick={() => select(skill.id)}
-                  >
-                    <span className="row-body">
-                      <span className="row-line">
-                        <span className="row-title">{skill.name}</span>
-                        {driftedSkillNames.has(skill.name) && <StatusBadge meta={statusMeta("skill", "edited")} />}
-                        {skill.builtIn && <StatusBadge tone="neutral" noDot label="Built-In" />}
-                        {skillRecommended(skill) && <StatusBadge tone="neutral" noDot label="Recommended" />}
-                      </span>
-                      {skill.description && <span className="row-sub">{skill.description}</span>}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            ))}
-          </div>
-        </aside>
+        <SkillList
+          skills={skills}
+          groups={groups}
+          runners={runners}
+          machineSkills={machineSkills}
+          selectedId={selectedId}
+          onSelect={select}
+          orphans={{ shown: showOrphanEntry, count: orphanCount, selected: showOrphans, onOpen: () => openPane("orphans") }}
+          bodyRef={listBodyRef}
+          onBodyScroll={(event) => {
+            // A hidden list reports 0; that is not where the person left it.
+            if (event.currentTarget.clientHeight > 0) listScrollTop.current = event.currentTarget.scrollTop;
+          }}
+        />
 
         <div ref={detailRef} className="master-detail-detail" data-focus-zone="main" tabIndex={-1}>
           {showOrphans ? (

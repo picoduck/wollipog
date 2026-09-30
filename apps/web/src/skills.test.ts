@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SKILL_MAX_FILES, type SkillFile } from "@wollipog/protocol";
+import { SKILL_MAX_FILES, type RunnerView, type SkillFile } from "@wollipog/protocol";
 import {
   describeAgentSelector,
   describeAssignmentScope,
+  filterSkillList,
   groupSkillList,
   invocationLabel,
   normalizeRemovalReporting,
@@ -14,12 +15,14 @@ import {
   reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
+  skillAttention,
   skillDeployBadge,
   skillEligibleAgents,
   skillFileByteLength,
   skillFilesFromUploads,
   skillFromPayload,
   skillGroupsFromPayload,
+  skillListDescription,
   skillMarkdownBody,
   skillMarkdownFrontmatterName,
   skillMarkdownTemplate,
@@ -83,24 +86,114 @@ test("payload normalizers accept wrapped and bare shapes and drop malformed rows
   assert.deepEqual(merged?.latestVersion, siblingVersion, "sibling full version replaces the summary");
 });
 
-test("the skill list groups by group order and collects ungrouped skills last", () => {
+test("the skill list orders Recommended, then No Group, then the named groups in their sort order", () => {
   const groups = [
     { id: "g2", name: "Writing", sortOrder: 2 },
     { id: "g1", name: "Review", sortOrder: 1 },
     { id: "g3", name: "Empty", sortOrder: 0 },
   ];
+  const recommended = { builtIn: { release: "0.29.0", heldUpdate: null }, recommendation: { dismissed: false }, assignmentCount: 0 };
   const skills = [
     skill({ id: "s1", name: "zeta", groupId: "g1" }),
     skill({ id: "s2", name: "alpha", groupId: "g1" }),
     skill({ id: "s3", name: "draft", groupId: "g2" }),
     skill({ id: "s4", name: "loose" }),
     skill({ id: "s5", name: "orphan", groupId: "gone" }),
+    skill({ id: "s6", name: "using-wollipog", groupId: "g1", ...recommended }),
+    skill({ id: "s7", name: "orchestrate-issues", ...recommended }),
   ];
   const grouped = groupSkillList(skills, groups);
-  assert.deepEqual(grouped.map((entry) => entry.name), ["Review", "Writing", "Ungrouped"]);
-  assert.deepEqual(grouped[0]!.skills.map((entry) => entry.name), ["alpha", "zeta"]);
-  assert.deepEqual(grouped[2]!.skills.map((entry) => entry.name), ["loose", "orphan"]);
-  assert.deepEqual(groupSkillList([skill()], []).map((entry) => entry.name), ["All Skills"]);
+  assert.deepEqual(grouped.map((entry) => entry.name), ["Recommended", "No Group", "Review", "Writing"]);
+  assert.deepEqual(grouped.map((entry) => entry.key), ["recommended", "no-group", "group:g1", "group:g2"]);
+  assert.deepEqual(grouped[0]!.skills.map((entry) => entry.name), ["orchestrate-issues", "using-wollipog"],
+    "a recommended skill is listed once, in Recommended, whatever its group");
+  assert.deepEqual(grouped[1]!.skills.map((entry) => entry.name), ["loose", "orphan"], "a missing group reads as No Group");
+  assert.deepEqual(grouped[2]!.skills.map((entry) => entry.name), ["alpha", "zeta"]);
+
+  // Assigning or dismissing it moves it to its own group on the next refresh.
+  const assigned = skills.map((entry) => entry.id === "s6" ? { ...entry, assignmentCount: 1 } : entry);
+  assert.deepEqual(groupSkillList(assigned, groups)[2]!.skills.map((entry) => entry.name), ["alpha", "using-wollipog", "zeta"]);
+  const dismissed = skills.map((entry) => entry.id === "s7" ? { ...entry, recommendation: { dismissed: true } } : entry);
+  assert.deepEqual(groupSkillList(dismissed, groups)[1]!.skills.map((entry) => entry.name), ["loose", "orchestrate-issues", "orphan"]);
+
+  // Without any library group or recommendation, the list is one No Group group.
+  assert.deepEqual(groupSkillList([skill()], []).map((entry) => entry.name), ["No Group"]);
+  assert.deepEqual(groupSkillList([], groups), []);
+});
+
+test("Group By None is one flat alphabetical list without a label", () => {
+  const grouped = groupSkillList([
+    skill({ id: "s1", name: "zeta", groupId: "g1" }),
+    skill({ id: "s2", name: "beta" }),
+    skill({ id: "s3", name: "alpha", builtIn: { release: "1", heldUpdate: null }, recommendation: { dismissed: false } }),
+  ], [{ id: "g1", name: "Review" }], "none");
+  assert.deepEqual(grouped.map((entry) => entry.name), [null]);
+  assert.deepEqual(grouped[0]!.skills.map((entry) => entry.name), ["alpha", "beta", "zeta"]);
+  assert.deepEqual(groupSkillList([], [], "none"), []);
+});
+
+test("a row's description is one line, hidden when it repeats the name, and empty when missing", () => {
+  assert.equal(skillListDescription(skill({ description: "Reviews code.\nThen\t writes  notes.\r\n" })), "Reviews code. Then writes notes.");
+  assert.equal(skillListDescription(skill({ name: "qa", description: "QA" })), null);
+  assert.equal(skillListDescription(skill({ name: "qa", description: " qa\n" })), null);
+  assert.equal(skillListDescription(skill({ description: null })), "");
+  assert.equal(skillListDescription(skill({ description: "  \n " })), "");
+});
+
+test("the filter matches the name and the full description, and Show narrows by kind", () => {
+  const long = "Plans a campaign of child sessions. ".repeat(20) + "Finally it reconciles the\nmerge queue.";
+  const gitSource = { url: "https://example.test/r.git", ref: "main", subdirectory: "", path: "", commit: "c" };
+  const skills = [
+    skill({ id: "s1", name: "orchestrate-issues", description: long, builtIn: { release: "1", heldUpdate: null }, assignmentCount: 0 }),
+    skill({ id: "s2", name: "code-review", description: "Reviews code", assignmentCount: 2, gitSource }),
+    skill({ id: "s3", name: "release-notes", assignmentCount: 1, latestVersion: { gitSource } }),
+  ];
+  const attention = (entry: SkillSummary) => entry.id === "s2" ? "edited" as const : null;
+  const names = (query: string, show: Parameters<typeof filterSkillList>[1]["show"] = "all") =>
+    filterSkillList(skills, { query, show, attention }).map((entry) => entry.name);
+  assert.deepEqual(names(""), ["orchestrate-issues", "code-review", "release-notes"]);
+  assert.deepEqual(names("RECONCILES"), ["orchestrate-issues"], "a word past the row's ellipsis still matches");
+  assert.deepEqual(names("the merge"), ["orchestrate-issues"], "a line break in the description reads as a space");
+  assert.deepEqual(names("  review "), ["code-review"]);
+  assert.deepEqual(names("nothing like it"), []);
+  assert.deepEqual(names("", "attention"), ["code-review"]);
+  assert.deepEqual(names("", "git"), ["code-review", "release-notes"]);
+  assert.deepEqual(names("", "built_in"), ["orchestrate-issues"]);
+  assert.deepEqual(names("", "unassigned"), ["orchestrate-issues"]);
+  assert.deepEqual(names("notes", "git"), ["release-notes"]);
+});
+
+test("a skill's attention is Error, then Edited, then Update Held, and Built-In or Recommended is none", () => {
+  const agent = { id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true };
+  const runner = { runnerId: "r1", os: "linux", status: "online", agents: [agent], protocolVersion: 200 } as unknown as RunnerView;
+  const desired = [{ name: "code-review", versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" as const }] }];
+  const linked: RunnerSkillsResponse = { desired, reported: { deployed: [{ name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "linked" }] }] } };
+  const failed: RunnerSkillsResponse = { desired, reported: { deployed: [{ name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "error", detail: "EACCES" }] }] } };
+  const edited: RunnerSkillsResponse = { ...linked, reported: { ...linked.reported, drift: [{ name: "code-review", digest: "d1", variant: "agent", held: false }] } };
+  const both: RunnerSkillsResponse = { ...failed, reported: { ...failed.reported, drift: edited.reported!.drift } };
+  const healthy = skill({ builtIn: { release: "1", heldUpdate: null }, recommendation: { dismissed: false }, assignmentCount: 0 });
+  const heldBuiltIn = skill({ builtIn: { release: "1", heldUpdate: { release: "2", digest: "d2" } } });
+
+  assert.equal(skillAttention(healthy, [runner], { r1: linked }), null, "a healthy recommended built-in skill needs nothing");
+  assert.equal(skillAttention(skill(), [runner], { r1: failed }), "error");
+  assert.equal(skillAttention(skill(), [runner], { r1: edited }), "edited");
+  assert.equal(skillAttention(skill(), [runner], { r1: both }), "error", "Error outranks Edited");
+  const second = { ...runner, runnerId: "r2" } as RunnerView;
+  assert.equal(skillAttention(skill(), [runner, second], { r1: edited, r2: failed }), "error", "on any machine");
+  assert.equal(skillAttention(skill({ gitAutoUpdate: { enabled: true, held: { commit: "c", reason: "scripts", scriptPaths: [], heldAt: 1 } } }),
+    [runner], { r1: linked }), "update_held");
+  assert.equal(skillAttention(heldBuiltIn, [runner], {}), "update_held");
+  assert.equal(skillAttention(heldBuiltIn, [runner], { r1: edited }), "edited", "Edited outranks Update Held");
+
+  // A machine-wide sync error belongs to the skills that machine deploys, not to every skill.
+  const syncFailed: RunnerSkillsResponse = { desired: [], reported: { error: "Disk full" } };
+  assert.equal(skillAttention(skill(), [runner], { r1: syncFailed }), null);
+  assert.equal(skillAttention(skill(), [runner], { r1: { ...syncFailed, desired } }), "error");
+  // An agent that cannot receive managed skills reports nothing, and an unloaded machine says nothing.
+  const acp = { ...runner, agents: [{ ...agent, driver: "acp" }] } as unknown as RunnerView;
+  assert.equal(skillAttention(skill(), [acp], { r1: failed }), null);
+  assert.equal(skillAttention(skill(), [runner], {}), null);
+  assert.equal(skillAttention(skill(), [runner], { r1: { ...failed, loadError: "Request failed" } }), null);
 });
 
 test("assignment presentation names machines, drivers, agents, and invocation policies", () => {

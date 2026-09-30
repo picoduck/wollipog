@@ -888,8 +888,9 @@ open, with a `--dur-base` transition.
 
 `.list-foot` (`ListFoot`): an entry after the last row of a list that leads somewhere else (the
 Skills list's Orphaned Copies entry, a "Show 20 More" row). It sits 12px below the list with 8px
-above its top hairline, is at least `--row-h` tall, and reads in `--text-dim`. No screen uses it
-yet.
+above its top hairline, is at least `--row-h` tall, and reads in `--text-dim`. The Agent Skills
+list's Orphaned Copies entry is its first use (#1961): a one-line row with the amber `CountBadge`,
+shown only while a machine reports copies.
 
 ---
 
@@ -1393,6 +1394,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Skill deployment | Linked | success |
 | Skill deployment | Pending | neutral |
 | Skill deployment | Edited (a machine copy differs from the library) | warning |
+| Skill deployment | Update Held (a Git or built-in update waits for review) | warning |
 | Skill deployment | Error | danger |
 | Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger |
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |

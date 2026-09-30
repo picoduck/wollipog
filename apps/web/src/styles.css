@@ -13943,18 +13943,45 @@ body.shell-dock-dragging * {
 }
 
 /* ------------------------------ Agent skills ------------------------------ */
-.skills-group { display: grid; }
-.skills-group + .skills-group { margin-top: var(--space-3); }
-/* Group headers inside a list (§5.2): --type-label in --text-dim, 32px, Title Case as written. */
-.skills-group-title {
+/* SkillList.tsx. The list pane's head (§6): the filter takes the width, View Options sits at its
+   end. */
+.skill-list-filter { flex: 1 1 auto; }
+.skill-list-group { display: grid; }
+.skill-list-group + .skill-list-group { margin-top: var(--space-3); }
+/* Group headers inside a list (§5.2): --type-label in --text-dim, 32px, Title Case as written, with
+   a plain count (§11.4). */
+.skill-list-group-title {
   display: flex;
   align-items: center;
+  gap: var(--space-2);
   height: var(--space-8);
   margin: 0;
   padding: 0 var(--space-3);
   color: var(--text-dim);
   font: var(--type-label);
+  text-transform: none;
 }
+.skill-list-group-count {
+  color: var(--text-faint);
+  font: var(--type-micro);
+  font-variant-numeric: tabular-nums;
+}
+/* Line 1 is the name, the Built-In flag beside it, and the one status at the row's end (§5.2). */
+.skill-row-status { margin-left: auto; }
+.skill-row .row-sub.is-empty { color: var(--text-faint); }
+/* No results (§12.2), inline in the list at the rows' inset: the icon beside its sentence. */
+.state.skill-list-no-results { padding: var(--space-3) var(--space-3) 0; }
+.skill-list-no-results .state-body {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.skill-list-no-results .state-body > svg { flex: none; }
+/* The foot's Orphaned Copies entry is one line in the foot's --text-dim (§5.6). */
+.list-foot > .skill-list-orphans { color: inherit; }
+.skill-list-orphans > .row-title { font: var(--type-body); }
+/* Skeleton rows are the row itself, holding a title bar over a meta bar (§12.3). */
+.skill-row-skeleton > .row-body { gap: var(--space-2); }
 /* The empty library (§12.1): the spanning state, then "How Skills Work" as three short steps. */
 .skills-how {
   display: grid;
@@ -14789,6 +14816,20 @@ body.shell-dock-dragging * {
   height: var(--space-6);
 }
 .skeleton-row.skeleton-block { height: 160px; }
+/* A row's anatomy (§12.3): a 60% title bar over a 40% meta bar, inside a real `.row`. */
+.skeleton-bar {
+  display: block;
+  width: 40%;
+  height: 10px;
+  border-radius: var(--radius-xs);
+  background: linear-gradient(90deg, var(--bg-elev) 0%, var(--bg-elev-2) 50%, var(--bg-elev) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.4s var(--ease-out) infinite;
+}
+.skeleton-bar.title {
+  width: 60%;
+  height: 12px;
+}
 @keyframes skeleton-sweep {
   from { background-position: 200% 0; }
   to { background-position: -200% 0; }
@@ -14796,7 +14837,7 @@ body.shell-dock-dragging * {
 /* The sweep is the only thing saying "still working", so with motion reduced the placeholder has to
    remain distinguishable from an empty row without it. */
 @media (prefers-reduced-motion: reduce) {
-  .skeleton-row { animation: none; background: var(--bg-elev-2); }
+  :is(.skeleton-row, .skeleton-bar) { animation: none; background: var(--bg-elev-2); }
 }
 
 /* No `content-visibility` on the disclosures.
