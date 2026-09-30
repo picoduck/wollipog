@@ -48,6 +48,17 @@ test("a pending zero-delay timer that queues another does not strand the second"
   assert.equal(await fires(own, 0), true);
 });
 
+test("a longer window timer that comes due during the settle cannot strand the zero-delay one it queues", async () => {
+  // Catches a settle that waits for its own sentinel's batch with a second Node tick: that tick
+  // lands after a 2ms window timer, whose zero-delay callback then opened a batch the abort killed.
+  // Every trial failed on the version that did (cross-model review round 1).
+  const own = new Window({ url: "http://localhost/" });
+  own.setTimeout(() => { own.setTimeout(() => {}, 0); }, 2);
+
+  assert.deepEqual(await runDomTestCleanup(own, []), []);
+  assert.equal(await fires(own, 0), true);
+});
+
 test("a zero-delay timer a disposer schedules is settled too", async () => {
   // The #2113 shape: a dialog's unmount queues its focus restore. The settle must come after the
   // disposers, not before them.

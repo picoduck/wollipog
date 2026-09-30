@@ -58,12 +58,18 @@ export async function settleZeroDelayWindowTimers(domWindow: object): Promise<vo
   if (!setZeroDelay) return;
   for (let round = 0; round < ZERO_DELAY_SETTLE_ROUNDS; round += 1) {
     let fired = false;
+    let markFlushed!: () => void;
+    const flushed = new Promise<boolean>((resolve) => { markFlushed = () => resolve(true); });
     const tick = nodeTick();
-    setZeroDelay(() => { fired = true; });
+    setZeroDelay(() => { fired = true; markFlushed(); });
     await tick;
     if (fired) continue;
-    await nodeTick();
-    if (fired) return;
+    // The sentinel's own batch was created in the same turn as `tick`, so Node runs it in the same
+    // pass over its 0ms timers, before any longer timer. Return from its flush, NOT from another
+    // tick: a tick lands after them, and a 2ms window timer that queued zero-delay work in between
+    // would open a batch the abort then strands (cross-model review round 1). The tick below only
+    // bounds the wait for a batch that is already dead.
+    if (await Promise.race([flushed, nodeTick().then(() => false)])) return;
     throw new Error(
       "Zero-delay window timers had stopped firing before this cleanup ran: the window was aborted "
       + "while one was pending, and happy-dom never flushes that batch again (#2113).",
