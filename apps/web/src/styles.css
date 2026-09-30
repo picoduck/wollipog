@@ -1577,6 +1577,11 @@ kbd {
   overflow-y: auto;
   padding: var(--space-2) var(--space-2) var(--space-6) 0;
 }
+/* Skeleton rows sit where the rows will, flush with the list's own padding (§12.3). */
+.master-detail-list-body > .skeleton {
+  min-height: 0;
+  padding: 0;
+}
 .master-detail-detail {
   display: grid;
   grid-template-columns: minmax(0, 920px);
@@ -13949,6 +13954,7 @@ body.shell-dock-dragging * {
 }
 .skills-how .steps > li {
   display: grid;
+  align-content: start;
   gap: var(--space-1);
   color: var(--text-dim);
 }
