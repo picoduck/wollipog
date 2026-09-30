@@ -463,14 +463,44 @@ test("CI validates production builds and caches the pinned Playwright browser", 
     /^      - name: Cache Playwright Browser\r?\n        id: playwright-cache\r?\n        uses: actions\/cache@[0-9a-f]{40}[^\r\n]*\r?\n        with:\r?\n          path: ~\/\.cache\/ms-playwright\r?\n          key: \$\{\{ runner\.os \}\}-playwright-\$\{\{ steps\.playwright-version\.outputs\.version \}\}$/m,
     "CI must cache Playwright's browser directory by OS and exact version",
   );
-  assert.match(
-    ci,
-    /^      - name: Install Playwright Browser\r?\n        if: steps\.playwright-cache\.outputs\.cache-hit != 'true'\r?\n        run: pnpm exec playwright install --with-deps chromium$/m,
-  );
-  assert.match(
-    ci,
-    /^      - name: Install Playwright System Dependencies\r?\n        if: steps\.playwright-cache\.outputs\.cache-hit == 'true'\r?\n        run: pnpm exec playwright install-deps chromium$/m,
-  );
+});
+
+test("both Playwright installs time out and retry once after clearing the stalled attempt", () => {
+  // An apt stall inside one of these steps once ran silently until the whole shard's 25-minute
+  // budget cancelled it (#2123). Each attempt is bounded on its own, and both steps are compared
+  // whole: a dropped timeout, a retry that no longer follows its attempt, a retry that swallows
+  // its own failure, or a retry that skips clearing the first attempt's processes (which a step
+  // timeout leaves running with the apt and dpkg locks held) all fail here.
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8").replace(/\r\n/g, "\n");
+  const steps = ci.split(/^      - name: /m).slice(1)
+    .map((step) => step.replace(/(?:\n *(?:#[^\n]*)?)+$/, ""));
+  const installs = [
+    ["Install Playwright Browser", "playwright-browser", "!=", "pnpm exec playwright install --with-deps chromium"],
+    ["Install Playwright System Dependencies", "playwright-system-dependencies", "==", "pnpm exec playwright install-deps chromium"],
+  ];
+
+  for (const [name, id, cacheHit, command] of installs) {
+    const index = steps.findIndex((step) => step.startsWith(`${name}\n`));
+    assert.notEqual(index, -1, `${name}: step is missing`);
+    assert.equal(steps[index], [
+      name,
+      `        id: ${id}`,
+      `        if: steps.playwright-cache.outputs.cache-hit ${cacheHit} 'true'`,
+      "        continue-on-error: true",
+      "        timeout-minutes: 6",
+      `        run: ${command}`,
+    ].join("\n"), `${name}: first attempt must be bounded and allow one retry`);
+    assert.equal(steps[index + 1], [
+      `Retry ${name}`,
+      `        if: \${{ !cancelled() && steps.${id}.outcome == 'failure' }}`,
+      "        timeout-minutes: 6",
+      "        run: |",
+      "          pkill -KILL -f 'playwright[^ ]* install' || true",
+      "          sudo pkill -KILL -x 'apt-get|dpkg' || true",
+      "          sudo dpkg --configure -a",
+      `          ${command}`,
+    ].join("\n"), `${name}: retry must immediately follow, clear the stalled attempt, and fail the job on a second failure`);
+  }
 });
 
 test("PR workflow expressions satisfy the complete event matrix", () => {
