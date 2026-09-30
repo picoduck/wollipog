@@ -352,6 +352,22 @@ test("in the labelled rail the tile's row shows the name and status, and the rai
   expect(narrow.bottom).toBeLessThanOrEqual(narrow.viewportHeight);
   expect(narrow.railScroll).toBeLessThanOrEqual(0);
 
+  // Settings is the shell's own item: its gear, and in the 64px rail no visible name, inside the rail.
+  const settings = page.locator(".rail-settings").getByRole("button", { name: "Settings" });
+  const settingsLook = () => settings.evaluate((element) => {
+    const icon = element.querySelector("svg")?.getBoundingClientRect();
+    const label = element.querySelector<HTMLElement>(".rail-item-label");
+    const rail = element.closest(".app-rail")!.getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    return {
+      icon: icon ? icon.width > 0 && icon.height > 0 : false,
+      label: label && getComputedStyle(label).display !== "none" ? label.textContent : null,
+      text: [...element.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join("").trim(),
+      insideRail: box.left >= rail.left && box.right <= rail.right && box.bottom <= window.innerHeight,
+    };
+  });
+  expect(await settingsLook()).toEqual({ icon: true, label: null, text: "", insideRail: true });
+
   await page.getByRole("button", { name: "Expand Navigation" }).click();
   await expect(page.locator(".app-rail.labelled")).toBeVisible();
   const trigger = tile(page, "Build Farm in the Northern Datacenter Rack Seven");
@@ -378,6 +394,7 @@ test("in the labelled rail the tile's row shows the name and status, and the rai
   expect(labelled.count).toBe(narrow.count);
   expect(labelled.tileHeight, "the labelled row spends no more height than the tile").toBe(narrow.tileHeight);
   expect(labelled.railScroll).toBeLessThanOrEqual(0);
+  expect(await settingsLook()).toEqual({ icon: true, label: "Settings", text: "", insideRail: true });
   expect(labelled.bottom).toBeLessThanOrEqual(labelled.viewportHeight);
 
   // The flyout opens beside the wider rail.

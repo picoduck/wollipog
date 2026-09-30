@@ -12,6 +12,7 @@ import { InstancesPanel } from "../components/InstancesPanel.js";
 import { OfflineBanner } from "../components/OfflineBanner.js";
 import { Rail } from "../components/Rail.js";
 import { RemoteInstanceBanner } from "../components/RemoteInstanceBanner.js";
+import { SettingsTrigger } from "../components/SettingsTrigger.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 import "../styles.css";
 
@@ -141,14 +142,15 @@ function Shell() {
         onlineConnections={1}
         onNavigate={() => undefined}
         instanceControl={<InstanceSelector connection={connection} labelled={labels} />}
-        settingsControl={<button type="button" className="rail-item">Settings</button>}
+        // The shell's own Settings item and page container, so captures show what production draws.
+        settingsControl={<SettingsTrigger active={false} onOpen={() => undefined} />}
         onSearch={() => undefined}
       />
       <main className="main">
         {connection && (instances.activeProfile.kind === "remote"
           ? <RemoteInstanceBanner authenticationRequired={connection === "sign-in-required"} />
           : <OfflineBanner connecting={false} onRetryNow={() => false} developmentBuild={false} />)}
-        <div className="main-body"><InstancesPanel /></div>
+        <div className="main-body"><div className="page"><InstancesPanel /></div></div>
       </main>
     </div>
   );
