@@ -123,15 +123,35 @@ export function userFacingMachineError(cause: unknown, machineName: string): str
 /**
  * One machine request at a time. The server serves a single machine request and refuses a second,
  * and a request keeps running after whatever started it has gone, so each request starts only
- * after the one before it has settled, whether that one succeeded or failed. `onPendingChange`
- * hears +1 when a request is queued and -1 when it settles, so a caller can hold its controls.
+ * after the one before it has settled, whether that one succeeded or failed. `pending` counts the
+ * requests queued or running, and `subscribe` hears it change, so a caller can hold its controls.
  */
-export function createRequestQueue(onPendingChange: (change: 1 | -1) => void) {
+export function createRequestQueue() {
   let tail: Promise<unknown> = Promise.resolve();
-  return <T>(request: () => Promise<T>): Promise<T> => {
-    onPendingChange(1);
-    const run = tail.then(request);
-    tail = run.catch(() => undefined);
-    return run.finally(() => onPendingChange(-1));
+  let pending = 0;
+  const listeners = new Set<() => void>();
+  const changed = (by: 1 | -1) => {
+    pending += by;
+    for (const listener of [...listeners]) listener();
+  };
+  return {
+    run<T>(request: () => Promise<T>): Promise<T> {
+      changed(1);
+      const run = tail.then(request);
+      tail = run.catch(() => undefined);
+      return run.finally(() => changed(-1));
+    },
+    pending: () => pending,
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
   };
 }
+
+/**
+ * The page's one queue for machine skill requests. The server's lock is not per dialog, and a
+ * request outlives the dialog that started it: cancelling Import from Machine mid-read and opening
+ * it again must wait for that read, not meet it.
+ */
+export const machineRequestQueue = createRequestQueue();

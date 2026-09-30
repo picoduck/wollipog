@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { RunnerView } from "@wollipog/protocol";
 import {
   machineSkillAdoptionRecoveryRequirement,
@@ -10,7 +10,7 @@ import { machineOptionLabels } from "../runners.js";
 import {
   adoptionAdvisoryText,
   adoptionBlockerText,
-  createRequestQueue,
+  machineRequestQueue,
   MACHINE_SKILL_RESULT_FACT,
   machineSkillImportLabel,
   machineSkillLocation,
@@ -95,14 +95,15 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
   /** Refreshing the page and the folders after an adoption: the dialog stays locked meanwhile. */
   const [settling, setSettling] = useState(false);
   /**
-   * Machine requests running or waiting, from this dialog and the dialogs stacked on it. The server
-   * serves one machine request at a time and refuses a second, and a request keeps running after
-   * the dialog that started it is cancelled. So every request goes through `track`, which starts
-   * each one only after the one before it has settled; the controls that start one also wait while
-   * this is above 0, so a person never queues work they cannot see.
+   * Machine requests running or waiting, from this dialog, the dialogs stacked on it, and an earlier
+   * opening of it. The server serves one machine request at a time and refuses a second, and a
+   * request keeps running after the dialog that started it is cancelled. So every request goes
+   * through the page's one queue (`machineRequestQueue`), which starts each only after the one
+   * before it has settled; the controls that start one also wait while this is above 0, so a person
+   * never queues work they cannot see.
    */
-  const [machineRequests, setMachineRequests] = useState(0);
-  const [track] = useState(() => createRequestQueue((change) => setMachineRequests((count) => count + change)));
+  const machineRequests = useSyncExternalStore(machineRequestQueue.subscribe, machineRequestQueue.pending, () => 0);
+  const track = machineRequestQueue.run;
 
   // The discovery the server holds for us, read by close and by requests that finish after it.
   const discoveryRef = useRef<MachineSkillDiscovery | null>(null);

@@ -85,9 +85,11 @@ test("a server refusal phrased with runner protocol numbers becomes the runner-u
 });
 
 test("machine requests run one at a time, in order, even after a failure, and are counted until they settle", async () => {
-  let pending = 0;
   const events: string[] = [];
-  const run = createRequestQueue((change) => { pending += change; });
+  const queue = createRequestQueue();
+  const run = <T,>(request: () => Promise<T>) => queue.run(request);
+  let notified = 0;
+  queue.subscribe(() => { notified += 1; });
   const gate = (name: string, fail = false) => {
     let release!: () => void;
     const released = new Promise<void>((resolve) => { release = resolve; });
@@ -105,7 +107,7 @@ test("machine requests run one at a time, in order, even after a failure, and ar
   const firstRun = run(first.request).catch((cause: Error) => `failed ${cause.message}`);
   const secondRun = run(second.request);
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(pending, 2, "both are counted while one runs and one waits");
+  assert.equal(queue.pending(), 2, "both are counted while one runs and one waits");
   assert.deepEqual(events, ["start first"], "the second waits for the first");
   first.release();
   assert.equal(await firstRun, "failed first");
@@ -113,5 +115,6 @@ test("machine requests run one at a time, in order, even after a failure, and ar
   assert.deepEqual(events, ["start first", "end first", "start second"], "a failure still lets the next one start");
   second.release();
   assert.equal(await secondRun, "second");
-  assert.equal(pending, 0);
+  assert.equal(queue.pending(), 0);
+  assert.equal(notified, 4, "subscribers hear every change");
 });

@@ -383,3 +383,25 @@ test("a restore that fails after its confirmation is cancelled still re-reads th
   assert.equal(calls.recovery, 2, "the journals are read again: the restore may have happened");
   await unmount();
 });
+
+test("closing mid-read and opening again waits for the first read instead of meeting it", async () => {
+  const calls: Record<string, number> = {};
+  const firstRead = deferred<Awaited<ReturnType<ApiClient["discoverMachineSkills"]>>>();
+  let reads = 0;
+  const base = fakeApi(calls);
+  const { client, probe } = probeConcurrency({ ...base,
+    discoverMachineSkills: (runnerId: string) => (reads++ === 0 ? firstRead.promise : base.discoverMachineSkills(runnerId)),
+  } as ApiClient);
+  const closeFirst = await mountDialog(client, async () => undefined);
+  await closeFirst();
+  const closeSecond = await mountDialog(client, async () => undefined);
+  assert.equal(reads, 1, "the second opening's read waits for the first");
+  await act(async () => { firstRead.resolve({ discoveryId: "first", candidates: [candidate] }); });
+  await settle();
+  assert.equal(reads, 2);
+  assert.equal(probe.most, 1, "never two machine requests at once");
+  assert.doesNotMatch(document.body.textContent ?? "", /Couldn't Read Skill Folders/u);
+  assert.ok(folderRow(), "the second opening lists the folders");
+  assert.ok((calls.discard ?? 0) >= 1, "the first opening's late discovery is discarded");
+  await closeSecond();
+});
