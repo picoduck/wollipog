@@ -1294,3 +1294,71 @@ test("an older library load that fails after a newer one succeeded leaves the li
     await view.unmount();
   }
 });
+
+/** Creates a group in Manage Groups…, whose change refreshes the library and the selected skill. */
+async function createGroupThroughDialog(container: HTMLElement) {
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".page-header button")]
+    .find((button) => button.textContent === "Manage Groups…")!.click());
+  await act(settle);
+  const dialog = container.querySelector('[role="dialog"]')!;
+  const input = [...dialog.querySelectorAll<HTMLInputElement>("label.field")]
+    .find((field) => field.textContent?.includes("New Group Name"))!.querySelector("input")!;
+  const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
+  assert.ok(setter);
+  // React's change plugin watches the focused input through keyup here, so type as a person would.
+  await act(async () => {
+    input.focus();
+    setter.call(input, "Review Team");
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: "m" }) as never);
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true, key: "m" }) as never);
+  });
+  const create = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Create Group")!;
+  assert.equal(create.disabled, false, "the group has a name");
+  await act(async () => create.click());
+  await act(settle);
+}
+
+test("a library that failed to load recovers when a later refresh succeeds, without another Retry", async () => {
+  let listCalls = 0;
+  const view = await mountRouted(oneSkillClient({
+    listSkills: async () => {
+      listCalls += 1;
+      if (listCalls === 1) throw new Error("HTTP 503 from /api/skills");
+      return { skills: [oneSkill] };
+    },
+    createSkillGroup: async ({ name }: { name: string }) => ({ group: { id: "group-1", name } }),
+    listSkillGroups: async () => ({ groups: [], creationScope: { organizationId: "demo-org", owner: { kind: "organization", organizationId: "demo-org" } } }),
+  }), "skills-list-recovers");
+  try {
+    const { container } = view;
+    assert.equal(container.querySelector(".master-detail-state .notice-title")?.textContent, "Couldn't Load Skills");
+    await createGroupThroughDialog(container);
+    assertNoDomNode(container.querySelector(".master-detail-state"), "the refreshed library replaces its error");
+    assert.match(container.querySelector(".master-detail-list-body")?.textContent ?? "", /code-review/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a skill that failed to load recovers when a later refresh of it succeeds, without another Retry", async () => {
+  let detailCalls = 0;
+  const view = await mountRouted(oneSkillClient({
+    getSkill: async () => {
+      detailCalls += 1;
+      if (detailCalls === 1) throw new Error("HTTP 500 reading skill-1");
+      return { skill: oneSkill, latestVersion: { id: "v1", digest: "d1", files: [] } };
+    },
+    createSkillGroup: async ({ name }: { name: string }) => ({ group: { id: "group-1", name } }),
+    listSkillGroups: async () => ({ groups: [], creationScope: { organizationId: "demo-org", owner: { kind: "organization", organizationId: "demo-org" } } }),
+  }), "skills-detail-recovers", { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    assert.equal(container.querySelector(".master-detail-detail .notice-title")?.textContent, "Couldn't Load This Skill");
+    await createGroupThroughDialog(container);
+    assert.ok(detailCalls >= 2, "the group change refreshed the selected skill");
+    assertNoDomNode(container.querySelector(".master-detail-detail .notice"), "the refreshed skill replaces its error");
+    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review");
+  } finally {
+    await view.unmount();
+  }
+});

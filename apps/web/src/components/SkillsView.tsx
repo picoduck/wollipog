@@ -282,6 +282,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
         return [null, null] as const;
       });
     if (generation !== listGeneration.current || !skillsPayload || !groupsPayload) return;
+    // The newest load succeeded, from Retry or from a mutation's refresh: its error is over.
+    setListError(null);
     setSkills(skillsFromPayload(skillsPayload));
     setGroups(skillGroupsFromPayload(groupsPayload));
   }, [api]);
@@ -300,6 +302,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       return [null, null] as const;
     });
     if (!current() || !detailPayload || !assignmentsPayload) return;
+    setDetailError((error) => error?.skillId === skillId ? null : error);
     setDetail(skillFromPayload(detailPayload));
     setAssignments(skillAssignmentsFromPayload(assignmentsPayload));
   }, [api]);
