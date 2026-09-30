@@ -1069,9 +1069,9 @@ kbd {
   justify-content: flex-start;
   width: 100%;
   min-width: 0;
-  height: auto;
-  min-height: var(--control-h-lg);
-  padding: var(--space-1);
+  /* One rail item's height, as in the 64px rail: the name (20px) and status (16px) lines fit, and
+     the labelled rail spends no more of a 600px window than the narrow one. */
+  padding: 0 var(--space-1);
 }
 .instance-tile-text {
   display: flex;

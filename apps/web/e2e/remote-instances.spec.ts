@@ -340,6 +340,7 @@ test("in the labelled rail the tile's row shows the name and status, and the rai
     const controls = [...rail.querySelectorAll<HTMLElement>(".instance-tile-trigger, .rail-item, .rail-foot button")];
     return {
       count: controls.length,
+      tileHeight: rail.querySelector<HTMLElement>(".instance-tile-trigger")!.getBoundingClientRect().height,
       bottom: Math.max(...controls.map((control) => control.getBoundingClientRect().bottom)),
       railScroll: rail.scrollHeight - rail.clientHeight,
       viewportHeight: window.innerHeight,
@@ -375,6 +376,8 @@ test("in the labelled rail the tile's row shows the name and status, and the rai
   expect(row.nameRight).toBeLessThanOrEqual(row.railRight);
   const labelled = await fits();
   expect(labelled.count).toBe(narrow.count);
+  expect(labelled.tileHeight, "the labelled row spends no more height than the tile").toBe(narrow.tileHeight);
+  expect(labelled.railScroll).toBeLessThanOrEqual(0);
   expect(labelled.bottom).toBeLessThanOrEqual(labelled.viewportHeight);
 
   // The flyout opens beside the wider rail.
