@@ -42,6 +42,9 @@ async function mount(node: React.ReactNode) {
   await act(async () => root.render(node));
   return {
     container,
+    async rerender(next: React.ReactNode) {
+      await act(async () => root.render(next));
+    },
     async unmount() {
       await act(async () => root.unmount());
       container.remove();
@@ -192,7 +195,7 @@ test("the detail bar names Back for its destination and keeps destructive action
     assert.equal(title.id, "page-title");
     assert.equal(title.getAttribute("tabindex"), "-1");
     assert.equal(title.textContent, "Active Collaboration Pod");
-    assert.equal(title.nextElementSibling?.className, "pod-status", "the one status badge follows the title");
+    assert.equal(title.nextElementSibling?.firstElementChild?.className, "pod-status", "the one status badge follows the title");
 
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!.click());
     const items = [...domWindow.document.querySelectorAll('[role="menuitem"]')];
@@ -232,6 +235,62 @@ test("a detail bar renders no instance control, and Tab leaves ⋯ from its trig
     assert.ok(domWindow.document.activeElement === (more as never),
       "the browser's Tab continues from ⋯, not from the end of <body> where the pop lived");
   } finally {
+    await view.unmount();
+  }
+});
+
+/**
+ * The compact tier (#1969, §15.2). happy-dom has no layout, so the title's widths are given; what is
+ * under test is the decision and what each state leaves for the reader and the accessibility tree.
+ */
+test("in the compact tier a detail bar trades the badge's label for the title's room, and shows icon actions", async () => {
+  const setWidth = (width: number) => domWindow.happyDOM.setWindowSize({ width, height: 800 });
+  const bar = (
+    <DetailBar
+      title="Docs Overhaul Bake-Off With Four Agents and a Very Long Objective"
+      backLabel="Back to Pods"
+      onBack={() => undefined}
+      status={<span className="status sm t-info">Active</span>}
+      secondary={{ label: "Open Worktree", icon: <svg data-icon="folder" />, onClick: () => undefined }}
+      primary={{ label: "Resume", onClick: () => undefined }}
+    />
+  );
+  await act(async () => setWidth(940));
+  const view = await mount(bar);
+  // A resize re-measures through the heading's ResizeObserver; every render re-measures as well.
+  // A fresh element each time: React skips re-rendering an identical one.
+  const rerender = () => view.rerender(React.cloneElement(bar));
+  try {
+    const title = view.container.querySelector<HTMLElement>("h1")!;
+    const badge = () => view.container.querySelector<HTMLElement>(".detail-bar-status")!;
+    let visible = 150;
+    Object.defineProperty(title, "scrollWidth", { configurable: true, get: () => 480 });
+    Object.defineProperty(title, "clientWidth", { configurable: true, get: () => visible });
+    await rerender();
+    assert.ok(badge().hasAttribute("data-dot"), "a title truncated to 150px is below a readable width");
+    assert.equal(badge().title, "Active", "the label moves to the tooltip");
+    assert.equal(badge().textContent, "Active", "and stays in the text, so the accessible name is unchanged");
+
+    visible = 260;
+    await rerender();
+    assert.ok(!badge().hasAttribute("data-dot"), "truncated at 260px is still readable, so the label stays");
+    assert.equal(badge().getAttribute("title"), null);
+
+    const [secondary, primary] = [...view.container.querySelectorAll<HTMLButtonElement>(".detail-bar-action")];
+    assert.match(secondary!.className, /\bicon-only\b/, "a text action with an icon becomes an icon button");
+    assert.equal(secondary!.title, "Open Worktree", "whose label is its tooltip");
+    assert.equal(secondary!.textContent, "Open Worktree", "and its accessible name");
+    assert.doesNotMatch(primary!.className, /\bicon-only\b/, "an action with no icon keeps its text");
+
+    // Wider than the tier, the same bar keeps its full badge and its text buttons.
+    visible = 150;
+    await act(async () => setWidth(1440));
+    await rerender();
+    assert.ok(!badge().hasAttribute("data-dot"), "the dot is a compact-tier treatment only");
+    assert.doesNotMatch(view.container.querySelector(".detail-bar-action")!.className, /\bicon-only\b/);
+    assert.equal(view.container.querySelector<HTMLButtonElement>(".detail-bar-action")!.getAttribute("title"), null);
+  } finally {
+    await act(async () => setWidth(1024));
     await view.unmount();
   }
 });

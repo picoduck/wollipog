@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { MOBILE_BREAKPOINT_PX, TABLET_BREAKPOINT_PX } from "./components/useIsMobile.js";
+import {
+  COMPACT_BREAKPOINT_PX,
+  MOBILE_BREAKPOINT_PX,
+  TABLET_BREAKPOINT_PX,
+  WIDE_BREAKPOINT_PX,
+} from "./components/useIsMobile.js";
 import { customProperties, mediaBlocks, topLevelRule } from "./css-rules.js";
 import { ALTERNATIVES, SCHEMES, THEMES } from "./palettes.js";
 
@@ -138,8 +143,6 @@ test("every phone-designated media query uses the shared breakpoint", () => {
  * is a scroll that lands in the wrong place rather than anything visible in a screenshot (#901).
  */
 test("the stacked-card media query uses the shared tablet breakpoint", () => {
-  assert.equal(only(scope(TOKENS), "--bp-tablet", "the token block"), `${TABLET_BREAKPOINT_PX}px`);
-
   // `.inbox-row-lead` is the wrapper the stacked shape dissolves, so the block that dissolves it is
   // the block that owns the shape.
   const owning = mediaBlocks(css).filter((block) => block.containsSelector(".inbox-row-lead"));
@@ -155,6 +158,32 @@ test("the phone breakpoint is not what chooses the card's shape", () => {
   assert.notEqual(MOBILE_BREAKPOINT_PX, TABLET_BREAKPOINT_PX,
     "the card's density threshold and the phone threshold are different decisions");
   assert.ok(TABLET_BREAKPOINT_PX > MOBILE_BREAKPOINT_PX, "a tablet is wider than a phone");
+});
+
+/**
+ * The tier tokens are documentation (media queries cannot read custom properties), so the only thing
+ * keeping them honest is that they equal the constants useIsCompact() is built from (§2.10, #1969).
+ */
+test("the tier tokens mirror the JS tier constants, and the retired ones are gone", () => {
+  const tokens = scope(TOKENS);
+  assert.equal(only(tokens, "--bp-compact", "the token block"), `${COMPACT_BREAKPOINT_PX}px`);
+  assert.equal(only(tokens, "--bp-wide", "the token block"), `${WIDE_BREAKPOINT_PX}px`);
+  // 900 and 1240 were declared and read by nothing; 900 lives on only as the Sessions card threshold.
+  for (const retired of ["--bp-tablet", "--bp-desktop"]) {
+    assert.doesNotMatch(css, new RegExp(`${retired}\\b`), `${retired} was replaced by --bp-compact and --bp-wide`);
+  }
+});
+
+test("every compact-tier media query ends where useIsCompact() does", () => {
+  // Anchored by what each block does, as the phone test above is, not by how close its width is.
+  const compact = mediaBlocks(css).filter((block) =>
+    block.containsSelector('.page-more[data-overflow="2"]') ||
+    block.declarationsForSelector(".project-manager-grid").get("grid-template-columns")?.includes("280px minmax(0, 1fr)"));
+  assert.equal(compact.length, 2, "the page header's priority+ tier and the Projects list pane");
+  for (const block of compact) {
+    assert.deepEqual(block.maxWidths, [COMPACT_BREAKPOINT_PX - 1],
+      `@media ${block.params} must end at the shared compact breakpoint, or CSS and useIsCompact() disagree`);
+  }
 });
 
 test("the token block declares every promised member of every scale", () => {
@@ -173,7 +202,7 @@ test("the token block declares every promised member of every scale", () => {
     "--dur-instant", "--dur-fast", "--dur-base", "--dur-slow", "--ease-out", "--ease-spring",
     "--elev-1", "--elev-2", "--elev-3",
     "--z-sticky", "--z-dock", "--z-popover", "--z-backdrop", "--z-modal", "--z-palette", "--z-toast",
-    "--bp-phone", "--bp-tablet", "--bp-desktop",
+    "--bp-phone", "--bp-compact", "--bp-wide",
     "--surface-selected", "--focus", "--focus-width", "--focus-offset",
     "--primary-bg", "--primary-bg-hover", "--primary-bg-active", "--primary-fg", "--tint",
   ];

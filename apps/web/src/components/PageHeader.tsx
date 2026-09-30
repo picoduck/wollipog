@@ -2,6 +2,7 @@ import React, { Fragment, useEffect, useLayoutEffect, useRef, useState, type Rea
 import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
+import { useIsCompact } from "./useIsMobile.js";
 
 /**
  * Page anatomy (docs/design-system.md §4.2, §4.3, §4.5).
@@ -112,6 +113,17 @@ export function PageHeader({
   );
 }
 
+export interface DetailBarAction extends PageAction {
+  /** Drawn before the label; in the compact tier the button shows only this (§15.2). */
+  icon?: ReactNode;
+}
+
+/**
+ * Below this, a truncated detail-bar title stops being readable, so in the compact tier the status
+ * badge gives up its label (to its tooltip) before the title gives up more (§15.2).
+ */
+export const DETAIL_TITLE_READABLE_PX = 200;
+
 export function DetailBar({
   title,
   backLabel,
@@ -127,33 +139,67 @@ export function DetailBar({
   onBack: () => void;
   /** The one status badge, placed right after the title. */
   status?: ReactNode;
-  primary?: PageAction;
-  secondary?: PageAction;
+  primary?: DetailBarAction;
+  secondary?: DetailBarAction;
   /** ⋯ contents. Destructive actions belong only here (§3.3). */
   menu?: PageMenuAction[];
 }) {
+  const compact = useIsCompact();
+  const headingRef = useRef<HTMLDivElement>(null);
+  // Whether the badge is a dot is measured against the full badge, every time, so the answer never
+  // depends on the previous one. The attribute is written straight to the DOM inside one layout
+  // pass: React does not own it, and nothing paints between taking it off and putting it back.
+  useLayoutEffect(() => {
+    const heading = headingRef.current;
+    const badge = heading?.querySelector<HTMLElement>(".detail-bar-status");
+    const titleElement = heading?.querySelector<HTMLElement>(".detail-bar-title");
+    if (!heading || !badge || !titleElement) return;
+    const measure = () => {
+      badge.removeAttribute("data-dot");
+      badge.removeAttribute("title");
+      if (!compact) return;
+      const truncated = titleElement.scrollWidth > titleElement.clientWidth;
+      if (!truncated || titleElement.clientWidth >= DETAIL_TITLE_READABLE_PX) return;
+      badge.setAttribute("data-dot", "");
+      badge.title = badge.textContent ?? "";
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    // The heading's width is set by the bar, never by the badge, so a collapse cannot re-trigger it.
+    const observer = new ResizeObserver(measure);
+    observer.observe(heading);
+    return () => observer.disconnect();
+  });
+  const action = (item: DetailBarAction, kind: "btn" | "btn primary") => {
+    const iconOnly = compact && Boolean(item.icon);
+    return (
+      <button
+        type="button"
+        className={`${kind} detail-bar-action${iconOnly ? " icon-only" : ""}`}
+        disabled={item.disabled}
+        // An icon-only button's label is its tooltip; a visible reason still wins (§9.3).
+        title={item.title ?? (iconOnly ? item.label : undefined)}
+        onClick={item.onClick}
+      >
+        {item.icon}
+        <span className="detail-bar-action-label">{item.label}</span>
+      </button>
+    );
+  };
   return (
     <header className="detail-bar">
       <button type="button" className="icon-btn detail-bar-back" onClick={onBack} title={backLabel} aria-label={backLabel}>
         <ChevronLeftIcon />
       </button>
-      <div className="detail-bar-heading">
+      <div ref={headingRef} className="detail-bar-heading">
         <h1 id="page-title" className="detail-bar-title" tabIndex={-1} title={title}>{title}</h1>
-        {status}
+        {status && <span className="detail-bar-status">{status}</span>}
       </div>
       {(primary || secondary || menu.length > 0) && (
         <div className="detail-bar-actions">
-          {secondary && (
-            <button type="button" className="btn" disabled={secondary.disabled} title={secondary.title} onClick={secondary.onClick}>
-              {secondary.label}
-            </button>
-          )}
+          {secondary && action(secondary, "btn")}
           {menu.length > 0 && <ActionsMenu overflow="always" items={menu} />}
-          {primary && (
-            <button type="button" className="btn primary" disabled={primary.disabled} title={primary.title} onClick={primary.onClick}>
-              {primary.label}
-            </button>
-          )}
+          {primary && action(primary, "btn primary")}
         </div>
       )}
     </header>

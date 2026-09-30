@@ -420,6 +420,24 @@ Side columns (right panel, list pane, dialogs) respond to **their own width** wi
 `container-type: inline-size` and `@container` rules, never to the viewport. The 600, 640, 680 and
 700px breakpoints are removed.
 
+One definition of each tier, shared by components and the stylesheet (#1969):
+
+- **JS.** `useIsMobile()` (≤ 760px) and `useIsCompact()` (`(min-width: 761px) and (max-width:
+  1099px)`) in `useIsMobile.ts`, built from `MOBILE_BREAKPOINT_PX`, `COMPACT_BREAKPOINT_PX` (1100)
+  and `WIDE_BREAKPOINT_PX` (1440).
+- **CSS.** Media queries cannot read custom properties, so `--bp-phone` (760px), `--bp-compact`
+  (1100px) and `--bp-wide` (1440px) are documentation tokens that `tokens.test.ts` holds equal to
+  the JS constants; compact-tier rules are written `@media (max-width: 1099px)`. `--bp-tablet` and
+  `--bp-desktop` are retired. The Sessions card's 900px density threshold (#901) is not a tier and
+  has no token; it stays until the Sessions row redesign replaces it.
+- **The `app` container is deferred.** Making the main column a named size container (`container:
+  app / inline-size`) waits for its first consumer, the session bar. At the build floor (Chrome
+  111–128, Safari before the CSSWG dropped layout containment from `container-type`), a size
+  container is also the containing block of every `position: fixed` descendant. Inside the main
+  column that includes the Select listbox and the Snooze popover, which place themselves in
+  viewport coordinates and would open shifted by the rail's width. The container lands together
+  with portalling them, as the page header's ⋯ menu already is.
+
 ### 2.11 Contrast (Wollipog Scheme)
 
 Computed with the WCAG 2 formula from the token values, with `color-mix()` resolved in sRGB and washes
@@ -1707,12 +1725,20 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 
 ### 15.2 Compact Desktop (761–1099px, Including the Tauri 940px Minimum)
 
-- Rail unchanged. Page header: primary + one secondary + ⋯.
+- Rail unchanged, including the opt-in labelled rail. Page header: primary + one secondary + ⋯.
+- Short windows with a mouse (`(max-height: 700px) and (pointer: fine)`, at any desktop width): the
+  rail tightens to 36px items 2px apart, with 4px either side of a group hairline, so Search, every
+  destination, the brand or instance tile and Settings fit at the desktop app's 600px minimum
+  height. It does this by redefining `--control-h-lg` on the rail. Touch keeps 48px items (§15.3).
 - Master-detail list pane 280px. Sessions is always stacked here (§6.3); its Preview Right option
   applies at 1100px and wider.
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
   with the label in its tooltip plus `+N` for extra attention kinds; the project crumb is dropped;
-  text buttons become icon buttons with tooltips.
+  text buttons become icon buttons with tooltips. `DetailBar` (Run, Pod, Project) does this now. Its
+  badge becomes a dot, with the label in the tooltip, when keeping the full badge would leave the
+  truncated title under 200px (`DETAIL_TITLE_READABLE_PX`). A `primary` or `secondary` that carries
+  an `icon` becomes a square icon button whose label is its tooltip and accessible name. The session
+  bar follows in its own epic.
 - Right panel docks at 320px or overlays as a sheet from the right with a scrim when the chat column
   would drop below 480px.
 

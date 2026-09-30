@@ -8,13 +8,24 @@ import { TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 export const MOBILE_BREAKPOINT_PX = 760;
 
 /**
- * The tablet breakpoint, matching `--bp-tablet`. The Sessions list card stacks into three rows at or
+ * The compact desktop tier (docs/design-system.md §2.10, §15.2) is wider than a phone and narrower
+ * than this. It holds the desktop app's 940×600 minimum window, an iPad in portrait and a
+ * half-screen laptop window: the rail stays, while bars and panes tighten. Mirrored by `--bp-compact`.
+ */
+export const COMPACT_BREAKPOINT_PX = 1100;
+
+/** The wide tier starts here; only the list pane may widen (§2.10). Mirrored by `--bp-wide`. */
+export const WIDE_BREAKPOINT_PX = 1440;
+
+/**
+ * The Sessions list card's density threshold (#901). The card stacks into three rows at or
  * below this width (#901): above the phone breakpoint but below this one there is not enough line to
  * hold the agent, the project, the Git identity, and the signals column at once, and the Git
  * identity is what gives way.
  *
  * Distinct from MOBILE_BREAKPOINT_PX on purpose. This is a layout-density threshold, not a claim
- * about the device — everything keyed on "this is a phone" still uses 760px.
+ * about the device — everything keyed on "this is a phone" still uses 760px. It is not a tier
+ * either: it stays at 900px inside the compact tier until the Sessions row redesign replaces it.
  */
 export const TABLET_BREAKPOINT_PX = 900;
 
@@ -26,7 +37,9 @@ export const SHORT_VIEWPORT_PX = 420;
 
 const MOBILE_QUERY = `(max-width: ${MOBILE_BREAKPOINT_PX}px)`;
 const TABLET_QUERY = `(max-width: ${TABLET_BREAKPOINT_PX}px)`;
-const SHORT_QUERY = `(max-height: ${SHORT_VIEWPORT_PX}px)`;
+/** 761px through 1099px: the one definition of the compact tier. */
+export const COMPACT_QUERY = `(min-width: ${MOBILE_BREAKPOINT_PX + 1}px) and (max-width: ${COMPACT_BREAKPOINT_PX - 1}px)`;
+const SHORT_QUERY =`(max-height: ${SHORT_VIEWPORT_PX}px)`;
 
 /** Live width flag; re-renders on breakpoint crossings only (not every resize pixel —
  * the snapshot is a boolean, so useSyncExternalStore ignores same-value notifications).
@@ -52,6 +65,11 @@ function useMediaQuery(query: string): boolean {
 /** Live phone-width flag. */
 export function useIsMobile(): boolean {
   return useMediaQuery(MOBILE_QUERY);
+}
+
+/** Live compact-tier flag (COMPACT_QUERY): the rail stays while bars and panes tighten (§15.2). */
+export function useIsCompact(): boolean {
+  return useMediaQuery(COMPACT_QUERY);
 }
 
 /**
