@@ -15179,11 +15179,12 @@ body.shell-dock-dragging * {
 .archive-session-meta { display: none; }
 /* The compact tier (§15.2): the seven columns need 970px, more than the tier has, so Project,
    Location and Agent fold into a meta line under the session's title, and the State badges stack.
-   The line wraps between values rather than truncating, so every value stays on screen; the
-   Session column keeps at least 170px. */
+   The line wraps between values rather than truncating, so every value stays on screen. State
+   keeps room for its longest badge ("Stop Waiting for Runner", about 157px), which leaves the
+   Session column about 150px at the 761px floor. */
 @media (min-width: 761px) and (max-width: 1099px) {
   .archive-table :is(.col-project, .col-location, .col-agent) { display: none; }
-  .archive-table .col-state { width: 160px; }
+  .archive-table .col-state { width: 188px; }
   .archive-table .col-created { width: 100px; }
   .archive-table .archive-session-cell { padding-block: var(--space-1); }
   .archive-session-meta {

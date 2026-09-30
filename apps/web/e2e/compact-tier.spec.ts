@@ -146,6 +146,14 @@ for (const width of [761, 834, 940, 1099]) {
 async function checkPageContent(page: Page, where: string) {
   await open(page, "path=%2Farchived", "Archived Sessions");
   await expect(page.locator(".archive-table tbody tr").first()).toBeVisible();
+  // The fixture has no stop in progress, so give the first row the longest State badge a session
+  // can show beside Archived and its lifecycle (§11.1: a badge keeps its own width).
+  await page.locator(".archive-state-badges").first().evaluate((badges) => {
+    const longest = badges.querySelector(".status")!.cloneNode() as HTMLElement;
+    longest.className = "status sm t-warning";
+    longest.textContent = "Stop Waiting for Runner";
+    badges.append(longest);
+  });
   const archive = await page.evaluate(() => {
     const box = (element: Element) => element.getBoundingClientRect();
     const wrap = document.querySelector(".archive-table-wrap")!;
@@ -177,7 +185,7 @@ async function checkPageContent(page: Page, where: string) {
     };
   });
   expect(archive.scroll, `${where}: the Archived Sessions table scrolls sideways`).toBeLessThanOrEqual(0);
-  expect(archive.sessionColumn, `${where}: the Session column keeps room for a title`).toBeGreaterThanOrEqual(170);
+  expect(archive.sessionColumn, `${where}: the Session column keeps room for a title`).toBeGreaterThanOrEqual(145);
   expect(archive.rows.length).toBeGreaterThan(0);
   for (const row of archive.rows) {
     expect(row.columnsShown, `${where}: Project, Location and Agent fold into the Session cell`).toEqual([false, false, false]);

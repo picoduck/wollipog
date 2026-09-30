@@ -1736,9 +1736,10 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   two most important other columns as meta on line 2, the rest in the detail. No 620–980px min-widths.
 - **Compact tier (761–1099px): a table whose declared widths exceed the tier folds its secondary
   columns into the name cell** as a meta line under the name, and hides those columns, so it never
-  scrolls sideways and the name keeps at least 170px. The meta line wraps between values rather than
-  truncating, so every value stays on screen. Archived Sessions does this for Project, Location and
-  Agent, and narrows State to 160px so its badges stack (§15.2).
+  scrolls sideways and the name keeps about 150px at 761px. The meta line wraps between values
+  rather than truncating, so every value stays on screen. Archived Sessions does this for Project,
+  Location and Agent, and narrows State to 188px, room for its longest badge, so its badges stack
+  (§15.2).
 
 ---
 
