@@ -365,3 +365,31 @@ test("a late catalog that replaces the no-results actions keeps focus in the pal
   await ui.key(ui.input(), "Escape");
   assertNoDomNode(ui.palette(), "Escape still reaches the palette");
 });
+
+test("a field blurred on purpose stays blurred when results arrive (Android Back closes the keyboard)", async () => {
+  const ui = await mount();
+  await ui.key(ui.doc.body, "k", { ctrlKey: true });
+  await ui.type("login");
+  await settle(250);
+  // mobile-viewport.ts blurs the field when the keyboard is dismissed without one.
+  await act(async () => { ui.input().blur(); });
+  await act(async () => {
+    ui.searches.at(-1)!.resolve([{ sessionId: "s-docs", title: "Write the docs", snippet: "the ⟪login⟫ flow" }]);
+  });
+  assert.ok(ui.palette(), "the palette is still open");
+  assert.ok(ui.doc.activeElement !== ui.input(), "focusing the field again would reopen the keyboard");
+});
+
+test("returning to the query already answered reuses its hits instead of searching again", async () => {
+  const ui = await mount();
+  await ui.key(ui.doc.body, "k", { ctrlKey: true });
+  await ui.type("login");
+  await settle(250);
+  await act(async () => { ui.searches.at(-1)!.resolve([{ sessionId: "s-docs", title: "Write the docs", snippet: "the ⟪login⟫ flow" }]); });
+  await ui.type("loginx");
+  await ui.type("login");
+  await settle(250);
+  assert.equal(ui.searches.length, 1, "no second request for the query already answered");
+  assert.doesNotMatch(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching/);
+  assert.deepEqual(ui.sections()[1], ["In Transcripts", ["Write the docs"]]);
+});

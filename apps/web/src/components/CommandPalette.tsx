@@ -135,11 +135,18 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   useCommandPaletteFocus(inputRef, returnFocusRef);
   // A control that held focus can leave the palette: crossing 760px removes Cancel, and a late
   // session catalog can replace the no-results actions with rows. Focus then falls to <body>, outside
-  // the dialog, where Tab and Escape no longer reach it, so every commit hands it back to the field.
-  // Before the shell's own breakpoint rescue runs, which leaves focus alone once it has a home.
+  // the dialog, where Tab and Escape no longer reach it, so the commit that removed it hands focus
+  // back to the field, before the shell's own breakpoint rescue (which then leaves it alone).
+  // Only a REMOVED control: a field blurred on purpose stays blurred, such as the one
+  // mobile-viewport.ts blurs when Android Back dismisses the keyboard, or the keyboard would reopen.
+  const lastFocusedRef = useRef<HTMLElement | null>(null);
   useLayoutEffect(() => {
     const active = document.activeElement;
-    if (!active || active === document.body || !active.isConnected) inputRef.current?.focus();
+    const lost = !active || active === document.body || !active.isConnected;
+    if (lost && lastFocusedRef.current && !lastFocusedRef.current.isConnected) {
+      lastFocusedRef.current = null;
+      inputRef.current?.focus();
+    }
   });
 
   useEffect(() => {
@@ -153,12 +160,17 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   const query = q.trim();
   const transcriptQuery = query.length >= TRANSCRIPT_QUERY_MIN ? query : "";
   // Debounced transcript search: each keystroke restarts the wait, and only the latest query's
-  // answer is kept. A query too short to search clears the hits (the hint row says why).
+  // answer is kept. A query too short to search clears the hits (the hint row says why). A query
+  // that returns to the one already answered (login, loginx, login) reuses that answer rather than
+  // asking again, so "Searching" is never hidden while a request is still out.
+  const hitsRef = useRef(hits);
+  hitsRef.current = hits;
   useEffect(() => {
     if (!transcriptQuery) {
       setHits({ query: "", results: [] });
       return;
     }
+    if (hitsRef.current.query === transcriptQuery) return;
     let cancelled = false;
     const t = setTimeout(() => {
       api
@@ -281,6 +293,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
         aria-modal="true"
         aria-label="Search"
         onClick={(e) => e.stopPropagation()}
+        onFocus={(event) => { lastFocusedRef.current = event.target as HTMLElement; }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             // Consume the press: the shell's layered-Escape handler would otherwise ALSO
