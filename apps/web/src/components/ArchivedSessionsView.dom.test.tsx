@@ -7,6 +7,7 @@ import { Window } from "happy-dom";
 import type { ControlPlaneToUi, SessionCommandPermissions, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { requestArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
 import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -350,6 +351,20 @@ test("search input debounces to one request and preserves server row order", asy
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
   assert.equal(fixture.archivePageCalls(), initialCalls + 1);
+  await fixture.unmount();
+});
+
+test("the palette's Search Archived Sessions opens the archive already searching its words (#1978)", async () => {
+  requestArchiveSearch("login");
+  const fixture = await mount([session(1, { id: "one", title: "Login work" })]);
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  assert.equal(input.value, "login");
+  assert.equal(fixture.archiveInputs[0]?.q, "login", "the first page is already the search, not the whole archive");
+  assert.equal(takeArchiveSearch(), null, "the query is taken once");
+
+  // With the archive already open under the palette, the handoff arrives as an event.
+  await act(async () => { requestArchiveSearch("deploy"); });
+  assert.equal(input.value, "deploy");
   await fixture.unmount();
 });
 

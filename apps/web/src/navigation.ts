@@ -187,20 +187,19 @@ export function viewSubjectName(view: View): string {
 }
 
 /**
- * Destinations the palette offers that the rail does not render as its own item.
+ * Destinations the palette's Go To offers that the rail does not render as its own item.
  *
  * Settings is reachable by a dedicated gear rather than a rail row, so it is absent from
  * GLOBAL_VIEW_ITEMS — and the palette, which derived its whole fixed list from that array, had no
  * way to reach it. Appending it to the rail list instead would have made the rail render a second
- * Settings entry beside the gear.
+ * Settings entry beside the gear. Each section is named by itself, with "Settings" as its second
+ * line (#1978). The board is not here: it is a mode of Sessions, which the palette's Actions switch.
  */
-export const EXTRA_PALETTE_DESTINATIONS: ReadonlyArray<{ label: string; view: View }> = [
-  // The board left the rail when it became a mode of Sessions, but the palette keeps a direct
-  // entry so "board" still matches a searchable destination.
-  { label: "Board", view: { name: "board" } },
+export const EXTRA_PALETTE_DESTINATIONS: ReadonlyArray<{ label: string; detail?: string; view: View }> = [
   { label: "Settings", view: { name: "settings" } },
   ...SETTINGS_SECTIONS.map((section) => ({
-    label: `Settings — ${section.title}`,
+    label: section.title,
+    detail: "Settings",
     view: { name: "settings" as const, section: section.id },
   })),
 ];

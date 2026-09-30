@@ -31,7 +31,6 @@ export const TEXT_GLYPHS = ["×", "✕", "✓", "▸", "▾", "↻", "←", "→
 
 // The area epics that own the recorded sites. An epic that is filed carries its number; the rest are
 // named by area and gain a number when filed.
-const PALETTE = "#1978 (Command Palette)";
 const TRANSCRIPT = "Transcript epic (not yet filed)";
 const COMPOSER = "Composer epic (not yet filed)";
 const SESSION_FRAME = "Session Page Frame and Header epic (not yet filed)";
@@ -50,9 +49,6 @@ const NEW_SESSION = "New Session epic (not yet filed)";
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/AutomationsView.tsx", "▸", "▸", AUTOMATIONS],
   ["components/AutomationsView.tsx", "×", "×", AUTOMATIONS],
-  ["components/CommandPalette.tsx", "▤", "▤", PALETTE],
-  ["components/CommandPalette.tsx", "❞", "❞", PALETTE],
-  ["components/CommandPalette.tsx", "→", "→", PALETTE],
   ["components/ComposerControls.tsx", "▾", "▾", COMPOSER],
   ["components/EventTimeline.tsx", "▸", "▸", TRANSCRIPT],
   ["components/EventTimeline.tsx", "⑃", "⑃", TRANSCRIPT],

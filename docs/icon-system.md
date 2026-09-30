@@ -111,6 +111,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `DialIcon` | Lucide | `CircleGauge` | Model or effort setting. |
 | `PullRequestIcon` | Lucide | `GitPullRequest` | Pull request. |
 | `DiffIcon` | Lucide | `FileDiff` | Changed files in the Review panel. |
+| `TranscriptHitIcon` | Lucide | `FileText` | A transcript search hit in the command palette. |
 | `JobsIcon` | Lucide | `ListChecks` | Background job list with per-job state. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
 | `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion. |

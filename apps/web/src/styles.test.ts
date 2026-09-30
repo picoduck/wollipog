@@ -176,8 +176,8 @@ test("the global focus ring is neutral, zero-specificity and absent on programma
   assert.equal(allDeclarations(css).filter((declaration) =>
     /data-focus-zone|zone-lit/.test(declaration.selector) && /focus/.test(declaration.selector)).length, 0,
   "a zone root takes no ring when F6 lands on it");
-  // The palette search suppresses its outline, so its bottom edge is its only focus cue.
-  assert.equal(soleRuleBody(".palette-input:focus-visible"), "border-color: var(--focus);");
+  // The palette search suppresses its outline, so the bar's bottom edge is its only focus cue.
+  assert.equal(soleRuleBody(".palette-bar:has(.palette-input:focus-visible)"), "border-color: var(--focus);");
   assert.equal(soleRuleBody(".clip-focus :focus-visible"), "outline-offset: calc(-1 * var(--focus-width));");
   // A bare `:focus-visible` is (0,1,0) and would outrank component rules that draw their own focus.
   assert.throws(() => topLevelRule(css, ":focus-visible"), /found 0/,

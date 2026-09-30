@@ -95,8 +95,12 @@ test("the palette can reach Settings", () => {
   // destination a keyboard user is most likely to search for.
   const labels = EXTRA_PALETTE_DESTINATIONS.map((entry) => entry.label);
   assert.ok(labels.includes("Settings"), "the palette needs a plain Settings destination");
+  // Each section is named by itself over a "Settings" second line (#1978), not "Settings — Appearance".
   for (const section of SETTINGS_SECTIONS) {
-    assert.ok(labels.includes(`Settings — ${section.title}`), `${section.title} must be searchable`);
+    const entry = EXTRA_PALETTE_DESTINATIONS.find((candidate) => candidate.label === section.title);
+    assert.ok(entry, `${section.title} must be searchable`);
+    assert.equal(entry.detail, "Settings");
+    assert.deepEqual(entry.view, { name: "settings", section: section.id });
   }
   // And not by adding it to the rail's list, which would render a second Settings item beside the
   // gear.

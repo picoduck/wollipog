@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isTerminal, type SessionStatus, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { ARCHIVE_SEARCH_EVENT, pendingArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
 import { sessionUnarchiveRestarts, unarchiveAndRestartFailureMessage } from "../archive-actions.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
 import {
@@ -135,8 +136,9 @@ export function ArchivedSessionsView() {
   const hasBeenOnlineRef = useRef(false);
   const connectionLostRef = useRef(false);
   const revalidateAfterLoadRef = useRef(false);
-  const [filters, setFilters] = useState(DEFAULT_FILTERS);
-  const [queryInput, setQueryInput] = useState("");
+  // A query handed over by the palette's "Search Archived Sessions" (#1978) is the first search.
+  const [filters, setFilters] = useState(() => ({ ...DEFAULT_FILTERS, query: pendingArchiveSearch() ?? "" }));
+  const [queryInput, setQueryInput] = useState(() => pendingArchiveSearch() ?? "");
   const [page, setPage] = useState(1);
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -214,6 +216,16 @@ export function ArchivedSessionsView() {
   }, []);
 
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
+
+  useEffect(() => {
+    takeArchiveSearch();
+    const onArchiveSearch = () => {
+      const query = takeArchiveSearch();
+      if (query !== null) setQueryInput(query);
+    };
+    window.addEventListener(ARCHIVE_SEARCH_EVENT, onArchiveSearch);
+    return () => window.removeEventListener(ARCHIVE_SEARCH_EVENT, onArchiveSearch);
+  }, []);
 
   useEffect(() => {
     if (filters.query === queryInput) return;

@@ -141,7 +141,7 @@ test("every surface that exposes a gated feature consults the flags", () => {
   const consumers: ReadonlyArray<[string, RegExp, string]> = [
     ["./components/Rail.tsx", /visibleRailViews\(preferences, flags\)/,
       "the rail must filter destinations through the flags, or a hidden feature keeps its row"],
-    ["./components/CommandPalette.tsx", /experimentForViewName/,
+    ["./components/CommandPalette.tsx", /visibleRailViews\(railPreferences, flags\)/,
       "the palette must filter destinations, or search reaches what the rail hides"],
     ["./App.tsx", /visibleRailViews\(railPreferences, experiments\.flags\)/,
       "the numbered shortcuts must consult the flags through the visible rail order, or a hidden view stays one keypress away"],

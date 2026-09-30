@@ -49,7 +49,7 @@ import { useDesktopUpdateSetting } from "./desktop-updates.js";
 import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRouter.js";
 import { useWindowTitle, windowDragRegion } from "./desktop-window.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
-import { CommandPalette } from "./components/CommandPalette.js";
+import { CommandPalette, useSearchShortcut } from "./components/CommandPalette.js";
 import { ShortcutReference } from "./components/ShortcutReference.js";
 import { SettingsTrigger } from "./components/SettingsTrigger.js";
 import { useTheme } from "./components/ThemeProvider.js";
@@ -86,11 +86,12 @@ import { railViewForDigit, visibleRailViews } from "./rail-preferences.js";
 import { machineAttention } from "./rail-attention.js";
 import { useRailPreferences } from "./use-rail-preferences.js";
 import { useSessionsViewModeMemory } from "./use-sessions-view-mode-memory.js";
+import { recordRecentSession } from "./recent-sessions.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { ProjectsView } from "./components/ProjectsView.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
 import { RemoteInstanceBanner } from "./components/RemoteInstanceBanner.js";
-import { PageHeader } from "./components/PageHeader.js";
+import { AppBarSearchProvider, PageHeader } from "./components/PageHeader.js";
 import { Rail, RailDragStrip } from "./components/Rail.js";
 import { InstancesPanel } from "./components/InstancesPanel.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
@@ -492,6 +493,11 @@ export function Shell() {
 
   const instanceScope = useInstanceScope();
   useSessionsViewModeMemory(view, instanceScope);
+  // The palette's Recent section: the sessions opened on this device, newest first (#1978).
+  const openedSessionId = view.name === "session" ? view.id : null;
+  useEffect(() => {
+    if (openedSessionId !== null) recordRecentSession(openedSessionId, instanceScope);
+  }, [openedSessionId, instanceScope]);
   const railPreferences = useRailPreferences();
   const visibleRailNames = visibleRailViews(railPreferences, experiments.flags);
   const visibleRailNamesRef = useRef(visibleRailNames);
@@ -603,22 +609,11 @@ export function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [isMobile, navigate, instanceScope]);
 
-  // Ctrl+K / Cmd+K opens the global search palette (sessions + transcripts + views).
-  // Deliberately ALSO from inputs/textareas (the Slack/Linear convention — jumping mid-typing
-  // is the point) but NOT from a terminal: Ctrl+K is a real control sequence inside xterm.
+  // The global search palette: the rail's Search, the phone app bars' Search icon, and Ctrl/Cmd+K.
   const [paletteOpen, setPaletteOpen] = useState(false);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || shortcutLayerActive(document, true)) return;
-      if (matchesShortcut(e, "search")) {
-        if (xtermOwnsKey(e.target)) return;
-        e.preventDefault();
-        setPaletteOpen((v) => !v);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+  const togglePalette = useCallback(() => setPaletteOpen((v) => !v), []);
+  useSearchShortcut(togglePalette);
 
   // `?` opens the discoverable reference without stealing punctuation from editors or xterm.
   useEffect(() => {
@@ -736,7 +731,7 @@ export function Shell() {
             ? <InstanceSelector connection={instanceConnection} labelled={railPreferences.labels} />
             : undefined,
           settingsControl: <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />,
-          onSearch: () => setPaletteOpen(true),
+          onSearch: openPalette,
         })}
       />
       <main className="main">
@@ -771,6 +766,7 @@ export function Shell() {
           data-focus-zone="main"
           tabIndex={-1}
         >
+          <AppBarSearchProvider onSearch={isMobile ? openPalette : undefined}>
           <ErrorBoundary
             name={viewSubjectName(view)}
             resetKey={viewPath(view)}
@@ -885,6 +881,7 @@ export function Shell() {
             />
           )}
           </ErrorBoundary>
+          </AppBarSearchProvider>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
             while toggled on; keyed by session so tab selection never bleeds across navigations. */}

@@ -76,6 +76,8 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.match(app, /instanceControl: desktopMultiInstance\s*\?\s*<InstanceSelector connection=\{instanceConnection\} labelled=\{railPreferences\.labels\} \/>\s*:\s*undefined/);
   assert.doesNotMatch(app, /appBarControl|PageChromeProvider|mobileInstanceControl/);
   assert.doesNotMatch(pageHeader, /appBarControl|PageChrome/);
+  // Phone app bars carry the Search icon that opens the palette (#1978).
+  assert.match(app, /<AppBarSearchProvider onSearch=\{isMobile \? openPalette : undefined\}>/);
   assert.doesNotMatch(app, /mobileSettingsControl/,
     "Settings left the phone topbar for the rail's More sheet");
   assert.match(css, /--rail-w: 64px;/);
@@ -97,7 +99,8 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
 
 test("the desktop rail is grouped, searchable and has one current-page treatment (#1958)", () => {
   // Search: the first Work item, opening the same palette as Ctrl/Cmd+K, never a destination.
-  assert.match(app, /onSearch: \(\) => setPaletteOpen\(true\),/);
+  assert.match(app, /const openPalette = useCallback\(\(\) => setPaletteOpen\(true\), \[\]\);/);
+  assert.match(app, /onSearch: openPalette,/);
   assert.match(rail, /entries\.splice\(Math\.max\(0, entries\.findIndex\(\(entry\) => entryGroup\(entry\) === "work"\)\), 0, "search"\)/);
   assert.match(rail, /aria-label="Search"[\s\S]*?aria-keyshortcuts=\{shortcutAriaKeys\("search"\)\}[\s\S]*?data-rail-tip="Search"[\s\S]*?data-rail-keys=\{shortcutDisplay\("search"\)\}/);
   assert.match(rail, /event\.currentTarget\.focus\(\);\s*onSearch\?\.\(\);/,

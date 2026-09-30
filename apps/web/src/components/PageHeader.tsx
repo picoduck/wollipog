@@ -1,5 +1,5 @@
-import React, { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
-import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon } from "./Icons.js";
+import React, { createContext, Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon, SearchIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useIsCompact } from "./useIsMobile.js";
@@ -31,6 +31,37 @@ export interface PageMenuAction extends PageAction {
   danger?: boolean;
 }
 
+/**
+ * On phones the page header and the detail bar are the app bar, and it carries a Search icon that
+ * opens the command palette (§15.1, #1978). The shell provides the opener only at 760px and below,
+ * where the rail has no Search.
+ */
+const AppBarSearchContext = createContext<(() => void) | undefined>(undefined);
+
+export function AppBarSearchProvider({ onSearch, children }: { onSearch?: () => void; children: ReactNode }) {
+  return <AppBarSearchContext.Provider value={onSearch}>{children}</AppBarSearchContext.Provider>;
+}
+
+/** The app bar's Search icon (§15.1). */
+function AppBarSearch({ onSearch }: { onSearch: () => void }) {
+  return (
+    <button
+      type="button"
+      className="icon-btn"
+      title="Search"
+      aria-label="Search"
+      onClick={(event) => {
+        // Safari does not focus a clicked button, and the palette returns focus to whatever held it
+        // when it opened.
+        event.currentTarget.focus();
+        onSearch();
+      }}
+    >
+      <SearchIcon />
+    </button>
+  );
+}
+
 /** The number of secondaries the widest header shows beside its primary (§3.3). */
 export const PAGE_HEADER_VISIBLE_SECONDARIES = 2;
 
@@ -57,6 +88,7 @@ export function PageHeader({
   /** Optional underline tabs, drawn as the header's last row. */
   tabs?: ReactNode;
 }) {
+  const onSearch = useContext(AppBarSearchContext);
   // Slot 1 is the secondary beside the primary. Visibility by slot lives in the stylesheet, where
   // the width tiers and the header's own @container width both apply (§3.3, §15.2).
   const slots = secondary.map((action, index) => ({ action, slot: secondary.length - index }));
@@ -68,8 +100,9 @@ export function PageHeader({
           <h1 id="page-title" className="page-title" tabIndex={-1}>{title}</h1>
           {description && <p className="page-desc" title={description}>{description}</p>}
         </div>
-        {(primary || secondary.length > 0 || menu.length > 0) && (
+        {(onSearch || primary || secondary.length > 0 || menu.length > 0) && (
           <div className="page-actions">
+            {onSearch && <AppBarSearch onSearch={onSearch} />}
             {slots.filter(({ slot }) => slot <= PAGE_HEADER_VISIBLE_SECONDARIES).map(({ action, slot }) => (
               <button
                 key={action.label}
@@ -146,6 +179,7 @@ export function DetailBar({
   menu?: PageMenuAction[];
 }) {
   const compact = useIsCompact();
+  const onSearch = useContext(AppBarSearchContext);
   const headingRef = useRef<HTMLDivElement>(null);
   // Whether the badge is a dot is measured against the full badge, every time, so the answer never
   // depends on the previous one. The attribute is written straight to the DOM inside one layout
@@ -196,8 +230,9 @@ export function DetailBar({
         <h1 id="page-title" className="detail-bar-title" tabIndex={-1} title={title}>{title}</h1>
         {status && <span className="detail-bar-status">{status}</span>}
       </div>
-      {(primary || secondary || menu.length > 0) && (
+      {(onSearch || primary || secondary || menu.length > 0) && (
         <div className="detail-bar-actions">
+          {onSearch && <AppBarSearch onSearch={onSearch} />}
           {secondary && action(secondary, "btn")}
           {menu.length > 0 && <ActionsMenu overflow="always" items={menu} />}
           {primary && action(primary, "btn primary")}

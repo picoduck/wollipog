@@ -629,7 +629,19 @@ Rules
   and Cost, Settings. Each `GLOBAL_VIEW_ITEMS` entry carries that one `name`, its page `description`
   (§4.2) and its `group`; back controls read "Back to <name>". "Inbox" is retired from all copy.
 - **Search.** A rail item "Search" (Ctrl/Cmd+K) at the top of the Work group and a search icon in the
-  phone app bar open the command palette.
+  phone app bar open the command palette; closing it returns focus to whichever opened it. The
+  palette is one listbox of labelled sections (§9.1): Recent (the last five sessions opened on this
+  device, per instance), Sessions, In Transcripts, Go To (every visible destination with its digit,
+  then Settings and each Settings section, named by itself over "Settings") and Actions ("Switch to
+  Board View" / "Switch to List View", "Show Navigation Labels" / "Hide Navigation Labels"). An empty
+  query shows Recent, Go To and Actions. A session matched by title and by transcript is one row,
+  with the snippet as its third line. Sessions show a status dot, transcript hits a file-text icon,
+  destinations their own icon. Transcript search starts at three characters (a hint row says so),
+  keeps earlier hits until new ones arrive and shows "Searching transcripts…" meanwhile; no results
+  is §12.2's sentence with Clear Search and Search Archived Sessions. Desktop: 640px, 96px from the
+  top, `--radius-lg`, `--elev-3`, a 48px search bar, the active row in `--surface-selected` with a
+  2px accent bar, and a 36px key-hint footer on fine pointers. At 760px and below it fills the
+  screen with Cancel and 48px rows.
 
 ### 4.2 Page Header (Destination Pages)
 

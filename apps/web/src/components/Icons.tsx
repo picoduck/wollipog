@@ -22,6 +22,7 @@ import {
   Eye as LucideEye,
   EyeOff as LucideEyeOff,
   FileDiff as LucideFileDiff,
+  FileText as LucideFileText,
   FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
   FolderKanban as LucideFolderKanban,
@@ -555,6 +556,10 @@ export function PullRequestIcon(props: IconProps) {
 
 export function DiffIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFileDiff} {...props} />;
+}
+
+export function TranscriptHitIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFileText} {...props} />;
 }
 
 export function JobsIcon(props: IconProps) {
