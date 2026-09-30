@@ -1,3 +1,4 @@
+import { fixedContainingBlockOffset } from "./fixed-containing-block.js";
 import { inTypingContext, shortcutLayerActive, type ShortcutScope } from "./shortcuts.js";
 
 /**
@@ -96,12 +97,21 @@ export function indicateFocusZone(targetDocument: Document, zone: FocusZone): HT
   const view = targetDocument.defaultView;
   if (!root || !view) return null;
   let frame = 0;
+  let placedFor = "";
   const place = () => {
     if (!root.isConnected) return clear();
     const edge = root.getBoundingClientRect();
-    root.style.setProperty("--zone-line-top", `${edge.top}px`);
-    root.style.setProperty("--zone-line-left", `${edge.left}px`);
-    root.style.setProperty("--zone-line-width", `${edge.width}px`);
+    const key = `${edge.left},${edge.top},${edge.width}`;
+    if (key !== placedFor) {
+      placedFor = key;
+      // The line is the root's own pseudo-element, so it cannot be portalled out of the main
+      // column. Its offsets count from the box `position: fixed` actually resolves against, which
+      // the `app` container becomes at the build floor (§2.10). Measured only when the edge moved.
+      const box = fixedContainingBlockOffset(root);
+      root.style.setProperty("--zone-line-top", `${edge.top - box.top}px`);
+      root.style.setProperty("--zone-line-left", `${edge.left - box.left}px`);
+      root.style.setProperty("--zone-line-width", `${edge.width}px`);
+    }
     frame = view.requestAnimationFrame(place);
   };
   const clear = () => {

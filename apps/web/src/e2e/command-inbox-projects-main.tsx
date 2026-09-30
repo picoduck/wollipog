@@ -803,12 +803,41 @@ class FixtureSocket implements UiSocket {
   }
 }
 
+/**
+ * `?offlineBanner=1` loses the connection once the snapshot has landed and never gets it back, so the
+ * shell keeps the snapshot and shows its offline page banner above the page (#2105). Every later
+ * socket stays connecting.
+ */
+const OFFLINE_BANNER = FIXTURE_QUERY.get("offlineBanner") === "1";
+let offlineBannerLost = false;
+
+class NeverOpenSocket implements UiSocket {
+  readonly readyState = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  send() {}
+  close() {}
+}
+
 const connection: UiConnectionRuntime = {
   instanceId: "project-inbox-e2e",
   runtimeKey: "project-inbox-e2e:1",
   createSocket() {
-    socket = new FixtureSocket();
-    return socket;
+    if (offlineBannerLost) return new NeverOpenSocket();
+    const opened = new FixtureSocket();
+    socket = opened;
+    if (OFFLINE_BANNER) {
+      // After the snapshot, and only for a socket the store still holds: StrictMode's first mount
+      // detaches its socket's handlers, and losing that one would lose nothing.
+      window.setTimeout(() => {
+        if (!opened.onclose || offlineBannerLost) return;
+        offlineBannerLost = true;
+        opened.onclose({ code: 1006 });
+      }, 50);
+    }
+    return opened;
   },
   close() {},
 };

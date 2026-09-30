@@ -6,6 +6,7 @@ import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
+import { OfflineBanner } from "../components/OfflineBanner.js";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
 import "../styles.css";
@@ -698,28 +699,48 @@ const rightPanel = {
   consumeSubagentFocusRequest() {},
 };
 
+/**
+ * `?shell=1` puts the frame in the shell's main column, beside a rail-wide column, and `&banner=1`
+ * adds the offline page banner above it, so the session strip's popovers can be held to their
+ * triggers when `.main` is their containing block (#2105).
+ */
+const inShell = params.get("shell") === "1";
+const withBanner = params.get("banner") === "1";
+
+const frame = (
+  /* The frame stands in for the pane an inbox splitter produces: fixed height, clipped. */
+  <div
+    id="frame"
+    style={{ height: frameHeight, width: frameWidth, display: "flex", flexDirection: "column", overflow: "hidden" }}
+  >
+    <SessionDetail
+      sessionId={SESSION_ID}
+      mode={mode}
+      rightPanel={rightPanel}
+      onOpenTerminal={() => {}}
+      pinnedOpen={pinnedOpen}
+      composerDraftLoader={async () => ({
+        text: composerDraftText,
+        images: composerDraftImages,
+        updatedAt: 1,
+      })}
+    />
+  </div>
+);
+
 createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
     <StoreProvider connection={connection} navigation={navigation}>
       <EventSeeder />
-      {/* The frame stands in for the pane an inbox splitter produces: fixed height, clipped. */}
-      <div
-        id="frame"
-        style={{ height: frameHeight, width: frameWidth, display: "flex", flexDirection: "column", overflow: "hidden" }}
-      >
-        <SessionDetail
-          sessionId={SESSION_ID}
-          mode={mode}
-          rightPanel={rightPanel}
-          onOpenTerminal={() => {}}
-          pinnedOpen={pinnedOpen}
-          composerDraftLoader={async () => ({
-            text: composerDraftText,
-            images: composerDraftImages,
-            updatedAt: 1,
-          })}
-        />
-      </div>
+      {inShell ? (
+        <div className="app">
+          <nav className="app-rail" aria-label="Primary Navigation" />
+          <main className="main">
+            {withBanner && <OfflineBanner connecting={false} onRetryNow={() => false} />}
+            {frame}
+          </main>
+        </div>
+      ) : frame}
     </StoreProvider>
   </ApiProvider>,
 );

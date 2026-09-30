@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { fixedContainingBlockOffset } from "../fixed-containing-block.js";
 import { isEditableShortcutTarget } from "../shortcuts.js";
 
 export interface AnchoredPopover<Root extends HTMLElement, Anchor extends HTMLElement> {
@@ -109,14 +110,31 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
 
   useLayoutEffect(() => {
     if (!open) { setPlacement(null); return; }
+    // What the panel was last placed for. A scroll elsewhere on the page, or a resize that moves
+    // nothing, leaves the placement as it is and measures nothing more.
+    let placedFor = "";
     const place = () => {
       const rect = anchorRef.current?.getBoundingClientRect();
       if (!rect) return;
-      setPlacement(placePanel(
+      const key = `${rect.left},${rect.top},${rect.bottom},${window.innerWidth},${window.innerHeight}`;
+      if (key === placedFor) return;
+      placedFor = key;
+      const placement = placePanel(
         rect,
         { width: window.innerWidth, height: window.innerHeight },
         { width, height },
-      ));
+      );
+      // The panel stays in the strip, whose type and colour it inherits, so it is not portalled.
+      // Placement is in viewport coordinates; the panel's `top`, `left` and `bottom` count from the
+      // box `position: fixed` resolves against, which an ancestor container becomes at the build
+      // floor (§2.10). The root is the panel's parent, so it shares the panel's ancestors.
+      const box = fixedContainingBlockOffset(rootRef.current);
+      setPlacement({
+        left: placement.left - box.left,
+        top: placement.top === undefined ? undefined : placement.top - box.top,
+        bottom: placement.bottom === undefined ? undefined : placement.bottom - box.bottom,
+        maxHeight: placement.maxHeight,
+      });
     };
     place();
     window.addEventListener("resize", place);

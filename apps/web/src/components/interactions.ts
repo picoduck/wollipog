@@ -14,6 +14,7 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react";
+import { fixedContainingBlockOffset } from "../fixed-containing-block.js";
 
 export type RovingKey = "ArrowDown" | "ArrowRight" | "ArrowUp" | "ArrowLeft" | "Home" | "End";
 
@@ -101,10 +102,16 @@ export function useAnchoredMenuStyle(
       setStyle(undefined);
       return;
     }
+    // What the list was last placed for. A scroll elsewhere on the page, or a resize that moves
+    // nothing, leaves the placement as it is and measures nothing more.
+    let placedFor = "";
     const update = () => {
       const trigger = triggerRef.current;
       if (!trigger) return;
       const rect = trigger.getBoundingClientRect();
+      const key = `${rect.left},${rect.top},${rect.width},${rect.height},${window.innerWidth},${window.innerHeight}`;
+      if (key === placedFor) return;
+      placedFor = key;
       const place = (desiredHeight: number) => anchoredMenuPlacement({
         trigger: rect,
         viewportWidth: window.innerWidth,
@@ -125,12 +132,19 @@ export function useAnchoredMenuStyle(
         const wanted = Math.min(rendered, options.maxHeight ?? rendered);
         if (wanted > options.desiredHeight) placement = place(wanted);
       }
+      // The list stays beside its field, whose font it takes (§8.3), so it is not portalled. The
+      // placement above is in viewport coordinates, and the list's `top`, `left` and `bottom` count
+      // from the box `position: fixed` resolves against: the viewport, or an ancestor with a
+      // transform or layout containment, which the main column's `app` container is at the build
+      // floor (§2.10). Measured from the list's own parent, falling back to the field's parent
+      // before the list exists.
+      const box = fixedContainingBlockOffset(content?.parentElement ?? trigger.parentElement);
       setStyle({
         position: "fixed",
-        top: placement.top,
-        left: placement.left,
+        top: placement.top === "auto" ? "auto" : placement.top - box.top,
+        left: placement.left - box.left,
         right: "auto",
-        bottom: placement.bottom,
+        bottom: placement.bottom === "auto" ? "auto" : placement.bottom - box.bottom,
         width: placement.width,
         maxHeight: placement.maxHeight,
       });

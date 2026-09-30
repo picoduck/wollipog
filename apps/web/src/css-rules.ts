@@ -74,8 +74,17 @@ export interface MediaBlock {
 
 /** Every `@media` block in the stylesheet, at any nesting depth. */
 export function mediaBlocks(css: string): MediaBlock[] {
+  return atRuleBlocks(css, "media");
+}
+
+/** Every `@container` block in the stylesheet, at any nesting depth; `params` keeps the name. */
+export function containerBlocks(css: string): MediaBlock[] {
+  return atRuleBlocks(css, "container");
+}
+
+function atRuleBlocks(css: string, name: "media" | "container"): MediaBlock[] {
   const blocks: MediaBlock[] = [];
-  parse(css).walkAtRules("media", (atRule: AtRule) => {
+  parse(css).walkAtRules(name, (atRule: AtRule) => {
     const maxWidths = [...atRule.params.matchAll(/max-width:\s*(\d+)px/g)]
       .map((match) => Number.parseInt(match[1]!, 10));
     blocks.push({

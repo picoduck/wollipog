@@ -431,13 +431,25 @@ One definition of each tier, shared by components and the stylesheet (#1969):
   the JS constants; compact-tier rules are written `@media (max-width: 1099px)`. `--bp-tablet` and
   `--bp-desktop` are retired. The Sessions card's 900px density threshold (#901) is not a tier and
   has no token; it stays until the Sessions row redesign replaces it.
-- **The `app` container is deferred.** Making the main column a named size container (`container:
-  app / inline-size`) waits for its first consumer, the session bar. At the build floor (Chrome
-  111–128, Safari before the CSSWG dropped layout containment from `container-type`), a size
-  container is also the containing block of every `position: fixed` descendant. Inside the main
-  column that includes the Select listbox and the Snooze popover, which place themselves in
-  viewport coordinates and would open shifted by the rail's width. The container lands together
-  with portalling them, as the page header's ⋯ menu already is.
+- **The main column is the `app` container.** From 761px up, `.main` is `container: app /
+  inline-size`. A rule that depends on the room the column has after the rail and any docked panel
+  queries it with `@container app (max-width: 1099px)`, not the viewport; the Projects list pane is
+  the first such rule. A phone has no `app` container. There the column is the viewport's width, and
+  the phone's full-screen right panel and editor note are placed in viewport coordinates.
+- **Nothing fixed inside the column may assume the viewport.** At the build floor (Chrome 111–128,
+  and Safari before the CSSWG dropped layout containment from `container-type`), a size container
+  is also the containing block of every `position: fixed` descendant. Each fixed surface in the
+  column therefore does one of two things. It is portalled to `<body>` (menus and popovers, §9;
+  dialogs, §7; the command palette). Or it stays in place and subtracts the offset that
+  `fixedContainingBlockOffset()` (`fixed-containing-block.ts`) measures for its real containing
+  block. Surfaces that stay in place are the Select and combobox lists (which take their field's
+  font), the Snooze suggestions, the session strip's popovers (which take the strip's type) and the
+  F6 zone line (a pseudo-element). The measurement inserts a probe and forces a layout, so it runs
+  only when the surface opens or its anchor moves, never on a scroll or resize that moved nothing.
+  A surface that stays in place remains inside the column's stacking context at the floor, which
+  is harmless because nothing outside the column overlaps an anchored surface. A new fixed surface
+  does one or the other. `app-container.spec.ts` forces layout containment on `.main` to hold every
+  one of them to its trigger.
 
 ### 2.11 Contrast (Wollipog Scheme)
 
@@ -1263,7 +1275,9 @@ workflow step list is a different component and keeps a local name.
   around listbox options. `useAnchoredMenuStyle` anchors it to its field and sets its width (at
   least the trigger and at least 280px, §8.3) and its one height cap, `SELECT_MENU_MAX_HEIGHT_PX` in
   `ChoiceControls.tsx`; the stylesheet sets no height. It stays anchored to its field on phones and
-  appears in place, without the menu's entrance motion.
+  appears in place, without the menu's entrance motion. It is not portalled: it stays beside its
+  field and takes the field's font. Its placement is measured against its real containing block
+  (§2.10), so an ancestor container cannot move it.
   It replaced `.ui-select-list`.
 
 ### 9.2 Popover

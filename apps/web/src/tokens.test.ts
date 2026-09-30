@@ -8,7 +8,7 @@ import {
   TABLET_BREAKPOINT_PX,
   WIDE_BREAKPOINT_PX,
 } from "./components/useIsMobile.js";
-import { customProperties, mediaBlocks, topLevelRule } from "./css-rules.js";
+import { containerBlocks, customProperties, mediaBlocks, topLevelRule } from "./css-rules.js";
 import { ALTERNATIVES, SCHEMES, THEMES } from "./palettes.js";
 
 const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
@@ -174,17 +174,33 @@ test("the tier tokens mirror the JS tier constants, and the retired ones are gon
   }
 });
 
-test("every compact-tier media query ends where useIsCompact() does", () => {
+test("every compact-tier query ends where useIsCompact() does", () => {
   // Anchored by what each block does, as the phone test above is, not by how close its width is.
-  const compact = mediaBlocks(css).filter((block) =>
-    block.containsSelector('.page-more[data-overflow="2"]') ||
+  // A compact rule is written against the viewport (@media) or the main column (@container app).
+  const compact = [...mediaBlocks(css).map((block) => ({ ...block, kind: "@media" })),
+    ...containerBlocks(css).map((block) => ({ ...block, kind: "@container" }))].filter((block) =>
+    block.containsSelector('.page-more[data-overflow="2"]') && block.kind === "@media" ||
     block.declarationsForSelector(".project-manager-grid").get("grid-template-columns")?.includes("280px minmax(0, 1fr)") ||
     block.containsSelector(".archive-session-meta"));
   assert.equal(compact.length, 3, "the page header's priority+ tier, the Projects list pane and the Archived Sessions table");
   for (const block of compact) {
     assert.deepEqual(block.maxWidths, [COMPACT_BREAKPOINT_PX - 1],
-      `@media ${block.params} must end at the shared compact breakpoint, or CSS and useIsCompact() disagree`);
+      `${block.kind} ${block.params} must end at the shared compact breakpoint, or CSS and useIsCompact() disagree`);
   }
+  // The Projects list pane answers to the width the main column has (§2.10, #2105).
+  const listPane = compact.find((block) => block.containsSelector(".project-manager-grid"));
+  assert.equal(listPane?.kind, "@container");
+  assert.match(listPane!.params, /^app\s*\(/, "the Projects list pane queries the main column's `app` container");
+});
+
+test("the main column is the `app` size container from the compact tier up (§2.10)", () => {
+  const desktop = mediaBlocks(css).filter((block) =>
+    block.declarationsForSelector(".main").get("container")?.includes("app / inline-size"));
+  assert.equal(desktop.length, 1, "one rule makes `.main` the `app` container");
+  assert.equal(desktop[0]!.params.replace(/\s+/g, " ").trim(), `(min-width: ${MOBILE_BREAKPOINT_PX + 1}px)`,
+    "not on a phone, where the column is the viewport and fixed phone surfaces use viewport coordinates");
+  assert.equal(topLevelRule(css, ".main").nodes.some((node) => node.type === "decl" && node.prop.startsWith("container")), false,
+    "the unconditional `.main` rule declares no container");
 });
 
 test("the token block declares every promised member of every scale", () => {

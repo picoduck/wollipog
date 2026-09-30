@@ -659,7 +659,9 @@ kbd {
    and measures its top edge into the `--zone-line-*` properties. Fixed rather than absolute, because
    most zone roots scroll and an absolute line would scroll away with their content. A border rather
    than a background, because forced colors repaints a border in a system colour but a background
-   as Canvas, which would hide the line. */
+   as Canvas, which would hide the line. A pseudo-element cannot be portalled, so focus-zones.ts
+   writes its offsets relative to its real containing block: the main column's `app` container is
+   that block at the build floor (§2.10). */
 .zone-lit::after {
   position: fixed;
   z-index: var(--z-sticky);
@@ -1032,6 +1034,15 @@ kbd {
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+/* The main column is the `app` size container (§2.10), so a rule can answer to the width the column
+   has after the rail and any docked panel rather than to the viewport. At the build floor a size
+   container is also the box `position: fixed` resolves against for everything inside it. Every
+   anchored surface in the column accounts for that (fixed-containing-block.ts), or is portalled
+   out of it. Not on a phone: there the column is the viewport's width, so a container adds nothing,
+   and the phone's full-screen right panel and editor note are placed in viewport coordinates. */
+@media (min-width: 761px) {
+  .main { container: app / inline-size; }
 }
 .main-body {
   flex: 1;
@@ -1526,6 +1537,8 @@ kbd {
   white-space: nowrap;
 }
 @media (max-width: 760px) {
+  /* Viewport coordinates inside the main column: safe only because a phone's `.main` is not the
+     `app` container (§2.10), so no containing block sits between the note and the viewport. */
   .editor-note {
     position: fixed;
     pointer-events: none;
@@ -2557,7 +2570,9 @@ button.status { cursor: pointer; }
    placement wins over the sheet's, and this rule restates the container the sheet rules replace.
    It has no stylesheet corner (`top`/`left` auto) and no entrance animation: it appears where its
    field is, already in place, as the list always has. It takes its field's font rather than the
-   menu's, as it always has, so a list reads like the form it belongs to. */
+   menu's, as it always has, so a list reads like the form it belongs to — which is why it is not
+   portalled like the menu. Its placement subtracts its real containing block's offset instead, so
+   the main column's `app` container cannot move it at the build floor (§2.10). */
 .menu.listbox {
   top: auto;
   left: auto;
@@ -10407,8 +10422,10 @@ body.shell-dock-dragging * {
   background: var(--bg-elev);
   grid-template-columns: 310px minmax(0, 1fr);
 }
-/* The compact tier's list pane (§2.10, §15.2); phones stack the two below. */
-@media (max-width: 1099px) {
+/* The compact tier's list pane (§2.10, §15.2), measured on the main column rather than the
+   viewport: the labelled rail takes width the viewport query could not see. Phones stack the two
+   below. */
+@container app (max-width: 1099px) {
   .project-manager-grid { grid-template-columns: 280px minmax(0, 1fr); }
 }
 .project-manager-list {
@@ -13520,7 +13537,9 @@ body.shell-dock-dragging * {
   }
 
   /* Right panel: a full-width overlay under the topbar instead of a side column.
-     !important beats the inline desktop width RightPanel.tsx sets. */
+     !important beats the inline desktop width RightPanel.tsx sets. Its edges are viewport
+     coordinates, which holds because a phone's `.main` is not the `app` container (§2.10): as one
+     at the build floor, it would end the panel --bottom-bar-h above the tab bar. */
   .right-panel {
     position: fixed;
     top: calc(50px + env(safe-area-inset-top, 0px)); /* the mobile topbar height above */
