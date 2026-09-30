@@ -228,3 +228,72 @@ test("a safety check still running after its confirmation is cancelled keeps the
   assert.equal(folderRow().disabled, false, "once it settles the dialog reads again");
   await unmount();
 });
+
+const newVersion = () => ({ previewId: "preview", candidate, files: [{ ...file, content: `${file.content}!` }], previousFiles: [file],
+  digest: "e", disposition: "update" as const, assignmentCount: 0 });
+
+test("a failed page refresh after an import stays reported through the automatic re-read", async () => {
+  const calls: Record<string, number> = {};
+  let previews = 0;
+  const base = fakeApi(calls);
+  const client = { ...base,
+    previewMachineSkill: async (id: string, candidateId: string) => (previews++ === 0 ? newVersion() : base.previewMachineSkill(id, candidateId)),
+    importMachineSkill: async () => ({}) as never,
+  } as ApiClient;
+  const unmount = await mountDialog(client, async () => { throw new Error("Skills list unavailable."); });
+  await act(async () => { folderRow().click(); });
+  await settle();
+  await act(async () => { buttonNamed("Import as New Version").click(); });
+  await settle();
+  assert.equal(previews, 2, "the folder is read again after the import");
+  assert.match(document.body.textContent ?? "", /didn't refresh: Skills list unavailable\./u);
+  await unmount();
+});
+
+test("Import waits while a recovery read dismissed before it finished is still running", async () => {
+  const calls: Record<string, number> = {};
+  const journals = deferred<Awaited<ReturnType<ApiClient["inspectMachineSkillRecovery"]>>>();
+  const base = fakeApi(calls);
+  const client = { ...base, previewMachineSkill: async () => newVersion(), inspectMachineSkillRecovery: () => journals.promise } as ApiClient;
+  const unmount = await mountDialog(client, async () => undefined);
+  await act(async () => { folderRow().click(); });
+  await settle();
+  assert.equal(buttonNamed("Import as New Version").disabled, false);
+  await act(async () => { buttonNamed("More Actions").click(); });
+  await act(async () => { buttonNamed("Adoption Recovery…").click(); });
+  await settle();
+  await act(async () => { buttonNamed("Done", dialogTitled("Adoption Recovery")).click(); });
+  await settle();
+  assert.ok(buttonNamed("Import as New Version").disabled, "the server is still reading the journals");
+  await act(async () => { journals.resolve(await base.inspectMachineSkillRecovery("runner-1")); });
+  await settle();
+  assert.equal(buttonNamed("Import as New Version").disabled, false);
+  await unmount();
+});
+
+test("a restore still running after its confirmation is cancelled locks Restore Original, then refreshes", async () => {
+  const calls: Record<string, number> = {};
+  const restoring = deferred<Awaited<ReturnType<ApiClient["restoreMachineSkillRecovery"]>>>();
+  let restores = 0;
+  let refreshes = 0;
+  const client = { ...fakeApi(calls), restoreMachineSkillRecovery: () => { restores++; return restoring.promise; } } as ApiClient;
+  const unmount = await mountDialog(client, async () => { refreshes++; });
+  await act(async () => { buttonNamed("More Actions").click(); });
+  await act(async () => { buttonNamed("Adoption Recovery…").click(); });
+  await settle();
+  const recovery = dialogTitled("Adoption Recovery");
+  await act(async () => { buttonNamed("Restore Original…", recovery).click(); });
+  await settle();
+  await act(async () => { buttonNamed("Restore Original", dialogTitled("Restore Original")).click(); });
+  await settle();
+  await act(async () => { buttonNamed("Cancel", dialogTitled("Restore Original")).click(); });
+  await settle();
+  assert.ok(buttonNamed("Restore Original…", recovery).disabled, "a second restore would meet the first");
+  assert.equal(restores, 1);
+  await act(async () => { restoring.resolve({ status: "restored" }); });
+  await settle();
+  assert.equal(calls.recovery, 2, "the journals are read again once the cancelled restore finishes");
+  assert.equal(refreshes, 1, "and the page is refreshed after it restored");
+  assert.equal(buttonNamed("Restore Original…", recovery).disabled, false);
+  await unmount();
+});

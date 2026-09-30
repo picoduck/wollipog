@@ -25,11 +25,14 @@ const restorable = (operation: SkillAdoptionRecoveryOperation) =>
  * with links, stacked over Import from Machine. Restoring one asks for a non-destructive
  * confirmation; the request and its server-side confirmation are unchanged.
  */
-export function SkillAdoptionRecoveryDialog({ runner, machineName, track, onClose, onRestored }: {
+export function SkillAdoptionRecoveryDialog({ runner, machineName, track, machineBusy, onClose, onRestored }: {
   runner: RunnerView;
   machineName: string;
   /** The import dialog's machine-request tracker: its reads wait until these settle. */
   track: MachineRequestTracker;
+  /** A machine request is still running (perhaps one whose confirmation was cancelled): the server
+   * refuses a second, so nothing here starts one until it settles. */
+  machineBusy: boolean;
   onClose: () => void;
   onRestored: () => Promise<void>;
 }) {
@@ -69,18 +72,28 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, track, onClos
   const restore = async (operation: SkillAdoptionRecoveryOperation) => {
     setStatus(null);
     let restored = false;
+    let stopped = false;
     const confirmed = await confirm({
       title: "Restore Original",
       message: `The original ${operation.name} folder returns to ${operation.sourceDirectory} on ${machineName}. The link is kept in the recovery journal.`,
       confirmLabel: "Restore Original",
       progress: "Restoring the original folder…",
-      onConfirm: async () => {
+      onConfirm: async (signal) => {
         let result: Awaited<ReturnType<typeof api.restoreMachineSkillRecovery>>;
         try {
           result = await track(() => api.restoreMachineSkillRecovery(runner.runnerId, operation.operationId));
         } catch (cause) {
           // The confirmation shows this text as is, so it is put in the dialog's words first (§17.2).
           throw new Error(userFacingMachineError(cause, machineName));
+        }
+        // Cancelled while the machine was restoring: the confirmation has gone, but the restore may
+        // have finished, so the journals (and, after a restore, the page) are read again.
+        if (signal.aborted) {
+          void (async () => {
+            await inspect();
+            if (result.status === "restored") await onRestored();
+          })();
+          return;
         }
         if (result.status === "restored" || result.status === "not_needed") {
           restored = result.status === "restored";
@@ -89,13 +102,18 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, track, onClos
             : "The original folder was already in place; nothing needed restoring." });
           return;
         }
-        void inspect();
+        // Read the journals again once the confirmation settles, not now: a retry from the
+        // confirmation must not meet a second machine request.
+        stopped = true;
         throw new Error(result.error
           ? userFacingMachineError(new Error(result.error), machineName)
           : "Restore stopped safely. Check the journal below before trying again.");
       },
     });
-    if (!confirmed) return;
+    if (!confirmed) {
+      if (stopped) await inspect();
+      return;
+    }
     await inspect();
     if (restored) await onRestored();
   };
@@ -109,7 +127,7 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, track, onClos
       <span className="sr-only">Loading recovery journals…</span>
       <div className="skeleton-row" /><div className="skeleton-row" /><div className="skeleton-row" />
     </div> : error ? <Notice tone="danger" title="Couldn't Load Recovery Journals"
-      actions={<button className="btn sm" type="button" onClick={() => void inspect()}>Retry</button>}>{error}</Notice>
+      actions={<button className="btn sm" type="button" disabled={machineBusy} onClick={() => void inspect()}>Retry</button>}>{error}</Notice>
       : <>
         {recovery?.truncated && <Notice tone="warning" title="Some Journals Aren't Shown">
           Restore or resolve the journals below, then open Adoption Recovery again to see the rest.
@@ -124,7 +142,7 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, track, onClos
               </span>
               <span className="row-trail">{RECOVERY_STATE_LABEL[operation.state] ?? "Unknown"}</span>
               {restorable(operation) && <button className="btn sm" type="button"
-                aria-describedby={`${rowId}-${index}`} onClick={() => void restore(operation)}>Restore Original…</button>}
+                disabled={machineBusy} aria-describedby={`${rowId}-${index}`} onClick={() => void restore(operation)}>Restore Original…</button>}
             </div>)}
           </div>}
       </>}

@@ -178,17 +178,21 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
   // choice is read when it finishes, so the review always matches the highlighted row.
   const wanted = useRef<string | null>(null);
   const readingRef = useRef(false);
-  const read = async (candidateId: string) => {
+  const read = async (candidateId: string, keepError = false) => {
     wanted.current = candidateId;
     if (readingRef.current) return;
     readingRef.current = true;
     setReading(true);
+    // An automatic re-read keeps what the change before it reported; a person's choice clears it.
+    let keep = keepError;
     try {
       while (wanted.current !== null) {
         const id: string = wanted.current;
         const current = discoveryRef.current;
         if (!current || closed.current) break;
-        setPreview(null); setPreviewError(null); setAccepted(false); setError(null);
+        setPreview(null); setPreviewError(null); setAccepted(false);
+        if (!keep) setError(null);
+        keep = false;
         try {
           const next = await track(() => api.previewMachineSkill(current.discoveryId, id));
           if (closed.current || discoveryRef.current !== current) break;
@@ -236,7 +240,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
     await refreshPage();
     setImporting(false);
     // Read the folder again: it now matches the latest version, which may offer Replace with Link.
-    if (!closed.current) void read(shown.candidate.id);
+    if (!closed.current) void read(shown.candidate.id, true);
   };
 
   /** Refresh the Skills page after a change. Its failure is reported, and never undoes the change. */
@@ -367,7 +371,8 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
         {primaryReason && <p className="skill-machine-import-reason" id={reasonId}>{primaryReason}</p>}
         <button className="btn" type="button" disabled={importing} onClick={close}>Cancel</button>
         <BusyButton className="btn primary" busy={importing} progress={`Importing ${shown?.candidate.name ?? "the skill"}…`}
-          disabled={!importable || reading || confirmingAdoption || settling || (needsConsent && !accepted)}
+          disabled={!importable || reading || confirmingAdoption || settling || (machineRequests > 0 && !importing) ||
+            (needsConsent && !accepted)}
           aria-describedby={primaryReason ? reasonId : undefined} onClick={() => void submit()}>
           {machineSkillImportLabel(shown?.disposition)}
         </BusyButton>
@@ -396,6 +401,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
       runner={runner} machineName={machineName} track={track} onCancel={() => setConfirmingAdoption(false)}
       onDone={(result) => adopted(result, shown.candidate)} />}
     {recoveryOpen && runner && <SkillAdoptionRecoveryDialog runner={runner} machineName={machineName} track={track}
+      machineBusy={machineRequests > 0}
       onClose={() => setRecoveryOpen(false)} onRestored={refreshPage} />}
   </>;
 }
@@ -406,23 +412,16 @@ function DialogMoreMenu({ label, items }: {
   items: Array<{ label: string; disabled?: boolean; reason?: string; onSelect: () => void }>;
 }) {
   const [open, setOpen] = useState(false);
-  const menu = useAccessibleMenu(open, setOpen, "dialog-more");
+  // Focus goes to the menu itself on open, so its Escape and Tab handling applies even when every
+  // item is unavailable and none can take focus.
+  const menu = useAccessibleMenu(open, setOpen, "dialog-more", "menu");
   return <>
     <button ref={menu.triggerRef} type="button" className="icon-btn" title={label} aria-label={label}
       aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menu.menuId : undefined}
-      onClick={menu.toggle} onKeyDown={(event) => {
-        // With every item disabled, focus stays here; Escape still belongs to the open menu.
-        if (open && event.key === "Escape") {
-          event.preventDefault();
-          event.stopPropagation();
-          menu.close(true);
-          return;
-        }
-        menu.onTriggerKeyDown(event);
-      }}>
+      onClick={menu.toggle} onKeyDown={menu.onTriggerKeyDown}>
       <MoreHorizontalIcon />
     </button>
-    {open && <MenuSurface surfaceRef={menu.menuRef} anchor={{ trigger: menu.triggerRef }} id={menu.menuId} label={label}
+    {open && <MenuSurface surfaceRef={menu.menuRef} anchor={{ trigger: menu.triggerRef }} id={menu.menuId} label={label} tabIndex={-1}
       align="end" inline onDismiss={() => menu.close(true)} onKeyDown={menu.onMenuKeyDown}>
       {items.map((item) => <MenuItem key={item.label} disabled={item.disabled} description={item.disabled ? item.reason : undefined}
         onClick={() => {

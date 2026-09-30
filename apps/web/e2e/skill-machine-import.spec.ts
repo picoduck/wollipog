@@ -382,4 +382,10 @@ test("Escape closes an open ⋯ menu whose only item is unavailable, and keeps t
   await expect(dialog).toBeVisible();
   await expect(row).toHaveAttribute("aria-current", "true");
   await expect(dialog.getByRole("button", { name: "More Actions", exact: true })).toBeFocused();
+  // Tab leaves the menu as it leaves any menu: closed, so a later Escape belongs to the dialog.
+  await dialog.getByRole("button", { name: "More Actions", exact: true }).click();
+  await expect(page.getByRole("menu")).toHaveCount(1);
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(dialog).toBeVisible();
 });
