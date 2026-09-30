@@ -8,7 +8,9 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView } from "@wollipog/protocol";
+import type {
+  ControlPlaneToUi, OrchestratorCampaignProjection, RunnerView, SessionEvent, SessionView,
+} from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -275,7 +277,8 @@ test("an invalid setup configuration shows only in the slot, ordered by severity
     assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Worktree Setup Failed",
       "danger, rank 3, shows over danger, rank 4");
     await act(async () => { fixture.button("+2 More")!.click(); });
-    const items = [...domWindow.document.querySelectorAll('[role="menu"] [role="menuitem"]')] as unknown as HTMLButtonElement[];
+    const items = [...domWindow.document.querySelectorAll('[role="menu"] [role="menuitem"]')] as unknown as
+      HTMLButtonElement[];
     assert.deepEqual(items.map((item) => item.textContent),
       ["Invalid Worktree Setup Configuration", "Account Switch Failed"], "danger before warning");
     await act(async () => { items[0]!.click(); });
@@ -294,6 +297,49 @@ test("an invalid setup configuration shows only in the slot, ordered by severity
     await act(async () => { fixture.button("Show Details")!.click(); });
     assert.equal(notice()!.querySelector(".notice-details-body .code-well code")?.textContent,
       ".wollipog.json.version must be 1");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("campaign notices stay under the session bar, in order, outside the slot (#2036)", async () => {
+  const orchestratorCampaign = {
+    status: "blocked",
+    policyRevision: 1,
+    decisionOwners: {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+    },
+    limits: { maximumConcurrentChildren: 4, occupied: 1, remaining: 3, costBudgetUsd: null, maxToolCalls: null },
+    uiEvidenceReview: { status: "available", effectiveOwner: "human" },
+    children: { total: 1, active: 0, waitingHuman: 0, blocked: 1, verified: 0, cleanupPending: 0 },
+    heldChildren: [{ sessionId: "held-child", holds: [{
+      kind: "worktree_recovery", holdId: "hold-one", since: 1,
+      reason: "The worktree is on the wrong branch.", recoveryAction: "Select the worktree again.",
+    }] }],
+    continuation: {
+      state: "failed", pendingEvents: 2, continuationId: "campaign_cont_failed", commandId: "campaign_prompt_failed",
+      eventFromSeq: 1, eventThroughSeq: 2, attemptCount: 3, updatedAt: 1, canRetry: true,
+    },
+    pendingDecisions: { human: 0, orchestrator: 0 },
+    followUps: { unique: 0, duplicates: 0 },
+  } as OrchestratorCampaignProjection;
+  const fixture = await mount(sessionView({ orchestratorCampaign, worktrees: [setupFailure] }), {
+    client: { descendantRequests: async () => ({ requests: [], blockedChildren: [] }) },
+  });
+  try {
+    const continuation = fixture.container.querySelector('[aria-label="Campaign Continuation: Failed"]');
+    const held = fixture.container.querySelector(".campaign-held-children");
+    assert.ok(continuation && held, "both campaign notices render");
+    assert.equal(continuation.closest(".session-notice-slot"), null, "Campaign Continuation is not a slot entry");
+    assert.equal(held.closest(".session-notice-slot"), null, "Held Children is not a slot entry");
+    assert.ok(continuation.compareDocumentPosition(held) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING,
+      "Campaign Continuation comes first");
+    assert.ok(held.compareDocumentPosition(fixture.slot()!) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING,
+      "both sit above the transcript and the slot");
+    assert.equal(fixture.notices().length, 1);
+    assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Worktree Setup Failed");
+    assertNoDomNode(fixture.container.querySelector(".session-notice-more"), "campaign notices are not counted");
   } finally {
     await fixture.unmount();
   }

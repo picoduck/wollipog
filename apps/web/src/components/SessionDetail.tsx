@@ -5023,6 +5023,9 @@ function SessionDetailLoaded({
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
         />
+        {/* Campaign notices, not session notices (§13.2; #2036): they describe the campaign, not
+            whether this session can take its next turn, so they stay here, in this order, rather
+            than in the notice slot above the composer. */}
         {session.orchestratorCampaign?.continuation && (
           <CampaignContinuationNotice
             continuation={session.orchestratorCampaign.continuation}
