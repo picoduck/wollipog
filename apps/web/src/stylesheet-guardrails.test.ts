@@ -665,6 +665,99 @@ test("no selector is defined more than twice", () => {
 });
 
 /**
+ * The icon scale (§18): 14, 16 and 20px (`--icon-sm`, `--icon`, `--icon-lg`), and 24px for
+ * empty-state tiles and the phone tab bar.
+ *
+ * #1955 guards the `size` prop, but a stylesheet rule overrides an SVG's width and height
+ * attributes, so an off-scale rule undid the prop without a trace: the phone session header drew
+ * its actions at 15px beside 16px icons everywhere else (#2081).
+ */
+const ICON_SCALE_PX = new Set([14, 16, 20, 24]);
+const ICON_SIZE_PROPERTIES = /^(?:(?:min|max)-)?(?:width|height|inline-size|block-size)$/;
+
+/**
+ * Rules allowed to size an icon off the scale, by `contextKey`, each with the issue that owns it.
+ *
+ * Empty. #2081 was written to exempt the desktop rail's 26px glyphs (`.app-rail .rail-item >
+ * .app-icon`, `.rail-settings .settings-trigger svg`) for #1958, which then deleted both rules and
+ * drew the rail at 20px (#2073). An entry here must still name a rule that sizes an icon off the
+ * scale; when the owner moves it onto the scale, the stale entry fails until it is removed.
+ */
+export const ICON_SIZE_EXEMPTIONS: ReadonlyMap<string, { owner: string; why: string }> = new Map();
+
+/** A selector's compounds, split at combinators outside parentheses, brackets and strings. */
+function selectorCompounds(selector: string): string[] {
+  const compounds: string[] = [];
+  let current = "";
+  let depth = 0;
+  let quote: "\"" | "'" | null = null;
+  for (const char of selector.trim()) {
+    if (quote) {
+      if (char === quote) quote = null;
+    } else if (char === "\"" || char === "'") quote = char;
+    else if (char === "(" || char === "[") depth += 1;
+    else if (char === ")" || char === "]") depth -= 1;
+    else if (depth === 0 && /[\s>+~]/.test(char)) {
+      if (current) compounds.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current) compounds.push(current);
+  return compounds;
+}
+
+/**
+ * Whether a selector's subject — its last compound — is an icon: an `svg` element or `.app-icon`.
+ *
+ * `:is()` and `:where()` offer alternatives for the subject, so an icon among them counts; `:not()`
+ * and `:has()` only filter it, so theirs do not.
+ */
+export function targetsIcon(selector: string): boolean {
+  const subject = selectorCompounds(selector).at(-1) ?? "";
+  for (const pseudo of [":is", ":where"]) {
+    const argument = functionalPseudoArgument(subject, pseudo);
+    if (argument !== null && topLevelSelectorMembers(argument).some(targetsIcon)) return true;
+  }
+  const own = subject.replace(/:[\w-]+\((?:[^()]|\([^()]*\))*\)/g, "");
+  return /^(?:\*\|)?svg(?![\w-])/i.test(own) || /\.app-icon(?![\w-])/.test(own);
+}
+
+/** Every width or height declaration on an icon whose px literals are off the scale, by rule. */
+export function offScaleIconSizes(sheet: postcss.Root): { rule: string; declaration: string }[] {
+  const found: { rule: string; declaration: string }[] = [];
+  sheet.walkDecls((decl) => {
+    const rule = decl.parent;
+    if (rule?.type !== "rule" || !ICON_SIZE_PROPERTIES.test(decl.prop)) return;
+    if (!topLevelSelectorMembers((rule as postcss.Rule).selector).some(targetsIcon)) return;
+    const literals = [...stripComments(decl.value).matchAll(/(?<![\w.-])(\d*\.?\d+)px\b/gi)];
+    if (literals.some(([, px]) => !ICON_SCALE_PX.has(Number(px)))) {
+      found.push({ rule: contextKey(rule as postcss.Rule), declaration: `${decl.prop}: ${decl.value}` });
+    }
+  });
+  return found;
+}
+
+export function assertIconSizesOnScale(
+  found: readonly { rule: string; declaration: string }[],
+  exemptions: ReadonlyMap<string, { owner: string; why: string }>,
+): void {
+  const offScale = found.filter(({ rule }) => !exemptions.has(rule)).map(({ rule, declaration }) => `${rule} { ${declaration} }`);
+  assert.deepEqual(offScale, [],
+    "an icon is sized off the §18 scale (docs/design-system.md): use var(--icon-sm), var(--icon) or " +
+    "var(--icon-lg) (14, 16 or 20px), or 24px for an empty-state tile or the phone tab bar");
+  for (const [rule, { owner }] of exemptions) {
+    assert.ok(found.some((entry) => entry.rule === rule),
+      `${rule}: exempted from the icon scale for ${owner}, but no longer sizes an icon off it; remove its ICON_SIZE_EXEMPTIONS entry`);
+  }
+}
+
+test("every stylesheet icon size is on the §18 scale", () => {
+  assertIconSizesOnScale(offScaleIconSizes(root), ICON_SIZE_EXEMPTIONS);
+});
+
+/**
  * PRODUCTION source only, in a STABLE order, read one file at a time.
  *
  * Three separate defects lived here. `src/e2e` reproduces production markup on purpose, which
@@ -1670,4 +1763,28 @@ test("an emoji in a clean component fails, and glyphs, comments and escapes are 
   assert.deepEqual(emojiLiterals("export const label = \"&#x1F512;\";", "a.ts"), []);
   assert.equal(decodeJsxEntities("Save &amp; Close &nope; &#x1F512;"), "Save & Close &nope; 🔒");
   assert.deepEqual(emojiLiterals("export const A = () => <b>  Thinking\n  💭  </b>;", "A.tsx"), ["A.tsx|💭|Thinking 💭"]);
+});
+
+test("an icon sized off the scale fails, naming the rule and §18, and a stale exemption fails", () => {
+  const sizesOf = (sheet: string) => offScaleIconSizes(postcss.parse(sheet));
+  const clean = ".notice-icon svg { width: var(--icon); height: var(--icon); }\n" +
+    ".state-icon svg { width: 24px; height: 24px; }\n.menu-icon, .menu-icon svg { width: 20px; }\n" +
+    ".usage-chart-svg { height: 260px; }\n.qr svg { width: 100%; height: auto; }\n" +
+    ".row:has(> svg) { height: 36px; }\n.icon-btn:not(svg) { width: 36px; }\n.app-icon-tile { width: 40px; }";
+  assert.deepEqual(sizesOf(clean), []);
+  assert.doesNotThrow(() => assertIconSizesOnScale(sizesOf(clean), new Map()));
+  for (const [rule, key] of [
+    [".access-section-title > .app-icon { width: 18px; }", "|.access-section-title>.app-icon"],
+    ["@media (max-width: 760px) { .session-header-action svg { height: 15px; } }", "@media (max-width: 760px)|.session-header-action svg"],
+    [".a, .b svg:hover { min-width: calc(var(--icon) + 2px); }", "|.a,.b svg:hover"],
+    [".bar :is(.x, svg) { inline-size: 18px; }", "|.bar :is(.x,svg)"],
+    [".rail .app-icon.active { max-height: 26px; }", "|.rail .app-icon.active"],
+  ] as const) {
+    const found = sizesOf(`${clean}\n${rule}`);
+    assert.deepEqual(found.map((entry) => entry.rule), [key], rule);
+    assert.throws(() => assertIconSizesOnScale(found, new Map()), failsNaming(key, "§18", "var(--icon)"));
+    assert.doesNotThrow(() => assertIconSizesOnScale(found, new Map([[key, { owner: "#1", why: "test" }]])));
+  }
+  assert.throws(() => assertIconSizesOnScale(sizesOf(clean), new Map([["|.gone svg", { owner: "#1958", why: "test" }]])),
+    failsNaming("|.gone svg", "#1958", "remove its ICON_SIZE_EXEMPTIONS entry"));
 });

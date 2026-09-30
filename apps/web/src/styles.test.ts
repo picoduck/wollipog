@@ -512,8 +512,8 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
     "the Session right panel must begin at the compact Session topbar's bottom edge");
 
   const actionIcon = phoneRule.declarationsForSelector(".session-header-action svg");
-  assert.deepEqual(actionIcon.get("width"), ["15px"]);
-  assert.deepEqual(actionIcon.get("height"), ["15px"]);
+  assert.deepEqual(actionIcon.get("width"), ["var(--icon)"]);
+  assert.deepEqual(actionIcon.get("height"), ["var(--icon)"]);
 });
 
 /**

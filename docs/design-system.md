@@ -1803,7 +1803,9 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
   `GearIcon`/`SettingsIcon`, Automations and Service Tier both `Zap`) are removed.
 - Guards (#1955): `LibraryIcon` warns in development for a size off the scale, a unit test fails on
   an off-scale size literal, and `text-glyph-ratchet.test.ts` records each remaining text-glyph site
-  with the area epic that removes it (docs/icon-system.md).
+  with the area epic that removes it (docs/icon-system.md). A stylesheet rule that sizes an icon
+  (`svg` or `.app-icon`) uses the `--icon*` tokens or 24px; `stylesheet-guardrails.test.ts` fails on
+  any other px width or height (#2081).
 
 ---
 

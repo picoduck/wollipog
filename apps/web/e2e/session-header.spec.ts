@@ -927,6 +927,8 @@ for (const viewport of [
           controlsLeft: Math.min(...controls.map((box) => box.left)),
           furthestControlRight: Math.max(...controls.map((box) => box.right)),
           controls: controls.map((box) => ({ width: box.width, height: box.height })),
+          controlIcons: [...element.querySelectorAll(".topbar-mobile-controls button svg")]
+            .map((node) => { const box = node.getBoundingClientRect(); return { width: box.width, height: box.height }; }),
         };
       });
       const subheaderBottom = await header.evaluate((element) => element.getBoundingClientRect().bottom);
@@ -942,16 +944,19 @@ for (const viewport of [
       expect(metrics.share.height).toBe(metrics.moreActions.height);
       expect(metrics.fork.width).toBe(metrics.share.width);
       expect(metrics.fork.height).toBe(metrics.share.height);
-      expect(metrics.forkIcon.width).toBe(15);
-      expect(metrics.forkIcon.height).toBe(15);
-      expect(metrics.shareIcon.width).toBe(15);
-      expect(metrics.shareIcon.height).toBe(15);
-      expect(metrics.moreActionsIcon.width).toBe(15);
-      expect(metrics.moreActionsIcon.height).toBe(15);
+      expect(metrics.forkIcon.width).toBe(16);
+      expect(metrics.forkIcon.height).toBe(16);
+      expect(metrics.shareIcon.width).toBe(16);
+      expect(metrics.shareIcon.height).toBe(16);
+      expect(metrics.moreActionsIcon.width).toBe(16);
+      expect(metrics.moreActionsIcon.height).toBe(16);
       for (const control of shellMetrics.controls) {
         expect(control.width).toBe(shellMetrics.trailingControl.width);
         expect(control.height).toBe(shellMetrics.trailingControl.height);
       }
+      // The top bar's icons are on the §18 scale too, the same 16px as the header's (#2081).
+      expect(shellMetrics.controlIcons.length).toBeGreaterThan(0);
+      for (const icon of shellMetrics.controlIcons) expect(icon).toEqual({ width: 16, height: 16 });
       expect(shellMetrics.trailingControl.right).toBeCloseTo(shellMetrics.furthestControlRight, 0);
       expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
       expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);

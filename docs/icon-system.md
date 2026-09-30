@@ -24,7 +24,8 @@ default, 20 for prominent toolbar icons, and 24 for empty-state tiles and the ph
 size logs a warning in development, the desktop rail's included: it draws at 20px, and its phone
 tabs at 24px. Product and vendor marks (`AgentIcon` and the custom exceptions below) keep their own
 sizes. A unit test fails when a production component passes an
-icon a literal size off the scale.
+icon a literal size off the scale, and `stylesheet-guardrails.test.ts` fails when a stylesheet rule
+sets an icon's width or height to a px value off it.
 
 ## Text Glyphs
 
@@ -136,7 +137,7 @@ The manifest declares `lucide-react` and `pnpm-lock.yaml` pins the resolved rele
 1. keep all imports named and centralized in `Icons.tsx`;
 2. run the full unit suite, typecheck, production build, and icon tree-shaking contract;
 3. compare representative navigation, action, status, file, and panel icons at 14px, 16px, 20px
-   and 24px, and the rail at its 26px;
+   and 24px;
 4. review light and dark themes at desktop and phone widths; and
 5. exercise interactive, disabled, selected, warning, and status styling without changing visible
    labels or accessible control names.

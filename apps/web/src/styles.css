@@ -7509,8 +7509,8 @@ button.file-head.source-path-link {
   min-width: 0;
 }
 .access-section-title > .app-icon {
-  width: 18px;
-  height: 18px;
+  width: var(--icon);
+  height: var(--icon);
   margin-top: 2px;
   color: var(--text-faint);
 }
@@ -13001,8 +13001,8 @@ body.shell-dock-dragging * {
     padding: 0;
   }
   .topbar:has(.mobile-session-back) .topbar-mobile-controls svg {
-    width: 15px;
-    height: 15px;
+    width: var(--icon);
+    height: var(--icon);
   }
   .main-body {
     padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
@@ -13164,7 +13164,7 @@ body.shell-dock-dragging * {
     display: none;
   }
   .session-header-action { width: 36px; height: 36px; }
-  .session-header-action svg { width: 15px; height: 15px; }
+  .session-header-action svg { width: var(--icon); height: var(--icon); }
   .detail-actions {
     flex-wrap: nowrap;
   }
