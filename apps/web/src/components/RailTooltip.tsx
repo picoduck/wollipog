@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState, type FocusEvent, type PointerEvent } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, type FocusEvent, type PointerEvent } from "react";
 
 /** §9.3: a first hover waits this long before the tooltip opens. */
 export const RAIL_TOOLTIP_DELAY_MS = 500;
@@ -50,6 +50,9 @@ export function useRailTooltip(enabled: boolean) {
   const [tip, setTip] = useState<RailTip | null>(null);
   const shownRef = useRef<RailTip | null>(null);
   const pendingRef = useRef<HTMLElement | null>(null);
+  // The keyboard-focused item, tracked apart from the pointer: hovering elsewhere borrows the
+  // tooltip, and it returns to this item when the pointer lets go.
+  const focusAnchorRef = useRef<HTMLElement | null>(null);
   const showTimerRef = useRef<number | null>(null);
   const hideTimerRef = useRef<number | null>(null);
   const warmUntilRef = useRef(0);
@@ -70,28 +73,43 @@ export function useRailTooltip(enabled: boolean) {
     setTip(next);
   }, []);
 
-  const hide = useCallback(() => {
-    clearShowTimer();
-    cancelHide();
-    commit(null);
-  }, [cancelHide, clearShowTimer, commit]);
-
-  const show = useCallback((anchor: HTMLElement, source: RailTip["source"]) => {
-    clearShowTimer();
-    cancelHide();
+  /** The tip an item shows now, read from the item itself; null once it has left the rail. */
+  const measure = useCallback((anchor: HTMLElement, source: RailTip["source"]): RailTip | null => {
     const name = anchor.dataset["railTip"];
-    if (!name || !anchor.isConnected) return commit(null);
+    if (!name || !anchor.isConnected) return null;
     const item = anchor.getBoundingClientRect();
     const railEdge = anchor.closest(".app-rail")?.getBoundingClientRect().right ?? item.right;
-    commit({
+    return {
       anchor,
       name,
       keys: anchor.dataset["railKeys"] || null,
       source,
       top: item.top + item.height / 2,
       left: railEdge + RAIL_TOOLTIP_OFFSET_PX,
-    });
+    };
+  }, []);
+
+  /** What shows once the pointer lets go: the focused item's tip, if one still has focus. */
+  const settle = useCallback((): RailTip | null => {
+    const focused = focusAnchorRef.current;
+    const next = focused ? measure(focused, "focus") : null;
+    if (!next) focusAnchorRef.current = null;
+    return next;
+  }, [measure]);
+
+  /** Escape, a press, or leaving the desktop layout: nothing shows until the next hover or focus. */
+  const hide = useCallback(() => {
+    clearShowTimer();
+    cancelHide();
+    focusAnchorRef.current = null;
+    commit(null);
   }, [cancelHide, clearShowTimer, commit]);
+
+  const show = useCallback((anchor: HTMLElement, source: RailTip["source"]) => {
+    clearShowTimer();
+    cancelHide();
+    commit(measure(anchor, source) ?? settle());
+  }, [cancelHide, clearShowTimer, commit, measure, settle]);
 
   const scheduleHide = useCallback(() => {
     if (!shownRef.current && !pendingRef.current) return;
@@ -99,10 +117,26 @@ export function useRailTooltip(enabled: boolean) {
     if (shownRef.current?.source === "focus" || hideTimerRef.current != null) return;
     hideTimerRef.current = window.setTimeout(() => {
       hideTimerRef.current = null;
-      commit(null);
+      commit(settle());
     }, RAIL_TOOLTIP_GRACE_MS);
-  }, [clearShowTimer, commit]);
+  }, [clearShowTimer, commit, settle]);
 
+  // Rail preferences can hide, renumber or move the item under an open tooltip (Settings ›
+  // Navigation, with the pointer resting on the rail). Re-read it after every rail render, and let
+  // the tooltip go with an item that has left.
+  useLayoutEffect(() => {
+    const current = shownRef.current;
+    if (!current) return;
+    const next = measure(current.anchor, current.source);
+    if (!next) {
+      if (current.anchor === focusAnchorRef.current) focusAnchorRef.current = null;
+      commit(settle());
+      return;
+    }
+    if (next.name !== current.name || next.keys !== current.keys || next.top !== current.top || next.left !== current.left) {
+      commit(next);
+    }
+  });
   useEffect(() => {
     if (!enabled) hide();
   }, [enabled, hide]);
@@ -142,10 +176,15 @@ export function useRailTooltip(enabled: boolean) {
     onPointerDown: () => hide(),
     onFocus: (event: FocusEvent<HTMLElement>) => {
       const anchor = tipAnchor(event.target);
-      if (enabled && anchor && anchor === event.target && focusVisible(anchor)) show(anchor, "focus");
+      if (!enabled || !anchor || anchor !== event.target || !focusVisible(anchor)) return;
+      focusAnchorRef.current = anchor;
+      show(anchor, "focus");
     },
     onBlur: (event: FocusEvent<HTMLElement>) => {
-      if (shownRef.current && tipAnchor(event.target) === shownRef.current.anchor) hide();
+      const anchor = tipAnchor(event.target);
+      if (!anchor || anchor !== focusAnchorRef.current) return;
+      focusAnchorRef.current = null;
+      if (shownRef.current?.anchor === anchor && shownRef.current.source === "focus") commit(null);
     },
   };
 

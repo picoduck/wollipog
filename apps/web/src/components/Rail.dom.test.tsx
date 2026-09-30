@@ -895,7 +895,18 @@ test("Settings is a rail item with the same current-page treatment and tooltip",
   }
 });
 
-test("the tooltip names the item and its keys, after a delay for a mouse and at once for keyboard focus", async () => {
+/**
+ * A mounted desktop rail on a fake clock. happy-dom binds its timers to Node's at import, so the
+ * window's timeout pair is replaced, and Date.now drives the tooltip's warm window.
+ */
+async function withTooltipRail(
+  body: (rail: Awaited<ReturnType<typeof mountDesktopRail>> & {
+    advance: (ms: number) => Promise<void>;
+    tooltip: () => HTMLElement | null;
+    item: (label: string) => HTMLElement;
+    pointer: (type: string, target: Element, pointerType?: string, relatedTarget?: Element | null) => Promise<void>;
+  }) => Promise<void>,
+) {
   resetRailPreferencesForTest();
   let now = 10_000;
   const timeouts = new Map<number, { at: number; run: () => void }>();
@@ -912,22 +923,38 @@ test("the tooltip names the item and its keys, after a delay for a mouse and at 
     now = until;
   };
   const dateNow = mock.method(Date, "now", () => now);
-  await withScopedClockOverrides(domWindow, {
-    setTimeout: (run: () => void, delay = 0) => {
-      const id = nextId++;
-      timeouts.set(id, { at: now + delay, run });
-      return id;
-    },
-    clearTimeout: (id: number) => { timeouts.delete(id); },
-  }, async () => {
-    const rail = await mountDesktopRail();
-    const tooltip = () => rail.container.querySelector<HTMLElement>(".rail-tooltip");
-    const item = (label: string) => rail.container.querySelector<HTMLElement>(`[aria-label="${label}"]`)!;
-    const pointer = (type: string, target: Element, pointerType = "mouse", relatedTarget: Element | null = null) =>
-      act(async () => {
-        target.dispatchEvent(new domWindow.PointerEvent(type, { bubbles: true, pointerType, relatedTarget: relatedTarget as never }) as never);
-      });
-    try {
+  try {
+    await withScopedClockOverrides(domWindow, {
+      setTimeout: (run: () => void, delay = 0) => {
+        const id = nextId++;
+        timeouts.set(id, { at: now + delay, run });
+        return id;
+      },
+      clearTimeout: (id: number) => { timeouts.delete(id); },
+    }, async () => {
+      const rail = await mountDesktopRail();
+      const tooltip = () => rail.container.querySelector<HTMLElement>(".rail-tooltip");
+      const item = (label: string) => rail.container.querySelector<HTMLElement>(`[aria-label="${label}"]`)!;
+      const pointer = (type: string, target: Element, pointerType = "mouse", relatedTarget: Element | null = null) =>
+        act(async () => {
+          target.dispatchEvent(new domWindow.PointerEvent(type, { bubbles: true, pointerType, relatedTarget: relatedTarget as never }) as never);
+        });
+      try {
+        await body({ ...rail, advance, tooltip, item, pointer });
+      } finally {
+        await rail.dispose();
+        resetRailPreferencesForTest();
+        domWindow.localStorage.clear();
+      }
+    });
+  } finally {
+    dateNow.mock.restore();
+  }
+}
+
+test("the tooltip names the item and its keys, after a delay for a mouse and at once for keyboard focus", async () => {
+  await withTooltipRail(async ({ advance, tooltip, item, pointer }) => {
+    {
       await pointer("pointerover", item("Automations"));
       assertNoDomNode(tooltip(), "nothing before the delay");
       await advance(RAIL_TOOLTIP_DELAY_MS - 1);
@@ -978,11 +1005,46 @@ test("the tooltip names the item and its keys, after a delay for a mouse and at 
       assert.equal(tooltip()?.textContent, "Connections6");
       await act(async () => { item("Connections").blur(); });
       assertNoDomNode(tooltip());
-    } finally {
-      await rail.dispose();
-      resetRailPreferencesForTest();
-      domWindow.localStorage.clear();
     }
   });
-  dateNow.mock.restore();
+});
+
+test("an open tooltip follows preference changes and leaves with a hidden item", async () => {
+  await withTooltipRail(async ({ advance, tooltip, item, pointer, render }) => {
+    await pointer("pointerover", item("Connections"));
+    await advance(RAIL_TOOLTIP_DELAY_MS);
+    assert.equal(tooltip()?.textContent, "Connections6");
+
+    // Settings › Navigation renumbers the rail while the pointer rests on Connections.
+    setRailViewHidden("automations", true);
+    await render({ name: "inbox" });
+    assert.equal(tooltip()?.textContent, "Connections5", "the tooltip shows the item's new digit");
+
+    setRailViewHidden("runners", true);
+    await render({ name: "inbox" });
+    assertNoDomNode(tooltip(), "a hidden item takes its tooltip with it");
+  });
+});
+
+test("a keyboard-focused item gets its tooltip back when a hover elsewhere ends", async () => {
+  await withTooltipRail(async ({ advance, tooltip, item, pointer }) => {
+    await act(async () => { item("Automations").focus(); });
+    assert.equal(tooltip()?.textContent, "Automations2");
+
+    await pointer("pointerover", item("Projects"));
+    assert.equal(tooltip()?.textContent, "Projects3", "a hover borrows the tooltip");
+    await pointer("pointerout", item("Projects"), "mouse", domWindow.document.body as never);
+    await advance(RAIL_TOOLTIP_GRACE_MS);
+    assert.equal(tooltip()?.textContent, "Automations2", "and returns it to the focused item");
+
+    // Escape dismisses the focused item's tooltip too; a hover that ends does not bring it back.
+    await act(async () => {
+      domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+    });
+    assertNoDomNode(tooltip());
+    await pointer("pointerover", item("Pods"));
+    await pointer("pointerout", item("Pods"), "mouse", domWindow.document.body as never);
+    await advance(RAIL_TOOLTIP_GRACE_MS + RAIL_TOOLTIP_DELAY_MS);
+    assertNoDomNode(tooltip());
+  });
 });
