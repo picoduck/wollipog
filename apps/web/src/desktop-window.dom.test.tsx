@@ -57,15 +57,22 @@ afterEach(() => {
 function fakeWindow(options: { tauri?: boolean; platform?: string; system?: ResolvedTheme | null } = {}) {
   const calls: Array<[string, unknown]> = [];
   let set: ResolvedTheme | null = null;
+  const schemeListeners = new Set<(scheme: ResolvedTheme) => void>();
   const desktop: DesktopWindow = {
     isTauri: () => options.tauri ?? true,
     platform: () => options.platform ?? "MacIntel",
     setTheme: async (theme) => { calls.push(["setTheme", theme]); set = theme; },
     // As tao answers: the theme set, or with none set the desktop portal's.
     theme: async () => { calls.push(["theme", null]); return set ?? options.system ?? null; },
+    onColorSchemeChanged: (listener) => {
+      schemeListeners.add(listener);
+      return () => schemeListeners.delete(listener);
+    },
     setTitle: async (title) => { calls.push(["setTitle", title]); },
   };
-  return { desktop, calls };
+  /** The webview's `prefers-color-scheme` changing, as it does when GTK's dark preference moves. */
+  const schemeChanges = (scheme: ResolvedTheme) => act(async () => { for (const listener of schemeListeners) listener(scheme); });
+  return { desktop, calls, schemeChanges, schemeListeners };
 }
 
 async function mount(node: React.ReactNode) {
@@ -221,6 +228,60 @@ test("a choice made while Linux's read-back is in flight is not overwritten by i
   } finally {
     await view.unmount();
   }
+});
+
+test("on Linux an explicit theme is put back when the desktop changes its own (#2108)", async () => {
+  // tao applies the portal's change to GTK's dark preference, which the title bar and the webview's
+  // prefers-color-scheme both follow; Tauri never reports it as the window's theme change.
+  for (const [chosen, other] of [["dark", "light"], ["light", "dark"]] as const) {
+    const { desktop, calls, schemeChanges } = fakeWindow({ platform: "Linux x86_64" });
+    const view = await mount(<ThemeProbe preference={chosen} resolved={chosen} desktop={desktop} />);
+    try {
+      // The app's own request turning the webview to the chosen scheme asks for nothing more.
+      await schemeChanges(chosen);
+      assert.deepEqual(calls, [["setTheme", chosen]], chosen);
+      await schemeChanges(other);
+      assert.deepEqual(calls, [["setTheme", chosen], ["setTheme", chosen]], `${chosen}: the desktop turned ${other}`);
+      await schemeChanges(chosen);
+      assert.deepEqual(calls, [["setTheme", chosen], ["setTheme", chosen]], `${chosen}: back again`);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("under System, and after leaving an explicit theme for it, the Linux window follows the desktop", async () => {
+  const { desktop, calls, schemeChanges, schemeListeners } = fakeWindow({ platform: "Linux x86_64", system: "dark" });
+  const view = await mount(<ThemeProbe preference="dark" resolved="dark" desktop={desktop} />);
+  try {
+    await view.rerender(<ThemeProbe preference="system" resolved="dark" desktop={desktop} />);
+    const switched = [["setTheme", "dark"], ["setTheme", null], ["theme", null], ["setTheme", "dark"]];
+    assert.deepEqual(calls, switched);
+    assert.equal(schemeListeners.size, 0, "the explicit theme's hold is released");
+    await schemeChanges("light");
+    await schemeChanges("dark");
+    assert.deepEqual(calls, switched, "nothing overrides the desktop's changes");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("macOS and Windows hold their own window's theme, so nothing watches for desktop changes", async () => {
+  for (const platform of ["MacIntel", "Win32"]) {
+    const { desktop, calls, schemeListeners } = fakeWindow({ platform });
+    const view = await mount(<ThemeProbe preference="dark" resolved="dark" desktop={desktop} />);
+    try {
+      assert.equal(schemeListeners.size, 0, platform);
+      assert.deepEqual(calls, [["setTheme", "dark"]], platform);
+    } finally {
+      await view.unmount();
+    }
+  }
+  const linux = fakeWindow({ platform: "Linux x86_64" });
+  const view = await mount(<ThemeProbe preference="light" resolved="light" desktop={linux.desktop} />);
+  assert.equal(linux.schemeListeners.size, 1);
+  await view.unmount();
+  assert.equal(linux.schemeListeners.size, 0, "unmounting releases the hold");
 });
 
 test("a browser has no native window theme to set, and a refused request is not an error", async () => {

@@ -25,6 +25,8 @@ export interface DesktopWindow {
   setTheme(theme: ResolvedTheme | null): Promise<void>;
   /** The window's theme: the one set, or with none set the operating system's (null if unknown). */
   theme(): Promise<ResolvedTheme | null>;
+  /** Call `listener` with the webview's `prefers-color-scheme` each time it changes; returns the unsubscribe. */
+  onColorSchemeChanged(listener: (scheme: ResolvedTheme) => void): () => void;
   setTitle(title: string): Promise<void>;
 }
 
@@ -34,8 +36,24 @@ const nativeWindow: DesktopWindow = {
   platform: () => typeof navigator === "undefined" ? "" : navigator.platform,
   setTheme: (theme) => getCurrentWindow().setTheme(theme),
   theme: () => getCurrentWindow().theme(),
+  onColorSchemeChanged: (listener) => {
+    let media: MediaQueryList;
+    try {
+      media = window.matchMedia("(prefers-color-scheme: dark)");
+    } catch {
+      return () => {};
+    }
+    const changed = (event: MediaQueryListEvent) => listener(event.matches ? "dark" : "light");
+    media.addEventListener("change", changed);
+    return () => media.removeEventListener("change", changed);
+  },
   setTitle: (title) => getCurrentWindow().setTitle(title),
 };
+
+/** Linux's desktop app, where GTK's dark preference is shared with the desktop portal. */
+function isLinux(desktop: DesktopWindow): boolean {
+  return /linux/i.test(desktop.platform());
+}
 
 /** True in the macOS desktop app, whose web content runs under the traffic lights. */
 export function hasOverlayTitleBar(desktop: DesktopWindow = nativeWindow): boolean {
@@ -83,9 +101,28 @@ export function nativeWindowTheme(preference: ThemePreference, resolved: Resolve
  */
 export async function applyNativeWindowTheme(theme: ResolvedTheme | null, desktop: DesktopWindow = nativeWindow, current: () => boolean = () => true): Promise<void> {
   await desktop.setTheme(theme);
-  if (theme !== null || !/linux/i.test(desktop.platform())) return;
+  if (theme !== null || !isLinux(desktop)) return;
   const system = await desktop.theme();
   if (system && current()) await desktop.setTheme(system);
+}
+
+/**
+ * On Linux, put an explicit `theme` back each time the desktop changes its own (#2108); returns the
+ * unsubscribe.
+ *
+ * tao applies each desktop portal `color-scheme` change straight to GTK's dark preference, which is
+ * the same preference `setTheme` sets, so the desktop's change overrides the app's choice and the
+ * title bar follows the desktop. Tauri never reports it as the window's theme change either: tao
+ * sends that event under a placeholder window id, which Tauri drops. WebKitGTK derives
+ * `prefers-color-scheme` from that same preference, though, so the webview sees the change, and a
+ * scheme other than the chosen one means the desktop has overridden it. A System preference asks
+ * for nothing to hold: there the title bar is meant to follow the desktop.
+ */
+function holdNativeWindowTheme(theme: ResolvedTheme | null, desktop: DesktopWindow = nativeWindow): () => void {
+  if (theme === null || !isLinux(desktop)) return () => {};
+  return desktop.onColorSchemeChanged((scheme) => {
+    if (scheme !== theme) desktop.setTheme(theme).catch(() => {});
+  });
 }
 
 /**
@@ -102,7 +139,11 @@ export function useNativeWindowTheme(preference: ThemePreference, resolved: Reso
     // A later choice supersedes this one: its Linux read-back must not name a stale system theme.
     let current = true;
     applyNativeWindowTheme(theme, desktop, () => current).catch(() => {});
-    return () => { current = false; };
+    const release = holdNativeWindowTheme(theme, desktop);
+    return () => {
+      current = false;
+      release();
+    };
   }, [desktop, theme]);
 }
 
