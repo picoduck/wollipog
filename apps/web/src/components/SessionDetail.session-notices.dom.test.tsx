@@ -331,8 +331,8 @@ test("campaign notices stay under the session bar, in order, outside the slot (#
     const continuation = fixture.container.querySelector('[aria-label="Campaign Continuation: Failed"]');
     const held = fixture.container.querySelector(".campaign-held-children");
     assert.ok(continuation && held, "both campaign notices render");
-    assert.equal(continuation.closest(".session-notice-slot"), null, "Campaign Continuation is not a slot entry");
-    assert.equal(held.closest(".session-notice-slot"), null, "Held Children is not a slot entry");
+    assertNoDomNode(continuation.closest(".session-notice-slot"), "Campaign Continuation is not a slot entry");
+    assertNoDomNode(held.closest(".session-notice-slot"), "Held Children is not a slot entry");
     assert.ok(continuation.compareDocumentPosition(held) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING,
       "Campaign Continuation comes first");
     assert.ok(held.compareDocumentPosition(fixture.slot()!) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING,

@@ -1584,8 +1584,8 @@ exactly one: the most severe, then the lowest rank.
   first and then Held Children, and never collapse into "+N More". The reasons: Held Children lists
   other sessions, each with its own hold and recovery action, which one `Notice` body cannot hold;
   Campaign Continuation's pending, running and held states are neutral progress, a tone the slot does
-  not have; and a failed continuation needs a person, so it must not wait behind a danger condition's
-  "+N More".
+  not have; and a failed continuation whose automatic retries have stopped needs a person, so it must
+  not wait behind a danger condition's "+N More".
 - A condition nothing waits on is info, compact and dismissible: skills that a container or cloud
   session cannot use (the dismissal is kept per session on the device, and the Pinned Summary keeps
   a Skills: Not Available row) and the Project setup suggestion (dismissed for the Project on the
