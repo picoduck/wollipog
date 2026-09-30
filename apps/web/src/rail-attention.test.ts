@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { PROTOCOL_VERSION, type SessionStatus } from "@wollipog/protocol";
 import { GLOBAL_VIEW_ITEMS } from "./navigation.js";
-import { NO_MACHINE_ATTENTION, machineAttention, railAttention, type RailAttentionState } from "./rail-attention.js";
+import { NO_MACHINE_ATTENTION, machineAttention, overflowAttention, railAttention, type RailAttentionState } from "./rail-attention.js";
 
 const state = (overrides: Partial<RailAttentionState> = {}): RailAttentionState => ({
   blocked: 0,
@@ -44,6 +44,29 @@ test("every other destination carries nothing, whatever is waiting elsewhere", (
     if (item.id === "inbox" || item.id === "runners") continue;
     assert.equal(railAttention(item.id, busy), null, item.id);
   }
+});
+
+const item = (id: (typeof GLOBAL_VIEW_ITEMS)[number]["id"]) => GLOBAL_VIEW_ITEMS.find((entry) => entry.id === id)!;
+
+test("More takes the most severe tone behind it and names each destination with its breakdown (#2110)", () => {
+  const busy = state({ blocked: 12, stalled: 3, machines: { offlineWithActiveSessions: 0, updateRequired: 1 } });
+  assert.deepEqual(overflowAttention([item("usage"), item("inbox")], busy),
+    { tone: "danger", note: "Sessions: 12 waiting on you, 3 stalled" });
+  // The sheet's order, and danger over warning whichever comes first.
+  assert.deepEqual(overflowAttention([item("runners"), item("archived"), item("inbox")], busy), {
+    tone: "danger",
+    note: "Connections: 1 machine needs an update. Sessions: 12 waiting on you, 3 stalled",
+  });
+  assert.deepEqual(overflowAttention([item("runners")], busy), { tone: "warning", note: "Connections: 1 machine needs an update" });
+  assert.deepEqual(overflowAttention([item("inbox")], state({ blocked: 2 })), { tone: "warning", note: "Sessions: 2 waiting on you" });
+});
+
+test("More says nothing when nothing behind it needs the user", () => {
+  // Sessions and Connections on the bar contribute nothing, whatever they carry.
+  const busy = state({ blocked: 12, stalled: 3, machines: { offlineWithActiveSessions: 1, updateRequired: 1 } });
+  assert.equal(overflowAttention([item("usage"), item("archived"), item("skills")], busy), null);
+  assert.equal(overflowAttention([], busy), null);
+  assert.equal(overflowAttention([item("inbox"), item("runners")], state()), null);
 });
 
 const runner = (runnerId: string, status: "online" | "offline", protocolVersion: number | null = PROTOCOL_VERSION) =>

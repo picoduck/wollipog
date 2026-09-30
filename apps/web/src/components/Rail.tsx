@@ -28,7 +28,14 @@ import { useInstanceScope } from "../instance-scope.js";
 import { sessionsDestination } from "../sessions-view-mode.js";
 import { phoneBarViews, railDigits, setRailLabels, visibleRailViews } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
-import { NO_MACHINE_ATTENTION, railAttention, type MachineAttention, type RailAttention } from "../rail-attention.js";
+import {
+  NO_MACHINE_ATTENTION,
+  overflowAttention,
+  railAttention,
+  type MachineAttention,
+  type OverflowAttention,
+  type RailAttention,
+} from "../rail-attention.js";
 import { CountBadge } from "./CountBadge.js";
 
 /** Shared with Settings → Appearance → Navigation, whose rows show the same glyphs (#385). */
@@ -87,6 +94,21 @@ export function AttentionMark({ attention, onIcon = false }: { attention: RailAt
   if (!attention) return null;
   if (attention.kind === "count") return <CountBadge count={attention.count} tone={attention.tone} onIcon={onIcon} />;
   return <span className={onIcon ? "rail-attention-dot t-warning on-icon" : "rail-attention-dot t-warning"} aria-hidden="true" />;
+}
+
+/**
+ * The phone's More tab carries what the sheet hides (#2110): the destinations' own dot on its
+ * icon's shoulder, red when any of them is failing and amber otherwise. Never a count: one number
+ * cannot stand for sessions and machines at once. The tab's description says which and why.
+ */
+function OverflowMark({ attention }: { attention: OverflowAttention | null }) {
+  if (!attention) return null;
+  return (
+    <span
+      className={attention.tone === "danger" ? "rail-attention-dot t-danger on-icon" : "rail-attention-dot t-warning on-icon"}
+      aria-hidden="true"
+    />
+  );
 }
 
 /** The desktop rail's Search item: first in the Work group, and not a destination. */
@@ -241,6 +263,9 @@ export function Rail({
   const separatorsBefore = isMobile ? entries.map(() => false) : railSeparatorsBefore(entries.map(entryGroup));
   const descriptionPrefix = useId();
   const attentionState = { blocked: blockedCount, stalled: stalledCount, machines };
+  // A destination moved into the sheet takes its attention with it, so More has to say so while the
+  // sheet is closed, or Sessions waiting behind it goes unnoticed (#2110).
+  const moreAttention = overflowAttention(overflowItems, attentionState);
   // The labelled rail already shows every name, so it shows no tooltip.
   const tooltip = useRailTooltip(!isMobile && !labelled);
   // The sheet is rendered for the whole phone breakpoint rather than only when a destination
@@ -395,9 +420,16 @@ export function Rail({
               aria-label={overflowSelected && !moreOpen
                 ? `More Destinations, ${overflowSelectedTitle} selected`
                 : "More Destinations"}
+              aria-describedby={moreAttention ? `${descriptionPrefix}-more` : undefined}
               title="More Destinations"
             >
-              {railTab(true, "More", <MoreHorizontalIcon size={TAB_ICON_SIZE} />)}
+              {railTab(true, "More", (
+                <span className="rail-icon">
+                  <MoreHorizontalIcon size={TAB_ICON_SIZE} />
+                  <OverflowMark attention={moreAttention} />
+                </span>
+              ))}
+              {moreAttention && <span id={`${descriptionPrefix}-more`} className="sr-only">{moreAttention.note}</span>}
             </button>
             {moreOpen && (
               // The shared menu, a bottom sheet at this width (§15.1). Its backdrop is the scrim:

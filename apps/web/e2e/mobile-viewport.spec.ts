@@ -1,6 +1,7 @@
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
 import { GLOBAL_VIEW_ITEMS, viewPath, viewTitle, type View } from "../src/navigation.js";
-import { defaultRailPreferences, phoneBarViews } from "../src/rail-preferences.js";
+import { RAIL_PREFERENCES_STORAGE_KEY, defaultRailPreferences, phoneBarViews } from "../src/rail-preferences.js";
+import { instanceStorageKey } from "../src/instance-storage.js";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../src/experiments.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../src/mobile-viewport.js";
 import { dialogMotionSettled } from "./dialog-motion.js";
@@ -603,6 +604,82 @@ for (const theme of THEMES) {
     }
   });
 }
+
+/**
+ * More carries what its sheet hides (#2110): with Sessions and Connections moved off the bar, the
+ * More tab shows one dot in the most severe tone behind it, clear of its glyph and under the bar's
+ * clipped top edge, and says which destinations need the user and why.
+ */
+for (const theme of THEMES) {
+  test(`More shows the overflowed destinations' attention on its icon in ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript((key) => {
+      localStorage.setItem(key, JSON.stringify({ v: 1, order: [], hidden: [], phoneBar: ["projects", "automations", "skills", "usage"] }));
+    }, instanceStorageKey(RAIL_PREFERENCES_STORAGE_KEY));
+    await useHarness(page, { theme, view: "projects", blocked: 12, stalled: 3, machines: 1 });
+    const bar = page.getByRole("navigation", { name: "Primary Navigation" });
+    await expect(bar.getByRole("link", { name: "Sessions", exact: true })).toHaveCount(0);
+    const more = page.locator(".rail-more-trigger");
+    const marks = more.locator(".rail-attention-dot, .count-badge");
+    await expect(marks).toHaveCount(1);
+    await expect(more.locator(".rail-tab-pill > .rail-icon > .rail-attention-dot.t-danger.on-icon")).toHaveCount(1);
+    await expect(more).toHaveAccessibleName("More Destinations");
+    await expect(more).toHaveAccessibleDescription("Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update");
+    expect(await glyphUnderMark(page, more), "the dot and its ring cover none of More's glyph").toBe(0);
+    const placed = await more.evaluate((element) => {
+      const mark = element.querySelector(".rail-attention-dot")!;
+      const box = mark.getBoundingClientRect();
+      const rail = element.closest(".app-rail")!;
+      const railBox = rail.getBoundingClientRect();
+      const probe = document.createElement("span");
+      // `.t-danger`'s tone.
+      probe.style.color = "var(--red)";
+      document.body.append(probe);
+      const redColor = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        // The ring is 2px outside the mark; the bar clips its overflow.
+        inside: box.top - 2 >= railBox.top + parseFloat(getComputedStyle(rail).borderTopWidth) && box.right + 2 <= railBox.right,
+        size: `${box.width}x${box.height}`,
+        danger: getComputedStyle(mark).borderTopColor === redColor,
+      };
+    });
+    expect(placed).toEqual({ inside: true, size: "8x8", danger: true });
+
+    // Standing on a destination behind More keeps its "…, <destination> selected" name.
+    await page.locator(".rail-more-trigger").click();
+    await page.locator('.menu[aria-label="More Destinations"] .menu-item', { hasText: "Archived Sessions" }).click();
+    await expect(more).toHaveAccessibleName("More Destinations, Archived Sessions selected");
+    await expect(more).toHaveAccessibleDescription("Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update");
+  });
+}
+
+test("More's mark is amber for a machine alone and absent when nothing behind it needs the user", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const phoneBar = async (views: string[]) => page.addInitScript(([key, bar]) => {
+    localStorage.setItem(key, JSON.stringify({ v: 1, order: [], hidden: [], phoneBar: bar }));
+  }, [instanceStorageKey(RAIL_PREFERENCES_STORAGE_KEY), views] as const);
+  const more = page.locator(".rail-more-trigger");
+  const marks = more.locator(".rail-attention-dot, .count-badge");
+
+  await phoneBar(["projects", "automations", "skills", "usage"]);
+  await useHarness(page, { view: "projects", machines: 1 });
+  await expect(more.locator(".rail-tab-pill > .rail-icon > .rail-attention-dot.t-warning.on-icon")).toHaveCount(1);
+  await expect(marks).toHaveCount(1);
+  await expect(more).toHaveAccessibleDescription("Connections: 1 machine needs an update");
+  expect(await glyphUnderMark(page, more)).toBe(0);
+
+  await useHarness(page, { view: "projects", machines: 0 });
+  await expect(marks).toHaveCount(0);
+  await expect(more).not.toHaveAttribute("aria-describedby", /./);
+
+  // Sessions waiting on the bar: its own tab carries the badge, and More carries nothing.
+  await phoneBar(["inbox", "projects", "automations", "usage"]);
+  await useHarness(page, { view: "projects", blocked: 12, stalled: 3, machines: 0 });
+  await expect(page.getByRole("link", { name: "Sessions", exact: true }).locator(".count-badge")).toHaveText("15");
+  await expect(marks).toHaveCount(0);
+  await expect(more).not.toHaveAttribute("aria-describedby", /./);
+});
 
 /**
  * No two destinations look the same.

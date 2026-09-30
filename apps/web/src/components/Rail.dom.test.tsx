@@ -260,6 +260,10 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     assertNoDomNode(connections.querySelector(".count-badge"));
     assert.equal(connections.querySelector(".rail-tab-pill > .rail-icon > .rail-attention-dot")?.className,
       "rail-attention-dot t-warning on-icon");
+    // Both are on the bar, so More carries nothing of theirs (#2110).
+    const moreTab = bar.querySelector(".rail-more-trigger")!;
+    assertNoDomNode(moreTab.querySelector(".rail-attention-dot, .count-badge"));
+    assert.equal(moreTab.hasAttribute("aria-describedby"), false);
 
     // Nothing that owns its own overlay may live in the bar or the sheet.
     assertNoDomNode(container.querySelector(".rail-instance"));
@@ -573,6 +577,69 @@ test("hiding and reordering renumber the surviving destinations", async () => {
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
+    resetRailPreferencesForTest();
+    domWindow.localStorage.clear();
+  }
+});
+
+test("More carries the attention of the destinations behind it in their most severe tone (#2110)", async () => {
+  resetRailPreferencesForTest();
+  const restore = stubPhoneWidth();
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (view: View, blocked: number, stalled: number, machines: MachineAttention) => act(async () => {
+    root.render(
+      <Rail view={view} blockedCount={blocked} stalledCount={stalled} machines={machines} onNavigate={() => {}} />,
+    );
+  });
+  const trigger = () => container.querySelector<HTMLButtonElement>(".rail-more-trigger")!;
+  const mark = () => trigger().querySelectorAll(".rail-attention-dot, .count-badge");
+  const described = () =>
+    container.querySelector(`[id="${trigger().getAttribute("aria-describedby")}"]`)?.textContent ?? null;
+  const updateRequired = { offlineWithActiveSessions: 0, updateRequired: 1 };
+  try {
+    // Sessions and Connections both behind More.
+    saveInstanceStorageValue(RAIL_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({ v: 1, order: [], hidden: [], phoneBar: ["projects", "automations", "skills", "usage"] }));
+    resetRailPreferencesForTest();
+    await render({ name: "projects" }, 12, 3, updateRequired);
+    assert.equal(mark().length, 1, "one mark, however many destinations need the user");
+    assert.equal(mark()[0]!.className, "rail-attention-dot t-danger on-icon", "stalled sessions outrank a machine update");
+    assert.equal(mark()[0]!.getAttribute("aria-hidden"), "true");
+    assert.equal(mark()[0]!.parentElement?.className, "rail-icon", "on the icon box's shoulder, like a destination tab's");
+    assert.equal(mark()[0]!.parentElement?.parentElement?.className, "rail-tab-pill");
+    assert.equal(trigger().getAttribute("aria-label"), "More Destinations", "the name is unchanged");
+    assert.equal(described(), "Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update");
+
+    // Standing on a destination behind More keeps the "…, <destination> selected" name.
+    await render({ name: "archived" }, 12, 3, updateRequired);
+    assert.equal(trigger().getAttribute("aria-label"), "More Destinations, Archived Sessions selected");
+    assert.equal(described(), "Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update");
+
+    // Only the machine behind More: amber.
+    await render({ name: "projects" }, 0, 0, updateRequired);
+    assert.equal(mark().length, 1);
+    assert.equal(mark()[0]!.className, "rail-attention-dot t-warning on-icon");
+    assert.equal(described(), "Connections: 1 machine needs an update");
+
+    // Nothing behind More needs the user.
+    await render({ name: "projects" }, 0, 0, { offlineWithActiveSessions: 0, updateRequired: 0 });
+    assert.equal(mark().length, 0);
+    assert.equal(trigger().hasAttribute("aria-describedby"), false);
+
+    // Sessions on the bar and waiting: its tab says so, More does not.
+    saveInstanceStorageValue(RAIL_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({ v: 1, order: [], hidden: [], phoneBar: ["inbox", "projects", "automations", "usage"] }));
+    resetRailPreferencesForTest();
+    await render({ name: "projects" }, 12, 3, { offlineWithActiveSessions: 0, updateRequired: 0 });
+    assert.equal(container.querySelectorAll('.rail-destinations > a[href="/"] .count-badge').length, 1);
+    assert.equal(mark().length, 0);
+    assert.equal(trigger().hasAttribute("aria-describedby"), false);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    restore();
     resetRailPreferencesForTest();
     domWindow.localStorage.clear();
   }

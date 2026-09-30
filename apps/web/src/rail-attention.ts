@@ -82,6 +82,32 @@ export function railAttention(view: GlobalViewName, state: RailAttentionState): 
   return null;
 }
 
+/**
+ * What the phone's More tab says about the destinations behind it (#2110): one dot in the most
+ * severe tone among them, danger over warning, and a description naming each one with its own
+ * breakdown, in the sheet's order. A count is never summed across destinations, because sessions
+ * and machines cannot be read as one number. Destinations on the bar contribute nothing.
+ */
+export interface OverflowAttention {
+  tone: "warning" | "danger";
+  note: string;
+}
+
+export function overflowAttention(
+  overflowed: readonly { id: GlobalViewName; name: string }[],
+  state: RailAttentionState,
+): OverflowAttention | null {
+  const marked = overflowed.flatMap((item) => {
+    const attention = railAttention(item.id, state);
+    return attention ? [{ name: item.name, attention }] : [];
+  });
+  if (marked.length === 0) return null;
+  return {
+    tone: marked.some(({ attention }) => attention.tone === "danger") ? "danger" : "warning",
+    note: marked.map(({ name, attention }) => `${name}: ${attention.note}`).join(". "),
+  };
+}
+
 function machines(count: number): string {
   return count === 1 ? "1 machine is" : `${count} machines are`;
 }

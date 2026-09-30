@@ -1417,6 +1417,13 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
     runner is outdated (Update Required). Machines that are online, idle, or offline with nothing
     running are normal and draw nothing.
   - Every other destination: nothing.
+  - The phone's More tab (#2110): while any destination in its sheet has a mark, one
+    `.rail-attention-dot` on its icon's shoulder, in the most severe tone among them (`t-danger`
+    when a Sessions badge behind it is red, `t-warning` otherwise). Never a count: a sum would mix
+    sessions with machines. Its accessible name stays "More Destinations" (or "…, <destination>
+    selected"); its description names each destination behind it with its breakdown, in sheet
+    order: "Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update". A
+    destination on the bar contributes nothing to it.
 
   The mark sits on the icon's shoulder in the 64px rail and on a phone tab, and inline after the
   name in the labelled rail and the More sheet. Its icon box (`.rail-icon`) is wider than the glyph,
@@ -1762,7 +1769,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Element | Phone behavior |
 | --- | --- |
 | Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Projects, Connections, Automations, More. Experimental destinations never take a primary slot by default. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). `phoneBarViews()` in `rail-preferences.ts` is the one source for the slots: an optional per-instance `phoneBar` list replaces the default, and a hidden or turned-off slot is filled in place by the next visible non-experimental destination in rail order. From 600px the tabs keep a 480px centered measure. |
-| More | A real bottom sheet with a scrim and a "More" title; rows 48px with icons; Settings last after a separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. |
+| More | A real bottom sheet with a scrim and a "More" title; rows 48px with icons; Settings last after a separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. While a destination in the sheet needs the user, the More tab carries one mark for them all (§11.4). |
 | App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯). Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
 | Page header actions | Primary as `+` icon (accessible name "New Skill"), all others in ⋯ sheet. |
 | Master-detail | Two routes (§6.2). |
