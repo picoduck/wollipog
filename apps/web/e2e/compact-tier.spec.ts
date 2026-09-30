@@ -291,9 +291,15 @@ test("outside the tier the Archived Sessions table keeps its own Project, Locati
 });
 
 test.describe("either side of the tier", () => {
-  test("the Projects list pane is 310px from 1100px, its filter inset like the search field", async ({ page }) => {
-    await page.setViewportSize({ width: 1100, height: 860 });
+  test("the Projects list pane is 310px once the main column is 1100px, its filter inset like the search field", async ({ page }) => {
+    // The pane answers to the main column (`@container app`, #2105), so the tier ends where the
+    // column, not the window, reaches 1100px: the window is 1100px plus the rail.
+    await page.setViewportSize({ width: 1440, height: 860 });
     await open(page, "path=%2Fprojects", "Projects");
+    const rail = await page.locator(".app-rail").evaluate((element) => element.getBoundingClientRect().width);
+    await page.setViewportSize({ width: 1100 + Math.ceil(rail), height: 860 });
+    await expect.poll(() => page.locator(".main").evaluate((main) => main.getBoundingClientRect().width))
+      .toBeGreaterThanOrEqual(1100);
     const chrome = await measureChrome(page);
     expect(chrome.pane!.width).toBe(310);
     expect(chrome.pane!.filterInset).toEqual([0, 0]);
