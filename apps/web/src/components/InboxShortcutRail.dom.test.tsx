@@ -17,6 +17,7 @@ for (const [name, value] of Object.entries({
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
+  MutationObserver: domWindow.MutationObserver,
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -166,4 +167,81 @@ test("a Viewer's Archive, Approve and Deny shortcuts are disabled with the reaso
 
   await act(async () => { root.unmount(); });
   container.remove();
+});
+
+/**
+ * The footer gives up keycaps, then the minor counts, so no shortcut is cut off (#1969). happy-dom has
+ * no layout, so widths are modelled: the strip's room is what the visible counts leave, and its
+ * content is narrower without keycaps. What is under test is that the answer follows the counts'
+ * text even when nothing observed is resized, which is the case for a count that is already hidden.
+ */
+test("the Sessions footer re-measures when a hidden count's text changes", async () => {
+  const FOOTER = 700;
+  const MAJOR_COUNTS = 100;
+  const PER_CHARACTER = 10;
+  const SHORTCUTS = { keys: 460, bare: 325 };
+  const footerOf = (element: Element) => element.closest(".inbox-activity-footer")!;
+  const fit = (element: Element) => footerOf(element).getAttribute("data-fit");
+  const minorCounts = (element: Element) => fit(element) === "counts" ? 0
+    : [...footerOf(element).querySelectorAll(".inbox-activity-minor")]
+      .reduce((width, span) => width + span.textContent!.length * PER_CHARACTER, 0);
+  const prototype = domWindow.HTMLElement.prototype as unknown as object;
+  Object.defineProperty(prototype, "clientWidth", {
+    configurable: true,
+    get(this: Element) {
+      return this.classList.contains("inbox-shortcut-rail") ? FOOTER - MAJOR_COUNTS - minorCounts(this) : 0;
+    },
+  });
+  Object.defineProperty(prototype, "scrollWidth", {
+    configurable: true,
+    get(this: Element) {
+      if (!this.classList.contains("inbox-shortcut-rail")) return 0;
+      return Math.max(fit(this) ? SHORTCUTS.bare : SHORTCUTS.keys, (this as HTMLElement).clientWidth);
+    },
+  });
+  const noop = () => undefined;
+  function Footer({ running }: { running: number }) {
+    return (
+      <footer className="inbox-activity-footer">
+        <div className="inbox-activity-summary">
+          <span className="inbox-activity-minor">{running} Running</span>
+          <span className="inbox-activity-minor">0 Queued</span>
+          <span className="inbox-activity-minor">0 Starting</span>
+          <span>0 Blocked</span>
+          <span>0 Stalled</span>
+        </div>
+        <InboxShortcutRail
+          session={session()} pinned={false} busy={false} stopBeforeArchiveSupported
+          forkAvailability={{ available: true, forkTurn: 3 }}
+          onApprove={noop} onDeny={noop} onReply={noop} onExpand={noop} onFork={noop}
+          onTogglePin={noop} onMarkUnread={noop} onArchive={noop}
+        />
+      </footer>
+    );
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Footer running={10} />));
+    const footer = container.querySelector(".inbox-activity-footer")!;
+    // 700 - 100 - 28 characters of minor counts leaves 320px, short of the 325px bare shortcuts.
+    assert.equal(footer.getAttribute("data-fit"), "counts");
+
+    // One character fewer leaves 330px: dropping the keycaps is enough, and the counts come back.
+    await act(async () => root.render(<Footer running={9} />));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(footer.getAttribute("data-fit"), "keys", "a hidden count's text change re-measures");
+
+    await act(async () => root.render(<Footer running={100} />));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(footer.getAttribute("data-fit"), "counts");
+
+    await act(async () => root.unmount());
+    assert.equal(footer.getAttribute("data-fit"), null, "unmounting leaves no answer behind");
+  } finally {
+    delete (prototype as Record<string, unknown>).clientWidth;
+    delete (prototype as Record<string, unknown>).scrollWidth;
+    container.remove();
+  }
 });

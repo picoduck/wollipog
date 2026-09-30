@@ -75,16 +75,21 @@ function useShortcutsFit(railRef: RefObject<HTMLDivElement | null>, hasSession: 
       }
     };
     fit();
-    if (typeof ResizeObserver === "undefined") return () => footer.removeAttribute("data-fit");
     // The footer's width, the counts' text and each shortcut group's labels are what move the answer.
     // None of them is sized by the answer except the counts, and a pass ends where it began.
-    const observer = new ResizeObserver(fit);
-    observer.observe(footer);
+    const resizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(fit);
+    resizes?.observe(footer);
     for (const part of footer.querySelectorAll(".inbox-activity-summary, .inbox-shortcut-rail > span")) {
-      observer.observe(part);
+      resizes?.observe(part);
     }
+    // A count hidden by the answer is a fixed 1px box, so "10 Running" becoming "9 Running" resizes
+    // nothing observed, yet it may be what lets the counts show again. Their text is watched instead.
+    const summary = footer.querySelector(".inbox-activity-summary");
+    const edits = summary && typeof MutationObserver !== "undefined" ? new MutationObserver(fit) : null;
+    if (summary) edits?.observe(summary, { characterData: true, childList: true, subtree: true });
     return () => {
-      observer.disconnect();
+      resizes?.disconnect();
+      edits?.disconnect();
       footer.removeAttribute("data-fit");
     };
   }, [railRef, hasSession, hasApprovals]);
