@@ -1,19 +1,19 @@
 /** Stateful runner frames stay FIFO while registration yields. Liveness and correlated replies
  * bypass this queue at the authenticated route. Disconnected sockets drop unprocessed frames. */
-  // These are liveness/credential handshakes and correlated request replies, not unsolicited
-  // authoritative session state. Keep HTTP/Agent Control round-trips live during the inventory.
-  // Durable command/status receipts deliberately remain FIFO with the snapshots.
+// These are liveness/credential handshakes and correlated request replies, not unsolicited
+// authoritative session state. Keep HTTP/Agent Control round-trips live during the inventory.
+// Durable command/status receipts deliberately remain FIFO with the snapshots.
 const INVENTORY_BYPASS_TYPES = new Set([
-    "heartbeat", "agent_control_credential", "policy_hook_credential",
-    "policy_hook_decision_recorded", "workflow_action_admission_recorded", "workflow_action_reconciliation_result",
-    "git_result", "session_history_result", "session_history_page_result", "reprocess_session_result",
-    "list_external_sessions_result", "adopt_session_result", "list_directory_result", "list_session_files_result",
-    "read_session_file_result", "search_workspace_references_result", "create_workspace_reference_result",
-    "shell_open_result", "rewind_result", "fork_result", "session_worktree_result", "workspace_worktree_setup_result",
-    "logout_agent_result", "switch_session_provider_account_result", "inspect_provider_authentication_result",
-    "select_provider_authentication_account_result", "acp_registry_approval_result", "host_action_result",
-    "interrupt_turn_result", "stop_background_job_result", "read_queued_prompt_result", "edit_queued_prompt_result",
-    "provider_login_result", "remove_provider_account_result", "session_worktree_progress",
+  "heartbeat", "agent_control_credential", "policy_hook_credential",
+  "policy_hook_decision_recorded", "workflow_action_admission_recorded", "workflow_action_reconciliation_result",
+  "git_result", "session_history_result", "session_history_page_result", "reprocess_session_result",
+  "list_external_sessions_result", "adopt_session_result", "list_directory_result", "list_session_files_result",
+  "read_session_file_result", "search_workspace_references_result", "create_workspace_reference_result",
+  "shell_open_result", "rewind_result", "fork_result", "session_worktree_result", "workspace_worktree_setup_result",
+  "logout_agent_result", "switch_session_provider_account_result", "inspect_provider_authentication_result",
+  "select_provider_authentication_account_result", "acp_registry_approval_result", "host_action_result",
+  "interrupt_turn_result", "stop_background_job_result", "read_queued_prompt_result", "edit_queued_prompt_result",
+  "provider_login_result", "remove_provider_account_result", "session_worktree_progress",
 ]);
 
 export function runnerFrameBypassesInventory(type: string): boolean {

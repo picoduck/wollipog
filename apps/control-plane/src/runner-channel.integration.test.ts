@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -58,11 +59,14 @@ function runnerToken(index: number): string {
   return `wollipogr_${String(index).padStart(43, "a")}`;
 }
 
-test("1000 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 60_000 }, async (t) => {
+test("1000 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 90_000 }, async (t) => {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-reconcile-responsive-"));
   const databasePath = join(temp, "control-plane.db");
   const seed = ControlPlaneDb.open(databasePath);
+  // Only fixture construction skips fsync; the real server opens its own normally durable
+  // connection. Thousands of setup commits should not dominate concurrent suite I/O.
+  seed.raw().exec("PRAGMA synchronous=OFF");
   const identity = seed.localIdentityContext();
   const frame = JSON.parse(registerFrame(555));
   const runnerId = frame.runner.runnerId as string;
@@ -84,6 +88,7 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
       driver: "claude-code", useWorktree: false, worktreePath: null, config: {}, preview: null,
       pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 });
   }
+  seed.raw().exec("PRAGMA synchronous=FULL");
   seed.close();
   let output = "";
   const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
@@ -109,6 +114,11 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
   for (let pass = 0; pass < 3; pass++) {
     const socket = await openSocket(`ws://127.0.0.1:${port}/runner`);
     sockets.push(socket);
+    // Behave like a real runner throughout the convergence wait, not just during probe samples.
+    const heartbeat = setInterval(() => {
+      if (socket.readyState === 1) socket.send(JSON.stringify({ type: "heartbeat" }));
+    }, 500);
+    t.after(() => clearInterval(heartbeat));
     const registered = new Promise<void>((resolvePromise) => socket.on("message", (raw) => {
       if (JSON.parse(raw.toString()).type === "registered") resolvePromise();
     }));
@@ -127,9 +137,11 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
     socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "child-999", tokenHash: "a".repeat(64) }));
     await credentialHandshake;
     // A live update arriving during the inventory must win, even on a replacement socket.
-    socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot: {
+    const liveSnapshot = {
       ...snapshots[999], title: `Live ${pass}`, updatedAt: 3 + pass,
-    } }));
+    };
+    const fingerprint = createHash("sha256").update(JSON.stringify(liveSnapshot)).digest("hex");
+    socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot: liveSnapshot }));
     for (let sample = 0; sample < (pass === 0 ? 1 : 10); sample++) {
       const start = performance.now();
       const pong = new Promise<void>((resolvePromise, reject) => {
@@ -145,11 +157,15 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
       maxHealthMs = Math.max(maxHealthMs, performance.now() - start);
     }
     if (pass === 0) continue; // replace a still-reconciling socket, not just a settled runner
-    for (let attempt = 0; attempt < 400; attempt++) {
-      if (read.prepare("SELECT title FROM sessions WHERE id='child-999'").get()?.title === `Live ${pass}`) break;
+    // Pin application of the exact newer snapshot, not title projection: a CP-owned rename is
+    // intentionally preserved even when newer runner state is successfully applied. Allow slow
+    // file-backed test hosts to converge, while individual HTTP/pong deadlines stay at two seconds.
+    for (let attempt = 0; attempt < 800; attempt++) {
+      if (read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-999'").get()?.runner_snapshot_fingerprint === fingerprint) break;
       await delay(25);
     }
-    assert.equal(read.prepare("SELECT title FROM sessions WHERE id='child-999'").get()?.title, `Live ${pass}`);
+    assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-999'").get()?.runner_snapshot_fingerprint,
+      fingerprint, `newer snapshot did not converge\n${output}`);
   }
   assert.ok(maxHealthMs < 2000, `health latency ${maxHealthMs}ms`);
   assert.ok(maxPongMs < 2000, `heartbeat latency ${maxPongMs}ms`);
