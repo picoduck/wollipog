@@ -5,10 +5,11 @@ import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { PendingApproval } from "@wollipog/protocol";
+import type { PendingApproval, SessionView } from "@wollipog/protocol";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import {
   CLOSE_WOULD_STOP_WORK,
+  closeRowStatus,
   closeWarning,
   DesktopCloseGuard,
   heldClose,
@@ -48,6 +49,16 @@ const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 
 const approval = (requestId: string, extra: Partial<PendingApproval> = {}): PendingApproval =>
   ({ requestId, title: "Run pnpm test", options: [{ optionId: "allow", name: "Allow" }], ...extra });
 
+/** Exact ownership of one request, as the control plane reports it for a campaign child. */
+const ownedBy = (requestId: string, owner: "human" | "orchestrator"): CloseGuardSession["pendingRequestOwners"] => ({
+  human: owner === "human" ? 1 : 0,
+  orchestrator: owner === "orchestrator" ? 1 : 0,
+  requests: [{ requestId, owner }],
+});
+
+const campaignWith = (human: number, orchestrator = 0) =>
+  ({ pendingRequests: { human, orchestrator } }) as SessionView["orchestratorCampaign"];
+
 const SESSIONS: Record<string, CloseGuardSession> = {
   s_rounding: { title: "Fix the invoice rounding bug", status: "running", pendingApproval: null },
   s_migration: { title: "Review the migration plan", status: "input_required", pendingApproval: null },
@@ -59,6 +70,45 @@ const SESSIONS: Record<string, CloseGuardSession> = {
     title: "Pick a migration strategy",
     status: "idle",
     pendingApproval: approval("r_question", { kind: "question", options: [] }),
+  },
+  // Listed for a request only the Orchestrator can answer, which is not the person's to make (#2100).
+  s_orchestrator_running: {
+    title: "Draft the rollout checklist",
+    status: "running",
+    pendingApproval: approval("r_orch_running"),
+    pendingRequestOwners: ownedBy("r_orch_running", "orchestrator"),
+  },
+  s_orchestrator_input: {
+    title: "Choose the retry policy",
+    status: "input_required",
+    pendingApproval: approval("r_orch_input", { kind: "question", options: [] }),
+    pendingRequestOwners: ownedBy("r_orch_input", "orchestrator"),
+  },
+  s_orchestrator_idle: {
+    title: "Merge the cache fix",
+    status: "idle",
+    pendingApproval: approval("r_orch_idle"),
+    pendingRequestOwners: ownedBy("r_orch_idle", "orchestrator"),
+  },
+  s_orchestrator_completed: {
+    title: "Delete the merged branch",
+    status: "completed",
+    pendingApproval: approval("r_orch_completed"),
+    pendingRequestOwners: ownedBy("r_orch_completed", "orchestrator"),
+  },
+  // A campaign whose descendants wait on the person, with nothing pending of its own.
+  s_campaign: {
+    title: "Ship the notices epic",
+    status: "running",
+    pendingApproval: null,
+    orchestratorCampaign: campaignWith(2, 1),
+  },
+  // A child agent's request that the person must answer is still theirs.
+  s_child_human: {
+    title: "Audit the lockfile",
+    status: "running",
+    pendingApproval: approval("r_child", { ownerToolUseId: "toolu_child" }),
+    pendingRequestOwners: ownedBy("r_child", "human"),
   },
 };
 
@@ -195,6 +245,44 @@ test("a session listed for its pending approval says so, whatever its lifecycle 
   await h.emit({ count: 4, sessionIds: ["s_completed_approval", "s_input_approval", "s_migration", "s_idle_question"] });
   assert.deepEqual(rowStatuses(), ["Approval Required", "Approval Required", "Awaiting Input", "Answer Required"],
     "attention outranks every lifecycle status, and names what kind of request it is");
+});
+
+test("a row's attention badge follows who owns the request, as the shared projection does (#2100)", () => {
+  const label = (id: string) => closeRowStatus(SESSIONS[id]!).label;
+  // Owned by the Orchestrator: no attention badge. A live turn keeps its lifecycle; a settled
+  // session is held open on a decision, which is "Awaiting Input", not "Awaiting Prompt".
+  assert.equal(label("s_orchestrator_running"), "Running");
+  assert.equal(label("s_orchestrator_input"), "Awaiting Input");
+  assert.equal(label("s_orchestrator_idle"), "Awaiting Input");
+  assert.equal(label("s_orchestrator_completed"), "Awaiting Input");
+  for (const id of ["s_orchestrator_running", "s_orchestrator_input", "s_orchestrator_idle", "s_orchestrator_completed"]) {
+    // Without ownership every request is the person's, which is the badge #2100 removes.
+    const unowned = closeRowStatus({ ...SESSIONS[id]!, pendingRequestOwners: undefined }).label;
+    assert.match(unowned, /^(Approval|Answer) Required$/);
+    assert.notEqual(label(id), unowned, `${id} must not read as the person's decision`);
+  }
+
+  // A campaign's human-owned requests claim the row, with or without an Orchestrator request of its own.
+  assert.equal(label("s_campaign"), "Needs Your Input");
+  assert.equal(closeRowStatus({ ...SESSIONS.s_orchestrator_idle!, orchestratorCampaign: campaignWith(1) }).label, "Needs Your Input");
+  assert.equal(closeRowStatus({ ...SESSIONS.s_campaign!, orchestratorCampaign: campaignWith(0, 3) }).label, "Running",
+    "Orchestrator-owned campaign requests alone do not");
+
+  // The person's own requests keep their attention badge (#2057), a child agent's included.
+  assert.equal(label("s_child_human"), "Approval Required");
+  assert.equal(closeRowStatus({ ...SESSIONS.s_orchestrator_idle!, pendingRequestOwners: ownedBy("r_orch_idle", "human") }).label,
+    "Approval Required");
+  assert.equal(label("s_idle_approval"), "Approval Required", "a session with no ownership report is the person's");
+  assert.equal(closeRowStatus({ ...SESSIONS.s_orchestrator_input!, pendingRequestOwners: ownedBy("r_orch_input", "human") }).label,
+    "Answer Required");
+});
+
+test("a row listed for someone else's request does not ask the person for a decision (#2100)", async () => {
+  const h = harness();
+  await mount(h);
+
+  await h.emit({ count: 5, sessionIds: ["s_orchestrator_idle", "s_orchestrator_running", "s_orchestrator_input", "s_campaign", "s_child_human"] });
+  assert.deepEqual(rowStatuses(), ["Awaiting Input", "Running", "Awaiting Input", "Needs Your Input", "Approval Required"]);
 });
 
 test("with the local instance not open, the count sentence stands alone", async () => {
@@ -345,4 +433,6 @@ test("the local instance's sessions are offered to the guard from inside that in
   assert.match(boundary, /<InstanceRuntimeHost[\s\S]*<CloseGuardSessionSource \/>[\s\S]*<\/InstanceRuntimeHost>/);
   const source = /function CloseGuardSessionSource\(\)[\s\S]*?\n\}/.exec(app)?.[0] ?? "";
   assert.match(source, /if \(scope !== LOCAL_INSTANCE_SCOPE\) return undefined;/);
+  // A row badges attention only for requests the person owns, so the ownership has to come along (#2100).
+  assert.match(source, /return \{ title, status, pendingApproval, pendingRequestOwners, orchestratorCampaign \};/);
 });

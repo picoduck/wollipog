@@ -1,4 +1,4 @@
-import type { PendingApproval, SessionStatus } from "@wollipog/protocol";
+import type { PendingApproval, SessionStatus, SessionView } from "@wollipog/protocol";
 
 /**
  * The dashboard's side of §23.1, which is now only the message.
@@ -49,6 +49,10 @@ export interface CloseGuardSession {
   /** The shell counts a session with a pending approval as working whatever its status, so the row
    * has to be able to say that is why it is listed (#2057). */
   pendingApproval: PendingApproval | null;
+  /** Who owns those requests, so a row claims the person's attention only for their own (#2100). */
+  pendingRequestOwners?: SessionView["pendingRequestOwners"];
+  /** A campaign's human-owned requests, which claim the row even with no request of its own. */
+  orchestratorCampaign?: SessionView["orchestratorCampaign"];
 }
 
 /**

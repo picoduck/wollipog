@@ -84,6 +84,23 @@ test.describe("choices", () => {
     await expect(rows.locator(".status.inline")).toHaveText(["Approval Required", "Running"]);
   });
 
+  test("a row asks for the person's attention only for requests they own (#2100)", async ({ page }) => {
+    await page.goto("/desktop-close-guard-e2e.html?state=ownership");
+    const rows = page.getByRole("dialog", { name: "Quit Wollipog" }).locator(".confirmation-rows > li");
+    await expect(rows.locator(".row-title")).toHaveText([
+      "Merge the cache fix",
+      "Draft the rollout checklist",
+      "Ship the notices epic",
+      "Tidy the release notes",
+      "Audit the lockfile",
+    ]);
+    // Orchestrator-owned: settled reads "Awaiting Input", in flight keeps its lifecycle. The campaign
+    // has requests the person owns; the last two are the person's own approvals.
+    await expect(rows.locator(".status.inline")).toHaveText(
+      ["Awaiting Input", "Running", "Needs Your Input", "Approval Required", "Approval Required"],
+    );
+  });
+
   test("a count the shell could not get says so, and names no one", async ({ page }) => {
     await page.goto("/desktop-close-guard-e2e.html?state=unknown");
     const dialog = page.getByRole("dialog", { name: "Quit Wollipog" });

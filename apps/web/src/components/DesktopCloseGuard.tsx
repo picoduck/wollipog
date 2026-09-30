@@ -3,7 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { sessionAttentionStatus } from "@wollipog/protocol";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
-import { closeGuardLinks, type CloseGuardLinks, type CloseGuardSession } from "../desktop-close-guard.js";
+import { closeGuardLinks, WORK_IN_FLIGHT, type CloseGuardLinks, type CloseGuardSession } from "../desktop-close-guard.js";
 import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
 
 /** The event the shell emits when it holds a close back. */
@@ -65,16 +65,26 @@ export function closeWarning(count: number): string {
 }
 
 /**
- * A row's badge: what the session is waiting on when it has a pending request, otherwise its
- * lifecycle. The shell lists a session with a pending approval whatever its status, so an idle one
- * badged "Awaiting Prompt" would contradict "still working" and hide why it is listed (#2057).
- * Attention outranks lifecycle here as on every other surface, by its kind's shared label: a row has
- * no room for the owner the full attention label names.
+ * A row's badge: the attention a person owes the session, otherwise its lifecycle. The shell lists a
+ * session with a pending approval whatever its status, so an idle one badged "Awaiting Prompt" would
+ * contradict "still working" and hide why it is listed (#2057). Attention is the shared human-owned
+ * projection, as in the Inbox and the archive confirmation: a request only the Orchestrator owns
+ * does not claim the row, and a campaign's human-owned requests do (#2100). A row has no room for the
+ * owner the full attention label names, so it shows its kind's shared label.
+ *
+ * Attention always addresses the person, so a row listed only for an Orchestrator-owned request
+ * keeps its lifecycle while that is work in flight. A settled one says "Awaiting Input": true, since
+ * the request holds it open on a decision, and it does not say the person must act. A bare
+ * "input_required" status with no request behind it is the projection's legacy fallback, which the
+ * lifecycle already says as "Awaiting Input".
  */
 export function closeRowStatus(session: CloseGuardSession): StatusMeta {
-  if (!session.pendingApproval) return statusMeta("session", session.status);
-  const attention = sessionAttentionStatus({ status: session.status, pendingApproval: session.pendingApproval });
-  return statusMeta("attention", attention?.kind ?? "approval_required");
+  const attention = sessionAttentionStatus(session);
+  const legacyInput = attention?.kind === "input_required" && !session.pendingApproval &&
+    !session.orchestratorCampaign?.pendingRequests?.human;
+  if (attention && !legacyInput) return statusMeta("attention", attention.kind);
+  if (session.pendingApproval && !WORK_IN_FLIGHT[session.status]) return statusMeta("session", "input_required");
+  return statusMeta("session", session.status);
 }
 
 /**
