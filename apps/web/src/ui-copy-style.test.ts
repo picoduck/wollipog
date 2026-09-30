@@ -242,9 +242,14 @@ function uiCopy(sourceFile: ts.SourceFile): UiCopy[] {
   return copy;
 }
 
+/** A source file's path under SOURCE_ROOT with `/` separators on every platform, as LABEL_FRAGMENTS names it. */
+function sourcePath(fileName: string): string {
+  return path.relative(SOURCE_ROOT, fileName).split(path.sep).join("/");
+}
+
 function copyLine(sourceFile: ts.SourceFile, node: ts.Node): string {
   const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-  return `${path.relative(SOURCE_ROOT, sourceFile.fileName)}:${line}`;
+  return `${sourcePath(sourceFile.fileName)}:${line}`;
 }
 
 /** A piece of label-tag text that is not a label on its own, with the reason it is exempt. */
@@ -279,14 +284,14 @@ const LABEL_FRAGMENTS: readonly LabelFragment[] = [
 ];
 
 /**
- * Every label in `sourceFile` that is not Title Case, less the exempt fragments, and every
- * `fragments` entry for this file that matched nothing.
+ * Every label in `sourceFile` that is not Title Case, less the exempt fragments, and the
+ * `fragments` entries that exempted something, so the caller can report the ones that never did.
  */
 function titleCaseFailures(
   sourceFile: ts.SourceFile,
   fragments: readonly LabelFragment[] = LABEL_FRAGMENTS,
 ): { failures: string[]; used: Set<LabelFragment> } {
-  const file = path.relative(SOURCE_ROOT, sourceFile.fileName);
+  const file = sourcePath(sourceFile.fileName);
   const failures: string[] = [];
   const used = new Set<LabelFragment>();
   for (const { node, kind, value, label } of uiCopy(sourceFile)) {
