@@ -1095,6 +1095,17 @@ app.register(async (instance) => {
   let runtimeAttentionBatch: ReturnType<SessionsService["beginRunnerAttentionBatch"]> | undefined;
   let runtimeAttentionFrames = 0;
   let runtimeAttentionStarted = 0;
+  let reconcilingInventory = false;
+  const deferNewCredentialBinding = (msg: Extract<RunnerToControlPlane,
+    { type: "agent_control_credential" | "policy_hook_credential" }>) => {
+    if (!reconcilingInventory || typeof msg.sessionId !== "string" ||
+        db.sessionReconciliationVersion(msg.sessionId) !== null) return false;
+    // An early ACK can prompt a valid binding before its first inventory row exists. Existing
+    // bindings bypass inventory immediately; new ones retain the old post-materialization order.
+    // Called only inside the guarded handler so a persistence error cannot escape the listener.
+    frameQueue.enqueue(msg, Buffer.byteLength(JSON.stringify(msg)));
+    return true;
+  };
   const currentSocket = () => Boolean(runnerId && socket.readyState === 1 &&
     hub.isCurrentRunnerSocket(runnerId, runnerClient) && credentialId &&
     db.isRunnerCredentialActive(runnerId, credentialId));
@@ -1227,10 +1238,13 @@ app.register(async (instance) => {
         // this subsumes reconcile and lets a dashboard see sessions it didn't create. Fall back to
         // reconcile for pre-Phase-2 runners.
         if (msg.sessionSnapshots) {
-          const completed = await svc.hydrateRunnerSessionsCooperatively(runnerId, msg.sessionSnapshots, {
-            isCurrent: currentSocket,
-          });
-          if (!completed) return;
+          reconcilingInventory = true;
+          try {
+            const completed = await svc.hydrateRunnerSessionsCooperatively(runnerId, msg.sessionSnapshots, {
+              isCurrent: currentSocket,
+            });
+            if (!completed) return;
+          } finally { reconcilingInventory = false; }
         }
         else svc.reconcileRunnerSessions(runnerId, msg.liveSessions ?? []);
         svc.reconcileArchivedCampaignWorktrees(runnerId);
@@ -1272,6 +1286,7 @@ app.register(async (instance) => {
         break;
       case "policy_hook_credential":
         {
+          if (deferNewCredentialBinding(msg)) break;
           const accepted = db.setPolicyHookCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
           send(socket, {
             type: "policy_hook_credential_registered",
@@ -1302,6 +1317,7 @@ app.register(async (instance) => {
         break;
       case "agent_control_credential":
         {
+          if (deferNewCredentialBinding(msg)) break;
           const accepted = db.setAgentControlCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
           send(socket, {
             type: "agent_control_credential_registered",
@@ -1678,7 +1694,13 @@ app.register(async (instance) => {
     app.log.warn({ event: "runner_frame_queue_closed", entryPoint: "runner_socket", runnerId },
       "runner replay exceeded its bounded queue or failed");
     socket.terminate();
-  }, undefined, flushRuntimeAttention);
+  }, undefined, flushRuntimeAttention, (paused) => {
+    if (socket.readyState !== 1) return;
+    if (paused) socket.pause();
+    else socket.resume();
+    app.log.debug({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused },
+      "runner receive flow control changed");
+  });
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());
     if (!msg) return;

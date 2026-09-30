@@ -27,12 +27,14 @@ export class RunnerFrameQueue<T> {
   private bytes = 0;
   private draining = false;
   private closed = false;
+  private pressured = false;
 
   constructor(
     private readonly handle: (message: T) => Promise<void>,
     private readonly onFailure: () => void,
     private limits = { frames: 4096, bytes: 2 * MAX_RUNNER_CLIENT_MESSAGE_BYTES },
     private readonly afterDrain: () => Promise<void> = async () => {},
+    private readonly onPressure: (paused: boolean) => void = () => {},
   ) {}
 
   /** The early registration ACK legitimately triggers one negotiated frame per retained session.
@@ -52,6 +54,7 @@ export class RunnerFrameQueue<T> {
     }
     this.pending.push({ message, bytes });
     this.bytes += bytes;
+    this.updatePressure();
     if (!this.draining) void this.drain();
   }
 
@@ -59,6 +62,20 @@ export class RunnerFrameQueue<T> {
     this.closed = true;
     this.pending = [];
     this.bytes = 0;
+    this.updatePressure();
+  }
+
+  private updatePressure(): void {
+    // Pause well below the hard ceiling, leaving room for the socket's already-buffered data
+    // and one full legal frame. Hysteresis prevents pause/resume chatter on a busy stream.
+    const highFrames = Math.max(1, Math.min(1024, Math.floor(this.limits.frames / 2)));
+    const highBytes = this.limits.bytes / 4;
+    const paused = !this.closed && (this.pressured
+      ? this.pending.length > highFrames / 2 || this.bytes > highBytes / 2
+      : this.pending.length >= highFrames || this.bytes >= highBytes);
+    if (paused === this.pressured) return;
+    this.pressured = paused;
+    this.onPressure(paused);
   }
 
   private async drain(): Promise<void> {
@@ -72,6 +89,7 @@ export class RunnerFrameQueue<T> {
         }
         const next = this.pending.shift()!;
         this.bytes -= next.bytes;
+        this.updatePressure();
         await this.handle(next.message);
         // A replay burst must not become a synchronous loop once registration completes.
         await new Promise<void>((resolve) => setImmediate(resolve));

@@ -154,3 +154,65 @@ test("cancelled runtime attention flush carries cleared blockers into replacemen
       .get("campaign-0")?.n, 1, "replacement publishes the partially committed runtime transition exactly once");
   } finally { db.close(); }
 });
+
+test("an immediate publication consumes human blocker transitions deferred by a runtime batch", async () => {
+  const { db, svc, snapshots } = fixture(100);
+  try {
+    for (const id of ["child-0", "child-10"]) db.setPendingApproval(id, {
+      requestId: `q-${id}`, kind: "question", title: "Private question", options: [],
+      questions: [{ id: "choice", question: "Private question", header: "Choice", options: [{ label: "Yes" }] }],
+    });
+    assert.equal(db.getSession("campaign-0")?.orchestratorCampaign?.pendingRequests?.human, 2);
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", snapshots[0]!, batch);
+    // Direct callers, including HTTP decisions, publish immediately from the current before-view.
+    svc.applySessionRuntimeUpdate("runner", snapshots[10]!);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE kind='human_blockers_cleared'")
+      .get()?.n, 1);
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE kind='human_blockers_cleared'")
+      .get()?.n, 1, "the older deferred token set must not create a second cleared-blocker wakeup");
+  } finally { db.close(); }
+});
+
+test("a campaign deleted during reconciliation cannot receive stale attention publications", async () => {
+  const { db, svc, snapshots } = fixture(100);
+  try {
+    db.setPendingApproval("child-0", { requestId: "q", kind: "question", title: "Private question", options: [],
+      questions: [{ id: "choice", question: "Private question", header: "Choice", options: [{ label: "Yes" }] }] });
+    let yielded = false;
+    assert.equal(await svc.hydrateRunnerSessionsCooperatively("runner", snapshots, {
+      isCurrent: () => true, yieldToLoop: async () => {
+        if (yielded) return;
+        yielded = true;
+        assert.ok(svc.delete("campaign-0").ok);
+      },
+    }), true);
+    assert.equal(db.getSession("campaign-0"), null);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE campaign_session_id='campaign-0'")
+      .get()?.n, 0);
+  } finally { db.close(); }
+});
+
+test("registration refreshes the deferred before-view after a publication yield", async () => {
+  const { db, svc, snapshots } = fixture(100);
+  try {
+    const ask = (requestId: string) => ({ requestId, kind: "question" as const, title: "Private question", options: [],
+      questions: [{ id: "choice", question: "Private question", header: "Choice", options: [{ label: "Yes" }] }] });
+    db.setPendingApproval("child-0", ask("old"));
+    let intervened = false;
+    await svc.hydrateRunnerSessionsCooperatively("runner", snapshots, {
+      isCurrent: () => true, yieldToLoop: async () => {
+        // All absent campaign rows settle before the first attention publication. At that yield,
+        // an immediate answer must consume even a before-view already captured by the iterator.
+        if (intervened || db.getSession("campaign-9")?.status !== "stopped") return;
+        intervened = true;
+        db.setPendingApproval("child-0", ask("new"));
+        svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, preview: "Immediate" });
+      },
+    });
+    assert.equal(intervened, true);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE kind='human_blockers_cleared'")
+      .get()?.n, 1);
+  } finally { db.close(); }
+});

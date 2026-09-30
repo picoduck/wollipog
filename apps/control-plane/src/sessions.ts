@@ -6734,6 +6734,9 @@ export class SessionsService {
   private publishCampaignAttentionTransition(before: SessionView | null, batch?: RunnerAttentionBatch): void {
     if (batch) { batch.defer(before); return; }
     if (!before) return;
+    // A yielded batch may outlive deletion or reparenting of its controlling campaign. Do not
+    // write continuation events for a stale owner (or a deleted row's foreign key).
+    if (this.orchestratorCampaignController(this.db.getSession(before.id))?.id !== before.id) return;
     const now = Date.now();
     const humanRequests = this.descendantRequests(before.id, () => true, "human", false);
     if (humanRequests.ok && humanRequests.data) {
@@ -6803,6 +6806,17 @@ export class SessionsService {
         kind: "human_blockers_cleared",
         now,
       });
+      // An immediate HTTP/direct publication can clear the last blocker while a runtime or
+      // registration batch still holds an older token set. Consume only its human transition;
+      // retain the original orchestrator tokens so per-request resolved events are not lost.
+      for (const campaigns of this.registrationAttention.values()) {
+        const deferred = campaigns.get(before.id);
+        const campaign = deferred?.orchestratorCampaign;
+        if (!deferred || !campaign?.pendingRequests) continue;
+        campaigns.set(before.id, { ...deferred, orchestratorCampaign: { ...campaign,
+          pendingRequests: { ...campaign.pendingRequests, human: 0, humanRequestTokens: [] },
+        } });
+      }
     }
     for (const child of this.db.campaignContinuationChildCandidates(before.id)) {
       this.db.recordCampaignContinuationEvent({
@@ -12710,10 +12724,12 @@ export class SessionsService {
         }
       }
     }
-    for (const before of campaigns.values()) {
+    for (const campaignId of campaigns.keys()) {
       yield;
-      this.publishCampaignAttentionTransition(before);
-      campaigns.delete(before.id);
+      // An immediate publication during this yield may have consumed the human transition.
+      const before = campaigns.get(campaignId);
+      if (before) this.publishCampaignAttentionTransition(before);
+      campaigns.delete(campaignId);
     }
     this.registrationAttention.delete(runnerId);
     // The box no longer reports these ordinary user-delete tombstones -> the delete took. Fork

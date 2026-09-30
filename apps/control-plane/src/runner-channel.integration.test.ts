@@ -88,15 +88,20 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
       driver: "claude-code", useWorktree: false, worktreePath: null, config: {}, preview: null,
       pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 });
   }
+  seed.createShell({ shellId: "burst-shell", sessionId: "child-999", runnerId, name: "Synthetic Burst", createdAt: 1 });
   seed.raw().exec("PRAGMA synchronous=FULL");
   seed.close();
   let output = "";
+  let reconciliationCompleted = false;
   const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
     cwd: REPO_ROOT, env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1",
       CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath },
     stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
-  child.stdout?.on("data", (chunk) => { output = (output + String(chunk)).slice(-128_000); });
+  child.stdout?.on("data", (chunk) => {
+    output = (output + String(chunk)).slice(-128_000);
+    reconciliationCompleted ||= output.includes("runner_reconciliation_completed");
+  });
   child.stderr?.on("data", (chunk) => { output = (output + String(chunk)).slice(-128_000); });
   const sockets: StrictSocket[] = [];
   let read: DatabaseSync | undefined;
@@ -122,13 +127,33 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
     const registered = new Promise<void>((resolvePromise) => socket.on("message", (raw) => {
       if (JSON.parse(raw.toString()).type === "registered") resolvePromise();
     }));
-    socket.send(JSON.stringify({ ...frame, sessionSnapshots: snapshots }));
+    socket.send(JSON.stringify({ ...frame, sessionSnapshots: pass === 2
+      ? [...snapshots, { ...snapshots[0]!, id: "new-credential-session" }] : snapshots }));
     await registered;
+    let newBindings: Promise<boolean[]> | undefined;
+    if (pass === 2) {
+      newBindings = new Promise<boolean[]>((resolvePromise) => {
+        const answers: boolean[] = [];
+        const timer = setTimeout(() => resolvePromise([false]), 60_000);
+        socket.on("message", (raw) => {
+          const message = JSON.parse(raw.toString());
+          if (message.sessionId !== "new-credential-session" || ![
+            "agent_control_credential_registered", "policy_hook_credential_registered",
+          ].includes(message.type)) return;
+          answers.push(message.accepted);
+          if (answers.length === 2) { clearTimeout(timer); resolvePromise(answers); }
+        });
+      });
+      // Unlike existing-session handshakes, these bindings must wait for their first inventory
+      // row instead of rejecting a valid runner-held session that has not been materialized yet.
+      socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "new-credential-session", tokenHash: "b".repeat(64) }));
+      socket.send(JSON.stringify({ type: "policy_hook_credential", sessionId: "new-credential-session", tokenHash: "c".repeat(64) }));
+    }
     const credentialHandshake = new Promise<void>((resolvePromise, reject) => {
       const timer = setTimeout(() => reject(new Error("Agent Control handshake stalled during inventory")), 2000);
       socket.on("message", (raw) => {
         const message = JSON.parse(raw.toString());
-        if (message.type !== "agent_control_credential_registered") return;
+        if (message.type !== "agent_control_credential_registered" || message.sessionId !== "child-999") return;
         clearTimeout(timer);
         assert.equal(message.accepted, true);
         resolvePromise();
@@ -174,11 +199,30 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
     }
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-999'").get()?.runner_snapshot_fingerprint,
       fingerprint, `newer snapshot did not converge\n${output}`);
+    if (newBindings) assert.deepEqual(await newBindings, [true, true], "new session bindings wait for materialization rather than being rejected");
   }
+  // Shell output bypasses the runner outbox and legitimately exceeds the queue's byte ceiling
+  // over time. Transport flow control must pace it, not disconnect every session on this runner.
+  const burstSocket = sockets.at(-1)!;
+  const data = "x".repeat(64 * 1024);
+  let disconnected = false;
+  burstSocket.once("close", () => { disconnected = true; });
+  for (let seq = 1; seq <= 2000; seq++) burstSocket.send(JSON.stringify({ type: "shell_output",
+    sessionId: "child-999", shellId: "burst-shell", stream: "stdout", data, seq }));
+  const burstDeadline = Date.now() + 60_000;
+  while (Date.now() < burstDeadline && !disconnected) {
+    if (read.prepare("SELECT output_end_seq FROM session_shells WHERE shell_id='burst-shell'").get()?.output_end_seq === 2000) break;
+    const response = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(2000) });
+    assert.equal(response.status, 200);
+    await delay(50);
+  }
+  assert.equal(disconnected, false, `ordinary shell output disconnected the runner\n${output}`);
+  assert.equal(read.prepare("SELECT output_end_seq FROM session_shells WHERE shell_id='burst-shell'").get()?.output_end_seq, 2000,
+    `the bounded shell tail did not reach the end of the burst\n${output}`);
   assert.ok(maxHealthMs < 2000, `health latency ${maxHealthMs}ms`);
   assert.ok(maxPongMs < 2000, `heartbeat latency ${maxPongMs}ms`);
   t.diagnostic(`Three registrations: max HTTP ${Math.round(maxHealthMs)}ms, max pong ${Math.round(maxPongMs)}ms`);
-  assert.match(output, /runner_reconciliation_completed/);
+  assert.equal(reconciliationCompleted, true);
   t.diagnostic(`Reconciliation cancellation observed: ${/runner_reconciliation_cancelled/.test(output)}`);
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
 });

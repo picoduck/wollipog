@@ -5,6 +5,25 @@ import { MAX_RUNNER_CLIENT_MESSAGE_BYTES } from "./runner-channel.js";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+test("flow control pauses below hard limits and resumes after draining with hysteresis", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const pressure: boolean[] = [];
+  const handled: number[] = [];
+  const queue = new RunnerFrameQueue<number>(async (n) => { handled.push(n); if (n === 0) await held; },
+    () => assert.fail("flow-controlled stream must not overflow"), { frames: 8, bytes: 100 }, undefined,
+    (paused) => { pressure.push(paused); });
+  queue.enqueue(0, 1);
+  for (let n = 1; n <= 5; n++) queue.enqueue(n, 10);
+  assert.deepEqual(pressure, [true], "pressure starts below the finite resource ceiling");
+  release();
+  for (let n = 0; n < 8; n++) await tick();
+  assert.deepEqual(handled, [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(pressure, [true, false], "draining releases read pressure exactly once");
+  queue.close();
+  assert.deepEqual(pressure, [true, false]);
+});
+
 test("the normal post-ACK inventory burst fits beyond the baseline frame count", async () => {
   let release!: () => void;
   let began!: () => void;
