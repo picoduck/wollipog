@@ -9,6 +9,7 @@ import {
   RAIL_PREFERENCES_STORAGE_KEY,
   moveRailView,
   resetRailPreferencesForTest,
+  setRailLabels,
   setRailViewHidden,
 } from "../rail-preferences.js";
 import { saveInstanceStorageValue } from "../instance-storage.js";
@@ -1065,4 +1066,105 @@ test("a keyboard-focused item gets its tooltip back when a hover elsewhere ends"
     await advance(RAIL_TOOLTIP_GRACE_MS + RAIL_TOOLTIP_DELAY_MS);
     assertNoDomNode(tooltip());
   });
+});
+
+test("the labelled rail names every item, puts counts and keycaps after the name, and shows no tooltip", async () => {
+  await withTooltipRail(async ({ container, render, items, advance, tooltip, item, pointer }) => {
+    const rail = () => container.querySelector<HTMLElement>(".app-rail")!;
+    const foot = () => container.querySelector<HTMLButtonElement>(".rail-foot > button")!;
+    const labels = () => [...container.querySelectorAll(".rail-item-label")].map((label) => label.textContent);
+
+    // Off by default: the 64px rail from #1958, with no names in it.
+    assert.equal(rail().classList.contains("labelled"), false);
+    assert.deepEqual(labels(), []);
+    assertNoDomNode(container.querySelector(".rail-item-keys"));
+    assert.equal(foot().tagName, "BUTTON", "a native button, so Tab reaches it");
+    assert.equal(foot().getAttribute("aria-label"), "Expand Navigation");
+    assert.equal(foot().getAttribute("data-rail-tip"), "Expand Navigation", "its tooltip is its name");
+
+    await act(async () => { foot().click(); });
+    assert.equal(rail().classList.contains("labelled"), true);
+    assert.deepEqual(labels(), ["Search", ...GLOBAL_VIEW_ITEMS.map((entry) => entry.name), "Settings"],
+      "Search, every destination and Settings show their names");
+    assert.equal(foot().getAttribute("aria-label"), "Collapse Navigation", "the name is the action it now takes");
+    // Each item keeps its icon first and its accessible name unchanged.
+    for (const railItem of [...items(), container.querySelector<HTMLElement>(".rail-settings > .rail-item")!]) {
+      assert.equal(railItem.firstElementChild?.tagName.toLowerCase(), "svg");
+      assert.equal(railItem.querySelector(".rail-item-label")?.textContent, railItem.getAttribute("aria-label"));
+    }
+    // Digits ride at the trailing edge, after the name; CSS shows them on hover or focus.
+    const automations = item("Automations");
+    assert.deepEqual(railItemParts(automations), ["svg", "rail-item-label", "rail-item-keys"]);
+    assert.equal(automations.querySelector(".rail-item-keys")?.textContent, "2");
+    assert.equal(automations.querySelector(".rail-item-keys")?.getAttribute("aria-hidden"), "true");
+
+    // The labelled rail already shows the names, so hover and focus open no tooltip.
+    await pointer("pointerover", automations);
+    await advance(RAIL_TOOLTIP_DELAY_MS * 2);
+    assertNoDomNode(tooltip());
+    await act(async () => { item("Projects").focus(); });
+    assertNoDomNode(tooltip());
+
+    // Collapsing brings the 64px rail and its tooltip back.
+    await act(async () => { foot().click(); });
+    await render({ name: "inbox" });
+    assert.equal(rail().classList.contains("labelled"), false);
+    assert.deepEqual(labels(), []);
+    await act(async () => { item("Automations").focus(); });
+    assert.equal(tooltip()?.textContent, "Automations2");
+  });
+});
+
+/** An item's children in order: its icon, then each part by class. */
+function railItemParts(railItem: Element): (string | null)[] {
+  return [...railItem.children].map((child) => child.tagName.toLowerCase() === "svg" ? "svg" : child.getAttribute("class"));
+}
+
+test("the labelled rail keeps Sessions' and Connections' counts inline after the name", async () => {
+  resetRailPreferencesForTest();
+  setRailLabels(true);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <Rail view={{ name: "inbox" }} blockedCount={2} stalledCount={1} onlineConnections={3} onNavigate={() => undefined} />,
+      );
+    });
+    const parts = (label: string) => railItemParts(container.querySelector(`[aria-label="${label}"]`)!);
+    assert.deepEqual(parts("Sessions"),
+      ["svg", "rail-item-label", "rail-badge blocked", "rail-badge stalled", "rail-item-keys", "sr-only"]);
+    assert.deepEqual(parts("Connections"), ["svg", "rail-item-label", "rail-badge", "rail-item-keys", "sr-only"]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    resetRailPreferencesForTest();
+    domWindow.localStorage.clear();
+  }
+});
+
+test("a phone ignores a stored labelled rail", async () => {
+  resetRailPreferencesForTest();
+  setRailLabels(true);
+  const restore = stubPhoneWidth();
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<Rail view={{ name: "inbox" }} blockedCount={0} stalledCount={0} onlineConnections={0} onNavigate={() => undefined} />);
+    });
+    assert.equal(container.querySelector(".app-rail")!.classList.contains("labelled"), false,
+      "no 208px column beside the phone tab bar");
+    assertNoDomNode(container.querySelector(".rail-item-label"));
+    assertNoDomNode(container.querySelector(".rail-foot"), "the foot button is desktop only");
+    assert.equal(container.querySelectorAll(".rail-tab-label").length, 5, "the tab bar is unchanged");
+  } finally {
+    restore();
+    await act(async () => { root.unmount(); });
+    container.remove();
+    resetRailPreferencesForTest();
+    domWindow.localStorage.clear();
+  }
 });

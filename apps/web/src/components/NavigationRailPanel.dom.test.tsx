@@ -4,7 +4,8 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import { InstanceScopeProvider } from "../instance-scope.js";
-import { resetRailPreferencesForTest } from "../rail-preferences.js";
+import { getRailPreferences, resetRailPreferencesForTest, setRailLabels } from "../rail-preferences.js";
+import { Rail } from "./Rail.js";
 import { NavigationRailPanel } from "./SettingsView.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -90,6 +91,82 @@ test("the Navigation group lists every destination with derived digits and a pro
     assert.equal(rowTitle(rows(container)[7]!), "Archived Sessions");
     assert.equal(reset.disabled, true, "a default configuration has nothing to reset");
   } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.localStorage.clear();
+    resetRailPreferencesForTest();
+  }
+});
+
+test("Show Labels in Rail, the rail's foot button and the stored preference stay in step", async () => {
+  domWindow.localStorage.clear();
+  resetRailPreferencesForTest();
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <InstanceScopeProvider instanceScope="rail-panel-test">
+        <Rail
+          view={{ name: "settings", section: "appearance" }}
+          blockedCount={0}
+          stalledCount={0}
+          onlineConnections={0}
+          onNavigate={() => undefined}
+        />
+        <NavigationRailPanel />
+      </InstanceScopeProvider>,
+    );
+  });
+  const labelsSwitch = () => [...container.querySelectorAll<HTMLButtonElement>('[role="switch"]')]
+    .find((candidate) => candidate.textContent?.includes("Show Labels in Rail"));
+  const foot = () => container.querySelector<HTMLButtonElement>(".rail-foot button")!;
+  const rail = () => container.querySelector<HTMLElement>(".app-rail")!;
+  try {
+    assert.ok(labelsSwitch(), "the row is the shared SwitchRow, whose whole row is the target");
+    assert.equal(labelsSwitch()!.getAttribute("aria-checked"), "false");
+    assert.equal(rail().classList.contains("labelled"), false);
+    assert.equal(foot().getAttribute("aria-label"), "Expand Navigation");
+
+    await act(async () => { labelsSwitch()!.click(); });
+    assert.equal(rail().classList.contains("labelled"), true, "the rail follows Settings without a reload");
+    assert.equal(foot().getAttribute("aria-label"), "Collapse Navigation");
+    assert.equal(getRailPreferences("rail-panel-test").labels, true, "written to the scoped instance");
+    assert.equal(getRailPreferences().labels, false, "and to no other instance");
+
+    await act(async () => { foot().click(); });
+    assert.equal(labelsSwitch()!.getAttribute("aria-checked"), "false", "Settings follows the rail's foot");
+    assert.equal(rail().classList.contains("labelled"), false);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.localStorage.clear();
+    resetRailPreferencesForTest();
+  }
+});
+
+test("a phone offers no Show Labels in Rail row", async () => {
+  domWindow.localStorage.clear();
+  resetRailPreferencesForTest();
+  const prior = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: true,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  setRailLabels(true, "rail-panel-test");
+  const { container, root } = await mount();
+  try {
+    assert.equal(container.querySelector('[role="switch"]'), null);
+    assert.equal(container.textContent?.includes("Show Labels in Rail"), false);
+    assert.equal(rows(container).length, 9, "the destination editor is unchanged");
+  } finally {
+    domWindow.matchMedia = prior;
     await act(async () => { root.unmount(); });
     container.remove();
     domWindow.localStorage.clear();

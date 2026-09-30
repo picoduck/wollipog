@@ -24,11 +24,13 @@ import {
   railDigits,
   railPreferencesAreDefault,
   resetRailPreferences,
+  setRailLabels,
   setRailViewHidden,
   visibleRailViews,
 } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 import { useInstanceScope } from "../instance-scope.js";
+import { useIsMobile } from "./useIsMobile.js";
 import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
@@ -244,14 +246,26 @@ export function AppearancePanel({
  * a phone it is the only Settings entry point, pinned as the More sheet's trailing row (#458).
  * Reordering uses Move buttons rather than drag-and-drop: one interaction that works for
  * pointer, touch, and keyboard alike, with the effect announced by the updated digit chips.
+ *
+ * Show Labels in Rail is the desktop rail's 208px labelled form (#1968). It is not offered on a
+ * phone, whose tab bar is always labelled and never takes the rail's width.
  */
 export function NavigationRailPanel() {
   const instanceScope = useInstanceScope();
   const preferences = useRailPreferences();
   const { flags } = useExperiments();
+  const isMobile = useIsMobile();
   const digits = railDigits(visibleRailViews(preferences, flags));
   return (
     <SettingsGroup title="Navigation">
+      {!isMobile && (
+        <SwitchRow
+          title="Show Labels in Rail"
+          description="Shows each destination's name beside its icon. The rail widens to fit them."
+          checked={preferences.labels}
+          onClick={() => setRailLabels(!preferences.labels, instanceScope)}
+        />
+      )}
       <ul className="rail-order-list" aria-label="Navigation Destinations">
         {preferences.order.map((name, index) => {
           const item = destination(name);

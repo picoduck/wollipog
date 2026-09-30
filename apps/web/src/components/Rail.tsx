@@ -8,6 +8,8 @@ import {
   ConnectionsIcon,
   InboxIcon,
   MoreHorizontalIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
   PodsIcon,
   ProjectsIcon,
   RunsIcon,
@@ -24,7 +26,7 @@ import { useIsMobile, useIsShortViewport } from "./useIsMobile.js";
 import { useExperiments } from "../use-experiments.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { sessionsDestination } from "../sessions-view-mode.js";
-import { phoneBarViews, railDigits, visibleRailViews } from "../rail-preferences.js";
+import { phoneBarViews, railDigits, setRailLabels, visibleRailViews } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 
 /** Shared with Settings → Appearance → Navigation, whose rows show the same glyphs (#385). */
@@ -46,6 +48,32 @@ export const RAIL_ICON_SIZE = 20;
 const TAB_ICON_SIZE = 24;
 /** More sheet rows are 48px with 20px icons (#1959). */
 const SHEET_ICON_SIZE = 20;
+
+/**
+ * What follows an item's icon (#1968). In the labelled rail: the name, the counts inline after it,
+ * and the keycap at the trailing edge, shown on hover or keyboard focus. In the 64px rail only the
+ * counts, which sit on the icon's corner; the tooltip carries the name and the keycap.
+ */
+export function RailItemText({
+  labelled,
+  name,
+  keys,
+  children,
+}: {
+  labelled: boolean;
+  name: string;
+  keys?: string | null;
+  children?: ReactNode;
+}) {
+  if (!labelled) return <>{children}</>;
+  return (
+    <>
+      <span className="rail-item-label">{name}</span>
+      {children}
+      {keys && <kbd className="rail-item-keys" aria-hidden="true">{keys}</kbd>}
+    </>
+  );
+}
 
 /** The desktop rail's Search item: first in the Work group, and not a destination. */
 type RailEntry = GlobalViewItem | "search";
@@ -174,6 +202,8 @@ export function Rail({
   // separately (phoneBarViews), so the desktop order and experiments never decide its four slots.
   const { flags } = useExperiments();
   const preferences = useRailPreferences();
+  // Desktop only: a stored preference never widens the phone tab bar (#1968).
+  const labelled = !isMobile && preferences.labels;
   const visibleNames = visibleRailViews(preferences, flags);
   const digits = railDigits(visibleNames);
   const itemFor = (name: GlobalViewName) => GLOBAL_VIEW_ITEMS.find((item) => item.id === name)!;
@@ -194,7 +224,8 @@ export function Rail({
   }
   const separatorsBefore = isMobile ? entries.map(() => false) : railSeparatorsBefore(entries.map(entryGroup));
   const descriptionPrefix = useId();
-  const tooltip = useRailTooltip(!isMobile);
+  // The labelled rail already shows every name, so it shows no tooltip.
+  const tooltip = useRailTooltip(!isMobile && !labelled);
   // The sheet is rendered for the whole phone breakpoint rather than only when a destination
   // overflows: Settings always lives there, so hiding every optional destination by experiment
   // must not strand it.
@@ -253,6 +284,7 @@ export function Rail({
           }}
         >
           <SearchIcon size={RAIL_ICON_SIZE} />
+          <RailItemText labelled={labelled} name="Search" keys={shortcutDisplay("search")} />
         </button>
       );
     }
@@ -295,13 +327,15 @@ export function Rail({
           item.name,
           <>
             <Icon size={isMobile ? TAB_ICON_SIZE : RAIL_ICON_SIZE} />
-            {item.id === "inbox" && blockedCount > 0 && (
-              <span className="rail-badge blocked" aria-hidden="true">{blockedCount}</span>
-            )}
-            {item.id === "inbox" && stalledCount > 0 && (
-              <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
-            )}
-            {item.id === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
+            <RailItemText labelled={labelled} name={item.name} keys={shortcutDigit}>
+              {item.id === "inbox" && blockedCount > 0 && (
+                <span className="rail-badge blocked" aria-hidden="true">{blockedCount}</span>
+              )}
+              {item.id === "inbox" && stalledCount > 0 && (
+                <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
+              )}
+              {item.id === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
+            </RailItemText>
           </>,
         )}
         {countDescription && <span id={descriptionId} className="sr-only">{countDescription}</span>}
@@ -310,7 +344,7 @@ export function Rail({
   };
 
   return (
-    <nav className="app-rail" aria-label="Primary Navigation" data-focus-zone="rail" tabIndex={-1} {...tooltip.handlers}>
+    <nav className={`app-rail${labelled ? " labelled" : ""}`} aria-label="Primary Navigation" data-focus-zone="rail" tabIndex={-1} {...tooltip.handlers}>
       {/* Decoration, not a second link to Sessions directly above the Sessions item (#1958). */}
       <div className="rail-brand" aria-hidden="true">
         <img src="/icons/icon-192.png" alt="" />
@@ -448,6 +482,22 @@ export function Rail({
           toast stack. */}
       {!isMobile && instanceControl && <div className="rail-instance">{instanceControl}</div>}
       {!isMobile && <div className="rail-settings">{settingsControl}</div>}
+      {!isMobile && (
+        <div className="rail-foot">
+          {/* One of three switches for the labelled rail, with Settings › Appearance › Navigation
+              and the palette (#1968). Its name is the action it takes, so it has no pressed state. */}
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label={labelled ? "Collapse Navigation" : "Expand Navigation"}
+            data-rail-tip={labelled ? undefined : "Expand Navigation"}
+            title={labelled ? "Collapse navigation" : undefined}
+            onClick={() => setRailLabels(!labelled, instanceScope)}
+          >
+            {labelled ? <PanelLeftCloseIcon size={16} /> : <PanelLeftOpenIcon size={16} />}
+          </button>
+        </div>
+      )}
       {tooltip.tooltip}
     </nav>
   );
@@ -455,7 +505,8 @@ export function Rail({
 
 /**
  * A phone tab: the icon in its pill over a one-line label (docs/design-system.md §15.1). The label
- * ellipsizes; the accessible name stays the tab's full name. The desktop rail stays icon-only.
+ * ellipsizes; the accessible name stays the tab's full name. The desktop rail is icon-only unless
+ * the user turns on its labels (RailItemText).
  */
 function railTab(labelled: boolean, name: string, icon: ReactNode): ReactNode {
   if (!labelled) return icon;

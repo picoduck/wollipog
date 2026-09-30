@@ -320,6 +320,7 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 | Token | Value | Notes |
 | --- | --- | --- |
 | `--rail-w` | 64px | The desktop rail (§4.1). |
+| `--rail-w-labelled` | 208px | The labelled desktop rail, when the user turns it on (§4.1). |
 | `--bar-h` | 48px | Every bar: desktop session bar, detail bar, phone app bar, compact page header. §4.4. |
 | `--page-gutter` | 24px (16px phone) | Left and right padding of the page container. |
 | `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Pods. Left-aligned. |
@@ -566,6 +567,15 @@ Rules
   8px superscripts. One count badge per item (§11.4). Archived uses an outline archive-box glyph.
   The instance switcher (Tauri) replaces the brand tile at the top as a 32px monogram tile with a
   status corner dot.
+- **Labelled rail (desktop, opt-in).** Off by default. Turned on, the rail is 208px and each item
+  shows its icon, still centred at x = 32px, then its name in `--type-body-strong` on one line with
+  an ellipsis. Counts sit inline after the name, and the digit keycap appears at the trailing edge on
+  hover (fine pointers) or keyboard focus. No tooltip is shown, and group hairlines span the rail.
+  Three controls write the same per-instance preference and follow each other live: an icon button
+  at the rail's foot ("Expand Navigation" / "Collapse Navigation"), the switch "Show Labels in Rail"
+  in Settings › Appearance › Navigation, and the palette action "Show Navigation Labels" / "Hide
+  Navigation Labels" (#1978). It never applies at 760px or below, and the Settings row is not shown
+  there.
 - **One name per destination**, used for the rail tooltip, `aria-label`, page title, phone app bar,
   More sheet, palette, shortcut reference and Settings › Appearance › Navigation: Sessions,
   Automations, Projects, Multi-Agent Runs, Pods, Connections, Agent Skills, Archived Sessions, Usage

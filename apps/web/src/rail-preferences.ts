@@ -52,12 +52,21 @@ export interface RailPreferences {
    * `DEFAULT_PHONE_BAR`. Older clients ignore the field.
    */
   phoneBar?: readonly GlobalViewName[];
+  /**
+   * Whether the desktop rail shows each destination's name beside its icon, 208px wide (#1968).
+   * Off by default and on a phone whatever is saved; a save without the field loads as off.
+   */
+  labels: boolean;
 }
 
 export function defaultRailPreferences(): RailPreferences {
-  return { order: [...CANONICAL_ORDER], hidden: new Set() };
+  return { order: [...CANONICAL_ORDER], hidden: new Set(), labels: false };
 }
 
+/**
+ * Whether the destination list is as shipped, which is what Reset to Default restores. The labelled
+ * rail is a separate switch beside the list, so it neither enables that reset nor is undone by it.
+ */
 export function railPreferencesAreDefault(preferences: RailPreferences): boolean {
   return preferences.hidden.size === 0 &&
     preferences.phoneBar === undefined &&
@@ -95,7 +104,13 @@ export function reconcileRailOrder(saved: readonly string[]): GlobalViewName[] {
 export function parseRailPreferences(raw: string | null): RailPreferences {
   if (!raw) return defaultRailPreferences();
   try {
-    const value = JSON.parse(raw) as { v?: unknown; order?: unknown; hidden?: unknown; phoneBar?: unknown };
+    const value = JSON.parse(raw) as {
+      v?: unknown;
+      order?: unknown;
+      hidden?: unknown;
+      phoneBar?: unknown;
+      labels?: unknown;
+    };
     if (!value || typeof value !== "object" || Array.isArray(value)) return defaultRailPreferences();
     const savedOrder = Array.isArray(value.order) ? value.order.filter((name): name is string => typeof name === "string") : [];
     const savedHidden = Array.isArray(value.hidden) ? value.hidden.filter((name): name is string => typeof name === "string") : [];
@@ -104,7 +119,9 @@ export function parseRailPreferences(raw: string | null): RailPreferences {
     for (const name of savedHidden) {
       if (KNOWN.has(name) && !REQUIRED_RAIL_VIEWS.has(name as GlobalViewName)) hidden.add(name as GlobalViewName);
     }
-    if (!Array.isArray(value.phoneBar)) return { order, hidden };
+    // Only a literal `true` turns labels on, so a save from before #1968 loads with them off.
+    const labels = value.labels === true;
+    if (!Array.isArray(value.phoneBar)) return { order, hidden, labels };
     const phoneBar: GlobalViewName[] = [];
     for (const name of value.phoneBar) {
       if (typeof name === "string" && KNOWN.has(name) && !phoneBar.includes(name as GlobalViewName)) {
@@ -112,8 +129,8 @@ export function parseRailPreferences(raw: string | null): RailPreferences {
       }
     }
     // An empty choice is no choice: the bar would otherwise be whatever the top-up happened to pick.
-    if (phoneBar.length === 0) return { order, hidden };
-    return { order, hidden, phoneBar: phoneBar.slice(0, PHONE_BAR_SLOTS) };
+    if (phoneBar.length === 0) return { order, hidden, labels };
+    return { order, hidden, phoneBar: phoneBar.slice(0, PHONE_BAR_SLOTS), labels };
   } catch {
     return defaultRailPreferences();
   }
@@ -199,6 +216,7 @@ function commit(preferences: RailPreferences, instanceScope: string): void {
       order: preferences.order,
       hidden: [...preferences.hidden],
       ...(preferences.phoneBar ? { phoneBar: preferences.phoneBar } : {}),
+      ...(preferences.labels ? { labels: true } : {}),
     }),
     instanceScope,
   );
@@ -234,8 +252,15 @@ export function moveRailView(
   commit({ ...current, order }, instanceScope);
 }
 
+/** The Settings switch, the rail's foot button and the palette action all write this (#1968). */
+export function setRailLabels(labels: boolean, instanceScope = LOCAL_INSTANCE_SCOPE): void {
+  const current = getRailPreferences(instanceScope);
+  if (current.labels === labels) return;
+  commit({ ...current, labels }, instanceScope);
+}
+
 export function resetRailPreferences(instanceScope = LOCAL_INSTANCE_SCOPE): void {
-  commit(defaultRailPreferences(), instanceScope);
+  commit({ ...defaultRailPreferences(), labels: getRailPreferences(instanceScope).labels }, instanceScope);
 }
 
 export function subscribeRailPreferences(listener: () => void): () => void {

@@ -115,7 +115,8 @@ test("the desktop rail is grouped, searchable and has one current-page treatment
 
   // Hover exists only where hover does, so a tap leaves no fill behind (§15.3).
   assert.match(css, /@media \(hover: hover\) \{\s*\.rail-item:hover \{ color: var\(--text\); background: var\(--bg-elev-2\); \}/);
-  assert.doesNotMatch(css.replace(/@media \(hover: hover\) \{[^}]*\}/g, ""), /\.rail-item:hover/);
+  // The labelled rail's hover keycap is narrower still: fine pointers only (#1968).
+  assert.doesNotMatch(css.replace(/@media \(hover: hover\)(?: and \(pointer: fine\))? \{[^}]*\}/g, ""), /\.rail-item:hover/);
 
   // Separators: a 24px hairline between contiguous groups only.
   assert.match(rail, /separatorsBefore\[index\] && <span className="rail-separator" aria-hidden="true" \/>/);

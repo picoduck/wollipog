@@ -444,6 +444,8 @@
   --page-max-wide: 1200px;
   --page-max-form: 760px;
   --rail-w: 64px;
+  /* The labelled rail (#1968): opt-in, desktop only. */
+  --rail-w-labelled: 208px;
 
   /* The two mobile Session-header rows share these trailing-column metrics. The inset includes the
      physical right safe area because the interface currently has a left-to-right layout. */
@@ -833,6 +835,53 @@ kbd {
   left: -9px;
   background: var(--red);
 }
+/* The labelled rail (#1968, §4.1): 208px, each item's name after its icon. Every icon stays where
+   the 64px rail centres it, so switching moves nothing but the rail's edge. Rail.tsx never sets the
+   class at 760px and below. */
+.app-rail.labelled {
+  /* The space between the rail's edge and a 64px-rail item, at the item size in force. */
+  --rail-inset: calc((var(--rail-w) - 1px - var(--control-h-lg)) / 2);
+  width: var(--rail-w-labelled);
+  align-items: stretch;
+}
+.app-rail.labelled .rail-brand { margin-left: var(--rail-inset); }
+.app-rail.labelled .rail-destinations { align-items: stretch; padding: 0 var(--rail-inset); }
+.app-rail.labelled .rail-settings { padding: 0 var(--rail-inset); }
+.app-rail.labelled .rail-settings > .rail-item { flex: 1 1 auto; }
+/* An 8px gap leaves the longest name room beside a hover keycap. */
+.app-rail.labelled .rail-item {
+  gap: var(--space-2);
+  justify-content: flex-start;
+  width: auto;
+  padding: 0 var(--space-2) 0 calc((var(--control-h-lg) - var(--icon-lg)) / 2);
+}
+.app-rail.labelled .rail-separator {
+  flex: none;
+  width: auto;
+  margin: var(--space-0-5) calc(-1 * var(--rail-inset));
+}
+.rail-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-body-strong);
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Counts sit inline after the name instead of on the icon's corner. */
+.app-rail.labelled .rail-badge { position: static; flex: none; }
+/* The digit shows where the tooltip would have: on hover with a mouse, and on keyboard focus. */
+.rail-item-keys { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .rail-item:hover > .rail-item-keys { display: inline-flex; }
+}
+.rail-item:focus-visible > .rail-item-keys { display: inline-flex; }
+.rail-foot { display: flex; justify-content: center; width: 100%; }
+/* The instance switcher and the foot button stay centred in a 64px rail's column (its width less
+   the right hairline), as the items do. */
+.app-rail.labelled .rail-instance,
+.app-rail.labelled .rail-foot { width: calc(var(--rail-w) - 1px); }
 /* --- Phone "More" sheet (see phoneBarViews) --- */
 .rail-more { position: relative; display: none; }
 .rail-spacer { flex: 1; }

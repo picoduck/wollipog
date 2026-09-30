@@ -17,7 +17,9 @@ import {
   reconcileRailOrder,
   resetRailPreferences,
   resetRailPreferencesForTest,
+  setRailLabels,
   setRailViewHidden,
+  subscribeRailPreferences,
   visibleRailViews,
   type RailPreferences,
 } from "./rail-preferences.js";
@@ -140,7 +142,7 @@ test("Sessions is required: neither a save nor the setter can hide it", () => {
 });
 
 test("digits derive solely from the visible order and skip hidden or gated destinations", () => {
-  const preferences: RailPreferences = { order: CANONICAL, hidden: new Set(["automations"]) };
+  const preferences: RailPreferences = { order: CANONICAL, hidden: new Set(["automations"]), labels: false };
   const flags = { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: false, pods: false };
   const visible = visibleRailViews(preferences, flags);
   assert.deepEqual(visible, ["inbox", "projects", "runners", "skills", "archived", "usage"]);
@@ -189,35 +191,37 @@ test("the default phone bar is Sessions, Projects, Connections and Automations w
     assert.deepEqual(phoneBarViews(defaultRailPreferences(), flags), ["inbox", "projects", "runners", "automations"]);
   }
   // Reordering the rail reorders digits and More, not the bar.
-  const reordered: RailPreferences = { order: [...CANONICAL].reverse(), hidden: new Set() };
+  const reordered: RailPreferences = { order: [...CANONICAL].reverse(), hidden: new Set(), labels: false };
   assert.deepEqual(phoneBarViews(reordered, ALL_ON), ["inbox", "projects", "runners", "automations"]);
 });
 
 test("a hidden default tab is filled in place by the next visible non-experimental destination", () => {
-  const hideProjects: RailPreferences = { order: CANONICAL, hidden: new Set(["projects"]) };
+  const hideProjects: RailPreferences = { order: CANONICAL, hidden: new Set(["projects"]), labels: false };
   assert.deepEqual(phoneBarViews(hideProjects, ALL_ON), ["inbox", "skills", "runners", "automations"],
     "Multi-Agent Runs and Pods come first in rail order, but never fill a slot");
   // The filler follows the user's rail order, not the canonical one.
   const usageFirst: RailPreferences = {
     order: ["usage", ...CANONICAL.filter((name) => name !== "usage")],
     hidden: new Set(["projects"]),
+    labels: false,
   };
   assert.deepEqual(phoneBarViews(usageFirst, ALL_ON), ["inbox", "usage", "runners", "automations"]);
   // Hide enough and the bar shrinks rather than taking an experiment.
   const sparse: RailPreferences = {
     order: CANONICAL,
     hidden: new Set(["projects", "runners", "automations", "skills", "archived", "usage"]),
+    labels: false,
   };
   assert.deepEqual(phoneBarViews(sparse, ALL_ON), ["inbox"]);
 });
 
 test("a chosen phone bar overrides the default and may hold an experiment the user put there", () => {
-  const chosen: RailPreferences = { order: CANONICAL, hidden: new Set(), phoneBar: ["runs", "inbox", "usage", "pods"] };
+  const chosen: RailPreferences = { order: CANONICAL, hidden: new Set(), phoneBar: ["runs", "inbox", "usage", "pods"], labels: false };
   assert.deepEqual(phoneBarViews(chosen, ALL_ON), ["runs", "inbox", "usage", "pods"]);
   // Turned off, the experiments' slots are topped up in place from the rail order.
   assert.deepEqual(phoneBarViews(chosen, ALL_OFF), ["automations", "inbox", "usage", "projects"]);
   // A choice shorter than the bar is topped up at its end.
-  const short: RailPreferences = { order: CANONICAL, hidden: new Set(), phoneBar: ["usage"] };
+  const short: RailPreferences = { order: CANONICAL, hidden: new Set(), phoneBar: ["usage"], labels: false };
   assert.deepEqual(phoneBarViews(short, ALL_ON), ["usage", "inbox", "automations", "projects"]);
 });
 
@@ -246,4 +250,72 @@ test("the phone bar choice is parsed defensively, survives edits and is cleared 
   resetRailPreferencesForTest();
   assert.equal(getRailPreferences().phoneBar, undefined);
   assert.equal(railPreferencesAreDefault(getRailPreferences()), true);
+});
+
+test("labels default to off, and only a literal true in a save turns them on", () => {
+  assert.equal(defaultRailPreferences().labels, false);
+  assert.equal(getRailPreferences().labels, false, "no save at all");
+  for (const labels of [undefined, false, "true", 1, null, {}]) {
+    const raw = JSON.stringify({ v: 1, order: CANONICAL, hidden: [], ...(labels === undefined ? {} : { labels }) });
+    assert.equal(parseRailPreferences(raw).labels, false, JSON.stringify(labels));
+  }
+  assert.equal(parseRailPreferences(JSON.stringify({ v: 1, order: CANONICAL, hidden: [], labels: true })).labels, true);
+  // The field rides beside a phone bar choice too, whichever parse branch returns.
+  const withBar = parseRailPreferences(JSON.stringify({ v: 1, order: CANONICAL, hidden: [], phoneBar: ["usage"], labels: true }));
+  assert.deepEqual(withBar.phoneBar, ["usage"]);
+  assert.equal(withBar.labels, true);
+});
+
+test("a save from before labels loads with them off and keeps its order, hidden items and phone bar", () => {
+  const order = [...CANONICAL].reverse();
+  saveInstanceStorageValue(
+    RAIL_PREFERENCES_STORAGE_KEY,
+    JSON.stringify({ v: 1, order, hidden: ["usage"], phoneBar: ["runs"] }),
+  );
+  resetRailPreferencesForTest();
+  const preferences = getRailPreferences();
+  assert.equal(preferences.labels, false);
+  assert.deepEqual([...preferences.order], order);
+  assert.deepEqual([...preferences.hidden], ["usage"]);
+  assert.deepEqual(preferences.phoneBar, ["runs"]);
+});
+
+test("turning labels on persists per instance, notifies subscribers and survives every other write", () => {
+  let notified = 0;
+  const unsubscribe = subscribeRailPreferences(() => { notified += 1; });
+  try {
+    setRailLabels(true);
+    assert.equal(notified, 1, "the rail, Settings and the palette update live");
+    setRailLabels(true);
+    assert.equal(notified, 1, "writing the current value is a no-op");
+  } finally {
+    unsubscribe();
+  }
+  assert.equal(getRailPreferences().labels, true);
+  assert.equal(getRailPreferences("remote-1").labels, false, "instances do not share the labelled rail");
+
+  moveRailView("usage", "up");
+  setRailViewHidden("archived", true);
+  resetRailPreferencesForTest();
+  const reloaded = getRailPreferences();
+  assert.equal(reloaded.labels, true, "saving the order after turning labels on keeps labels: true");
+  assert.equal(reloaded.hidden.has("archived"), true);
+  assert.notDeepEqual([...reloaded.order], CANONICAL);
+  assert.equal(railPreferencesAreDefault(reloaded), false);
+
+  // Reset to Default restores the destination list, which the labels switch sits beside, not in.
+  resetRailPreferences();
+  resetRailPreferencesForTest();
+  assert.equal(railPreferencesAreDefault(getRailPreferences()), true);
+  assert.equal(getRailPreferences().labels, true);
+
+  // And turning labels off keeps a customised order and hidden set.
+  moveRailView("usage", "up");
+  setRailViewHidden("archived", true);
+  setRailLabels(false);
+  resetRailPreferencesForTest();
+  const off = getRailPreferences();
+  assert.equal(off.labels, false);
+  assert.equal(off.hidden.has("archived"), true);
+  assert.notDeepEqual([...off.order], CANONICAL);
 });

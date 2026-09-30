@@ -46,6 +46,8 @@ import {
   MonitorCog as LucideMonitorCog,
   NotebookText as LucideNotebookText,
   PanelBottom as LucidePanelBottom,
+  PanelLeftClose as LucidePanelLeftClose,
+  PanelLeftOpen as LucidePanelLeftOpen,
   PanelRight as LucidePanelRight,
   PictureInPicture2 as LucidePictureInPicture2,
   Pencil as LucidePencil,
@@ -324,6 +326,15 @@ export function DockBottomIcon(props: IconProps) {
 
 export function PanelRightIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePanelRight} {...props} />;
+}
+
+/** The rail's foot: Expand Navigation shows the labelled rail (#1968). */
+export function PanelLeftOpenIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePanelLeftOpen} {...props} />;
+}
+
+export function PanelLeftCloseIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePanelLeftClose} {...props} />;
 }
 
 export function CommandLineIcon(props: IconProps) {
