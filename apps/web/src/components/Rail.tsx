@@ -150,12 +150,19 @@ export function Rail({
   // that point always reported "outside", so the handoff below never ran and the next Tab restarted
   // at the top of the document.
   const focusInsideRailRef = useRef(false);
+  // The same problem in the other direction: Search, Settings, the instance switcher and the
+  // labelled rail's foot button exist only on desktop, so narrowing past 760px unmounts a focused
+  // one and drops focus on <body> (#1968).
+  const focusOnDesktopOnlyRef = useRef(false);
   useEffect(() => {
     const track = () => {
       const active = document.activeElement;
       if (active && active !== document.body) {
         // The sheet is portalled to <body>, so it is found by its menu id, not inside the rail.
         focusInsideRailRef.current = active.closest?.('.rail-more, [id^="rail-more-menu-"]') != null;
+        focusOnDesktopOnlyRef.current = active.closest?.(
+          ".app-rail :is(.rail-foot, .rail-settings, .rail-instance), .rail-destinations > button.rail-item",
+        ) != null;
       }
     };
     document.addEventListener("focusin", track);
@@ -195,6 +202,22 @@ export function Rail({
       }
     });
   }, [isMobile, moreOpen, more, settingsSelected]);
+
+  // The crossing down to a phone: a focused desktop-only control is gone, so hand focus to the
+  // current tab, or to More when the current page lives in the sheet (Settings included).
+  useLayoutEffect(() => {
+    if (!isMobile) return;
+    const hadFocus = focusOnDesktopOnlyRef.current;
+    focusOnDesktopOnlyRef.current = false;
+    if (!hadFocus) return;
+    window.requestAnimationFrame(() => {
+      if (document.activeElement && document.activeElement !== document.body) return;
+      for (const selector of [".app-rail .rail-item.active", ".rail-destinations a.rail-item"]) {
+        const target = document.querySelector<HTMLElement>(selector);
+        if (target) return target.focus();
+      }
+    });
+  }, [isMobile]);
 
   // The user's configured order, minus hidden and experiment-disabled destinations, IS the rail
   // (#385): digits, keycaps and the More sheet's order all derive from this one list, so hiding a

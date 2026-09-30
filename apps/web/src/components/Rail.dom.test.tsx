@@ -1144,6 +1144,90 @@ test("the labelled rail keeps Sessions' and Connections' counts inline after the
   }
 });
 
+test("crossing to a phone from a desktop-only rail control hands focus to the current tab", async () => {
+  // The foot button, Search and Settings exist only on desktop. Focus on one of them was dropped
+  // on <body> when the window narrowed past 760px, and the next Tab restarted at the top.
+  resetRailPreferencesForTest();
+  setRailLabels(true);
+  let phone = false;
+  const prior = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: phone,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (view: View) => act(async () => {
+    root.render(
+      <Rail
+        view={view}
+        blockedCount={0}
+        stalledCount={0}
+        onlineConnections={0}
+        onNavigate={() => undefined}
+        {...(phone ? {} : {
+          settingsControl: <SettingsTrigger active={view.name === "settings"} onOpen={() => undefined} />,
+          onSearch: () => undefined,
+        })}
+      />,
+    );
+  });
+  const cross = async (view: View, toPhone: boolean, focus: () => Element | null) => {
+    phone = !toPhone;
+    await render(view);
+    const control = focus() as unknown as HTMLElement;
+    await act(async () => { control.focus(); });
+    assert.ok(domWindow.document.activeElement === (control as never), "the desktop control owns focus first");
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      phone = toPhone;
+      await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
+      await render(view);
+      await act(async () => { frames.flush(); });
+    });
+    return domWindow.document.activeElement as unknown as Element | null;
+  };
+
+  try {
+    let focused = await cross({ name: "automations" }, true, () => container.querySelector(".rail-foot > button"));
+    assert.ok(focused === (container.querySelector('.rail-destinations a[href="/automations"]') as never),
+      `the foot button hands focus to the current tab — got ${focused?.getAttribute("aria-label") ?? focused?.tagName}`);
+
+    // A page that lives behind More hands focus to More.
+    focused = await cross({ name: "settings", section: "appearance" }, true,
+      () => container.querySelector(".rail-settings > .rail-item"));
+    assert.ok(focused === (container.querySelector(".rail-more-trigger") as never),
+      `Settings hands focus to More — got ${focused?.getAttribute("aria-label") ?? focused?.tagName}`);
+
+    // Nothing moves focus that was not in the rail.
+    phone = false;
+    await render({ name: "inbox" });
+    const outside = domWindow.document.createElement("button");
+    domWindow.document.body.append(outside);
+    await act(async () => { (outside as unknown as HTMLElement).focus(); });
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      phone = true;
+      await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
+      await render({ name: "inbox" });
+      await act(async () => { frames.flush(); });
+    });
+    assert.ok(domWindow.document.activeElement === (outside as never), "focus outside the rail stays put");
+    outside.remove();
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.matchMedia = prior;
+    resetRailPreferencesForTest();
+    domWindow.localStorage.clear();
+  }
+});
+
 test("a phone ignores a stored labelled rail", async () => {
   resetRailPreferencesForTest();
   setRailLabels(true);
