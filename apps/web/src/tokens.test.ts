@@ -178,8 +178,9 @@ test("every compact-tier media query ends where useIsCompact() does", () => {
   // Anchored by what each block does, as the phone test above is, not by how close its width is.
   const compact = mediaBlocks(css).filter((block) =>
     block.containsSelector('.page-more[data-overflow="2"]') ||
-    block.declarationsForSelector(".project-manager-grid").get("grid-template-columns")?.includes("280px minmax(0, 1fr)"));
-  assert.equal(compact.length, 2, "the page header's priority+ tier and the Projects list pane");
+    block.declarationsForSelector(".project-manager-grid").get("grid-template-columns")?.includes("280px minmax(0, 1fr)") ||
+    block.containsSelector(".archive-session-meta"));
+  assert.equal(compact.length, 3, "the page header's priority+ tier, the Projects list pane and the Archived Sessions table");
   for (const block of compact) {
     assert.deepEqual(block.maxWidths, [COMPACT_BREAKPOINT_PX - 1],
       `@media ${block.params} must end at the shared compact breakpoint, or CSS and useIsCompact() disagree`);

@@ -139,6 +139,147 @@ for (const width of [761, 834, 940, 1099]) {
   });
 }
 
+/**
+ * Page content the tier's audit found overflowing (#2106): the Archived Sessions table, the Usage
+ * API card's controls and the Pod Orchestration Controls fields.
+ */
+async function checkPageContent(page: Page, where: string) {
+  await open(page, "path=%2Farchived", "Archived Sessions");
+  await expect(page.locator(".archive-table tbody tr").first()).toBeVisible();
+  const archive = await page.evaluate(() => {
+    const box = (element: Element) => element.getBoundingClientRect();
+    const wrap = document.querySelector(".archive-table-wrap")!;
+    const edge = box(wrap);
+    return {
+      scroll: wrap.scrollWidth - wrap.clientWidth,
+      sessionColumn: box(document.querySelector(".archive-table thead th")!).width,
+      rows: [...wrap.querySelectorAll("tbody tr")].map((row) => {
+        const hidden = [".col-project", ".col-location", ".col-agent"].map((selector) => row.querySelector(selector)!);
+        const meta = row.querySelector(".archive-session-meta")!;
+        const cell = box(row.querySelector(".archive-session-cell")!);
+        // Everything the row shows, cut off by its cell or by the wrapper.
+        const clipped = [...row.querySelectorAll(".archive-session-meta > span, .archive-session-cell > a, .status, .actions-cell button, time")]
+          .filter((element) => element.getClientRects().length > 0)
+          .filter((element) => {
+            const own = box(element);
+            const td = box(element.closest("td")!);
+            return own.left < Math.max(td.left, edge.left) - 0.5 || own.right > Math.min(td.right, edge.right) + 0.5;
+          })
+          .map((element) => element.textContent);
+        return {
+          columnsShown: hidden.map((element) => element.getClientRects().length > 0),
+          values: hidden.map((element) => element.textContent),
+          meta: meta.getClientRects().length > 0 ? (meta as HTMLElement).innerText : null,
+          metaInside: box(meta).right <= cell.right + 0.5,
+          clipped,
+        };
+      }),
+    };
+  });
+  expect(archive.scroll, `${where}: the Archived Sessions table scrolls sideways`).toBeLessThanOrEqual(0);
+  expect(archive.sessionColumn, `${where}: the Session column keeps room for a title`).toBeGreaterThanOrEqual(170);
+  expect(archive.rows.length).toBeGreaterThan(0);
+  for (const row of archive.rows) {
+    expect(row.columnsShown, `${where}: Project, Location and Agent fold into the Session cell`).toEqual([false, false, false]);
+    for (const value of row.values) expect(row.meta, `${where}: the Session cell shows ${value}`).toContain(value);
+    expect(row.metaInside, `${where}: the meta line stays inside its cell`).toBe(true);
+    expect(row.clipped, `${where}: row content cut off`).toEqual([]);
+  }
+
+  await open(page, "path=%2Fusage", "Usage and Cost");
+  const usage = await page.evaluate(() => {
+    const box = (element: Element) => element.getBoundingClientRect();
+    const card = document.querySelector(".usage-api-controls")!;
+    const description = card.querySelector(".usage-api-controls-heading p")!;
+    const controls = [...card.querySelectorAll(".usage-desktop-controls > .seg")];
+    const style = getComputedStyle(description);
+    const context = document.createElement("canvas").getContext("2d")!;
+    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const text = description.textContent!;
+    const overlaps = (a: DOMRect, b: DOMRect) =>
+      Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.5;
+    return {
+      count: controls.length,
+      rows: new Set(controls.map((control) => Math.round(box(control).top))).size,
+      overlapping: controls.flatMap((a, i) => [description, ...controls.slice(i + 1)]
+        .filter((b) => overlaps(box(a), box(b))).map((b) => `${a.getAttribute("aria-label")} / ${b.textContent}`)),
+      escape: Math.max(...controls.map((control) => box(control).right)) - box(card).right,
+      charactersPerLine: box(description).width / (context.measureText(text).width / text.length),
+    };
+  });
+  expect(usage.count).toBe(3);
+  expect(usage.rows, `${where}: the Usage controls stay on one row`).toBe(1);
+  expect(usage.overlapping, `${where}: the Usage controls overlap`).toEqual([]);
+  expectGeometry(usage.escape, `${where}: the Usage controls stay inside their card`).toBeLessThanOrEqual(0.51);
+  expect(usage.charactersPerLine, `${where}: the Usage description keeps a readable measure`).toBeGreaterThanOrEqual(30);
+
+  await open(page, "view=pod", "Active Collaboration Pod");
+  const pod = await page.evaluate(() => {
+    const box = (element: Element) => element.getBoundingClientRect();
+    const card = document.querySelector(".pod-orchestration")!;
+    const style = getComputedStyle(card);
+    const inner = { left: box(card).left + parseFloat(style.paddingLeft), right: box(card).right - parseFloat(style.paddingRight) };
+    return [...card.querySelectorAll(".pod-orchestration-grid > .field")].map((field) => {
+      const label = field.querySelector("span")!;
+      const control = field.querySelector("select, input") as HTMLSelectElement | HTMLInputElement;
+      // A select is as wide as its longest option when nothing constrains it.
+      const natural = control.cloneNode(true) as HTMLElement;
+      natural.style.cssText = "position: absolute; width: auto; min-width: 0";
+      field.append(natural);
+      const needed = control instanceof HTMLSelectElement ? box(natural).width : 0;
+      natural.remove();
+      return {
+        name: label.textContent,
+        outside: Math.max(inner.left - box(field).left, box(field).right - inner.right),
+        // The label's text on one line, and no wider than its field.
+        labelClipped: (() => {
+          const range = document.createRange();
+          range.selectNodeContents(label);
+          const lines = new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size;
+          return lines !== 1 || range.getBoundingClientRect().right > box(field).right + 0.5;
+        })(),
+        valueClipped: box(control).width < needed - 0.5,
+      };
+    });
+  });
+  expect(pod.map((field) => field.name)).toEqual(["Arbitration", "Default Context Tokens", "Summary Tokens", "Turn Cap", "Repeated-Output Cap"]);
+  for (const field of pod) {
+    expectGeometry(field.outside, `${where}: ${field.name} reaches past the Orchestration Controls card`).toBeLessThanOrEqual(0.51);
+    expect(field.labelClipped, `${where}: ${field.name} keeps its label on one line`).toBe(false);
+    expect(field.valueClipped, `${where}: ${field.name} shows its longest option`).toBe(false);
+  }
+}
+
+for (const width of [761, 834, 940, 1099]) {
+  test(`at ${width}px, the Archived Sessions table, the Usage controls and the Pod Orchestration fields fit`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 860 });
+    await checkPageContent(page, `at ${width}px`);
+  });
+}
+
+test.describe("page content on an 834×1112 coarse-pointer tablet", () => {
+  test.use({ viewport: { width: 834, height: 1112 }, hasTouch: true, isMobile: true });
+
+  test("the same three surfaces fit with touch-sized controls", async ({ page }) => {
+    await checkPageContent(page, "at 834px on touch");
+  });
+});
+
+test("outside the tier the Archived Sessions table keeps its own Project, Location and Agent columns", async ({ page }) => {
+  for (const width of [760, 1100]) {
+    await page.setViewportSize({ width, height: 860 });
+    await open(page, "path=%2Farchived", "Archived Sessions");
+    const row = page.locator(".archive-table tbody tr").first();
+    await expect(row.locator(".archive-session-meta"), `at ${width}px`).toBeHidden();
+    // The phone rows show the project as line-2 meta and leave Location and Agent to the detail (§14).
+    await expect(row.locator(".col-project"), `at ${width}px`).toBeVisible();
+    if (width === 1100) {
+      await expect(row.locator(".col-location")).toBeVisible();
+      await expect(row.locator(".col-agent")).toBeVisible();
+    }
+  }
+});
+
 test.describe("either side of the tier", () => {
   test("the Projects list pane is 310px from 1100px, its filter inset like the search field", async ({ page }) => {
     await page.setViewportSize({ width: 1100, height: 860 });

@@ -8858,13 +8858,16 @@ button.file-head.source-path-link {
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--bg-elev) 94%, var(--accent));
 }
+/* Five fields on one row from the compact tier's 761px floor up (§15.2). Each column is at least as
+   wide as its label on one line, and Arbitration as wide as its longest mode, so at 761px nothing
+   clips and no field reaches past the card's padding (together about 525px of the card's 625px). */
 .pod-orchestration-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  grid-template-columns: minmax(max-content, 1fr) repeat(4, minmax(min-content, 1fr));
   gap: 10px;
 }
 .pod-orchestration .field.compact { gap: 5px; min-width: 0; }
-.pod-orchestration .field.compact > span { font-size: 10px; }
+.pod-orchestration .field.compact > span { font-size: 10px; white-space: nowrap; }
 .pod-orchestration .field.compact input,
 .pod-orchestration .field.compact select { width: 100%; min-width: 0; }
 .pod-orchestration-runner {
@@ -13956,11 +13959,15 @@ body.shell-dock-dragging * {
 /* Usage accounting ------------------------------------------------------- */
 .usage-coverage, .usage-privacy, .usage-retention p { color: var(--text-dim); }
 .usage-range { display: flex; flex-wrap: wrap; gap: 6px; }
-.usage-api-controls { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: start; gap: 12px 18px; margin: 0 0 16px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
+/* The description takes the line and the three controls follow as one unbroken group: beside the
+   description while it keeps 220px (about 30 characters), otherwise on their own line below it,
+   left-aligned. The group wraps inside only if it is wider than the card. */
+.usage-api-controls { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 18px; margin: 0 0 16px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
+.usage-api-controls-heading { flex: 1 1 220px; min-width: 0; }
 .usage-api-controls-heading h3 { margin: 0; }
 .usage-api-controls-heading p { margin: 5px 0 0; color: var(--text-dim); font-size: var(--text-sm); }
 .usage-mobile-controls { display: none; }
-.usage-granularity-notes { display: grid; grid-column: 1 / -1; gap: 4px; }
+.usage-granularity-notes { display: grid; flex-basis: 100%; gap: 4px; }
 .usage-granularity-note { margin: 0; color: var(--text-dim); font-size: var(--text-sm); }
 .usage-state { padding: 28px; color: var(--text-dim); text-align: center; }
 .usage-state.error { color: var(--red); }
@@ -14042,7 +14049,7 @@ body.shell-dock-dragging * {
 .usage-series-swatch { width: 10px; height: 10px; }
 .usage-series-key { width: 12px; height: 2px; }
 
-.usage-api-controls > .toolbar { flex-wrap: wrap; justify-content: flex-end; }
+.usage-api-controls > .toolbar { flex: 0 1 auto; flex-wrap: wrap; }
 .usage-notice { display: grid; gap: 4px; margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-dim); font-size: var(--text-sm); }
 .usage-notice p { margin: 0; }
 
@@ -14124,7 +14131,7 @@ body.shell-dock-dragging * {
 }
 
 @media (max-width: 760px) {
-  .usage-api-controls { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+  .usage-api-controls { display: grid; grid-template-columns: minmax(0, 1fr); padding: 12px; }
   .usage-desktop-controls { display: none; }
   .usage-mobile-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .usage-compact-field { display: grid; gap: 4px; min-width: 0; }
@@ -15168,6 +15175,30 @@ body.shell-dock-dragging * {
   overflow: hidden;
   color: var(--text-faint);
   text-overflow: ellipsis;
+}
+.archive-session-meta { display: none; }
+/* The compact tier (§15.2): the seven columns need 970px, more than the tier has, so Project,
+   Location and Agent fold into a meta line under the session's title, and the State badges stack.
+   The line wraps between values rather than truncating, so every value stays on screen; the
+   Session column keeps at least 170px. */
+@media (min-width: 761px) and (max-width: 1099px) {
+  .archive-table :is(.col-project, .col-location, .col-agent) { display: none; }
+  .archive-table .col-state { width: 160px; }
+  .archive-table .col-created { width: 100px; }
+  .archive-table .archive-session-cell { padding-block: var(--space-1); }
+  .archive-session-meta {
+    display: block;
+    color: var(--text-dim);
+    font: var(--type-small);
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  /* Each value moves to the next line whole; one wider than the cell breaks inside. */
+  .archive-session-meta > span { display: inline-block; max-width: 100%; }
+  .archive-session-meta .app-icon {
+    display: inline-block;
+    vertical-align: -2px;
+  }
 }
 /* The State cell is a badge list: its badges are whole words, so a rare third one (a stop in
    progress) wraps inside the cell rather than being cut mid-word. */

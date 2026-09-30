@@ -594,6 +594,13 @@ export function ArchivedSessionsView() {
                         loadSession(session);
                         navigate(target);
                       }}>{session.title || session.id}</a>
+                      {/* The compact tier (§15.2) folds the Project, Location and Agent columns into
+                          this line; elsewhere it is not rendered and those columns show. */}
+                      <span className="archive-session-meta">
+                        <span><span className="sr-only">Project: </span><ProjectsIcon size={14} /> {rowMetadata.project}</span>
+                        {" · "}<span><span className="sr-only">Location: </span>{rowMetadata.location}</span>
+                        {" · "}<span><span className="sr-only">Agent: </span>{rowMetadata.agent}</span>
+                      </span>
                       {snippet && filters.query.trim().length >= 3 && <small>{snippet}</small>}
                     </td>
                     <td className="cell-status"><div className="archive-state-badges">
@@ -607,9 +614,9 @@ export function ArchivedSessionsView() {
                         ? "stop_waiting_for_runner"
                         : "stop_pending")} />}
                     </div></td>
-                    <td className="cell-meta cell-fill cell-dim" title={rowMetadata.project}><span className="cell-label" aria-hidden="true"><ProjectsIcon size={14} /> </span>{rowMetadata.project}</td>
-                    <td className="cell-extra cell-dim">{rowMetadata.location}</td>
-                    <td className="cell-extra cell-dim">{rowMetadata.agent}</td>
+                    <td className="col-project cell-meta cell-fill cell-dim" title={rowMetadata.project}><span className="cell-label" aria-hidden="true"><ProjectsIcon size={14} /> </span>{rowMetadata.project}</td>
+                    <td className="col-location cell-extra cell-dim">{rowMetadata.location}</td>
+                    <td className="col-agent cell-extra cell-dim">{rowMetadata.agent}</td>
                     <td className="cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Created </span><time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time></td>
                     <td className="actions-cell">
                       <ArchiveRowActions sessionId={session.id} title={session.title || session.id} actions={actions} busy={busy} />

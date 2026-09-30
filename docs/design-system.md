@@ -1734,6 +1734,11 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 - Wide tables sit in a scroll wrapper with a right edge fade; the name column is sticky.
 - **Phone (and containers under 560px): tables become two-line rows**: name + status on line 1, the
   two most important other columns as meta on line 2, the rest in the detail. No 620–980px min-widths.
+- **Compact tier (761–1099px): a table whose declared widths exceed the tier folds its secondary
+  columns into the name cell** as a meta line under the name, and hides those columns, so it never
+  scrolls sideways and the name keeps at least 170px. The meta line wraps between values rather than
+  truncating, so every value stays on screen. Archived Sessions does this for Project, Location and
+  Agent, and narrows State to 160px so its badges stack (§15.2).
 
 ---
 
@@ -1772,6 +1777,12 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   redesigns the footer.
 - Master-detail list pane 280px. Sessions is always stacked here (§6.3); its Preview Right option
   applies at 1100px and wider.
+- Page content follows the tier too (#2106). The Archived Sessions table folds Project, Location and
+  Agent into its Session cell (§14). The Usage API card's description takes the line and its three
+  segmented controls follow as one group: beside the description while it keeps 220px (about 30
+  characters), otherwise together on their own line below it. The Pod Orchestration Controls keep
+  their five fields on one row; each column is at least as wide as its label on one line, and
+  Arbitration as wide as its longest mode.
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
   with the label in its tooltip plus `+N` for extra attention kinds; the project crumb is dropped;
   text buttons become icon buttons with tooltips. `DetailBar` (Run, Pod, Project) does this now. Its
