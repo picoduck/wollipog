@@ -69,7 +69,7 @@ test.describe("at desktop widths", () => {
 
     await importButton.click();
     await items.nth(1).click();
-    await expect(page.getByRole("dialog", { name: "Import Skill from Machine" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Import from Machine" })).toBeVisible();
     await page.keyboard.press("Escape");
     await importButton.click();
     await menu.getByRole("menuitem", { name: "Import from Git…" }).click();
