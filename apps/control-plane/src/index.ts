@@ -1186,6 +1186,7 @@ app.register(async (instance) => {
             : undefined,
         );
         hub.clearRunnerQueues(runnerId); // a fresh connection has no in-flight queues — drop stale ones
+        if (Array.isArray(msg.sessionSnapshots)) frameQueue.reserveInventory(msg.sessionSnapshots.length);
         send(socket, {
           type: "registered",
           ok: true,

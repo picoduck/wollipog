@@ -5,6 +5,27 @@ import { MAX_RUNNER_CLIENT_MESSAGE_BYTES } from "./runner-channel.js";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+test("the normal post-ACK inventory burst fits beyond the baseline frame count", async () => {
+  let release!: () => void;
+  let began!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const finished = new Promise<void>((resolve) => { began = resolve; });
+  let handled = 0;
+  let failures = 0;
+  const queue = new RunnerFrameQueue<number>(async (n) => {
+    if (n === 0) await held;
+    else if (++handled === 5000) began();
+  }, () => { failures++; });
+  queue.enqueue(0, 1);
+  // Registration reserves its advertised inventory before sending the early ACK.
+  queue.reserveInventory(5000);
+  for (let n = 1; n <= 5000; n++) queue.enqueue(n, 100);
+  release();
+  assert.equal(failures, 0, "a legitimate retained inventory must not enter a permanent reconnect loop");
+  await finished;
+  assert.equal(handled, 5000);
+});
+
 test("two maximum-sized legitimate frames fit behind a held registration", async () => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });

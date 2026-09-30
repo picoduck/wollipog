@@ -31,9 +31,17 @@ export class RunnerFrameQueue<T> {
   constructor(
     private readonly handle: (message: T) => Promise<void>,
     private readonly onFailure: () => void,
-    private readonly limits = { frames: 4096, bytes: 2 * MAX_RUNNER_CLIENT_MESSAGE_BYTES },
+    private limits = { frames: 4096, bytes: 2 * MAX_RUNNER_CLIENT_MESSAGE_BYTES },
     private readonly afterDrain: () => Promise<void> = async () => {},
   ) {}
+
+  /** The early registration ACK legitimately triggers one negotiated frame per retained session.
+   * Reserve that finite advertised count plus ordinary replay headroom; the byte ceiling remains
+   * fixed regardless of inventory size. Call only after authenticating the registration. */
+  reserveInventory(snapshotCount: number): void {
+    if (!Number.isSafeInteger(snapshotCount) || snapshotCount < 0) return;
+    this.limits = { ...this.limits, frames: Math.max(this.limits.frames, snapshotCount + 4096) };
+  }
 
   enqueue(message: T, bytes: number): void {
     if (this.closed) return;

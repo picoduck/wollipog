@@ -59,7 +59,7 @@ function runnerToken(index: number): string {
   return `wollipogr_${String(index).padStart(43, "a")}`;
 }
 
-test("1000 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 90_000 }, async (t) => {
+test("1000 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, async (t) => {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-reconcile-responsive-"));
   const databasePath = join(temp, "control-plane.db");
@@ -146,7 +146,7 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
     };
     const fingerprint = createHash("sha256").update(JSON.stringify(liveSnapshot)).digest("hex");
     socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot: liveSnapshot }));
-    for (let sample = 0; sample < (pass === 0 ? 1 : 10); sample++) {
+    const probe = async () => {
       const start = performance.now();
       const pong = new Promise<void>((resolvePromise, reject) => {
         const timer = setTimeout(() => reject(new Error(`pong exceeded 2s during reconciliation\n${output}`)), 2000);
@@ -159,14 +159,18 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
       ]);
       assert.equal(response.status, 200);
       maxHealthMs = Math.max(maxHealthMs, performance.now() - start);
-    }
+    };
+    for (let sample = 0; sample < (pass === 0 ? 1 : 10); sample++) await probe();
     if (pass === 0) continue; // replace a still-reconciling socket, not just a settled runner
     // Pin application of the exact newer snapshot, not title projection: a CP-owned rename is
     // intentionally preserved even when newer runner state is successfully applied. Allow slow
-    // file-backed test hosts to converge, while individual HTTP/pong deadlines stay at two seconds.
-    for (let attempt = 0; attempt < 800; attempt++) {
+    // file-backed test hosts to converge under full-suite fsync contention. Probe throughout the
+    // entire replay, not just its first few steps; HTTP/pong deadlines remain two seconds.
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
       if (read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-999'").get()?.runner_snapshot_fingerprint === fingerprint) break;
-      await delay(25);
+      await probe();
+      await delay(50);
     }
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-999'").get()?.runner_snapshot_fingerprint,
       fingerprint, `newer snapshot did not converge\n${output}`);
