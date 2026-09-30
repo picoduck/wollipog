@@ -146,11 +146,11 @@ jobs:
     runs-on: ubuntu-22.04
     # Measured on 2026-09-30 over 310 passing jobs, four shards took a median 14 minutes and at most
     # 16.6 (995 seconds, setup included): past the fifteen-minute budget, which cancelled shards
-    # whose tests had all passed (#2067). Playwright splits the suite by test count, not time, and
-    # the costliest files land in the last shard. With five, shards 1-4 took 8.6-12.6 minutes and
-    # shard 5 took 14.8 (890 seconds) on two different runners. Twenty-five keeps ten minutes spare
-    # for a slow runner, and stays below the old thirty so a doubling of the suite is a loud failure
-    # rather than a creep towards the cap (#842).
+    # whose tests had all passed (#2067). Five shards cut the median to 11.4 minutes over three runs;
+    # the slowest took 16.3 (975 seconds: a slow dependency install plus shard 1's production pass).
+    # Playwright splits by test count, not time, so which shard is slowest moves as files are added.
+    # Twenty-five keeps over eight minutes spare for a slow runner, and stays below the old thirty so
+    # a doubling of the suite is a loud failure rather than a creep towards the cap (#842).
     timeout-minutes: 25
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
