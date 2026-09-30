@@ -27,6 +27,27 @@ for (const layout of ["unified", "split"] as const) {
   });
 }
 
+for (const query of ["pane=unstaged", "pane=unstaged&references=1", "pane=unstaged&layout=split"]) {
+  test(`a row with boxes is as tall as one without, and each box is centred on its line (${query})`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/diff-discard-e2e.html?${query}`);
+    const rows = await page.locator(".diff-line, .diff-split-cell").evaluateAll((elements) => elements.map((row) => {
+      const text = row.querySelector(".diff-text")!.getBoundingClientRect();
+      return {
+        height: row.getBoundingClientRect().height,
+        boxes: [...row.querySelectorAll(".diff-line-select input")].map((input) => {
+          const box = input.getBoundingClientRect();
+          return box.top + box.height / 2 - (text.top + text.height / 2);
+        }),
+      };
+    }));
+    // Not vacuous: some rows carry a box and the context row carries none, or the reference box only.
+    expect(rows.some((row) => row.boxes.length > 0)).toBe(true);
+    expect(new Set(rows.map((row) => row.height)).size, "every row is one line tall").toBe(1);
+    for (const offset of rows.flatMap((row) => row.boxes)) expect(Math.abs(offset)).toBeLessThanOrEqual(0.5);
+  });
+}
+
 test("a refused line selector is disabled, and its reason is its tooltip and description", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/diff-discard-e2e.html?pane=unstaged&refused=1");

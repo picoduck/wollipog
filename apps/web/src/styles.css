@@ -11514,8 +11514,11 @@ body.shell-dock-dragging * {
   align-items: baseline;
   white-space: pre;
 }
+/* Centred on the row, not on the text baseline: a 16px box standing on the baseline rose above the
+   18px line and made every row with a box taller than a row without one. */
 .diff-line-select {
   display: inline-flex;
+  align-self: center;
   width: auto;
   min-width: 24px;
   gap: 3px;
