@@ -24,6 +24,9 @@ import type { NewSessionPreset } from "./NewSessionDialog.js";
 
 export interface ProjectSplitMenuProps {
   split: InboxSplit;
+  /** The same split before the Inbox's Active or Snoozed filter. A durable Project archive runs on the
+   * server over every unarchived session, snoozed or not, so its confirmation counts and lists these. */
+  unfilteredSplit?: InboxSplit;
   active?: boolean;
   runner: RunnerView | undefined;
   stopBeforeArchiveSupported?: boolean;
@@ -62,6 +65,7 @@ export function archiveDetailRows(
 /** Project actions owned by a Command Inbox project split. */
 export function ProjectSplitMenu({
   split,
+  unfilteredSplit,
   active = true,
   runner,
   stopBeforeArchiveSupported = true,
@@ -86,7 +90,11 @@ export function ProjectSplitMenu({
   if (!durableProject && !legacyLocation) return null;
   const entityLabel = durableProject ? "Project" : "Workspace";
   const actionsLabel = `${entityLabel} Actions for ${split.name}`;
-  const archiveStopsRuntime = split.sessions.some((session) =>
+  // What "Archive All Sessions" affects: a durable Project's every unarchived session, or exactly the
+  // legacy workspace sessions shown here.
+  const archiveScope = durableProject ? unfilteredSplit ?? split : split;
+  const archiveCount = durableProject ? archiveScope.count : split.sessions.length;
+  const archiveStopsRuntime = archiveScope.sessions.some((session) =>
     sessionArchiveRequiresStop(session, stopBeforeArchiveSupported));
   const runnerId = durableLocation?.runnerId ?? legacyLocation?.runnerId ?? null;
   const workspaceId = durableLocation?.workspaceId ?? legacyLocation?.workspaceId ?? null;
@@ -127,7 +135,7 @@ export function ProjectSplitMenu({
       ? hostActionsHint
       : null);
   const managementUnavailableReason = canManageProject ? null : "Project management permission is required.";
-  const archiveUnavailableReason = (durableProject ? split.count : split.sessions.length) === 0
+  const archiveUnavailableReason = archiveCount === 0
     ? `This ${entityLabel} has no unarchived sessions.`
     : managementUnavailableReason;
   const hasActionStatus = !!(locationUnavailableReason || revealUnavailableReason || managementUnavailableReason || archiveUnavailableReason);
@@ -187,9 +195,9 @@ export function ProjectSplitMenu({
   const archiveAll = async () => {
     closeForLayer();
     const sessionIds = split.sessions.map((session) => session.id);
-    const sessionCount = durableProject ? split.count : sessionIds.length;
+    const sessionCount = archiveCount;
     if (sessionCount === 0) return;
-    const detail = archiveDetailRows(split.sessions, sessionCount);
+    const detail = archiveDetailRows(archiveScope.sessions, sessionCount);
     const accepted = await confirm({
       title: archiveStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions",
       message: archiveStopsRuntime
@@ -355,7 +363,7 @@ export function ProjectSplitMenu({
           <MenuSeparator />
           <MenuItem
             danger
-            disabled={(durableProject ? split.count : split.sessions.length) === 0 || !canManageProject}
+            disabled={archiveCount === 0 || !canManageProject}
             title={archiveUnavailableReason ?? undefined}
             onClick={() => void archiveAll()}
           >

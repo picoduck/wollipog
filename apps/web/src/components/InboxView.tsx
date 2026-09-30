@@ -1335,6 +1335,7 @@ export function InboxView({
                   {hasMenu && (
                     <ProjectSplitMenu
                       split={split}
+                      unfilteredSplit={baseSplits.find((candidate) => candidate.key === split.key)}
                       active={active}
                       runner={runners.get(
                         split.project?.kind === "durable"

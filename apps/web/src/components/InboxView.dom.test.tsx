@@ -19,6 +19,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
+import { FeedbackProvider } from "./FeedbackProvider.js";
 import { INBOX_COLLAPSED_THREADS_KEY, type InboxSplit } from "../inbox.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, saveSeen } from "../sessions-seen.js";
@@ -558,6 +559,90 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
   assertNoDomNode(betaTab.querySelector(".count-badge"), "a tab with nothing blocked or stalled draws no badge");
   assert.equal(accessibleText(betaTab), "Beta1");
   assert.doesNotMatch(accessibleText(betaTab), /Blocked|Stalled/);
+});
+
+// #2051: a durable Project archive runs on the server over every unarchived session, so the
+// confirmation counts and lists the snoozed ones hidden from Active, and the Active ones from Snoozed.
+test("a Project's archive confirmation lists its sessions from Active and Snoozed alike", async () => {
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-project-archive-scope-test",
+    runtimeKey: "inbox-project-archive-scope-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const alpha: ProjectView = {
+    id: "alpha",
+    name: "Alpha",
+    hidden: false,
+    locations: [],
+    activeSessionCount: 2,
+    unarchivedSessionCount: 2,
+    totalSessionCount: 2,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const active = session("alpha-active", 50, { projectId: alpha.id });
+  const snoozed = session("alpha-snoozed", 40, { projectId: alpha.id });
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <FeedbackProvider>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        </FeedbackProvider>
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false,
+        boundedDelivery: false,
+        paginatedSessionHistory: false,
+        projects: true,
+        sessionReminders: true,
+      },
+      runners: [],
+      boxes: [],
+      sessions: [active, snoozed],
+      projects: [alpha],
+      reminders: [reminder(snoozed.id)],
+      runs: [],
+      pods: [],
+    });
+  });
+  const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
+    .find((tab) => tab.textContent?.includes("Alpha"))!;
+  await act(async () => { alphaTab.click(); });
+  const body = domWindow.document.body as unknown as HTMLElement;
+  const confirmation = async () => {
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Project Actions for Alpha"]')!;
+    await act(async () => { trigger.click(); });
+    const archive = [...body.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+      .find((item) => /^Archive/u.test(item.textContent ?? ""))!;
+    await act(async () => { archive.click(); });
+    const dialog = body.querySelector<HTMLElement>('[role="dialog"]')!;
+    const shown = {
+      message: dialog.querySelector(".confirmation-message")?.textContent ?? "",
+      rows: [...dialog.querySelectorAll(".confirmation-rows .row-title")].map((row) => row.textContent),
+    };
+    const cancel = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Cancel")!;
+    await act(async () => { cancel.click(); });
+    return shown;
+  };
+
+  const fromActive = await confirmation();
+  assert.match(fromActive.message, /^All 2 sessions in “Alpha”/);
+  assert.deepEqual(fromActive.rows, ["Session alpha-active", "Session alpha-snoozed"]);
+
+  const snoozedFilter = container.querySelector<HTMLElement>('[title="Snoozed"]')!;
+  await act(async () => { snoozedFilter.click(); });
+  const fromSnoozed = await confirmation();
+  assert.match(fromSnoozed.message, /^All 2 sessions in “Alpha”/);
+  assert.deepEqual(fromSnoozed.rows, ["Session alpha-active", "Session alpha-snoozed"]);
 });
 
 test("the tab the URL names survives widening from a phone to a desktop that remembered another", async () => {
