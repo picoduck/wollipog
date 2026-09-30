@@ -1351,7 +1351,9 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
 it is the element rule, so a surface places a keycap but never sizes it or sets its font or border.
 A hint's label beside it is `--type-small` in `--text-dim`. A menu item with a binding shows the
 keycap in its trailing slot (§9.1).
-Hidden on coarse pointers (`@media (pointer: coarse)`), never by viewport width. Inside a cramped
+Hidden on coarse pointers (`@media (pointer: coarse)`), never by viewport width, except in the
+Keyboard Shortcuts reference, which keeps its keycaps because it is where someone with a hardware
+keyboard on a touch device looks them up. Inline hints still hide there (§15.1). Inside a cramped
 pane a keycap may yield to the content it would squeeze, as the follow-output control's does below
 its measured transcript-pane width; its control's tooltip still names the chord.
 

@@ -56,7 +56,7 @@ import {
   handleRovingChoiceKeyDown,
   rovingChoiceTabIndex,
 } from "./components/interactions.js";
-import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone } from "./focus-zones.js";
+import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone, shortcutScopeForFocus } from "./focus-zones.js";
 import { installTerminalExitBoundary } from "./terminal-focus.js";
 import {
   bareDigitPressed,
@@ -323,6 +323,8 @@ export function Shell() {
   const terminalHint = runnerCapabilityRequirement(activeRunnerProtocol, "sessionShells", "Session terminal access");
   const [dialog, setDialog] = useState<null | { kind: "session"; preset?: NewSessionPreset } | { kind: "run" } | { kind: "pod" }>(null);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
+  // What had focus when the reference opened: its focus zone picks the "Current Page" group.
+  const [shortcutReferenceOpener, setShortcutReferenceOpener] = useState<HTMLElement | null>(null);
   const [composerFocusSessionId, setComposerFocusSessionId] = useState<string | null>(null);
   const shortcutReturnFocusRef = useRef<HTMLElement | null>(null);
   // Remembered as a SELECTOR alongside the element. Settings → Keyboard Shortcuts → cross 760px →
@@ -341,6 +343,7 @@ export function Shell() {
       : target?.closest(".settings-view")
       ? ".settings-view .ui-row-nav"
       : null;
+    setShortcutReferenceOpener(target);
     setShortcutReferenceOpen(true);
   }, []);
   const closeShortcutReference = useCallback(() => {
@@ -900,6 +903,11 @@ export function Shell() {
       {shortcutReferenceOpen && (
         <ShortcutReference
           onClose={closeShortcutReference}
+          scope={shortcutScopeForFocus({
+            viewName: view.name,
+            activeElement: shortcutReferenceOpener,
+            sessionReading: view.name === "session" && !isMobile,
+          })}
           sessionOpen={view.name === "session"}
           terminalSupported={terminalSupported}
           filesSupported={filesSupported}

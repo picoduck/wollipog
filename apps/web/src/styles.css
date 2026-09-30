@@ -9077,23 +9077,40 @@ button.file-head.source-path-link {
   .menu,
   .popover { animation: modal-fade-in var(--dur-base) var(--ease-out); }
 }
-.shortcut-intro,
-.shortcut-footnote {
-  margin: 0;
-  color: var(--text-dim);
-  line-height: 1.45;
+/* The Keyboard Shortcuts reference (§7.1, §11.5). A filter, then the groups in two columns that
+   ShortcutReference balances (one column at or below the tablet breakpoint, where it renders
+   one). Each row is one line at the control height: the label left, the keycap right. */
+.shortcut-filter { width: 100%; }
+.shortcut-columns {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  align-items: start;
+  gap: var(--space-6);
 }
-.shortcut-groups {
+.shortcut-column {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--space-6);
+  min-width: 0;
 }
 .shortcut-group h3 {
-  margin: 0 0 8px;
-  color: var(--text-faint);
-  font-size: 11px;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  font: var(--type-section);
+  color: var(--text);
+}
+.shortcut-current {
+  font: var(--type-label);
+  color: var(--accent);
+}
+/* Said once for the whole group ("Open a session to use these."), not on every row. */
+.shortcut-group-note {
+  margin: calc(-1 * var(--space-1)) 0 var(--space-2);
+  font: var(--type-small);
+  color: var(--text-dim);
 }
 .shortcut-list {
   display: flex;
@@ -9101,44 +9118,52 @@ button.file-head.source-path-link {
   margin: 0;
 }
 .shortcut-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 10px 0;
+  gap: var(--space-2);
+  min-height: var(--control-h);
   border-top: 1px solid var(--border);
 }
-.shortcut-row:last-child {
-  border-bottom: 1px solid var(--border);
+.shortcut-row:first-child { border-top: 0; }
+.shortcut-row dt {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-/* De-emphasised by TOKEN, not by subtree opacity. This row explains a shortcut that is unavailable
-   here — it is documentation, not an inactive control, so it carries the full text contrast
-   requirement, and `opacity: 0.62` took --text-faint to about 2.6:1 on the light modal. Setting the
-   colour on the row alone would have changed nothing, because `dt` and `dd` declare their own. */
-.shortcut-row.is-unavailable dt,
-.shortcut-row.is-unavailable dd {
+.shortcut-row dd { margin: 0; }
+/* A reason only this row has (a hidden destination, an experiment, runner support) shares its
+   line, and gives way before the label or the keycap does. The full text is its tooltip. */
+.shortcut-reason {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-small);
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shortcut-row .shortcut-keys {
+  display: flex;
+  flex: none;
+  margin-left: auto;
+}
+/* De-emphasised by TOKEN, not by subtree opacity. An unavailable row is documentation, not an
+   inactive control, so it keeps the full text contrast requirement: `opacity: 0.62` took
+   --text-faint to about 2.6:1 on the light modal. */
+.shortcut-row.is-unavailable dt {
   color: var(--text-dim);
 }
 .shortcut-row.is-unavailable kbd {
   border-style: dashed;
 }
-.shortcut-row dt {
-  color: var(--text);
-  font-weight: 600;
-}
-.shortcut-row dd {
-  margin: 3px 0 0;
-  color: var(--text-faint);
-  font-size: 12px;
-}
-.shortcut-scope {
-  display: inline-block;
-  margin-left: 7px;
+.shortcut-reference-note {
+  margin: 0 auto 0 0;
+  font: var(--type-small);
   color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-  text-transform: uppercase;
+}
+@media (max-width: 760px) {
+  .shortcut-reference-note { flex-basis: 100%; }
 }
 
 /* --------------------------------- Toasts --------------------------------

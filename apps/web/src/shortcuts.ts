@@ -76,7 +76,6 @@ export type ShortcutDefinition = {
   id: ShortcutId;
   group: ShortcutGroup;
   label: string;
-  description: string;
   scope: ShortcutScope;
   binding: {
     key: string;
@@ -112,7 +111,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "search",
     group: "Navigation",
     label: "Search",
-    description: "Search sessions, transcripts, and views",
     scope: "Global",
     binding: { key: "k", primary: true },
   },
@@ -126,7 +124,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: RAIL_SHORTCUT_IDS[item.id],
     group: "Navigation",
     label: item.name,
-    description: item.id === "inbox" ? `Open ${item.name} in its last-used list or board mode` : `Open ${item.name}`,
     scope: "Global",
     binding: { key: String(index + 1), bare: true },
   })),
@@ -134,7 +131,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "toggle-sessions-view",
     group: "Navigation",
     label: "Toggle List / Board",
-    description: "Switch Sessions between its list and board modes",
     scope: "Sessions",
     binding: { key: "b", bare: true },
   },
@@ -142,7 +138,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "open-settings",
     group: "Navigation",
     label: "Open Settings",
-    description: "Open Settings from anywhere in the app",
     scope: "Global",
     // On supported desktop layouts Shift+, is reported as KeyboardEvent.key "<". Keep the
     // matcher honest while displaying the physical key people press rather than "Shift+<".
@@ -152,7 +147,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "focus-inbox-search",
     group: "Navigation",
     label: "Search Sessions",
-    description: "Focus the Sessions search",
     scope: "Global",
     binding: { key: "/", bare: true },
   },
@@ -160,7 +154,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "new-session",
     group: "Actions",
     label: "New Session",
-    description: "Open the new session dialog",
     scope: "Global",
     binding: { key: "c", bare: true },
   },
@@ -168,7 +161,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "focus-next-zone",
     group: "Navigation",
     label: "Next Focus Zone",
-    description: "Move focus through the rail, list, and page",
     scope: "Global",
     binding: { key: "F6" },
   },
@@ -176,7 +168,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "focus-previous-zone",
     group: "Navigation",
     label: "Previous Focus Zone",
-    description: "Move focus backward through the rail, list, and page",
     scope: "Global",
     binding: { key: "F6", shift: true },
   },
@@ -184,7 +175,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "open-files",
     group: "Session",
     label: "Files Panel",
-    description: "Open the current session's files",
     scope: "Session",
     binding: { key: "p", primary: true },
   },
@@ -192,7 +182,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "open-review",
     group: "Session",
     label: "Review Panel",
-    description: "Open the current session's review summary",
     scope: "Session",
     binding: { key: "g", primary: true, shift: true },
   },
@@ -200,7 +189,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "toggle-terminal",
     group: "Session",
     label: "Toggle Terminal",
-    description: "Show or hide the current session's terminal dock",
     scope: "Session",
     binding: { key: "`", primary: true },
   },
@@ -208,7 +196,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "submit-run",
     group: "Actions",
     label: "Start Multi-Agent Run",
-    description: "Submit the current multi-agent run dialog",
     scope: "Run dialog",
     binding: { key: "Enter", primary: true },
   },
@@ -216,7 +203,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "relay-pod-note",
     group: "Actions",
     label: "Add Pod Note",
-    description: "Add or relay the current attributed pod note",
     scope: "Pod detail",
     binding: { key: "Enter", primary: true },
   },
@@ -224,7 +210,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "shortcut-reference",
     group: "Help",
     label: "Keyboard Shortcuts",
-    description: "Open this shortcut reference",
     scope: "Global",
     binding: { key: "?", shift: true, bare: true },
   },
@@ -232,7 +217,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-next",
     group: "Sessions List",
     label: "Next Session",
-    description: "Select the next session card",
     scope: "Sessions List",
     binding: { key: "j", bare: true },
   },
@@ -240,7 +224,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-previous",
     group: "Sessions List",
     label: "Previous Session",
-    description: "Select the previous session card",
     scope: "Sessions List",
     binding: { key: "k", bare: true },
   },
@@ -248,7 +231,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-grid-next",
     group: "Sessions List",
     label: "Next Session (Grid)",
-    description: "Select the next session while the Sessions grid has focus",
     scope: "Sessions List",
     binding: { key: "ArrowDown", bare: true, displayKey: "↓" },
   },
@@ -256,7 +238,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-grid-previous",
     group: "Sessions List",
     label: "Previous Session (Grid)",
-    description: "Select the previous session while the Sessions grid has focus",
     scope: "Sessions List",
     binding: { key: "ArrowUp", bare: true, displayKey: "↑" },
   },
@@ -264,7 +245,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-grid-first",
     group: "Sessions List",
     label: "First Session (Grid)",
-    description: "Select the first session while the Sessions grid has focus",
     scope: "Sessions List",
     binding: { key: "Home", bare: true },
   },
@@ -272,7 +252,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-expand",
     group: "Sessions List",
     label: "Expand Session",
-    description: "Expand the selected session",
     scope: "Sessions List",
     binding: { key: "Enter", bare: true },
   },
@@ -280,7 +259,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-open-top-request",
     group: "Sessions List",
     label: "Open Top Request",
-    description: "Open the selected session with its highest-priority pending request focused",
     scope: "Sessions List",
     binding: { key: "F2", bare: true },
   },
@@ -288,7 +266,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-toggle-thread",
     group: "Sessions List",
     label: "Toggle Thread",
-    description: "Collapse or expand the selected session's child sessions; from a child, collapse its thread and select the parent",
     scope: "Sessions List",
     binding: { key: "t", bare: true },
   },
@@ -296,7 +273,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-toggle-all-threads",
     group: "Sessions List",
     label: "Toggle All Threads",
-    description: "Expand every thread if any is collapsed, otherwise collapse every thread",
     scope: "Sessions List",
     binding: { key: "t", shift: true, bare: true },
   },
@@ -304,7 +280,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-go-to-parent",
     group: "Sessions List",
     label: "Go to Parent",
-    description: "Select the parent of the selected child session",
     scope: "Sessions List",
     binding: { key: "p", bare: true },
   },
@@ -312,7 +287,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-expand-thread",
     group: "Sessions List",
     label: "Expand Thread",
-    description: "Expand the selected session's thread, or select its first child when already expanded",
     scope: "Sessions List",
     binding: { key: "ArrowRight", bare: true, displayKey: "→" },
   },
@@ -320,7 +294,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-collapse-thread",
     group: "Sessions List",
     label: "Collapse Thread",
-    description: "Collapse the selected session's thread, or select the parent from a child",
     scope: "Sessions List",
     binding: { key: "ArrowLeft", bare: true, displayKey: "←" },
   },
@@ -328,7 +301,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-fork",
     group: "Sessions List",
     label: "Fork Conversation",
-    description: "Fork the selected session at its latest completed checkpoint",
     scope: "Sessions List",
     binding: { key: "f", bare: true },
   },
@@ -336,7 +308,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-next-split",
     group: "Sessions List",
     label: "Next Split",
-    description: "Move to the next project split",
     scope: "Sessions List",
     binding: { key: "Tab", bare: true },
   },
@@ -344,7 +315,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-previous-split",
     group: "Sessions List",
     label: "Previous Split",
-    description: "Move to the previous project split",
     scope: "Sessions List",
     binding: { key: "Tab", shift: true, bare: true },
   },
@@ -352,7 +322,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-approve",
     group: "Sessions List",
     label: "Approve Request",
-    description: "Approve the selected session request",
     scope: "Sessions List",
     binding: { key: "a", bare: true },
   },
@@ -360,7 +329,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-deny",
     group: "Sessions List",
     label: "Deny Request",
-    description: "Deny the selected session request",
     scope: "Sessions List",
     binding: { key: "d", bare: true },
   },
@@ -368,7 +336,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-archive",
     group: "Sessions List",
     label: "Archive Session",
-    description: "Archive the selected session and advance",
     scope: "Sessions List",
     binding: { key: "e", bare: true },
   },
@@ -376,7 +343,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-snooze",
     group: "Sessions List",
     label: "Snooze Session",
-    description: "Schedule or edit a reminder for the selected session",
     scope: "Sessions List",
     binding: { key: "h", bare: true },
   },
@@ -384,7 +350,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-pin",
     group: "Sessions List",
     label: "Pin Session",
-    description: "Pin or unpin the selected session",
     scope: "Sessions List",
     binding: { key: "s", bare: true },
   },
@@ -392,7 +357,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-unread",
     group: "Sessions List",
     label: "Mark Unread",
-    description: "Mark the selected session unread",
     scope: "Sessions List",
     binding: { key: "u", bare: true },
   },
@@ -400,7 +364,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-reply",
     group: "Sessions List",
     label: "Reply to Session",
-    description: "Expand the selected session and focus the composer",
     scope: "Sessions List",
     binding: { key: "r", bare: true },
   },
@@ -408,7 +371,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-page-down",
     group: "Sessions List",
     label: "Page Down",
-    description: "Page down through preview history",
     scope: "Sessions List",
     binding: { key: " ", bare: true },
   },
@@ -416,7 +378,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-page-up",
     group: "Sessions List",
     label: "Page Up",
-    description: "Page up through preview history",
     scope: "Sessions List",
     binding: { key: " ", shift: true, bare: true },
   },
@@ -424,7 +385,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-follow-latest",
     group: "Sessions List",
     label: "Follow Live Output",
-    description: "Jump to the latest preview event and resume following",
     scope: "Sessions List",
     binding: { key: "g", shift: true, bare: true },
   },
@@ -432,7 +392,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "inbox-follow-latest-end",
     group: "Sessions List",
     label: "Last Session / Follow Live Output",
-    description: "Select the last session from the grid, or jump to the latest preview event and resume following",
     scope: "Sessions List",
     binding: { key: "End", bare: true },
   },
@@ -440,7 +399,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-line-down",
     group: "Session Reading",
     label: "Scroll Down",
-    description: "Scroll the transcript down by one line",
     scope: "Session Reading",
     binding: { key: "j", bare: true },
   },
@@ -448,7 +406,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-line-up",
     group: "Session Reading",
     label: "Scroll Up",
-    description: "Scroll the transcript up by one line",
     scope: "Session Reading",
     binding: { key: "k", bare: true },
   },
@@ -456,7 +413,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-page-down",
     group: "Session Reading",
     label: "Page Down",
-    description: "Page down through session history",
     scope: "Session Reading",
     binding: { key: " ", bare: true },
   },
@@ -464,7 +420,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-page-up",
     group: "Session Reading",
     label: "Page Up",
-    description: "Page up through session history",
     scope: "Session Reading",
     binding: { key: " ", shift: true, bare: true },
   },
@@ -472,7 +427,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-start",
     group: "Session Reading",
     label: "Session Start",
-    description: "Jump to the start of the session",
     scope: "Session Reading",
     binding: { key: "g", bare: true, sequence: ["g", "g"] },
   },
@@ -480,7 +434,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-latest",
     group: "Session Reading",
     label: "Follow Live Output",
-    description: "Jump to the latest event and resume following",
     scope: "Session Reading",
     binding: { key: "g", shift: true, bare: true },
   },
@@ -488,7 +441,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-latest-end",
     group: "Session Reading",
     label: "Follow Live Output (End)",
-    description: "Jump to the latest event and resume following",
     scope: "Session Reading",
     binding: { key: "End", bare: true },
   },
@@ -496,7 +448,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-next-session",
     group: "Session Reading",
     label: "Next Session",
-    description: "Open the next inbox session while staying expanded",
     scope: "Session Reading",
     binding: { key: "j", ctrl: true },
   },
@@ -504,7 +455,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-previous-session",
     group: "Session Reading",
     label: "Previous Session",
-    description: "Open the previous inbox session while staying expanded",
     scope: "Session Reading",
     binding: { key: "k", ctrl: true },
   },
@@ -512,7 +462,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-approve",
     group: "Session Reading",
     label: "Approve Request",
-    description: "Approve the pending session request",
     scope: "Session Reading",
     binding: { key: "a", bare: true },
   },
@@ -520,7 +469,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-deny",
     group: "Session Reading",
     label: "Deny Request",
-    description: "Deny the pending session request",
     scope: "Session Reading",
     binding: { key: "d", bare: true },
   },
@@ -528,7 +476,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-archive",
     group: "Session Reading",
     label: "Archive and Advance",
-    description: "Archive this session and open the next session",
     scope: "Session Reading",
     binding: { key: "e", bare: true },
   },
@@ -536,7 +483,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-snooze",
     group: "Session Reading",
     label: "Snooze Session",
-    description: "Schedule or edit a reminder for this session",
     scope: "Session Reading",
     binding: { key: "h", bare: true },
   },
@@ -544,7 +490,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "session-reading-reply",
     group: "Session Reading",
     label: "Reply to Session",
-    description: "Focus the composer, entering Answer Mode for a pending question",
     scope: "Session Reading",
     binding: { key: "r", bare: true },
   },
@@ -552,7 +497,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "steer-turn",
     group: "Session",
     label: "Steer Active Turn",
-    description: "Send the composer message into the active agent turn",
     scope: "Session",
     binding: { key: "Enter", ctrl: true },
   },
@@ -560,7 +504,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "stop-turn",
     group: "Session",
     label: "Stop Turn",
-    description: "Stop the active agent turn without ending the session",
     scope: "Session",
     binding: { key: "Escape", shift: true },
   },
@@ -568,13 +511,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "exit-terminal",
     group: "Session",
     label: "Exit Terminal Focus",
-    description: "Return keyboard focus from the terminal to the session",
     scope: "Session",
     binding: { key: "Escape", ctrl: true },
   },
 ] as const;
 
-export const SHORTCUT_GROUPS = ["Navigation", "Sessions List", "Session Reading", "Session", "Actions", "Help"] as const;
+/** The reference's default group order: the two small groups everyone needs, then the contextual ones. */
+export const SHORTCUT_GROUPS = ["Navigation", "Actions", "Sessions List", "Session Reading", "Session", "Help"] as const;
 
 export function shortcut(id: ShortcutId): ShortcutDefinition {
   const definition = SHORTCUTS.find((candidate) => candidate.id === id);
@@ -709,19 +652,31 @@ export function railViewForShortcut(id: ShortcutId): keyof typeof RAIL_SHORTCUT_
   return null;
 }
 
-export function shortcutUnavailableReason(
-  definition: ShortcutDefinition,
-  context: {
-    sessionOpen: boolean;
-    terminalSupported: boolean;
-    filesSupported: boolean;
-    conversationSteeringSupported?: boolean;
-    turnInterruptionSupported?: boolean;
-    experimentFlags?: ExperimentFlags;
-    /** Rail destinations hidden by preference (#385); their digits are unassigned, not dead. */
-    hiddenRailViews?: ReadonlySet<string>;
-  },
+/** What decides whether a binding works here. The reference reads it to explain a dead key. */
+export type ShortcutAvailability = {
+  sessionOpen: boolean;
+  terminalSupported: boolean;
+  filesSupported: boolean;
+  conversationSteeringSupported?: boolean;
+  turnInterruptionSupported?: boolean;
+  experimentFlags?: ExperimentFlags;
+  /** Rail destinations hidden by preference (#385); their digits are unassigned, not dead. */
+  hiddenRailViews?: ReadonlySet<string>;
+};
+
+/** Why a whole group cannot be used here, said once under its heading, or null. */
+export function shortcutGroupUnavailableReason(
+  group: ShortcutGroup,
+  context: Pick<ShortcutAvailability, "sessionOpen">,
 ): string | null {
+  if ((group === "Session" || group === "Session Reading") && !context.sessionOpen) {
+    return "Open a session to use these.";
+  }
+  return null;
+}
+
+/** Why this one binding cannot be used here, beyond what its group already says, or null. */
+export function shortcutUnavailableReason(definition: ShortcutDefinition, context: ShortcutAvailability): string | null {
   const railView = railViewForShortcut(definition.id);
   if (railView && context.hiddenRailViews?.has(railView)) {
     return "Hidden in Settings → Appearance";
@@ -730,22 +685,100 @@ export function shortcutUnavailableReason(
   if (experiment && context.experimentFlags && !context.experimentFlags[experiment]) {
     return "Turned off in Settings → Experimental";
   }
-  if ((definition.scope === "Session" || definition.scope === "Session Reading") && !context.sessionOpen) {
-    return "Open a session to use this binding";
-  }
-  if (definition.id === "toggle-terminal" && !context.terminalSupported) {
-    return "Unavailable until this runner supports session shells";
-  }
-  if (definition.id === "open-files" && !context.filesSupported) {
-    return "Unavailable until this runner supports session files";
-  }
-  if (definition.id === "steer-turn" && !context.conversationSteeringSupported) {
-    return "Unavailable until this runner supports conversation steering";
-  }
-  if (definition.id === "stop-turn" && !context.turnInterruptionSupported) {
-    return "Unavailable until this runner supports stopping an active turn";
+  // The row names the feature, so the reason only has to say whose fault it is. It stays short
+  // enough to share the row's one line with the label and the keycap.
+  const runnerSupport: Partial<Record<ShortcutId, boolean | undefined>> = {
+    "toggle-terminal": context.terminalSupported,
+    "open-files": context.filesSupported,
+    "steer-turn": context.conversationSteeringSupported,
+    "stop-turn": context.turnInterruptionSupported,
+  };
+  if (definition.id in runnerSupport && !runnerSupport[definition.id]) {
+    return "Not supported by this runner";
   }
   return null;
+}
+
+/** The reference group a focus scope belongs to, or null for a page with no group of its own. */
+export function shortcutGroupForScope(scope: ShortcutScope): ShortcutGroup | null {
+  return scope === "Sessions List" || scope === "Session Reading" || scope === "Session" ? scope : null;
+}
+
+export type ShortcutReferenceRow = {
+  id: ShortcutId;
+  label: string;
+  /** The keycap text, as the person sees it. */
+  keys: string;
+  /** A row-specific reason the binding is dead here; a whole group's reason is its `note`. */
+  reason: string | null;
+};
+
+export type ShortcutReferenceGroup = {
+  group: ShortcutGroup;
+  /** The group for the page the reference was opened from ("Current Page"). */
+  current: boolean;
+  /** Why the whole group is unavailable here, or null. */
+  note: string | null;
+  rows: ShortcutReferenceRow[];
+};
+
+/** The two Session groups share some actions. A row there with the same label and keys as one
+ * already listed is said once, in whichever of the two comes first. */
+const MERGED_ROW_GROUPS: ReadonlySet<ShortcutGroup> = new Set(["Sessions List", "Session Reading"]);
+
+/** Keys compare without spaces or "+", so "ctrl k" finds Ctrl+K. */
+function compactKeys(text: string): string {
+  return text.toLowerCase().replace(/[\s+]/g, "");
+}
+
+function matchesQuery(row: ShortcutReferenceRow, needle: string): boolean {
+  if (!needle || row.label.toLowerCase().includes(needle)) return true;
+  const keys = compactKeys(needle);
+  return keys !== "" && compactKeys(row.keys).includes(keys);
+}
+
+/**
+ * The Keyboard Shortcuts reference, in reading order: the group for the page it was opened from
+ * first, then the default order. Rows say their label and keys once; a query keeps the rows whose
+ * label or keys contain it, and a group with no row left is dropped.
+ */
+export function shortcutReferenceGroups({
+  scope,
+  availability,
+  keys,
+  query = "",
+}: {
+  scope: ShortcutScope;
+  availability: ShortcutAvailability;
+  keys: (definition: ShortcutDefinition) => string;
+  query?: string;
+}): ShortcutReferenceGroup[] {
+  const current = shortcutGroupForScope(scope);
+  const order = current ? [current, ...SHORTCUT_GROUPS.filter((group) => group !== current)] : [...SHORTCUT_GROUPS];
+  const needle = query.trim().toLowerCase();
+  const listed = new Set<string>();
+  const groups: ShortcutReferenceGroup[] = [];
+  for (const group of order) {
+    const note = shortcutGroupUnavailableReason(group, availability);
+    const rows: ShortcutReferenceRow[] = [];
+    for (const definition of SHORTCUTS) {
+      if (definition.group !== group) continue;
+      const row: ShortcutReferenceRow = {
+        id: definition.id,
+        label: definition.label,
+        keys: keys(definition),
+        reason: note ? null : shortcutUnavailableReason(definition, availability),
+      };
+      if (MERGED_ROW_GROUPS.has(group)) {
+        const identity = `${row.label}\n${row.keys}`;
+        if (listed.has(identity)) continue;
+        listed.add(identity);
+      }
+      if (matchesQuery(row, needle)) rows.push(row);
+    }
+    if (rows.length > 0) groups.push({ group, current: group === current, note, rows });
+  }
+  return groups;
 }
 
 export function shortcutLayerActive(document: Document, exceptPalette = false): boolean {

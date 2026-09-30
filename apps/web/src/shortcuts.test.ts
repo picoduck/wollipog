@@ -11,8 +11,12 @@ import {
   shortcut,
   shortcutBindingDisplay,
   shortcutDisplay,
+  shortcutGroupForScope,
+  shortcutGroupUnavailableReason,
   shortcutLayerActive,
+  shortcutReferenceGroups,
   shortcutUnavailableReason,
+  type ShortcutDefinition,
 } from "./shortcuts.js";
 import { GLOBAL_VIEW_ITEMS } from "./navigation.js";
 
@@ -32,7 +36,7 @@ function key(
 
 test("the shortcut registry has stable unique ids and bindings", () => {
   assert.equal(new Set(SHORTCUTS.map((item) => item.id)).size, SHORTCUTS.length);
-  assert.equal(SHORTCUTS.every((item) => item.label && item.description && item.binding.key), true);
+  assert.equal(SHORTCUTS.every((item) => item.label && item.binding.key), true);
 });
 
 test("shortcut matching accepts either primary modifier and rejects modifier drift", () => {
@@ -277,75 +281,87 @@ test("editable targets include inherited, empty, and plaintext-only contentedita
 });
 
 test("session shortcut availability reflects the active runner capability", () => {
-  assert.equal(
-    shortcutUnavailableReason(shortcut("toggle-terminal"), { sessionOpen: false, terminalSupported: false, filesSupported: false }),
-    "Open a session to use this binding",
-  );
-  assert.equal(
-    shortcutUnavailableReason(shortcut("toggle-terminal"), { sessionOpen: true, terminalSupported: false, filesSupported: true }),
-    "Unavailable until this runner supports session shells",
-  );
-  assert.equal(
-    shortcutUnavailableReason(shortcut("open-files"), { sessionOpen: true, terminalSupported: true, filesSupported: false }),
-    "Unavailable until this runner supports session files",
-  );
-  assert.equal(
-    shortcutUnavailableReason(shortcut("open-files"), { sessionOpen: true, terminalSupported: false, filesSupported: true }),
-    null,
-  );
-  assert.equal(
-    shortcutUnavailableReason(shortcut("steer-turn"), {
-      sessionOpen: true,
-      terminalSupported: true,
-      filesSupported: true,
-      conversationSteeringSupported: false,
-    }),
-    "Unavailable until this runner supports conversation steering",
-  );
-  assert.equal(
-    shortcutUnavailableReason(shortcut("steer-turn"), {
-      sessionOpen: true,
-      terminalSupported: true,
-      filesSupported: true,
-      conversationSteeringSupported: true,
-    }),
-    null,
-  );
-  assert.equal(
-    shortcutUnavailableReason(shortcut("stop-turn"), {
-      sessionOpen: true,
-      terminalSupported: true,
-      filesSupported: true,
-      turnInterruptionSupported: false,
-    }),
-    "Unavailable until this runner supports stopping an active turn",
-  );
-  assert.equal(
-    shortcutUnavailableReason(shortcut("stop-turn"), {
-      sessionOpen: true,
-      terminalSupported: true,
-      filesSupported: true,
-      turnInterruptionSupported: true,
-    }),
-    null,
-  );
-  assert.equal(
-    shortcutUnavailableReason(shortcut("session-reading-line-down"), {
-      sessionOpen: false,
-      terminalSupported: true,
-      filesSupported: true,
-    }),
-    "Open a session to use this binding",
-  );
-  assert.equal(
-    shortcutUnavailableReason(shortcut("inbox-follow-latest"), {
-      sessionOpen: false,
-      terminalSupported: true,
-      filesSupported: true,
-    }),
-    null,
-    "the Inbox shortcut reference must advertise preview resume keys on the Inbox surface",
-  );
+  const supported = { sessionOpen: true, terminalSupported: true, filesSupported: true, conversationSteeringSupported: true, turnInterruptionSupported: true };
+  for (const [id, capability] of [
+    ["toggle-terminal", "terminalSupported"],
+    ["open-files", "filesSupported"],
+    ["steer-turn", "conversationSteeringSupported"],
+    ["stop-turn", "turnInterruptionSupported"],
+  ] as const) {
+    assert.equal(shortcutUnavailableReason(shortcut(id), supported), null, id);
+    assert.equal(shortcutUnavailableReason(shortcut(id), { ...supported, [capability]: false }), "Not supported by this runner", id);
+  }
+  // Whether a session is open is the group's reason, said once under its heading, never per row.
+  assert.equal(shortcutUnavailableReason(shortcut("session-reading-line-down"), { ...supported, sessionOpen: false }), null);
+  assert.equal(shortcutGroupUnavailableReason("Session", { sessionOpen: false }), "Open a session to use these.");
+  assert.equal(shortcutGroupUnavailableReason("Session Reading", { sessionOpen: false }), "Open a session to use these.");
+  assert.equal(shortcutGroupUnavailableReason("Session", { sessionOpen: true }), null);
+  assert.equal(shortcutGroupUnavailableReason("Sessions List", { sessionOpen: false }), null,
+    "the reference must advertise the preview's resume keys on the Sessions page");
+});
+
+const AVAILABLE = { sessionOpen: true, terminalSupported: true, filesSupported: true, conversationSteeringSupported: true, turnInterruptionSupported: true };
+const referenceKeys = (definition: ShortcutDefinition) => shortcutBindingDisplay(definition.binding, false);
+
+test("the reference puts the current page's group first and marks only that one", () => {
+  const global = shortcutReferenceGroups({ scope: "Global", availability: { ...AVAILABLE, sessionOpen: false }, keys: referenceKeys });
+  assert.deepEqual(global.map((group) => group.group), ["Navigation", "Actions", "Sessions List", "Session Reading", "Session", "Help"]);
+  assert.equal(global.some((group) => group.current), false, "a page with no group of its own marks none");
+
+  for (const scope of ["Sessions List", "Session Reading", "Session"] as const) {
+    const groups = shortcutReferenceGroups({ scope, availability: AVAILABLE, keys: referenceKeys });
+    assert.equal(groups[0]!.group, scope);
+    assert.deepEqual(groups.filter((group) => group.current).map((group) => group.group), [scope]);
+  }
+  assert.equal(shortcutGroupForScope("Sessions"), null);
+  assert.equal(shortcutGroupForScope("Run dialog"), null);
+});
+
+test("without a session the Session groups carry one note and no per-row session reason", () => {
+  const groups = shortcutReferenceGroups({
+    scope: "Global",
+    availability: { sessionOpen: false, terminalSupported: false, filesSupported: false },
+    keys: referenceKeys,
+  });
+  for (const name of ["Session", "Session Reading"] as const) {
+    const group = groups.find((candidate) => candidate.group === name)!;
+    assert.equal(group.note, "Open a session to use these.");
+    // No runner is chosen before a session is, so no runner reason repeats the note.
+    assert.deepEqual(group.rows.filter((row) => row.reason !== null), [], name);
+  }
+  assert.equal(groups.find((group) => group.group === "Sessions List")!.note, null);
+});
+
+test("shared Session actions are listed once, in the first of the two groups, only when their keys match", () => {
+  const labelsOf = (groups: ReturnType<typeof shortcutReferenceGroups>, name: string) =>
+    groups.find((group) => group.group === name)!.rows.map((row) => row.label);
+  const shared = ["Approve Request", "Deny Request", "Snooze Session", "Reply to Session", "Page Down", "Page Up", "Follow Live Output"];
+
+  const onSessions = shortcutReferenceGroups({ scope: "Sessions List", availability: AVAILABLE, keys: referenceKeys });
+  const inSession = shortcutReferenceGroups({ scope: "Session Reading", availability: AVAILABLE, keys: referenceKeys });
+  for (const label of shared) {
+    assert.ok(labelsOf(onSessions, "Sessions List").includes(label), label);
+    assert.ok(!labelsOf(onSessions, "Session Reading").includes(label), label);
+    assert.ok(labelsOf(inSession, "Session Reading").includes(label), label);
+    assert.ok(!labelsOf(inSession, "Sessions List").includes(label), label);
+  }
+  // Same label, different keys (J in the list, Ctrl+J while reading): both stay under their headings.
+  assert.ok(labelsOf(onSessions, "Sessions List").includes("Next Session"));
+  assert.ok(labelsOf(onSessions, "Session Reading").includes("Next Session"));
+  // The same key under different labels is a different action and is never merged.
+  assert.ok(labelsOf(onSessions, "Sessions List").includes("Archive Session"));
+  assert.ok(labelsOf(onSessions, "Session Reading").includes("Archive and Advance"));
+});
+
+test("the reference filter keeps rows whose label or keys match and drops empty groups", () => {
+  const filter = (query: string) => shortcutReferenceGroups({ scope: "Global", availability: AVAILABLE, keys: referenceKeys, query });
+  assert.deepEqual(filter("term").map((group) => [group.group, group.rows.map((row) => row.label)]), [
+    ["Session", ["Toggle Terminal", "Exit Terminal Focus"]],
+  ]);
+  assert.deepEqual(filter("  TERMINAL ").flatMap((group) => group.rows.map((row) => row.label)), ["Toggle Terminal", "Exit Terminal Focus"]);
+  assert.deepEqual(filter("ctrl k").flatMap((group) => group.rows.map((row) => `${row.label} ${row.keys}`)),
+    ["Search Ctrl+K", "Previous Session Ctrl+K"]);
+  assert.deepEqual(filter("zzz"), []);
 });
 
 test("modal and popover layers isolate background application chords", () => {
