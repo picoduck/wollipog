@@ -124,6 +124,11 @@ test.describe("on a 390px phone", () => {
     await expect(reference).toBeVisible();
     await settle(page);
     await expect(reference.locator(".modal-desc")).toHaveText(/^These shortcuts need a hardware keyboard\./);
+    // A touch screen opens on the sheet, not the filter: focusing the field would raise the
+    // software keyboard over a sheet nobody has read yet.
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    await expect(reference).toBeFocused();
+    await expect(reference.getByRole("searchbox", { name: "Filter Shortcuts" })).not.toBeFocused();
     const sheet = (await page.locator(".modal", { has: reference }).boundingBox())!;
     expect(sheet.width).toBe(390);
     expect(Math.round(sheet.y + sheet.height)).toBe(844);
