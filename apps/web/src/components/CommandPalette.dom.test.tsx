@@ -422,3 +422,24 @@ test("a failed transcript search is asked again when its query returns, and show
   assert.doesNotMatch(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching/,
     "the spinner does not run on after the retry fails");
 });
+
+// Last in the file on purpose: five tests above end with the palette open after a query, which
+// left a zero-delay window timer pending when the shared cleanup aborted the window. That used to
+// kill every later zero-delay timer in this file, so this test's `settle()` hung (#2113).
+test("closing the palette after its phone opener was removed across 760px returns focus to the page title", async () => {
+  await act(async () => { domWindow.happyDOM.setViewport({ width: 390, height: 844 }); });
+  try {
+    const ui = await mount({ appBarSearchOnPhoneOnly: true });
+    await act(async () => { ui.doc.querySelector<HTMLElement>('.page-app-bar [aria-label="Search"]')!.click(); });
+    assert.ok(ui.palette(), "the phone app bar's Search opens the palette");
+    await act(async () => { domWindow.happyDOM.setViewport({ width: 1440, height: 900 }); });
+    assertNoDomNode(ui.doc.querySelector('.page-app-bar [aria-label="Search"]'), "the opener went with the phone layout");
+    await ui.key(ui.input(), "Escape");
+    assertNoDomNode(ui.palette(), "Escape closes the palette");
+    await settle();
+    const title = ui.doc.querySelector<HTMLElement>(".page-app-bar #page-title")!;
+    assert.ok(ui.doc.activeElement === title, `focus is on the page title, not <body> (found ${ui.doc.activeElement?.tagName})`);
+  } finally {
+    await act(async () => { domWindow.happyDOM.setViewport({ width: 1440, height: 900 }); });
+  }
+});
