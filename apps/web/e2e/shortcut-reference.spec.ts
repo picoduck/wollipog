@@ -86,6 +86,32 @@ test.describe("at 1440×900", () => {
     expect(current.y + current.height).toBeLessThan(body.y + body.height);
   });
 
+  test("Ctrl+K opens Search while Session Reading owns the transcript, and Alt+Arrow hops sessions", async ({ page }) => {
+    await page.goto(SESSION);
+    const transcript = page.locator('[data-focus-zone="main"] .detail-scroll');
+    await expect(transcript).toBeVisible();
+    await transcript.focus();
+    await page.keyboard.press("Control+k");
+    const search = page.getByRole("dialog", { name: "Search", exact: true });
+    await expect(search).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(search).toBeHidden();
+
+    const title = page.getByRole("heading", { level: 1 });
+    await expect(title).toHaveText("Alpha Session");
+    await transcript.focus();
+    await page.keyboard.press("Alt+ArrowDown");
+    await expect(title).not.toHaveText("Alpha Session");
+    await transcript.focus();
+    await page.keyboard.press("Alt+ArrowUp");
+    await expect(title).toHaveText("Alpha Session");
+
+    const reference = await openWithKey(page, SESSION);
+    const reading = reference.locator(".shortcut-group").filter({ has: page.getByRole("heading", { name: /^Session Reading/ }) });
+    await expect(reading.locator(".shortcut-row", { hasText: "Next Session" }).locator("kbd")).toHaveText("Alt+↓");
+    await expect(reading.locator(".shortcut-row", { hasText: "Previous Session" }).locator("kbd")).toHaveText("Alt+↑");
+  });
+
   test("typing filters to the matching rows and their headings", async ({ page }) => {
     const reference = await openWithKey(page, SKILLS);
     const filter = reference.getByRole("searchbox", { name: "Filter Shortcuts" });

@@ -449,14 +449,16 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Session Reading",
     label: "Next Session",
     scope: "Session Reading",
-    binding: { key: "j", ctrl: true },
+    // Alt/Option+Arrow on every platform: a literal Ctrl+J/K pair made Previous Session shadow
+    // Search's Ctrl+K on Windows and Linux (#2080). KeyboardEvent.key is the same arrow everywhere.
+    binding: { key: "ArrowDown", alt: true, displayKey: "↓" },
   },
   {
     id: "session-reading-previous-session",
     group: "Session Reading",
     label: "Previous Session",
     scope: "Session Reading",
-    binding: { key: "k", ctrl: true },
+    binding: { key: "ArrowUp", alt: true, displayKey: "↑" },
   },
   {
     id: "session-reading-approve",

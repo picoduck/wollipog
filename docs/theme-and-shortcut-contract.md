@@ -36,6 +36,12 @@ reference uses the shared modal focus trap and Escape behavior, then restores fo
 control when closed. Session-scoped bindings only act while a session is selected, and `Ctrl/Cmd+K`
 continues to preserve xterm's native control sequence.
 
+No contextual binding may shadow a global one. Two bindings that can be live together (a global
+binding and any scope's, two in one scope, or Session with Session Reading and Sessions with the
+Sessions List) never show the same keys on either platform, and a registry test enforces it. Session
+Reading's Previous and Next Session are therefore `Alt+↑` and `Alt+↓` (`⌥↑` and `⌥↓` on Apple
+platforms), which leaves `Ctrl/Cmd+K` to Search while someone is reading a session.
+
 ## Verification contract
 
 - Pure tests cover preference parsing/resolution, DOM/meta application, terminal palettes, unique

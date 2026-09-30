@@ -57,7 +57,7 @@ function xtermOwnsFocus(targetDocument: Document): boolean {
 function nativeControlOwnsFocus(targetDocument: Document): boolean {
   const active = targetDocument.activeElement;
   if (!(active instanceof HTMLElement)) return false;
-  // Text inputs deliberately remain eligible for modifier bindings (Ctrl+J/K); bare bindings
+  // Text inputs deliberately remain eligible for modifier bindings (Alt+↑/↓); bare bindings
   // are rejected by matchesShortcut's typing-context guard. Other controls keep all keys.
   return active.matches(
     'button, a[href], select, [role="button"], [role="link"], [role="radio"], [role="checkbox"], [role="switch"], [role="menuitem"]',
@@ -79,8 +79,9 @@ function scrollTo(scroll: HTMLElement | null, top: number): void {
 }
 
 /**
- * The sole Session Reading keyboard listener. Capture phase intentionally lets this contextual
- * scope shadow global Ctrl+K search before the global bubble listener observes the event.
+ * The sole Session Reading keyboard listener. Capture phase lets this contextual scope own its
+ * keys before the transcript bridge and the global bubble listeners see them, so none of its
+ * bindings may share keys with a global one; the registry's co-active binding test enforces that.
  */
 export function useSessionReadingKeys({
   enabled,

@@ -10,6 +10,7 @@ import {
   type SessionReadingKeyActions,
 } from "./useSessionReadingKeys.js";
 import { focusComposerAtEnd } from "./composer-focus.js";
+import { matchesShortcut } from "./shortcuts.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "./viewport-intent.js";
 
 const domWindow = new Window({ url: "http://localhost/sessions/~reading" });
@@ -170,16 +171,43 @@ test("expanded latest keys are owned once at capture before the transcript bridg
 test("Session Reading dispatches contextual triage and session hopping bindings", async () => {
   const fixture = await renderHarness();
 
-  dispatchKey("j", { ctrlKey: true });
-  const previous = dispatchKey("k", { ctrlKey: true });
+  const next = dispatchKey("ArrowDown", { altKey: true });
+  const previous = dispatchKey("ArrowUp", { altKey: true });
   dispatchKey("a");
   dispatchKey("d");
   dispatchKey("e");
   dispatchKey("r");
 
-  assert.equal(previous.defaultPrevented, true, "contextual Ctrl+K shadows global search");
+  assert.equal(next.defaultPrevented, true);
+  assert.equal(previous.defaultPrevented, true);
   assert.deepEqual(fixture.calls, ["nextSession", "previousSession", "approve", "deny", "archive", "reply"]);
 
+  await act(async () => { fixture.root.unmount(); });
+  fixture.container.remove();
+});
+
+test("Ctrl+K reaches the global Search listener while Session Reading owns the transcript", async () => {
+  const fixture = await renderHarness();
+  // The palette's bubble listener in App: it ignores a key someone already handled.
+  const searches: Array<{ defaultPrevented: boolean }> = [];
+  const onSearch = (event: KeyboardEvent) => {
+    if (matchesShortcut(event, "search")) searches.push({ defaultPrevented: event.defaultPrevented });
+  };
+  domWindow.addEventListener("keydown", onSearch as never);
+
+  dispatchKey("k", { ctrlKey: true });
+  fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Composer"]')!.focus();
+  dispatchKey("k", { ctrlKey: true });
+  const terminal = fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Terminal"]')!;
+  terminal.focus();
+  const inTerminal = dispatchKey("k", { ctrlKey: true });
+
+  assert.deepEqual(searches, [{ defaultPrevented: false }, { defaultPrevented: false }, { defaultPrevented: false }],
+    "Session Reading leaves Ctrl+K unhandled from the transcript, the composer and the terminal");
+  assert.equal(inTerminal.defaultPrevented, false, "the terminal still receives its own Ctrl+K");
+  assert.deepEqual(fixture.calls, []);
+
+  domWindow.removeEventListener("keydown", onSearch as never);
   await act(async () => { fixture.root.unmount(); });
   fixture.container.remove();
 });
@@ -256,13 +284,13 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
   const composer = fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Composer"]')!;
   composer.focus();
   dispatchKey("a");
-  dispatchKey("j", { ctrlKey: true });
+  dispatchKey("ArrowDown", { altKey: true });
   assert.deepEqual(fixture.calls, ["nextSession"], "typing blocks bare keys but preserves modifier navigation");
 
   fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=main] button")!.focus();
   for (const key of ["a", "j", " "]) dispatchKey(key);
   fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Terminal"]')!.focus();
-  dispatchKey("j", { ctrlKey: true });
+  dispatchKey("ArrowDown", { altKey: true });
   fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=rail] button")!.focus();
   dispatchKey("e");
 

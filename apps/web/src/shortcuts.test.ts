@@ -110,8 +110,10 @@ test("shortcut labels follow the current platform without changing definitions",
   assert.equal(shortcutDisplay("session-reading-start", false), "G G");
   assert.equal(shortcutDisplay("session-reading-latest", false), "Shift+G");
   assert.equal(shortcutDisplay("session-reading-latest-end", false), "End");
-  assert.equal(shortcutDisplay("session-reading-next-session", true), "Ctrl+J");
-  assert.equal(shortcutDisplay("session-reading-previous-session", false), "Ctrl+K");
+  assert.equal(shortcutDisplay("session-reading-next-session", false), "Alt+↓");
+  assert.equal(shortcutDisplay("session-reading-previous-session", false), "Alt+↑");
+  assert.equal(shortcutDisplay("session-reading-next-session", true), "⌥↓");
+  assert.equal(shortcutDisplay("session-reading-previous-session", true), "⌥↑");
   assert.equal(shortcutDisplay("session-reading-reply", false), "R");
   assert.equal(shortcutBindingDisplay({ key: "g", bare: true, sequence: ["g", "g"] }, false), "G G");
 });
@@ -208,9 +210,51 @@ test("Session Reading shortcuts are registered in their contextual reference gro
   assert.deepEqual(shortcut("session-reading-start").binding.sequence, ["g", "g"]);
   assert.equal(shortcut("session-reading-latest").label, "Follow Live Output");
   assert.equal(shortcut("session-reading-latest-end").label, "Follow Live Output (End)");
-  assert.equal(shortcut("session-reading-next-session").binding.ctrl, true);
-  assert.equal(shortcut("session-reading-previous-session").binding.ctrl, true,
-    "Session Reading intentionally shadows global Ctrl+K search with a literal Control binding");
+  assert.equal(matchesShortcut(key("ArrowDown", { altKey: true }), "session-reading-next-session"), true);
+  assert.equal(matchesShortcut(key("ArrowUp", { altKey: true }), "session-reading-previous-session"), true);
+  assert.equal(matchesShortcut(key("ArrowUp"), "session-reading-previous-session"), false);
+  assert.equal(matchesShortcut(key("k", { ctrlKey: true }), "session-reading-previous-session"), false,
+    "Ctrl+K belongs to Search on every platform");
+});
+
+/** Scopes that are live together besides Global, which is live with every scope. The Session
+ * panel keys work while Session Reading owns the transcript, and Sessions sits over its list. */
+const CO_ACTIVE_SCOPES: ReadonlyArray<readonly [ShortcutDefinition["scope"], ShortcutDefinition["scope"]]> = [
+  ["Session", "Session Reading"],
+  ["Sessions", "Sessions List"],
+];
+
+function coActive(a: ShortcutDefinition["scope"], b: ShortcutDefinition["scope"]): boolean {
+  return a === b || a === "Global" || b === "Global" ||
+    CO_ACTIVE_SCOPES.some(([x, y]) => (x === a && y === b) || (x === b && y === a));
+}
+
+function coActiveCollisions(definitions: readonly ShortcutDefinition[], mac: boolean): string[] {
+  const collisions: string[] = [];
+  for (const [index, first] of definitions.entries()) {
+    for (const second of definitions.slice(index + 1)) {
+      if (!coActive(first.scope, second.scope)) continue;
+      const keys = shortcutBindingDisplay(first.binding, mac);
+      if (keys === shortcutBindingDisplay(second.binding, mac)) collisions.push(`${first.id} / ${second.id}: ${keys}`);
+    }
+  }
+  return collisions;
+}
+
+test("no two bindings that can be active together show the same keys on either platform", () => {
+  assert.deepEqual(coActiveCollisions(SHORTCUTS, false), [], "Windows and Linux");
+  assert.deepEqual(coActiveCollisions(SHORTCUTS, true), [], "macOS");
+});
+
+test("the collision check reports a contextual binding that shadows Search on one platform only", () => {
+  // Previous Session's binding before #2080: literal Control, so Ctrl+K beside Search off macOS.
+  const before = SHORTCUTS.map((definition): ShortcutDefinition => definition.id === "session-reading-previous-session"
+    ? { ...definition, binding: { key: "k", ctrl: true } }
+    : definition);
+  assert.deepEqual(coActiveCollisions(before, false), ["search / session-reading-previous-session: Ctrl+K"]);
+  assert.deepEqual(coActiveCollisions(before, true), []);
+  // Scopes that are never live together may reuse keys: the Run dialog and Pod detail both submit.
+  assert.equal(shortcutDisplay("submit-run", false), shortcutDisplay("relay-pod-note", false));
 });
 
 test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sidebar binding", () => {
@@ -345,7 +389,7 @@ test("shared Session actions are listed once, in the first of the two groups, on
     assert.ok(labelsOf(inSession, "Session Reading").includes(label), label);
     assert.ok(!labelsOf(inSession, "Sessions List").includes(label), label);
   }
-  // Same label, different keys (J in the list, Ctrl+J while reading): both stay under their headings.
+  // Same label, different keys (J in the list, Alt+↓ while reading): both stay under their headings.
   assert.ok(labelsOf(onSessions, "Sessions List").includes("Next Session"));
   assert.ok(labelsOf(onSessions, "Session Reading").includes("Next Session"));
   // The same key under different labels is a different action and is never merged.
@@ -360,7 +404,9 @@ test("the reference filter keeps rows whose label or keys match and drops empty 
   ]);
   assert.deepEqual(filter("  TERMINAL ").flatMap((group) => group.rows.map((row) => row.label)), ["Toggle Terminal", "Exit Terminal Focus"]);
   assert.deepEqual(filter("ctrl k").flatMap((group) => group.rows.map((row) => `${row.label} ${row.keys}`)),
-    ["Search Ctrl+K", "Previous Session Ctrl+K"]);
+    ["Search Ctrl+K"]);
+  assert.deepEqual(filter("alt").flatMap((group) => group.rows.map((row) => `${row.label} ${row.keys}`)),
+    ["Next Session Alt+↓", "Previous Session Alt+↑"]);
   assert.deepEqual(filter("zzz"), []);
 });
 
