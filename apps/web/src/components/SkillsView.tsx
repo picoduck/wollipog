@@ -942,7 +942,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
               )}
               {(gitSource || latest?.machineSource) && (
                 <SkillDetailSection title="Source">
-                  {gitSource && <div className="skills-git-source">
+                  {gitSource && <div className="skills-section skills-git-source">
                     <h4>Git Source</h4>
                     <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
                     <p className="skills-hint">Commit {gitSource.commit}</p>
@@ -956,7 +956,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                       {heldUpdate ? "Review Held Update" : "Check for Updates"}
                     </button>
                   </div>}
-                  {latest?.machineSource && <div className="skills-machine-import">
+                  {latest?.machineSource && <div className="skills-section skills-machine-import">
                     <h4>Machine Snapshot Source</h4>
                     <p className="skills-hint">{machineLabels.get(latest.machineSource.runnerId) ?? latest.machineSource.runnerId} · {latest.machineSource.context?.kind === "wsl" ? `WSL: ${latest.machineSource.context.distro} · ` : ""}{latest.machineSource.sourceDirectory}/{latest.machineSource.name}</p>
                     <p className="skills-hint">Digest: {latest.machineSource.digest}</p>

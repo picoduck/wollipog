@@ -14107,12 +14107,7 @@ body.shell-dock-dragging * {
    stretches (§3.1). */
 .skills-section { display: grid; gap: 10px; }
 .skills-section h4, .skills-section h5 { margin: 0; }
-.skill-detail :is(.skills-section, .skills-git-source, .skills-machine-import) > .btn { justify-self: start; }
-.skills-git-source,
-.skills-machine-import {
-  display: grid;
-  gap: var(--space-2);
-}
+.skill-detail .skills-section > .btn { justify-self: start; }
 /* Dialogs keep the card until each is rebuilt; #1984 (Version History, Machine Version), #1983
    (Import from Git), #1963 (Import from Machine) and #1985 (Manage Groups) delete this rule. */
 .modal .skills-section {

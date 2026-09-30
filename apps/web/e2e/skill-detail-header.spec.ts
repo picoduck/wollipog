@@ -141,6 +141,9 @@ test.describe("at 1440×900", () => {
       };
     });
     expect(rhythm).toEqual({ toContent: [12, 12, 12, 12], between: [32, 32, 32] });
+    // A block's own heading inside a section (Git Source) keeps no browser margin either.
+    const gitHeading = page.locator(".skills-git-source h4");
+    expect(await gitHeading.evaluate((element) => getComputedStyle(element).marginBottom)).toBe("0px");
   });
 });
 
