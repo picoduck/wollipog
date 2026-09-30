@@ -6,11 +6,10 @@ import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionStatus } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
-import { createCloseGuardLinks, type CloseGuardLinks } from "../desktop-close-guard.js";
+import { createCloseGuardLinks, type CloseGuardLinks, type CloseGuardSession } from "../desktop-close-guard.js";
 import {
   heldUpdateMessage,
   useDesktopUpdateSetting,
@@ -66,9 +65,9 @@ async function until(what: string, ready: () => unknown) {
 
 const VERSION = "0.29.0";
 const RELEASE_URL = `https://github.com/picoduck/wollipog/releases/tag/v${VERSION}`;
-const SESSIONS: Record<string, { title: string; status: SessionStatus }> = {
-  s_rounding: { title: "Fix the invoice rounding bug", status: "running" },
-  s_migration: { title: "Review the migration plan", status: "input_required" },
+const SESSIONS: Record<string, CloseGuardSession> = {
+  s_rounding: { title: "Fix the invoice rounding bug", status: "running", pendingApproval: null },
+  s_migration: { title: "Review the migration plan", status: "input_required", pendingApproval: null },
 };
 const HELD: DesktopUpdateOutcome = { outcome: "heldForWork", sessions: 2, sessionIds: ["s_rounding", "s_migration"] };
 

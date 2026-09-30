@@ -211,7 +211,7 @@ function CloseGuardSessionSource() {
     return closeGuardLinks.provide({
       session: (id) => {
         const session = latest.current.get(id);
-        return session ? { title: session.title, status: session.status } : null;
+        return session ? { title: session.title, status: session.status, pendingApproval: session.pendingApproval } : null;
       },
     });
   }, [scope]);

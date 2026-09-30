@@ -74,6 +74,16 @@ test.describe("choices", () => {
     await expect(dialog.locator(".confirmation-rows-more")).toHaveText("and 1 more");
   });
 
+  test("an idle session listed for its pending approval is badged Approval Required, not Awaiting Prompt (#2057)", async ({ page }) => {
+    await page.goto("/desktop-close-guard-e2e.html?state=approval");
+    const rows = page.getByRole("dialog", { name: "Quit Wollipog" }).locator(".confirmation-rows > li");
+    await expect(rows.locator(".row-title")).toHaveText([
+      "Tidy the release notes",
+      "Fix the half-cent rounding bug in invoice totals before the quarterly close",
+    ]);
+    await expect(rows.locator(".status.inline")).toHaveText(["Approval Required", "Running"]);
+  });
+
   test("a count the shell could not get says so, and names no one", async ({ page }) => {
     await page.goto("/desktop-close-guard-e2e.html?state=unknown");
     const dialog = page.getByRole("dialog", { name: "Quit Wollipog" });

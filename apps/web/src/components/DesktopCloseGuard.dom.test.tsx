@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionStatus } from "@wollipog/protocol";
+import type { PendingApproval } from "@wollipog/protocol";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import {
   CLOSE_WOULD_STOP_WORK,
@@ -14,7 +14,7 @@ import {
   heldClose,
   type CloseGuardShell,
 } from "./DesktopCloseGuard.js";
-import { createCloseGuardLinks, type CloseGuardLinks } from "../desktop-close-guard.js";
+import { createCloseGuardLinks, type CloseGuardLinks, type CloseGuardSession } from "../desktop-close-guard.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 /**
@@ -45,9 +45,21 @@ for (const [name, value] of Object.entries({
 const document = domWindow.document as unknown as Document;
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
 
-const SESSIONS: Record<string, { title: string; status: SessionStatus }> = {
-  s_rounding: { title: "Fix the invoice rounding bug", status: "running" },
-  s_migration: { title: "Review the migration plan", status: "input_required" },
+const approval = (requestId: string, extra: Partial<PendingApproval> = {}): PendingApproval =>
+  ({ requestId, title: "Run pnpm test", options: [{ optionId: "allow", name: "Allow" }], ...extra });
+
+const SESSIONS: Record<string, CloseGuardSession> = {
+  s_rounding: { title: "Fix the invoice rounding bug", status: "running", pendingApproval: null },
+  s_migration: { title: "Review the migration plan", status: "input_required", pendingApproval: null },
+  // The shell counts these for their pending request, not their status (#2057).
+  s_idle_approval: { title: "Tidy the release notes", status: "idle", pendingApproval: approval("r_idle") },
+  s_completed_approval: { title: "Rename the billing module", status: "completed", pendingApproval: approval("r_completed") },
+  s_input_approval: { title: "Bump the lockfile", status: "input_required", pendingApproval: approval("r_input") },
+  s_idle_question: {
+    title: "Pick a migration strategy",
+    status: "idle",
+    pendingApproval: approval("r_question", { kind: "question", options: [] }),
+  },
 };
 
 interface Harness {
@@ -166,6 +178,23 @@ test("the working sessions the local instance knows are named with their status,
   await h.emit({ count: 4, sessionIds: ["s_rounding", "s_migration"] });
   assert.equal(rowTitles().length, 2);
   assert.equal(more(), "and 2 more");
+});
+
+test("a session listed for its pending approval says so, whatever its lifecycle status (#2057)", async () => {
+  const h = harness();
+  await mount(h);
+
+  await h.emit({ count: 2, sessionIds: ["s_idle_approval", "s_rounding"] });
+  assert.deepEqual(rowTitles(), ["Tidy the release notes", "Fix the invoice rounding bug"]);
+  // Not "Awaiting Prompt", which would contradict "still working" and hide why the row is there.
+  assert.deepEqual(rowStatuses(), ["Approval Required", "Running"]);
+  const badge = document.querySelector(".confirmation-rows .status.inline");
+  assert.match(badge?.className ?? "", /\bt-warning\b/, "the shared attention badge, in its own tone");
+  await act(async () => { button("Keep Open")!.click(); await tick(); });
+
+  await h.emit({ count: 4, sessionIds: ["s_completed_approval", "s_input_approval", "s_migration", "s_idle_question"] });
+  assert.deepEqual(rowStatuses(), ["Approval Required", "Approval Required", "Awaiting Input", "Answer Required"],
+    "attention outranks every lifecycle status, and names what kind of request it is");
 });
 
 test("with the local instance not open, the count sentence stands alone", async () => {

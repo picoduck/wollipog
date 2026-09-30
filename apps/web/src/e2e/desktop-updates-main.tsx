@@ -1,10 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { SessionStatus } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { DesktopUpdateNotifier } from "../components/DesktopUpdateNotifier.js";
 import { DesktopExternalLinkRouter, EXTERNAL_URL_POLICY_ERROR_PREFIX, type ExternalLinkDesktop } from "../components/DesktopExternalLinkRouter.js";
-import { createCloseGuardLinks } from "../desktop-close-guard.js";
+import { createCloseGuardLinks, type CloseGuardSession } from "../desktop-close-guard.js";
 import type { DesktopUpdateOutcome, DesktopUpdateRuntime, DesktopUpdateStatus } from "../desktop-updates.js";
 import "../styles.css";
 
@@ -27,9 +26,9 @@ const RELEASE_URL = `https://github.com/picoduck/wollipog/releases/tag/v${VERSIO
 const FAILED_LINK = "https://github.com/picoduck/wollipog/pull/2040/files#diff-4f8c2d1e9b7a6035c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4";
 const BLOCKED_LINK = "file:///Users/avery/Projects/wollipog/docs/design-system.md";
 
-const SESSIONS: Record<string, { title: string; status: SessionStatus }> = {
-  s_rounding: { title: "Fix the half-cent rounding bug in invoice totals before the quarterly close", status: "running" },
-  s_migration: { title: "Review the migration plan", status: "input_required" },
+const SESSIONS: Record<string, CloseGuardSession> = {
+  s_rounding: { title: "Fix the half-cent rounding bug in invoice totals before the quarterly close", status: "running", pendingApproval: null },
+  s_migration: { title: "Review the migration plan", status: "input_required", pendingApproval: null },
 };
 
 /** A refused link several kilobytes long: its detail scrolls inside the toast. */

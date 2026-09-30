@@ -107,7 +107,7 @@ test("the guard's links merge what each part of the app provides, for as long as
   assert.deepEqual(links.current(), {});
   const showSessions = () => undefined;
   const stopShowing = links.provide({ showSessions });
-  const first = () => ({ title: "First", status: "running" as const });
+  const first = () => ({ title: "First", status: "running" as const, pendingApproval: null });
   const stopFirst = links.provide({ session: first });
   assert.equal(links.current().showSessions, showSessions);
   assert.equal(links.current().session, first);

@@ -1,4 +1,4 @@
-import type { SessionStatus } from "@wollipog/protocol";
+import type { PendingApproval, SessionStatus } from "@wollipog/protocol";
 
 /**
  * The dashboard's side of §23.1, which is now only the message.
@@ -42,10 +42,13 @@ export const WORK_IN_FLIGHT: Readonly<Record<SessionStatus, boolean>> = {
 export const WORK_IN_FLIGHT_STATUSES: readonly SessionStatus[] =
   (Object.keys(WORK_IN_FLIGHT) as SessionStatus[]).filter((status) => WORK_IN_FLIGHT[status]);
 
-/** A session the close confirmation can name: its title and status from the loaded local instance. */
+/** A session the close confirmation can name, as the loaded local instance holds it. */
 export interface CloseGuardSession {
   title: string;
   status: SessionStatus;
+  /** The shell counts a session with a pending approval as working whatever its status, so the row
+   * has to be able to say that is why it is listed (#2057). */
+  pendingApproval: PendingApproval | null;
 }
 
 /**

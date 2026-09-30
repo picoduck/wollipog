@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { statusMeta } from "../status-meta.js";
-import { closeGuardLinks, type CloseGuardLinks } from "../desktop-close-guard.js";
+import { sessionAttentionStatus } from "@wollipog/protocol";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
+import { closeGuardLinks, type CloseGuardLinks, type CloseGuardSession } from "../desktop-close-guard.js";
 import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
 
 /** The event the shell emits when it holds a close back. */
@@ -64,6 +65,19 @@ export function closeWarning(count: number): string {
 }
 
 /**
+ * A row's badge: what the session is waiting on when it has a pending request, otherwise its
+ * lifecycle. The shell lists a session with a pending approval whatever its status, so an idle one
+ * badged "Awaiting Prompt" would contradict "still working" and hide why it is listed (#2057).
+ * Attention outranks lifecycle here as on every other surface, by its kind's shared label: a row has
+ * no room for the owner the full attention label names.
+ */
+export function closeRowStatus(session: CloseGuardSession): StatusMeta {
+  if (!session.pendingApproval) return statusMeta("session", session.status);
+  const attention = sessionAttentionStatus({ status: session.status, pendingApproval: session.pendingApproval });
+  return statusMeta("attention", attention?.kind ?? "approval_required");
+}
+
+/**
  * The working sessions the local instance can name, and how many it cannot. With none named, the
  * count sentence stands alone rather than above an "and 2 more" that names nothing.
  */
@@ -73,7 +87,7 @@ export function closeDetailRows(held: HeldClose, links: CloseGuardLinks): { rows
   const rows: ConfirmationDetailRow[] = [];
   for (const id of new Set(held.sessionIds)) {
     const known = session(id);
-    if (known) rows.push({ label: known.title || "Untitled Session", status: statusMeta("session", known.status) });
+    if (known) rows.push({ label: known.title || "Untitled Session", status: closeRowStatus(known) });
   }
   if (rows.length === 0) return { rows: [], overflow: 0 };
   return { rows, overflow: Math.max(0, held.count - rows.length) };
