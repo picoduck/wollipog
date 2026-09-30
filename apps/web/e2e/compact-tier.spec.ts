@@ -140,11 +140,11 @@ for (const width of [761, 834, 940, 1099]) {
 }
 
 /**
- * Page content the tier's audit found overflowing (#2106): the Archived Sessions table, the Usage
- * API card's controls and the Pod Orchestration Controls fields.
+ * The Archived Sessions table, measured with the longest State badge in its first row: nothing
+ * scrolls sideways or is cut off, the Session column keeps `minSession` for a title, and Project,
+ * Location and Agent show either as columns or, `folded`, in the meta line under the title.
  */
-async function checkPageContent(page: Page, where: string) {
-  await open(page, "path=%2Farchived", "Archived Sessions");
+async function checkArchivedTable(page: Page, where: string, { folded, minSession }: { folded: boolean; minSession: number }) {
   await expect(page.locator(".archive-table tbody tr").first()).toBeVisible();
   // The fixture has no stop in progress, so give the first row the longest State badge a session
   // can show beside Archived and its lifecycle (§11.1: a badge keeps its own width).
@@ -185,14 +185,28 @@ async function checkPageContent(page: Page, where: string) {
     };
   });
   expect(archive.scroll, `${where}: the Archived Sessions table scrolls sideways`).toBeLessThanOrEqual(0);
-  expect(archive.sessionColumn, `${where}: the Session column keeps room for a title`).toBeGreaterThanOrEqual(145);
+  expect(archive.sessionColumn, `${where}: the Session column keeps room for a title`).toBeGreaterThanOrEqual(minSession);
   expect(archive.rows.length).toBeGreaterThan(0);
   for (const row of archive.rows) {
-    expect(row.columnsShown, `${where}: Project, Location and Agent fold into the Session cell`).toEqual([false, false, false]);
-    for (const value of row.values) expect(row.meta, `${where}: the Session cell shows ${value}`).toContain(value);
-    expect(row.metaInside, `${where}: the meta line stays inside its cell`).toBe(true);
+    if (folded) {
+      expect(row.columnsShown, `${where}: Project, Location and Agent fold into the Session cell`).toEqual([false, false, false]);
+      for (const value of row.values) expect(row.meta, `${where}: the Session cell shows ${value}`).toContain(value);
+      expect(row.metaInside, `${where}: the meta line stays inside its cell`).toBe(true);
+    } else {
+      expect(row.columnsShown, `${where}: Project, Location and Agent keep their columns`).toEqual([true, true, true]);
+      expect(row.meta, `${where}: no meta line repeats the columns`).toBeNull();
+    }
     expect(row.clipped, `${where}: row content cut off`).toEqual([]);
   }
+}
+
+/**
+ * Page content the tier's audit found overflowing (#2106): the Archived Sessions table, the Usage
+ * API card's controls and the Pod Orchestration Controls fields.
+ */
+async function checkPageContent(page: Page, where: string) {
+  await open(page, "path=%2Farchived", "Archived Sessions");
+  await checkArchivedTable(page, where, { folded: true, minSession: 145 });
 
   await open(page, "path=%2Fusage", "Usage and Cost");
   const usage = await page.evaluate(() => {
@@ -275,19 +289,53 @@ test.describe("page content on an 834×1112 coarse-pointer tablet", () => {
   });
 });
 
-test("outside the tier the Archived Sessions table keeps its own Project, Location and Agent columns", async ({ page }) => {
-  for (const width of [760, 1100]) {
-    await page.setViewportSize({ width, height: 860 });
-    await open(page, "path=%2Farchived", "Archived Sessions");
-    const row = page.locator(".archive-table tbody tr").first();
-    await expect(row.locator(".archive-session-meta"), `at ${width}px`).toBeHidden();
-    // The phone rows show the project as line-2 meta and leave Location and Agent to the detail (§14).
-    await expect(row.locator(".col-project"), `at ${width}px`).toBeVisible();
-    if (width === 1100) {
-      await expect(row.locator(".col-location")).toBeVisible();
-      await expect(row.locator(".col-agent")).toBeVisible();
-    }
+async function expandRail(page: Page) {
+  await page.getByRole("navigation", { name: "Primary Navigation" })
+    .getByRole("button", { name: "Expand Navigation", exact: true }).click();
+  await expect(page.locator(".app-rail.labelled")).toBeVisible();
+}
+
+test("a phone keeps the Archived Sessions table's own rows, with the project on line 2", async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 860 });
+  await open(page, "path=%2Farchived", "Archived Sessions");
+  const row = page.locator(".archive-table tbody tr").first();
+  await expect(row.locator(".archive-session-meta")).toBeHidden();
+  // The phone rows show the project as line-2 meta and leave Location and Agent to the detail (§14).
+  await expect(row.locator(".col-project")).toBeVisible();
+});
+
+/**
+ * Above the tier the table folds the same way until the main column fits its full layout with 200px
+ * for the Session column (§14, #2114): a 1220px column, which the labelled rail's extra width pushes
+ * from a 1284px window to 1428px.
+ */
+test.describe("the Archived Sessions table from 1100px", () => {
+  const cases = [
+    { width: 1100, labelled: false, folded: true },
+    { width: 1280, labelled: false, folded: true },
+    { width: 1439, labelled: false, folded: false },
+    { width: 1100, labelled: true, folded: true },
+    { width: 1280, labelled: true, folded: true },
+    { width: 1439, labelled: true, folded: false },
+  ];
+  for (const { width, labelled, folded } of cases) {
+    test(`at ${width}px with the labelled rail ${labelled ? "on" : "off"}, the Session column keeps 200px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 860 });
+      await open(page, "path=%2Farchived", "Archived Sessions");
+      if (labelled) await expandRail(page);
+      await checkArchivedTable(page, `at ${width}px, labelled rail ${labelled ? "on" : "off"}`, { folded, minSession: 200 });
+    });
   }
+
+  test("the full layout returns exactly where it fits", async ({ page }) => {
+    await open(page, "path=%2Farchived", "Archived Sessions");
+    for (const [width, folded] of [[1283, true], [1284, false]] as const) {
+      await page.setViewportSize({ width, height: 860 });
+      await checkArchivedTable(page, `at ${width}px`, { folded, minSession: 200 });
+      await page.reload();
+      await expect(page.getByRole("heading", { level: 1, name: "Archived Sessions", exact: true })).toBeVisible();
+    }
+  });
 });
 
 test.describe("either side of the tier", () => {
@@ -323,11 +371,7 @@ test.describe("the Sessions footer in the compact tier", () => {
     test(`no shortcut is cut off at ${width}px with the labelled rail ${labelled ? "on" : "off"}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 860 });
       await open(page, "path=%2Finbox", "Sessions");
-      if (labelled) {
-        await page.getByRole("navigation", { name: "Primary Navigation" })
-          .getByRole("button", { name: "Expand Navigation", exact: true }).click();
-        await expect(page.locator(".app-rail.labelled")).toBeVisible();
-      }
+      if (labelled) await expandRail(page);
       const shortcuts = page.locator(".inbox-shortcut-rail button");
       await expect(shortcuts.first()).toBeVisible();
       expect(await shortcuts.count()).toBeGreaterThanOrEqual(6);

@@ -434,8 +434,10 @@ One definition of each tier, shared by components and the stylesheet (#1969):
 - **The main column is the `app` container.** From 761px up, `.main` is `container: app /
   inline-size`. A rule that depends on the room the column has after the rail and any docked panel
   queries it with `@container app (max-width: 1099px)`, not the viewport; the Projects list pane is
-  the first such rule. A phone has no `app` container. There the column is the viewport's width, and
-  the phone's full-screen right panel and editor note are placed in viewport coordinates.
+  the first such rule. A rule whose edge is its own content's fit rather than the tier uses the same
+  container with that edge: the Archived Sessions fold (§14) ends at a 1220px column. A phone has
+  no `app` container. There the column is the viewport's width, and the phone's full-screen right
+  panel and editor note are placed in viewport coordinates.
 - **Nothing fixed inside the column may assume the viewport.** At the build floor (Chrome 111–128,
   and Safari before the CSSWG dropped layout containment from `container-type`), a size container
   is also the containing block of every `position: fixed` descendant. Each fixed surface in the
@@ -1781,6 +1783,12 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   rather than truncating, so every value stays on screen. Archived Sessions does this for Project,
   Location and Agent, and narrows State to 188px, room for its longest badge, so its badges stack
   (§15.2).
+- **The fold ends where the full layout fits, not at the tier's edge.** A folding table answers to
+  the main column (`@container app`, §2.10), not the viewport, and keeps its fold until the column
+  holds its declared widths plus 200px for the name, its wrapper's borders and the page gutters.
+  Archived Sessions' six declared columns need 970px, so it folds below a 1220px column: up to a
+  1283px window with the icon rail and a 1427px window with the labelled rail (#2114).
+  `tokens.test.ts` derives that edge from the declared widths.
 
 ---
 
@@ -1820,11 +1828,12 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 - Master-detail list pane 280px. Sessions is always stacked here (§6.3); its Preview Right option
   applies at 1100px and wider.
 - Page content follows the tier too (#2106). The Archived Sessions table folds Project, Location and
-  Agent into its Session cell (§14). The Usage API card's description takes the line and its three
-  segmented controls follow as one group: beside the description while it keeps 220px (about 30
-  characters), otherwise together on their own line below it. The Pod Orchestration Controls keep
-  their five fields on one row; each column is at least as wide as its label on one line, and
-  Arbitration as wide as its longest mode.
+  Agent into its Session cell (§14), and keeps that fold above the tier until the main column fits
+  the full layout. The Usage API card's description takes the line and its three segmented
+  controls follow as one group: beside the description while it keeps 220px (about 30 characters),
+  otherwise together on their own line below it. The Pod Orchestration Controls keep their five
+  fields on one row; each column is at least as wide as its label on one line, and Arbitration as
+  wide as its longest mode.
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
   with the label in its tooltip plus `+N` for extra attention kinds; the project crumb is dropped;
   text buttons become icon buttons with tooltips. `DetailBar` (Run, Pod, Project) does this now. Its

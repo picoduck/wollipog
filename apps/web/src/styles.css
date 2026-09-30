@@ -15336,12 +15336,16 @@ body.shell-dock-dragging * {
   text-overflow: ellipsis;
 }
 .archive-session-meta { display: none; }
-/* The compact tier (§15.2): the seven columns need 970px, more than the tier has, so Project,
-   Location and Agent fold into a meta line under the session's title, and the State badges stack.
-   The line wraps between values rather than truncating, so every value stays on screen. State
-   keeps room for its longest badge ("Stop Waiting for Runner", about 157px), which leaves the
-   Session column about 150px at the 761px floor. */
-@media (min-width: 761px) and (max-width: 1099px) {
+/* Folded (§14): the six declared columns need 970px, so until the table also has 200px for the
+   Session column, Project, Location and Agent fold into a meta line under the session's title, and
+   the State badges stack. That is the whole compact tier (§15.2) and, with the rail and any docked
+   panel taken out, desktop widths up to where the full layout fits: a main column of 1220px is the
+   970px, the 200px, the table's 2px border and the page's 2 × 24px gutter. A phone has no `app`
+   container, so its rows (§14) are untouched. The line wraps between values rather than
+   truncating, so every value stays on screen. State keeps room for its longest badge ("Stop
+   Waiting for Runner", about 157px), which leaves the Session column about 150px at the 761px
+   floor. */
+@container app (max-width: 1219px) {
   .archive-table :is(.col-project, .col-location, .col-agent) { display: none; }
   .archive-table .col-state { width: 188px; }
   .archive-table .col-created { width: 100px; }
