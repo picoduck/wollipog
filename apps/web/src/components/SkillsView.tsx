@@ -274,8 +274,14 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
 
   const refreshList = useCallback(async () => {
     const generation = (listGeneration.current += 1);
-    const [skillsPayload, groupsPayload] = await Promise.all([api.listSkills(), api.listSkillGroups()]);
-    if (generation !== listGeneration.current) return;
+    // A failure is fenced like a success: an older request that rejects after a newer one loaded
+    // must not replace the library with its error.
+    const [skillsPayload, groupsPayload] = await Promise.all([api.listSkills(), api.listSkillGroups()])
+      .catch((cause: unknown) => {
+        if (generation === listGeneration.current) throw cause;
+        return [null, null] as const;
+      });
+    if (generation !== listGeneration.current || !skillsPayload || !groupsPayload) return;
     setSkills(skillsFromPayload(skillsPayload));
     setGroups(skillGroupsFromPayload(groupsPayload));
   }, [api]);
@@ -284,11 +290,16 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     // A mutation that finishes after the user selected another skill, or none, refreshes nothing.
     if (selectedRef.current !== skillId) return;
     const generation = (detailGeneration.current += 1);
+    const current = () => generation === detailGeneration.current && selectedRef.current === skillId;
     const [detailPayload, assignmentsPayload] = await Promise.all([
       api.getSkill(skillId),
       api.listSkillAssignments(skillId),
-    ]);
-    if (generation !== detailGeneration.current || selectedRef.current !== skillId) return;
+    ]).catch((cause: unknown) => {
+      // Only the newest request for the current selection reports its failure.
+      if (current()) throw cause;
+      return [null, null] as const;
+    });
+    if (!current() || !detailPayload || !assignmentsPayload) return;
     setDetail(skillFromPayload(detailPayload));
     setAssignments(skillAssignmentsFromPayload(assignmentsPayload));
   }, [api]);

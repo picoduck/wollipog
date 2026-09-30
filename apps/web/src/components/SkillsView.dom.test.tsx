@@ -1009,7 +1009,7 @@ function stubPhone(): () => void {
 }
 
 /** Mounts the view on a route through a store whose navigation records every push. */
-async function mountRouted(client: ApiClient, key: string, view: View = { name: "skills" }) {
+async function mountRouted(client: ApiClient, key: string, view: View = { name: "skills" }, strict = false) {
   const pushed: View[] = [];
   const routed: ViewNavigation = { current: () => view, push: (next) => { pushed.push(next); }, listen: () => () => {} };
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -1020,7 +1020,7 @@ async function mountRouted(client: ApiClient, key: string, view: View = { name: 
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={{ instanceId: key, runtimeKey: `${key}:1`, createSocket: () => socket, close() {} }} navigation={routed}>
-          <SkillsWhenReady />
+          {strict ? <React.StrictMode><SkillsWhenReady /></React.StrictMode> : <SkillsWhenReady />}
         </StoreProvider>
       </ApiProvider>,
     );
@@ -1233,6 +1233,63 @@ test("a failed reload of a skill seen before shows its error, never its cached c
     assert.equal(detail.querySelector(".notice-title")?.textContent, "Couldn't Load This Skill");
     assertNoDomNode(detail.querySelector(".skills-detail-head"), "the cached skill is not shown under its error");
     assertNoDomNode(detail.querySelector(".detail-skeleton"), "nor a skeleton");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a superseded detail request that fails later never replaces the skill a newer request loaded", async () => {
+  const other = { id: "skill-2", name: "release-notes", latestVersion: { id: "v2", digest: "d2" } };
+  let rejectFirst!: (cause: Error) => void;
+  let firstLoad = true;
+  const view = await mountRouted(oneSkillClient({
+    listSkills: async () => ({ skills: [oneSkill, other] }),
+    getSkill: async (id: string) => {
+      if (id === other.id) return new Promise(() => {});
+      if (firstLoad) {
+        firstLoad = false;
+        return new Promise((_, reject) => { rejectFirst = reject; });
+      }
+      return { skill: oneSkill, latestVersion: { id: "v1", digest: "d1", files: [] } };
+    },
+  }), "skills-stale-detail-failure", { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    const row = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".master-detail-list-body .row")]
+      .find((candidate) => candidate.querySelector(".row-title")?.textContent === name)!;
+    await act(async () => row("release-notes").click());
+    await act(settle);
+    await act(async () => row("code-review").click());
+    await act(settle);
+    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review", "the newer load succeeded");
+    await act(async () => { rejectFirst(new Error("HTTP 500 from the first request")); });
+    await act(settle);
+    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review", "the stale failure is ignored");
+    assertNoDomNode(container.querySelector(".master-detail-detail .notice"), "no error for a superseded request");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an older library load that fails after a newer one succeeded leaves the library on screen", async () => {
+  let rejectFirst!: (cause: Error) => void;
+  let calls = 0;
+  const view = await mountRouted(oneSkillClient({
+    // StrictMode mounts the view's effects twice: the first load is superseded by the second.
+    listSkills: async () => {
+      calls += 1;
+      if (calls === 1) return new Promise((_, reject) => { rejectFirst = reject; });
+      return { skills: [oneSkill] };
+    },
+  }), "skills-stale-list-failure", { name: "skills" }, true);
+  try {
+    const { container } = view;
+    assert.equal(calls, 2, "StrictMode started two loads");
+    assert.match(container.querySelector(".master-detail-list-body")?.textContent ?? "", /code-review/);
+    await act(async () => { rejectFirst(new Error("HTTP 503 from the first load")); });
+    await act(settle);
+    assertNoDomNode(container.querySelector(".master-detail-state"), "the stale failure does not replace the library");
+    assert.match(container.querySelector(".master-detail-list-body")?.textContent ?? "", /code-review/);
   } finally {
     await view.unmount();
   }
