@@ -7,7 +7,7 @@ import { ControlPlaneDb } from "./db.js";
 
 // An old application already removed the cache,
 // leaving only its attested CP sequence. No durable report identity ever existed.
-function legacyFixture(file = ":memory:") {
+function campaignFixture(file = ":memory:") {
   const db = ControlPlaneDb.open(file);
   db.registerRunner({ runnerId: "runner", hostname: "fixture", os: "linux", version: "fixture",
     agents: [], workspaces: [{ id: "workspace", name: "Fixture", path: "/fixture" }] }, 500);
@@ -17,6 +17,11 @@ function legacyFixture(file = ":memory:") {
       ...(id === "child" ? { parentSessionId: "campaign" } : {}) });
   }
   db.updateSessionStatus("child", "idle", 999);
+  return db;
+}
+
+function legacyFixture(file = ":memory:") {
+  const db = campaignFixture(file);
   db.reconcileRunnerHistory("child", 1, 3);
   db.reconcileRunnerHistory("child", 2, 3);
   db.raw().prepare(`INSERT INTO orchestrator_campaign_child_reports
@@ -25,6 +30,47 @@ function legacyFixture(file = ":memory:") {
   assert.deepEqual(db.listEvents("child"), []);
   assert.deepEqual(db.campaignReportRecoverySessionIds("campaign"), ["child"]);
   return db;
+}
+
+for (const superseded of [false, true]) {
+  test(`unreset legacy proof with a runner clock ahead is ${superseded ? "rejected after a new assignment" : "captured at upgrade"}`, () => {
+    const root = mkdtempSync(join(tmpdir(), "campaign-legacy-capture-"));
+    const file = join(root, "control-plane.db");
+    let db: ControlPlaneDb | undefined;
+    try {
+      db = campaignFixture(file);
+      db.appendEvent("child", { kind: "agent_thought", text: "Before report" }, 4999);
+      db.appendEvent("child", { kind: "agent_message", text: "Original", final: true }, 5000);
+      if (superseded) db.appendEvent("child", { kind: "user_message", text: "New assignment" }, 5001);
+      db.raw().prepare(`INSERT INTO orchestrator_campaign_child_reports
+        (campaign_session_id, child_session_id, report_event_seq, verified_at)
+        VALUES ('campaign', 'child', 2, 1001)`).run();
+      assert.equal(db.getRunnerHistoryState("child")!.eventEpoch, 0);
+      db.close();
+      db = ControlPlaneDb.open(file);
+      assert.equal(db.campaignChildReportVerified("campaign", "child"), !superseded);
+      const proof = db.raw().prepare("SELECT report_digest, report_event_epoch, report_ts FROM orchestrator_campaign_child_reports").get()!;
+      assert.equal(proof.report_event_epoch, superseded ? null : 0);
+      assert.equal(proof.report_ts, superseded ? null : 5000);
+      assert.equal(typeof proof.report_digest, superseded ? "object" : "string");
+      db.clearSessionEvents("child");
+      assert.equal(db.campaignChildReportVerified("campaign", "child"), !superseded);
+      if (!superseded) {
+        db.reconcileRunnerHistory("child", 2, 2);
+        db.appendHydratedPage("child", { afterSeq: 0, historyEpoch: 2,
+          eventEpoch: db.getRunnerHistoryState("child")!.eventEpoch }, [
+          { seq: 1, ts: 5999, payload: { kind: "agent_thought", text: "Before replacement" } },
+          { seq: 2, ts: 6000, payload: { kind: "agent_message", text: "Different", final: true } },
+        ]);
+        db.finishCampaignReportHistoryHydration("child");
+        assert.equal(db.campaignChildReportVerified("campaign", "child"), false,
+          "captured original proof cannot follow a replacement at the same sequence");
+      }
+    } finally {
+      db?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 }
 
 test("restart and another cache reset cannot capture a replayed legacy sequence as original proof", () => {
