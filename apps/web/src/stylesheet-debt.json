@@ -131,7 +131,6 @@
     "|.files-md|font-size|13",
     "|.files-text|font-size|12",
     "|.filter|font-size|11",
-    "|.follow-tail-chip|font-size|12",
     "|.form-error|font-size|12.5",
     "|.git-action input,.git-action textarea|font-size|13",
     "|.git-action>label|font-size|12",
@@ -951,7 +950,7 @@
     "|.ws-select|gap|6px"
   ],
   "paddingLiterals": [
-    "@container transcript-pane (max-width: 340px)|.transcript-status-cluster .follow-tail-chip|padding-inline|7px",
+    "@container transcript-pane (max-width: 340px)|.transcript-status-cluster .follow-tail-chip|padding-inline|1px",
     "@media (max-width: 640px)|.workflow-inspector|padding|10px",
     "@media (max-width: 700px)|.automation-editor,.automation-card|padding|14px",
     "@media (max-width: 760px)|.access-empty|padding|14px",
@@ -1166,7 +1165,6 @@
     "|.files-source-line|padding|6px",
     "|.files-text|padding|10px",
     "|.files-text|padding|12px",
-    "|.follow-tail-chip|padding|12px",
     "|.follow-tail-chip|padding|5px",
     "|.git-action input,.git-action textarea|padding|10px",
     "|.git-action input,.git-action textarea|padding|7px",

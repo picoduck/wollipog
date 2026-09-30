@@ -439,9 +439,10 @@ test.describe("desktop: context and cost flank the live-output control", () => {
 
   test("an enlarged root font retires the hint too, at a pane width that fits by pixels", async ({ page }) => {
     // Type is in rem so the browser's font-size preference actually does something (styles.css
-    // "--- Type ---"). The follow-state control is px-sized and does not grow, but the hint and the
-    // cost both do — so a pane wide enough at a 16px root can still be too narrow at 32px, and a
-    // pixel-only cutoff would leave the hint showing while the cost fell below its own scrollWidth.
+    // "--- Type ---"). The hint, the cost and (since #2041) the follow-state control's label all
+    // grow, so a pane wide enough at a 16px root can still be too narrow at 32px, and a pixel-only
+    // cutoff would leave the hint showing while the cost fell below its own scrollWidth. Here the
+    // strip also yields the control's keycap and then its action text, so the cost keeps its seat.
     await page.setViewportSize({ width: 1280, height: 820 });
     await page.goto("/session-usage-e2e.html?width=561&height=780&cost=12345.67");
     await page.addStyleTag({ content: "html { font-size: 32px; }" });

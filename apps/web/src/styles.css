@@ -12365,33 +12365,47 @@ body.shell-dock-dragging * {
    these rules back out of this file, measures what the follow-state control, the hint, and a wide
    cost actually render at, and fails when the constants stop covering them. Retuning any control in
    this strip therefore fails that spec rather than silently squeezing the cost. Change these numbers
-   only in response to a measurement, and let the spec confirm it. 618px and calc(354px + 16.5rem):
-   the shared keycap (#1956) put the hint's label on the 12px small type and every keycap here on
-   the 11px rem keycap, and in the widest fallback face the strip then measured 608.6, 736.3 and
-   867.7px at 16, 24 and 32px roots. */
+   only in response to a measurement, and let the spec confirm it. 618px and calc(186px + 27rem):
+   with every label in the strip on rem type (#2041), in the widest fallback face the strip
+   measured 608.6, 821.8 and 1039.1px at 16, 24 and 32px roots. Almost all of that now scales, so
+   the calc() carries the budget at every root and the plain length only matches it at 16px. */
 @container transcript-pane (max-width: 618px) {
   .transcript-status-actions { display: none; }
 }
-@container transcript-pane (max-width: calc(354px + 16.5rem)) {
+@container transcript-pane (max-width: calc(186px + 27rem)) {
   .transcript-status-actions { display: none; }
 }
-/* The follow control's resume keycap scales with the reader's text size, but the control's own
-   label is px-sized, so at an enlarged root the keycap alone can push the centered cluster past the
-   pane and squeeze the cost below its own width. Below the width the cluster needs WITH the keycap,
-   the keycap yields as the Reply hint does: the control's tooltip still names the chord, and the
-   Keyboard Shortcuts reference lists it. Measured with the widest follow label in the widest
-   fallback face: 455, 534 and 616px at 16, 24 and 32px roots, with a few px of headroom for CI's
-   faces. Like the cutoffs above, this is checked by `apps/web/e2e/status-strip-budget.spec.ts`. */
-@container transcript-pane (max-width: calc(306px + 10rem)) {
+/* The strip yields in a fixed order as the pane narrows: the Reply hint, then the follow control's
+   resume keycap, then the control's " · Follow Live Output" action text. Each is discoverability
+   for something that still works: the control's accessible name still reads "Paused, Follow Live
+   Output", its tooltip names the chord, and the Keyboard Shortcuts reference lists it. The cost is
+   never what yields.
+
+   The keycap's cutoff is the width the cluster needs WITH the keycap: 458.6, 633.8 and 811.1px at
+   16, 24 and 32px roots, measured with the widest follow label in the widest fallback face.
+
+   The action text's cutoff is inert at the default root: 316px, below the narrowest supported pane,
+   where the phone strip has its own compact rule below. At an enlarged root the whole label grows
+   with the reader's text, and the cluster needs 546.3 and 700.4px at 24 and 32px roots with the
+   action text; below that the control keeps only its state word. It hides the keycap too, so the
+   order above holds at any root, however large.
+
+   Like the cutoffs above, these are checked by `apps/web/e2e/status-strip-budget.spec.ts`. */
+@container transcript-pane (max-width: calc(114px + 22rem)) {
+  .follow-tail-kbd { display: none; }
+}
+@container transcript-pane (max-width: calc(-164px + 30rem)) {
+  .follow-tail-action,
   .follow-tail-kbd { display: none; }
 }
 /* At the narrowest supported phone width, compact both side gaps and the widest follow-state
    chip's horizontal padding so fallback-font differences cannot make the context ring or cost
    collide with it. The tracks stay symmetric, so this compression cannot move the centered
-   control. */
+   control. The chip keeps a px short of --space-2: a full 8px puts the context ring half a pixel
+   outside the 320px strip in the widest fallback face. */
 @container transcript-pane (max-width: 340px) {
   .transcript-status-cluster { column-gap: 4px; }
-  .transcript-status-cluster .follow-tail-chip { padding-inline: 7px; }
+  .transcript-status-cluster .follow-tail-chip { padding-inline: calc(var(--space-2) - 1px); }
 }
 /* Pager hints remain an inner group inside the centered status cluster. */
 .follow-tail-control {
@@ -12403,14 +12417,15 @@ body.shell-dock-dragging * {
 .follow-tail-chip {
   flex: none;
   position: static;
-  padding: 5px 12px;
+  padding: 5px var(--space-3);
   border-radius: 999px;
   border: 1px solid var(--border-strong);
   background: var(--bg-elev-2);
   color: var(--text);
-  font-size: 12px;
-  /* The small-text line box (§2.3); body's 20px would outgrow the phone status strip. */
-  line-height: 16px;
+  /* The small type role (§2.3), like the Reply hint and cost beside it: the label grows with the
+     reader's text size in step with the keycap it carries, and the px line box keeps the control's
+     height fixed — body's 20px would outgrow the phone status strip (#2041). */
+  font: var(--type-small);
   white-space: nowrap;
   cursor: pointer;
   box-shadow: var(--shadow);
