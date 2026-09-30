@@ -6549,8 +6549,8 @@ export class SessionsService {
     return ok(followUp, 201);
   }
 
-  /** Campaign reads recover legacy attestations whose cache was lost before durable report
-   * identity was recorded. Ordinary projections remain synchronous and cache-independent. */
+  /** Campaign reads recover history for legacy rows whose cache was lost before report identity
+   * was recorded. Ambiguous rows require exact re-verification; reads never establish proof. */
   async campaignProjectionWithHistory(campaignSessionId: string): Promise<ServiceResult<OrchestratorCampaignProjection>> {
     const projection = this.campaignProjection(campaignSessionId);
     if (!projection.ok) return projection;

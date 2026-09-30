@@ -5972,6 +5972,7 @@ export class ControlPlaneDb {
       controlPlane.collectOrphanedEventPayloadArtifacts();
       controlPlane.migrateInlineSessionEventPayloads();
       controlPlane.collectWorkflowArtifactBlobs();
+      controlPlane.captureUnresetLegacyCampaignReports();
       controlPlane.seedUsageAggregationBaseline(Date.now());
       controlPlane.maintainUsageAggregation(Date.now());
       return controlPlane;
@@ -14799,9 +14800,34 @@ export class ControlPlaneDb {
     return createHash("sha256").update(JSON.stringify([payload.kind, payload.text])).digest("hex");
   }
 
+  /** A legacy sequence has provenance only in a cache that has never been reset. Capture it
+   * before any replay; a cache from a later epoch cannot identify what the old verifier saw. */
+  private captureUnresetLegacyCampaignReports(childSessionId?: string): void {
+    const childFilter = childSessionId === undefined ? "" : " AND child.id=?";
+    const reports = this.stmt(
+      `SELECT verification.campaign_session_id, verification.child_session_id,
+         verification.report_event_seq, verification.verified_at
+       FROM orchestrator_campaign_child_reports verification
+       JOIN sessions child ON child.id=verification.child_session_id
+       JOIN session_events target ON target.session_id=child.id AND target.seq=verification.report_event_seq
+       WHERE verification.report_digest IS NULL AND verification.report_event_epoch IS NULL
+         AND child.event_epoch=0 AND target.ts<=verification.verified_at
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))${childFilter}`,
+    ).all(...(childSessionId === undefined ? [] : [childSessionId])) as Array<{
+      campaign_session_id: string; child_session_id: string; report_event_seq: number; verified_at: number;
+    }>;
+    for (const report of reports) {
+      if (this.durableFinalReportSeq(report.child_session_id) === report.report_event_seq) {
+        this.verifyCampaignChildReport(report.campaign_session_id, report.child_session_id,
+          report.report_event_seq, report.verified_at);
+      }
+    }
+  }
+
   /** Capture legacy attestations while their exact report still exists. An invalidated report
    * must never become valid just because the cache holding its superseding assignment is lost. */
   private preserveCampaignReportsBeforeCacheReset(childSessionId: string): void {
+    this.captureUnresetLegacyCampaignReports(childSessionId);
     const reports = this.stmt(
       `SELECT campaign_session_id, report_event_seq, verified_at, report_digest, report_event_epoch
        FROM orchestrator_campaign_child_reports WHERE child_session_id=?`,
@@ -14814,8 +14840,8 @@ export class ControlPlaneDb {
     for (const report of reports) {
       const cached = this.stmt("SELECT 1 FROM session_events WHERE session_id=? AND seq=?")
         .get(childSessionId, report.report_event_seq);
-      // An already-evicted legacy proof has no identity to preserve yet. Keep it recoverable by
-      // campaign reads rather than mistaking a cache miss for evidence of a superseding task.
+      // An already-evicted legacy row has no identity. Keep history recovery retryable, but
+      // recovered events will require a new exact verification instead of inheriting proof.
       if (!report.report_digest && !cached) continue;
       if (!this.campaignChildReportVerified(report.campaign_session_id, childSessionId)) {
         this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE campaign_session_id=? AND child_session_id=?")
@@ -14842,27 +14868,18 @@ export class ControlPlaneDb {
   }
 
   /** Once a complete replacement log lacks the attested report, the old proof is no longer
-   * applicable. Partial/failed reloads leave the durable attestation intact. */
+   * applicable. A legacy row without identity cannot gain proof from replayed sequence numbers.
+   * Partial/failed reloads leave durable attestations and legacy recovery requests intact. */
   finishCampaignReportHistoryHydration(sessionId: string): void {
     this.atomic(() => {
       this.stmt(
       `DELETE FROM orchestrator_campaign_child_reports WHERE child_session_id=? AND report_digest IS NOT NULL
        AND report_event_epoch!=(SELECT event_epoch FROM sessions WHERE id=?)`,
       ).run(sessionId, sessionId);
-      const legacy = this.stmt(
-        `SELECT campaign_session_id, report_event_seq, verified_at FROM orchestrator_campaign_child_reports
-         WHERE child_session_id=? AND report_digest IS NULL`,
-      ).all(sessionId) as Array<{ campaign_session_id: string; report_event_seq: number; verified_at: number }>;
-      for (const report of legacy) {
-        if (this.campaignChildReportVerified(report.campaign_session_id, sessionId)) {
-          this.verifyCampaignChildReport(report.campaign_session_id, sessionId, report.report_event_seq, report.verified_at);
-        } else {
-          // The full log cannot restore this legacy sequence. Stop repeatedly fetching it on
-          // every campaign poll; a new exact report verification remains available.
-          this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE campaign_session_id=? AND child_session_id=?")
-            .run(report.campaign_session_id, sessionId);
-        }
-      }
+      // Stop repeatedly recovering the now-complete history. Only an explicit verification of
+      // an exact completed report may establish a fresh identity for these ambiguous rows.
+      this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE child_session_id=? AND report_digest IS NULL")
+        .run(sessionId);
     });
   }
 
@@ -14894,8 +14911,6 @@ export class ControlPlaneDb {
       `SELECT verification.child_session_id AS id FROM orchestrator_campaign_child_reports verification
        JOIN sessions child ON child.id=verification.child_session_id
        WHERE verification.campaign_session_id=? AND verification.report_digest IS NULL
-         AND NOT EXISTS (SELECT 1 FROM session_events target
-           WHERE target.session_id=child.id AND target.seq=verification.report_event_seq)
          AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))`,
     ).all(campaignSessionId) as Array<{ id: string }>).map((row) => row.id);
   }
@@ -15223,8 +15238,9 @@ export class ControlPlaneDb {
        JOIN sessions child ON child.id=verification.child_session_id
        LEFT JOIN session_events target ON target.session_id=verification.child_session_id
          AND target.seq=verification.report_event_seq
-         AND (verification.report_event_epoch IS NULL OR verification.report_event_epoch=child.event_epoch)
+         AND verification.report_event_epoch=child.event_epoch
        WHERE verification.campaign_session_id=?${childFilter}
+         AND verification.report_digest IS NOT NULL
          AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))
          AND ((verification.report_digest IS NOT NULL AND verification.report_event_epoch!=child.event_epoch) OR (
          (

@@ -136,7 +136,7 @@ test(`campaign verification hydrates a dropped cache with advertised tail ${adve
 });
 }
 
-test("campaign reads restore a legacy attestation with a missing report, and leave active children lazy", async () => {
+test("campaign reads recover ambiguous legacy history for exact re-verification, and leave active children lazy", async () => {
   const { db, hub, svc } = campaignHistoryHarness();
   try {
     const payload = { kind: "agent_message", text: "Completed report", final: true } as const;
@@ -158,13 +158,59 @@ test("campaign reads restore a legacy attestation with a missing report, and lea
     } });
     assert.equal(db.campaignProjection("campaign")?.children.verified, 0);
     const projection = await svc.campaignProjectionWithHistory("campaign");
-    assert.equal(projection.data?.children.verified, 1);
+    assert.equal(projection.data?.children.verified, 0);
     assert.deepEqual(seen.filter((message) => message.type === "session_history_page")
       .map((message) => message.sessionId), ["child"]);
     await svc.campaignProjectionWithHistory("campaign");
     assert.equal(seen.filter((message) => message.type === "session_history_page").length, 1);
+    const verified = await svc.verifyCampaignChildWithHistory("campaign", {
+      childSessionId: "child", reportEventSeq: 1, followUpsAccounted: true,
+    });
+    assert.ok(verified.ok, verified.error);
+    assert.equal(verified.data?.campaign.children.verified, 1);
   } finally { db.close(); }
 });
+
+for (const protocolVersion of [53, PROTOCOL_VERSION]) {
+  test(`protocol ${protocolVersion} legacy recovery rejects sequence reuse and retries after a failed reload`, async () => {
+    const { db, hub, svc } = campaignHistoryHarness(protocolVersion);
+    try {
+      db.reconcileRunnerHistory("child", 2, 2);
+      db.raw().prepare(`INSERT INTO orchestrator_campaign_child_reports
+        (campaign_session_id, child_session_id, report_event_seq, verified_at) VALUES ('campaign','child',2,1001)`).run();
+      const events: StoredSessionEvent[] = [
+        { seq: 1, ts: 1000, payload: { kind: "agent_message", text: "Original", final: true } },
+        { seq: 2, ts: 2000, payload: { kind: "agent_message", text: "Different", final: true } },
+      ];
+      let attempts = 0;
+      hub.attachRunner(RUNNER_ID, { send(data: string) {
+        const msg = JSON.parse(data) as ControlPlaneToRunner;
+        if (msg.type !== "session_history_page" && msg.type !== "session_history") return;
+        const ok = ++attempts > 1;
+        queueMicrotask(() => hub.resolveRunnerRequest(msg.type === "session_history_page"
+          ? { type: "session_history_page_result", requestId: msg.requestId, sessionId: msg.sessionId, ok,
+            ...(ok ? { events, page: { logEpoch: 2, throughSeq: 2, nextAfterSeq: 2, hasMore: false } }
+              : { error: "retry later" }) }
+          : { type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok,
+            ...(ok ? { events } : { error: "retry later" }) }));
+      } });
+      const failed = await svc.campaignProjectionWithHistory("campaign");
+      assert.equal(failed.data?.children.verified, 0);
+      assert.deepEqual(db.campaignReportRecoverySessionIds("campaign"), ["child"]);
+      const recovered = await svc.campaignProjectionWithHistory("campaign");
+      assert.equal(recovered.data?.children.verified, 0);
+      assert.equal(db.hasCompletedAgentReportAt("child", 2), true);
+      assert.deepEqual(db.campaignReportRecoverySessionIds("campaign"), []);
+      await svc.campaignProjectionWithHistory("campaign");
+      assert.equal(attempts, 2, "complete recovery must stop repeated campaign fetches");
+      const verified = await svc.verifyCampaignChildWithHistory("campaign", {
+        childSessionId: "child", reportEventSeq: 2, followUpsAccounted: true,
+      });
+      assert.ok(verified.ok, verified.error);
+      assert.equal(verified.data?.campaign.children.verified, 1);
+    } finally { db.close(); }
+  });
+}
 
 test("verification does not fetch inaccessible or unrelated child history", async () => {
   const { db, hub, svc } = campaignHistoryHarness();
