@@ -1192,3 +1192,48 @@ test("on a phone a skill route is its own screen with Back, and Back returns to 
     restore();
   }
 });
+
+test("the detail pane shows exactly one state: a skill that loads before the library has no skeleton over it", async () => {
+  const view = await mountRouted(oneSkillClient({ listSkills: () => new Promise(() => {}) }), "skills-early-detail",
+    { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    assert.equal(container.querySelector(".master-detail-list .skeleton")?.getAttribute("role"), "status", "the list still loads");
+    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review");
+    assertNoDomNode(container.querySelector(".master-detail-detail .detail-skeleton"), "no skeleton beside the loaded skill");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a failed reload of a skill seen before shows its error, never its cached content", async () => {
+  const other = { id: "skill-2", name: "release-notes", latestVersion: { id: "v2", digest: "d2" } };
+  const loads = new Map<string, number>();
+  const view = await mountRouted(oneSkillClient({
+    listSkills: async () => ({ skills: [oneSkill, other] }),
+    getSkill: async (id: string) => {
+      const count = (loads.get(id) ?? 0) + 1;
+      loads.set(id, count);
+      if (id === other.id) return new Promise(() => {});
+      if (count > 1) throw new Error("HTTP 500 reading skill-1");
+      return { skill: oneSkill, latestVersion: { id: "v1", digest: "d1", files: [] } };
+    },
+  }), "skills-cached-failure", { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    const row = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".master-detail-list-body .row")]
+      .find((candidate) => candidate.querySelector(".row-title")?.textContent === name)!;
+    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review");
+    await act(async () => row("release-notes").click());
+    await act(settle);
+    assert.ok(container.querySelector(".master-detail-detail .detail-skeleton"), "the pending skill shows its skeleton");
+    await act(async () => row("code-review").click());
+    await act(settle);
+    const detail = container.querySelector(".master-detail-detail")!;
+    assert.equal(detail.querySelector(".notice-title")?.textContent, "Couldn't Load This Skill");
+    assertNoDomNode(detail.querySelector(".skills-detail-head"), "the cached skill is not shown under its error");
+    assertNoDomNode(detail.querySelector(".detail-skeleton"), "nor a skeleton");
+  } finally {
+    await view.unmount();
+  }
+});

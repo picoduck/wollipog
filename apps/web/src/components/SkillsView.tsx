@@ -540,15 +540,16 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   ];
 
   return (
-    <>
-    {phoneDetail && (
-      <DetailBar
-        title={route.id ? skillName ?? "Skill" : PANE_TITLES[route.pane!]}
-        backLabel={backLabel("skills")}
-        onBack={() => select(null)}
-      />
-    )}
     <section className="page full fill">
+      {/* Inside the fill page, so the bar and the panes share the column's height; the page has no
+          gutter of its own, so the bar stays full-bleed like every detail bar. */}
+      {phoneDetail && (
+        <DetailBar
+          title={route.id ? skillName ?? "Skill" : PANE_TITLES[route.pane!]}
+          backLabel={backLabel("skills")}
+          onBack={() => select(null)}
+        />
+      )}
       {!phoneDetail && (
         <PageHeader
           title={destination("skills").name}
@@ -678,15 +679,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
               onReview={(runner, copy) => setOrphanImport({ runnerId: runner.runnerId, copy })}
               onDiscard={(runner, copy) => void discardOrphan(runner, copy)}
             />
-          ) : skills === null ? (
-            <DetailSkeleton />
-          ) : !selectedId ? (
-            /* The default detail (/skills, /skills/overview) until the Library Overview (#1971)
-               replaces it. */
-            <p className="skills-hint">
-              Select a skill to see its content, assignments, and per-machine deployment.
-            </p>
-          ) : detailError?.skillId === selectedId ? (
+          ) : selectedId && detailError?.skillId === selectedId ? (
             <State
               variant="error"
               compact
@@ -696,10 +689,21 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
             >
               It may have been deleted, or Wollipog could not be reached.
             </State>
-          ) : !detail ? (
-            <DetailSkeleton announce="Loading skill" />
+          ) : selectedId && !detail ? (
+            // While the whole library loads, the list's skeleton is the one announcement.
+            <DetailSkeleton announce={skills === null ? undefined : "Loading skill"} />
+          ) : !selectedId && skills === null ? (
+            <DetailSkeleton />
+          ) : !selectedId ? (
+            /* The default detail (/skills, /skills/overview) until the Library Overview (#1971)
+               replaces it. */
+            <p className="skills-hint">
+              Select a skill to see its content, assignments, and per-machine deployment.
+            </p>
           ) : null}
-          {!showOrphans && detail && (
+          {/* Exactly one detail state: a failed reload never leaves the cached skill actionable below
+              its error. */}
+          {!showOrphans && detail && detailError?.skillId !== selectedId && (
             <>
               <div className="skills-detail-head">
                 <div>
@@ -1080,6 +1084,5 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
         />
       )}
     </section>
-    </>
   );
 }

@@ -228,6 +228,10 @@ test.describe("on a phone", () => {
       await expect(bar.getByRole("button", { name: "Back to Agent Skills", exact: true })).toBeVisible();
       await expect(list).toBeHidden();
       await expect(page.locator("#page-title")).toBeFocused();
+      // The bar and the detail share the column: only the detail scrolls, never the page around it.
+      expect(await page.locator(".main-body").evaluate((element) => element.scrollHeight - element.clientHeight)).toBe(0);
+      const barBox = await bar.boundingBox();
+      expect(barBox!.y).toBe(0);
       if (back === "bar") await bar.getByRole("button", { name: "Back to Agent Skills", exact: true }).tap();
       else await page.goBack();
       await expect(page.locator(".detail-bar")).toHaveCount(0);

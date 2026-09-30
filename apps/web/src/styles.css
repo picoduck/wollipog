@@ -1329,7 +1329,9 @@ kbd {
   padding-right: var(--page-gutter);
   padding-left: var(--page-gutter);
 }
-.page.fill > :not(.page-header) { flex: 1 1 0; min-height: 0; }
+/* A phone's detail route puts its detail bar in the page instead (Agent Skills, §6.2), keeping its
+   own 48px so the panes below get the rest. */
+.page.fill > :not(.page-header, .detail-bar) { flex: 1 1 0; min-height: 0; }
 
 /* 64px with a title alone, 88px with a description, 124px with tabs: 20 + 28 (+ 4 + 20)
    (+ 12 + 40) + 16 without tabs. The hairline is inset so it adds nothing to those heights. */
