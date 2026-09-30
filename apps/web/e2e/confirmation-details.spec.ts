@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
 import { expectGeometry } from "./geometry-margins.js";
 
@@ -6,6 +6,19 @@ import { expectGeometry } from "./geometry-margins.js";
  * #1950: a confirmation lists what it affects as one surface of dense rows, can name its safe choice,
  * and can offer a harmless extra action on desktop only (docs/design-system.md §7.4, §7.5).
  */
+
+/** Opens a project split's archive confirmation from its actions menu, as the Command Inbox does. */
+async function openProjectArchive(page: Page, variant: "stop" | "archive"): Promise<Locator> {
+  await page.goto(`/confirmation-details-e2e.html?surface=project-archive${variant === "archive" ? "&variant=archive" : ""}`);
+  // The trigger shows on the tab group's hover or focus, as in the Command Inbox tab strip.
+  await page.getByRole("button", { name: "Workspace Actions for Invoicing" }).focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("menuitem", { name: variant === "archive" ? "Archive All Sessions" : "Archive and Stop All Sessions" }).click();
+  const dialog = page.getByRole("dialog", { name: variant === "archive" ? "Archive Sessions" : "Archive and Stop Sessions" });
+  await expect(dialog).toBeVisible();
+  await dialogMotionSettled(page);
+  return dialog;
+}
 
 async function footButtons(dialog: Locator) {
   return dialog.locator(".modal-foot > button").evaluateAll((buttons) => buttons.map((button) => {
@@ -97,6 +110,18 @@ test.describe("desktop", () => {
     await expect(dialog.getByRole("button", { name: "Keep Open" })).toBeFocused();
   });
 
+  // #2051: a project split's archive lists the sessions it stops, in both of its variants.
+  for (const variant of ["stop", "archive"] as const) {
+    test(`the project split's ${variant === "stop" ? "Archive and Stop" : "Archive"} confirmation lists five of its seven sessions`, async ({ page }) => {
+      const dialog = await openProjectArchive(page, variant);
+      const rows = dialog.locator(".confirmation-rows > li");
+      await expect(rows).toHaveCount(5);
+      await expect(rows.locator(".status.inline")).toHaveText(["Running", "Awaiting Input", "Awaiting Prompt", "Approval Required", "Running"]);
+      await expect(dialog.locator(".confirmation-rows-more")).toHaveText("and 2 more");
+      await expect(dialog).toHaveAccessibleDescription(/All 7 sessions in “Invoicing”.*Review the migration plan.*and 2 more/);
+    });
+  }
+
   test("Escape and the scrim choose the named cancel button", async ({ page }) => {
     await page.goto("/confirmation-details-e2e.html?surface=secondary");
     await expect(page.getByRole("dialog", { name: "Quit Wollipog" })).toBeVisible();
@@ -123,6 +148,14 @@ test.describe("phone", () => {
     const buttons = await footButtons(dialog);
     expect(buttons.map(({ text }) => text)).toEqual(["Keep Open", "Quit Wollipog"]);
     expectGeometry(Math.abs(buttons[0]!.width - buttons[1]!.width), "the two footer buttons are equal width").toBeLessThanOrEqual(0.61);
+  });
+
+  test("the project split's archive rows fit the sheet", async ({ page }) => {
+    const dialog = await openProjectArchive(page, "stop");
+    await expect(dialog.locator(".confirmation-rows > li")).toHaveCount(5);
+    const overflow = await dialog.locator(".confirmation-rows").evaluate((element) => element.scrollWidth - element.clientWidth);
+    expect(overflow, "no row spills sideways").toBe(0);
+    await expect(dialog.locator(".confirmation-rows-more")).toHaveText("and 2 more");
   });
 
   test("the update confirmation's rows fit the sheet", async ({ page }) => {

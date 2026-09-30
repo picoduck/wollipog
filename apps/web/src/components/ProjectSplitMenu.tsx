@@ -2,7 +2,9 @@ import { useState } from "react";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
+  sessionAttentionStatus,
   type RunnerView,
+  type SessionView,
 } from "@wollipog/protocol";
 import type { InboxSplit } from "../inbox.js";
 import {
@@ -12,8 +14,9 @@ import {
 } from "../archive-actions.js";
 import { archiveProjectWithFeedback } from "../project-actions.js";
 import { useApi } from "../api-context.js";
-import { useFeedback } from "./FeedbackProvider.js";
-import { Modal } from "./common.js";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
+import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
+import { Modal, sessionLifecycleMeta } from "./common.js";
 import { MoreHorizontalIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
@@ -28,6 +31,32 @@ export interface ProjectSplitMenuProps {
   onPinnedChange: (pinned: boolean) => void;
   onNewSession: (preset: NewSessionPreset) => void;
   onManageProject?: () => void;
+}
+
+/**
+ * A row's badge: what the session is waiting on when it has a pending request, otherwise its
+ * lifecycle, including a Stop already under way. One badge per row, attention first (§11.1).
+ */
+export function archiveRowStatus(session: SessionView): StatusMeta {
+  if (session.pendingApproval) return statusMeta("attention", sessionAttentionStatus(session)?.kind ?? "approval_required");
+  return sessionLifecycleMeta(session.status, {
+    archiveStatus: session.archiveStatus,
+    stopOperation: session.stopOperation,
+    historyQuarantine: session.historyQuarantine,
+  });
+}
+
+/**
+ * The sessions the split has loaded, and how many more the archive affects. A durable Project
+ * archives every unarchived session server-side, including ones this split has not loaded, so they
+ * join "and N more" (#2051).
+ */
+export function archiveDetailRows(
+  sessions: readonly SessionView[],
+  sessionCount: number,
+): { rows: ConfirmationDetailRow[]; overflow: number } {
+  const rows = sessions.map((session) => ({ label: session.title || "Untitled Session", status: archiveRowStatus(session) }));
+  return { rows, overflow: Math.max(0, sessionCount - rows.length) };
 }
 
 /** Project actions owned by a Command Inbox project split. */
@@ -160,6 +189,7 @@ export function ProjectSplitMenu({
     const sessionIds = split.sessions.map((session) => session.id);
     const sessionCount = durableProject ? split.count : sessionIds.length;
     if (sessionCount === 0) return;
+    const detail = archiveDetailRows(split.sessions, sessionCount);
     const accepted = await confirm({
       title: archiveStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions",
       message: archiveStopsRuntime
@@ -169,6 +199,8 @@ export function ProjectSplitMenu({
         : sessionCount === 1
           ? `The session in “${split.name}” moves to Archived Sessions. If it is still running, it is stopped first.`
           : `All ${sessionCount} sessions in “${split.name}” move to Archived Sessions. Any that are still running are stopped first.`,
+      detailRows: detail.rows,
+      detailRowsOverflow: detail.overflow,
       confirmLabel: archiveStopsRuntime ? "Archive and Stop" : "Archive Sessions",
       ...(archiveStopsRuntime ? { tone: "danger" as const } : {}),
     });

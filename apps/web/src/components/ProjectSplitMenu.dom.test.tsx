@@ -639,6 +639,10 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
   // The count covers the Project sessions that are not loaded here, which the server also stops.
   assert.match(container.textContent ?? "", /All 2 sessions in “Project One” stop and move to Archived Sessions/);
   assert.match(container.textContent ?? "", /use Snooze instead/);
+  // The loaded session is listed; the one the split has not loaded is still counted (#2051).
+  const durableDialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+  assert.deepEqual([...durableDialog.querySelectorAll(".confirmation-rows .row-title")].map((row) => row.textContent), ["session-visible"]);
+  assert.equal(durableDialog.querySelector(".confirmation-rows-more")?.textContent, "and 1 more");
   await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archivedProjects, ["project-1"]);
   assert.match(container.textContent ?? "", /2 sessions archived from Project One/);
@@ -654,6 +658,88 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
   await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archivedProjects, ["project-1", "project-1"]);
   assert.match(container.textContent ?? "", /Sessions archived from Project One\. Exact undo is unavailable/);
+
+  await act(async () => { root.unmount(); });
+  mountPoint.remove();
+});
+
+test("the archive confirmation lists the split's sessions with their status, then counts the rest (#2051)", async () => {
+  const statuses: Array<[string, Partial<SessionView>]> = [
+    ["Fix the invoice rounding bug", { status: "running" }],
+    ["Review the migration plan", { status: "input_required" }],
+    ["Draft release notes", { status: "idle" }],
+    ["Approve the schema change", {
+      status: "input_required",
+      pendingApproval: { requestId: "request-1", title: "Run Bash", options: [] },
+    }],
+    ["Retry the stuck stop", {
+      status: "running",
+      stopOperation: { operationId: "stop-1", status: "stop_pending", requestedAt: 1, lastAttemptAt: 1, attemptCount: 1 } as SessionView["stopOperation"],
+    }],
+    ["Upgrade the browsers", { status: "queued" }],
+    ["Audit stylesheet debt", { status: "idle" }],
+  ];
+  const sevenSplit: InboxSplit = {
+    ...split,
+    sessions: statuses.map(([title, overrides], index) => ({ ...session(`session-${index + 1}`), title, ...overrides })),
+    count: statuses.length,
+  };
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
+  const render = async (stopBeforeArchiveSupported: boolean) => {
+    await act(async () => {
+      root.render(
+        <ApiProvider>
+          <FeedbackProvider>
+            <ProjectSplitMenu split={sevenSplit} runner={runner()} stopBeforeArchiveSupported={stopBeforeArchiveSupported}
+              pinned={false} onPinnedChange={() => undefined} onNewSession={() => undefined} />
+          </FeedbackProvider>
+        </ApiProvider>,
+      );
+    });
+  };
+  const expectRows = (title: string) => {
+    const dialog = [...domWindow.document.querySelectorAll('[role="dialog"]')]
+      .find((candidate) => candidate.getAttribute("aria-labelledby")
+        && domWindow.document.getElementById(candidate.getAttribute("aria-labelledby")!)?.textContent === title) as unknown as HTMLElement;
+    assert.ok(dialog, `missing dialog: ${title}`);
+    const rows = [...dialog.querySelectorAll(".confirmation-rows > li")];
+    assert.deepEqual(rows.map((row) => row.querySelector(".row-title")?.textContent), [
+      "Fix the invoice rounding bug",
+      "Review the migration plan",
+      "Draft release notes",
+      "Approve the schema change",
+      "Retry the stuck stop",
+    ]);
+    // Attention outranks lifecycle, and a Stop already under way reads as one (§11.1).
+    assert.deepEqual(rows.map((row) => row.querySelector(".status.inline")?.textContent?.trim()), [
+      "Running",
+      "Awaiting Input",
+      "Awaiting Prompt",
+      "Approval Required",
+      "Stop Pending",
+    ]);
+    assert.equal(dialog.querySelector(".confirmation-rows-more")?.textContent, "and 2 more");
+    const described = (dialog.getAttribute("aria-describedby") ?? "").split(" ");
+    assert.ok(described.includes(dialog.querySelector(".confirmation-rows")!.id), "the rows join the dialog's description");
+    // The message copy is unchanged; the rows sit under it.
+    assert.match(dialog.querySelector(".confirmation-message")?.textContent ?? "", /^All 7 sessions in “Project One” /);
+  };
+
+  await render(true);
+  await openMenu(container);
+  await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
+  expectRows("Archive and Stop Sessions");
+  await act(async () => { button(container, "Cancel").click(); await tick(); });
+
+  // Without Stop-before-archive support the action is plain "Archive Sessions" with the same rows.
+  await render(false);
+  await openMenu(container);
+  await act(async () => { button(container, "Archive All Sessions").click(); await tick(); });
+  expectRows("Archive Sessions");
+  await act(async () => { button(container, "Cancel").click(); await tick(); });
 
   await act(async () => { root.unmount(); });
   mountPoint.remove();
