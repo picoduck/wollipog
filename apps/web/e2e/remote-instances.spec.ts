@@ -331,6 +331,52 @@ test("with the active instance offline, the banner shows and the tile's dot is h
   await expect(page.locator(".rail-tooltip-detail")).toHaveText("Reconnecting…");
 });
 
+test("the active card says what the banner says, for This Machine and a remote, in the badge's tone", async ({ page }) => {
+  const card = (name: string) => page.locator(".instance-card").filter({ has: page.getByRole("heading", { name, exact: true }) });
+  const dotStyle = (name: string) => card(name).locator(".instance-status-dot").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, ring: style.boxShadow };
+  });
+
+  // This Machine: the instance manager records no status for it when its socket drops (#2102).
+  const local = card("This Machine");
+  await expect(local.locator(".status:not(.no-dot)")).toHaveText("Online");
+  await expect(local.locator(".instance-status-dot")).toHaveClass(/t-success/);
+  const green = (await dotStyle("This Machine")).background;
+  await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.setConnection("reconnecting"));
+  await expect(page.getByRole("status").filter({ hasText: "Can't reach Wollipog" })).toBeVisible();
+  await expect(local.locator(".status:not(.no-dot)")).toHaveText("Reconnecting…");
+  await expect(local.locator(".instance-status-dot")).toHaveClass(/t-neutral/);
+  await expect(local.locator(".instance-status-dot")).toHaveClass(/hollow/);
+  await expect(local.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(local).not.toContainText("Online");
+  const hollow = await dotStyle("This Machine");
+  expect(hollow.background).toBe("rgba(0, 0, 0, 0)");
+  expect(hollow.ring).toContain("inset");
+  expect(hollow.ring).not.toContain(green);
+  await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.setConnection(null));
+
+  await addInstance(page, "Studio", `http://100.64.10.11:4317/#pair=${TOKEN_A}`);
+  const studio = card("Studio");
+  await expect(studio.locator(".status:not(.no-dot)")).toHaveText("Online");
+  await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.setConnection("reconnecting"));
+  await expect(page.getByRole("status").filter({ hasText: "Can't reach Studio" })).toBeVisible();
+  await expect(studio.locator(".status:not(.no-dot)")).toHaveText("Reconnecting…");
+  await expect(studio.locator(".instance-status-dot")).toHaveClass(/hollow/);
+  await expect(studio.getByRole("button", { name: "Retry" })).toBeVisible();
+
+  await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.setConnection("sign-in-required"));
+  await expect(studio.locator(".status:not(.no-dot)")).toHaveText("Sign-In Required");
+  await expect(studio.locator(".instance-status-dot")).toHaveClass(/t-warning/);
+  await expect(studio.locator(".instance-status-dot")).not.toHaveClass(/hollow/);
+  await expect(studio.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  const amber = await dotStyle("Studio");
+  expect(amber.background).not.toBe(green);
+  expect(amber.background).not.toBe("rgba(0, 0, 0, 0)");
+  // The inactive This Machine card keeps its own status: the banner speaks only for Studio.
+  await expect(local.locator(".status:not(.no-dot)")).not.toHaveText("Sign-In Required");
+});
+
 test("in the labelled rail the tile's row shows the name and status, and the rail fits a 940×600 window", async ({ page }) => {
   await page.setViewportSize({ width: 940, height: 600 });
   await addInstance(page, "Build Farm in the Northern Datacenter Rack Seven", `https://build-farm-north-rack-7.internal.example/#pair=${TOKEN_B}`);

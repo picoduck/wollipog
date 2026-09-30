@@ -601,7 +601,10 @@ Rules
   each of the profile label's first two words; there are no per-instance colors, because color
   means state. The corner dot is `instanceAvailabilityMeta`'s tone (§11.2), hollow when offline.
   While the shell shows the offline or sign-in banner, the tile agrees with it
-  (`activeInstanceConnection`): hollow and neutral, "Reconnecting…", never Online. Accessible
+  (`activeInstanceConnection`): hollow and neutral, "Reconnecting…", never Online. The active
+  instance's card in Connections › Instances reads the same truth, which the shell provides once
+  (`ActiveInstanceConnectionProvider`), for This Machine as for a remote, and offers Retry while the
+  connection is lost; every card's dot is its badge's tone and hollow state (#2102). Accessible
   name "Switch Instance: <label>"; the tooltip gives the name and the status in sentence case. It
   opens the instance menu as a 300px flyout to the right of the rail, top-aligned with the tile
   (§9.1): `menuitemradio` rows with a 24px monogram, the name, and the origin ("On this machine"

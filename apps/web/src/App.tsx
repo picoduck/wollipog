@@ -21,7 +21,7 @@ import {
 import { createBrowserInstanceRuntime } from "./instance-runtime.js";
 import { InstanceRuntimeHost } from "./InstanceRuntimeHost.js";
 import { InstanceProvider, desktopMultiInstanceAvailable } from "./InstanceProvider.js";
-import { activeInstanceConnection, useInstances } from "./instances-context.js";
+import { ActiveInstanceConnectionProvider, activeInstanceConnection, useInstances } from "./instances-context.js";
 import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type PushSetting } from "./push.js";
 import { pickTopmost } from "./layers.js";
 import { useIsMobile } from "./components/useIsMobile.js";
@@ -298,7 +298,8 @@ export function Shell() {
   const conn = useStoreSelector((s) => s.conn);
   const authRequired = useStoreSelector((s) => s.authRequired);
   const offlineHeld = useConnectionLostFor(conn, 2000);
-  // The rail tile agrees with the banners below: it is never Online while one is shown (#1970).
+  // The rail tile and the Instances card agree with the banners below: neither is Online while one
+  // is shown (#1970, #2102).
   const connectionLost = useConnectionLost(conn);
   const instanceConnection = activeInstanceConnection({ conn, authRequired, connectionLost });
   useEffect(() => {
@@ -722,7 +723,7 @@ export function Shell() {
     </>
   ) : null;
 
-  return (
+  const shell = (
     <div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}>
       <Rail
         view={view}
@@ -733,7 +734,7 @@ export function Shell() {
         {...(isMobile ? {} : {
           // The desktop app's tile; the browser build keeps the brand (§4.1).
           instanceControl: desktopMultiInstance
-            ? <InstanceSelector connection={instanceConnection} labelled={railPreferences.labels} />
+            ? <InstanceSelector labelled={railPreferences.labels} />
             : undefined,
           settingsControl: <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />,
           onSearch: () => setPaletteOpen(true),
@@ -926,6 +927,8 @@ export function Shell() {
       )}
     </div>
   );
+  // The rail tile and the Instances card read the banner's truth from here, so they never disagree.
+  return <ActiveInstanceConnectionProvider value={instanceConnection}>{shell}</ActiveInstanceConnectionProvider>;
 }
 
 export function Header({

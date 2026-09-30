@@ -1,10 +1,11 @@
 import React, { useId, useRef, useState } from "react";
 import type { InstanceProfile } from "../desktop-instances.js";
 import {
+  activeInstanceStatusMeta,
   instanceAvailabilityMeta,
   instanceMonogram,
+  useActiveInstanceConnection,
   useInstances,
-  type ActiveInstanceConnection,
   type InstanceAvailability,
 } from "../instances-context.js";
 import type { StatusMeta } from "../status-meta.js";
@@ -12,7 +13,7 @@ import { ListIcon, PlusIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { RemoteInstanceDialog } from "./RemoteInstanceDialog.js";
-import { StatusBadge } from "./StatusBadge.js";
+import { StatusBadge, statusToneClass } from "./StatusBadge.js";
 
 /** The instance menu is a 300px flyout beside the rail (§9.1, #1970). */
 export const INSTANCE_MENU_WIDTH = 300;
@@ -20,44 +21,23 @@ export const INSTANCE_MENU_WIDTH = 300;
 /** The ancestors the flyout opens beside: the desktop rail, or the recovery shell's navigation. */
 const INSTANCE_MENU_BESIDE = ".app-rail, .instance-recovery-nav";
 
-/**
- * The active instance while the shell's banner says its connection is lost: hollow and neutral, as
- * Offline is (§11.2), so the tile never shows Online beside the banner.
- */
-const RECONNECTING: StatusMeta = { label: "Reconnecting…", tone: "neutral", pulse: false, hollow: true };
-const SIGN_IN_REQUIRED = instanceAvailabilityMeta("authentication-required");
-
 /** A status label as tooltip text, which is sentence case (§9.3): "Sign-In Required" → "Sign-in required". */
 function sentenceCase(label: string): string {
   return label.charAt(0) + label.slice(1).toLowerCase();
-}
-
-/** Written out in full so the stylesheet guard can see every tone class rendered. */
-function toneClass(meta: StatusMeta): string {
-  return meta.tone === "info" ? "t-info"
-    : meta.tone === "success" ? "t-success"
-      : meta.tone === "warning" ? "t-warning"
-        : meta.tone === "danger" ? "t-danger"
-          : "t-neutral";
 }
 
 /**
  * The current instance as a monogram tile (docs/design-system.md §4.1), and the menu that switches
  * it (§9.1). Desktop app only: in the browser build it renders nothing and the rail keeps its brand.
  *
- * `connection` is what the shell's banner says about the active instance; it wins over the status
- * the instance manager last recorded, which can still read Online for a moment after the socket
- * drops. `labelled` shows the name and status beside the tile, for a navigation wide enough to hold
- * them (the recovery shell's).
+ * What the shell's banner says about the active instance (`useActiveInstanceConnection`) wins over
+ * the status the instance manager last recorded, which can still read Online for a moment after the
+ * socket drops. `labelled` shows the name and status beside the tile, for a navigation wide enough
+ * to hold them (the recovery shell's).
  */
-export function InstanceSelector({
-  connection = null,
-  labelled = false,
-}: {
-  connection?: ActiveInstanceConnection | null;
-  labelled?: boolean;
-}) {
+export function InstanceSelector({ labelled = false }: { labelled?: boolean }) {
   const instances = useInstances();
+  const connection = useActiveInstanceConnection();
   const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "instance-selector-menu");
@@ -71,7 +51,7 @@ export function InstanceSelector({
   /** The status a row shows as text: only one that is known and is not Online. */
   const rowStatus = (profile: InstanceProfile): StatusMeta | null => {
     const current = profile.id === active.id;
-    if (current && connection) return connection === "reconnecting" ? RECONNECTING : SIGN_IN_REQUIRED;
+    if (current && connection) return activeInstanceStatusMeta(connection, activeAvailability);
     const availability = current ? activeAvailability : instances.statusByProfile[profile.id]?.availability ?? "saved";
     return availability === "online" || availability === "saved" ? null : instanceAvailabilityMeta(availability);
   };
@@ -136,7 +116,7 @@ export function InstanceSelector({
       >
         <span ref={tileRef} className="instance-monogram tile" aria-hidden="true">
           {instanceMonogram(active.label)}
-          <span className={`instance-tile-dot ${toneClass(tileStatus)}${tileStatus.hollow ? " hollow" : ""}`} />
+          <span className={`instance-tile-dot ${statusToneClass(tileStatus.tone)}${tileStatus.hollow ? " hollow" : ""}`} />
         </span>
         {labelled ? (
           <span className="instance-tile-text">

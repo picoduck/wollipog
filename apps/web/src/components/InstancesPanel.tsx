@@ -1,8 +1,13 @@
 import React, { useRef, useState } from "react";
 import type { InstanceProfile } from "../desktop-instances.js";
 import { relativeTime } from "../format.js";
-import { instanceAvailabilityMeta, useInstances } from "../instances-context.js";
-import { StatusBadge } from "./StatusBadge.js";
+import {
+  activeInstanceStatusMeta,
+  instanceAvailabilityMeta,
+  useActiveInstanceConnection,
+  useInstances,
+} from "../instances-context.js";
+import { StatusBadge, statusToneClass } from "./StatusBadge.js";
 import { CloseIcon, EditIcon, PlusIcon, RefreshIcon, UpdateIcon } from "./Icons.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { RemoteInstanceDialog } from "./RemoteInstanceDialog.js";
@@ -21,6 +26,7 @@ function lastConnected(value: string | undefined): string {
 
 export function InstancesPanel() {
   const instances = useInstances();
+  const activeConnection = useActiveInstanceConnection();
   const { confirm } = useFeedback();
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
@@ -77,21 +83,27 @@ export function InstancesPanel() {
           const active = profile.id === instances.activeProfile.id;
           const status = instances.statusByProfile[profile.id]?.availability
             ?? (active && instances.phase === "opening" ? "connecting" : "saved");
+          // The active card says what the banner and the rail tile say (#2102): the status recorded
+          // for it is kept only for remote profiles and can read Online after the socket drops.
+          const connection = active ? activeConnection : null;
+          const meta = connection ? activeInstanceStatusMeta(connection, status) : instanceAvailabilityMeta(status);
           const statusMessage = instances.statusByProfile[profile.id]?.message;
           const pending = Boolean(busy[profile.id]) || status === "connecting";
-          const needsRepair = status === "authentication-required" || status === "missing-credential";
+          const needsRepair = connection === "sign-in-required"
+            || status === "authentication-required" || status === "missing-credential";
+          const canRetry = active && (connection === "reconnecting" || status === "offline");
           return (
             <article
               key={profile.id}
-              className={`instance-card status-${status}${active ? " is-current" : ""}`}
+              className={`instance-card ${statusToneClass(meta.tone)}${active ? " is-current" : ""}`}
               aria-busy={pending || undefined}
             >
               <div className="instance-card-head">
                 <div className="instance-card-title">
-                  <span className={`instance-status-dot status-${status}`} aria-hidden="true" />
+                  <span className={`instance-status-dot ${statusToneClass(meta.tone)}${meta.hollow ? " hollow" : ""}`} aria-hidden="true" />
                   <h2>{profile.label}</h2>
                   {active && <StatusBadge tone="neutral" noDot label="Current" />}
-                  <StatusBadge meta={instanceAvailabilityMeta(status)} />
+                  <StatusBadge meta={meta} />
                 </div>
               </div>
               <dl className="instance-meta">
@@ -117,7 +129,7 @@ export function InstancesPanel() {
                     {pending ? "Switching…" : "Switch"}
                   </button>
                 )}
-                {active && status === "offline" && (
+                {canRetry && (
                   <button type="button" className="btn primary sm" disabled={pending} onClick={() => void run(profile.id, () => instances.retryActive())}>
                     <RefreshIcon />
                     <span>Retry</span>

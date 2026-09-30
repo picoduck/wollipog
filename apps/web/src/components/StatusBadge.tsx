@@ -82,6 +82,18 @@ export function StatusBadge({
   );
 }
 
+/**
+ * A tone's class, for a status dot drawn outside the badge (the instance tile and card). Written out
+ * in full so the stylesheet guard can see every tone class rendered.
+ */
+export function statusToneClass(tone: StatusTone): string {
+  return tone === "info" ? "t-info"
+    : tone === "success" ? "t-success"
+      : tone === "warning" ? "t-warning"
+        : tone === "danger" ? "t-danger"
+          : "t-neutral";
+}
+
 /** A count inside a status badge ("Answer Required 2"). The badge's accessible name says it in words. */
 export function StatusCount({ children }: { children: ReactNode }) {
   return <span className="status-count" aria-hidden="true">{children}</span>;

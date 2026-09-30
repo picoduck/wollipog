@@ -5,7 +5,11 @@ import { createApiClient } from "../api.js";
 import type { InstanceProfile, InstanceRegistrySnapshot } from "../desktop-instances.js";
 import { InstanceProvider } from "../InstanceProvider.js";
 import type { InstanceRuntime } from "../instance-runtime.js";
-import { useInstances, type ActiveInstanceConnection } from "../instances-context.js";
+import {
+  ActiveInstanceConnectionProvider,
+  useInstances,
+  type ActiveInstanceConnection,
+} from "../instances-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { InstanceSelector } from "../components/InstanceSelector.js";
 import { InstancesPanel } from "../components/InstancesPanel.js";
@@ -134,24 +138,26 @@ function Shell() {
   setHarnessConnection = setConnection;
   const { labels } = useRailPreferences();
   return (
-    <div className="app">
-      <Rail
-        view={{ name: "inbox" }}
-        blockedCount={0}
-        stalledCount={0}
-        onNavigate={() => undefined}
-        instanceControl={<InstanceSelector connection={connection} labelled={labels} />}
-        // The shell's own Settings item and page container, so captures show what production draws.
-        settingsControl={<SettingsTrigger active={false} onOpen={() => undefined} />}
-        onSearch={() => undefined}
-      />
-      <main className="main">
-        {connection && (instances.activeProfile.kind === "remote"
-          ? <RemoteInstanceBanner authenticationRequired={connection === "sign-in-required"} />
-          : <OfflineBanner connecting={false} onRetryNow={() => false} developmentBuild={false} />)}
-        <div className="main-body"><div className="page"><InstancesPanel /></div></div>
-      </main>
-    </div>
+    <ActiveInstanceConnectionProvider value={connection}>
+      <div className="app">
+        <Rail
+          view={{ name: "inbox" }}
+          blockedCount={0}
+          stalledCount={0}
+          onNavigate={() => undefined}
+          instanceControl={<InstanceSelector labelled={labels} />}
+          // The shell's own Settings item and page container, so captures show what production draws.
+          settingsControl={<SettingsTrigger active={false} onOpen={() => undefined} />}
+          onSearch={() => undefined}
+        />
+        <main className="main">
+          {connection && (instances.activeProfile.kind === "remote"
+            ? <RemoteInstanceBanner authenticationRequired={connection === "sign-in-required"} />
+            : connection === "reconnecting" && <OfflineBanner connecting={false} onRetryNow={() => false} developmentBuild={false} />)}
+          <div className="main-body"><div className="page"><InstancesPanel /></div></div>
+        </main>
+      </div>
+    </ActiveInstanceConnectionProvider>
   );
 }
 

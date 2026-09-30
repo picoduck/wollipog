@@ -1176,28 +1176,19 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* An Instances card's status: its badge's tone in the machine vocabulary (§11.2), and hollow when the
+   state is not known to be current (Offline, Reconnecting), so dot and badge never disagree (#2102). */
 .instance-status-dot {
   width: 8px;
   height: 8px;
   flex: none;
-  border-radius: 999px;
-  background: var(--text-faint);
+  border-radius: var(--radius-pill);
+  background: var(--tone);
   box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent);
 }
-.instance-status-dot.status-online {
-  background: var(--green);
-}
-.instance-status-dot.status-connecting {
-  background: var(--teal);
-  animation: pulse 1.2s ease-in-out infinite;
-}
-.instance-status-dot.status-offline,
-.instance-status-dot.status-incompatible {
-  background: var(--red);
-}
-.instance-status-dot.status-authentication-required,
-.instance-status-dot.status-missing-credential {
-  background: var(--amber);
+.instance-status-dot.hollow {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--tone), 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent);
 }
 .agent-icon {
   flex: none;
@@ -7490,13 +7481,10 @@ button.file-head.source-path-link {
   border-color: color-mix(in srgb, var(--teal) 45%, var(--border));
   box-shadow: inset 3px 0 0 color-mix(in srgb, var(--teal) 78%, transparent);
 }
-.instance-card.status-offline,
-.instance-card.status-incompatible {
-  border-color: color-mix(in srgb, var(--red) 35%, transparent);
-}
-.instance-card.status-authentication-required,
-.instance-card.status-missing-credential {
-  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+/* A card that needs the user is edged in its status's tone; Offline is neutral and keeps its edge. */
+.instance-card.t-warning,
+.instance-card.t-danger {
+  border-color: color-mix(in srgb, var(--tone) 45%, var(--border));
 }
 .instance-card-head,
 .instance-card-title,
