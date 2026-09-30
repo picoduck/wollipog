@@ -217,7 +217,11 @@ test("rows use the shared menu sizes, and the keyboard moves between them and ba
   // Add Remote Instance… opens the existing add dialog.
   await trigger.click();
   await menu.getByRole("menuitem", { name: "Add Remote Instance…" }).click();
-  await expect(page.getByRole("dialog", { name: "Add Remote Instance" })).toBeVisible();
+  const addDialog = page.getByRole("dialog", { name: "Add Remote Instance" });
+  await expect(addDialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(addDialog).toBeHidden();
+  await expect(trigger).toBeFocused();
 });
 
 test("pairs, switches, edits, re-pairs, persists, and removes remote instances", async ({ page }) => {

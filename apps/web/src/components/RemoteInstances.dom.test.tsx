@@ -143,6 +143,9 @@ test("the instance menu switches, adds and manages, and keeps focus on the tile"
     const cancel = Array.from(dialog!.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => button.textContent === "Cancel")!;
     await act(async () => { cancel.click(); await tick(); });
+    await act(async () => { await new Promise<void>((resolve) => domWindow.requestAnimationFrame(() => resolve())); await tick(); });
+    assert.ok(domWindow.document.activeElement === (trigger as never),
+      `closing the add dialog returns focus to the tile, not ${domWindow.document.activeElement?.outerHTML.slice(0, 80)}`);
 
     // Dismissing through the shared backdrop hands focus back to the tile: the backdrop takes
     // the click, so nothing underneath it would otherwise receive focus.

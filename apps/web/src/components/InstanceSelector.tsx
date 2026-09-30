@@ -83,7 +83,10 @@ export function InstanceSelector({
     if (profileId !== active.id) void instances.switchInstance(profileId);
   };
   const add = () => {
-    menu.close(true);
+    // Focus the tile now rather than through close(true), which restores it a frame later: the
+    // dialog records what held focus as it mounts, and must return to the tile, not to this row.
+    menu.triggerRef.current?.focus();
+    menu.close(false);
     setAdding(true);
   };
   const manage = () => {
