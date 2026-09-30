@@ -144,13 +144,14 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Browser End-to-End Tests
     runs-on: ubuntu-22.04
-    # Measured over the 77 runs of 2026-09-30, four shards took a median 14 minutes and at most 16.6
-    # (995 seconds, setup included): past the old fifteen-minute budget, which cancelled passing
-    # shards (#2067). Playwright already splits the suite evenly by test count, so a fifth shard is
-    # what shortens each one, to an expected 12 minutes at the slowest. Twenty keeps at least three
-    # minutes spare for a slow runner, and stays well below the old thirty so the next doubling of
-    # the suite is a loud failure rather than a creep towards the cap (#842).
-    timeout-minutes: 20
+    # Measured on 2026-09-30 over 310 passing jobs, four shards took a median 14 minutes and at most
+    # 16.6 (995 seconds, setup included): past the fifteen-minute budget, which cancelled shards
+    # whose tests had all passed (#2067). Playwright splits the suite by test count, not time, and
+    # the costliest files land in the last shard. With five, shards 1-4 took 8.6-12.6 minutes and
+    # shard 5 took 14.8 (890 seconds) on two different runners. Twenty-five keeps ten minutes spare
+    # for a slow runner, and stays below the old thirty so a doubling of the suite is a loud failure
+    # rather than a creep towards the cap (#842).
+    timeout-minutes: 25
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be
