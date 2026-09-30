@@ -1731,6 +1731,19 @@ kbd {
   border-color: color-mix(in srgb, currentColor 30%, transparent);
   border-top-color: currentColor;
 }
+/* Forced colors (#2130) replaces --text-faint and the secondary fill with the system's button colours,
+   so an `aria-disabled` button would read as enabled. Author system colours survive forcing, so
+   disabled names the system's own "unavailable" ink for text and edge, as the timeline's unavailable
+   actions do. Busy is running, not unavailable, so it keeps the button ink. The solid danger's
+   disabled edge is set at a heavier selector, so it is named again at that weight. */
+@media (forced-colors: active) {
+  .btn:disabled,
+  .btn[aria-disabled="true"]:not([aria-busy="true"]),
+  .btn.danger:not(.ghost):is(:disabled, [aria-disabled="true"]):not([aria-busy="true"]) {
+    color: GrayText;
+    border-color: GrayText;
+  }
+}
 /* §3.2 Split button: a primary action and the menu of its alternatives as one control. The two
    `.btn`s join on one shared edge. `:where()` keeps the recipe at a single class's weight, so a
    component can size its segments without fighting it. */

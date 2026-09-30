@@ -12,8 +12,9 @@ import "../styles.css";
  * `?surface=buttons` (the default) renders every variant at every size between two neighbours;
  * pressing one makes it busy and it stays busy, so a spec can measure the same element idle and busy.
  * `?surface=toast&toast=install|undo` shows one toast whose action never finishes, and
- * `?surface=confirm` opens a confirmation whose confirm action never finishes. `?theme=light`
- * switches theme. Chosen by query string so every state is a clean reload.
+ * `?surface=confirm` opens a confirmation whose confirm action never finishes. `?surface=states`
+ * (#2130) renders every variant enabled, `disabled`, `aria-disabled` and busy side by side.
+ * `?theme=light` switches theme. Chosen by query string so every state is a clean reload.
  */
 
 const never = () => new Promise<void>(() => undefined);
@@ -48,6 +49,23 @@ function Buttons() {
           <button className={`btn ${sizeClass}`} type="button" data-neighbour="after">After</button>
         </div>
       )))}
+    </div>
+  );
+}
+
+function States() {
+  return (
+    <div className="button-states-fixture" style={{ display: "grid", gap: 16, padding: 24 }}>
+      {VARIANTS.map(([name, variant]) => {
+        const className = `btn ${variant}`.trim();
+        return (
+          <div className="actions" key={name} data-variant={name}>
+            <button className={className} type="button" data-state="enabled">{name}</button>
+            <button className={className} type="button" data-state="disabled" disabled>{name}</button>
+            <button className={className} type="button" data-state="aria-disabled" aria-disabled="true">{name}</button>
+            <BusyButton className={className} busy progress={`${name} is running…`} data-state="busy">{name}</BusyButton>          </div>
+        );
+      })}
     </div>
   );
 }
@@ -87,7 +105,8 @@ function Harness() {
     <FeedbackProvider>
       {surface === "toast" ? <Toast kind={params.get("toast") === "undo" ? "undo" : "install"} />
         : surface === "confirm" ? <Confirm />
-          : <Buttons />}
+          : surface === "states" ? <States />
+            : <Buttons />}
     </FeedbackProvider>
   );
 }

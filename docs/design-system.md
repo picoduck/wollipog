@@ -515,8 +515,8 @@ States
 | Pressed | `--bg-elev-3` (primary: `--primary-bg-active`; danger: `--danger-bg-hover`). The secondary button's pressed fill equals its hover fill; press feedback there is the pointer, not a third gray. |
 | Selected / on (toggle buttons) | `--bg-elev-3` fill **plus a 1px `--control-outline` edge** (icon buttons: an inset edge), `aria-pressed="true"`, and an icon or label change. The edge is what separates "on" from "hovered": with one fill for both, a toggle that is on looks hovered. |
 | Focus | 2px `--focus` ring, 2px offset (§16.1). |
-| Disabled | Text `--text-faint`, fill unchanged, no hover, `cursor: not-allowed`. No opacity. A disabled control that the user would reasonably expect to work shows its reason as visible text next to it (§8.6), never only in `title`. |
-| Busy | Label stays; a 14px spinner replaces the leading icon (or is prepended); the button keeps its width (`min-width` locked on press). |
+| Disabled | Text `--text-faint`, fill unchanged, no hover, `cursor: not-allowed`. No opacity. In forced colors, text and edge are `GrayText`, for `disabled` and `aria-disabled="true"` alike. A disabled control that the user would reasonably expect to work shows its reason as visible text next to it (§8.6), never only in `title`. |
+| Busy | Label stays; a 14px spinner replaces the leading icon (or is prepended); the button keeps its width (`min-width` locked on press). In forced colors it keeps the enabled button ink, not `GrayText`. |
 
 Busy is one component, `BusyButton` (`apps/web/src/components/ui/BusyButton.tsx`). It locks the
 button to the width it had just before it became busy; a prepended spinner takes its room from the
