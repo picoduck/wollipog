@@ -1440,6 +1440,9 @@ export class SessionsService {
   private readonly rehydrate = new Set<string>();
   /** Bound v54 history/index work to one page chain per runner. */
   private readonly runnerHydrationTails = new Map<string, Promise<void>>();
+  /** Carry an interrupted pass's before-views into its replacement so resolved-request wakeups
+   * are not lost when some snapshots committed before the old socket disappeared. */
+  private readonly registrationAttention = new Map<string, Map<string, SessionView>>();
   private readonly promptOutbox: SessionPromptOutbox;
   /** Process-local epochs fence late initial/manual results. Durable title/source checks provide
    * the cross-restart fence, so an abandoned request can never overwrite newer state. */
@@ -12437,125 +12440,216 @@ export class SessionsService {
    * runner sends snapshots; event timelines are then fetched lazily via hydrateHistory().
    */
   hydrateRunnerSessions(runnerId: string, snapshots: SessionSnapshot[]): void {
+    for (const _ of this.runnerSessionHydrationSteps(runnerId, snapshots)) { /* synchronous callers */ }
+  }
+
+  /** Socket registration uses this bounded drain; a superseded connection cannot finish an
+   * inventory or write its remaining snapshots. No transaction is held across an event-loop yield. */
+  async hydrateRunnerSessionsCooperatively(
+    runnerId: string,
+    snapshots: SessionSnapshot[],
+    options: { isCurrent: () => boolean; yieldToLoop?: () => Promise<void> },
+  ): Promise<boolean> {
+    const started = performance.now();
+    let batches = 0;
+    let maxBatchMs = 0;
+    let affectedCampaigns = 0;
+    const reconciliationId = randomUUID();
+    const diagnostic = (event: string) => this.log.info(JSON.stringify({
+      event, entryPoint: "runner_socket", runnerId, reconciliationId, snapshotCount: snapshots.length,
+      batches, snapshotBatchLimit: 32, affectedCampaigns, maxBatchMs: Math.round(maxBatchMs),
+      durationMs: Math.round(performance.now() - started),
+    }));
+    const steps = this.runnerSessionHydrationSteps(runnerId, snapshots, (count) => { affectedCampaigns = count; });
+    diagnostic("runner_reconciliation_started");
+    try {
+      while (options.isCurrent()) {
+        const batchStarted = performance.now();
+        const step = steps.next();
+        maxBatchMs = Math.max(maxBatchMs, performance.now() - batchStarted);
+        if (step.done) {
+          diagnostic("runner_reconciliation_completed");
+          return true;
+        }
+        batches++;
+        await (options.yieldToLoop?.() ?? new Promise<void>((resolve) => setImmediate(resolve)));
+      }
+      diagnostic("runner_reconciliation_cancelled");
+      return false;
+    } catch (error) {
+      diagnostic("runner_reconciliation_failed");
+      throw error;
+    } finally {
+      steps.return();
+    }
+  }
+
+  private *runnerSessionHydrationSteps(
+    runnerId: string, snapshots: SessionSnapshot[], onCampaignCount?: (count: number) => void,
+  ): Generator<void, void> {
     const now = Date.now();
     const byId = new Set(snapshots.map((s) => s.id));
+    const versions = this.db.runnerSessionReconciliationVersions(runnerId);
+    const absentIds = [...versions.keys()].filter((id) => !byId.has(id));
+    const tombstoneIds = this.db.prunableTombstoneIds(runnerId);
+    const changedSinceInventory = (id: string) =>
+      (versions.get(id) ?? null) !== this.db.sessionReconciliationVersion(id);
+    const recordAppliedVersion = (id: string) => {
+      const version = this.db.sessionReconciliationVersion(id);
+      if (version) versions.set(id, version);
+    };
     const duplicateSnapshotIds = new Set<string>();
     const seenSnapshotIds = new Set<string>();
     for (const { id } of snapshots) {
       if (seenSnapshotIds.has(id)) duplicateSnapshotIds.add(id);
       seenSnapshotIds.add(id);
     }
-    const stopIntentIds = new Set(this.db.sessionStopIntentIds(runnerId));
-    // Retained terminal sessions dominate reconnect snapshots. Their reconciliation is normally
-    // read-only outside updateSessionFromSnapshot, but committing every unchanged row separately
-    // can block the event loop long enough to miss the runner heartbeat on a large durable cache.
-    // Batch only sessions with no stop, workflow-decision, hook, or policy-resume obligations;
-    // everything with live service-level work remains on the exact per-session path below.
-    const terminalBatch = snapshots.flatMap((snap, snapshotIndex) => {
-      if (!isTerminal(snap.status) || duplicateSnapshotIds.has(snap.id) ||
-          stopIntentIds.has(snap.id) || this.db.isTombstoned(snap.id)) return [];
-      const existing = this.db.getSession(snap.id);
-      if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) ||
-          this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
-          this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
-          this.db.hasOpenRestartNotices(snap.id) ||
-          this.db.listOpenPolicyHookApprovals(snap.id).length > 0 ||
-          this.db.policyResumeStatus(snap.id) !== null) return [];
-      return [{ snap, snapshotIndex, campaignBefore: this.campaignAttentionController(existing) }];
-    });
-    const terminalBatchIndexes = new Set(terminalBatch.map(({ snapshotIndex }) => snapshotIndex));
-    const terminalHistories = this.db.updateSessionsFromSnapshots(terminalBatch.map(({ snap }) => snap), now);
-    for (const [index, { snap, campaignBefore }] of terminalBatch.entries()) {
-      if (terminalHistories[index]?.reset) {
-        const reset = this.db.getSession(snap.id)!;
-        this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
-        if (snap.seq > 0) this.rehydrate.add(snap.id);
-      }
-      this.gateOnPolicy(snap.id, now);
-      this.restorePendingWorkflowDecisionCards(snap.id);
-      this.hub.sessionChangedById(snap.id);
-      this.publishCampaignAttentionTransition(campaignBefore);
+    // Capture the first before-view once per campaign. Publishing after every retained child
+    // rescans the entire campaign and retries the same durable events quadratically (#2125).
+    let campaigns = this.registrationAttention.get(runnerId);
+    if (!campaigns) {
+      campaigns = new Map<string, SessionView>();
+      this.registrationAttention.set(runnerId, campaigns);
     }
-    for (const [snapshotIndex, snap] of snapshots.entries()) {
-      if (terminalBatchIndexes.has(snapshotIndex)) continue;
-      // A session the user deleted must not be recreated — re-issue the delete to the (now online)
-      // runner and skip it. The tombstone is pruned below once the box stops reporting the id.
-      if (this.db.isTombstoned(snap.id)) {
-        this.hub.sendToRunner(runnerId, { type: "delete_session", sessionId: snap.id });
-        continue;
+    const parents = new Map<string, SessionView | null>();
+    const campaignBefore = (session: SessionView | null): SessionView | null => {
+      if (!session?.parentSessionId) return null;
+      let controller = parents.get(session.parentSessionId);
+      if (controller === undefined) {
+        controller = this.campaignAttentionController(session);
+        parents.set(session.parentSessionId, controller);
       }
-      const existing = this.db.getSession(snap.id);
-      const campaignBefore = this.campaignAttentionController(existing);
-      if (existing?.archived && !isTerminal(snap.status) && !stopIntentIds.has(snap.id)) {
-        this.requestStop(existing, now, true);
-        continue;
-      }
-      if (stopIntentIds.has(snap.id)) {
-        const restartLaunchId = this.db.sessionStopRestartLaunchId(snap.id);
-        if (restartLaunchId && snap.controlPlaneLaunchId === restartLaunchId) {
-          this.db.removeSessionStopIntent(snap.id);
-        } else if (!restartLaunchId && isTerminal(snap.status)) {
-          this.settleStopIntent(snap.id, now, "runner_terminal");
-        } else {
-          // Fence runner-authoritative hydration until the durable stop is re-applied. In
-          // particular, never replace the CP's stopped status with this still-live snapshot.
-          this.db.updateSessionStatus(snap.id, "stopped", now, { cause: "requested" });
-          if (!isTerminal(snap.status)) {
-            this.sendStopCommand(runnerId, snap.id);
-          }
-          this.hub.sessionChangedById(snap.id);
-          this.publishCampaignAttentionTransition(campaignBefore);
-          continue;
-        }
-      }
-      if (existing) {
-        // Only the owning runner may mutate an existing session row.
-        if (existing.runnerId !== runnerId) {
-          this.log.warn(`runner ${runnerId} sent a snapshot for ${snap.id} owned by ${existing.runnerId} — ignored`);
-          continue;
-        }
-        if (isTerminal(snap.status)) {
-          this.revokeUnconsumedWorkflowDecisionsForSession(snap.id, "provider-session-ended");
-          this.abortPolicyHookApprovals(existing, now, "provider-session-ended");
-          this.db.clearPolicyResumeStatus(snap.id);
-        } else if (snap.status === "idle" && this.db.listOpenPolicyHookApprovals(snap.id).length > 0) {
-          // Runner startup removes the hook process before publishing its authoritative idle
-          // snapshot. The old invocation cannot resume, so never resurrect its durable card.
-          this.abortPolicyHookApprovals(existing, now, "provider-session-inactive");
-          this.db.clearPolicyResumeStatus(snap.id);
-        } else if (snap.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
-          this.db.notePolicyResumeStatus(snap.id, "idle");
-        } else if (snap.status !== "idle") {
-          this.db.clearPolicyResumeStatus(snap.id);
-        }
-        const history = this.db.updateSessionFromSnapshot(snap.id, snap, now);
-        if (history?.reset) {
+      if (controller && !campaigns.has(controller.id)) campaigns.set(controller.id, controller);
+      onCampaignCount?.(campaigns.size);
+      return controller;
+    };
+    // Chunk both eligibility reads and transactions, not just the final publications. All stop
+    // and ownership checks are refreshed after yielding, so UI actions remain authoritative.
+    for (let offset = 0; offset < snapshots.length; offset += 32) {
+      const chunk = snapshots.slice(offset, offset + 32);
+      const stopIntentIds = new Set(this.db.sessionStopIntentIds(runnerId));
+      // Retained terminal sessions dominate reconnect snapshots. Their reconciliation is normally
+      // read-only outside updateSessionFromSnapshot, but committing every unchanged row separately
+      // can block the event loop long enough to miss the runner heartbeat on a large durable cache.
+      // Batch only sessions with no stop, workflow-decision, hook, or policy-resume obligations;
+      // everything with live service-level work remains on the exact per-session path below.
+      const terminalBatch = chunk.flatMap((snap, snapshotIndex) => {
+        if (!isTerminal(snap.status) || duplicateSnapshotIds.has(snap.id) ||
+            stopIntentIds.has(snap.id) || this.db.isTombstoned(snap.id) || changedSinceInventory(snap.id)) return [];
+        const existing = this.db.getSession(snap.id);
+        if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) ||
+            this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
+            this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
+            this.db.hasOpenRestartNotices(snap.id) ||
+            this.db.listOpenPolicyHookApprovals(snap.id).length > 0 ||
+            this.db.policyResumeStatus(snap.id) !== null) return [];
+        campaignBefore(existing);
+        return [{ snap, snapshotIndex }];
+      });
+      const terminalBatchIndexes = new Set(terminalBatch.map(({ snapshotIndex }) => snapshotIndex));
+      const terminalHistories = this.db.updateSessionsFromSnapshots(terminalBatch.map(({ snap }) => snap), now);
+      for (const [index, { snap }] of terminalBatch.entries()) {
+        if (terminalHistories[index]?.reset) {
           const reset = this.db.getSession(snap.id)!;
           this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
           if (snap.seq > 0) this.rehydrate.add(snap.id);
         }
-      } else {
-        this.db.createSessionFromSnapshot(snap, runnerId, now);
+        this.gateOnPolicy(snap.id, now);
+        this.restorePendingWorkflowDecisionCards(snap.id);
+        this.hub.sessionChangedById(snap.id);
+        recordAppliedVersion(snap.id);
       }
-      // A provisional disconnect clears projected cards while durable policy state survives.
-      // Hydration is the settle-like moment that re-derives guardrails and restores typed cards.
-      // gateOnPolicy is idempotent and no-ops when a runner card holds the slot or nothing is tripped.
-      this.gateOnPolicy(snap.id, now);
-      this.restorePendingWorkflowDecisionCards(snap.id);
-      this.deliverHeldWorkflowDecisionResumes(snap.id, now);
-      this.deliverHeldRestartNotices(snap.id, now);
-      this.hub.sessionChangedById(snap.id);
-      this.publishCampaignAttentionTransition(campaignBefore);
+      for (const [snapshotIndex, snap] of chunk.entries()) {
+        if (terminalBatchIndexes.has(snapshotIndex)) continue;
+        // A session the user deleted must not be recreated — re-issue the delete to the (now online)
+        // runner and skip it. The tombstone is pruned below once the box stops reporting the id.
+        if (this.db.isTombstoned(snap.id)) {
+          this.hub.sendToRunner(runnerId, { type: "delete_session", sessionId: snap.id });
+          continue;
+        }
+        // HTTP answers/config changes/restarts can happen during an event-loop yield. A snapshot
+        // captured before those actions has no authority to restore an old ask or launch state.
+        if (changedSinceInventory(snap.id)) continue;
+        const existing = this.db.getSession(snap.id);
+        campaignBefore(existing);
+        if (existing?.archived && !isTerminal(snap.status) && !stopIntentIds.has(snap.id)) {
+          this.requestStop(existing, now, true);
+          recordAppliedVersion(snap.id);
+          continue;
+        }
+        if (stopIntentIds.has(snap.id)) {
+          const restartLaunchId = this.db.sessionStopRestartLaunchId(snap.id);
+          if (restartLaunchId && snap.controlPlaneLaunchId === restartLaunchId) {
+            this.db.removeSessionStopIntent(snap.id);
+          } else if (!restartLaunchId && isTerminal(snap.status)) {
+            this.settleStopIntent(snap.id, now, "runner_terminal");
+          } else {
+            // Fence runner-authoritative hydration until the durable stop is re-applied. In
+            // particular, never replace the CP's stopped status with this still-live snapshot.
+            this.db.updateSessionStatus(snap.id, "stopped", now, { cause: "requested" });
+            if (!isTerminal(snap.status)) {
+              this.sendStopCommand(runnerId, snap.id);
+            }
+          this.hub.sessionChangedById(snap.id);
+          recordAppliedVersion(snap.id);
+          continue;
+          }
+        }
+        if (existing) {
+          // Only the owning runner may mutate an existing session row.
+          if (existing.runnerId !== runnerId) {
+            this.log.warn(`runner ${runnerId} sent a snapshot for ${snap.id} owned by ${existing.runnerId} — ignored`);
+            continue;
+          }
+          if (isTerminal(snap.status)) {
+            this.revokeUnconsumedWorkflowDecisionsForSession(snap.id, "provider-session-ended");
+            this.abortPolicyHookApprovals(existing, now, "provider-session-ended");
+            this.db.clearPolicyResumeStatus(snap.id);
+          } else if (snap.status === "idle" && this.db.listOpenPolicyHookApprovals(snap.id).length > 0) {
+            // Runner startup removes the hook process before publishing its authoritative idle
+            // snapshot. The old invocation cannot resume, so never resurrect its durable card.
+            this.abortPolicyHookApprovals(existing, now, "provider-session-inactive");
+            this.db.clearPolicyResumeStatus(snap.id);
+          } else if (snap.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
+            this.db.notePolicyResumeStatus(snap.id, "idle");
+          } else if (snap.status !== "idle") {
+            this.db.clearPolicyResumeStatus(snap.id);
+          }
+          const history = this.db.updateSessionFromSnapshot(snap.id, snap, now);
+          if (history?.reset) {
+            const reset = this.db.getSession(snap.id)!;
+            this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
+            if (snap.seq > 0) this.rehydrate.add(snap.id);
+          }
+        } else {
+          this.db.createSessionFromSnapshot(snap, runnerId, now);
+        }
+        // A provisional disconnect clears projected cards while durable policy state survives.
+        // Hydration is the settle-like moment that re-derives guardrails and restores typed cards.
+        // gateOnPolicy is idempotent and no-ops when a runner card holds the slot or nothing is tripped.
+        this.gateOnPolicy(snap.id, now);
+        this.restorePendingWorkflowDecisionCards(snap.id);
+        this.deliverHeldWorkflowDecisionResumes(snap.id, now);
+        this.deliverHeldRestartNotices(snap.id, now);
+        this.hub.sessionChangedById(snap.id);
+        recordAppliedVersion(snap.id);
+      }
+      yield;
     }
     // A session the runner no longer holds has ended for good, whatever its stored status says: a
     // disconnect or startup settlement stopped it provisionally, or an explicit Stop was cut off
     // before it revoked. Nothing will restore it, so it can answer nothing: its unconsumed
     // decisions are revoked and it owes no resume (#1759). A live absent session is ended below.
-    this.endAbsentWorkflowDecisionWork(runnerId, (sessionId) => !byId.has(sessionId));
-    for (const s of this.db.listSessions({ includeArchived: true })) {
+    // Capture ids before the first yield, then refresh rows at each step boundary. Sessions and
+    // deletion intents created by HTTP requests during registration are not part of its inventory.
+    for (const id of absentIds) {
+      yield;
+      const s = this.db.getSession(id);
+      if (!s || changedSinceInventory(id)) continue;
       if (s.runnerId === runnerId && !byId.has(s.id)) {
-        const campaignBefore = this.campaignAttentionController(s);
-        if (stopIntentIds.has(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
+        campaignBefore(s);
+        if (this.db.hasSessionStopIntent(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
+        if (isTerminal(s.status)) this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
         const hadOpenHookApproval = this.db.listOpenPolicyHookApprovals(s.id).length > 0;
         if (hadOpenHookApproval) {
           this.abortPolicyHookApprovals(s, now, "provider-session-absent");
@@ -12570,13 +12664,19 @@ export class SessionsService {
         }
         if (hadOpenHookApproval || !isTerminal(s.status)) {
           this.hub.sessionChangedById(s.id);
-          this.publishCampaignAttentionTransition(campaignBefore);
         }
       }
     }
+    for (const before of campaigns.values()) {
+      yield;
+      this.publishCampaignAttentionTransition(before);
+      campaigns.delete(before.id);
+    }
+    this.registrationAttention.delete(runnerId);
     // The box no longer reports these ordinary user-delete tombstones -> the delete took. Fork
     // cleanup tombstones are intentionally retained because a timed-out fork may appear later.
-    for (const id of this.db.prunableTombstoneIds(runnerId)) {
+    for (const id of tombstoneIds) {
+      yield;
       if (!byId.has(id)) this.db.removeTombstone(id);
     }
     // Catch the transcript SEARCH index up in the background: timelines hydrate lazily on

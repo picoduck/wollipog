@@ -9,6 +9,9 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, type SessionSnapshot } from "@wollipog/protocol";
+import { DatabaseSync } from "node:sqlite";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import { MAX_RUNNER_CLIENT_MESSAGE_BYTES, MAX_RUNNER_CONNECTIONS_PER_IP } from "./runner-channel.js";
@@ -22,6 +25,8 @@ interface StrictSocket {
   readyState: number;
   send(data: string | Buffer): void;
   close(): void;
+  ping(): void;
+  once(event: "pong", listener: () => void): void;
   on(event: "message", listener: (data: Buffer) => void): void;
   once(event: "open", listener: () => void): void;
   once(event: "error", listener: (error: Error) => void): void;
@@ -52,6 +57,107 @@ async function openSocket(url: string): Promise<StrictSocket> {
 function runnerToken(index: number): string {
   return `wollipogr_${String(index).padStart(43, "a")}`;
 }
+
+test("1000 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 60_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-reconcile-responsive-"));
+  const databasePath = join(temp, "control-plane.db");
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  const frame = JSON.parse(registerFrame(555));
+  const runnerId = frame.runner.runnerId as string;
+  seed.issueRunnerCredential({ credentialId: "rcred_reconcile_responsiveness_test", runnerId,
+    organizationId: identity.organizationId, ownerKind: "organization", ownerId: identity.organizationId,
+    label: "Synthetic", tokenHash: hashToken(runnerToken(555)), createdByUserId: identity.userId,
+    now: Date.now(), expiresAt: Date.now() + 120_000 });
+  seed.registerRunner(frame.runner, 1, PROTOCOL_VERSION);
+  const base = { runnerId, workspaceId: "ws", agentId: "claude", title: "Synthetic",
+    driver: "claude-code" as const, useWorktree: false, config: {}, now: 1 };
+  for (let i = 0; i < 10; i++) seed.createSession({ ...base, id: `campaign-${i}`,
+    orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") });
+  const snapshots: SessionSnapshot[] = [];
+  for (let i = 0; i < 1000; i++) {
+    const id = `child-${i}`;
+    seed.createSession({ ...base, id, parentSessionId: `campaign-${i % 10}` });
+    seed.updateSessionStatus(id, "completed", 2);
+    snapshots.push({ id, workspaceId: "ws", agentId: "claude", title: "Synthetic", status: "completed",
+      driver: "claude-code", useWorktree: false, worktreePath: null, config: {}, preview: null,
+      pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 });
+  }
+  seed.close();
+  let output = "";
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
+    cwd: REPO_ROOT, env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1",
+      CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath },
+    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
+  child.stdout?.on("data", (chunk) => { output = (output + String(chunk)).slice(-128_000); });
+  child.stderr?.on("data", (chunk) => { output = (output + String(chunk)).slice(-128_000); });
+  const sockets: StrictSocket[] = [];
+  let read: DatabaseSync | undefined;
+  t.after(async () => {
+    for (const socket of sockets) if (socket.readyState < 2) socket.close();
+    await stopChild(child);
+    read?.close();
+    rmSync(temp, { recursive: true, force: true });
+  });
+  const url = `http://127.0.0.1:${port}`;
+  await waitForHealth(url, child, () => output);
+  read = new DatabaseSync(databasePath, { readOnly: true });
+  let maxHealthMs = 0;
+  let maxPongMs = 0;
+  for (let pass = 0; pass < 3; pass++) {
+    const socket = await openSocket(`ws://127.0.0.1:${port}/runner`);
+    sockets.push(socket);
+    const registered = new Promise<void>((resolvePromise) => socket.on("message", (raw) => {
+      if (JSON.parse(raw.toString()).type === "registered") resolvePromise();
+    }));
+    socket.send(JSON.stringify({ ...frame, sessionSnapshots: snapshots }));
+    await registered;
+    const credentialHandshake = new Promise<void>((resolvePromise, reject) => {
+      const timer = setTimeout(() => reject(new Error("Agent Control handshake stalled during inventory")), 2000);
+      socket.on("message", (raw) => {
+        const message = JSON.parse(raw.toString());
+        if (message.type !== "agent_control_credential_registered") return;
+        clearTimeout(timer);
+        assert.equal(message.accepted, true);
+        resolvePromise();
+      });
+    });
+    socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "child-999", tokenHash: "a".repeat(64) }));
+    await credentialHandshake;
+    // A live update arriving during the inventory must win, even on a replacement socket.
+    socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot: {
+      ...snapshots[999], title: `Live ${pass}`, updatedAt: 3 + pass,
+    } }));
+    for (let sample = 0; sample < (pass === 0 ? 1 : 10); sample++) {
+      const start = performance.now();
+      const pong = new Promise<void>((resolvePromise, reject) => {
+        const timer = setTimeout(() => reject(new Error(`pong exceeded 2s during reconciliation\n${output}`)), 2000);
+        socket.once("pong", () => { clearTimeout(timer); maxPongMs = Math.max(maxPongMs, performance.now() - start); resolvePromise(); });
+      });
+      socket.ping();
+      socket.send(JSON.stringify({ type: "heartbeat" }));
+      const [response] = await Promise.all([
+        fetch(`${url}/healthz`, { signal: AbortSignal.timeout(2000) }), pong,
+      ]);
+      assert.equal(response.status, 200);
+      maxHealthMs = Math.max(maxHealthMs, performance.now() - start);
+    }
+    if (pass === 0) continue; // replace a still-reconciling socket, not just a settled runner
+    for (let attempt = 0; attempt < 400; attempt++) {
+      if (read.prepare("SELECT title FROM sessions WHERE id='child-999'").get()?.title === `Live ${pass}`) break;
+      await delay(25);
+    }
+    assert.equal(read.prepare("SELECT title FROM sessions WHERE id='child-999'").get()?.title, `Live ${pass}`);
+  }
+  assert.ok(maxHealthMs < 2000, `health latency ${maxHealthMs}ms`);
+  assert.ok(maxPongMs < 2000, `heartbeat latency ${maxPongMs}ms`);
+  t.diagnostic(`Three registrations: max HTTP ${Math.round(maxHealthMs)}ms, max pong ${Math.round(maxPongMs)}ms`);
+  assert.match(output, /runner_reconciliation_completed/);
+  assert.match(output, /runner_reconciliation_cancelled/);
+  assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
+});
 
 function registerFrame(index: number): string {
   return JSON.stringify({

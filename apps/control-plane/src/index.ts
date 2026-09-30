@@ -26,6 +26,7 @@ import {
   RunnerConnectionLimits,
   runnerAuthTimeoutMs,
 } from "./runner-channel.js";
+import { RunnerFrameQueue, runnerFrameBypassesInventory } from "./runner-frame-queue.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
 import { legacyPeerWorktreeRetirement } from "./worktree-retirement.js";
@@ -1091,10 +1092,7 @@ app.register(async (instance) => {
     terminate: () => socket.terminate(),
   };
 
-  socket.on("message", (raw: Buffer) => {
-    const msg = parseMessage<RunnerToControlPlane>(raw.toString());
-    if (!msg) return;
-
+  const handleRunnerFrame = async (msg: RunnerToControlPlane) => {
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) or a
     // transient persistence error must not escape this listener: an uncaught throw here becomes a
     // fatal uncaughtException that drops EVERY runner/session/dashboard connection. Isolate the
@@ -1208,7 +1206,14 @@ app.register(async (instance) => {
         // Phase 2: hydrate from the box's session snapshots (the source of truth) when present —
         // this subsumes reconcile and lets a dashboard see sessions it didn't create. Fall back to
         // reconcile for pre-Phase-2 runners.
-        if (msg.sessionSnapshots) svc.hydrateRunnerSessions(runnerId, msg.sessionSnapshots);
+        if (msg.sessionSnapshots) {
+          const completed = await svc.hydrateRunnerSessionsCooperatively(runnerId, msg.sessionSnapshots, {
+            isCurrent: () => Boolean(runnerId && socket.readyState === 1 &&
+              hub.isCurrentRunnerSocket(runnerId, runnerClient) && credentialId &&
+              db.isRunnerCredentialActive(runnerId, credentialId)),
+          });
+          if (!completed) return;
+        }
         else svc.reconcileRunnerSessions(runnerId, msg.liveSessions ?? []);
         svc.reconcileArchivedCampaignWorktrees(runnerId);
         svc.recoverWorkflowRunner(runnerId);
@@ -1221,11 +1226,8 @@ app.register(async (instance) => {
         // Registration completes with the machine's authoritative desired skill set so a fresh
         // (or reconnected) runner converges without waiting for the next library mutation.
         pushSkillsSync(runnerId);
-        // Registration reconciliation is synchronous and can legitimately outlast a heartbeat
-        // interval on a runner with many live sessions. The runner starts heartbeats as soon as it
-        // receives `registered`, but those frames cannot be handled until this callback yields.
-        // Refresh liveness at that yield boundary so the sweep measures silence after registration,
-        // rather than charging the runner for time the control plane spent reconciling its state.
+        // Heartbeats bypass the bounded FIFO during cooperative registration. Refresh once more
+        // at completion; live frames following the inventory are applied afterward, in order.
         db.touch(runnerId, Date.now());
         app.log.info(
           `runner online: ${runnerId} (${msg.runner.hostname}, ${msg.runner.os}) ` +
@@ -1646,9 +1648,25 @@ app.register(async (instance) => {
         /* socket already tearing down */
       }
     }
+  };
+
+  const frameQueue = new RunnerFrameQueue<RunnerToControlPlane>(handleRunnerFrame, () => {
+    app.log.warn({ event: "runner_frame_queue_closed", entryPoint: "runner_socket", runnerId },
+      "runner replay exceeded its bounded queue or failed");
+    socket.terminate();
+  });
+  socket.on("message", (raw: Buffer) => {
+    const msg = parseMessage<RunnerToControlPlane>(raw.toString());
+    if (!msg) return;
+    // Validate both on arrival and at application time; neither unauthenticated nor replaced
+    // sockets can accumulate messages that later gain authority.
+    if (msg.type !== "register" && (!runnerId || !hub.isCurrentRunnerSocket(runnerId, runnerClient))) return;
+    if (runnerFrameBypassesInventory(msg.type)) void handleRunnerFrame(msg);
+    else frameQueue.enqueue(msg, raw.byteLength);
   });
 
   const onGone = () => {
+    frameQueue.close();
     if (authenticationTimer) {
       clearTimeout(authenticationTimer);
       authenticationTimer = undefined;

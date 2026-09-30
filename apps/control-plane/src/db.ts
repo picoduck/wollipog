@@ -12430,6 +12430,23 @@ export class ControlPlaneDb {
 
   /* ----------------------------- Sessions -------------------------------- */
 
+  /** Optimistic fences for HTTP mutations while registration yields. These are process-local
+   * comparisons, not durable snapshot identities; never expose the pending-request contents. */
+  private sessionReconciliationRows(kind: "runner" | "session", id: string): Array<{ id: string }> {
+    return this.stmt(`SELECT id,status,updated_at,pending_approval,model,effort,service_tier,
+      permission_mode,archived,event_epoch FROM sessions WHERE ${kind === "runner" ? "runner_id" : "id"}=?`)
+      .all(id) as Array<{ id: string }>;
+  }
+
+  runnerSessionReconciliationVersions(runnerId: string): Map<string, string> {
+    return new Map(this.sessionReconciliationRows("runner", runnerId).map((row) => [row.id, JSON.stringify(row)]));
+  }
+
+  sessionReconciliationVersion(sessionId: string): string | null {
+    const row = this.sessionReconciliationRows("session", sessionId)[0];
+    return row ? JSON.stringify(row) : null;
+  }
+
   /** The scope a new session will carry: the explicit one, else what the workspace or runner
    * confers. Exposed so admission checks can look at the owner BEFORE the session exists. */
   effectiveSessionScope(runnerId: string, workspaceId: string | null, explicit?: ResourceScope): ResourceScope | null {
@@ -14926,6 +14943,10 @@ export class ControlPlaneDb {
     now: number;
   }): boolean {
     if (!input.eventId || input.eventId.length > 512) throw new Error("campaign event identity is invalid");
+    // INSERT OR IGNORE still advances AUTOINCREMENT (and writes the WAL) for a duplicate.
+    // Reconnect replay is read-only for identities already recorded. The insert remains guarded
+    // for callers sharing the database; no asynchronous gap exists between this read and insert.
+    if (this.stmt("SELECT 1 FROM orchestrator_campaign_events WHERE event_id=?").get(input.eventId)) return false;
     const result = this.stmt(
       `INSERT OR IGNORE INTO orchestrator_campaign_events
        (event_id,campaign_session_id,kind,subject_session_id,occurrence_id,subject_status,created_at)
