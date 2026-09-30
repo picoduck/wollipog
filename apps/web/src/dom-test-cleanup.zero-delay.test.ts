@@ -43,8 +43,10 @@ test("a pending zero-delay timer that queues another does not strand the second"
   // first one is flushing, and the abort would catch that one instead.
   const own = new Window({ url: "http://localhost/" });
   own.setTimeout(() => { own.setTimeout(() => { own.setTimeout(() => {}, 0); }, 0); }, 0);
+  const before = own.setTimeout;
 
   assert.deepEqual(await runDomTestCleanup(own, []), []);
+  assert.equal(own.setTimeout, before, "the settle puts back the setTimeout it counted through");
   assert.equal(await fires(own, 0), true);
 });
 
@@ -54,6 +56,20 @@ test("a longer window timer that comes due during the settle cannot strand the z
   // Every trial failed on the version that did (cross-model review round 1).
   const own = new Window({ url: "http://localhost/" });
   own.setTimeout(() => { own.setTimeout(() => {}, 0); }, 2);
+
+  assert.deepEqual(await runDomTestCleanup(own, []), []);
+  assert.equal(await fires(own, 0), true);
+});
+
+test("an animation frame that queues a zero-delay chain during the settle cannot strand its tail", async () => {
+  // The frame runs as an immediate while the settle waits, so its zero-delay callback joins the
+  // batch the settle's own sentinel opened, and queues the next one only as that batch flushes.
+  // Treating the sentinel's flush as quiet let the abort kill it (cross-model review round 2).
+  const own = new Window({ url: "http://localhost/" });
+  // Start from a timer callback, as a test resuming from a timer does: from there the frame's
+  // immediate reliably runs before the settle's first 0ms timers come due.
+  await new Promise((resolve) => { nodeSetTimeout(resolve, 5); });
+  own.requestAnimationFrame(() => { own.setTimeout(() => { own.setTimeout(() => {}, 0); }, 0); });
 
   assert.deepEqual(await runDomTestCleanup(own, []), []);
   assert.equal(await fires(own, 0), true);

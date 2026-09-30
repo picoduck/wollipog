@@ -32,6 +32,28 @@ function realWindowSetTimeout(domWindow: object): ((callback: () => void) => voi
 }
 
 /**
+ * Wraps the window's own `setTimeout` (the real one, or a test's fake) so every zero-delay call
+ * through it is reported, until the returned function puts it back. The delay test is happy-dom's
+ * own, `!delay`, so exactly the calls it would batch are counted. A test that swapped in another
+ * `setTimeout` meanwhile keeps it.
+ */
+function countZeroDelayCalls(domWindow: object, onZeroDelay: () => void): () => void {
+  const original = Object.getOwnPropertyDescriptor(domWindow, "setTimeout");
+  if (!original || typeof original.value !== "function" || !original.writable) return () => {};
+  const inner = original.value as (...args: unknown[]) => unknown;
+  function counted(this: unknown, ...args: unknown[]): unknown {
+    if (!args[1]) onZeroDelay();
+    return inner.apply(this, args);
+  }
+  Object.defineProperty(domWindow, "setTimeout", { ...original, value: counted });
+  return () => {
+    if (Object.getOwnPropertyDescriptor(domWindow, "setTimeout")?.value === counted) {
+      Object.defineProperty(domWindow, "setTimeout", original);
+    }
+  };
+}
+
+/**
  * Lets every pending zero-delay window timer fire, so that the abort after it cannot strand one.
  *
  * happy-dom 20 groups zero-delay `setTimeout` calls into one batch behind a single Node timer, and
@@ -48,6 +70,15 @@ function realWindowSetTimeout(domWindow: object): ((callback: () => void) => voi
  * which must flush too before the abort, or the settle strands the very thing it guards against.
  * A sentinel that still has not fired after that joined a batch some earlier abort already killed.
  *
+ * The settle yields to the event loop, so other work runs meanwhile: an animation frame, a 2ms
+ * timer, I/O. Whatever of it queues zero-delay work may join the sentinel's own batch, or open a
+ * new one after it, so a flush of the sentinel's batch alone proves nothing (cross-model review
+ * rounds 1 and 2). The batch is private and cannot be probed without opening one, so the settle
+ * counts instead: it wraps the window's own `setTimeout` for its duration, and a round is quiet only
+ * if its sentinel opened the batch and no one queued zero-delay work until that batch flushed. Any
+ * other round goes again. Only a caller holding a `setTimeout` it read before the settle, and using
+ * it during the settle, gets past the count.
+ *
  * The pending callbacks RUN rather than being cancelled: the batch holds them privately, so there is
  * no way to cancel one without its `Timeout`. It is also what a browser does after an unmount, and
  * why this runs after the disposers — a dialog's focus restore scheduled by its own unmount is
@@ -56,24 +87,30 @@ function realWindowSetTimeout(domWindow: object): ((callback: () => void) => voi
 export async function settleZeroDelayWindowTimers(domWindow: object): Promise<void> {
   const setZeroDelay = realWindowSetTimeout(domWindow);
   if (!setZeroDelay) return;
-  for (let round = 0; round < ZERO_DELAY_SETTLE_ROUNDS; round += 1) {
-    let fired = false;
-    let markFlushed!: () => void;
-    const flushed = new Promise<boolean>((resolve) => { markFlushed = () => resolve(true); });
-    const tick = nodeTick();
-    setZeroDelay(() => { fired = true; markFlushed(); });
-    await tick;
-    if (fired) continue;
-    // The sentinel's own batch was created in the same turn as `tick`, so Node runs it in the same
-    // pass over its 0ms timers, before any longer timer. Return from its flush, NOT from another
-    // tick: a tick lands after them, and a 2ms window timer that queued zero-delay work in between
-    // would open a batch the abort then strands (cross-model review round 1). The tick below only
-    // bounds the wait for a batch that is already dead.
-    if (await Promise.race([flushed, nodeTick().then(() => false)])) return;
-    throw new Error(
-      "Zero-delay window timers had stopped firing before this cleanup ran: the window was aborted "
-      + "while one was pending, and happy-dom never flushes that batch again (#2113).",
-    );
+  let queued = 0;
+  const stopCounting = countZeroDelayCalls(domWindow, () => { queued += 1; });
+  try {
+    for (let round = 0; round < ZERO_DELAY_SETTLE_ROUNDS; round += 1) {
+      queued = 0;
+      let fired = false;
+      let markFlushed!: () => void;
+      const flushed = new Promise<boolean>((resolve) => { markFlushed = () => resolve(true); });
+      const tick = nodeTick();
+      setZeroDelay(() => { fired = true; markFlushed(); });
+      await tick;
+      if (fired) continue;
+      // Return from the sentinel batch's own flush, NOT from a later tick, which would let a longer
+      // timer queue more after it. The tick only bounds the wait for a batch that is already dead.
+      if (!await Promise.race([flushed, nodeTick().then(() => false)])) {
+        throw new Error(
+          "Zero-delay window timers had stopped firing before this cleanup ran: the window was aborted "
+          + "while one was pending, and happy-dom never flushes that batch again (#2113).",
+        );
+      }
+      if (queued === 0) return;
+    }
+  } finally {
+    stopCounting();
   }
   throw new Error(
     `Zero-delay window timers were still queueing more after ${ZERO_DELAY_SETTLE_ROUNDS} rounds. `
