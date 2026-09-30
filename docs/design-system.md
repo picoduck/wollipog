@@ -1435,7 +1435,14 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
   item's description and the rail tooltip's second line.
 - Inline by default, in the text flow of a list-foot row, a menu row or a tab. `.count-badge.on-icon`
   places it on an icon's top-right shoulder (the icon's wrapper is the positioned box), growing
-  away from the icon, with a 2px ring in `--count-badge-ring`. That property defaults to
+  away from the icon, with 2px sides rather than 4px (one digit stays a 16px circle, two are about 17px
+  wide) and a 2px ring in `--count-badge-ring`. On the 64px rail a count too wide for the room
+  beside the glyph grows back over the icon box's corner instead, so the badge and its ring end at
+  the rail's border and never cross it, in every tier (#2110). Three digits or more (`CountBadge`
+  adds `long` on an icon) also rise 7px there, because grown back that far the badge would sit on
+  the glyph's top edge: it clears the glyph, and its ring leaves the item's top edge by 4px to 10px,
+  over the gap and the empty foot of the item above. That is the one case where the ring leaves its
+  item. A phone tab has room to grow away as usual. That property defaults to
   `--bg-elev`; a surface that is not `--bg-elev` (a selected rail item on `--surface-selected`)
   sets it once on an ancestor rather than redrawing the badge. Forced colors drops the ring's
   box-shadow, so there a 2px `Canvas` outline redraws it.

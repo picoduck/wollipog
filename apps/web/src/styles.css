@@ -870,6 +870,22 @@ kbd {
   width: calc(var(--icon-lg) + 18px);
   height: calc(var(--icon-lg) + 6px);
 }
+/* A count too wide for the room beside the glyph grows back over the icon box's corner instead of
+   past the rail (#2110): the badge and its ring end at the rail's border, never on it. The room runs
+   from the badge's anchor, 8px in from the box's right edge, to that line less the ring. The icon
+   box is centred in every tier, so the room is the same at 40px, 36px and 48px items. A translation's
+   percentage is the badge's own width, which is how a rule can know how wide the count is. */
+.rail-icon > .count-badge.on-icon {
+  transform: translateX(min(0px, calc((var(--rail-w) - 1px - var(--icon-lg) - 18px) / 2 + 8px - 2px - 100%)));
+}
+/* Three digits cannot fit beside the glyph at all: grown back that far, the badge would sit on the
+   glyph's top edge. It rises 7px instead, so it clears the stroke, and its ring leaves the item's
+   top edge by 4px to 10px across the tiers, over the gap and the empty foot of the item above. The
+   one exception to a ring kept inside its item, accepted for counts of 100 or more (#2110). */
+.rail-icon > .count-badge.on-icon.long {
+  transform: translateX(min(0px, calc((var(--rail-w) - 1px - var(--icon-lg) - 18px) / 2 + 8px - 2px - 100%)))
+    translateY(-7px);
+}
 @media (hover: hover) {
   .rail-item:hover { --count-badge-ring: var(--bg-elev-2); }
 }
@@ -13189,6 +13205,8 @@ body.shell-dock-dragging * {
     height: 20px;
   }
   .rail-tab-pill { --count-badge-ring: var(--bg-elev); }
+  /* A tab is a fifth of the bar, so a wide count has room to grow away from the icon as §11.4 says. */
+  .rail-tab-pill > .rail-icon > .count-badge.on-icon { transform: none; }
   @media (hover: hover) {
     .rail-destinations > .rail-item:hover,
     .rail-more > .rail-item:hover { background: transparent; }
@@ -14646,11 +14664,14 @@ body.shell-dock-dragging * {
   color: var(--danger-fg);
 }
 /* On an icon's top-right shoulder, growing away from the icon so a longer count covers no more of
-   it. The icon's wrapper is the positioned box; the ring separates the badge from the icon. */
+   it. The icon's wrapper is the positioned box; the ring separates the badge from the icon. Its
+   sides are 2px rather than 4px, so two digits are barely wider than one and still fit beside the
+   64px rail's glyph (#2110); a single digit stays the 16px circle its min-width makes. */
 .count-badge.on-icon {
   position: absolute;
   top: -6px;
   left: calc(100% - 8px);
+  padding: 0 var(--space-0-5);
   box-shadow: 0 0 0 2px var(--count-badge-ring);
 }
 /* Forced colors drops box-shadow, so an outline (kept) in the system's own Canvas redraws the ring

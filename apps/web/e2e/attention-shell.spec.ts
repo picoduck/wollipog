@@ -243,6 +243,59 @@ for (const [label, device] of [
   });
 }
 
+/**
+ * A wide count stays inside the rail (#2110). Before it grew rightward from the icon's shoulder, and
+ * "128" ended 5.4px past the rail, with even a two-digit ring notching its border. The fixture's 4
+ * blocked and 4 stalled sessions make 8; `more-blocked` adds sessions waiting on the user.
+ */
+for (const [label, device] of [
+  ["at 1440×900 with a mouse", { viewport: { width: 1440, height: 900 } }],
+  ["in the compact tier at 940×600", { viewport: { width: 940, height: 600 } }],
+  ["on an 834px coarse-pointer tablet", { viewport: { width: 834, height: 1112 }, hasTouch: true, isMobile: true }],
+] as const) {
+  test.describe(label, () => {
+    test.use(device);
+
+    for (const [extra, count] of [[0, "8"], [7, "15"], [120, "128"]] as const) {
+      test(`a Sessions badge of ${count} and its ring stay inside the rail, clear of the glyph (#2110)`, async ({ page }) => {
+        const rail = page.getByRole("navigation", { name: "Primary Navigation" });
+        const sessions = rail.getByRole("link", { name: "Sessions", exact: true });
+        const inside = () => sessions.evaluate((element) => {
+          const badge = element.querySelector(".count-badge")!.getBoundingClientRect();
+          const railElement = element.closest(".app-rail")!;
+          const edge = railElement.getBoundingClientRect().right - parseFloat(getComputedStyle(railElement).borderRightWidth);
+          // The glyph of the item above: a lifted three-digit badge may rise into that item's foot,
+          // never onto its glyph.
+          const above = element.previousElementSibling?.querySelector("svg")?.getBoundingClientRect();
+          // The ring is 2px outside the badge; it may meet the border but not cover it.
+          return {
+            overhang: badge.right + 2 - edge,
+            rise: element.getBoundingClientRect().top - (badge.top - 2),
+            clearsAbove: above ? badge.top - 2 >= above.bottom : true,
+          };
+        });
+        for (const path of ["/projects", undefined]) {
+          await page.goto(`${fullShell(path)}&more-blocked=${extra}`);
+          await expect(sessions.locator(".count-badge.danger.on-icon")).toHaveText(count);
+          // At rest on Projects, then on the current item, whose ring follows the selected fill.
+          if (path) await expect(sessions).not.toHaveAttribute("aria-current", "page");
+          else await expect(sessions).toHaveAttribute("aria-current", "page");
+          const placed = await inside();
+          expect(placed.overhang, "the badge and its ring end at or inside the rail's border").toBeLessThanOrEqual(0);
+          expect(placed.clearsAbove, "the ring stops short of the glyph of the item above").toBe(true);
+          // Only three digits rise out of the item, by the 7px lift (#2110); one and two digits keep
+          // the shoulder's 1px to 3px overlap of the item's top edge, depending on the tier.
+          if (count === "128") expect(placed.rise).toBeGreaterThan(3);
+          else expect(placed.rise).toBeLessThanOrEqual(3);
+          expect(await glyphUnderMark(page, sessions), "the badge and its ring cover none of the glyph").toBe(0);
+          const { ring, fill } = await ringAndFill(sessions);
+          expect(ring).toBe(`${fill} 0px 0px 0px 2px`);
+        }
+      });
+    }
+  });
+}
+
 test.describe("the rail tooltip at 1440×900", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 

@@ -167,6 +167,18 @@ if (fullShell) {
   }
 }
 
+// More sessions waiting on the user, so the rail's Sessions badge reaches two and three digits
+// (#2110). Each is blocked the way a real one is: waiting on a pending request.
+const moreBlocked = Number(new URLSearchParams(location.search).get("more-blocked") ?? 0);
+for (let index = 0; index < moreBlocked; index += 1) {
+  sessions.push(session(`s-waiting-${index}`, `Waiting Session ${index + 1}`, "input_required", {
+    status: "input_required",
+    updatedAt: Date.now(),
+    lastEventAt: Date.now(),
+    pendingApproval: { requestId: `waiting-${index}`, title: "Approve Command", options: [] } as never,
+  }));
+}
+
 if (empty) sessions.splice(0);
 
 const reminders: SessionReminderView[] = [

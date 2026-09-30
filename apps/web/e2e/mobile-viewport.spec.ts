@@ -654,6 +654,17 @@ for (const theme of THEMES) {
   });
 }
 
+test("a one-digit tab badge is still a 16px circle with the on-icon badge's 2px sides (#2110)", async ({ page }) => {
+  await useHarness(page, { blocked: 1 });
+  const badge = page.getByRole("link", { name: "Sessions", exact: true }).locator(".count-badge.on-icon");
+  await expect(badge).toHaveText("1");
+  expect(await badge.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return { size: `${box.width}x${box.height}`, round: parseFloat(style.borderTopLeftRadius) >= 8, sides: style.paddingLeft };
+  })).toEqual({ size: "16x16", round: true, sides: "2px" });
+});
+
 test("More's mark is amber for a machine alone and absent when nothing behind it needs the user", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const phoneBar = async (views: string[]) => page.addInitScript(([key, bar]) => {
