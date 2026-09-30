@@ -168,6 +168,7 @@ import { useAnchoredPopover } from "./anchored-popover.js";
 import {
   followTailControlLabel,
   followTailControlTooltip,
+  followTailLabelParts,
   followTailSurfaceLabel,
   hasSavedFollowTailAnchor,
   isFollowTailResumeKey,
@@ -3270,6 +3271,7 @@ function SessionDetailLoaded({
     actions: readingActions,
   });
   const followLabel = followTailSurfaceLabel(followTail.state, mode, isMobile);
+  const followLabelParts = followTailLabelParts(followLabel);
   // Fork also covers Edit in Fork, handoff and quarantine recovery, which share its route (#1864).
   const forkRefusal = sessionCommandRefusal(session, "fork");
   const rewindRefusal = sessionCommandRefusal(session, "rewind");
@@ -5386,7 +5388,10 @@ function SessionDetailLoaded({
                       shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest"),
                     )}
                   >
-                    <span aria-live="polite">{followLabel}</span>
+                    <span aria-live="polite">
+                      {followLabelParts.word}
+                      {followLabelParts.rest && <span className="follow-tail-label-rest">{followLabelParts.rest}</span>}
+                    </span>
                     {!followTail.isFollowing && <span className="follow-tail-action">Follow Live Output</span>}
                     {!isMobile && !followTail.isFollowing && (
                       <kbd

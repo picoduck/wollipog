@@ -53,7 +53,7 @@ function readCutoffs(selector = ".transcript-status-actions"): Cutoff[] {
 }
 
 /**
- * The two length forms the cutoff uses today: a plain px length, and `calc(<px> + <rem>)`.
+ * The length forms the cutoffs use today: a plain px length, `calc(<px> + <rem>)`, and `min()` of those.
  *
  * Anything else throws rather than guessing. A cutoff written in a form this cannot evaluate is not
  * a reason to skip the check — it is a reason to teach the evaluator the new form, because an
@@ -64,6 +64,12 @@ function evaluateLength(expression: string, rootPx: number): number {
   if (plain) return Number(plain[1]);
   const sum = /^calc\(\s*(-?[\d.]+)px\s*\+\s*(-?[\d.]+)rem\s*\)$/.exec(expression);
   if (sum) return Number(sum[1]) + Number(sum[2]) * rootPx;
+  // `min()` of the forms above (#2041): a cutoff that is inert at one root and covering at others.
+  const smallest = /^min\(\s*(.+)\s*\)$/.exec(expression);
+  if (smallest) {
+    const terms = smallest[1]!.split(/,\s*(?=calc\(|-?[\d.]+px)/);
+    if (terms.length > 1) return Math.min(...terms.map((term) => evaluateLength(term.trim(), rootPx)));
+  }
   throw new Error(
     `status-strip cutoff "${expression}" is in a form this spec cannot evaluate. Extend `
     + "evaluateLength() so the budget stays verified rather than dropping the check.",
@@ -154,9 +160,9 @@ test("the stylesheet declares a cutoff this spec can evaluate", () => {
 });
 
 // The px part of the budget is fixed and the rem part scales, so one root size cannot prove the
-// decomposition. 16 is the default; 24 and 32 are the enlarged text-size preferences the app's rem
-// type exists to serve.
-for (const rootPx of [16, 24, 32]) {
+// decomposition. 16 is the default; 20, 24 and 32 are enlarged text-size preferences the app's rem
+// type exists to serve, 20 between the sampled roots so a cutoff fitted only at them cannot pass.
+for (const rootPx of [16, 20, 24, 32]) {
   test(`the declared cutoff covers what the strip measures at a ${rootPx}px root`, async ({ page }) => {
     const parts = await measureParts(page, rootPx);
     const required = requiredWidth(parts);
@@ -220,7 +226,7 @@ async function clusterWithKeycap(page: Page, rootPx: number, keycap = true): Pro
   }, keycap);
 }
 
-for (const rootPx of [16, 24, 32]) {
+for (const rootPx of [16, 20, 24, 32]) {
   test(`the resume keycap's cutoff covers the cluster it widens at a ${rootPx}px root`, async ({ page }) => {
     const cutoffs = readCutoffs(".follow-tail-kbd");
     expect(cutoffs.length, "a transcript-pane rule retires the follow control's keycap").toBeGreaterThan(0);
@@ -279,11 +285,12 @@ test("the follow control's label grows with the root in step with the Reply hint
  * enlarged root the whole " · Follow Live Output" label can outgrow a narrow pane on its own, so
  * below the width the cluster needs WITH it (and without the already-retired keycap) the control
  * keeps only its state word. At the default root the cutoff is inert: the phone strip's own 340px
- * compact rule owns that layout, so the rule must never fire in a supported pane at 16px.
+ * compact rule owns that layout, so the rule must never fire in a supported pane at 16px. From
+ * 17px, the smallest enlarged size a browser offers, it has to cover the cluster at every root.
  */
 const NARROWEST_PANE = 320;
 
-for (const rootPx of [16, 24, 32]) {
+for (const rootPx of [16, 17, 20, 24, 32]) {
   test(`the action text's cutoff fits the yield order at a ${rootPx}px root`, async ({ page }) => {
     const cutoffs = readCutoffs(".follow-tail-action");
     expect(cutoffs.length, "a transcript-pane rule retires the follow control's action text").toBeGreaterThan(0);
@@ -326,6 +333,17 @@ test("below the action text's cutoff the control keeps its state word and its na
     await page.addStyleTag({ content: "html { font-size: 32px; }" });
     const chip = page.locator(".follow-tail-chip");
     await expect(chip).toBeVisible();
+    await expect(chip).toHaveAttribute("data-follow-tail-state", "following");
+    // "Following Live Output" has no action text or keycap to give up, so it keeps its state word
+    // and visually hides the rest, which the live region and the accessible name still carry.
+    const rest = chip.locator(".follow-tail-label-rest");
+    const restWidth = await rest.evaluate((element) => element.getBoundingClientRect().width);
+    if (shown) expect(restWidth, "the whole following label shows above the cutoff").toBeGreaterThan(20);
+    else expect(restWidth, "only the state word shows below the cutoff").toBeLessThanOrEqual(1);
+    await expect(chip.locator("[aria-live]")).toHaveText("Following Live Output");
+    await expect(chip).toHaveAccessibleName("Following Live Output");
+    await expectFullCost(page);
+
     await page.mouse.move(pane / 2, 300);
     await page.mouse.wheel(0, -900);
     await expect(chip).toHaveAttribute("data-follow-tail-state", "paused");
@@ -343,14 +361,63 @@ test("below the action text's cutoff the control keeps its state word and its na
     expect((await chip.innerText()).trim()).toBe("Paused");
     await expect(chip).toHaveAccessibleName("Paused, Follow Live Output");
     await expect(chip).toHaveAccessibleDescription(/^Follow Live Output \(.+\)$/);
-
-    const cost = await page.locator(".transcript-status-usage .session-cost-button").evaluate((button) => ({
-      visible: button.getBoundingClientRect().width,
-      needed: button.scrollWidth,
-    }));
-    expect(cost.visible, "the cost keeps its full width").toBeGreaterThanOrEqual(cost.needed - 0.5);
+    await expectFullCost(page);
   }
 });
+
+async function expectFullCost(page: Page): Promise<void> {
+  const cost = await page.locator(".transcript-status-usage .session-cost-button").evaluate((button) => ({
+    visible: button.getBoundingClientRect().width,
+    needed: button.scrollWidth,
+  }));
+  expect(cost.visible, "the cost keeps its full width").toBeGreaterThanOrEqual(cost.needed - 0.5);
+}
+
+/**
+ * The Inbox preview has no cost; its control carries Page Up and Page Down hints around the chip.
+ * Those hints are the preview's first step, so their cutoff covers the whole control, with the
+ * widest label and its keycap, and sits above the keycap's own cutoff.
+ */
+async function previewControl(page: Page, rootPx: number): Promise<number> {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.goto("/session-usage-e2e.html?mode=preview&width=1360&height=840");
+  await page.addStyleTag({ content: `html { font-size: ${rootPx}px; }` });
+  await expect(page.locator(".follow-tail-chip")).toBeVisible();
+  await page.mouse.move(680, 300);
+  await page.mouse.wheel(0, -900);
+  await expect(page.locator(".follow-tail-chip .follow-tail-kbd")).toBeVisible();
+  await expect(page.locator(".follow-tail-control > .shortcut-hint")).toHaveCount(2);
+
+  return page.locator(".transcript-status-strip").evaluate((strip) => {
+    const stripStyle = getComputedStyle(strip);
+    const cluster = strip.querySelector(".transcript-status-cluster") as HTMLElement;
+    const control = strip.querySelector(".follow-tail-control") as HTMLElement;
+    const stateLabel = control.querySelector(".follow-tail-chip span")!;
+    const original = stateLabel.textContent;
+    stateLabel.textContent = "Previewing";
+    const width = control.scrollWidth;
+    stateLabel.textContent = original;
+    return parseFloat(stripStyle.paddingLeft) + parseFloat(stripStyle.paddingRight)
+      + parseFloat(getComputedStyle(cluster).columnGap) * 2 + width;
+  });
+}
+
+for (const rootPx of [16, 20, 24, 32]) {
+  test(`the preview pager hints' cutoff covers the control at a ${rootPx}px root`, async ({ page }) => {
+    const cutoffs = readCutoffs(".follow-tail-control > .shortcut-hint");
+    expect(cutoffs.length, "a transcript-pane rule retires the preview pager hints").toBeGreaterThan(0);
+    const declared = effectiveCutoff(cutoffs, rootPx);
+    expect(declared, "the pager hints yield before the keycap")
+      .toBeGreaterThanOrEqual(effectiveCutoff(readCutoffs(".follow-tail-kbd"), rootPx));
+    const required = await previewControl(page, rootPx);
+    expect(
+      declared,
+      `the preview pager hint cutoff (${cutoffs.map((c) => c.source).join(" and ")} = ${declared}px) no longer `
+      + `covers the ${required.toFixed(1)}px the preview control needs at a ${rootPx}px root.`,
+    ).toBeGreaterThanOrEqual(required);
+    expect(declared - required, "re-derive the pager hint cutoff rather than padding it").toBeLessThan(200);
+  });
+}
 
 test("the cutoff is what decides whether the hint is shown, at the boundary", async ({ page }) => {
   // Ties the arithmetic above to observable behaviour: the same constant the budget check reads is

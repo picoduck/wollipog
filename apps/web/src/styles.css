@@ -12384,19 +12384,38 @@ body.shell-dock-dragging * {
    The keycap's cutoff is the width the cluster needs WITH the keycap: 458.6, 633.8 and 811.1px at
    16, 24 and 32px roots, measured with the widest follow label in the widest fallback face.
 
-   The action text's cutoff is inert at the default root: 316px, below the narrowest supported pane,
-   where the phone strip has its own compact rule below. At an enlarged root the whole label grows
-   with the reader's text, and the cluster needs 546.3 and 700.4px at 24 and 32px roots with the
-   action text; below that the control keeps only its state word. It hides the keycap too, so the
-   order above holds at any root, however large.
+   The action text's cutoff is the smaller of two lines. At the default root the first makes it
+   inert: 316px, below the narrowest supported pane, where the phone strip has its own compact rule
+   below. From a 17px root up (browsers offer whole-px text sizes) the second covers what the cluster
+   needs with the widest label and its action text: 412.0, 469.2, 546.3 and 700.4px at 17, 20, 24
+   and 32px roots, so a reader who enlarged their text keeps the cost whole at every width the label
+   used to allow. Below it the control keeps only its state word: the paused action text goes, the
+   keycap goes with it so the order above holds at any root, and "Following Live Output" keeps
+   "Following" with the rest visually hidden, so the live region still announces the whole label.
+
+   In the Inbox preview the control carries its Page Up and Page Down hints and there is no cost, so
+   the preview's first step is those hints, below the width the whole control needs with the widest
+   label and its keycap: 589, 703, 817 and 1045px at 16, 20, 24 and 32px roots. That cutoff sits
+   above the keycap's at every root, so the rest of the order is unchanged.
 
    Like the cutoffs above, these are checked by `apps/web/e2e/status-strip-budget.spec.ts`. */
+@container transcript-pane (max-width: calc(142px + 28.5rem)) {
+  .follow-tail-control > .shortcut-hint { display: none; }
+}
 @container transcript-pane (max-width: calc(114px + 22rem)) {
   .follow-tail-kbd { display: none; }
 }
-@container transcript-pane (max-width: calc(-164px + 30rem)) {
+@container transcript-pane (max-width: min(calc(-1604px + 120rem), calc(96px + 19.25rem))) {
   .follow-tail-action,
   .follow-tail-kbd { display: none; }
+  .follow-tail-label-rest {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 /* At the narrowest supported phone width, compact both side gaps and the widest follow-state
    chip's horizontal padding so fallback-font differences cannot make the context ring or cost

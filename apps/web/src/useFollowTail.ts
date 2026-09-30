@@ -32,6 +32,16 @@ export function followTailControlTooltip(
   return readingKeysActive ? `Follow Live Output (${followShortcut})` : "Follow Live Output";
 }
 
+/**
+ * A state label split into its leading state word and the rest ("Following" + " Live Output").
+ * A cramped status strip keeps only the word and visually hides the rest (#2041), so the rest stays
+ * in the live region's announcement and the control's accessible name is unchanged.
+ */
+export function followTailLabelParts(label: string): { word: string; rest: string } {
+  const space = label.indexOf(" ");
+  return space < 0 ? { word: label, rest: "" } : { word: label.slice(0, space), rest: label.slice(space) };
+}
+
 export function followTailSurfaceLabel(
   state: FollowTailState,
   mode: "preview" | "expanded",

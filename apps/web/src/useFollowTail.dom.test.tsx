@@ -9,6 +9,7 @@ import {
   FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS,
   followTailControlLabel,
   followTailControlTooltip,
+  followTailLabelParts,
   followTailSurfaceLabel,
   isAtFollowTailBottom,
   hasSavedFollowTailAnchor,
@@ -35,6 +36,12 @@ test("follow copy distinguishes live, paused, and previewing states", () => {
     "surfaces without active reading keys never advertise an inactive shortcut");
   assert.equal(followTailControlTooltip("paused", false, "Shift+G"), "Follow Live Output",
     "mobile expanded surfaces never advertise an inactive reading shortcut");
+});
+
+test("a cramped strip keeps each state's leading word", () => {
+  assert.deepEqual(followTailLabelParts(FOLLOW_TAIL_LABELS.following), { word: "Following", rest: " Live Output" });
+  assert.deepEqual(followTailLabelParts(FOLLOW_TAIL_LABELS.paused), { word: "Paused", rest: "" });
+  assert.deepEqual(followTailLabelParts(FOLLOW_TAIL_LABELS.previewing), { word: "Previewing", rest: "" });
 });
 
 test("resume-key matching excludes Inbox navigation and modified global shortcuts", () => {
