@@ -245,6 +245,8 @@ async function checkPageContent(page: Page, where: string) {
   expect(pod.map((field) => field.name)).toEqual(["Arbitration", "Default Context Tokens", "Summary Tokens", "Turn Cap", "Repeated-Output Cap"]);
   for (const field of pod) {
     expectGeometry(field.outside, `${where}: ${field.name} reaches past the Orchestration Controls card`).toBeLessThanOrEqual(0.51);
+  }
+  for (const field of pod) {
     expect(field.labelClipped, `${where}: ${field.name} keeps its label on one line`).toBe(false);
     expect(field.valueClipped, `${where}: ${field.name} shows its longest option`).toBe(false);
   }
