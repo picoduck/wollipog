@@ -121,10 +121,8 @@ export function useRailTooltip(enabled: boolean) {
     }, RAIL_TOOLTIP_GRACE_MS);
   }, [clearShowTimer, commit, settle]);
 
-  // Rail preferences can hide, renumber or move the item under an open tooltip (Settings ›
-  // Navigation, with the pointer resting on the rail). Re-read it after every rail render, and let
-  // the tooltip go with an item that has left.
-  useLayoutEffect(() => {
+  /** Re-read the open tooltip's item, and let the tooltip go with an item that has left. */
+  const sync = useCallback(() => {
     const current = shownRef.current;
     if (!current) return;
     const next = measure(current.anchor, current.source);
@@ -136,7 +134,17 @@ export function useRailTooltip(enabled: boolean) {
     if (next.name !== current.name || next.keys !== current.keys || next.top !== current.top || next.left !== current.left) {
       commit(next);
     }
-  });
+  }, [commit, measure, settle]);
+  // Rail preferences can hide, renumber or move the item under an open tooltip (Settings ›
+  // Navigation, with the pointer resting on the rail), so it is re-read after every rail render.
+  useLayoutEffect(sync);
+  // A resize moves the bottom-pinned Settings item without re-rendering the rail: a height-only
+  // change leaves useIsMobile() as it was.
+  useEffect(() => {
+    if (!tip) return;
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, [tip, sync]);
   useEffect(() => {
     if (!enabled) hide();
   }, [enabled, hide]);

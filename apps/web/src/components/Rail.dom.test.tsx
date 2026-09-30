@@ -1026,6 +1026,24 @@ test("an open tooltip follows preference changes and leaves with a hidden item",
   });
 });
 
+test("an open tooltip follows its item when the window resizes without re-rendering the rail", async () => {
+  await withTooltipRail(async ({ tooltip, item }) => {
+    // Settings is pinned to the rail's foot, so a height-only resize moves it; useIsMobile() does
+    // not change, and nothing re-renders the rail.
+    const settings = item("Settings");
+    let bottom = 900;
+    settings.getBoundingClientRect = () => ({
+      top: bottom - 40, bottom, left: 12, right: 52, width: 40, height: 40, x: 12, y: bottom - 40, toJSON() {},
+    }) as DOMRect;
+    await act(async () => { settings.focus(); });
+    assert.equal(tooltip()?.style.top, "880px");
+
+    bottom = 800;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
+    assert.equal(tooltip()?.style.top, "780px", "the tooltip moves with the item");
+  });
+});
+
 test("a keyboard-focused item gets its tooltip back when a hover elsewhere ends", async () => {
   await withTooltipRail(async ({ advance, tooltip, item, pointer }) => {
     await act(async () => { item("Automations").focus(); });
