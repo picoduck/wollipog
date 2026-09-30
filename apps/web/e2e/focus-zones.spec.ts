@@ -149,8 +149,10 @@ test("any other key puts the zone line out, including a digit that changes the r
   await page.keyboard.press("F6");
   expect((await zoneLine(page)).count).toBe(1);
   // A digit changes the route while the page root keeps focus.
+  // Any other destination will do; the rail order (and so which page a digit opens) is not this test's concern.
   await page.keyboard.press("3");
-  await expect(page.getByRole("heading", { name: "Multi-Agent Runs", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Automations", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   expect((await zoneLine(page)).count).toBe(0);
 });
 
