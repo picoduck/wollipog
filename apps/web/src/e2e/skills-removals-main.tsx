@@ -261,6 +261,6 @@ const view = (
 
 createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
-    {drift || orphans ? <FeedbackProvider>{view}</FeedbackProvider> : view}
+    <FeedbackProvider>{view}</FeedbackProvider>
   </ApiProvider>,
 );

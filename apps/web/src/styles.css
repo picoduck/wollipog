@@ -14074,6 +14074,88 @@ body.shell-dock-dragging * {
   /* On a phone sheet it is a full-width row above Cancel and the primary. */
   .modal-foot > .review-consent { flex-basis: 100%; }
 }
+/* Import from Machine (#1963): a `.modal.lg` at full height whose body is two panes, the machine's
+   skill folders beside the selected folder's review, each scrolling on its own. On a phone sheet
+   the body is one column and shows one step at a time (the dialog renders only that pane). */
+@media (min-width: 761px) {
+  .modal.lg:has(> .modal-panel-host > .skill-machine-import) { height: calc(100dvh - 48px); }
+  .skill-machine-import > .modal-body {
+    flex-direction: row;
+    gap: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+  .skill-machine-import-pane {
+    min-height: 0;
+    padding: var(--space-5);
+    overflow-y: auto;
+  }
+  .skill-machine-import-pane.list {
+    flex: 0 0 300px;
+    border-right: 1px solid var(--border);
+  }
+  .skill-machine-import-pane:is(.review, .only) { flex: 1 1 auto; }
+}
+.skill-machine-import-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+/* Headings and paragraphs take the body's gap (§7.2), not the browser's margins. */
+:is(.skill-machine-import, .skill-adoption-confirmation, .skill-adoption-recovery) :is(h3, p, dl, ul) { margin: 0; }
+.skill-machine-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: calc(var(--space-2) - var(--space-4));
+}
+.skill-machine-import-title {
+  min-width: 0;
+  color: var(--text);
+  font: var(--type-section);
+  overflow-wrap: anywhere;
+}
+.skill-machine-import-note,
+.skill-adoption-recovery-empty {
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+.skill-machine-import-loading,
+.skill-adoption-recovery-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.skill-machine-location { font-family: var(--font-mono); }
+.skill-machine-import .facts dd.skill-machine-location { font-size: var(--text-sm); }
+.skill-machine-import .row-trail { max-width: 40%; }
+/* With only the runner-update notice, the Machine field keeps a field's width (§8.3). */
+.skill-machine-import-pane.only > .field { max-width: 360px; }
+/* Why the primary is disabled (§7.3): the footer's left slot, small and dim. */
+.modal-foot > .skill-machine-import-reason {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: auto;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.skill-adoption-findings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.skill-adoption-label { color: var(--text); }
+.skill-adoption-list {
+  display: grid;
+  gap: var(--space-1);
+  padding-left: var(--space-4);
+}
+.skill-adoption-recovery .row > .btn { flex: none; }
+@media (max-width: 760px) {
+  .modal-foot > .skill-machine-import-reason { flex-basis: 100%; }
+}
 .skills-git-source { min-width: 0; overflow-wrap: anywhere; }
 .skills-git-auto-update { display: grid; gap: 4px; margin: 8px 0; }
 .skills-machine-import { min-width: 0; overflow-wrap: anywhere; }

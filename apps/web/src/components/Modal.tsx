@@ -125,6 +125,8 @@ export function Modal({
   className,
   returnFocusRef,
   onKeyDown,
+  headerActions,
+  back,
 }: {
   title: string;
   /** Optional one-line description under the title, in `--text-dim` (§7.2). */
@@ -153,6 +155,11 @@ export function Modal({
   returnFocusRef?: { current: HTMLElement | null };
   /** Optional dialog-scoped keyboard contract; runs after the shared focus trap. */
   onKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  /** Controls in the header before Close, such as a dialog's ⋯ menu of secondary actions. */
+  headerActions?: ReactNode;
+  /** A step inside this dialog (a phone sheet's review step, §7.5): the header's Close becomes a
+   * Back arrow with this name that runs this handler. Escape still closes the dialog. */
+  back?: { label: string; onBack: () => void };
 }) {
   const titleId = useId();
   const descriptionId = useId();
@@ -352,8 +359,9 @@ export function Modal({
     (top?.close ?? onCloseRef.current)();
   };
 
-  const showBack = hosted || (phone && phoneSheet === "full");
+  const showBack = back !== undefined || hosted || (phone && phoneSheet === "full");
   const showClose = closeButton && !showBack;
+  const backName = back?.label ?? backLabel;
   const hasTertiary = tertiary != null;
   const panel = (
     <div
@@ -380,15 +388,16 @@ export function Modal({
           <h2 id={titleId} className="modal-title">{title}</h2>
           {description && <p id={descriptionId} className="modal-desc">{description}</p>}
         </div>
+        {headerActions}
         {/* One element for Close and Back: a breakpoint crossing swaps its glyph, name and side
             (`order`), and never unmounts the button that holds focus. */}
         {(showBack || showClose) && (
           <button
             type="button"
             className={`icon-btn ${showBack ? "modal-back" : "modal-close"}`}
-            onClick={onClose}
-            aria-label={showBack ? backLabel : "Close"}
-            title={showBack ? backLabel : "Close"}
+            onClick={back?.onBack ?? onClose}
+            aria-label={showBack ? backName : "Close"}
+            title={showBack ? backName : "Close"}
           >
             {showBack ? <ChevronLeftIcon /> : <CloseIcon />}
           </button>

@@ -262,6 +262,5 @@ test("a solid danger button is only ever the confirm of a destructive confirmati
     'FeedbackProvider.tsx: {`btn ${danger ? "danger" : "primary"}`}',
     'ProjectsView.tsx: "btn danger"',
     'SkillMachineImportDialog.tsx: "btn danger"',
-    'SkillMachineImportDialog.tsx: "btn danger"',
   ]);
 });

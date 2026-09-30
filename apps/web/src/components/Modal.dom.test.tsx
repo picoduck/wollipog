@@ -453,3 +453,32 @@ test("closing the dialog that owns a phone sheet keeps focus in the dialog that 
   assert.equal(document.activeElement, input);
   await view.unmount();
 });
+
+test("header actions sit before Close, and a step's Back replaces Close without taking Escape", async () => {
+  matchingMedia = new Set();
+  let backs = 0;
+  let closes = 0;
+  const actions = <button type="button" className="icon-btn" aria-label="More Actions">⋯</button>;
+  const view = await mount(
+    <Modal title="Import from Machine" size="lg" onClose={() => { closes++; }} headerActions={actions}>Body</Modal>,
+  );
+  const head = document.querySelector(".modal-head")!;
+  const names = [...head.querySelectorAll("button")].map((button) => button.getAttribute("aria-label"));
+  assert.deepEqual(names, ["More Actions", "Close"], "the dialog's own actions come before Close");
+
+  await act(async () => {
+    view.root.render(
+      <Modal title="Import from Machine" size="lg" onClose={() => { closes++; }} headerActions={actions}
+        back={{ label: "Back to Skill Folders", onBack: () => { backs++; } }}>Body</Modal>,
+    );
+  });
+  const back = head.querySelector<HTMLButtonElement>(".modal-back");
+  assert.equal(back?.getAttribute("aria-label"), "Back to Skill Folders");
+  assertNoDomNode(head.querySelector(".modal-close"), "Back takes Close's place");
+  await act(async () => { click(back); });
+  assert.deepEqual([backs, closes], [1, 0], "Back runs the step's handler, not close");
+  await act(async () => {
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never);
+  });
+  assert.deepEqual([backs, closes], [1, 1], "Escape still closes the dialog");
+});

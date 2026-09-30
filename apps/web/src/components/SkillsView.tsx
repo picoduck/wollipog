@@ -211,6 +211,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   const routeKey = viewPath(route);
 
   const [skills, setSkills] = useState<SkillSummary[] | null>(null);
+  const libraryNames = useMemo(() => new Set((skills ?? []).map((skill) => skill.name)), [skills]);
   const [groups, setGroups] = useState<SkillGroupView[]>([]);
   const [loadedDetail, setDetail] = useState<SkillSummary | null>(null);
   // A detail loaded for an earlier selection is never shown under the current one.
@@ -992,7 +993,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
         await refreshMachines();
       }} />}
       {dialog === "machine-versions" && detail && <SkillMachineVersionDialog key={detail.id} skillId={detail.id} runners={runners} initialRunnerId={versionRunnerId} onClose={() => { setDialog(null); setVersionRunnerId(undefined); }} onSaved={refreshMachines} />}
-      {dialog === "machine-import" && <SkillMachineImportDialog runners={runners} onClose={() => setDialog(null)} onImported={async () => {
+      {dialog === "machine-import" && <SkillMachineImportDialog runners={runners} libraryNames={libraryNames} machineLabels={machineLabels} onClose={() => setDialog(null)} onImported={async () => {
         await refreshList();
         if (selectedId) await refreshDetail(selectedId);
         await refreshMachines();

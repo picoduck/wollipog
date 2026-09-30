@@ -80,7 +80,6 @@ const BASELINE: Readonly<Record<string, number>> = {
   "components/SkillAssignmentDialog.tsx": 1,
   "components/SkillAssignmentMatrix.tsx": 1,
   "components/SkillGitImportDialog.tsx": 2,
-  "components/SkillMachineImportDialog.tsx": 1,
   "components/SkillOrphanedCopies.tsx": 1,
   "components/SkillsView.tsx": 2,
   "components/SnoozeDialog.tsx": 1,

@@ -344,3 +344,41 @@ test("a selected radio-like item shows a check icon, never color alone", async (
     restore();
   }
 });
+
+test("an inline menu renders where it is written, inside its dialog, rather than in <body>", async () => {
+  function Harness({ inline }: { inline: boolean }) {
+    const surfaceRef = useRef<HTMLDivElement>(null);
+    const triggerRef = useRef<HTMLButtonElement>(null);
+    return (
+      <div role="dialog" aria-modal="true" className="host-dialog">
+        <button ref={triggerRef} type="button">More Actions</button>
+        <MenuSurface surfaceRef={surfaceRef} anchor={{ trigger: triggerRef }} label="More Actions" inline={inline}
+          onDismiss={() => undefined}>
+          <MenuItem>Adoption Recovery…</MenuItem>
+        </MenuSurface>
+      </div>
+    );
+  }
+  const restore = stubViewport(false);
+  for (const inline of [true, false]) {
+    const mounted = await mount(<Harness inline={inline} />);
+    try {
+      const menu = doc().querySelector<HTMLElement>('[role="menu"]');
+      assert.ok(menu);
+      const backdrop = doc().querySelector(".menu-backdrop");
+      if (inline) {
+        // Inside the aria-modal dialog, so assistive technology reaches it, and inside the dialog's
+        // layer, so the dialogs' backdrop cannot cover it.
+        assert.ok(menu.closest(".host-dialog"), "an inline menu stays inside its dialog");
+        assert.ok(backdrop?.closest(".host-dialog"), "its backdrop does too");
+        assert.notEqual(menu.style.left, "", "an inline menu is still placed against its trigger");
+      } else {
+        assert.equal(menu.parentElement, doc().body, "a menu is portalled to <body> by default");
+        assertNoDomNode(menu.closest(".host-dialog"));
+      }
+    } finally {
+      await unmount(mounted);
+    }
+  }
+  restore();
+});

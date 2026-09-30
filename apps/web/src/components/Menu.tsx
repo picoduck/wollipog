@@ -197,6 +197,14 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
   beside?: string;
   /** A backdrop click. The shell's Escape ladder clicks the same backdrop. */
   onDismiss: () => void;
+  /**
+   * Render where the menu is written instead of in <body>: a menu inside a dialog (a dialog
+   * header's ⋯ menu). An aria-modal dialog hides everything outside it from assistive technology,
+   * and every dialog's backdrop covers the popover layer, so a portalled menu would be both unheard
+   * and under the dialog. In place it is fixed like any menu and stacks inside the dialog's layer,
+   * as a Select's list does.
+   */
+  inline?: boolean;
   children: ReactNode;
 }
 
@@ -218,6 +226,7 @@ export function MenuSurface({
   boundary,
   beside,
   onDismiss,
+  inline = false,
   className,
   style,
   children,
@@ -241,7 +250,7 @@ export function MenuSurface({
     setMenuOpen(1);
     return () => setMenuOpen(-1);
   }, []);
-  return createPortal(
+  const surface = (
     <>
       <div className="menu-backdrop" aria-hidden="true" onClick={onDismiss} />
       <div
@@ -256,9 +265,9 @@ export function MenuSurface({
         {head ?? <div className="menu-head" aria-hidden="true">{label}</div>}
         {children}
       </div>
-    </>,
-    document.body,
+    </>
   );
+  return inline ? surface : createPortal(surface, document.body);
 }
 
 export interface MenuItemProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "role"> {
