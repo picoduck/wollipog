@@ -158,16 +158,22 @@ function uiCopy(sourceFile: ts.SourceFile): UiCopy[] {
   const copy: UiCopy[] = [];
   const parentTag = (node: ts.Node) =>
     ts.isJsxElement(node.parent) ? node.parent.openingElement.tagName.getText(sourceFile) : "";
+  // Markup inside a literal element (`<code><span>cancelled</span></code>`) is still a literal value.
+  const insideLiteral = (node: ts.Node): boolean => {
+    for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
+      if (ts.isJsxElement(ancestor) && LITERAL_TAGS.has(ancestor.openingElement.tagName.getText(sourceFile))) return true;
+    }
+    return false;
+  };
   const visit = (node: ts.Node) => {
     if (ts.isJsxText(node) && !node.containsOnlyTriviaWhiteSpaces) {
       const tag = parentTag(node);
-      if (!LITERAL_TAGS.has(tag)) copy.push({ node, kind: `<${tag}>`, value: node.text, label: LABEL_TAGS.has(tag) });
+      const label = LABEL_TAGS.has(tag);
+      if (label || !insideLiteral(node)) copy.push({ node, kind: `<${tag}>`, value: node.text, label });
     }
-    if (ts.isJsxExpression(node) && node.expression && (ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent))) {
-      const tag = parentTag(node);
-      if (!LITERAL_TAGS.has(tag)) {
-        for (const value of copyLiterals(node.expression)) copy.push({ node, kind: `<${tag}>`, value, label: false });
-      }
+    if (ts.isJsxExpression(node) && node.expression && (ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent)) &&
+        !insideLiteral(node)) {
+      for (const value of copyLiterals(node.expression)) copy.push({ node, kind: `<${parentTag(node)}>`, value, label: false });
     }
     if (ts.isJsxAttribute(node) && node.initializer) {
       const name = node.name.getText(sourceFile);
@@ -194,7 +200,11 @@ function uiCopy(sourceFile: ts.SourceFile): UiCopy[] {
         if (name === "options" && tag === "ChoiceRows") {
           const titles = (inner: ts.Node) => {
             if (ts.isPropertyAssignment(inner) && ts.isIdentifier(inner.name) && inner.name.text === "title") {
-              for (const value of staticBranches(inner.initializer) ?? []) copy.push({ node: inner, kind: "ChoiceRow title", value, label: true });
+              // A title the Title Case check cannot read whole is still read word by word for spelling.
+              const branches = staticBranches(inner.initializer);
+              for (const value of branches ?? copyLiterals(inner.initializer)) {
+                copy.push({ node: inner, kind: "ChoiceRow title", value, label: branches !== null });
+              }
             }
             ts.forEachChild(inner, titles);
           };
@@ -209,16 +219,16 @@ function uiCopy(sourceFile: ts.SourceFile): UiCopy[] {
         for (const value of copyLiterals(node.initializer)) copy.push({ node, kind: node.name.text, value, label: false });
       }
     }
-    // A confirmation's title and body; its button labels are label properties above.
+    // A confirmation's title and body; its button labels are label properties above. A template hole
+    // stays a placeholder even when it names a constant, which may hold a status (`${status}`).
     if (ts.isCallExpression(node) && isConfirmCall(node.expression.getText(sourceFile))) {
       for (const literal of node.arguments.flatMap(optionLiterals)) {
         for (const property of literal.properties) {
           if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) continue;
-          const kind = property.name.text;
-          const values = kind === "title" ? copyLiterals(property.initializer)
-            : kind === "message" ? bodyBranches(property.initializer, sourceFile) ?? copyLiterals(property.initializer)
-            : [];
-          for (const value of values) copy.push({ node: property, kind: `confirmation ${kind}`, value, label: false });
+          if (property.name.text !== "title" && property.name.text !== "message") continue;
+          for (const value of copyLiterals(property.initializer)) {
+            copy.push({ node: property, kind: `confirmation ${property.name.text}`, value, label: false });
+          }
         }
       }
     }
@@ -310,6 +320,13 @@ test("the US spelling check reads visible copy, not comments, identifiers or sta
   assert.deepEqual(britishSpellings("Cancellation, dialogue, analyses, organism, gray, canceled, realize, supervise"), []);
   assert.deepEqual(britishSpellings("Customise the colours; initialising… Organisation, Summarised").map(([word]) => word),
     ["colours", "Customise", "initialising", "Organisation", "Summarised"]);
+  const words = (source: string) => spellingFailures(parseSource(path.join(SOURCE_ROOT, "fixture.tsx"), source))
+    .map((failure) => failure.match(/spells "(\w+)"/)?.[1]);
+  assert.deepEqual(words(`const status = "cancelled"; confirm({ title: "Stop Run", message: \`Status: \${status}.\`, confirmLabel: "Stop Run" });`),
+    [], "a constant in a template hole may hold a status");
+  assert.deepEqual(words(`<code><span>cancelled</span> {"cancelled"}</code>`), [], "markup inside a literal element");
+  assert.deepEqual(words(`<ChoiceRows options={[{ title: done ? "Colour" : computedTitle }]} />`), ["Colour"],
+    "a ChoiceRow title with one readable branch");
 });
 
 test("a masked identifier's words and every reveal control's name are Title Case (#1954)", () => {
