@@ -685,68 +685,98 @@ const ICON_SIZE_PROPERTIES = /^(?:(?:min|max)-)?(?:width|height|inline-size|bloc
  */
 export const ICON_SIZE_EXEMPTIONS: ReadonlyMap<string, { owner: string; why: string }> = new Map();
 
-/** A selector's compounds, split at combinators outside parentheses, brackets and strings. */
-function selectorCompounds(selector: string): string[] {
-  const compounds: string[] = [];
+/**
+ * Each member of a selector list, reduced to the top-level simple selectors of its subject (its
+ * last compound) as written: `svg`, `.name`, `#id`, `[attr]`, `:name(…)`, `::name`.
+ *
+ * One pass, because every split point has the same exceptions: an escaped character, a quoted
+ * string, and anything in brackets or parentheses never splits, and a comment is dropped wherever
+ * it sits. So `.a[title="x, .app-icon"]` is one member with no icon class, `svg[title="6\" x"] .b`
+ * has `.b` as its subject, and `svg/* glyph *\/:hover` is `svg` then `:hover`.
+ */
+export function selectorSubjects(selectorList: string): string[][] {
+  const members: string[][] = [];
+  let parts: string[] = [];
   let current = "";
   let depth = 0;
-  let quote: "\"" | "'" | null = null;
-  for (const char of selector.trim()) {
+  let quote: string | null = null;
+  let afterCombinator = false;
+  const flush = () => {
+    if (current) parts.push(current);
+    current = "";
+  };
+  for (let index = 0; index < selectorList.length; index += 1) {
+    const char = selectorList[index]!;
+    if (!quote && char === "/" && selectorList[index + 1] === "*") {
+      const end = selectorList.indexOf("*/", index + 2);
+      index = end < 0 ? selectorList.length : end + 1;
+      continue;
+    }
+    if (depth === 0 && !quote) {
+      if (char === ",") {
+        flush();
+        members.push(parts);
+        parts = [];
+        afterCombinator = false;
+        continue;
+      }
+      if (/[\s>+~]/.test(char)) {
+        flush();
+        afterCombinator = true;
+        continue;
+      }
+      if (afterCombinator) parts = [];
+      afterCombinator = false;
+      if (char === "." || char === "#" || char === "[" || (char === ":" && current !== ":")) flush();
+    }
+    if (char === "\\") {
+      // A hex escape takes one whitespace after it: `.app\2d icon` is one class.
+      const escape = /^\\(?:[0-9a-f]{1,6}[ \t\n\f\r]?|[\s\S])?/i.exec(selectorList.slice(index))![0];
+      current += escape;
+      index += escape.length - 1;
+      continue;
+    }
     if (quote) {
       if (char === quote) quote = null;
     } else if (char === "\"" || char === "'") quote = char;
     else if (char === "(" || char === "[") depth += 1;
     else if (char === ")" || char === "]") depth -= 1;
-    else if (depth === 0 && /[\s>+~]/.test(char)) {
-      if (current) compounds.push(current);
-      current = "";
-      continue;
-    }
     current += char;
   }
-  if (current) compounds.push(current);
-  return compounds;
+  flush();
+  members.push(parts);
+  return members.filter((member) => member.length > 0);
+}
+
+/** An identifier as the browser reads it: `\2d ` and `\-` are both `-`. */
+function unescapeIdentifier(text: string): string {
+  return text
+    .replace(/\\([0-9a-f]{1,6})[ \t\n\f\r]?/gi, (_, hex: string) => {
+      const point = Number.parseInt(hex, 16);
+      return point === 0 || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff) ? "�" : String.fromCodePoint(point);
+    })
+    .replace(/\\([^0-9a-f\n])/gi, "$1");
 }
 
 /**
- * A compound's top-level simple selectors — `svg`, `.name`, `#id`, `[attr]`, `:name(…)`,
- * `::name` — so a class spelled inside an attribute value or a pseudo-class argument is not read as
- * one of the compound's own.
- */
-function simpleSelectors(compound: string): string[] {
-  const parts: string[] = [];
-  let current = "";
-  let depth = 0;
-  let quote: "\"" | "'" | null = null;
-  for (const char of compound) {
-    if (quote) {
-      if (char === quote) quote = null;
-    } else if (char === "\"" || char === "'") quote = char;
-    else if (char === ")" || char === "]") depth -= 1;
-    else if (depth === 0 && (char === "." || char === "#" || char === "[" || (char === ":" && current !== ":"))) {
-      if (current) parts.push(current);
-      current = "";
-    }
-    if (!quote && (char === "(" || char === "[")) depth += 1;
-    current += char;
-  }
-  if (current) parts.push(current);
-  return parts;
-}
-
-/**
- * Whether a selector's subject — its last compound — is an icon: an `svg` element or `.app-icon`.
+ * Whether a subject is an icon: an `svg` element or `.app-icon`.
  *
  * `:is()` and `:where()` offer alternatives for the subject, so an icon among any of them counts;
  * `:not()` and `:has()` only filter it, so theirs do not.
  */
-export function targetsIcon(selector: string): boolean {
-  return simpleSelectors(selectorCompounds(selector).at(-1) ?? "").some((part, index) => {
-    if (part === ".app-icon") return true;
-    if (index === 0 && /^(?:[\w-]*\|)?svg$/i.test(part.replace(/^\*\|/, ""))) return true;
+function isIconSubject(parts: readonly string[]): boolean {
+  return parts.some((part, index) => {
+    const name = unescapeIdentifier(part);
+    if (name === ".app-icon") return true;
+    if (index === 0 && /^(?:(?:[\w-]*|\*)\|)?svg$/i.test(name)) return true;
     const alternatives = /^:(?:is|where)\(([\s\S]*)\)$/i.exec(part);
-    return alternatives !== null && topLevelSelectorMembers(alternatives[1]!).some(targetsIcon);
+    return alternatives !== null && selectorSubjects(alternatives[1]!).some(isIconSubject);
   });
+}
+
+/** Whether any member of a selector list has an icon as its subject. */
+export function targetsIcon(selectorList: string): boolean {
+  return selectorSubjects(selectorList).some(isIconSubject);
 }
 
 /** Every width or height declaration on an icon whose px literals are off the scale, by rule. */
@@ -755,7 +785,7 @@ export function offScaleIconSizes(sheet: postcss.Root): { rule: string; declarat
   sheet.walkDecls((decl) => {
     const rule = decl.parent;
     if (rule?.type !== "rule" || !ICON_SIZE_PROPERTIES.test(decl.prop.toLowerCase())) return;
-    if (!topLevelSelectorMembers((rule as postcss.Rule).selector).some(targetsIcon)) return;
+    if (!targetsIcon((rule as postcss.Rule).selector)) return;
     // Signed and exponent forms too: `calc(var(--icon) + -1px)` and `1.8e1px` are off the scale.
     const literals = [...stripComments(decl.value).matchAll(/(?<![\w.-])([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)px\b/gi)];
     if (literals.some(([, px]) => !ICON_SCALE_PX.has(Number(px)))) {
@@ -772,7 +802,7 @@ export function assertIconSizesOnScale(
   const offScale = found.filter(({ rule }) => !exemptions.has(rule)).map(({ rule, declaration }) => `${rule} { ${declaration} }`);
   assert.deepEqual(offScale, [],
     "an icon is sized off the §18 scale (docs/design-system.md): use var(--icon-sm), var(--icon) or " +
-    "var(--icon-lg) (14, 16 or 20px), or 24px for an empty-state tile or the phone tab bar");
+    `var(--icon-lg) (14, 16 or 20px), or 24px for an empty-state tile or the phone tab bar:\n${offScale.join("\n")}`);
   for (const [rule, { owner }] of exemptions) {
     assert.ok(found.some((entry) => entry.rule === rule),
       `${rule}: exempted from the icon scale for ${owner}, but no longer sizes an icon off it; remove its ICON_SIZE_EXEMPTIONS entry`);
@@ -1799,7 +1829,9 @@ test("an icon sized off the scale fails, naming the rule and §18, and a stale e
     ".row:has(> svg) { height: 36px; }\n.icon-btn:not(svg) { width: 36px; }\n.app-icon-tile { width: 40px; }\n" +
     // Filters and attribute values name an icon without making it the subject.
     ".row:has(:is(svg, .app-icon)) { width: 36px; }\n.x[data-label=\".app-icon\"] { width: 36px; }\n" +
-    ".x:is(.a, .b):not(.app-icon) { height: 36px; }\n.x svg:hover { width: var(--icon-sm); }";
+    ".x:is(.a, .b):not(.app-icon) { height: 36px; }\n.x svg:hover { width: var(--icon-sm); }\n" +
+    // Strings and escapes do not end a compound or a member early.
+    "svg[data-label=\"6\\\" screen\"] .label { width: 18px; }\n.a[title=\"x, .app-icon\"] { width: 36px; }";
   assert.deepEqual(sizesOf(clean), []);
   assert.doesNotThrow(() => assertIconSizesOnScale(sizesOf(clean), new Map()));
   for (const [rule, key] of [
@@ -1815,12 +1847,19 @@ test("an icon sized off the scale fails, naming the rule and §18, and a stale e
     [".c svg { WIDTH: 18px; }", "|.c svg"],
     [".d svg { width: calc(var(--icon) + -1px); }", "|.d svg"],
     [".e svg { height: 1.8e1px; }", "|.e svg"],
+    // A comment between simple selectors is dropped, and an escaped identifier is still the icon's.
+    ["svg/**/:hover { width: 18px; }", "|svg/**/:hover"],
+    [".app-icon/* glyph */:hover { width: 18px; }", "|.app-icon/* glyph */:hover"],
+    [".row[data-label=\"6\\\" screen\"] svg { width: 18px; }", "|.row[data-label=\"6\\\" screen\"] svg"],
+    [".f .app\\2d icon { height: 18px; }", "|.f .app\\2d icon"],
   ] as const) {
     const found = sizesOf(`${clean}\n${rule}`);
     assert.deepEqual(found.map((entry) => entry.rule), [key], rule);
     assert.throws(() => assertIconSizesOnScale(found, new Map()), failsNaming(key, "§18", "var(--icon)"));
     assert.doesNotThrow(() => assertIconSizesOnScale(found, new Map([[key, { owner: "#1", why: "test" }]])));
   }
+  assert.equal(targetsIcon(".a :where(.b, svg)"), true);
+  assert.equal(targetsIcon(".a svg\\"), false, "a trailing backslash is read, not thrown on");
   assert.throws(() => assertIconSizesOnScale(sizesOf(clean), new Map([["|.gone svg", { owner: "#1958", why: "test" }]])),
     failsNaming("|.gone svg", "#1958", "remove its ICON_SIZE_EXEMPTIONS entry"));
 });
