@@ -12386,9 +12386,11 @@ body.shell-dock-dragging * {
 
    The action text's cutoff is the smaller of two lines. At the default root the first makes it
    inert: 316px, below the narrowest supported pane, where the phone strip has its own compact rule
-   below. From a 17px root up (browsers offer whole-px text sizes) the second covers what the cluster
-   needs with the widest label and its action text: 412.0, 469.2, 546.3 and 700.4px at 17, 20, 24
-   and 32px roots, so a reader who enlarged their text keeps the cost whole at every width the label
+   below. It climbs 1000px per root px, so a tenth of a px above 16 the second takes over and
+   covers what the cluster needs with the widest label and its action text: 401.8, 412.0, 469.2,
+   546.3 and 700.4px at 16.5, 17, 20, 24 and 32px roots. (Between 16 and 16.1px, a size no browser
+   setting produces, the label has grown by under a pixel.) A reader who enlarged their text
+   therefore keeps the cost whole at every width the label
    used to allow. Below it the control keeps only its state word: the paused action text goes, the
    keycap goes with it so the order above holds at any root, and "Following Live Output" keeps
    "Following" with the rest visually hidden, so the live region still announces the whole label.
@@ -12405,7 +12407,7 @@ body.shell-dock-dragging * {
 @container transcript-pane (max-width: calc(114px + 22rem)) {
   .follow-tail-kbd { display: none; }
 }
-@container transcript-pane (max-width: min(calc(-1604px + 120rem), calc(96px + 19.25rem))) {
+@container transcript-pane (max-width: min(calc(-15684px + 1000rem), calc(96px + 19.25rem))) {
   .follow-tail-action,
   .follow-tail-kbd { display: none; }
   .follow-tail-label-rest {

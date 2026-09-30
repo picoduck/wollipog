@@ -285,12 +285,12 @@ test("the follow control's label grows with the root in step with the Reply hint
  * enlarged root the whole " · Follow Live Output" label can outgrow a narrow pane on its own, so
  * below the width the cluster needs WITH it (and without the already-retired keycap) the control
  * keeps only its state word. At the default root the cutoff is inert: the phone strip's own 340px
- * compact rule owns that layout, so the rule must never fire in a supported pane at 16px. From
- * 17px, the smallest enlarged size a browser offers, it has to cover the cluster at every root.
+ * compact rule owns that layout, so the rule must never fire in a supported pane at 16px. Above
+ * that it has to cover the cluster at every root, fractional ones included (16.5px samples them).
  */
 const NARROWEST_PANE = 320;
 
-for (const rootPx of [16, 17, 20, 24, 32]) {
+for (const rootPx of [16, 16.5, 17, 20, 24, 32]) {
   test(`the action text's cutoff fits the yield order at a ${rootPx}px root`, async ({ page }) => {
     const cutoffs = readCutoffs(".follow-tail-action");
     expect(cutoffs.length, "a transcript-pane rule retires the follow control's action text").toBeGreaterThan(0);
