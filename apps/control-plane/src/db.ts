@@ -14812,7 +14812,8 @@ export class ControlPlaneDb {
        JOIN session_events target ON target.session_id=child.id AND target.seq=verification.report_event_seq
        WHERE verification.report_digest IS NULL AND verification.report_event_epoch IS NULL
          AND child.event_epoch=0
-         AND (child.archived=1 OR child.status IN ('idle','completed','stopped'))${childFilter}`,
+         AND (child.archived=1 OR child.status IN ('idle','completed','stopped')
+           OR (child.status='input_required' AND child.policy_resume_status='idle'))${childFilter}`,
     ).all(...(childSessionId === undefined ? [] : [childSessionId])) as Array<{
       campaign_session_id: string; child_session_id: string; report_event_seq: number; verified_at: number;
     }>;

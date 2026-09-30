@@ -32,8 +32,12 @@ function legacyFixture(file = ":memory:") {
   return db;
 }
 
-for (const superseded of [false, true]) {
-  test(`unreset legacy proof with a runner clock ahead is ${superseded ? "rejected after a new assignment" : "captured at upgrade"}`, () => {
+for (const { superseded, paused } of [
+  { superseded: false, paused: false },
+  { superseded: false, paused: true },
+  { superseded: true, paused: false },
+]) {
+  test(`unreset legacy proof with a runner clock ahead is ${superseded ? "rejected after a new assignment" : paused ? "captured through an idle policy pause" : "captured at upgrade"}`, () => {
     const root = mkdtempSync(join(tmpdir(), "campaign-legacy-capture-"));
     const file = join(root, "control-plane.db");
     let db: ControlPlaneDb | undefined;
@@ -45,9 +49,18 @@ for (const superseded of [false, true]) {
       db.raw().prepare(`INSERT INTO orchestrator_campaign_child_reports
         (campaign_session_id, child_session_id, report_event_seq, verified_at)
         VALUES ('campaign', 'child', 2, 1001)`).run();
+      if (paused) {
+        db.notePolicyResumeStatus("child", "idle");
+        db.updateSessionStatus("child", "input_required", 1002);
+      }
       assert.equal(db.getRunnerHistoryState("child")!.eventEpoch, 0);
       db.close();
       db = ControlPlaneDb.open(file);
+      if (paused) {
+        assert.equal(db.campaignChildReportVerified("campaign", "child"), false,
+          "a policy-paused child is unverified until its idle state is restored");
+        db.updateSessionStatus("child", "idle", 1003);
+      }
       assert.equal(db.campaignChildReportVerified("campaign", "child"), !superseded);
       const proof = db.raw().prepare("SELECT report_digest, report_event_epoch, report_ts FROM orchestrator_campaign_child_reports").get()!;
       assert.equal(proof.report_event_epoch, superseded ? null : 0);
