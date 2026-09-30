@@ -105,74 +105,211 @@ function hasFlag(owner: ts.JsxOpeningLikeElement, name: string, sourceFile: ts.S
       && property.initializer.expression?.kind === ts.SyntaxKind.TrueKeyword)));
 }
 
+function parseSource(file: string, source = readFileSync(file, "utf8")): ts.SourceFile {
+  return ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+    file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+}
+
+/** One static string a person reads. `label` marks the compact labels held to Title Case (§17.1). */
+interface UiCopy {
+  node: ts.Node;
+  kind: string;
+  value: string;
+  label: boolean;
+}
+
+/** Attributes whose text is shown or announced beyond the label attributes: tooltips, placeholders, alt text. */
+const TEXT_ATTRIBUTES = new Set(["alt", "aria-description", "placeholder", "title", ...LABEL_PROPERTIES]);
+/** Elements whose text is a literal value (a command, a path, a status), not copy. */
+const LITERAL_TAGS = new Set(["code", "kbd", "pre", "samp"]);
+
+/**
+ * The literal copy an expression can show, read word by word rather than as a whole label. Branches
+ * and fallbacks (`??`, `||`, the right of `&&`) are copy; a condition's test and a call's arguments
+ * are code (`status === "cancelled"`, `statusMeta("cancelled")`), so they are never read. A template
+ * hole reads as a placeholder word.
+ */
+function copyLiterals(node: ts.Expression): string[] {
+  if (ts.isParenthesizedExpression(node)) return copyLiterals(node.expression);
+  if (ts.isStringLiteralLike(node)) return [node.text];
+  if (ts.isTemplateExpression(node)) return [node.head.text + node.templateSpans.map((span) => `Name${span.literal.text}`).join("")];
+  if (ts.isConditionalExpression(node)) return [...copyLiterals(node.whenTrue), ...copyLiterals(node.whenFalse)];
+  if (ts.isBinaryExpression(node)) {
+    const operator = node.operatorToken.kind;
+    if (operator === ts.SyntaxKind.AmpersandAmpersandToken) return copyLiterals(node.right);
+    if (operator === ts.SyntaxKind.QuestionQuestionToken || operator === ts.SyntaxKind.BarBarToken ||
+        operator === ts.SyntaxKind.PlusToken) return [...copyLiterals(node.left), ...copyLiterals(node.right)];
+  }
+  return [];
+}
+
+function isConfirmCall(callee: string): boolean {
+  return callee === "confirm" || (callee.endsWith(".confirm") && callee !== "window.confirm") || callee === "confirmWhileAllowed";
+}
+
+/**
+ * Every static UI string in a source file. The labels are label-tag text, label attributes and
+ * properties, ChoiceRow titles and dialog titles. The rest of the copy is other JSX text and JSX
+ * expressions (`{done ? "Saved" : "Saving…"}`), text attributes, consent sentences, and confirmation
+ * titles and bodies. Comments, identifiers, class names and values that are compared or stored
+ * (`status === "cancelled"`) are never read.
+ */
+function uiCopy(sourceFile: ts.SourceFile): UiCopy[] {
+  const copy: UiCopy[] = [];
+  const parentTag = (node: ts.Node) =>
+    ts.isJsxElement(node.parent) ? node.parent.openingElement.tagName.getText(sourceFile) : "";
+  const visit = (node: ts.Node) => {
+    if (ts.isJsxText(node) && !node.containsOnlyTriviaWhiteSpaces) {
+      const tag = parentTag(node);
+      if (!LITERAL_TAGS.has(tag)) copy.push({ node, kind: `<${tag}>`, value: node.text, label: LABEL_TAGS.has(tag) });
+    }
+    if (ts.isJsxExpression(node) && node.expression && (ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent))) {
+      const tag = parentTag(node);
+      if (!LITERAL_TAGS.has(tag)) {
+        for (const value of copyLiterals(node.expression)) copy.push({ node, kind: `<${tag}>`, value, label: false });
+      }
+    }
+    if (ts.isJsxAttribute(node) && node.initializer) {
+      const name = node.name.getText(sourceFile);
+      // A JsxAttribute sits in JsxAttributes; the element that owns it is one level further up.
+      const owner = node.parent.parent;
+      const tag = ts.isJsxOpeningLikeElement(owner) ? owner.tagName.getText(sourceFile) : "";
+      // A consent checkbox's label is a sentence, which its own test checks.
+      const consent = tag === "Checkbox" && ts.isJsxOpeningLikeElement(owner) && hasFlag(owner, "consent", sourceFile);
+      const label = !(consent && name === "label") && (name === "aria-label" || name === "ariaLabel" ||
+        name === "data-menu-label" || name === "label" || (name === "title" && (tag === "State" || tag === "Notice" || tag === "Modal")));
+      const text = label || TEXT_ATTRIBUTES.has(name);
+      if (ts.isStringLiteral(node.initializer)) {
+        if (text) copy.push({ node, kind: name, value: node.initializer.text, label });
+      } else if (ts.isJsxExpression(node.initializer) && node.initializer.expression) {
+        const expression = node.initializer.expression;
+        // A dialog title chosen by a condition is still a title (§7.2): read every branch.
+        const modalTitles = name === "title" && tag === "Modal" ? staticBranches(expression) : null;
+        if (modalTitles) {
+          for (const value of modalTitles) copy.push({ node, kind: "Modal title", value, label: true });
+        } else if (text) {
+          for (const value of copyLiterals(expression)) copy.push({ node, kind: name, value, label: false });
+        }
+        // A ChoiceRow's title is its label (§8.4): every static title in a ChoiceRows `options` list.
+        if (name === "options" && tag === "ChoiceRows") {
+          const titles = (inner: ts.Node) => {
+            if (ts.isPropertyAssignment(inner) && ts.isIdentifier(inner.name) && inner.name.text === "title") {
+              for (const value of staticBranches(inner.initializer) ?? []) copy.push({ node: inner, kind: "ChoiceRow title", value, label: true });
+            }
+            ts.forEachChild(inner, titles);
+          };
+          titles(expression);
+        }
+      }
+    }
+    if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name) && LABEL_PROPERTIES.has(node.name.text)) {
+      if (ts.isStringLiteralLike(node.initializer)) {
+        copy.push({ node, kind: node.name.text, value: node.initializer.text, label: true });
+      } else {
+        for (const value of copyLiterals(node.initializer)) copy.push({ node, kind: node.name.text, value, label: false });
+      }
+    }
+    // A confirmation's title and body; its button labels are label properties above.
+    if (ts.isCallExpression(node) && isConfirmCall(node.expression.getText(sourceFile))) {
+      for (const literal of node.arguments.flatMap(optionLiterals)) {
+        for (const property of literal.properties) {
+          if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) continue;
+          const kind = property.name.text;
+          const values = kind === "title" ? copyLiterals(property.initializer)
+            : kind === "message" ? bodyBranches(property.initializer, sourceFile) ?? copyLiterals(property.initializer)
+            : [];
+          for (const value of values) copy.push({ node: property, kind: `confirmation ${kind}`, value, label: false });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return copy;
+}
+
+function copyLine(sourceFile: ts.SourceFile, node: ts.Node): string {
+  const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+  return `${path.relative(SOURCE_ROOT, sourceFile.fileName)}:${line}`;
+}
+
 test("static compact UI labels use Title Case", () => {
   const failures: string[] = [];
   for (const file of sourceFiles(SOURCE_ROOT)) {
-    const source = readFileSync(file, "utf8");
-    const sourceFile = ts.createSourceFile(
-      file,
-      source,
-      ts.ScriptTarget.Latest,
-      true,
-      file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-    );
-    const report = (node: ts.Node, kind: string, value: string) => {
-      const label = compactLabel(value);
-      if (!label || isTitleCase(label)) return;
-      const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-      failures.push(`${path.relative(SOURCE_ROOT, file)}:${line} ${kind}: ${JSON.stringify(label)}`);
-    };
-    const visit = (node: ts.Node) => {
-      if (ts.isJsxText(node) && ts.isJsxElement(node.parent)) {
-        const tag = node.parent.openingElement.tagName.getText(sourceFile);
-        if (LABEL_TAGS.has(tag)) report(node, `<${tag}>`, node.text);
+    const sourceFile = parseSource(file);
+    for (const { node, kind, value, label } of uiCopy(sourceFile)) {
+      if (!label) continue;
+      const compact = compactLabel(value);
+      if (compact && !isTitleCase(compact)) failures.push(`${copyLine(sourceFile, node)} ${kind}: ${JSON.stringify(compact)}`);
+      if (kind === "Modal title" && value.trim().endsWith("?")) {
+        failures.push(`${path.relative(SOURCE_ROOT, file)} Modal title is a question: ${JSON.stringify(value)}`);
       }
-      if (ts.isJsxAttribute(node) && node.initializer && ts.isStringLiteral(node.initializer)) {
-        const name = node.name.getText(sourceFile);
-        // A JsxAttribute sits in JsxAttributes; the element that owns it is one level further up.
-        const owner = node.parent.parent;
-        const tag = ts.isJsxOpeningLikeElement(owner) ? owner.tagName.getText(sourceFile) : "";
-        const consent = tag === "Checkbox" && ts.isJsxOpeningLikeElement(owner) && hasFlag(owner, "consent", sourceFile);
-        if (consent && name === "label") {
-          // Checked below as a sentence instead.
-        } else if (name === "aria-label" || name === "ariaLabel" || name === "data-menu-label" || name === "label" || (name === "title" && (tag === "State" || tag === "Notice" || tag === "Modal"))) {
-          report(node, name, node.initializer.text);
-        }
-      }
-      // A ChoiceRow's title is its label (§8.4): every static title in a ChoiceRows `options` list.
-      if (ts.isJsxAttribute(node) && node.name.getText(sourceFile) === "options" && node.initializer &&
-          ts.isJsxExpression(node.initializer) && node.initializer.expression &&
-          ts.isJsxOpeningLikeElement(node.parent.parent) && node.parent.parent.tagName.getText(sourceFile) === "ChoiceRows") {
-        const titles = (inner: ts.Node) => {
-          if (ts.isPropertyAssignment(inner) && ts.isIdentifier(inner.name) && inner.name.text === "title") {
-            for (const branch of staticBranches(inner.initializer) ?? []) report(inner, "ChoiceRow title", branch);
-          }
-          ts.forEachChild(inner, titles);
-        };
-        titles(node.initializer.expression);
-      }
-      // A dialog title chosen by a condition is still a title (§7.2): read every branch.
-      if (ts.isJsxAttribute(node) && node.name.getText(sourceFile) === "title" && node.initializer &&
-          ts.isJsxExpression(node.initializer) && node.initializer.expression &&
-          ts.isJsxOpeningLikeElement(node.parent.parent) && node.parent.parent.tagName.getText(sourceFile) === "Modal") {
-        for (const branch of staticBranches(node.initializer.expression) ?? []) {
-          report(node, "Modal title", branch);
-          if (branch.trim().endsWith("?")) failures.push(`${path.relative(SOURCE_ROOT, file)} Modal title is a question: ${JSON.stringify(branch)}`);
-        }
-      }
-      if (
-        ts.isPropertyAssignment(node) &&
-        ts.isIdentifier(node.name) &&
-        LABEL_PROPERTIES.has(node.name.text) &&
-        ts.isStringLiteralLike(node.initializer)
-      ) {
-        report(node, node.name.text, node.initializer.text);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
+    }
   }
   assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+/**
+ * docs/design-system.md §17.2: visible copy is US English. #2026 and #2059 each swept British
+ * spellings out by hand; this keeps them out. The list is the British words UI copy is likely to
+ * reach for, so it is closed on purpose. Each entry matches only whole words that are not also US
+ * English: "cancellation", "dialogue", "analyses" and "organism" stay legal.
+ */
+const BRITISH_SPELLINGS: [RegExp, string][] = [
+  [/\bcolour\w*/gi, "color"],
+  [/\bbehaviour\w*/gi, "behavior"],
+  [/\bfavourite\w*/gi, "favorite"],
+  [/\bgrey(?:s|ed|ing|ish)?\b/gi, "gray"],
+  [/\bcancell(?:ed|ing)\b/gi, "canceled, canceling"],
+  [/\blabell(?:ed|ing)\b/gi, "labeled, labeling"],
+  [/\blicences?\b/gi, "license"],
+  [/\bcentre[ds]?\b/gi, "center"],
+  [/\banalys(?:e|ed|ing)\b/gi, "analyze"],
+  [
+    /\b(?:apologi|authori|categori|customi|finali|initiali|maximi|minimi|normali|optimi|organi|personali|prioriti|recogni|summari|synchroni|visuali)s(?:e[ds]?|ing|ations?)\b/gi,
+    "-ize, -ization",
+  ],
+];
+
+/** Each British word in `text`, with its US spelling. */
+function britishSpellings(text: string): [string, string][] {
+  return BRITISH_SPELLINGS.flatMap(([pattern, us]) =>
+    [...text.matchAll(pattern)].map((match): [string, string] => [match[0], us]));
+}
+
+function spellingFailures(sourceFile: ts.SourceFile): string[] {
+  return uiCopy(sourceFile).flatMap(({ node, kind, value }) => britishSpellings(value).map(([word, us]) =>
+    `${copyLine(sourceFile, node)} ${kind}: ${JSON.stringify(value.trim())} spells "${word}" the British way; US English (§17.2) is "${us}"`));
+}
+
+test("visible UI copy uses US English spelling", () => {
+  // The e2e harness pages are test-only fixtures, out of scope like every other test file.
+  const failures = sourceFiles(SOURCE_ROOT)
+    .filter((file) => !file.includes(`${path.sep}e2e${path.sep}`))
+    .flatMap((file) => spellingFailures(parseSource(file)));
+  assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+test("the US spelling check reads visible copy, not comments, identifiers or status values", () => {
+  const sourceFile = parseSource(path.join(SOURCE_ROOT, "fixture.tsx"), `
+    // The colour of a cancelled row is grey.
+    const cancelled = status === "cancelled" || code === "COMMAND_CANCELLED";
+    const colour = cancelled ? "grey" : "green";
+    const actions = [{ label: "Favourite Colour", value: "cancelled" }];
+    const remove = () => confirm({ title: "Remove Row", message: \`Its queued work is cancelled.\`, confirmLabel: "Remove Row" });
+    export const Row = () => (
+      <div className="grey" data-status="cancelled" title="Behaviour">
+        Colour {cancelled ? "Cancelled" : "Running"} <code>cancelled</code>
+        <span title={refusal ?? "Nothing is cancelled"}>{ready && "Greyed"}{statusMeta("cancelled")}</span>
+      </div>
+    );`);
+  const failures = spellingFailures(sourceFile);
+  assert.deepEqual(failures.map((failure) => failure.match(/spells "(\w+)"/)?.[1]),
+    ["Colour", "Favourite", "cancelled", "Behaviour", "Colour", "Cancelled", "cancelled", "Greyed"]);
+  assert.equal(failures[0], 'fixture.tsx:5 label: "Favourite Colour" spells "Colour" the British way; US English (§17.2) is "color"');
+  assert.deepEqual(britishSpellings("Cancellation, dialogue, analyses, organism, gray, canceled, realize, supervise"), []);
+  assert.deepEqual(britishSpellings("Customise the colours; initialising… Organisation, Summarised").map(([word]) => word),
+    ["colours", "Customise", "initialising", "Organisation", "Summarised"]);
 });
 
 test("a masked identifier's words and every reveal control's name are Title Case (#1954)", () => {
@@ -445,8 +582,7 @@ function confirmationCopyFailures(file: string, source: string): { failures: str
     if (ts.isCallExpression(node)) {
       const callee = node.expression.getText(sourceFile);
       if (callee === "window.confirm") failures.push(`${where(node)} window.confirm is banned; use useFeedback().confirm`);
-      const isConfirm = callee === "confirm" || callee.endsWith(".confirm") || callee === "confirmWhileAllowed";
-      if (isConfirm && callee !== "window.confirm") {
+      if (isConfirmCall(callee)) {
         for (const literal of node.arguments.flatMap(optionLiterals)) {
           const property = (name: string, owner = literal) => owner.properties.find((entry): entry is ts.PropertyAssignment =>
             ts.isPropertyAssignment(entry) && ts.isIdentifier(entry.name) && entry.name.text === name);
