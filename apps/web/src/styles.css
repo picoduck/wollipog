@@ -2353,7 +2353,10 @@ button.status { cursor: pointer; }
   gap: var(--space-2);
   min-width: 0;
 }
-.section-title { font: var(--type-section); }
+.section-title {
+  margin: 0;
+  font: var(--type-section);
+}
 .section > .btn { justify-self: start; }
 /* A Surface (§5.1): one bordered group of rows that belong together, divided by hairlines. */
 .surface {

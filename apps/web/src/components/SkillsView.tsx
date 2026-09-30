@@ -546,7 +546,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   // The open skill's actions (#1962): Add Assignment… beside ⋯ on a wide pane; on a phone the
   // detail bar's ⋯ holds Add Assignment… and then the same items.
   const addAssignment = { label: "Add Assignment…", disabled: busy, onClick: () => { setError(null); setDialog("add-assignment"); } };
-  const detailMenu = detail ? skillDetailMenu(detail, {
+  const detailMenu = detail ? skillDetailMenu(detail, busy, {
     onVersionHistory: () => setDialog("version-history"),
     onMachineVersion: () => { setVersionRunnerId(undefined); setDialog("machine-versions"); },
     onCheckForUpdates: () => setDialog("git-update"),
@@ -566,7 +566,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
           title={route.id ? skillName ?? "Skill" : PANE_TITLES[route.pane!]}
           backLabel={backLabel("skills")}
           onBack={() => select(null)}
-          menu={route.id && detail && detailError?.skillId !== selectedId ? [addAssignment, ...detailMenu] : []}
+          menu={route.id && detail && !listError && detailError?.skillId !== selectedId ? [addAssignment, ...detailMenu] : []}
         />
       )}
       {!phoneDetail && (

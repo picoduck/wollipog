@@ -1716,3 +1716,54 @@ test("on a phone the detail bar's ⋯ holds Add Assignment… and the skill menu
     restore();
   }
 });
+
+test("Delete Skill… waits, and says why, while a change to the skill is still saving", async () => {
+  const layout = stubDescriptionLayout(1);
+  let release!: () => void;
+  const view = await mountRouted(headerClient(headerSkill(), {
+    listSkillAssignments: async () => ({ assignments: [{
+      id: "assignment-1", skillId: "skill-1", scopeKind: "instance" as const,
+      agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const,
+    }] }),
+    updateSkillAssignment: () => new Promise<void>((resolve) => { release = resolve; }),
+  }), "skills-header-busy", { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    const enabled = container.querySelector<HTMLButtonElement>('.skills-table button[role="switch"]')!;
+    await act(async () => enabled.click());
+    const head = container.querySelector(".skill-detail-head")!;
+    assert.equal(buttonNamed(head, "Add Assignment…")[0]!.disabled, true);
+    let menu = await openMoreActions(head);
+    const remove = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].at(-1)!;
+    assert.equal(remove.querySelector(".menu-text")?.textContent, "Delete Skill…");
+    assert.equal(remove.disabled, true, "deleting under a pending update would fail it");
+    assert.equal(remove.querySelector(".menu-desc")?.textContent, "Wait for the current change to finish.");
+    await act(async () => domWindow.document.body.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never));
+    await act(async () => { release(); });
+    await act(settle);
+    if (!domWindow.document.querySelector('[role="menu"][aria-label="More Actions"]')) menu = await openMoreActions(head);
+    const again = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].at(-1)!;
+    assert.equal(again.disabled, false, "once the change is saved, Delete Skill… is back");
+    assertNoDomNode(again.querySelector(".menu-desc"));
+  } finally {
+    await view.unmount();
+    layout.restore();
+  }
+});
+
+test("on a phone a failed library load leaves no skill actions behind its error", async () => {
+  const restore = stubPhone();
+  const layout = stubDescriptionLayout(1);
+  const view = await mountRouted(headerClient(headerSkill(), {
+    listSkills: async () => { throw new Error("HTTP 503: skill library unavailable"); },
+  }), "skills-header-phone-error", { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    assert.match(container.textContent ?? "", /Couldn't Load Skills/);
+    assertNoDomNode(container.querySelector('.detail-bar button[aria-label="More Actions"]'), "the hidden detail offers no Delete Skill…");
+  } finally {
+    await view.unmount();
+    layout.restore();
+    restore();
+  }
+});

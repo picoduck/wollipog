@@ -169,7 +169,7 @@ test("every skill version view carries its 1-based number in creation order, acr
   assert.equal(db.getSkill(skill.id)!.latestVersion!.versionNumber, 55);
   assert.equal(db.listSkills().find((entry) => entry.id === skill.id)!.latestVersion!.versionNumber, 55);
 
-  db.raw().prepare("INSERT INTO skill_machine_versions VALUES (?, ?, ?, ?)").run(skill.id, "runner", ids[9], "rev");
+  db.raw().prepare("INSERT INTO skill_machine_versions VALUES (?, ?, ?, ?)").run(skill.id, "runner", ids[9]!, "rev");
   assert.equal(db.getMachineSkillVersion(skill.id, "runner")!.version!.versionNumber, 10);
 
   // Restoring appends a new version with the next number; the restored one keeps its own.

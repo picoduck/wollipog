@@ -131,6 +131,16 @@ test.describe("at 1440×900", () => {
         return `${style.borderLeftWidth} ${style.borderBottomWidth} ${style.backgroundColor}`;
       }));
     expect(new Set(boxes)).toEqual(new Set(["0px 0px rgba(0, 0, 0, 0)"]));
+    // §4.5: a title row, 12px to its content, 32px between sections.
+    const rhythm = await page.locator(".skill-detail").evaluate((detail) => {
+      const sections = [...detail.querySelectorAll<HTMLElement>(":scope > section.section")];
+      return {
+        toContent: sections.map((section) => Math.round(section.querySelector(".section-head")!.nextElementSibling!.getBoundingClientRect().top -
+          section.querySelector(".section-head")!.getBoundingClientRect().bottom)),
+        between: sections.slice(1).map((section, index) => Math.round(section.getBoundingClientRect().top - sections[index]!.getBoundingClientRect().bottom)),
+      };
+    });
+    expect(rhythm).toEqual({ toContent: [12, 12, 12, 12], between: [32, 32, 32] });
   });
 });
 

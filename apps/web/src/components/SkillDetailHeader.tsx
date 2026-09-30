@@ -6,6 +6,8 @@ import { ActionsMenu, type PageAction, type PageMenuAction } from "./PageHeader.
 
 /** Why a built-in skill has no Check for Updates… of its own (§9.1: a disabled item says why). */
 export const BUILT_IN_UPDATES_REASON = "Built-in skills update with each Wollipog release.";
+/** Why Delete Skill… waits: a change to this skill is still being saved, and deleting under it would fail it. */
+export const SKILL_BUSY_REASON = "Wait for the current change to finish.";
 
 /**
  * The skill detail's ⋯ items (#1962), in order. The desktop header shows them behind its ⋯; on a
@@ -14,7 +16,7 @@ export const BUILT_IN_UPDATES_REASON = "Built-in skills update with each Wollipo
  * Git skill, and for a built-in skill as a disabled item that says why; other skills have no source
  * to check.
  */
-export function skillDetailMenu(skill: SkillSummary, actions: {
+export function skillDetailMenu(skill: SkillSummary, busy: boolean, actions: {
   onVersionHistory: () => void;
   onMachineVersion: () => void;
   onCheckForUpdates: () => void;
@@ -27,7 +29,7 @@ export function skillDetailMenu(skill: SkillSummary, actions: {
     ...(source === "built_in"
       ? [{ label: "Check for Updates…", onClick: () => {}, disabled: true, description: BUILT_IN_UPDATES_REASON }]
       : source === "git" ? [{ label: "Check for Updates…", onClick: actions.onCheckForUpdates }] : []),
-    { label: "Delete Skill…", onClick: actions.onDelete, danger: true },
+    { label: "Delete Skill…", onClick: actions.onDelete, danger: true, disabled: busy, ...(busy ? { description: SKILL_BUSY_REASON } : {}) },
   ];
 }
 
