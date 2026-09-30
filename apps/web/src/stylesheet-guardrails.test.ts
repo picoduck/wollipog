@@ -709,19 +709,44 @@ function selectorCompounds(selector: string): string[] {
 }
 
 /**
+ * A compound's top-level simple selectors — `svg`, `.name`, `#id`, `[attr]`, `:name(…)`,
+ * `::name` — so a class spelled inside an attribute value or a pseudo-class argument is not read as
+ * one of the compound's own.
+ */
+function simpleSelectors(compound: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let depth = 0;
+  let quote: "\"" | "'" | null = null;
+  for (const char of compound) {
+    if (quote) {
+      if (char === quote) quote = null;
+    } else if (char === "\"" || char === "'") quote = char;
+    else if (char === ")" || char === "]") depth -= 1;
+    else if (depth === 0 && (char === "." || char === "#" || char === "[" || (char === ":" && current !== ":"))) {
+      if (current) parts.push(current);
+      current = "";
+    }
+    if (!quote && (char === "(" || char === "[")) depth += 1;
+    current += char;
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+/**
  * Whether a selector's subject — its last compound — is an icon: an `svg` element or `.app-icon`.
  *
- * `:is()` and `:where()` offer alternatives for the subject, so an icon among them counts; `:not()`
- * and `:has()` only filter it, so theirs do not.
+ * `:is()` and `:where()` offer alternatives for the subject, so an icon among any of them counts;
+ * `:not()` and `:has()` only filter it, so theirs do not.
  */
 export function targetsIcon(selector: string): boolean {
-  const subject = selectorCompounds(selector).at(-1) ?? "";
-  for (const pseudo of [":is", ":where"]) {
-    const argument = functionalPseudoArgument(subject, pseudo);
-    if (argument !== null && topLevelSelectorMembers(argument).some(targetsIcon)) return true;
-  }
-  const own = subject.replace(/:[\w-]+\((?:[^()]|\([^()]*\))*\)/g, "");
-  return /^(?:\*\|)?svg(?![\w-])/i.test(own) || /\.app-icon(?![\w-])/.test(own);
+  return simpleSelectors(selectorCompounds(selector).at(-1) ?? "").some((part, index) => {
+    if (part === ".app-icon") return true;
+    if (index === 0 && /^(?:[\w-]*\|)?svg$/i.test(part.replace(/^\*\|/, ""))) return true;
+    const alternatives = /^:(?:is|where)\(([\s\S]*)\)$/i.exec(part);
+    return alternatives !== null && topLevelSelectorMembers(alternatives[1]!).some(targetsIcon);
+  });
 }
 
 /** Every width or height declaration on an icon whose px literals are off the scale, by rule. */
@@ -729,9 +754,10 @@ export function offScaleIconSizes(sheet: postcss.Root): { rule: string; declarat
   const found: { rule: string; declaration: string }[] = [];
   sheet.walkDecls((decl) => {
     const rule = decl.parent;
-    if (rule?.type !== "rule" || !ICON_SIZE_PROPERTIES.test(decl.prop)) return;
+    if (rule?.type !== "rule" || !ICON_SIZE_PROPERTIES.test(decl.prop.toLowerCase())) return;
     if (!topLevelSelectorMembers((rule as postcss.Rule).selector).some(targetsIcon)) return;
-    const literals = [...stripComments(decl.value).matchAll(/(?<![\w.-])(\d*\.?\d+)px\b/gi)];
+    // Signed and exponent forms too: `calc(var(--icon) + -1px)` and `1.8e1px` are off the scale.
+    const literals = [...stripComments(decl.value).matchAll(/(?<![\w.-])([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)px\b/gi)];
     if (literals.some(([, px]) => !ICON_SCALE_PX.has(Number(px)))) {
       found.push({ rule: contextKey(rule as postcss.Rule), declaration: `${decl.prop}: ${decl.value}` });
     }
@@ -1770,7 +1796,10 @@ test("an icon sized off the scale fails, naming the rule and §18, and a stale e
   const clean = ".notice-icon svg { width: var(--icon); height: var(--icon); }\n" +
     ".state-icon svg { width: 24px; height: 24px; }\n.menu-icon, .menu-icon svg { width: 20px; }\n" +
     ".usage-chart-svg { height: 260px; }\n.qr svg { width: 100%; height: auto; }\n" +
-    ".row:has(> svg) { height: 36px; }\n.icon-btn:not(svg) { width: 36px; }\n.app-icon-tile { width: 40px; }";
+    ".row:has(> svg) { height: 36px; }\n.icon-btn:not(svg) { width: 36px; }\n.app-icon-tile { width: 40px; }\n" +
+    // Filters and attribute values name an icon without making it the subject.
+    ".row:has(:is(svg, .app-icon)) { width: 36px; }\n.x[data-label=\".app-icon\"] { width: 36px; }\n" +
+    ".x:is(.a, .b):not(.app-icon) { height: 36px; }\n.x svg:hover { width: var(--icon-sm); }";
   assert.deepEqual(sizesOf(clean), []);
   assert.doesNotThrow(() => assertIconSizesOnScale(sizesOf(clean), new Map()));
   for (const [rule, key] of [
@@ -1779,6 +1808,13 @@ test("an icon sized off the scale fails, naming the rule and §18, and a stale e
     [".a, .b svg:hover { min-width: calc(var(--icon) + 2px); }", "|.a,.b svg:hover"],
     [".bar :is(.x, svg) { inline-size: 18px; }", "|.bar :is(.x,svg)"],
     [".rail .app-icon.active { max-height: 26px; }", "|.rail .app-icon.active"],
+    // Every :is() in the subject offers alternatives, not only the first.
+    [":is(.active, .selected):is(svg, .app-icon) { width: 18px; }", "|:is(.active,.selected):is(svg,.app-icon)"],
+    ["*|svg::before { height: 18px; }", "|*|svg::before"],
+    // Property names are case-insensitive, and a signed or exponent px literal is still a size.
+    [".c svg { WIDTH: 18px; }", "|.c svg"],
+    [".d svg { width: calc(var(--icon) + -1px); }", "|.d svg"],
+    [".e svg { height: 1.8e1px; }", "|.e svg"],
   ] as const) {
     const found = sizesOf(`${clean}\n${rule}`);
     assert.deepEqual(found.map((entry) => entry.rule), [key], rule);
