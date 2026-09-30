@@ -721,6 +721,44 @@ test("SkillsView marks built-in skills recommended, assigns one in a step, and d
   await view.unmount();
 });
 
+test("turning off Automatic Updates for a held Git skill clears its Update Held status in the list", async () => {
+  const gitSource = { url: "https://example.test/skills.git", ref: "main", subdirectory: "", path: "", commit: "c1" };
+  const skill = {
+    id: "skill-git", name: "lint-rules", description: "Keeps lint rules current", assignmentCount: 1, gitSource,
+    gitAutoUpdate: { enabled: true, held: { commit: "c2", reason: "scripts", scriptPaths: ["fix.sh"], heldAt: 1 } } as {
+      enabled: boolean; held: { commit: string; reason: string; scriptPaths: string[]; heldAt: number } | null;
+    },
+    latestVersion: { id: "v1", digest: "d1", createdAt: 1, gitSource },
+  };
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [structuredClone(skill)] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => ({ skill: structuredClone(skill), latestVersion: { ...skill.latestVersion, files: [] } }),
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => ({ desired: [], reported: null }),
+    getMachineSkillVersionPolicy: async () => ({ policy: null }),
+    // Disabling drops the setting's status, hold included (db.setSkillGitAutoUpdate).
+    setSkillGitAutoUpdate: async (_id: string, enabled: boolean) => {
+      skill.gitAutoUpdate = { enabled, held: null };
+      return skill.gitAutoUpdate;
+    },
+  } as unknown as ApiClient;
+  const view = await mountSkills(client, "skills-git-hold");
+  try {
+    const status = () => [...view.listItem("lint-rules")!.querySelectorAll(".status")].map((badge) => badge.textContent);
+    assert.deepEqual(status(), ["Update Held"]);
+    await view.click(view.listItem("lint-rules"));
+    const toggle = [...view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+      .find((input) => input.closest("label")?.textContent?.includes("Automatic Updates"));
+    await view.click(toggle);
+    assert.equal(skill.gitAutoUpdate.enabled, false);
+    assert.deepEqual(status(), [], "the list reads the refreshed summary, not the one loaded before the change");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a recommendation dismissed in the Skills view or the Inbox notice is dismissed in both", async () => {
   const skillMd = (name: string) => `---\nname: ${name}\n---\nBody.\n`;
   const skills = ["orchestrate-issues", "using-wollipog"].map((name) => ({

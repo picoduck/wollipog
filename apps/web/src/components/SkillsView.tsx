@@ -719,7 +719,11 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
                 <p className="skills-hint">Commit {gitSource.commit}</p>
                 <SkillGitAutoUpdateControls status={detail.gitAutoUpdate} gitRef={gitSource.ref} busy={busy}
-                  onChange={(enabled) => void mutate(() => api.setSkillGitAutoUpdate(detail.id, enabled), () => refreshDetail(detail.id))} />
+                  onChange={(enabled) => void mutate(() => api.setSkillGitAutoUpdate(detail.id, enabled), async () => {
+                    // Disabling drops a held update, which the list shows as Update Held.
+                    await refreshList();
+                    await refreshDetail(detail.id);
+                  })} />
                 <button className={`btn sm${heldUpdate ? " primary" : ""}`} type="button" onClick={() => setDialog("git-update")}>
                   {heldUpdate ? "Review Held Update" : "Check for Updates"}
                 </button>
