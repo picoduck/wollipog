@@ -71,10 +71,6 @@ export function SessionContextMenu({
   // Dialog-opening actions close WITHOUT restoring focus — the dialog takes it, and its own
   // return-focus handling brings it back (the SessionHeader menu's established ordering).
   const act = (action: (sessionId: string) => void, restoreFocus: boolean) => () => {
-    // On a phone the menu is a bottom sheet, which can mount under the finger that long-pressed a
-    // low row: the click its release synthesizes lands on an item, not on the backdrop. That click
-    // is the opening gesture, so it is consumed here too and runs nothing.
-    if (consumeLongPressClick()) return;
     const target = state.sessionId;
     close(restoreFocus);
     action(target);
@@ -95,6 +91,16 @@ export function SessionContextMenu({
         // click (a dismissal tap, the Escape ladder) working normally.
         if (consumeLongPressClick()) return;
         close(true);
+      }}
+      // On a phone the menu is a bottom sheet, which can mount under the finger that long-pressed
+      // a low row: the click its release synthesizes lands on the sheet, not on the backdrop. That
+      // click is the opening gesture, so the sheet consumes it at capture and it runs nothing —
+      // wherever it lands. Left to an item, a release on the title row or grabber went unspent and
+      // its grace swallowed the next real tap on an item (#2082).
+      onClickCapture={(event) => {
+        if (!consumeLongPressClick()) return;
+        event.preventDefault();
+        event.stopPropagation();
       }}
       onKeyDown={(event) => handleMenuKeyDown(event, close)}
       onContextMenu={(event) => event.preventDefault()}

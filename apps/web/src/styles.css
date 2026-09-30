@@ -11218,8 +11218,11 @@ body.shell-dock-dragging * {
 
 @media (max-width: 760px) {
   .inbox-list-pane > .toolbar { align-items: stretch; flex-direction: column-reverse; padding: var(--space-2) var(--space-2) 0; }
-  .inbox-toolbar-actions { width: 100%; }
-  .inbox-search { width: 100%; min-width: 0; flex: 1; margin-bottom: 0; }
+  /* List / Board, Active / Snoozed and + already fill most of a phone's width, so a search field
+     sharing their row got what was left: 97px at 390px, its placeholder cut to "Sear" (#2082). The
+     field wraps onto a full-width row of its own below them instead (§6). */
+  .inbox-toolbar-actions { width: 100%; flex-wrap: wrap; }
+  .inbox-search { width: 100%; min-width: 0; flex: 1 0 100%; margin-bottom: 0; }
   .inbox-search input { width: auto; flex: 1; opacity: 1; pointer-events: auto; }
   .inbox-search-key { display: inline-flex; }
   /* A phone drops what a tablet can still afford: the base ref off the Git line, and a few cells

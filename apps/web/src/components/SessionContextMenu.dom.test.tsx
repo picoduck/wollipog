@@ -233,9 +233,8 @@ test("Tab closes the menu from where it was opened, not from the end of <body>",
   }
 });
 
-test("the click a long-press releases onto a phone sheet item runs nothing", async () => {
-  // A long-press on a low row can mount the phone sheet under the finger: the release click then
-  // lands on an item rather than the backdrop. It is the opening gesture, not a choice.
+/** Long-press and lift a touch pointer, as a finger does before the phone sheet mounts under it. */
+async function longPressAndRelease(): Promise<Root> {
   function Pressable() {
     const press = useLongPress(() => undefined);
     return <div data-testid="pressable" {...press.handlers} />;
@@ -251,6 +250,13 @@ test("the click a long-press releases onto a phone sheet item runs nothing", asy
     await new Promise((resolve) => domWindow.setTimeout(resolve, 560));
     pressable.dispatchEvent(new domWindow.PointerEvent("pointerup", pointer) as never);
   });
+  return pressRoot;
+}
+
+test("the click a long-press releases onto a phone sheet item runs nothing", async () => {
+  // A long-press on a low row can mount the phone sheet under the finger: the release click then
+  // lands on an item rather than the backdrop. It is the opening gesture, not a choice.
+  const pressRoot = await longPressAndRelease();
   const { root, log, menu } = await mount();
   try {
     const pin = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
@@ -259,6 +265,24 @@ test("the click a long-press releases onto a phone sheet item runs nothing", asy
     assert.deepEqual(log.toggledPin, [], "the release click is swallowed");
     await act(async () => { pin.click(); });
     assert.deepEqual(log.toggledPin, ["s-1"], "the next, deliberate tap acts");
+  } finally {
+    await act(async () => { pressRoot.unmount(); });
+    await unmount(root);
+  }
+});
+
+test("a release onto the phone sheet's title row spends the grace, so the next item tap acts (#2082)", async () => {
+  // The finger can lift over the sheet's title row instead of an item. Unspent there, the
+  // release grace swallowed the user's first real tap on an item.
+  const pressRoot = await longPressAndRelease();
+  const { root, log, menu } = await mount();
+  try {
+    await act(async () => { menu.querySelector<HTMLElement>(".menu-head")!.click(); });
+    assert.equal(domWindow.document.querySelector('[role="menu"]') !== null, true, "the release closes nothing");
+    const pin = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent === "Pin Session")!;
+    await act(async () => { pin.click(); });
+    assert.deepEqual(log.toggledPin, ["s-1"]);
   } finally {
     await act(async () => { pressRoot.unmount(); });
     await unmount(root);

@@ -20,6 +20,26 @@ function harnessPath(page: Page): string | null {
   return new URL(page.url()).searchParams.get("path");
 }
 
+/** The Sessions toolbar's search field against its segmented controls, measured in the page. */
+function toolbarGeometry(page: Page) {
+  return page.locator(".inbox-toolbar-actions").evaluate((actions) => {
+    const input = actions.querySelector<HTMLInputElement>(".inbox-search input")!;
+    const search = input.closest(".inbox-search")!.getBoundingClientRect();
+    const options = [...actions.querySelectorAll<HTMLElement>(".seg-option")]
+      .map((option) => option.getBoundingClientRect());
+    // An input's scrollWidth ignores its placeholder, so the placeholder is measured in the input's font.
+    const context = document.createElement("canvas").getContext("2d")!;
+    context.font = getComputedStyle(input).font;
+    return {
+      inputWidth: input.clientWidth,
+      placeholderWidth: context.measureText(input.placeholder).width,
+      optionsOneLine: options.every((option) => Math.abs(option.top - options[0]!.top) < 1),
+      searchBelowControls: options.every((option) => search.top >= option.bottom),
+      contained: actions.scrollWidth <= actions.clientWidth,
+    };
+  });
+}
+
 test("Inbox rows name their pending request and F2 opens the session on it without approving", async ({ page }) => {
   await openHarness(page);
   const row = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
@@ -66,19 +86,22 @@ test.describe("with a touch pointer", () => {
     await expect(page.locator(".sessions-toolbar-option-icon").first()).toBeVisible();
     await expect(page.locator(".sessions-toolbar-option .count")).toHaveText(["4", "1"]);
 
-    const geometry = await page.locator(".inbox-toolbar-actions").evaluate((actions) => {
-      const search = actions.querySelector(".inbox-search")!.getBoundingClientRect();
-      const options = [...actions.querySelectorAll<HTMLElement>(".seg-option")]
-        .map((option) => option.getBoundingClientRect());
-      return {
-        searchWidth: search.width,
-        oneLine: options.every((option) => Math.abs(option.top - options[0]!.top) < 1),
-        contained: actions.scrollWidth <= actions.clientWidth,
-      };
-    });
-    expect(geometry.searchWidth).toBeGreaterThan(70);
-    expect(geometry.oneLine).toBe(true);
+    // With Active / Snoozed present, a search field sharing the controls' row was left 97px and cut
+    // its placeholder to "Sear" (#2082). It takes a full-width row of its own below them instead.
+    const geometry = await toolbarGeometry(page);
+    expect(geometry.inputWidth).toBeGreaterThanOrEqual(160);
+    expect(geometry.inputWidth, "the whole placeholder shows").toBeGreaterThanOrEqual(geometry.placeholderWidth);
+    expect(geometry.optionsOneLine).toBe(true);
+    expect(geometry.searchBelowControls).toBe(true);
     expect(geometry.contained).toBe(true);
+    const create = (await page.getByRole("button", { name: "Create", exact: true }).boundingBox())!;
+    expect(create.width).toBeGreaterThanOrEqual(44);
+    expect(create.height).toBeGreaterThanOrEqual(44);
+
+    // One pixel past the phone breakpoint the toolbar is the desktop row again, search beside the
+    // controls.
+    await page.setViewportSize({ width: 761, height: 844 });
+    expect((await toolbarGeometry(page)).searchBelowControls).toBe(false);
   });
 });
 
