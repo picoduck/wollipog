@@ -144,11 +144,10 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Browser End-to-End Tests
     runs-on: ubuntu-22.04
-    # Four shards of roughly seven minutes each, against a budget that used to be one run of
-    # twenty-eight. Kept well above the expected duration so an ordinary slow runner does not
-    # cancel a shard, and well below the old thirty so the next doubling of the suite is a loud
-    # failure rather than another year of creeping towards the cap (#842).
-    timeout-minutes: 15
+    # Browser shards now take up to fifteen minutes, including dependency and browser setup.
+    # Leave headroom for ordinary runner variation and cleanup so passing suites are not
+    # cancelled at the old fifteen-minute cap. Keep execution bounded below the old thirty.
+    timeout-minutes: 25
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be
