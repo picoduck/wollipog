@@ -23,6 +23,7 @@ import {
   EyeOff as LucideEyeOff,
   FileDiff as LucideFileDiff,
   FileText as LucideFileText,
+  Files as LucideFiles,
   FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
   FolderKanban as LucideFolderKanban,
@@ -33,6 +34,7 @@ import {
   GitPullRequest as LucideGitPullRequest,
   Globe as LucideGlobe,
   Grid2X2 as LucideGrid2X2,
+  History as LucideHistory,
   Image as LucideImage,
   Inbox as LucideInbox,
   Info as LucideInfo,
@@ -46,6 +48,7 @@ import {
   Monitor as LucideMonitor,
   MonitorCog as LucideMonitorCog,
   NotebookText as LucideNotebookText,
+  Package as LucidePackage,
   PanelBottom as LucidePanelBottom,
   PanelLeftClose as LucidePanelLeftClose,
   PanelLeftOpen as LucidePanelLeftOpen,
@@ -63,6 +66,7 @@ import {
   Smartphone as LucideSmartphone,
   Square as LucideSquare,
   SquareTerminal as LucideSquareTerminal,
+  Tag as LucideTag,
   TriangleAlert as LucideTriangleAlert,
   Upload as LucideUpload,
   UserPlus as LucideUserPlus,
@@ -576,4 +580,20 @@ export function WrenchIcon(props: IconProps) {
 
 export function ExperimentIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFlaskConical} {...props} />;
+}
+
+export function VersionIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideTag} {...props} />;
+}
+
+export function UpdatedIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideHistory} {...props} />;
+}
+
+export function FilesIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFiles} {...props} />;
+}
+
+export function SkillSourceIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePackage} {...props} />;
 }

@@ -180,8 +180,9 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   await act(async () => { item!.click(); });
   await act(settle);
 
-  // Detail pane: version metadata, rendered SKILL.md body, assignments, deployment, unmanaged.
-  assert.match(pageText(), /Version d1/);
+  // Detail pane: version metadata, rendered SKILL.md body, assignments, deployment, unmanaged. This
+  // control plane predates version numbers, so the meta names the version by its short digest.
+  assert.equal(container.querySelector(".skill-detail-meta .mono")?.textContent, "d1");
   assert.match(pageText(), /Always review the diff\./);
   assert.doesNotMatch(pageText(), /name: code-review/, "frontmatter stays out of the rendered content");
   assert.match(pageText(), /All Machines/);
@@ -940,10 +941,10 @@ test("SkillsView follows the route's selected skill, including back to no select
     });
   });
   await act(settle);
-  assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review", "the deep link selects its skill");
+  assert.equal(container.querySelector(".skill-detail-title")?.textContent, "code-review", "the deep link selects its skill");
   await act(async () => { route(undefined); });
   await act(settle);
-  assertNoDomNode(container.querySelector(".skills-detail-head"), "the bare Skills route clears the selection");
+  assertNoDomNode(container.querySelector(".skill-detail-head"), "the bare Skills route clears the selection");
   assert.match(container.querySelector(".master-detail-detail")?.textContent ?? "", /Select a skill/);
 
   // A detail load still pending when the route clears never repopulates the pane.
@@ -953,7 +954,7 @@ test("SkillsView follows the route's selected skill, including back to no select
   await act(async () => { route(undefined); });
   await act(async () => { release(); await hold; });
   await act(settle);
-  assertNoDomNode(container.querySelector(".skills-detail-head"), "a stale detail load is discarded");
+  assertNoDomNode(container.querySelector(".skill-detail-head"), "a stale detail load is discarded");
   await act(async () => root.unmount());
   mountPoint.remove();
 });
@@ -1010,7 +1011,7 @@ test("SkillsView keeps following the selection when a mutation finishes after th
     });
   });
   await act(settle);
-  const heading = () => container.querySelector(".skills-detail-head h3")?.textContent;
+  const heading = () => container.querySelector(".skill-detail-title")?.textContent;
   assert.equal(heading(), "using-wollipog");
   const dismiss = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === "Dismiss Recommendation")!;
@@ -1059,7 +1060,8 @@ function stubPhone(): () => void {
 }
 
 /** Mounts the view on a route through a store whose navigation records every push. */
-async function mountRouted(client: ApiClient, key: string, view: View = { name: "skills" }, strict = false) {
+async function mountRouted(client: ApiClient, key: string, view: View = { name: "skills" }, strict = false,
+  feedback?: { confirm: (options: { title: string; message: string; confirmLabel?: string }) => Promise<boolean> }) {
   const pushed: View[] = [];
   const routed: ViewNavigation = { current: () => view, push: (next) => { pushed.push(next); }, listen: () => () => {} };
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -1070,7 +1072,11 @@ async function mountRouted(client: ApiClient, key: string, view: View = { name: 
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={{ instanceId: key, runtimeKey: `${key}:1`, createSocket: () => socket, close() {} }} navigation={routed}>
-          {strict ? <React.StrictMode><SkillsWhenReady /></React.StrictMode> : <SkillsWhenReady />}
+          {feedback ? (
+            <FeedbackContext.Provider value={{ showToast: () => -1, showUndo: () => -1, dismissToast: () => undefined, ...feedback } as never}>
+              {strict ? <React.StrictMode><SkillsWhenReady /></React.StrictMode> : <SkillsWhenReady />}
+            </FeedbackContext.Provider>
+          ) : strict ? <React.StrictMode><SkillsWhenReady /></React.StrictMode> : <SkillsWhenReady />}
         </StoreProvider>
       </ApiProvider>,
     );
@@ -1254,7 +1260,7 @@ test("the detail pane shows exactly one state: a skill that loads before the lib
   try {
     const { container } = view;
     assert.equal(container.querySelector(".master-detail-list .skeleton")?.getAttribute("role"), "status", "the list still loads");
-    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review");
+    assert.equal(container.querySelector(".skill-detail-title")?.textContent, "code-review");
     assertNoDomNode(container.querySelector(".master-detail-detail .detail-skeleton"), "no skeleton beside the loaded skill");
   } finally {
     await view.unmount();
@@ -1278,7 +1284,7 @@ test("a failed reload of a skill seen before shows its error, never its cached c
     const { container } = view;
     const row = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".master-detail-list-body .row")]
       .find((candidate) => candidate.querySelector(".row-title")?.textContent === name)!;
-    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review");
+    assert.equal(container.querySelector(".skill-detail-title")?.textContent, "code-review");
     await act(async () => row("release-notes").click());
     await act(settle);
     assert.ok(container.querySelector(".master-detail-detail .detail-skeleton"), "the pending skill shows its skeleton");
@@ -1286,7 +1292,7 @@ test("a failed reload of a skill seen before shows its error, never its cached c
     await act(settle);
     const detail = container.querySelector(".master-detail-detail")!;
     assert.equal(detail.querySelector(".notice-title")?.textContent, "Couldn't Load This Skill");
-    assertNoDomNode(detail.querySelector(".skills-detail-head"), "the cached skill is not shown under its error");
+    assertNoDomNode(detail.querySelector(".skill-detail-head"), "the cached skill is not shown under its error");
     assertNoDomNode(detail.querySelector(".detail-skeleton"), "nor a skeleton");
   } finally {
     await view.unmount();
@@ -1316,10 +1322,10 @@ test("a superseded detail request that fails later never replaces the skill a ne
     await act(settle);
     await act(async () => row("code-review").click());
     await act(settle);
-    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review", "the newer load succeeded");
+    assert.equal(container.querySelector(".skill-detail-title")?.textContent, "code-review", "the newer load succeeded");
     await act(async () => { rejectFirst(new Error("HTTP 500 from the first request")); });
     await act(settle);
-    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review", "the stale failure is ignored");
+    assert.equal(container.querySelector(".skill-detail-title")?.textContent, "code-review", "the stale failure is ignored");
     assertNoDomNode(container.querySelector(".master-detail-detail .notice"), "no error for a superseded request");
   } finally {
     await view.unmount();
@@ -1412,8 +1418,301 @@ test("a skill that failed to load recovers when a later refresh of it succeeds, 
     await createGroupThroughDialog(container);
     assert.ok(detailCalls >= 2, "the group change refreshed the selected skill");
     assertNoDomNode(container.querySelector(".master-detail-detail .notice"), "the refreshed skill replaces its error");
-    assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review");
+    assert.equal(container.querySelector(".skill-detail-title")?.textContent, "code-review");
   } finally {
     await view.unmount();
+  }
+});
+
+/* --- The skill detail header (#1962) --- */
+
+/** A 1,024-character description with line breaks, as long as the protocol allows. */
+const LONG_DESCRIPTION = (() => {
+  const paragraph = "Coordinate explicitly requested Wollipog child-session issue campaigns through merge, cleanup, recursive follow-ups, and archival.";
+  let text = `${paragraph}\nUse only when the user invokes this skill.\n\n`;
+  while (text.length < 1024) text += paragraph.slice(0, Math.min(paragraph.length, 1024 - text.length));
+  return text;
+})();
+
+const gitSource = { url: "https://example.com/skills.git", ref: "main", subdirectory: "", path: "skills/orchestrate-issues", commit: "abc123" };
+const skillMdFile = { path: "SKILL.md", content: "---\nname: orchestrate-issues\n---\n\nRun the campaign.\n", encoding: "utf8" as const };
+
+function headerSkill(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "skill-1", name: "orchestrate-issues", description: LONG_DESCRIPTION, groupId: "group-1",
+    gitSource, updatedAt: Date.now() - 4 * 60_000,
+    latestVersion: { id: "skillv_3", digest: "0123456789abcdef0123", createdAt: 1, versionNumber: 3 },
+    ...overrides,
+  };
+}
+
+function headerClient(skill: ReturnType<typeof headerSkill>, overrides: Record<string, unknown> = {}) {
+  return oneSkillClient({
+    listSkills: async () => ({ skills: [skill] }),
+    listSkillGroups: async () => ({ groups: [{ id: "group-1", name: "Campaigns", sortOrder: 0 }] }),
+    getSkill: async () => ({ skill, latestVersion: { ...skill.latestVersion, files: [skillMdFile, { path: "notes.md", content: "x", encoding: "utf8" as const }] } }),
+    ...overrides,
+  });
+}
+
+/**
+ * happy-dom has no layout. The description is `lines` lines tall at the current width, and the
+ * clamp shows two of them, so the paragraph reads as truncated exactly when `lines` exceeds two.
+ */
+function stubDescriptionLayout(initialLines: number) {
+  const proto = domWindow.HTMLElement.prototype as unknown as Record<string, unknown>;
+  const prior = {
+    scrollHeight: Object.getOwnPropertyDescriptor(proto, "scrollHeight"),
+    clientHeight: Object.getOwnPropertyDescriptor(proto, "clientHeight"),
+  };
+  const layout = { lines: initialLines };
+  const isDescription = (element: HTMLElement) => element.classList?.contains("skill-detail-desc");
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get(this: HTMLElement) {
+    return isDescription(this) ? layout.lines * 20 : 0;
+  } });
+  Object.defineProperty(proto, "clientHeight", { configurable: true, get(this: HTMLElement) {
+    if (!isDescription(this)) return 0;
+    return (this.classList.contains("is-clamped") ? Math.min(layout.lines, 2) : layout.lines) * 20;
+  } });
+  // Resize delivery on demand: a width change is a new line count and a callback.
+  const observers: Array<() => void> = [];
+  const priorObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+  (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class {
+    constructor(private readonly callback: () => void) {}
+    observe() { observers.push(this.callback); }
+    unobserve() {}
+    disconnect() { const index = observers.indexOf(this.callback); if (index >= 0) observers.splice(index, 1); }
+  };
+  return {
+    async resize(lines: number) {
+      layout.lines = lines;
+      await act(async () => { for (const callback of [...observers]) callback(); });
+    },
+    restore() {
+      for (const [name, descriptor] of Object.entries(prior)) {
+        if (descriptor) Object.defineProperty(proto, name, descriptor);
+        else delete proto[name];
+      }
+      (globalThis as { ResizeObserver?: unknown }).ResizeObserver = priorObserver;
+    },
+  };
+}
+
+async function openMoreActions(scope: Element) {
+  const more = scope.querySelector<HTMLButtonElement>('button[aria-label="More Actions"]')!;
+  assert.equal(more.title, "More Actions");
+  await act(async () => more.click());
+  return domWindow.document.querySelector('[role="menu"][aria-label="More Actions"]') as unknown as HTMLElement;
+}
+
+const menuLabels = (menu: Element) => [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+  .map((item) => item.querySelector(".menu-text")?.textContent);
+
+test("the skill header is its name, Add Assignment… and one ⋯ menu; Delete Skill… is last and still deletes", async () => {
+  const layout = stubDescriptionLayout(1);
+  const deleted: string[] = [];
+  const confirmations: string[] = [];
+  const view = await mountRouted(headerClient(headerSkill({ description: "Short." }), {
+    deleteSkill: async (id: string) => { deleted.push(id); return {}; },
+  }), "skills-header", { name: "skills", id: "skill-1" }, false, {
+    confirm: async (options) => { confirmations.push(`${options.title}|${options.confirmLabel}|${options.message}`); return true; },
+  });
+  try {
+    const { container } = view;
+    const head = container.querySelector(".skill-detail-head")!;
+    assert.equal(head.querySelector("h2.skill-detail-title")?.textContent, "orchestrate-issues");
+    // The actions row: one secondary and ⋯. Nothing else in the detail is a bar-wide button.
+    const actions = [...head.querySelectorAll<HTMLButtonElement>(".skill-detail-title-row > .actions button")];
+    assert.deepEqual(actions.map((button) => button.getAttribute("aria-label") ?? button.textContent?.trim()), ["Add Assignment…", "More Actions"]);
+    assert.equal(actions[0]!.className, "btn");
+    for (const gone of ["Version History", "Machine Versions", "Delete Skill", "Add Assignment"]) {
+      assert.equal(buttonNamed(container, gone).length, 0, `${gone} is not a button of its own any more`);
+    }
+
+    const menu = await openMoreActions(head);
+    assert.deepEqual(menuLabels(menu), ["Version History…", "Machine Version…", "Check for Updates…", "Delete Skill…"]);
+    const items = [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    assert.ok(items[3]!.classList.contains("danger"), "Delete Skill… is drawn in danger text");
+    assert.equal(items[3]!.previousElementSibling?.getAttribute("role"), "separator", "a separator sits before it");
+    assert.equal((items[2] as HTMLButtonElement).disabled, false, "a Git skill checks for updates");
+
+    await act(async () => items[3]!.click());
+    await act(settle);
+    assert.equal(confirmations.length, 1);
+    assert.match(confirmations[0]!, /^Delete Skill\|Delete Skill\|“orchestrate-issues”, its versions and its assignments are removed/);
+    assert.deepEqual(deleted, ["skill-1"]);
+    assert.deepEqual(view.pushed.at(-1), { name: "skills" }, "deleting returns to /skills");
+  } finally {
+    await view.unmount();
+    layout.restore();
+  }
+});
+
+test("each ⋯ item opens its dialog, and Add Assignment… opens the existing one", async () => {
+  const layout = stubDescriptionLayout(1);
+  const view = await mountRouted(headerClient(headerSkill(), {
+    listSkillVersions: async () => ({ versions: [], nextCursor: null }),
+    getMachineSkillVersionPolicy: async () => ({ policy: null }),
+  }), "skills-header-dialogs", { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    const head = container.querySelector(".skill-detail-head")!;
+    const open = async (label: string) => {
+      const menu = await openMoreActions(head);
+      const item = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((candidate) => candidate.querySelector(".menu-text")?.textContent === label)!;
+      await act(async () => item.click());
+      await act(settle);
+      const dialog = container.querySelector('[role="dialog"]');
+      const title = dialog?.getAttribute("aria-label") ?? dialog?.querySelector("h2")?.textContent;
+      const close = dialog && buttonNamed(dialog, "Cancel")[0] || dialog && buttonNamed(dialog, "Close")[0] ||
+        dialog?.querySelector<HTMLButtonElement>('button[aria-label="Close"]');
+      await act(async () => close?.click());
+      await act(settle);
+      return title;
+    };
+    assert.equal(await open("Version History…"), "Version History");
+    assert.equal(await open("Machine Version…"), "Machine Versions");
+    assert.equal(await open("Check for Updates…"), "Check for Skill Updates");
+    await act(async () => buttonNamed(head, "Add Assignment…")[0]!.click());
+    const dialog = container.querySelector('[role="dialog"]');
+    assert.equal(dialog?.getAttribute("aria-label") ?? dialog?.querySelector("h2")?.textContent, "Add Assignment");
+  } finally {
+    await view.unmount();
+    layout.restore();
+  }
+});
+
+test("a built-in skill's Check for Updates… is disabled and says why; a library skill has none", async () => {
+  const layout = stubDescriptionLayout(1);
+  const builtIn = headerSkill({ gitSource: undefined, builtIn: { release: "0.29.1", heldUpdate: null } });
+  let view = await mountRouted(headerClient(builtIn), "skills-header-built-in", { name: "skills", id: "skill-1" });
+  try {
+    const menu = await openMoreActions(view.container.querySelector(".skill-detail-head")!);
+    const check = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')][2]!;
+    assert.equal(check.querySelector(".menu-text")?.textContent, "Check for Updates…");
+    assert.equal(check.disabled, true);
+    assert.equal(check.querySelector(".menu-desc")?.textContent, "Built-in skills update with each Wollipog release.");
+    assert.equal(view.container.querySelector(".skill-detail-meta")?.textContent?.includes("Built-In"), true);
+  } finally {
+    await view.unmount();
+  }
+  view = await mountRouted(headerClient(headerSkill({ gitSource: undefined })), "skills-header-library", { name: "skills", id: "skill-1" });
+  try {
+    const menu = await openMoreActions(view.container.querySelector(".skill-detail-head")!);
+    assert.deepEqual(menuLabels(menu), ["Version History…", "Machine Version…", "Delete Skill…"]);
+  } finally {
+    await view.unmount();
+    layout.restore();
+  }
+});
+
+test("the meta row names the group, v3, when it changed, the file count and the source, in 12px dim facts", async () => {
+  const layout = stubDescriptionLayout(1);
+  const view = await mountRouted(headerClient(headerSkill()), "skills-header-meta", { name: "skills", id: "skill-1" });
+  try {
+    const facts = [...view.container.querySelectorAll(".skill-detail-meta > li")];
+    assert.deepEqual(facts.map((fact) => fact.textContent), ["Group: Campaigns", "Version: v3", "Updated 4m ago", "2 files", "Source: Git"]);
+    for (const fact of facts) assert.equal(fact.querySelector("svg")?.getAttribute("width"), "14", "each fact leads with a 14px icon");
+    assert.doesNotMatch(view.container.querySelector(".skill-detail-head")?.textContent ?? "", /skillv_|0123456789abcdef|·/,
+      "no version id, digest or middle dot in the header");
+  } finally {
+    await view.unmount();
+    layout.restore();
+  }
+});
+
+test("the description is two lines with Show Full Description, expands to every character, and Show Less collapses it", async () => {
+  const layout = stubDescriptionLayout(9);
+  const view = await mountRouted(headerClient(headerSkill()), "skills-header-desc", { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    const paragraph = container.querySelector<HTMLElement>(".skill-detail-desc")!;
+    assert.equal(paragraph.textContent, LONG_DESCRIPTION, "every character, line breaks included, is in the text");
+    assert.equal(LONG_DESCRIPTION.length, 1024);
+    assert.ok(paragraph.classList.contains("is-clamped"));
+    const toggle = () => container.querySelector<HTMLButtonElement>(".skill-detail-desc-toggle");
+    assert.equal(toggle()?.textContent, "Show Full Description");
+    assert.equal(toggle()?.getAttribute("aria-expanded"), "false");
+    assert.equal(toggle()?.getAttribute("aria-controls"), paragraph.id);
+
+    await act(async () => toggle()!.click());
+    assert.equal(paragraph.classList.contains("is-clamped"), false, "expanded, the clamp is off");
+    assert.equal(toggle()?.textContent, "Show Less");
+    assert.equal(toggle()?.getAttribute("aria-expanded"), "true");
+
+    await act(async () => toggle()!.click());
+    assert.ok(paragraph.classList.contains("is-clamped"));
+    assert.equal(toggle()?.textContent, "Show Full Description");
+  } finally {
+    await view.unmount();
+    layout.restore();
+  }
+});
+
+test("a description that fits in two lines has no toggle, including after the pane widens", async () => {
+  const layout = stubDescriptionLayout(2);
+  const view = await mountRouted(headerClient(headerSkill({ description: "Reviews code before merge." })), "skills-header-fits",
+    { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    assertNoDomNode(container.querySelector(".skill-detail-desc-toggle"), "a description that fits has no toggle");
+    // Narrowed (900px): three lines, so the toggle appears; widened (1440px): two again, and it goes.
+    await layout.resize(3);
+    assert.equal(container.querySelector(".skill-detail-desc-toggle")?.textContent, "Show Full Description");
+    await layout.resize(2);
+    assertNoDomNode(container.querySelector(".skill-detail-desc-toggle"), "widening past the clamp removes the toggle");
+
+    // Measured against the clamp while expanded too: a widening that makes it fit takes Show Less
+    // away and hands its focus to the text.
+    await layout.resize(4);
+    const toggle = container.querySelector<HTMLButtonElement>(".skill-detail-desc-toggle")!;
+    await act(async () => toggle.click());
+    toggle.focus();
+    await layout.resize(2);
+    assertNoDomNode(container.querySelector(".skill-detail-desc-toggle"));
+    assert.ok(domWindow.document.activeElement === container.querySelector(".skill-detail-desc") as never, "focus stays in the header");
+  } finally {
+    await view.unmount();
+    layout.restore();
+  }
+});
+
+test("the detail sections are Deployment, Assignments, Instructions and Source, as unboxed sections", async () => {
+  const layout = stubDescriptionLayout(1);
+  const view = await mountRouted(headerClient(headerSkill({ groupId: null })), "skills-sections", { name: "skills", id: "skill-1" });
+  try {
+    const sections = [...view.container.querySelectorAll(".skill-detail > section.section")];
+    assert.deepEqual(sections.map((section) => section.querySelector(":scope > .section-head > h3.section-title")?.textContent),
+      ["Deployment", "Assignments", "Instructions", "Source"]);
+    for (const section of sections) {
+      assert.equal(section.getAttribute("aria-labelledby"), section.querySelector("h3")?.id, "each section is named by its title");
+      assertNoDomNode(section.closest(".skills-section"), "no section sits in a card");
+    }
+    assert.match(sections[2]!.textContent ?? "", /Run the campaign\./);
+    assert.match(sections[3]!.textContent ?? "", /Git Source/);
+  } finally {
+    await view.unmount();
+    layout.restore();
+  }
+});
+
+test("on a phone the detail bar's ⋯ holds Add Assignment… and the skill menu, and the header keeps only its text", async () => {
+  const restore = stubPhone();
+  const layout = stubDescriptionLayout(9);
+  const view = await mountRouted(headerClient(headerSkill()), "skills-header-phone", { name: "skills", id: "skill-1" });
+  try {
+    const { container } = view;
+    const bar = container.querySelector(".detail-bar")!;
+    assert.equal(bar.querySelector("h1")?.textContent, "orchestrate-issues");
+    const menu = await openMoreActions(bar);
+    assert.deepEqual(menuLabels(menu), ["Add Assignment…", "Version History…", "Machine Version…", "Check for Updates…", "Delete Skill…"]);
+    const head = container.querySelector(".skill-detail-head")!;
+    assertNoDomNode(head.querySelector(".skill-detail-title-row"), "the name and actions live in the detail bar");
+    assert.equal(head.querySelector(".skill-detail-desc-toggle")?.textContent, "Show Full Description");
+    assert.ok(head.querySelector(".skill-detail-meta"));
+  } finally {
+    await view.unmount();
+    layout.restore();
+    restore();
   }
 });

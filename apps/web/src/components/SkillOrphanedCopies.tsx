@@ -43,8 +43,10 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
   onDiscard: (runner: RunnerView, copy: OrphanedSkillCopy) => void;
 }) {
   return (
-    <section className="skills-section" aria-label="Orphaned Copies">
-      <h3>Orphaned Copies</h3>
+    <section className="section" aria-label="Orphaned Copies">
+      <div className="section-head">
+        <h3 className="section-title">Orphaned Copies</h3>
+      </div>
       <p className="skills-hint">
         Edited skill copies that a machine kept but no library skill shows: copies a restore kept aside, and edited copies
         of skills deleted from the library. Review and import a copy to keep it in the library, or discard it.

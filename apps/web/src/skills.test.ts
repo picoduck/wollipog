@@ -20,6 +20,9 @@ import {
   skillEligibleAgents,
   skillFileByteLength,
   skillFilesFromUploads,
+  skillSourceKind,
+  skillSourceLabel,
+  skillVersionLabel,
   skillFromPayload,
   skillGroupsFromPayload,
   skillListDescription,
@@ -84,6 +87,28 @@ test("payload normalizers accept wrapped and bare shapes and drop malformed rows
   const summarySkill = { ...skill(), latestVersion: { id: "v1", digest: "d1", createdAt: 1 } };
   const merged = skillFromPayload({ skill: summarySkill, latestVersion: siblingVersion, assignments: [] });
   assert.deepEqual(merged?.latestVersion, siblingVersion, "sibling full version replaces the summary");
+});
+
+test("a version is named by its number, or by its short digest against a control plane without numbers", () => {
+  assert.deepEqual(skillVersionLabel({ id: "skillv_a", digest: "0123456789abcdef", versionNumber: 3 }), { text: "v3", mono: false });
+  assert.deepEqual(skillVersionLabel({ id: "skillv_a", digest: "0123456789abcdef" }), { text: "0123456789ab", mono: true });
+  // A malformed number is not trusted over the digest; an id alone names nothing.
+  assert.deepEqual(skillVersionLabel({ digest: "0123456789abcdef", versionNumber: 0 }), { text: "0123456789ab", mono: true });
+  assert.deepEqual(skillVersionLabel({ digest: "0123456789abcdef", versionNumber: 1.5 }), { text: "0123456789ab", mono: true });
+  assert.equal(skillVersionLabel({ id: "skillv_a" }), null);
+  assert.equal(skillVersionLabel(null), null);
+});
+
+test("a skill's source is Built-In, Git, Machine or Library, in that precedence", () => {
+  const git = { url: "https://example.com/r.git", ref: "main", subdirectory: "", path: "", commit: "c" };
+  const machine = { runnerId: "r", sourceDirectory: ".agents/skills", name: "s", digest: "d", importedAt: 1 };
+  const base = { id: "s", name: "s" };
+  assert.equal(skillSourceKind(base), "library");
+  assert.equal(skillSourceKind({ ...base, latestVersion: { machineSource: machine } }), "machine");
+  assert.equal(skillSourceKind({ ...base, gitSource: git, latestVersion: { machineSource: machine } }), "git");
+  assert.equal(skillSourceKind({ ...base, latestVersion: { gitSource: git } }), "git");
+  assert.equal(skillSourceKind({ ...base, gitSource: git, builtIn: { release: "1", heldUpdate: null } }), "built_in");
+  assert.deepEqual((["built_in", "git", "machine", "library"] as const).map(skillSourceLabel), ["Built-In", "Git", "Machine", "Library"]);
 });
 
 test("the skill list orders Recommended, then No Group, then the named groups in their sort order", () => {

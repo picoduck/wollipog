@@ -31,6 +31,7 @@ import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
 import { SkillBuiltInSection } from "./SkillBuiltInSection.js";
 import { SkillBuiltInReviewDialog } from "./SkillBuiltInReviewDialog.js";
 import { SkillList } from "./SkillList.js";
+import { SkillDetailHeader, SkillDetailSection, skillDetailMenu } from "./SkillDetailHeader.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -542,6 +543,15 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   // opens its pane: deleting every skill is exactly when orphaned copies appear.
   const spanningEmpty = skills !== null && skills.length === 0 && !route.id && !showOrphans;
   const manageGroups = { label: "Manage Groups…", variant: "ghost" as const, onClick: () => setDialog("groups") };
+  // The open skill's actions (#1962): Add Assignment… beside ⋯ on a wide pane; on a phone the
+  // detail bar's ⋯ holds Add Assignment… and then the same items.
+  const addAssignment = { label: "Add Assignment…", disabled: busy, onClick: () => { setError(null); setDialog("add-assignment"); } };
+  const detailMenu = detail ? skillDetailMenu(detail, {
+    onVersionHistory: () => setDialog("version-history"),
+    onMachineVersion: () => { setVersionRunnerId(undefined); setDialog("machine-versions"); },
+    onCheckForUpdates: () => setDialog("git-update"),
+    onDelete: () => void deleteSkill(detail),
+  }) : [];
   const importItems = [
     { label: "Import from Git…", description: "Copy a skill from a Git repository and keep its source.", onClick: () => setDialog("git-import") },
     { label: "Import from Machine…", description: "Snapshot a skill that already lives on a connected machine.", onClick: () => setDialog("machine-import") },
@@ -556,6 +566,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
           title={route.id ? skillName ?? "Skill" : PANE_TITLES[route.pane!]}
           backLabel={backLabel("skills")}
           onBack={() => select(null)}
+          menu={route.id && detail && detailError?.skillId !== selectedId ? [addAssignment, ...detailMenu] : []}
         />
       )}
       {!phoneDetail && (
@@ -672,27 +683,15 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
           {/* Exactly one detail state: a failed reload never leaves the cached skill actionable below
               its error. */}
           {!showOrphans && detail && detailError?.skillId !== selectedId && (
-            <>
-              <div className="skills-detail-head">
-                <div>
-                  <h3>{detail.name}</h3>
-                  {detail.description && <p className="skills-hint">{detail.description}</p>}
-                  <p className="skills-meta muted">
-                    {latest?.digest ? `Version ${latest.digest.slice(0, 12)}` : "No version recorded"}
-                    {" · "}
-                    {formatTime(latest?.createdAt)}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  className="btn ghost danger sm"
-                  disabled={busy}
-                  onClick={() => void deleteSkill(detail)}
-                >
-                  Delete Skill
-                </button>
-              </div>
-
+            <div className="skill-detail">
+              <SkillDetailHeader
+                key={detail.id}
+                skill={detail}
+                groupName={detail.groupId ? groups.find((group) => group.id === detail.groupId)?.name : undefined}
+                showTitle={!phoneDetail}
+                addAssignment={addAssignment}
+                menu={detailMenu}
+              />
               <SkillBuiltInSection
                 key={`built-in-${detail.id}`}
                 skill={detail}
@@ -703,144 +702,10 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 onDismiss={(dismissed) => void setRecommendationDismissed(detail.id, dismissed)}
                 onReview={() => setDialog("built-in-review")}
               />
-              <button className="btn sm" type="button" onClick={() => setDialog("version-history")}>Version History</button>
-              <button className="btn sm" type="button" onClick={() => setDialog("machine-versions")}>Machine Versions</button>
-              {skillMd && (
-                <section className="skills-section" aria-label="Skill Content">
-                  <h4>Content</h4>
-                  <div className="skills-doc">
-                    <Markdown highlightEligible={false}>{skillMarkdownBody(skillMd.content)}</Markdown>
-                  </div>
-                </section>
-              )}
-
-              {gitSource && <section className="skills-section skills-git-source">
-                <h4>Git Source</h4>
-                <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
-                <p className="skills-hint">Commit {gitSource.commit}</p>
-                <SkillGitAutoUpdateControls status={detail.gitAutoUpdate} gitRef={gitSource.ref} busy={busy}
-                  onChange={(enabled) => void mutate(() => api.setSkillGitAutoUpdate(detail.id, enabled), async () => {
-                    // Disabling drops a held update, which the list shows as Update Held.
-                    await refreshList();
-                    await refreshDetail(detail.id);
-                  })} />
-                <button className={`btn sm${heldUpdate ? " primary" : ""}`} type="button" onClick={() => setDialog("git-update")}>
-                  {heldUpdate ? "Review Held Update" : "Check for Updates"}
-                </button>
-              </section>}
-              {latest?.machineSource && <section className="skills-section skills-machine-import">
-                <h4>Machine Snapshot Source</h4>
-                <p className="skills-hint">{machineLabels.get(latest.machineSource.runnerId) ?? latest.machineSource.runnerId} · {latest.machineSource.context?.kind === "wsl" ? `WSL: ${latest.machineSource.context.distro} · ` : ""}{latest.machineSource.sourceDirectory}/{latest.machineSource.name}</p>
-                <p className="skills-hint">Digest: {latest.machineSource.digest}</p>
-                <p className="skills-hint">Imported {formatTime(latest.machineSource.importedAt)}. This records a snapshot, not an adopted source directory.</p>
-              </section>}
-
-              {detail.groupId && <SkillInheritedAssignments key={detail.id} groupId={detail.groupId} groups={groups} runners={runners} machineLabels={machineLabels} onManage={() => setDialog("groups")} />}
-              <section className="skills-section" aria-label="Assignments">
-                <div className="skills-section-heading">
-                  <h4>Assignments</h4>
-                  <button type="button" className="btn sm" disabled={busy} onClick={() => { setError(null); setDialog("add-assignment"); }}>
-                    Add Assignment
-                  </button>
-                </div>
-                {assignments.length === 0 ? (
-                  <p className="skills-hint">No direct assignments. Group assignments may still deploy this skill.</p>
-                ) : (
-                  <div className="table-wrap">
-                    <table className="table skills-table">
-                      <thead>
-                        <tr>
-                          <th scope="col">Scope</th>
-                          <th scope="col" className="col-agents">Agents</th>
-                          <th scope="col" className="col-invocation">Invocation</th>
-                          <th scope="col" className="col-enabled">Enabled</th>
-                          <th scope="col" className="col-actions actions-cell"><span className="sr-only">Actions</span></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {assignments.map((assignment) => {
-                          const runner = assignment.runnerId ? runnersMap.get(assignment.runnerId) : undefined;
-                          return (
-                            <tr key={assignment.id}>
-                              <td>{describeAssignmentScope(assignment, (id) => machineLabels.get(id))}</td>
-                              <td className="cell-meta cell-fill cell-dim">
-                                <span className="cell-label" aria-hidden="true">Agents: </span>
-                                {describeAgentSelector(assignment.agentSelector, runner?.agents ?? [])}
-                              </td>
-                              <td className="cell-meta">
-                                <span className="cell-label" aria-hidden="true">Invocation</span>
-                                <Select<SkillInvocationPolicy>
-                                  label="Invocation"
-                                  value={assignment.invocation}
-                                  disabled={busy}
-                                  options={[
-                                    { value: "agent", label: invocationLabel("agent") },
-                                    { value: "manual", label: invocationLabel("manual") },
-                                  ]}
-                                  onChange={(value) => void mutate(
-                                    () => api.updateSkillAssignment(assignment.id, { invocation: value }),
-                                    async () => {
-                                      await refreshDetail(detail.id);
-                                      await refreshMachines();
-                                    },
-                                  )}
-                                />
-                              </td>
-                              <td className="cell-status">
-                                <span className="cell-label" aria-hidden="true">Enabled </span>
-                                <button
-                                  type="button"
-                                  role="switch"
-                                  aria-checked={assignment.enabled}
-                                  aria-label="Enabled"
-                                  className="btn sm"
-                                  disabled={busy}
-                                  onClick={() => void mutate(
-                                    () => api.updateSkillAssignment(assignment.id, { enabled: !assignment.enabled }),
-                                    async () => {
-                                      await refreshDetail(detail.id);
-                                      await refreshMachines();
-                                    },
-                                  )}
-                                >
-                                  {assignment.enabled ? "On" : "Off"}
-                                </button>
-                              </td>
-                              <td className="actions-cell">
-                                <button
-                                  type="button"
-                                  className="btn ghost danger sm"
-                                  disabled={busy}
-                                  onClick={() => void (async () => {
-                                    const confirmed = await confirm({
-                                      title: "Remove Assignment",
-                                      message: "The next sync removes the skill from the machines this assignment covered.",
-                                      confirmLabel: "Remove Assignment",
-                                      tone: "danger",
-                                    });
-                                    if (!confirmed) return;
-                                    await mutate(() => api.deleteSkillAssignment(assignment.id), async () => {
-                                      await refreshList();
-                                      await refreshDetail(detail.id);
-                                      await refreshMachines();
-                                    });
-                                  })()}
-                                >
-                                  Delete
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
-
-              <SkillAssignmentMatrix key={`matrix-${detail.id}`} skillId={detail.id} skillName={detail.name} runners={runners} machineLabels={machineLabels} machineSkills={machineSkills} onManageVersion={runnerId => { setVersionRunnerId(runnerId); setDialog("machine-versions"); }} />
-              <section className="skills-section" aria-label="Deployment">
-                <h4>Deployment</h4>
+              {/* §5.1: unboxed sections, in the order Deployment, Assignments, Instructions, Source.
+                  #1981, #1982 and #1980 rebuild what each one holds. */}
+              <SkillDetailSection title="Deployment">
+                <SkillAssignmentMatrix key={`matrix-${detail.id}`} skillId={detail.id} skillName={detail.name} runners={runners} machineLabels={machineLabels} machineSkills={machineSkills} onManageVersion={runnerId => { setVersionRunnerId(runnerId); setDialog("machine-versions"); }} />
                 {runners.length === 0 && <p className="skills-hint">Connect a machine to deploy this skill.</p>}
                 {runners.map((runner) => {
                   const machine = machineSkills[runner.runnerId];
@@ -971,8 +836,135 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                     </article>
                   );
                 })}
-              </section>
-            </>
+              </SkillDetailSection>
+              <SkillDetailSection title="Assignments">
+                {detail.groupId && <SkillInheritedAssignments key={detail.id} groupId={detail.groupId} groups={groups} runners={runners} machineLabels={machineLabels} onManage={() => setDialog("groups")} />}
+                {assignments.length === 0 ? (
+                  <p className="skills-hint">No direct assignments. Group assignments may still deploy this skill.</p>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="table skills-table">
+                      <thead>
+                        <tr>
+                          <th scope="col">Scope</th>
+                          <th scope="col" className="col-agents">Agents</th>
+                          <th scope="col" className="col-invocation">Invocation</th>
+                          <th scope="col" className="col-enabled">Enabled</th>
+                          <th scope="col" className="col-actions actions-cell"><span className="sr-only">Actions</span></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {assignments.map((assignment) => {
+                          const runner = assignment.runnerId ? runnersMap.get(assignment.runnerId) : undefined;
+                          return (
+                            <tr key={assignment.id}>
+                              <td>{describeAssignmentScope(assignment, (id) => machineLabels.get(id))}</td>
+                              <td className="cell-meta cell-fill cell-dim">
+                                <span className="cell-label" aria-hidden="true">Agents: </span>
+                                {describeAgentSelector(assignment.agentSelector, runner?.agents ?? [])}
+                              </td>
+                              <td className="cell-meta">
+                                <span className="cell-label" aria-hidden="true">Invocation</span>
+                                <Select<SkillInvocationPolicy>
+                                  label="Invocation"
+                                  value={assignment.invocation}
+                                  disabled={busy}
+                                  options={[
+                                    { value: "agent", label: invocationLabel("agent") },
+                                    { value: "manual", label: invocationLabel("manual") },
+                                  ]}
+                                  onChange={(value) => void mutate(
+                                    () => api.updateSkillAssignment(assignment.id, { invocation: value }),
+                                    async () => {
+                                      await refreshDetail(detail.id);
+                                      await refreshMachines();
+                                    },
+                                  )}
+                                />
+                              </td>
+                              <td className="cell-status">
+                                <span className="cell-label" aria-hidden="true">Enabled </span>
+                                <button
+                                  type="button"
+                                  role="switch"
+                                  aria-checked={assignment.enabled}
+                                  aria-label="Enabled"
+                                  className="btn sm"
+                                  disabled={busy}
+                                  onClick={() => void mutate(
+                                    () => api.updateSkillAssignment(assignment.id, { enabled: !assignment.enabled }),
+                                    async () => {
+                                      await refreshDetail(detail.id);
+                                      await refreshMachines();
+                                    },
+                                  )}
+                                >
+                                  {assignment.enabled ? "On" : "Off"}
+                                </button>
+                              </td>
+                              <td className="actions-cell">
+                                <button
+                                  type="button"
+                                  className="btn ghost danger sm"
+                                  disabled={busy}
+                                  onClick={() => void (async () => {
+                                    const confirmed = await confirm({
+                                      title: "Remove Assignment",
+                                      message: "The next sync removes the skill from the machines this assignment covered.",
+                                      confirmLabel: "Remove Assignment",
+                                      tone: "danger",
+                                    });
+                                    if (!confirmed) return;
+                                    await mutate(() => api.deleteSkillAssignment(assignment.id), async () => {
+                                      await refreshList();
+                                      await refreshDetail(detail.id);
+                                      await refreshMachines();
+                                    });
+                                  })()}
+                                >
+                                  Delete
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </SkillDetailSection>
+              {skillMd && (
+                <SkillDetailSection title="Instructions">
+                  <div className="skills-doc">
+                    <Markdown highlightEligible={false}>{skillMarkdownBody(skillMd.content)}</Markdown>
+                  </div>
+                </SkillDetailSection>
+              )}
+              {(gitSource || latest?.machineSource) && (
+                <SkillDetailSection title="Source">
+                  {gitSource && <div className="skills-git-source">
+                    <h4>Git Source</h4>
+                    <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
+                    <p className="skills-hint">Commit {gitSource.commit}</p>
+                    <SkillGitAutoUpdateControls status={detail.gitAutoUpdate} gitRef={gitSource.ref} busy={busy}
+                      onChange={(enabled) => void mutate(() => api.setSkillGitAutoUpdate(detail.id, enabled), async () => {
+                        // Disabling drops a held update, which the list shows as Update Held.
+                        await refreshList();
+                        await refreshDetail(detail.id);
+                      })} />
+                    <button className={`btn sm${heldUpdate ? " primary" : ""}`} type="button" onClick={() => setDialog("git-update")}>
+                      {heldUpdate ? "Review Held Update" : "Check for Updates"}
+                    </button>
+                  </div>}
+                  {latest?.machineSource && <div className="skills-machine-import">
+                    <h4>Machine Snapshot Source</h4>
+                    <p className="skills-hint">{machineLabels.get(latest.machineSource.runnerId) ?? latest.machineSource.runnerId} · {latest.machineSource.context?.kind === "wsl" ? `WSL: ${latest.machineSource.context.distro} · ` : ""}{latest.machineSource.sourceDirectory}/{latest.machineSource.name}</p>
+                    <p className="skills-hint">Digest: {latest.machineSource.digest}</p>
+                    <p className="skills-hint">Imported {formatTime(latest.machineSource.importedAt)}. This records a snapshot, not an adopted source directory.</p>
+                  </div>}
+                </SkillDetailSection>
+              )}
+            </div>
           )}
         </div>
       </div>

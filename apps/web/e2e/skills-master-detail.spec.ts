@@ -190,7 +190,13 @@ for (const [label, options] of [
       const widths = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, viewport: window.innerWidth }));
       expect(widths.scroll).toBe(widths.viewport);
       // A dialog opened from the detail is laid out against the viewport, not a widened page.
-      await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
+      // A phone keeps Add Assignment… in the detail bar's ⋯ (#1962); a wider pane shows it in the header.
+      if (options.viewport.width <= 760) {
+        await page.locator(".detail-bar").getByRole("button", { name: "More Actions" }).click();
+        await page.getByRole("menuitem", { name: "Add Assignment…", exact: true }).click();
+      } else {
+        await page.getByRole("button", { name: "Add Assignment…", exact: true }).click();
+      }
       const dialog = await page.getByRole("dialog", { name: "Add Assignment" }).boundingBox();
       expect(dialog!.x).toBeGreaterThanOrEqual(0);
       expect(dialog!.x + dialog!.width).toBeLessThanOrEqual(options.viewport.width);

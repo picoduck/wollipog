@@ -775,7 +775,7 @@ function snapshot(): UiSnapshotMessage {
       ...(SESSION_REMINDERS ? { sessionReminders: true } : {}),
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
     },
-    runners: [runner],
+    runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner] : [runner],
     boxes: [],
     ...(LEGACY_WORKSPACES ? {} : { projects: structuredClone(model.projects) }),
     sessions: structuredClone(model.sessions.filter((candidate) => !candidate.archived)),
@@ -1042,14 +1042,76 @@ const shellSkillMarkdown = (name: string) => [
   "---", `name: ${name}`, "---", "",
   ...Array.from({ length: 24 }, (_, index) => `${index + 1}. Step ${index + 1}: read the change, check it against the team's conventions, and write down what you found before moving on.`),
 ].join("\n");
+/**
+ * `?skills=detail` (#1962): the skill detail's header cases. The first skill carries the real
+ * orchestrate-issues description (about 450 characters) in a group; the second the longest
+ * description the protocol allows, 1,024 characters with line breaks; then a Git skill whose
+ * description fits in two lines, a built-in skill, and a machine snapshot. Every version is numbered.
+ * `&numbers=0` answers as a control plane from before version numbers.
+ */
+const SHELL_DETAIL_NUMBERS = FIXTURE_QUERY.get("numbers") !== "0";
+const ORCHESTRATE_DESCRIPTION = "Coordinate explicitly requested Wollipog child-session issue campaigns through merge, cleanup, " +
+  "recursive follow-ups, and archival. Use only when the user invokes this skill or explicitly asks to orchestrate or " +
+  "delegate issue implementation across sessions. A request to claim, implement, or fix multiple issues alone stays in the " +
+  "current session and does not trigger this skill. Do not trigger merely because the issues concern Orchestrator features.";
+const MAXIMUM_DESCRIPTION = (() => {
+  const lines = [
+    "Plans a release from the merged pull requests since the last tag.",
+    "Groups them by area, flags anything that changes a protocol or a migration, and drafts notes in the team's voice.",
+    "",
+    "Steps: read the changelog, list the merged pull requests, check each for a migration, a protocol bump or a new setting, " +
+      "and write one line per change a user would notice.",
+    "Never publish; hand the draft back for review.",
+  ];
+  let text = lines.join("\n");
+  const filler = " Keep each line short, name the change in user terms, and link the pull request.";
+  while (text.length < 1024) text += filler.slice(0, 1024 - text.length);
+  return text;
+})();
+const detailVersion = (index: number, number: number) => ({
+  id: `skillv_${index}`, digest: `${index.toString(16).padStart(4, "0")}`.padEnd(64, "c"), createdAt: 1_700_000_000_000,
+  ...(SHELL_DETAIL_NUMBERS ? { versionNumber: number } : {}),
+});
+const detailGitSource = { url: "https://github.com/example/skills.git", ref: "main", subdirectory: "skills", path: "skills/code-review", commit: "a".repeat(40) };
+const detailSkills = [
+  { id: "skill-1", name: "orchestrate-issues", description: ORCHESTRATE_DESCRIPTION, groupId: "group-1",
+    latestVersion: detailVersion(1, 3), assignmentCount: 3, updatedAt: Date.now() - 4 * 60_000 },
+  { id: "skill-2", name: "release-planner", description: MAXIMUM_DESCRIPTION, latestVersion: detailVersion(2, 7), updatedAt: Date.now() - 2 * 3_600_000 },
+  { id: "skill-3", name: "code-review", description: "Reviews a change against the team's conventions before it merges.",
+    gitSource: detailGitSource, gitAutoUpdate: { enabled: false }, latestVersion: { ...detailVersion(3, 12), gitSource: detailGitSource },
+    updatedAt: Date.now() - 26 * 3_600_000 },
+  { id: "skill-4", name: "using-wollipog", description: "Operate Wollipog sessions from inside an agent session.",
+    builtIn: { release: "0.29.1", heldUpdate: null }, recommendation: { dismissed: false }, assignmentCount: 1,
+    latestVersion: detailVersion(4, 2), updatedAt: Date.now() - 3 * 86_400_000 },
+  { id: "skill-5", name: "machine-notes", description: "Notes an agent keeps about this machine: which toolchains are " +
+      "installed, where the caches live, and which services must be running before a build starts.",
+    latestVersion: { ...detailVersion(5, 1), machineSource: { runnerId: "runner-1", sourceDirectory: ".codex/skills", name: "machine-notes",
+      digest: "e".repeat(64), importedAt: 1_700_000_000_000 } }, updatedAt: Date.now() - 9 * 86_400_000 },
+];
+const detailFiles = (name: string) => [
+  { path: "SKILL.md", content: shellSkillMarkdown(name), encoding: "utf8" as const },
+  { path: "references/checklist.md", content: "- Read the change.\n", encoding: "utf8" as const },
+  { path: "scripts/check.sh", content: "#!/bin/sh\n", encoding: "utf8" as const },
+];
+/** A second machine, so Machine × Agents and the Orphaned Copies pane show what divides one machine from the next. */
+const secondSkillRunner: RunnerView = {
+  ...runner, runnerId: "runner-2", hostname: "build-box", displayName: "Build Box", workspaces: [],
+};
+const detailMode = SHELL_SKILLS_MODE === "detail";
 const shellSkillsApi = {
   listSkills: async () => {
     if (SHELL_SKILLS_MODE === "loading") return new Promise<never>(() => {});
     if (SHELL_SKILLS_MODE === "error") throw new Error("HTTP 503: skill library unavailable (GET /api/skills)");
-    return { skills: structuredClone(shellSkills) };
+    return { skills: structuredClone(detailMode ? detailSkills : shellSkills) };
   },
-  listSkillGroups: async () => ({ groups: SHELL_SKILLS_MODE === "list" ? [{ id: "group-platform", name: "Platform", sortOrder: 1 }] : [] }),
+  listSkillGroups: async () => ({ groups: detailMode ? [{ id: "group-1", name: "Campaigns", sortOrder: 0 }]
+    : SHELL_SKILLS_MODE === "list" ? [{ id: "group-platform", name: "Platform", sortOrder: 1 }] : [] }),
   getSkill: async (id: string) => {
+    if (detailMode) {
+      const skill = detailSkills.find((candidate) => candidate.id === id);
+      if (!skill) throw new Error("HTTP 404: skill not found");
+      return { skill: structuredClone(skill), latestVersion: { ...structuredClone(skill.latestVersion), files: detailFiles(skill.name) } };
+    }
     const skill = shellSkills.find((candidate) => candidate.id === id);
     if (!skill) throw new Error("HTTP 404: skill not found");
     return {
@@ -1057,6 +1119,10 @@ const shellSkillsApi = {
       latestVersion: { ...skill.latestVersion, files: [{ path: "SKILL.md", content: shellSkillMarkdown(skill.name), encoding: "utf8" as const }] },
     };
   },
+  ...(detailMode ? {
+    getMachineSkillVersionPolicy: async () => ({ policy: null }),
+    listSkillGroupAssignments: async () => ({ assignments: [] }),
+  } : {}),
   listSkillAssignments: async (skillId?: string) => ({ assignments: skillId !== "skill-1" ? [] : [
     { id: "assignment-1", skillId, scopeKind: "instance" as const, agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const },
     { id: "assignment-2", skillId, scopeKind: "runner" as const, runnerId: "runner-1",

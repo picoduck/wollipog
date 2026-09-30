@@ -146,6 +146,39 @@ test("skills CRUD: update, new versions track latest, and delete clears everythi
   assert.equal(db.skillScope(skill.id), null, "ownership cascades with the skill row");
 });
 
+test("every skill version view carries its 1-based number in creation order, across history pages", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta("runner"), 10, 90);
+  const skill = createSkill(db, "numbered", { now: 100 });
+  const other = createSkill(db, "other", { now: 150 });
+  assert.equal(skill.latestVersion!.versionNumber, 1);
+  assert.equal(other.latestVersion!.versionNumber, 1, "numbers count within one skill");
+
+  // Versions 2 to 4 share a millisecond: they number in the order they were added, not by id.
+  const ids = [skill.latestVersion!.id];
+  for (let index = 2; index <= 55; index += 1) {
+    const at = index <= 4 ? 120 : 100 + index * 10;
+    ids.push(db.addSkillVersion(skill.id, { files: skillFiles("numbered"), manifest: "{}", digest: `numbered-${index}` }, at)!.id);
+  }
+  const listed = [...db.listSkillVersions(skill.id).versions];
+  const first = db.listSkillVersions(skill.id);
+  listed.push(...db.listSkillVersions(skill.id, first.nextCursor!).versions);
+  assert.equal(listed.length, 55);
+  assert.deepEqual(listed.map((version) => version.versionNumber), Array.from({ length: 55 }, (_, index) => 55 - index));
+  for (const version of listed) assert.equal(db.getSkillVersion(version.id)!.versionNumber, version.versionNumber);
+  assert.equal(db.getSkill(skill.id)!.latestVersion!.versionNumber, 55);
+  assert.equal(db.listSkills().find((entry) => entry.id === skill.id)!.latestVersion!.versionNumber, 55);
+
+  db.raw().prepare("INSERT INTO skill_machine_versions VALUES (?, ?, ?, ?)").run(skill.id, "runner", ids[9], "rev");
+  assert.equal(db.getMachineSkillVersion(skill.id, "runner")!.version!.versionNumber, 10);
+
+  // Restoring appends a new version with the next number; the restored one keeps its own.
+  const restored = db.restoreSkillVersion(skill.id, ids[0]!, db.getSkill(skill.id)!.latestVersion!.id)!;
+  assert.equal(restored.versionNumber, 56);
+  assert.equal(db.getSkillVersion(ids[0]!)!.versionNumber, 1);
+  assert.equal(db.getSkill(other.id)!.latestVersion!.versionNumber, 1);
+});
+
 test("skill groups order by sort_order and deletion detaches member skills", () => {
   const db = ControlPlaneDb.open(":memory:");
   const first = db.createSkillGroup("Writing", 10);

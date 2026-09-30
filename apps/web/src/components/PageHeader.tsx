@@ -29,6 +29,8 @@ export interface PagePrimaryAction extends PageAction {
 export interface PageMenuAction extends PageAction {
   /** Destructive: drawn last, after a separator, in the danger text colour (§3.3). */
   danger?: boolean;
+  /** The item's second line: a folded menu button's description, or why a disabled item is unavailable (§9.1). */
+  description?: string;
 }
 
 /** One item of a menu-button secondary: a label and an optional one-line description (§9.1). */
@@ -265,8 +267,6 @@ export function DetailBar({
 interface ActionsMenuItem extends PageMenuAction {
   /** A page-header secondary that also has a button; ⋯ lists it only while that button is hidden. */
   slot?: number;
-  /** A folded menu button's item keeps its description line. */
-  description?: string;
 }
 
 /**
@@ -353,13 +353,14 @@ function slotButtonShown(trigger: HTMLElement | null, slot: number): boolean {
 }
 
 /**
- * The ⋯ menu shared by the page header and the detail bar. Destructive items sort last.
+ * The ⋯ menu shared by the page header, the detail bar and an in-page header such as the skill
+ * detail's (#1962). Destructive items sort last.
  *
  * The menu is the shared MenuSurface, portalled: the page header is an inline-size query container,
  * and engines at the build floor that give `container-type` layout containment would make it the
  * containing block of a fixed-position menu and its backdrop.
  */
-function ActionsMenu({ className, overflow, items }: { className?: string; overflow: string; items: ActionsMenuItem[] }) {
+export function ActionsMenu({ className, overflow = "always", items }: { className?: string; overflow?: string; items: ActionsMenuItem[] }) {
   const [open, setOpen] = useState(false);
   const [, remeasure] = useState(0);
   const menu = useAccessibleMenu(open, setOpen, "page-actions-menu");

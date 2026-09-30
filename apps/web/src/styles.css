@@ -2339,6 +2339,22 @@ button.status { cursor: pointer; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A Section (§4.5, §5.1): no border and no fill, a title row and then its content 12px below.
+   Sections sit 32px apart through their container's gap. A button in one never stretches (§3.1). */
+.section {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.section-title { font: var(--type-section); }
+.section > .btn { justify-self: start; }
 /* A Surface (§5.1): one bordered group of rows that belong together, divided by hairlines. */
 .surface {
   min-width: 0;
@@ -14005,11 +14021,103 @@ body.shell-dock-dragging * {
   max-width: 480px;
   margin-top: var(--space-6);
 }
-.skills-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
-.skills-detail-head h3 { margin: 0; overflow-wrap: anywhere; }
-.skills-meta { margin: 5px 0 0; }
-.skills-section { display: grid; gap: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-elev); padding: 14px; }
+/* The skill detail (#1962): the header, then unboxed sections 32px apart (§4.5, §5.1). */
+.skill-detail {
+  display: grid;
+  align-content: start;
+  gap: var(--space-8);
+  min-width: 0;
+}
+.skill-detail-head {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.skill-detail-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-width: 0;
+}
+/* 16/600 on at most two lines; a long token breaks instead of widening the pane. The top padding
+   centres the first line on the actions beside it, at every control height. */
+.skill-detail-title {
+  display: -webkit-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding-top: calc((var(--control-h) - var(--space-6)) / 2);
+  overflow: hidden;
+  font: var(--type-title);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.skill-detail-title-row > .actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+}
+.skill-detail-desc-block {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+/* 13px, never smaller than the meta below it. Its own line breaks stay, and long tokens wrap. */
+.skill-detail-desc {
+  margin: 0;
+  font: var(--type-body);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.skill-detail-desc.is-clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+/* A `.link`, so on a coarse pointer it borrows a 44px band without growing (§15.3). */
+.skill-detail-desc-toggle {
+  justify-self: start;
+  font: var(--type-small);
+}
+/* Neutral facts (§11.3): 12px dim text, each after its 14px icon, 12px apart, no separators. */
+.skill-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+  list-style: none;
+}
+.skill-detail-meta > li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.skill-detail-meta .mono { font-family: var(--font-mono); }
+/* Blocks inside a detail section keep their rhythm without a card of their own; no button in them
+   stretches (§3.1). */
+.skills-section { display: grid; gap: 10px; }
 .skills-section h4, .skills-section h5 { margin: 0; }
+.skill-detail :is(.skills-section, .skills-git-source, .skills-machine-import) > .btn { justify-self: start; }
+.skills-git-source,
+.skills-machine-import {
+  display: grid;
+  gap: var(--space-2);
+}
+/* Dialogs keep the card until each is rebuilt; #1984 (Version History, Machine Version), #1983
+   (Import from Git), #1963 (Import from Machine) and #1985 (Manage Groups) delete this rule. */
+.modal .skills-section {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+}
 .skills-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .skills-doc { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elev-2); padding: 10px 12px; overflow: auto; max-height: 320px; }
 /* Skill review diff (#1948): one block per file, drawn with the Git diff's row classes so a change
@@ -14075,6 +14183,11 @@ body.shell-dock-dragging * {
   .modal-foot > .review-consent { flex-basis: 100%; }
 }
 .skills-git-source { min-width: 0; overflow-wrap: anywhere; }
+/* One machine after another in Machine × Agents, divided by hairlines rather than cards. */
+.skill-assignment-matrix > article + article {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
 .skills-git-auto-update { display: grid; gap: 4px; margin: 8px 0; }
 .skills-machine-import { min-width: 0; overflow-wrap: anywhere; }
 .skills-built-in { min-width: 0; overflow-wrap: anywhere; }

@@ -285,11 +285,14 @@ test("skill history is paginated without payloads and restore preserves history 
   const first = (await app.inject(`/api/skills/${skill.id}/versions`)).json();
   assert.equal(first.versions.length, 50);
   assert.ok(first.nextCursor);
-  assert.deepEqual(Object.keys(first.versions[0]).sort(), ["createdAt", "digest", "id"]);
+  assert.deepEqual(Object.keys(first.versions[0]).sort(), ["createdAt", "digest", "id", "versionNumber"]);
   const second = (await app.inject(`/api/skills/${skill.id}/versions?before=${first.nextCursor}`)).json();
   assert.equal(second.versions.length, 3);
   assert.equal(second.nextCursor, null);
   assert.equal(new Set([...first.versions, ...second.versions].map((v) => v.id)).size, 53);
+  // 52 versions share one millisecond: they number, and page, in the order they were added.
+  assert.deepEqual([...first.versions, ...second.versions].map((v) => v.versionNumber), Array.from({ length: 53 }, (_, i) => 53 - i));
+  assert.equal(first.versions[0].id, db.getSkill(skill.id)!.latestVersion!.id);
   assert.equal((await app.inject(`/api/skills/${skill.id}/versions?before=missing`)).statusCode, 400);
   const preview = (await app.inject(`/api/skills/${skill.id}/versions/${original.id}`)).json();
   assert.deepEqual(preview.version, original);

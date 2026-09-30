@@ -19,7 +19,8 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.goto("/skills-removals-e2e.html");
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
     await page.getByRole("button", { name: /code-review/i }).click();
-    await page.getByRole("button", { name: "Machine Versions", exact: true }).click();
+    await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
+    await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
     await page.getByRole("button", { name: /^Version Policy:/ }).click();
     await page.getByRole("option", { name: /Pin v0/ }).click();
     await page.getByRole("button", { name: "Preview Version Policy" }).click();
@@ -49,7 +50,8 @@ test("a stale machine policy requires a fresh preview", async ({ page }) => {
   await page.route("**/api/skills/skill-1/machines/runner-1/version*", (route) => route.request().method() === "PUT" ? route.fulfill({ status: 409, json: { error: "The library or machine version policy changed. Preview again." } }) : route.fulfill({ json: { policy: null, currentVersion: latest, proposedVersion: latest, expectedLatestVersionId: "v1" } }));
   await page.goto("/skills-removals-e2e.html");
   await page.getByRole("button", { name: /code-review/i }).click();
-  await page.getByRole("button", { name: "Machine Versions", exact: true }).click();
+  await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
   await page.getByRole("button", { name: "Preview Version Policy" }).click();
   // Tracking the version the machine already runs changes nothing deployed, so there is no consent.
   await expect(page.getByRole("dialog").getByRole("checkbox")).toHaveCount(0);

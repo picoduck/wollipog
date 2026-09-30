@@ -116,6 +116,10 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
 | `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion. |
 | `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows. |
+| `VersionIcon` | Lucide | `Tag` | A numbered version ("v3") in a meta row. |
+| `UpdatedIcon` | Lucide | `History` | When something last changed, in a meta row. |
+| `FilesIcon` | Lucide | `Files` | A count of files, in a meta row. |
+| `SkillSourceIcon` | Lucide | `Package` | Where a skill's content comes from (Git, Machine, Built-In or Library). |
 
 The Visual Studio Code mark comes from Microsoft's
 [official SVG asset bundle](https://code.visualstudio.com/assets/branding/visual-studio-code-icons.zip)

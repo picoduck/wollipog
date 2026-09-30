@@ -72,8 +72,8 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await expect(page.getByRole("alert")).toHaveCount(0);
     await page.getByRole("button", { name: "Close", exact: true }).last().click();
     await expect(page.getByRole("region", { name: "Inherited Assignments" })).toHaveCount(0);
-    // The skill stays open; on a phone it is its own screen, so its list row is not on screen (#1947).
-    await expect(page.locator(".skills-detail-head").getByRole("heading", { name: "code-review", exact: true })).toBeVisible();
+    // The skill stays open; on a phone it is its own screen, named in the detail bar (#1947, #1962).
+    await expect(page.locator(".skill-detail-head, .detail-bar").getByRole("heading", { name: "code-review", exact: true })).toBeVisible();
   });
 }
 test("legacy conversion is explicit and discloses permanent ownership", async ({ page }) => {

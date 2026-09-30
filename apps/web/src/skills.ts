@@ -35,6 +35,9 @@ export interface SkillVersionSummary {
   id?: string;
   digest?: string;
   createdAt?: number;
+  /** 1-based, in creation order within the skill, from the control plane (#1962): shown as "v3".
+   * Absent from an older control plane, where a version is named by its short digest instead. */
+  versionNumber?: number;
   note?: string;
   manifest?: unknown;
   files?: SkillFile[];
@@ -120,6 +123,8 @@ export interface SkillSummary {
   recommendation?: { dismissed: boolean };
   latestVersion?: SkillVersionSummary | null;
   assignmentCount?: number;
+  /** When the skill last changed: a new version, a new description, or a new group. */
+  updatedAt?: number;
 }
 
 export interface SkillBuiltInRelease { release: string; digest: string }
@@ -359,6 +364,38 @@ export function skillFromPayload(payload: SkillDetailPayload | unknown): SkillSu
     return { ...candidate, latestVersion: record.latestVersion as SkillVersionSummary };
   }
   return candidate;
+}
+
+/* --- Versions and sources --- */
+
+/** The 12 characters a digest shows as, wherever a version needs a fingerprint (§11.3). */
+export const SHORT_DIGEST_LENGTH = 12;
+
+/**
+ * How people name a version: "v3". A control plane that predates version numbers gets the short
+ * digest instead (`mono` tells the caller to set it in the monospace face); `skillv_…` ids never show.
+ */
+export function skillVersionLabel(version: SkillVersionSummary | null | undefined): { text: string; mono: boolean } | null {
+  const number = version?.versionNumber;
+  if (typeof number === "number" && Number.isInteger(number) && number > 0) return { text: `v${number}`, mono: false };
+  if (version?.digest) return { text: version.digest.slice(0, SHORT_DIGEST_LENGTH), mono: true };
+  return null;
+}
+
+export type SkillSourceKind = "built_in" | "git" | "machine" | "library";
+
+/** Where a skill's content comes from. A built-in skill updates with each release whatever else it
+ * records, and a Git skill keeps its source (and its updates) even when a later version was imported
+ * from a machine. */
+export function skillSourceKind(skill: SkillSummary): SkillSourceKind {
+  if (skill.builtIn) return "built_in";
+  if (skill.gitSource ?? skill.latestVersion?.gitSource) return "git";
+  if (skill.latestVersion?.machineSource) return "machine";
+  return "library";
+}
+
+export function skillSourceLabel(kind: SkillSourceKind): string {
+  return { built_in: "Built-In", git: "Git", machine: "Machine", library: "Library" }[kind];
 }
 
 /* --- The list --- */

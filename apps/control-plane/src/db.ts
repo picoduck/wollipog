@@ -3581,6 +3581,9 @@ export interface SkillVersionSummary {
   id: string;
   digest: string;
   createdAt: number;
+  /** 1-based position in the skill's creation order, shown as "v3". Derived here because the version
+   * history is paginated, so a client cannot count the older versions it has not loaded. */
+  versionNumber: number;
 }
 
 /** Why an automatic Git update waits for a human to import it through the preview. */
@@ -7494,12 +7497,25 @@ export class ControlPlaneDb {
       } : {}),
       ...(offered && adoptable ? { builtInOffer: offered } : {}),
       latestVersion: latest
-        ? { id: latest.id, digest: latest.digest, createdAt: latest.created_at }
+        ? { id: latest.id, digest: latest.digest, createdAt: latest.created_at,
+          versionNumber: this.skillVersionNumber(row.id, latest.id) }
         : null,
       assignmentCount: Number(assignments.n),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  /**
+   * Versions order by creation time, then by insertion (`rowid`), exactly as the version history
+   * lists them. Insertion rather than the random id breaks a same-millisecond tie, so a version
+   * added later never renumbers the ones before it.
+   */
+  private skillVersionNumber(skillId: string, versionId: string): number {
+    const row = this.stmt(`SELECT COUNT(*) AS n FROM skill_versions v, skill_versions t
+      WHERE t.id=? AND v.skill_id=? AND (v.created_at < t.created_at OR (v.created_at = t.created_at AND v.rowid <= t.rowid))`)
+      .get(versionId, skillId) as { n: number };
+    return Number(row.n);
   }
 
   private skillVersionView(row: SkillVersionRow): SkillVersionView {
@@ -7520,6 +7536,7 @@ export class ControlPlaneDb {
       ...(provenance ? { gitSource: JSON.parse(provenance.source) as NonNullable<SkillVersionView["gitSource"]> } : {}),
       ...(builtInProvenance ? { builtInSource: JSON.parse(builtInProvenance.source) as SkillBuiltInRelease } : {}),
       createdAt: row.created_at,
+      versionNumber: this.skillVersionNumber(row.skill_id, row.id),
     };
   }
 
@@ -7674,7 +7691,9 @@ export class ControlPlaneDb {
       FROM skill_machine_versions p LEFT JOIN skill_versions v ON v.id=p.version_id AND v.skill_id=p.skill_id
       WHERE p.skill_id=? AND p.runner_id=?`).get(skillId, runnerId) as
       { version_id: string | null; revision: string; id: string | null; digest: string; created_at: number } | undefined;
-    return row ? { versionId: row.version_id, revision: row.revision, version: row.id ? { id: row.id, digest: row.digest, createdAt: row.created_at } : null } : null;
+    return row ? { versionId: row.version_id, revision: row.revision, version: row.id
+      ? { id: row.id, digest: row.digest, createdAt: row.created_at, versionNumber: this.skillVersionNumber(skillId, row.id) }
+      : null } : null;
   }
 
   setMachineSkillVersion(skillId: string, runnerId: string, versionId: string | null, expectedRevision: string | null, expectedLatestVersionId: string): void {
@@ -7693,12 +7712,16 @@ export class ControlPlaneDb {
 
   /** Keyset pagination never loads historical file payloads into a library listing. */
   listSkillVersions(skillId: string, before?: string): { versions: SkillVersionSummary[]; nextCursor: string | null } {
-    const cursor = before ? this.stmt("SELECT created_at FROM skill_versions WHERE id=? AND skill_id=?").get(before, skillId) as { created_at: number } | undefined : undefined;
+    const cursor = before ? this.stmt("SELECT created_at, rowid AS seq FROM skill_versions WHERE id=? AND skill_id=?").get(before, skillId) as { created_at: number; seq: number } | undefined : undefined;
     if (before && !cursor) throw new Error("invalid version cursor");
     const rows = (cursor
-      ? this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE skill_id=? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT 51").all(skillId, cursor.created_at, cursor.created_at, before!)
-      : this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE skill_id=? ORDER BY created_at DESC, id DESC LIMIT 51").all(skillId)) as unknown as Array<{ id: string; digest: string; created_at: number }>;
-    const versions = rows.slice(0, 50).map((row) => ({ id: row.id, digest: row.digest, createdAt: row.created_at }));
+      ? this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE skill_id=? AND (created_at < ? OR (created_at = ? AND rowid < ?)) ORDER BY created_at DESC, rowid DESC LIMIT 51").all(skillId, cursor.created_at, cursor.created_at, cursor.seq)
+      : this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE skill_id=? ORDER BY created_at DESC, rowid DESC LIMIT 51").all(skillId)) as unknown as Array<{ id: string; digest: string; created_at: number }>;
+    // A page is newest first and contiguous in the numbering order, so one count numbers all of it.
+    const newest = rows[0] ? this.skillVersionNumber(skillId, rows[0].id) : 0;
+    const versions = rows.slice(0, 50).map((row, index) => ({
+      id: row.id, digest: row.digest, createdAt: row.created_at, versionNumber: newest - index,
+    }));
     return { versions, nextCursor: rows.length > 50 ? versions[versions.length - 1]!.id : null };
   }
 

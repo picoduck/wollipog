@@ -4,17 +4,18 @@ test("direct assignment errors are visible inside the open dialog", async ({ pag
   await page.route("**/api/skill-assignments", route => route.fulfill({ status: 409, json: { error: "Assignment ownership rejected" } }));
   await page.goto("/skills-removals-e2e.html");
   await page.getByRole("button", { name: /code-review/i }).click();
-  await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
+  await page.getByRole("button", { name: "Add Assignment…", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Add Assignment", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("Assignment ownership rejected");
   await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
+  await page.getByRole("button", { name: "Add Assignment…", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("alert")).toHaveCount(0);
 });
 test("version picker explains when no compatible machines exist", async ({ page }) => {
   await page.goto("/skills-removals-e2e.html?legacySkills=1");
   await page.getByRole("button", { name: /code-review/i }).click();
-  await page.getByRole("button", { name: "Machine Versions", exact: true }).click();
+  await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
   await expect(page.getByText(/No compatible machines are available/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Preview Version Policy" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeDisabled();
@@ -26,7 +27,7 @@ test("capable Windows machines offer WSL agents for direct assignment", async ({
   const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
   await expect(matrix.getByRole("row", { name: /^WSL Codex / }).first())
     .toHaveAccessibleName(/^WSL Codex Not Assigned Not Reported/);
-  await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
+  await page.getByRole("button", { name: "Add Assignment…", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: /^Machine:/ }).click();
   await page.getByRole("option", { name: "Build Machine", exact: true }).click();
@@ -125,7 +126,8 @@ test("older control planes use the authorized preview to initialize the saved pi
   await page.route("**/api/skills/skill-1/machines/*/version-policy", route => route.fulfill({ status: 404, json: { error: "Route not found" } }));
   await page.goto("/skills-removals-e2e.html?matrix=1");
   await page.getByRole("button", { name: /code-review/i }).click();
-  await page.getByRole("button", { name: "Machine Versions", exact: true }).click();
+  await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
   await expect(page.getByRole("button", { name: /^Version Policy: Pin v0/ })).toBeEnabled();
   await page.getByRole("button", { name: "Preview Version Policy" }).click();
   await expect(page.getByText("Current policy: pinned to v0.")).toBeVisible();
@@ -139,7 +141,8 @@ test("late policy response cannot overwrite a newly selected machine", async ({ 
   await page.getByRole("button", { name: /code-review/i }).click();
   let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
   await page.route("**/api/skills/skill-1/machines/runner-1/version-policy", async route => { await held; await route.fulfill({ json: { policy: { versionId: "v0", revision: "r1" } } }); });
-  await page.getByRole("button", { name: "Machine Versions", exact: true }).click();
+  await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
   await page.getByRole("button", { name: /^Machine:/ }).click();
   await page.getByRole("option", { name: "Other Machine", exact: true }).click();
   await expect(page.getByRole("button", { name: /^Version Policy: Track Latest/ })).toBeEnabled();
