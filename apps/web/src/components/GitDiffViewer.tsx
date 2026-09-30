@@ -790,7 +790,7 @@ function HunkView({
               <>
                 <button className="hunk-act" type="button" disabled={disabled} title={refusal?.reason}
                   aria-describedby={refusal?.id} onClick={() => mutateLines(changeIndices)}>
-                  {inFlight ? <Spinner /> : `${lineDirection === "stage" ? "Stage" : "Unstage"} hunk`}
+                  {inFlight ? <Spinner /> : `${lineDirection === "stage" ? "Stage" : "Unstage"} Hunk`}
                 </button>
                 <button className="hunk-act" type="button" disabled={disabled || selectedLines.size === 0} title={refusal?.reason}
                   aria-describedby={refusal?.id} onClick={() => mutateLines([...selectedLines].sort((a, b) => a - b))}>

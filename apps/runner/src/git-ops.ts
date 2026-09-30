@@ -2975,7 +2975,7 @@ export async function runGitAction(cwd: string, action: GitAction, ctx: GitActio
     case "diff":
       return { diff: await gitDiff(cwd, action.scope, ctx) };
     case "commit": {
-      // The button's meaning depends on whether anything is staged ("Commit staged" vs commit-
+      // The button's meaning depends on whether anything is staged ("Commit Staged" vs commit-
       // everything). If the index moved since the panel read it (agent's own git add, another
       // dashboard, external reset), refuse instead of committing a different set than promised.
       if (action.all !== true && action.expectStaged !== undefined) {

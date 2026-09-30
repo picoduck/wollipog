@@ -39,6 +39,11 @@ async function waitForDom(predicate: () => boolean, description: string): Promis
   }
 }
 
+/** The row's one load control; its name is Title Case in every state (§17.1, #2098). */
+function button(container: HTMLElement): HTMLButtonElement {
+  return container.querySelector("button") as HTMLButtonElement;
+}
+
 test("event payload loader reconstructs ordered chunks after MIME, size, digest, and UTF-8 checks", async () => {
   const refs = [ref("a", "first "), ref("b", "second")];
   const blobs = new Map([
@@ -84,13 +89,14 @@ test("event payload content is preview-first, explicitly loads, hides, and retri
   try {
     await act(async () => {
       root.render(
-        <EventPayloadContent preview="preview" references={references} mimeType="text/plain" label="output">
+        <EventPayloadContent preview="preview" references={references} mimeType="text/plain" label="Output">
           {(text) => <pre>{text}</pre>}
         </EventPayloadContent>,
       );
     });
     assert.deepEqual(requested, []);
     assert.equal(container.querySelector("pre")?.textContent, "preview");
+    assert.equal(button(container).textContent, "Load Full Output (1 KiB)");
 
     await act(async () => { (container.querySelector("button") as HTMLButtonElement).click(); });
     await waitForDom(
@@ -107,9 +113,11 @@ test("event payload content is preview-first, explicitly loads, hides, and retri
     );
     assert.deepEqual(requested, ["payload", "payload"]);
     assert.equal(container.querySelector("pre")?.textContent, "complete payload");
+    assert.equal(button(container).textContent, "Hide Full Output");
 
     await act(async () => { (container.querySelector("button") as HTMLButtonElement).click(); });
     assert.equal(container.querySelector("pre")?.textContent, "preview");
+    assert.equal(button(container).textContent, "Load Full Output (1 KiB)");
   } finally {
     await act(async () => { root.unmount(); });
     api.artifactExport = priorExport;
@@ -129,12 +137,13 @@ test("unmount fences a pending artifact load from updating discarded row state",
   try {
     await act(async () => {
       root.render(
-        <EventPayloadContent preview="preview" references={references} mimeType="text/plain" label="output">
+        <EventPayloadContent preview="preview" references={references} mimeType="text/plain" label="Output">
           {(text) => <pre>{text}</pre>}
         </EventPayloadContent>,
       );
     });
     await act(async () => { (container.querySelector("button") as HTMLButtonElement).click(); });
+    assert.equal(button(container).textContent, "Loading Full Output…");
     await act(async () => {
       root.unmount();
       resolveExport(new Blob(["complete payload"], { type: "text/plain" }));

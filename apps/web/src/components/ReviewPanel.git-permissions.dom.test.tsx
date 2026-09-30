@@ -258,7 +258,7 @@ async function choosePane(container: HTMLElement, label: "All Changes" | "Unstag
 
 /** The Git actions on the All Changes pane: the panel's own, then the diff's hunk Stage and Discard. */
 function combinedControls(container: HTMLElement): Array<[string, HTMLButtonElement]> {
-  return ["Commit staged", "Commit All", "Push & Open Pull Request", "Sync GitHub", "Stage", "Discard"]
+  return ["Commit Staged", "Commit All", "Push & Open Pull Request", "Sync GitHub", "Stage", "Discard"]
     .map((label) => [label, onlyButton(container, label)]);
 }
 
@@ -268,7 +268,7 @@ function lineControls(container: HTMLElement): Array<[string, HTMLButtonElement 
     .filter((box) => /^Select (Added|Removed) Line /u.test(box.getAttribute("aria-label")!));
   assert.equal(boxes.length, 2, "each changed line can be selected");
   return [
-    ["Stage hunk", onlyButton(container, "Stage hunk")],
+    ["Stage Hunk", onlyButton(container, "Stage Hunk")],
     ["Stage Selected (0)", onlyButton(container, "Stage Selected (0)")],
     ...boxes.map((box) => [box.getAttribute("aria-label")!, box] as [string, HTMLInputElement]),
   ];
@@ -361,7 +361,7 @@ test("an allowed or absent verdict leaves every Git action as it was (#1870)", a
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Stage")); });
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Discard")); });
       await act(async () => { harness.confirmations[0]!(true); await Promise.resolve(); });
-      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Commit staged")); });
+      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Commit Staged")); });
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Commit All")); });
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Push & Open Pull Request")); });
       await choosePane(harness.container, "Unstaged");
@@ -369,7 +369,7 @@ test("an allowed or absent verdict leaves every Git action as it was (#1870)", a
         assert.equal(control.disabled, name === "Stage Selected (0)", `${name} is enabled unless nothing is selected`);
         assert.equal(control.getAttribute("aria-describedby"), null, `${name} has no refusal description`);
       }
-      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Stage hunk")); });
+      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Stage Hunk")); });
       assert.deepEqual(harness.calls, [
         "forge_review_sync",
         "hunk:stage",

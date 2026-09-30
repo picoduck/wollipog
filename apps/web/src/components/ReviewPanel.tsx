@@ -994,7 +994,7 @@ export function ReviewPanel({
             placeholder="Describe the change"
           />
           <button className="btn sm" onClick={() => doCommit(false)} disabled={gitActionDisabled} {...gitRefusalProps}>
-            {busy === "commit" ? "Committing…" : stagedCount > 0 ? "Commit staged" : "Commit"}
+            {busy === "commit" ? "Committing…" : stagedCount > 0 ? "Commit Staged" : "Commit"}
           </button>
           {stagedCount > 0 && (
             <button

@@ -40,8 +40,8 @@ control-plane cache can always be rebuilt.
 
 ## Browser loading and integrity
 
-Timeline rows render the inline preview without fetching artifact bytes. **Load full output** or
-**Load full diff** performs an authenticated same-origin artifact export for each ordered chunk.
+Timeline rows render the inline preview without fetching artifact bytes. **Load Full Output** or
+**Load Full Diff** performs an authenticated same-origin artifact export for each ordered chunk.
 Before rendering, the browser validates the reference shape/count, expected MIME type, exact Blob
 length, SHA-256, aggregate size, and strict UTF-8 decoding. Missing, reordered, truncated, tampered,
 or wrongly typed chunks fail closed and expose a retry action.

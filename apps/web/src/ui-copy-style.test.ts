@@ -171,9 +171,13 @@ function uiCopy(sourceFile: ts.SourceFile): UiCopy[] {
       const label = LABEL_TAGS.has(tag);
       if (label || !insideLiteral(node)) copy.push({ node, kind: `<${tag}>`, value: node.text, label });
     }
-    if (ts.isJsxExpression(node) && node.expression && (ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent)) &&
-        !insideLiteral(node)) {
-      for (const value of copyLiterals(node.expression)) copy.push({ node, kind: `<${parentTag(node)}>`, value, label: false });
+    // A label tag's text built in `{…}` is a label too (#2098): every branch and template it can show.
+    if (ts.isJsxExpression(node) && node.expression && (ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent))) {
+      const tag = parentTag(node);
+      const label = LABEL_TAGS.has(tag);
+      if (label || !insideLiteral(node)) {
+        for (const value of copyLiterals(node.expression)) copy.push({ node, kind: `<${tag}>`, value, label });
+      }
     }
     if (ts.isJsxAttribute(node) && node.initializer) {
       const name = node.name.getText(sourceFile);
@@ -243,20 +247,119 @@ function copyLine(sourceFile: ts.SourceFile, node: ts.Node): string {
   return `${path.relative(SOURCE_ROOT, sourceFile.fileName)}:${line}`;
 }
 
-test("static compact UI labels use Title Case", () => {
+/** A piece of label-tag text that is not a label on its own, with the reason it is exempt. */
+interface LabelFragment {
+  file: string;
+  fragment: string;
+  reason: string;
+}
+
+/**
+ * Label-tag text built in a `{…}` expression that is only part of a label (#2098). The Title Case
+ * check reads each branch of such an expression as a whole label, so a fragment joined to the text
+ * beside it is exempt only through this list. Each entry names its file, the fragment as the check
+ * reads it, and why it is not a label. An entry that no longer matches anything fails the check.
+ */
+const LABEL_FRAGMENTS: readonly LabelFragment[] = [
+  {
+    file: "components/GitDiffViewer.tsx",
+    fragment: "s",
+    reason: 'the plural suffix of "{hiddenCount} More Hunk{…}", which reads "3 More Hunks"',
+  },
+  {
+    file: "components/UsageView.tsx",
+    fragment: "· unpriced",
+    reason: "a status note after the model name in its row header, not part of the name",
+  },
+  {
+    file: "components/UsageView.tsx",
+    fragment: "· paused by daily budget",
+    reason: "a status note after the user's name in its row header, not part of the name",
+  },
+];
+
+/**
+ * Every label in `sourceFile` that is not Title Case, less the exempt fragments, and every
+ * `fragments` entry for this file that matched nothing.
+ */
+function titleCaseFailures(
+  sourceFile: ts.SourceFile,
+  fragments: readonly LabelFragment[] = LABEL_FRAGMENTS,
+): { failures: string[]; used: Set<LabelFragment> } {
+  const file = path.relative(SOURCE_ROOT, sourceFile.fileName);
   const failures: string[] = [];
-  for (const file of sourceFiles(SOURCE_ROOT)) {
-    const sourceFile = parseSource(file);
-    for (const { node, kind, value, label } of uiCopy(sourceFile)) {
-      if (!label) continue;
-      const compact = compactLabel(value);
-      if (compact && !isTitleCase(compact)) failures.push(`${copyLine(sourceFile, node)} ${kind}: ${JSON.stringify(compact)}`);
-      if (kind === "Modal title" && value.trim().endsWith("?")) {
-        failures.push(`${path.relative(SOURCE_ROOT, file)} Modal title is a question: ${JSON.stringify(value)}`);
-      }
+  const used = new Set<LabelFragment>();
+  for (const { node, kind, value, label } of uiCopy(sourceFile)) {
+    if (!label) continue;
+    const compact = compactLabel(value);
+    if (compact && !isTitleCase(compact)) {
+      const exempt = fragments.find((entry) => entry.file === file && entry.fragment === compact);
+      if (exempt) used.add(exempt);
+      else failures.push(`${copyLine(sourceFile, node)} ${kind}: ${JSON.stringify(compact)}`);
+    }
+    if (kind === "Modal title" && value.trim().endsWith("?")) {
+      failures.push(`${file} Modal title is a question: ${JSON.stringify(value)}`);
     }
   }
+  return { failures, used };
+}
+
+test("static compact UI labels use Title Case", () => {
+  const failures: string[] = [];
+  const used = new Set<LabelFragment>();
+  for (const file of sourceFiles(SOURCE_ROOT)) {
+    const result = titleCaseFailures(parseSource(file));
+    failures.push(...result.failures);
+    for (const entry of result.used) used.add(entry);
+  }
+  for (const entry of LABEL_FRAGMENTS) {
+    if (!used.has(entry)) failures.push(`${entry.file} exempt fragment ${JSON.stringify(entry.fragment)} no longer matches; remove it`);
+  }
   assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+test("the Title Case check reads label-tag text built in expressions and templates (#2098)", () => {
+  const read = (source: string, fragments: readonly LabelFragment[] = []) =>
+    titleCaseFailures(parseSource(path.join(SOURCE_ROOT, "fixture.tsx"), source), fragments);
+  assert.deepEqual(read(`<button>{busy ? "Committing…" : staged ? "Commit staged" : "Commit"}</button>`).failures,
+    ['fixture.tsx:1 <button>: "Commit staged"']);
+  assert.deepEqual(read(`<button>{loaded ? \`Hide full \${label}\` : \`Load Full \${label} (\${size})\`}</button>`).failures,
+    ['fixture.tsx:1 <button>: "Hide full Name"'], "a template hole reads as a placeholder word");
+  assert.deepEqual(read(`<th scope="row">{name}{over ? " · paused" : ""}</th>`).failures,
+    ['fixture.tsx:1 <th>: "· paused"']);
+  assert.deepEqual(read(`<button>{busy ? "Committing…" : "Commit Staged"}</button>`).failures, []);
+  assert.deepEqual(read(`<span>{done ? "all set" : "not yet"}</span>`).failures, [], "text outside a label tag is not a label");
+  assert.deepEqual(read(`<button><code>{"npm run build"}</code></button>`).failures, [], "a literal value inside a label");
+
+  // A fragment is exempt only in the file its entry names, and an entry that matches reports itself used.
+  const plural: LabelFragment = { file: "fixture.tsx", fragment: "s", reason: "a plural suffix" };
+  const elsewhere: LabelFragment = { file: "other.tsx", fragment: "s", reason: "a plural suffix" };
+  const suffix = `<button>{count} More Hunk{count === 1 ? "" : "s"}</button>`;
+  const exempt = read(suffix, [plural]);
+  assert.deepEqual(exempt.failures, []);
+  assert.deepEqual([...exempt.used], [plural]);
+  const unused = read(suffix, [elsewhere]);
+  assert.deepEqual(unused.failures, ['fixture.tsx:1 <button>: "s"']);
+  assert.deepEqual([...unused.used], []);
+});
+
+test("reverting any label fixed for #2096 or #2098 fails the Title Case check", () => {
+  const reverts = [
+    ["components/GitDiffViewer.tsx", '"Unstage"} Hunk`', '"Unstage"} hunk`', '"Name hunk"'],
+    ["components/ReviewPanel.tsx", '"Commit Staged"', '"Commit staged"', '"Commit staged"'],
+    ["components/EventPayloadContent.tsx", "`Hide Full ${label}`", "`Hide full ${label}`", '"Hide full Name"'],
+    ["components/EventPayloadContent.tsx", "`Loading Full ${label}…`", "`Loading full ${label}…`", '"Loading full Name…"'],
+    ["components/EventPayloadContent.tsx", "`Load Full ${label} (", "`Load full ${label} (", '"Load full Name (Name)"'],
+  ];
+  for (const [file, fixed, reverted, reported] of reverts) {
+    const target = path.join(SOURCE_ROOT, file!);
+    const source = readFileSync(target, "utf8");
+    assert.ok(source.includes(fixed!), `${file} still reads ${fixed}`);
+    assert.deepEqual(titleCaseFailures(parseSource(target)).failures, [], `${file} passes as it is`);
+    const { failures } = titleCaseFailures(parseSource(target, source.replace(fixed!, reverted!)));
+    assert.equal(failures.length, 1, `${file} with ${reverted}: ${failures.join("\n")}`);
+    assert.match(failures[0]!, new RegExp(`^${file!.replace(/\./g, "\\.")}:\\d+ <button>: ${reported!.replace(/[()]/g, "\\$&")}$`));
+  }
 });
 
 /**

@@ -102,7 +102,7 @@ export function EventPayloadContent({
       )}
       <div className="event-payload-actions">
         <button type="button" className="btn-link" disabled={loading} onClick={loaded ? () => setLoaded(null) : load}>
-          {loaded ? `Hide full ${label}` : loading ? `Loading full ${label}…` : `Load full ${label} (${sizeLabel(references)})`}
+          {loaded ? `Hide Full ${label}` : loading ? `Loading Full ${label}…` : `Load Full ${label} (${sizeLabel(references)})`}
         </button>
         {error && <span className="event-payload-error" role="alert">{error}; retry is available.</span>}
       </div>

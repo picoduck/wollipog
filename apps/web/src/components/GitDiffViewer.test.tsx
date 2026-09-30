@@ -3,7 +3,7 @@ import { test } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { GitDiffFile, GitDiffInfo, GitHunk } from "@wollipog/protocol";
-import { GitDiffViewer, type StagingControls } from "./GitDiffViewer.js";
+import { GitDiffViewer, type DiffPane, type StagingControls } from "./GitDiffViewer.js";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
@@ -254,6 +254,14 @@ test("Discard renders only inside the file head row, the surface its contrast is
   assert.ok(row, "the file head row renders");
   assert.equal(elementsWithClass(row[1]!, "button", "diff-discard").length, 1, "Discard sits in the head row");
   assert.equal(elementsWithClass(html, "button", "diff-discard").length, 1, "and nowhere else");
+});
+
+test("line staging names a hunk's buttons in Title Case on both index panes (#2096)", () => {
+  const file: GitDiffFile = { path: "src/app.ts", status: "modified", binary: false, hunks: [TEXT_HUNK] };
+  const actions = (pane: DiffPane) => elementsWithClass(renderDiff(file, { ...STAGING, pane }), "button", "hunk-act")
+    .map(({ text }) => text.replace(/<!-- -->/g, ""));
+  assert.deepEqual(actions("unstaged"), ["Stage Hunk", "Stage Selected (0)"]);
+  assert.deepEqual(actions("staged"), ["Unstage Hunk", "Unstage Selected (0)"]);
 });
 
 test("a renamed file that also changed content renders its patch, not the rename note", () => {
