@@ -1,33 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import type { SkillFile } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { driftVariantLabel, type SkillDriftCopy, type SkillDriftPreview, type SkillDriftResolution } from "../skills.js";
 import { Modal } from "./common.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
-
-const contents = (file?: SkillFile) => !file ? "(File absent)" : file.encoding === "utf8" ? file.content : `Binary content (base64):\n${file.content}`;
-
-/** Every file of a reviewed copy, each expandable. With library files to compare against, each shows
- * both sides and its change; without them, every file is new. */
-export function SkillCopyFileReview({ previousFiles, files, copyLabel }: {
-  previousFiles: SkillFile[];
-  files: SkillFile[];
-  copyLabel: string;
-}) {
-  const compare = previousFiles.length > 0;
-  return <>
-    {[...new Set([...previousFiles, ...files].map((file) => file.path))].sort().map((path) => {
-      const before = previousFiles.find((file) => file.path === path);
-      const after = files.find((file) => file.path === path);
-      const change = !before ? "Added" : !after ? "Removed" : contents(before) === contents(after) ? "Unchanged" : "Changed";
-      return <details key={path}><summary>{path} · {change}</summary>
-        {compare && <><h4>Current</h4><pre className="skill-import-content">{contents(before)}</pre></>}
-        {compare && <h4>{copyLabel}</h4>}
-        <pre className="skill-import-content">{contents(after)}</pre>
-      </details>;
-    })}
-  </>;
-}
+import { deployToAssignmentsConsent, ReviewConsent } from "./ReviewConsent.js";
+import { SkillFileDiff } from "./SkillFileDiff.js";
 
 /** Review one drifted deployed copy as a library update, then commit exactly the reviewed bytes. */
 export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, onImported }: {
@@ -61,7 +37,8 @@ export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, 
     if (!preview) return;
     setBusy(true); setError(null);
     try {
-      const result = await api.importSkillDrift(preview.previewId, accepted);
+      // An update with no assignments deploys nothing, so reviewing it is the acceptance.
+      const result = await api.importSkillDrift(preview.previewId, needsConsent ? accepted : preview.disposition === "update");
       previewId.current = null;
       await onImported(result);
     } catch (cause) {
@@ -69,10 +46,11 @@ export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, 
       setBusy(false);
     }
   };
-  const needsAcceptance = preview?.disposition === "update";
+  const needsConsent = !!preview?.importable && preview.disposition === "update" && preview.assignmentCount > 0;
   return <Modal title="Import Edit as New Version" size="lg" onClose={close} footer={<>
+    {needsConsent && preview && <ReviewConsent label={deployToAssignmentsConsent(preview.assignmentCount)} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button>
-    <button type="button" className="btn primary" disabled={busy || !preview?.importable || (needsAcceptance && !accepted)}
+    <button type="button" className="btn primary" disabled={busy || !preview?.importable || (needsConsent && !accepted)}
       onClick={() => void importEdit()}>Import Edit as New Version</button>
   </>}>
     <div className="form skills-machine-import">
@@ -85,13 +63,12 @@ export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, 
       {error && <p className="form-error" role="alert">{error}</p>}
       {preview && <>
         {preview.pinned && <p>This machine is pinned to a version of this skill. Importing moves its pin to the new version.</p>}
-        {!preview.publishedFromLatest && <p>This copy was edited from an older version. Importing replaces the newer library content shown as Current.</p>}
+        {!preview.publishedFromLatest && <p>This copy was edited from an older version. Importing replaces the newer library content shown as removed lines.</p>}
         {copy.variant === "manual" && <p>The Manual Only copy's injected <code>disable-model-invocation</code> line is left out, so the library keeps the untransformed skill.</p>}
         {preview.importBlocker && <p className="form-error" role="alert">{preview.importBlocker}</p>}
         {preview.disposition === "identical" && <p>The edited files already match the latest library version. Importing only resolves the machine's hold.</p>}
         <p>Review every file, including scripts. Reading and importing never run skill contents.</p>
-        <SkillCopyFileReview previousFiles={preview.previousFiles} files={preview.files} copyLabel="Edited" />
-        {preview.importable && needsAcceptance && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
+        <SkillFileDiff previousFiles={preview.previousFiles} files={preview.files} />
       </>}
     </div>
   </Modal>;

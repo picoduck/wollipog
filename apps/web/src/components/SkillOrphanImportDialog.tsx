@@ -7,8 +7,8 @@ import {
   type OrphanedSkillCopyResolution,
 } from "../skills.js";
 import { Modal } from "./common.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
-import { SkillCopyFileReview } from "./SkillDriftImportDialog.js";
+import { deployToAssignmentsConsent, ReviewConsent } from "./ReviewConsent.js";
+import { SkillFileDiff } from "./SkillFileDiff.js";
 
 /** Review one orphaned copy's files, then import exactly the reviewed bytes as a new skill or as a
  * new version of the skill with its name. */
@@ -43,7 +43,8 @@ export function SkillOrphanImportDialog({ runnerId, machineLabel, copy, onClose,
     if (!preview) return;
     setBusy(true); setError(null);
     try {
-      const result = await api.importOrphanedSkillCopy(preview.previewId, accepted);
+      // An update with no assignments deploys nothing, so reviewing it is the acceptance.
+      const result = await api.importOrphanedSkillCopy(preview.previewId, needsConsent ? accepted : preview.disposition === "update");
       previewId.current = null;
       await onImported(result);
     } catch (cause) {
@@ -51,12 +52,13 @@ export function SkillOrphanImportDialog({ runnerId, machineLabel, copy, onClose,
       setBusy(false);
     }
   };
-  const needsAcceptance = preview?.disposition === "update";
+  const needsConsent = !!preview?.importable && preview.disposition === "update" && preview.assignmentCount > 0;
   const importLabel = preview?.disposition === "new" ? "Import as New Skill" : "Import as New Version";
   const name = preview?.name ?? copy.name;
   return <Modal title="Review Orphaned Copy" size="lg" onClose={close} footer={<>
+    {needsConsent && preview && <ReviewConsent label={deployToAssignmentsConsent(preview.assignmentCount)} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button>
-    <button type="button" className="btn primary" disabled={busy || !preview?.importable || (needsAcceptance && !accepted)}
+    <button type="button" className="btn primary" disabled={busy || !preview?.importable || (needsConsent && !accepted)}
       onClick={() => void importCopy()}>{importLabel}</button>
   </>}>
     <div className="form skills-machine-import">
@@ -76,8 +78,7 @@ export function SkillOrphanImportDialog({ runnerId, machineLabel, copy, onClose,
         {copy.kind === "kept_aside" && !copy.variant && <p>This copy was kept aside before the runner recorded its details, so it is imported exactly as stored.</p>}
         {preview.importBlocker && <p className="form-error" role="alert">{preview.importBlocker}</p>}
         <p>Review every file, including scripts. Reading and importing never run skill contents.</p>
-        <SkillCopyFileReview previousFiles={preview.previousFiles} files={preview.files} copyLabel="Copy" />
-        {preview.importable && needsAcceptance && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
+        <SkillFileDiff previousFiles={preview.previousFiles} files={preview.files} />
       </>}
     </div>
   </Modal>;

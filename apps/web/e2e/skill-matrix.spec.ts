@@ -80,7 +80,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.getByRole("button", { name: /^Version Policy:/ }).click();
     await page.getByRole("option", { name: "Track Latest", exact: true }).click();
     await page.getByRole("button", { name: "Preview Version Policy" }).click();
-    await page.getByRole("checkbox", { name: "Accept Files and Machine-Wide Version Policy" }).check();
+    await page.locator(".modal-foot").getByRole("checkbox", { name: /^Switch \d+ agents? to the latest version$/ }).check();
     await page.getByRole("button", { name: "Save Version Policy" }).click();
     await expect(page.getByRole("status").filter({ hasText: "Version policy saved" })).toBeVisible();
     await page.getByRole("button", { name: "Close", exact: true }).last().click();
@@ -129,7 +129,9 @@ test("older control planes use the authorized preview to initialize the saved pi
   await expect(page.getByRole("button", { name: /^Version Policy: Pin v0/ })).toBeEnabled();
   await page.getByRole("button", { name: "Preview Version Policy" }).click();
   await expect(page.getByText("Current policy: pinned to v0.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeDisabled();
+  // Previewing the pin already in force changes nothing the machine runs: no consent to give (#1948).
+  await expect(page.getByRole("dialog").getByRole("checkbox")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeEnabled();
 });
 test("late policy response cannot overwrite a newly selected machine", async ({ page }) => {
   await installSkillMatrixFixture(page);

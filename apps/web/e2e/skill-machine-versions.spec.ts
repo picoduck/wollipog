@@ -24,19 +24,21 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.getByRole("option", { name: /Pin v0/ }).click();
     await page.getByRole("button", { name: "Preview Version Policy" }).click();
     await expect(page.getByRole("heading", { name: "Version Policy Preview" })).toBeVisible();
-    await page.getByText("SKILL.md", { exact: true }).click();
-    await expect(page.getByText("Original instructions", { exact: true })).toBeVisible();
+    // One highlighted diff (#1948), and a consent naming what the pin changes on the machine.
+    const file = page.locator(".skill-diff-file", { hasText: "SKILL.md" });
+    await expect(file.locator(".diff-line-del")).toContainText("Updated instructions");
+    await expect(file.locator(".diff-line-add")).toContainText("Original instructions");
     await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeDisabled();
     await page.screenshot({ path: info.outputPath(`pins-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.getByRole("checkbox", { name: "Accept Files and Machine-Wide Version Policy" }).check();
+    await page.locator(".modal-foot").getByRole("checkbox", { name: "Switch 1 agent to version v0", exact: true }).check();
     await page.getByRole("button", { name: "Save Version Policy" }).click();
     await expect(page.getByRole("status").filter({ hasText: "Version policy saved" })).toBeVisible();
     await page.getByRole("button", { name: /^Version Policy:/ }).click();
     await page.getByRole("option", { name: "Track Latest", exact: true }).click();
     await page.getByRole("button", { name: "Preview Version Policy" }).click();
     await expect(page.getByText("Current policy: pinned to v0.")).toBeVisible();
-    await page.getByRole("checkbox", { name: "Accept Files and Machine-Wide Version Policy" }).check();
+    await page.getByRole("checkbox", { name: "Switch 1 agent to the latest version", exact: true }).check();
     await page.getByRole("button", { name: "Save Version Policy" }).click();
     await expect(page.getByRole("status").filter({ hasText: "Version policy saved" })).toBeVisible();
     expect(writes).toBe(2);
@@ -49,7 +51,8 @@ test("a stale machine policy requires a fresh preview", async ({ page }) => {
   await page.getByRole("button", { name: /code-review/i }).click();
   await page.getByRole("button", { name: "Machine Versions", exact: true }).click();
   await page.getByRole("button", { name: "Preview Version Policy" }).click();
-  await page.getByRole("checkbox", { name: "Accept Files and Machine-Wide Version Policy" }).check();
+  // Tracking the version the machine already runs changes nothing deployed, so there is no consent.
+  await expect(page.getByRole("dialog").getByRole("checkbox")).toHaveCount(0);
   await page.getByRole("button", { name: "Save Version Policy" }).click();
   await expect(page.getByRole("alert")).toContainText("Preview again");
   await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeDisabled();

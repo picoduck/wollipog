@@ -1,15 +1,10 @@
 import { useState } from "react";
-import { isSkillScriptFile, type SkillFile } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import type { SkillGitPreview, SkillGitSource } from "../skills.js";
 import { Modal } from "./common.js";
+import { deployToAssignmentsConsent, ReviewConsent } from "./ReviewConsent.js";
+import { SkillFileDiff } from "./SkillFileDiff.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
-
-function contents(file: SkillFile | undefined): string {
-  if (!file) return "(File absent)";
-  if (file.encoding === "utf8") return file.content;
-  return "Binary content (base64):\n" + file.content;
-}
 
 export function SkillGitImportDialog({ onClose, onImported, source }: {
   onClose: () => void; onImported: () => Promise<void>; source?: SkillGitSource;
@@ -44,7 +39,8 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
     try {
       for (const path of selected) {
         const candidate = preview.candidates.find((entry) => entry.path === path)!;
-        await api.importGitSkill({ previewId: preview.previewId, path, acceptUpdate: accepted });
+        // Updates with no assignments deploy nothing, so reviewing them is the acceptance.
+        await api.importGitSkill({ previewId: preview.previewId, path, acceptUpdate: needsConsent ? accepted : true });
         setImported((current) => [...current, candidate.name]);
         setSelected((current) => current.filter((entry) => entry !== path));
         setPreview((current) => current && { ...current, candidates: current.candidates.filter((entry) => entry.path !== path) });
@@ -56,9 +52,12 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
     }
   };
   const updates = preview?.candidates.filter((entry) => selected.includes(entry.path) && entry.disposition === "update") ?? [];
+  const deployedAssignments = updates.reduce((sum, entry) => sum + entry.assignmentCount, 0);
+  const needsConsent = deployedAssignments > 0;
   return <Modal title={source ? "Check for Skill Updates" : "Import Skills from Git"} size="lg" onClose={close} footer={<>
+    {needsConsent && <ReviewConsent label={deployToAssignmentsConsent(deployedAssignments)} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button className="btn ghost" type="button" disabled={busy} onClick={close}>Close</button>
-    {preview && <button className="btn primary" type="button" disabled={busy || !selected.length || (updates.length > 0 && !accepted)}
+    {preview && <button className="btn primary" type="button" disabled={busy || !selected.length || (needsConsent && !accepted)}
       onClick={() => void submit()}>{busy ? "Working…" : "Import Selected"}</button>}
   </>}>
     <div className="form">
@@ -71,25 +70,16 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
       {imported.length > 0 && <p role="status">Imported: {imported.join(", ")}</p>}
       {preview && preview.candidates.length === 0 && <p>No remaining skill candidates in this preview.</p>}
       {preview?.candidates.map((candidate) => {
-        const paths = [...new Set([...candidate.files, ...candidate.previousFiles].map((file) => file.path))].sort();
         return <section className="skills-section" key={candidate.path}>
           <Checkbox label={candidate.name} disabled={busy} checked={selected.includes(candidate.path)}
             onChange={(checked) => { setAccepted(false); setSelected((current) => checked ? [...current, candidate.path] : current.filter((path) => path !== candidate.path)); }} />
           <p className="skills-hint">{candidate.disposition === "identical" ? "Identical content; reuses the library version." : candidate.disposition === "update" ? `New version · ${candidate.assignmentCount} existing assignments` : "New skill · no assignments"}</p>
           <p className="skills-hint">Source: {candidate.source.url} · {candidate.path || "/"} · Commit {candidate.commit}</p>
           <p>Review every file below. Scripts and instructions are imported as content.</p>
-          {paths.map((path) => {
-            const before = candidate.previousFiles.find((file) => file.path === path);
-            const after = candidate.files.find((file) => file.path === path);
-            const change = !before ? "Added" : !after ? "Removed" : contents(before) === contents(after) ? "Unchanged" : "Changed";
-            return <details key={path}><summary>{path}{[after, before].some((file) => file && isSkillScriptFile(file, candidate.executablePaths.includes(path))) ? " · Script" : ""} · {change}</summary>
-              {candidate.disposition !== "new" && <><h4>Current</h4><pre className="skill-import-content">{contents(before)}</pre></>}
-              <h4>Proposed</h4><pre className="skill-import-content">{contents(after)}</pre>
-            </details>;
-          })}
+          <SkillFileDiff previousFiles={candidate.previousFiles} files={candidate.files} executablePaths={candidate.executablePaths}
+            label={`File Changes in ${candidate.name}`} />
         </section>;
       })}
-      {updates.length > 0 && <Checkbox consent label="Accept version diffs and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
     </div>
   </Modal>;
 }

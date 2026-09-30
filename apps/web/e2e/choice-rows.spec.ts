@@ -251,7 +251,7 @@ test.describe("with a coarse pointer at 390px", () => {
         rowCentre: box.top + box.height / 2,
       };
     }));
-    const consent = rows.find((row) => row.name?.startsWith("Accept version diff"))!;
+    const consent = rows.find((row) => row.name?.startsWith("I understand this deletes"))!;
     // Not vacuous: at this width the consent sentence really does wrap.
     expect(consent.lines).toBe(2);
     expect(Math.abs(consent.markerCentre - consent.firstLineCentre), "the box sits on the first line").toBeLessThanOrEqual(0.5);

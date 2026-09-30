@@ -826,10 +826,15 @@ test("SkillsView offers a same-name skill the built-in version and adopts it aft
   const dialog = view.container.querySelector('[role="dialog"]')!;
   assert.match(dialog.textContent ?? "", /2 existing assignments and every machine pin stay as they are/);
   assert.match(dialog.textContent ?? "", /Accepting turns off this skill's automatic Git updates\./);
-  assert.match(dialog.textContent ?? "", /SKILL\.md · Changed/);
+  const file = dialog.querySelector(".skill-diff-file")!;
+  assert.match(file.querySelector(".skill-diff-file-head")?.textContent ?? "", /SKILL\.md.*Changed/);
+  assert.equal(file.querySelectorAll(".diff-line-del").length, 1);
+  assert.equal(file.querySelectorAll(".diff-line-add").length, 1);
   const acceptButton = view.button("Accept Built-In Version", dialog)!;
-  assert.equal(acceptButton.disabled, true, "the version diff must be accepted first");
-  await act(async () => { dialog.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); });
+  assert.equal(acceptButton.disabled, true, "the deploy consent must be given first");
+  const consent = dialog.querySelector<HTMLElement>(".modal-foot .review-consent")!;
+  assert.equal(consent.textContent, "Deploy to 2 existing assignments");
+  await act(async () => { consent.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); });
   assert.equal(acceptButton.disabled, false);
   await view.click(acceptButton);
   assert.deepEqual(accepted, [{ id: "skill-mine", body: { digest: "r1", expectedLatestVersionId: "v1" } }]);

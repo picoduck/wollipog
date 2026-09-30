@@ -9,6 +9,11 @@ import { closeWarning } from "./components/DesktopCloseGuard.js";
 import { heldUpdateMessage } from "./desktop-updates.js";
 import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
 import { lifecycleConflictPresentation } from "./components/RunnersView.js";
+import {
+  DEPLOY_TO_TRACKING_MACHINES_CONSENT,
+  deployToAssignmentsConsent,
+  switchAgentsConsent,
+} from "./components/ReviewConsent.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
 const MINOR_WORDS = new Set([
@@ -184,8 +189,10 @@ function uiCopy(sourceFile: ts.SourceFile): UiCopy[] {
       // A JsxAttribute sits in JsxAttributes; the element that owns it is one level further up.
       const owner = node.parent.parent;
       const tag = ts.isJsxOpeningLikeElement(owner) ? owner.tagName.getText(sourceFile) : "";
-      // A consent checkbox's label is a sentence, which its own test checks.
-      const consent = tag === "Checkbox" && ts.isJsxOpeningLikeElement(owner) && hasFlag(owner, "consent", sourceFile);
+      // A consent checkbox's label is a sentence, which its own test checks. A skill review's
+      // `ReviewConsent` is always one.
+      const consent = tag === "ReviewConsent" ||
+        (tag === "Checkbox" && ts.isJsxOpeningLikeElement(owner) && hasFlag(owner, "consent", sourceFile));
       const label = !(consent && name === "label") && (name === "aria-label" || name === "ariaLabel" ||
         name === "data-menu-label" || name === "label" || (name === "title" && (tag === "State" || tag === "Notice" || tag === "Modal")));
       const text = label || TEXT_ATTRIBUTES.has(name);
@@ -516,6 +523,15 @@ test("consent checkbox labels are sentences, and every other checkbox label is T
     visit(sourceFile);
   }
   assert.deepEqual(failures, [], failures.join("\n"));
+  // Every sentence a skill review's `ReviewConsent` can show is computed, not written in JSX (#1948).
+  for (const sentence of [
+    deployToAssignmentsConsent(1), deployToAssignmentsConsent(2), DEPLOY_TO_TRACKING_MACHINES_CONSENT,
+    switchAgentsConsent(3, "the latest version"), switchAgentsConsent(1, "version skillv_0123"),
+    switchAgentsConsent(null, "the latest version"),
+  ]) {
+    consents += 1;
+    if (!isSentenceCase(sentence)) failures.push(`ReviewConsent label is not a sentence: ${JSON.stringify(sentence)}`);
+  }
   // Not vacuous: the scan found the consent labels in the Skills review dialogs and ordinary ones.
   assert.ok(consents >= 8, `found ${consents} consent labels`);
   assert.ok(labels - consents >= 8, `found ${labels - consents} ordinary checkbox labels`);
@@ -596,8 +612,8 @@ test("no production screen calls Sessions the Inbox", () => {
 });
 
 test("the copy rules tell a sentence from a title", () => {
-  assert.equal(isSentenceCase("Accept version diff and update existing assignments"), true);
-  assert.equal(isSentenceCase("Accept Version Diff and Update Existing Assignments"), false);
+  assert.equal(isSentenceCase("Deploy to 2 existing assignments"), true);
+  assert.equal(isSentenceCase("Deploy to 2 Existing Assignments"), false);
   assert.equal(isSentenceCase("Open the PR after creating it"), true);
   assert.equal(isTitleCase("Include Session Name"), true);
   assert.equal(isTitleCase("Include session name"), false);

@@ -90,8 +90,14 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     const dialog = page.getByRole("dialog", { name: "Review Orphaned Copy" });
     await expect(dialog).toContainText("creates it with no assignments");
     await expect(dialog).toContainText("injected disable-model-invocation line is left out");
-    await dialog.getByText("SKILL.md · Added").click();
-    await expect(dialog.getByText("Group them by area.")).toBeVisible();
+    // A new skill's file is Added and every line of it is a + line (#1948); nothing to consent to.
+    const file = dialog.locator(".skill-diff-file", { hasText: "SKILL.md" });
+    await expect(file.locator(".skill-diff-file-head")).toContainText("Added");
+    await expect(file.locator(".skill-diff-counts")).toContainText("+6 −0");
+    await expect(file.locator(".diff-line-add")).toHaveCount(6);
+    await expect(file.locator(".diff-line-del, .diff-line-ctx")).toHaveCount(0);
+    await expect(file.getByText("Group them by area.")).toBeVisible();
+    await expect(dialog.getByRole("checkbox")).toHaveCount(0);
     await page.screenshot({ path: info.outputPath(`orphans-review-${width}-${theme}.png`) });
     expect(await noHorizontalOverflow(page)).toBe(true);
     await dialog.getByRole("button", { name: "Import as New Skill" }).click();

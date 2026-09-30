@@ -87,7 +87,7 @@ function Harness() {
           <Checkbox label="Succeeded" checked={checks.succeeded ?? false} onChange={check("succeeded")} />
           <Checkbox label="Include Session Name" helper="Session names are excluded unless selected."
             checked={checks.sessionName ?? false} onChange={check("sessionName")} />
-          <Checkbox consent label="Accept version diff and update existing assignments"
+          <Checkbox consent label="I understand this deletes 3 assignments and every machine pin"
             checked={checks.consent ?? false} onChange={check("consent")} />
           <Checkbox label="Expired" disabled checked={false} onChange={check("expired")} />
         </fieldset>

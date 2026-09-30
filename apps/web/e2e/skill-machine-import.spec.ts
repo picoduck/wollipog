@@ -32,14 +32,21 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.getByRole("button", { name: "Discover Skills" }).click();
     await page.getByRole("button", { name: "Preview Files for code-review from .codex/skills" }).click();
     await expect(page.getByRole("heading", { name: "Snapshot Preview" })).toBeVisible();
-    await page.getByText("SKILL.md · Changed", { exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Current", exact: true })).toBeVisible();
-    await expect(page.getByText("scripts/check.sh · Script · Added", { exact: true })).toBeVisible();
+    // One highlighted diff (#1948): an added script is flagged and every line of it is a + line.
+    const skill = page.locator(".skill-diff-file", { hasText: "SKILL.md" });
+    await expect(skill.locator(".skill-diff-file-head .status")).toHaveText(["Changed"]);
+    await expect(skill.locator(".diff-line-del")).toHaveCount(1);
+    await expect(skill.locator(".diff-line-add")).toHaveCount(1);
+    const script = page.locator(".skill-diff-file", { hasText: "scripts/check.sh" });
+    await expect(script.locator(".skill-diff-file-head .status")).toHaveText(["Script", "Added"]);
+    await expect(script.locator(".skill-diff-counts")).toContainText("+1 −0");
+    await expect(script.locator(".diff-line-add")).toContainText("echo review-only");
+    await expect(page.getByRole("heading", { name: "Current", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Import Snapshot" })).toBeDisabled();
     expect(imports).toBe(0);
     await page.screenshot({ path: info.outputPath(`machine-preview-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.getByRole("checkbox", { name: "Accept Version Diff and Update Existing Assignments" }).check();
+    await page.locator(".modal-foot").getByRole("checkbox", { name: "Deploy to 2 existing assignments", exact: true }).check();
     await page.getByRole("button", { name: "Import Snapshot" }).click();
     await expect(page.getByRole("status")).toHaveText("Imported: code-review. The source directory was not adopted.");
     expect(imports).toBe(1);

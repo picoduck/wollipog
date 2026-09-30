@@ -21,13 +21,20 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await expect(page.getByRole("button", { name: "Restore Version", exact: true })).toBeDisabled();
     await page.getByRole("button", { name: "Preview Version v0", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Restore Preview" })).toBeVisible();
-    await page.getByText("SKILL.md · Changed", { exact: true }).click();
-    await expect(page.getByText("scripts/check.sh · Removed", { exact: true })).toBeVisible();
+    // One highlighted diff (#1948): a file the restored version lacks is all − lines.
+    const skill = page.locator(".skill-diff-file", { hasText: "SKILL.md" });
+    await expect(skill.locator(".skill-diff-file-head .status")).toHaveText(["Changed"]);
+    await expect(skill.locator(".diff-line-del")).toContainText("Review the diff and all callers.");
+    await expect(skill.locator(".diff-line-add")).toContainText("Review the diff.");
+    const script = page.locator(".skill-diff-file", { hasText: "scripts/check.sh" });
+    await expect(script.locator(".skill-diff-file-head .status")).toHaveText(["Script", "Removed"]);
+    await expect(script.locator(".diff-line-del")).toHaveCount(1);
+    await expect(script.locator(".diff-line-add, .diff-line-ctx")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Restore Version", exact: true })).toBeDisabled();
     expect(restores).toBe(0);
     await page.screenshot({ path: info.outputPath(`history-preview-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.getByRole("checkbox", { name: "Accept Version Diff and Update Existing Assignments" }).check();
+    await page.locator(".modal-foot").getByRole("checkbox", { name: "Deploy to machines that track the latest version", exact: true }).check();
     await page.getByRole("button", { name: "Restore Version", exact: true }).click();
     await expect(page.getByRole("status").filter({ hasText: "Version restored" })).toBeVisible();
     expect(restores).toBe(1);
@@ -47,7 +54,7 @@ test("history paginates and stale restore invalidates acceptance; current versio
   await expect(page.getByRole("button", { name: "Restore Version", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "Load Older Versions" }).click();
   await page.getByRole("button", { name: "Preview Version v0", exact: true }).click();
-  await page.getByRole("checkbox", { name: "Accept Version Diff and Update Existing Assignments" }).check();
+  await page.getByRole("checkbox", { name: "Deploy to machines that track the latest version", exact: true }).check();
   await page.getByRole("button", { name: "Restore Version", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("library changed");
   await expect(page.getByRole("heading", { name: "Restore Preview" })).toHaveCount(0);

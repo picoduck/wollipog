@@ -1,7 +1,6 @@
 import { useState } from "react";
-import type { RunnerView, SkillFile } from "@wollipog/protocol";
+import type { RunnerView } from "@wollipog/protocol";
 import {
-  isSkillScriptFile,
   machineSkillAdoptionRecoveryRequirement,
   machineSkillAdoptionRequirement,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
@@ -16,9 +15,9 @@ import type {
 } from "../skills.js";
 import { Modal } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
+import { deployToAssignmentsConsent, ReviewConsent } from "./ReviewConsent.js";
+import { SkillFileDiff } from "./SkillFileDiff.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
-
-const contents = (file?: SkillFile) => !file ? "(File absent)" : file.encoding === "utf8" ? file.content : `Binary content (base64):\n${file.content}`;
 const accountLabel = (runner: RunnerView | undefined, providerAccountId: string | undefined) =>
   providerAccountId
     ? accountLabelText(runner?.providerAccounts?.find((account) => account.id === providerAccountId)?.label ?? "Provider Account")
@@ -152,15 +151,18 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
     if (!discovery || !preview) return;
     setBusy(true); setError(null);
     try {
-      await api.importMachineSkill(discovery.discoveryId, preview.previewId, accepted);
+      // An update with no assignments deploys nothing, so reviewing it is the acceptance.
+      await api.importMachineSkill(discovery.discoveryId, preview.previewId, needsConsent ? accepted : preview.disposition === "update");
       setImported(preview.candidate.name); setPreview(null); setAccepted(false);
       await onImported();
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   };
+  const needsConsent = preview?.disposition === "update" && preview.assignmentCount > 0;
   return <Modal title="Import Skill from Machine" size="lg" onClose={close} footer={<>
+    {needsConsent && preview && <ReviewConsent label={deployToAssignmentsConsent(preview.assignmentCount)} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button className="btn ghost" type="button" disabled={busy} onClick={close}>Close</button>
-    <button className="btn primary" type="button" disabled={busy || !preview || (preview.disposition === "update" && !accepted)} onClick={() => void submit()}>Import Snapshot</button>
+    <button className="btn primary" type="button" disabled={busy || !preview || (needsConsent && !accepted)} onClick={() => void submit()}>Import Snapshot</button>
   </>}>
     <div className="form skills-machine-import">
       <p>Import a read-only snapshot. After an identical library version is assigned, a separate confirmed action can preserve the original and replace it with a managed link. New skills stay unassigned; accepted updates deploy to current assignments on unpinned machines.</p>
@@ -218,16 +220,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
         <p className="skills-hint">Digest: {preview.digest}</p>
         {!!preview.executablePaths?.length && <p className="skills-hint">Executable files: {preview.executablePaths.join(", ")}. These files can be imported as content, but this snapshot cannot be adopted.</p>}
         <p>Review every file before importing. Instructions and scripts are content, not executed during import.</p>
-        {[...new Set([...preview.files, ...preview.previousFiles].map((file) => file.path))].sort().map((path) => {
-          const before = preview.previousFiles.find((file) => file.path === path);
-          const after = preview.files.find((file) => file.path === path);
-          const change = !before ? "Added" : !after ? "Removed" : contents(before) === contents(after) ? "Unchanged" : "Changed";
-          return <details key={path}><summary>{path}{[after, before].some((file) => file && isSkillScriptFile(file, preview.executablePaths?.includes(path))) ? " · Script" : ""} · {change}</summary>
-            {preview.disposition !== "new" && <><h4>Current</h4><pre className="skill-import-content">{contents(before)}</pre></>}
-            <h4>Proposed</h4><pre className="skill-import-content">{contents(after)}</pre>
-          </details>;
-        })}
-        {preview.disposition === "update" && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
+        <SkillFileDiff previousFiles={preview.previousFiles} files={preview.files} executablePaths={preview.executablePaths} />
         {preview.disposition === "identical" && <>
           <button className="btn" type="button" disabled={busy || !adoptionSupported}
             onClick={() => void checkAdoption()}>Check Adoption</button>

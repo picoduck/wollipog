@@ -13859,7 +13859,68 @@ body.shell-dock-dragging * {
 .skills-section h4, .skills-section h5 { margin: 0; }
 .skills-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .skills-doc { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elev-2); padding: 10px 12px; overflow: auto; max-height: 320px; }
-.skill-import-content { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; padding: 12px; background: var(--bg-elev-2); }
+/* Skill review diff (#1948): one block per file, drawn with the Git diff's row classes so a change
+   reads the same in both places. Component-local by #1805's rule: only skill reviews use it. */
+.skill-diff { display: grid; gap: var(--space-2); min-width: 0; }
+.skill-diff-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.skill-diff-summary { margin: 0; color: var(--text-dim); font: var(--type-small); }
+.skill-diff-file {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+/* The whole header is the disclosure's target, not a pill inside it. */
+.skill-diff-file > .skill-diff-file-head {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+  min-height: var(--row-h-dense);
+  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2);
+  color: var(--text);
+  font: var(--type-body);
+}
+.skill-diff-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.skill-diff-counts { font: var(--type-small); font-variant-numeric: tabular-nums; }
+.skill-diff-count-add { color: var(--positive-text); }
+.skill-diff-count-del { color: var(--danger-text); }
+.skill-diff-file-body { border-top: 1px solid var(--border); }
+.skill-diff-note { margin: 0; padding: var(--space-2) var(--space-3); color: var(--text-dim); font: var(--type-small); }
+.skill-diff-hunk + .skill-diff-hunk { border-top: 1px solid var(--border); }
+/* The off-screen "Added line" names are positioned against their own lines. */
+.skill-diff-lines { position: relative; }
+/* A review dialog has no horizontal room to scroll a line into: long lines wrap, and Split's two
+   columns share the width instead of holding the Git pane's 360px minimum each. */
+.skill-diff .diff-line,
+.skill-diff .diff-split-cell { white-space: pre-wrap; overflow-wrap: anywhere; }
+.skill-diff .diff-text { flex: 1 1 auto; min-width: 0; }
+.skill-diff .diff-split-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-width: 0; }
+.skill-diff-nonl { color: var(--text-faint-on-tint); font-family: var(--font-ui); font-style: italic; }
+/* Forced colours drop the row tints, so an edge marks each changed line beside its +/− sign:
+   solid for added, dashed for removed. */
+@media (forced-colors: active) {
+  .skill-diff .diff-line-add { border-inline-start: 4px solid Highlight; }
+  .skill-diff .diff-line-del { border-inline-start: 4px dashed CanvasText; }
+}
+/* The review's consent (#1948) takes the footer's left slot, beside the primary it unlocks. */
+.modal-foot > .review-consent { flex: 0 1 auto; min-width: 0; margin-right: auto; }
+@media (max-width: 760px) {
+  /* On a phone sheet it is a full-width row above Cancel and the primary. */
+  .modal-foot > .review-consent { flex-basis: 100%; }
+}
 .skills-git-source { min-width: 0; overflow-wrap: anywhere; }
 .skills-git-auto-update { display: grid; gap: 4px; margin: 8px 0; }
 .skills-machine-import { min-width: 0; overflow-wrap: anywhere; }

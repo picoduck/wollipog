@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { useApi } from "../api-context.js";
 import type { SkillBuiltInReview } from "../skills.js";
 import { Modal } from "./common.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
-import { SkillCopyFileReview } from "./SkillDriftImportDialog.js";
+import { deployToAssignmentsConsent, ReviewConsent } from "./ReviewConsent.js";
+import { SkillFileDiff } from "./SkillFileDiff.js";
 
 /** Review the running release's version of a skill file by file, then commit exactly that
  * version: a built-in update held by local changes, or the adoption of a same-name skill. */
@@ -38,9 +38,12 @@ export function SkillBuiltInReviewDialog({ skillId, skillName, onClose, onAccept
   };
   const changed = review ? review.currentVersion?.digest !== review.digest : false;
   const adopt = review?.kind === "adopt";
+  // Accepting makes the release's version the latest, which assigned machines tracking it deploy.
+  const needsConsent = changed && !!review && review.assignmentCount > 0;
   return <Modal title={adopt ? "Review Built-In Version" : "Review Built-In Update"} size="lg" onClose={() => { if (!busy) onClose(); }} footer={<>
+    {needsConsent && review && <ReviewConsent label={deployToAssignmentsConsent(review.assignmentCount)} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
-    <button type="button" className="btn primary" disabled={busy || !review || (changed && !accepted)} onClick={() => void accept()}>
+    <button type="button" className="btn primary" disabled={busy || !review || (needsConsent && !accepted)} onClick={() => void accept()}>
       Accept Built-In Version
     </button>
   </>}>
@@ -65,8 +68,7 @@ export function SkillBuiltInReviewDialog({ skillId, skillName, onClose, onAccept
         {review.gitAutoUpdate && <p>Accepting turns off this skill's automatic Git updates.</p>}
         {!changed && <p>The built-in version matches the latest library version. Accepting only records where it comes from.</p>}
         <p>Review every file, including scripts. Reviewing and accepting never run skill contents.</p>
-        <SkillCopyFileReview previousFiles={review.currentVersion?.files ?? []} files={review.files} copyLabel="Built-In" />
-        {changed && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
+        <SkillFileDiff previousFiles={review.currentVersion?.files ?? []} files={review.files} />
       </>}
     </div>
   </Modal>;

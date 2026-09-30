@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { runnerSupportsProtocol, type RunnerView, type SkillFile } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
-import type { MachineSkillVersionPreview, SkillVersionSummary } from "../skills.js";
+import { skillFromPayload, type MachineSkillVersionPreview, type SkillVersionSummary } from "../skills.js";
 import { Modal } from "./common.js";
-import { Checkbox, Select } from "./ui/ChoiceControls.js";
-
-const contents = (file?: SkillFile) => !file ? "(File absent)" : file.encoding === "utf8" ? file.content : `Binary content (base64):\n${file.content}`;
+import { ReviewConsent, switchAgentsConsent } from "./ReviewConsent.js";
+import { SkillFileDiff } from "./SkillFileDiff.js";
+import { Select } from "./ui/ChoiceControls.js";
 
 export function SkillMachineVersionDialog({ skillId, runners, initialRunnerId, onClose, onSaved }: {
   skillId: string; runners: RunnerView[]; initialRunnerId?: string; onClose: () => void; onSaved: () => Promise<void>;
@@ -18,6 +18,8 @@ export function SkillMachineVersionDialog({ skillId, runners, initialRunnerId, o
   const [versions, setVersions] = useState<SkillVersionSummary[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [preview, setPreview] = useState<MachineSkillVersionPreview | null>(null);
+  /** Agents on the machine that run this skill; null when the machine's skills could not be read. */
+  const [agentCount, setAgentCount] = useState<number | null>(null);
   const [accepted, setAccepted] = useState(false);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -56,14 +58,35 @@ export function SkillMachineVersionDialog({ skillId, runners, initialRunnerId, o
     catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   };
+  // The agents this machine deploys the skill to, for the consent's count. A failure leaves the
+  // count unknown, which still asks for consent rather than assuming nothing runs there.
+  const agentsRunningSkill = async (): Promise<number | null> => {
+    try {
+      const [skill, machine] = await Promise.all([api.getSkill(skillId), api.runnerSkills(runnerId)]);
+      const name = skillFromPayload(skill)?.name;
+      if (!name || machine.loadError) return null;
+      return new Set(machine.desired.find((entry) => entry.name === name)?.targets.map((target) => target.agentId) ?? []).size;
+    } catch { return null; }
+  };
   const read = async () => {
     reset(); setBusy(true);
-    try { setPreview(await api.previewMachineSkillVersion(skillId, runnerId, versionId || null)); }
+    try {
+      const [result, agents] = await Promise.all([
+        api.previewMachineSkillVersion(skillId, runnerId, versionId || null),
+        agentsRunningSkill(),
+      ]);
+      setAgentCount(agents);
+      setPreview(result);
+    }
     catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   };
+  // Saving changes what runs on the machine only when the proposed content differs from what it runs
+  // now (without both digests, assume it does), and only if some agent there runs the skill.
+  const sameContent = !!preview?.proposedVersion.digest && preview.proposedVersion.digest === preview.currentVersion?.digest;
+  const needsConsent = !!preview && !sameContent && agentCount !== 0;
   const save = async () => {
-    if (!accepted || !preview) return;
+    if ((needsConsent && !accepted) || !preview) return;
     setBusy(true); setError(null);
     try {
       await api.setMachineSkillVersion(skillId, runnerId, { versionId: versionId || null, expectedRevision: preview.policy?.revision ?? null, expectedLatestVersionId: preview.expectedLatestVersionId });
@@ -73,8 +96,10 @@ export function SkillMachineVersionDialog({ skillId, runners, initialRunnerId, o
     finally { setBusy(false); }
   };
   return <Modal title="Machine Versions" size="lg" onClose={() => { if (!busy) onClose(); }} footer={<>
+    {needsConsent && <ReviewConsent label={switchAgentsConsent(agentCount, versionId ? `version ${versionId}` : "the latest version")}
+      checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button className="btn ghost" type="button" disabled={busy} onClick={onClose}>Close</button>
-    <button className="btn primary" type="button" disabled={busy || !preview || !accepted} onClick={() => void save()}>Save Version Policy</button>
+    <button className="btn primary" type="button" disabled={busy || !preview || (needsConsent && !accepted)} onClick={() => void save()}>Save Version Policy</button>
   </>}><div className="form skills-machine-import">
     <p>All assigned agents on a machine share one canonical skill version. Pin that machine to a revision, or track library updates. This does not create or change assignments.</p>
     <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy} options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={(value) => { reset(); setRunnerId(value); }} /></label>
@@ -90,11 +115,7 @@ export function SkillMachineVersionDialog({ skillId, runners, initialRunnerId, o
       <p>Proposed policy: {versionId ? `pin ${versionId}` : "track latest, including future library updates"}.</p>
       <p className="skills-hint">Proposed digest: {preview.proposedVersion.digest}</p>
       <p>Review every file. Saving affects all assigned agents on this machine; scripts are not executed by preview or save.</p>
-      {[...new Set([...(preview.currentVersion?.files ?? []), ...(preview.proposedVersion.files ?? [])].map((file) => file.path))].sort().map((path) => <details key={path}><summary>{path}</summary>
-        <h4>Current</h4><pre className="skill-import-content">{contents(preview.currentVersion?.files?.find((file) => file.path === path))}</pre>
-        <h4>Proposed</h4><pre className="skill-import-content">{contents(preview.proposedVersion.files?.find((file) => file.path === path))}</pre>
-      </details>)}
-      <Checkbox consent label="Accept files and machine-wide version policy" checked={accepted} disabled={busy} onChange={setAccepted} />
+      <SkillFileDiff previousFiles={preview.currentVersion?.files ?? []} files={preview.proposedVersion.files ?? []} />
     </section>}
   </div></Modal>;
 }

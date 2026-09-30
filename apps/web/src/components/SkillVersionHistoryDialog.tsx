@@ -1,11 +1,9 @@
 import { useEffect, useState } from "react";
-import type { SkillFile } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import type { SkillVersionPreview, SkillVersionSummary } from "../skills.js";
 import { Modal } from "./common.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
-
-const contents = (file?: SkillFile) => !file ? "(File absent)" : file.encoding === "utf8" ? file.content : `Binary content (base64):\n${file.content}`;
+import { DEPLOY_TO_TRACKING_MACHINES_CONSENT, ReviewConsent } from "./ReviewConsent.js";
+import { SkillFileDiff } from "./SkillFileDiff.js";
 
 export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
   skillId: string; onClose: () => void; onRestored: () => Promise<void>;
@@ -41,8 +39,13 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
     catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   };
+  const restorable = !!preview?.version.id && !!preview.currentVersion?.id && preview.version.id !== preview.currentVersion.id;
+  // Restoring makes this content the latest version; when it differs from what is deployed now,
+  // every machine that tracks the latest version deploys it. Without both digests, assume it differs.
+  const sameContent = !!preview?.version.digest && preview.version.digest === preview.currentVersion?.digest;
+  const needsConsent = restorable && !sameContent;
   const restore = async () => {
-    if (!accepted || !preview?.version.id || !preview.currentVersion?.id) return;
+    if ((needsConsent && !accepted) || !preview?.version.id || !preview.currentVersion?.id) return;
     setBusy(true); setError(null);
     try {
       await api.restoreSkillVersion(skillId, preview.version.id, preview.currentVersion.id);
@@ -54,8 +57,9 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
     finally { setBusy(false); }
   };
   return <Modal title="Version History" size="lg" onClose={() => { if (!busy) onClose(); }} footer={<>
+    {needsConsent && <ReviewConsent label={DEPLOY_TO_TRACKING_MACHINES_CONSENT} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>Close</button>
-    <button type="button" className="btn primary" disabled={busy || !accepted || !preview?.currentVersion?.id || preview.version.id === preview.currentVersion.id} onClick={() => void restore()}>Restore Version</button>
+    <button type="button" className="btn primary" disabled={busy || !restorable || (needsConsent && !accepted)} onClick={() => void restore()}>Restore Version</button>
   </>}>
     <div className="form skills-machine-import">
       <p>Restore historical content as a new library revision. Unpinned machines track the restored content; pinned machines keep their selected revision. Newer history is kept.</p>
@@ -78,16 +82,7 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
         {preview.version.gitSource && <p className="skills-hint">Git source: {preview.version.gitSource.url} · {preview.version.gitSource.commit}</p>}
         {preview.version.machineSource && <p className="skills-hint">Machine snapshot: {preview.version.machineSource.context?.kind === "wsl" ? `WSL: ${preview.version.machineSource.context.distro} · ` : ""}{preview.version.machineSource.sourceDirectory}/{preview.version.machineSource.name} · {preview.version.machineSource.digest}</p>}
         <p>Review every file, including scripts. Preview and restore never execute skill contents. Restoring updates assignments on unpinned machines.</p>
-        {[...new Set([...(preview.currentVersion?.files ?? []), ...(preview.version.files ?? [])].map((file) => file.path))].sort().map((path) => {
-          const before = preview.currentVersion?.files?.find((file) => file.path === path);
-          const after = preview.version.files?.find((file) => file.path === path);
-          const change = !before ? "Added" : !after ? "Removed" : contents(before) === contents(after) ? "Unchanged" : "Changed";
-          return <details key={path}><summary>{path} · {change}</summary>
-            <h4>Current</h4><pre className="skill-import-content">{contents(before)}</pre>
-            <h4>Proposed</h4><pre className="skill-import-content">{contents(after)}</pre>
-          </details>;
-        })}
-        {preview.version.id !== preview.currentVersion?.id && <Checkbox consent label="Accept version diff and update existing assignments" checked={accepted} disabled={busy} onChange={setAccepted} />}
+        <SkillFileDiff previousFiles={preview.currentVersion?.files ?? []} files={preview.version.files ?? []} />
       </section>}
     </div>
   </Modal>;

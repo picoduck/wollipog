@@ -28,8 +28,14 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
       await route.fulfill({ json: { previewId: "preview-1", candidates: [{
         name: "code-review", path: "skills/code-review", commit: "a".repeat(40), digest: "d2",
         source: { url: "https://github.com/example/skills.git", ref: "main", subdirectory: "skills" },
-        files: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: code-review\n---\nReview the diff and verify affected callers." }],
-        previousFiles: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: code-review\n---\nReview the diff." }],
+        files: [
+          { path: "SKILL.md", encoding: "utf8", content: "---\nname: code-review\n---\nReview the diff and verify affected callers." },
+          { path: "scripts/check.sh", encoding: "utf8", content: "#!/bin/sh\nset -eu\nnpm test\nnpm run lint\n" },
+        ],
+        previousFiles: [
+          { path: "SKILL.md", encoding: "utf8", content: "---\nname: code-review\n---\nReview the diff." },
+          { path: "scripts/check.sh", encoding: "utf8", content: "#!/bin/sh\nnpm test\n" },
+        ],
         disposition: "update", assignmentCount: 2, executablePaths: [],
       }] } });
     });
@@ -45,17 +51,28 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await page.getByLabel("Git Repository", { exact: true }).fill("example/skills");
     await page.getByRole("button", { name: "Preview Skills" }).click();
     await expect(page.getByText("New version · 2 existing assignments")).toBeVisible();
-    await page.getByText("SKILL.md · Changed", { exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Current", exact: true })).toBeVisible();
-    await expect(page.getByText("Review the diff and verify affected callers.", { exact: false })).toBeVisible();
+    // One highlighted diff per file (#1948): the changed line is one − and one + line, and the
+    // changed script is flagged with its counts.
+    const skill = page.locator(".skill-diff-file", { hasText: "SKILL.md" });
+    await expect(skill.locator(".skill-diff-file-head")).toContainText("Changed");
+    await expect(skill.locator(".diff-line-del")).toHaveText(["Removed line 4−Review the diff. No newline at end of file"]);
+    await expect(skill.locator(".diff-line-add")).toHaveText(["Added line 4+Review the diff and verify affected callers. No newline at end of file"]);
+    await expect(page.getByRole("heading", { name: "Current", exact: true })).toHaveCount(0);
+    const script = page.locator(".skill-diff-file", { hasText: "scripts/check.sh" });
+    await expect(script.locator(".skill-diff-file-head .status")).toHaveText(["Script", "Changed"]);
+    await expect(script.locator(".skill-diff-counts")).toContainText("+2 −0");
+    // No consent until an update that deploys somewhere is selected.
+    await expect(page.locator(".modal-foot").getByRole("checkbox")).toHaveCount(0);
     await page.getByRole("checkbox", { name: "code-review", exact: true }).check();
     const submit = page.getByRole("button", { name: "Import Selected" });
     await expect(submit).toBeDisabled();
+    const consent = page.locator(".modal-foot").getByRole("checkbox", { name: "Deploy to 2 existing assignments", exact: true });
+    await expect(consent).toBeVisible();
     expect(imports).toBe(0);
     await page.screenshot({ path: info.outputPath(`git-preview-${width}-${theme}.png`), fullPage: true });
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
     expect(overflow).toBe(false);
-    await page.getByRole("checkbox", { name: "Accept Version Diffs and Update Existing Assignments" }).check();
+    await consent.check();
     await submit.click();
     await expect(page.getByRole("status")).toHaveText("Imported: code-review");
     expect(imports).toBe(1);
