@@ -79,7 +79,11 @@ interface SearchCall { query: string; resolve: (results: { sessionId: string; sn
 
 let sequence = 0;
 
-async function mount(options: { view?: View; appBarSearchOnPhoneOnly?: boolean } = {}) {
+async function mount(options: {
+  view?: View;
+  appBarSearchOnPhoneOnly?: boolean;
+  catalog?: () => Promise<{ sessions: SessionView[] }>;
+} = {}) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -94,7 +98,7 @@ async function mount(options: { view?: View; appBarSearchOnPhoneOnly?: boolean }
   const navigation: ViewNavigation = { current: () => options.view ?? { name: "inbox" }, push() {}, listen: () => () => {} };
   const searches: SearchCall[] = [];
   const client = {
-    listAllSessions: async () => ({ sessions: SESSIONS }),
+    listAllSessions: options.catalog ?? (async () => ({ sessions: SESSIONS })),
     search: (query: string) => new Promise((resolve) => {
       searches.push({ query, resolve: (results) => resolve({ results }) });
     }),
@@ -344,4 +348,20 @@ test("crossing 760px with Cancel focused keeps focus in the palette, so Escape s
   } finally {
     await act(async () => { domWindow.happyDOM.setViewport({ width: 1440, height: 900 }); });
   }
+});
+
+test("a late catalog that replaces the no-results actions keeps focus in the palette", async () => {
+  let deliver!: (value: { sessions: SessionView[] }) => void;
+  const ui = await mount({ catalog: () => new Promise((resolve) => { deliver = resolve; }) });
+  await ui.key(ui.doc.body, "k", { ctrlKey: true });
+  await ui.type("zq");
+  const archive = ui.doc.querySelectorAll<HTMLButtonElement>(".palette-empty button")[1]!;
+  assert.equal(archive.textContent, "Search Archived Sessions");
+  await act(async () => { archive.focus(); });
+  // The archive holds a session the live list did not, so the no-results block goes away.
+  await act(async () => { deliver({ sessions: [...SESSIONS, session("s-zq", "Zq notes", { archived: true })] }); });
+  assertNoDomNode(ui.doc.querySelector(".palette-empty"), "the match replaced the no-results actions");
+  assert.ok(ui.doc.activeElement === ui.input(), `focus is back on the field (found ${ui.doc.activeElement?.tagName})`);
+  await ui.key(ui.input(), "Escape");
+  assertNoDomNode(ui.palette(), "Escape still reaches the palette");
 });

@@ -133,13 +133,14 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   );
   const listboxId = `command-palette-${useId().replace(/:/g, "")}`;
   useCommandPaletteFocus(inputRef, returnFocusRef);
-  // Crossing 760px removes Cancel. If it held focus, focus stays in the dialog, on the field, so Tab
-  // and Escape still reach the palette.
-  const dialogRef = useRef<HTMLDivElement>(null);
+  // A control that held focus can leave the palette: crossing 760px removes Cancel, and a late
+  // session catalog can replace the no-results actions with rows. Focus then falls to <body>, outside
+  // the dialog, where Tab and Escape no longer reach it, so every commit hands it back to the field.
+  // Before the shell's own breakpoint rescue runs, which leaves focus alone once it has a home.
   useLayoutEffect(() => {
-    const dialog = dialogRef.current;
-    if (dialog && !dialog.contains(document.activeElement)) inputRef.current?.focus();
-  }, [isMobile]);
+    const active = document.activeElement;
+    if (!active || active === document.body || !active.isConnected) inputRef.current?.focus();
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -275,7 +276,6 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   return (
     <div className="palette-backdrop" onClick={onClose}>
       <div
-        ref={dialogRef}
         className="palette"
         role="dialog"
         aria-modal="true"
