@@ -13,7 +13,15 @@ Enumerate the candidate surfaces:
   against readers with `git grep`;
 - protocol compatibility shims — `git grep -n "runnerSupportsProtocol\|protocolVersion"` and compare
   each version floor against the current protocol version in `packages/protocol`;
-- environment variables — `git grep -n "process\.env\." | sort -u` against what is documented and set.
+- environment variables — compare every name that is documented or set (docs, workflows, scripts,
+  example configs) against name tokens read anywhere in `apps packages scripts`, including
+  `apps/desktop/src-tauri/src`. `git grep "process\.env\."` alone is not enough: many reads pass
+  the name as a string (`readCompatibleEnv(env, "WOLLIPOG_…", "MAM_…")`, name arrays in
+  `spawn.ts` and `agent-tui.ts`) or through Rust `std::env::var(CONST)`. The legacy `MAM_*`
+  aliases and the `__MAM_SAME_ORIGIN__` marker sit inside the open-ended compatibility window
+  recorded in `docs/release-notes-v0.16.0.md` ("Compatibility Windows That Remain Active"); they
+  are out of scope until a later release note closes that window, the same way the protocol
+  floor rule below treats an unstated support window.
 
 For each candidate, determine whether both sides of the condition are still reachable.
 

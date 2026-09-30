@@ -30,7 +30,11 @@ would actually require.
   signal.
 
 Cross-check against Dependabot: `gh pr list --label dependencies --state open`. A dependency with an
-open Dependabot PR is already tracked and must not be reported again. The converse does not hold:
+open Dependabot PR is already tracked and must not be reported again, but only when the PR's
+target version is at or above the advisory's patched version. A PR that bumps to a version still
+inside the vulnerable range tracks the update, not the fix: report the advisory and recommend
+replacing the PR (on 2026-09-30, #1538 proposed shell-quote 1.10.0 against an advisory patched in
+1.11.0). The converse does not hold:
 an absent Dependabot PR is not evidence that a dependency is current. Compare the open PR count per
 ecosystem against `open-pull-requests-limit` in `.github/dependabot.yml`; a queue sitting at its
 limit is indistinguishable from a broken updater, and the run that found the `fastify` gap found
