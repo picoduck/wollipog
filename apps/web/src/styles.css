@@ -880,10 +880,12 @@ kbd {
 }
 .rail-item:focus-visible > .rail-item-keys { display: inline-flex; }
 .rail-foot { display: flex; justify-content: center; width: 100%; }
-/* The instance switcher and the foot button stay centred in a 64px rail's column (its width less
-   the right hairline), as the items do. */
-.app-rail.labelled .rail-instance,
+/* The foot button stays centred in a 64px rail's column (its width less the right hairline), as the
+   items' icons do. */
 .app-rail.labelled .rail-foot { width: calc(var(--rail-w) - 1px); }
+/* The instance tile's row spans the labelled rail with the items' inset, so its monogram stays
+   centred where the 64px rail centres it and the name and status follow it (#1970). */
+.app-rail.labelled .rail-instance { padding: 0 var(--rail-inset); }
 /* --- Phone "More" sheet (see phoneBarViews) --- */
 .rail-more { position: relative; display: none; }
 .rail-spacer { flex: 1; }
@@ -1057,10 +1059,16 @@ kbd {
   background: var(--bg-elev);
   box-shadow: inset 0 0 0 2px var(--tone);
 }
-/* A navigation wide enough for the name shows it and the status beside the tile. */
+/* A navigation wide enough for the name shows it and the status beside the tile: the recovery
+   shell's, and the labelled rail (#1968). */
+.instance-selector.labelled {
+  flex: 1;
+  min-width: 0;
+}
 .instance-selector.labelled .instance-tile-trigger {
   justify-content: flex-start;
   width: 100%;
+  min-width: 0;
   height: auto;
   min-height: var(--control-h-lg);
   padding: var(--space-1);

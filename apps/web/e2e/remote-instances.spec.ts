@@ -330,3 +330,59 @@ test("with the active instance offline, the banner shows and the tile's dot is h
   await tile(page, "Studio").hover();
   await expect(page.locator(".rail-tooltip-detail")).toHaveText("Reconnecting…");
 });
+
+test("in the labelled rail the tile's row shows the name and status, and the rail fits a 940×600 window", async ({ page }) => {
+  await page.setViewportSize({ width: 940, height: 600 });
+  await addInstance(page, "Build Farm in the Northern Datacenter Rack Seven", `https://build-farm-north-rack-7.internal.example/#pair=${TOKEN_B}`);
+
+  const fits = async () => page.evaluate(() => {
+    const rail = document.querySelector<HTMLElement>(".app-rail")!;
+    const controls = [...rail.querySelectorAll<HTMLElement>(".instance-tile-trigger, .rail-item, .rail-foot button")];
+    return {
+      count: controls.length,
+      bottom: Math.max(...controls.map((control) => control.getBoundingClientRect().bottom)),
+      railScroll: rail.scrollHeight - rail.clientHeight,
+      viewportHeight: window.innerHeight,
+    };
+  });
+  // The tile takes the brand's square and the old foot trigger is gone, so the 64px rail keeps
+  // every control, #1968's foot button included, inside the desktop app's minimum window.
+  const narrow = await fits();
+  expect(narrow.bottom).toBeLessThanOrEqual(narrow.viewportHeight);
+  expect(narrow.railScroll).toBeLessThanOrEqual(0);
+
+  await page.getByRole("button", { name: "Expand Navigation" }).click();
+  await expect(page.locator(".app-rail.labelled")).toBeVisible();
+  const trigger = tile(page, "Build Farm in the Northern Datacenter Rack Seven");
+  await expect(trigger.locator(".instance-tile-name")).toHaveText("Build Farm in the Northern Datacenter Rack Seven");
+  await expect(trigger.locator(".instance-tile-status")).toHaveText("Online");
+  await expect(trigger).not.toHaveAttribute("data-rail-tip");
+  const row = await page.evaluate(() => {
+    const monogram = document.querySelector<HTMLElement>(".rail-instance .instance-monogram.tile")!.getBoundingClientRect();
+    const icon = document.querySelector<HTMLElement>(".rail-destinations .rail-item svg")!.getBoundingClientRect();
+    const name = document.querySelector<HTMLElement>(".rail-instance .instance-tile-name")!;
+    const rail = document.querySelector<HTMLElement>(".app-rail")!.getBoundingClientRect();
+    return {
+      monogramCenter: monogram.left + monogram.width / 2,
+      iconCenter: icon.left + icon.width / 2,
+      nameClipped: name.scrollWidth > name.clientWidth && getComputedStyle(name).textOverflow === "ellipsis",
+      nameRight: name.getBoundingClientRect().right,
+      railRight: rail.right,
+    };
+  });
+  expect(Math.abs(row.monogramCenter - row.iconCenter)).toBeLessThanOrEqual(1);
+  expect(row.nameClipped).toBe(true);
+  expect(row.nameRight).toBeLessThanOrEqual(row.railRight);
+  const labelled = await fits();
+  expect(labelled.count).toBe(narrow.count);
+  expect(labelled.bottom).toBeLessThanOrEqual(labelled.viewportHeight);
+
+  // The flyout opens beside the wider rail.
+  await trigger.click();
+  await dialogMotionSettled(page);
+  const geometry = await flyoutGeometry(page);
+  expect(geometry.railRight).toBeGreaterThan(200);
+  expect(geometry.menuLeft - geometry.railRight).toBeGreaterThanOrEqual(3);
+  expect(geometry.menuLeft - geometry.railRight).toBeLessThanOrEqual(5);
+  expect(Math.abs(geometry.menuTop - geometry.tileTop)).toBeLessThanOrEqual(1);
+});

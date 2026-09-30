@@ -441,3 +441,25 @@ test("changing an instance address requires a matching fresh pairing link", asyn
     mounted.mountPoint.remove();
   }
 });
+
+test("a labelled tile shows the name and status beside the monogram and leaves the tooltip to the rail", async () => {
+  const mounted = mount(
+    <InstancesContextProvider value={manager({ activeProfile: remote })}>
+      <InstanceSelector labelled />
+    </InstancesContextProvider>,
+  );
+  await mounted.render();
+  try {
+    const trigger = mounted.mountPoint.querySelector<HTMLButtonElement>(".instance-tile-trigger")!;
+    assert.equal(trigger.getAttribute("aria-label"), "Switch Instance: Home Workstation");
+    assert.equal(trigger.querySelector(".instance-tile-name")?.textContent, "Home Workstation");
+    const status = trigger.querySelector(".instance-tile-status")!;
+    assert.equal(status.textContent, "Sign-In Required");
+    assert.equal(trigger.getAttribute("aria-describedby"), status.id, "the visible status is the description");
+    assert.equal(trigger.getAttribute("data-rail-tip"), null, "the labelled rail shows no tooltip");
+    assert.equal(trigger.getAttribute("data-rail-detail"), null);
+  } finally {
+    await act(async () => { mounted.root.unmount(); });
+    mounted.mountPoint.remove();
+  }
+});

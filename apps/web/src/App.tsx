@@ -723,7 +723,9 @@ export function Shell() {
         onNavigate={navigate}
         {...(isMobile ? {} : {
           // The desktop app's tile; the browser build keeps the brand (§4.1).
-          instanceControl: desktopMultiInstance ? <InstanceSelector connection={instanceConnection} /> : undefined,
+          instanceControl: desktopMultiInstance
+            ? <InstanceSelector connection={instanceConnection} labelled={railPreferences.labels} />
+            : undefined,
           settingsControl: <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />,
           onSearch: () => setPaletteOpen(true),
         })}

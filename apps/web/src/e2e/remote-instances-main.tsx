@@ -12,6 +12,7 @@ import { InstancesPanel } from "../components/InstancesPanel.js";
 import { OfflineBanner } from "../components/OfflineBanner.js";
 import { Rail } from "../components/Rail.js";
 import { RemoteInstanceBanner } from "../components/RemoteInstanceBanner.js";
+import { useRailPreferences } from "../use-rail-preferences.js";
 import "../styles.css";
 
 const STORAGE_KEY = "wollipog.e2e.instance-registry";
@@ -130,6 +131,7 @@ function Shell() {
   const instances = useInstances();
   const [connection, setConnection] = useState<ActiveInstanceConnection | null>(null);
   setHarnessConnection = setConnection;
+  const { labels } = useRailPreferences();
   return (
     <div className="app">
       <Rail
@@ -138,7 +140,7 @@ function Shell() {
         stalledCount={0}
         onlineConnections={1}
         onNavigate={() => undefined}
-        instanceControl={<InstanceSelector connection={connection} />}
+        instanceControl={<InstanceSelector connection={connection} labelled={labels} />}
         settingsControl={<button type="button" className="rail-item">Settings</button>}
         onSearch={() => undefined}
       />

@@ -69,7 +69,8 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/);
   // The instance tile is desktop-app only and lives at the top of the rail (#1970). The desktop
   // app's 940px minimum width never reaches the phone layout, so no phone bar carries a switcher.
-  assert.match(app, /instanceControl: desktopMultiInstance \? <InstanceSelector connection=\{instanceConnection\} \/> : undefined/);
+  // In the labelled rail (#1968) its row also shows the name and status (§4.1).
+  assert.match(app, /instanceControl: desktopMultiInstance\s*\?\s*<InstanceSelector connection=\{instanceConnection\} labelled=\{railPreferences\.labels\} \/>\s*:\s*undefined/);
   assert.doesNotMatch(app, /appBarControl|PageChromeProvider|mobileInstanceControl/);
   assert.doesNotMatch(pageHeader, /appBarControl|PageChrome/);
   assert.doesNotMatch(app, /mobileSettingsControl/,

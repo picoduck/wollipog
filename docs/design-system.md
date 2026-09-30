@@ -587,7 +587,9 @@ Rules
   (§9.1): `menuitemradio` rows with a 24px monogram, the name, and the origin ("On this machine"
   for the local profile) as a second line; a check on the current instance; a known status other
   than Online as text in its tone; a "Remote" label before remote profiles; then "Add Remote
-  Instance…" and "Manage Instances". The browser build keeps the decorative brand. No phone bar
+  Instance…" and "Manage Instances". In the labelled rail the tile's row also shows the full name
+  (ellipsized) and the status text, the monogram stays centred at x = 32px, and there is no
+  tooltip. The browser build keeps the decorative brand. No phone bar
   carries a switcher: the desktop app's 940px minimum width never reaches the phone layout (#1970).
 - **One name per destination**, used for the rail tooltip, `aria-label`, page title, phone app bar,
   More sheet, palette, shortcut reference and Settings › Appearance › Navigation: Sessions,
