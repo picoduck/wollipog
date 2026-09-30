@@ -50,7 +50,8 @@ function ShortcutGroupSection({ group }: { group: ShortcutReferenceGroup }) {
     >
       <h3 id={id}>
         {group.group}
-        {group.current && <span className="shortcut-current">Current Page</span>}
+        {/* The space keeps the heading's accessible name two words apart; the flex gap draws it. */}
+        {group.current && <>{" "}<span className="shortcut-current">Current Page</span></>}
       </h3>
       {group.note && <p id={`${id}-note`} className="shortcut-group-note">{group.note}</p>}
       <dl className="shortcut-list">

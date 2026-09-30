@@ -29,7 +29,7 @@ function render({
 
 /** The group headings in document order, and whether each is marked Current Page. */
 function headings(html: string): string[] {
-  return [...html.matchAll(/<h3 id="shortcut-[^"]+">([^<]+)(<span class="shortcut-current">Current Page<\/span>)?<\/h3>/g)]
+  return [...html.matchAll(/<h3 id="shortcut-[^"]+">([^<]+?)( <span class="shortcut-current">Current Page<\/span>)?<\/h3>/g)]
     .map((match) => `${match[1]}${match[2] ? " (Current Page)" : ""}`);
 }
 

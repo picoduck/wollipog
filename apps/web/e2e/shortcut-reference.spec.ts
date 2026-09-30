@@ -77,7 +77,8 @@ test.describe("at 1440×900", () => {
 
   test("with a session open its group comes first, marked Current Page", async ({ page }) => {
     const reference = await openWithKey(page, SESSION);
-    await expect(headings(reference).first()).toHaveText("Session ReadingCurrent Page");
+    await expect(headings(reference).first()).toHaveText("Session Reading Current Page");
+    await expect(reference.getByRole("heading", { name: "Session Reading Current Page" })).toBeVisible();
     await expect(reference.locator(".shortcut-current")).toHaveCount(1);
     await expect(reference.getByText("Open a session to use these.")).toHaveCount(0);
     const current = (await headings(reference).first().boundingBox())!;
