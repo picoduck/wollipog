@@ -448,6 +448,8 @@
      between its edge and an item, at the item size in force. */
   --rail-w-labelled: 208px;
   --rail-inset: calc((var(--rail-w) - 1px - var(--control-h-lg)) / 2);
+  /* The rail's instance tile (#1970, §4.1), which also sets the labelled row's inset. */
+  --instance-tile: 32px;
 
   /* The two mobile Session-header rows share these trailing-column metrics. The inset includes the
      physical right safe area because the interface currently has a left-to-right layout. */
@@ -1037,8 +1039,8 @@ kbd {
   font-weight: var(--weight-semibold);
 }
 .instance-monogram.tile {
-  width: 32px;
-  height: 32px;
+  width: var(--instance-tile);
+  height: var(--instance-tile);
   border-radius: var(--radius-sm);
   font: var(--type-label);
   font-weight: var(--weight-semibold);
@@ -1070,8 +1072,9 @@ kbd {
   width: 100%;
   min-width: 0;
   /* One rail item's height, as in the 64px rail: the name (20px) and status (16px) lines fit, and
-     the labelled rail spends no more of a 600px window than the narrow one. */
-  padding: 0 var(--space-1);
+     the labelled rail spends no more of a 600px window than the narrow one. The inline padding
+     centres the 32px monogram in a rail item's square, 40px or 48px on touch, as the icons are. */
+  padding: 0 calc((var(--control-h-lg) - var(--instance-tile)) / 2);
 }
 .instance-tile-text {
   display: flex;

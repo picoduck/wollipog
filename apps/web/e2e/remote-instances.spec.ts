@@ -389,3 +389,21 @@ test("in the labelled rail the tile's row shows the name and status, and the rai
   expect(geometry.menuLeft - geometry.railRight).toBeLessThanOrEqual(5);
   expect(Math.abs(geometry.menuTop - geometry.tileTop)).toBeLessThanOrEqual(1);
 });
+
+test.describe("on a coarse pointer", () => {
+  test.use({ hasTouch: true, viewport: { width: 940, height: 900 } });
+
+  test("the labelled tile's monogram stays centred where the rail's icons are", async ({ page }) => {
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    await page.getByRole("button", { name: "Expand Navigation" }).click();
+    await expect(page.locator(".app-rail.labelled")).toBeVisible();
+    const centres = await page.evaluate(() => {
+      const monogram = document.querySelector<HTMLElement>(".rail-instance .instance-monogram.tile")!.getBoundingClientRect();
+      const icon = document.querySelector<HTMLElement>(".rail-destinations .rail-item svg")!.getBoundingClientRect();
+      const item = document.querySelector<HTMLElement>(".rail-destinations .rail-item")!.getBoundingClientRect();
+      return { monogram: monogram.left + monogram.width / 2, icon: icon.left + icon.width / 2, itemHeight: item.height };
+    });
+    expect(centres.itemHeight).toBe(48);
+    expect(Math.abs(centres.monogram - centres.icon)).toBeLessThanOrEqual(1);
+  });
+});
