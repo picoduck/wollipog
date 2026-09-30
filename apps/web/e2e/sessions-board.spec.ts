@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * The Sessions list/board merge (#499), pinned in a real browser (#527).
@@ -462,6 +463,8 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   let menu = page.getByRole("menu", { name: "Session Actions for Queued Session" });
   const pinRow = menu.getByRole("menuitem", { name: "Pin Session" });
   await expect(pinRow).toBeVisible();
+  // At 390px the menu is a bottom sheet that slides up; measure its resting position, not a frame.
+  await dialogMotionSettled(page);
   const menuBox = (await menu.boundingBox())!;
   expect(menuBox.y).toBeGreaterThanOrEqual(0);
   expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(640);
