@@ -73,6 +73,9 @@ function samePlacement(a: Placement | undefined, b: Placement): boolean {
  *
  * `boundary` names an ancestor of the trigger whose width the menu stays inside, for a menu that
  * belongs to a narrow pane (the composer in a side panel) rather than to the whole viewport.
+ *
+ * A flyout (`beside`) opens to the right of that ancestor instead, top-aligned with the trigger and
+ * moved up only as far as the viewport needs: the instance menu beside the rail (#1970).
  */
 function useMenuPlacement(
   surfaceRef: RefObject<HTMLDivElement | null>,
@@ -82,6 +85,7 @@ function useMenuPlacement(
   maxWidth: number,
   sheet: boolean,
   boundary: string | undefined,
+  beside: string | undefined,
 ): Placement | undefined {
   const [placement, setPlacement] = useState<Placement>();
   const trigger = anchor.trigger ?? null;
@@ -102,6 +106,18 @@ function useMenuPlacement(
       const wantedHeight = Math.min(surface.scrollHeight + edges, MENU_MAX_HEIGHT);
       // Fractional, not offsetWidth: a rounded width let the menu overhang its pane by a pixel.
       const surfaceWidth = surface.getBoundingClientRect().width;
+      if (beside) {
+        const edge = trigger?.current?.closest(beside)?.getBoundingClientRect().right ?? rect.right;
+        const maxHeight = Math.min(wantedHeight, window.innerHeight - VIEWPORT_MARGIN * 2);
+        const flyout: Placement = {
+          top: Math.max(VIEWPORT_MARGIN, Math.min(rect.top, window.innerHeight - VIEWPORT_MARGIN - maxHeight)),
+          bottom: "auto",
+          left: Math.max(VIEWPORT_MARGIN, Math.min(edge + gap, window.innerWidth - VIEWPORT_MARGIN - surfaceWidth)),
+          maxHeight,
+        };
+        setPlacement((current) => samePlacement(current, flyout) ? current : flyout);
+        return;
+      }
       const next = anchoredMenuPlacement({
         trigger: rect,
         viewportWidth: window.innerWidth,
@@ -157,7 +173,7 @@ function useMenuPlacement(
       window.cancelAnimationFrame(frame);
       observer?.disconnect();
     };
-  }, [sheet, surfaceRef, trigger, pointX, pointY, align, gap, maxWidth, boundary]);
+  }, [sheet, surfaceRef, trigger, pointX, pointY, align, gap, maxWidth, boundary, beside]);
   return placement;
 }
 
@@ -177,6 +193,8 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
   width?: number | "trigger";
   /** A selector for the trigger's ancestor whose width the menu stays inside on desktop. */
   boundary?: string;
+  /** A selector for the trigger's ancestor the menu opens beside as a flyout on desktop (the rail). */
+  beside?: string;
   /** A backdrop click. The shell's Escape ladder clicks the same backdrop. */
   onDismiss: () => void;
   children: ReactNode;
@@ -198,6 +216,7 @@ export function MenuSurface({
   align = "start",
   width,
   boundary,
+  beside,
   onDismiss,
   className,
   style,
@@ -213,6 +232,7 @@ export function MenuSurface({
     kind === "popover" ? POPOVER_MAX_WIDTH : MENU_MAX_WIDTH,
     sheet,
     boundary,
+    beside,
   );
   const fixedWidth = sheet || width === undefined
     ? undefined
@@ -250,7 +270,7 @@ export interface MenuItemProps extends Omit<ButtonHTMLAttributes<HTMLButtonEleme
   description?: ReactNode;
   /** A stable id for the second line, when something else refers to it. */
   descriptionId?: string;
-  /** The trailing slot: a keycap or a submenu chevron. A checked item shows its check here. */
+  /** The trailing slot: a keycap, a submenu chevron or a status. A checked item's check follows it. */
   trail?: ReactNode;
   /** A radio-like or checkbox item's state, marked by a trailing check, never by color alone. */
   checked?: boolean;
@@ -296,7 +316,7 @@ export function MenuItem({
         {description && <span className="menu-desc" id={descriptionId}>{description}</span>}
       </span>
       {(checked || trail) && (
-        <span className="menu-trail" aria-hidden="true">{checked ? <CheckIcon className="menu-check" /> : trail}</span>
+        <span className="menu-trail" aria-hidden="true">{trail}{checked && <CheckIcon className="menu-check" />}</span>
       )}
     </button>
   );

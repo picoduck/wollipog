@@ -121,6 +121,7 @@ export function Rail({
   stalledCount: number;
   onlineConnections: number;
   onNavigate: (view: View) => void;
+  /** Desktop app only: the current instance's tile, drawn in the brand's place at the top. */
   instanceControl?: ReactNode;
   /** Desktop only. On a phone Settings is a row in the More sheet (see the note by .rail-spacer). */
   settingsControl?: ReactNode;
@@ -345,10 +346,15 @@ export function Rail({
 
   return (
     <nav className={`app-rail${labelled ? " labelled" : ""}`} aria-label="Primary Navigation" data-focus-zone="rail" tabIndex={-1} {...tooltip.handlers}>
-      {/* Decoration, not a second link to Sessions directly above the Sessions item (#1958). */}
-      <div className="rail-brand" aria-hidden="true">
-        <img src="/icons/icon-192.png" alt="" />
-      </div>
+      {/* In the desktop app the current instance's tile takes the brand's place (§4.1, #1970).
+          Elsewhere the brand is decoration, not a second link to Sessions directly below it (#1958). */}
+      {!isMobile && instanceControl ? (
+        <div className="rail-instance">{instanceControl}</div>
+      ) : (
+        <div className="rail-brand" aria-hidden="true">
+          <img src="/icons/icon-192.png" alt="" />
+        </div>
+      )}
       <div className="rail-destinations">
         {entries.map((entry, index) => (
           <React.Fragment key={entry === "search" ? "search" : entry.id}>
@@ -466,21 +472,17 @@ export function Rail({
         </span>
       </div>
       <div className="rail-spacer" />
-      {/* On a phone the instance switcher moves to the TOPBAR (see App.tsx), and Settings is the
-          trailing item of the More sheet above.
+      {/* On a phone Settings is the trailing item of the More sheet above, and there is no instance
+          switcher: the desktop app's 940px minimum width never reaches the phone layout (#1970).
 
-          Both once lived in the sheet and were evicted together: nested inside a role="menu",
-          InstanceSelector and the then-SettingsDialog bubbled their own Tab/Escape into the outer
-          roving controller, so one Tab tore down both layers and one Escape peeled two — and
-          neither was reachable by keyboard at all, since only the destination links carried a
-          menuitem role. That reasoning is about owning a nested layer, and only the instance
-          switcher still does. Settings is a plain route now, so it carries menuitem like any other
-          sheet row and opens no layer to nest. The topbar keeps the switcher because it is a
-          fixed, uncontested strip that no overlay occupies.
+          Settings once lived in the sheet with the switcher and was evicted with it: nested inside
+          a role="menu", InstanceSelector and the then-SettingsDialog bubbled their own Tab/Escape
+          into the outer roving controller, so one Tab tore down both layers and one Escape peeled
+          two. Settings is a plain route now, so it carries menuitem like any other sheet row and
+          opens no layer to nest.
 
-          Floating buttons were rejected for both: that band is occupied by the shell dock and the
-          toast stack. */}
-      {!isMobile && instanceControl && <div className="rail-instance">{instanceControl}</div>}
+          Floating buttons were rejected: that band is occupied by the shell dock and the toast
+          stack. */}
       {!isMobile && <div className="rail-settings">{settingsControl}</div>}
       {!isMobile && (
         <div className="rail-foot">

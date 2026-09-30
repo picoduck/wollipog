@@ -1,14 +1,17 @@
 import { browserRandomUUID } from "../browser-crypto.js";
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createApiClient } from "../api.js";
 import type { InstanceProfile, InstanceRegistrySnapshot } from "../desktop-instances.js";
 import { InstanceProvider } from "../InstanceProvider.js";
 import type { InstanceRuntime } from "../instance-runtime.js";
+import { useInstances, type ActiveInstanceConnection } from "../instances-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { InstanceSelector } from "../components/InstanceSelector.js";
 import { InstancesPanel } from "../components/InstancesPanel.js";
+import { OfflineBanner } from "../components/OfflineBanner.js";
 import { Rail } from "../components/Rail.js";
+import { RemoteInstanceBanner } from "../components/RemoteInstanceBanner.js";
 import "../styles.css";
 
 const STORAGE_KEY = "wollipog.e2e.instance-registry";
@@ -105,6 +108,8 @@ declare global {
   interface Window {
     __WOLLIPOG_INSTANCE_E2E__: {
       failNextOpen(profileId: string, code: string, message: string): void;
+      /** What the shell's banner says about the active instance's connection. */
+      setConnection(connection: ActiveInstanceConnection | null): void;
       registry(): InstanceRegistrySnapshot;
       closedRuntimes(): string[];
     };
@@ -113,9 +118,39 @@ declare global {
 
 window.__WOLLIPOG_INSTANCE_E2E__ = {
   failNextOpen(profileId, code, message) { openFailures.set(profileId, { code, message }); },
+  setConnection(connection) { setHarnessConnection(connection); },
   registry: () => structuredClone(registry),
   closedRuntimes: () => [...closedRuntimes],
 };
+
+let setHarnessConnection: (connection: ActiveInstanceConnection | null) => void = () => undefined;
+
+/** The shell's part: the rail with the tile, and the banner the tile must agree with (#1970). */
+function Shell() {
+  const instances = useInstances();
+  const [connection, setConnection] = useState<ActiveInstanceConnection | null>(null);
+  setHarnessConnection = setConnection;
+  return (
+    <div className="app">
+      <Rail
+        view={{ name: "inbox" }}
+        blockedCount={0}
+        stalledCount={0}
+        onlineConnections={1}
+        onNavigate={() => undefined}
+        instanceControl={<InstanceSelector connection={connection} />}
+        settingsControl={<button type="button" className="rail-item">Settings</button>}
+        onSearch={() => undefined}
+      />
+      <main className="main">
+        {connection && (instances.activeProfile.kind === "remote"
+          ? <RemoteInstanceBanner authenticationRequired={connection === "sign-in-required"} />
+          : <OfflineBanner connecting={false} onRetryNow={() => false} developmentBuild={false} />)}
+        <div className="main-body"><InstancesPanel /></div>
+      </main>
+    </div>
+  );
+}
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
@@ -136,20 +171,7 @@ createRoot(root).render(
           return runtime(profileId, profile.origin);
         }}
       >
-        <div className="app">
-          <Rail
-            view={{ name: "inbox" }}
-            blockedCount={0}
-            stalledCount={0}
-            onlineConnections={1}
-            onNavigate={() => undefined}
-            instanceControl={<InstanceSelector compact />}
-            settingsControl={<button type="button" className="rail-item">Settings</button>}
-          />
-          <main className="main">
-            <div className="main-body"><InstancesPanel /></div>
-          </main>
-        </div>
+        <Shell />
       </InstanceProvider>
     </FeedbackProvider>
   </React.StrictMode>,

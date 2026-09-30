@@ -3,7 +3,7 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { DetailBar, PageChromeProvider, PageHeader } from "./PageHeader.js";
+import { DetailBar, PageHeader } from "./PageHeader.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -59,14 +59,12 @@ test("the page header owns the page title and orders its actions for priority+ o
   const calls: string[] = [];
   const action = (label: string) => ({ label, onClick: () => calls.push(label) });
   const view = await mount(
-    <PageChromeProvider appBarControl={<button type="button" className="instance-selector-trigger">I</button>}>
-      <PageHeader
-        title="Agent Skills"
-        description="Write a skill once, then choose which machines and agents get it."
-        secondary={[action("Import from Machine"), action("Manage Groups"), action("Import from Git")]}
-        primary={action("New Skill")}
-      />
-    </PageChromeProvider>,
+    <PageHeader
+      title="Agent Skills"
+      description="Write a skill once, then choose which machines and agents get it."
+      secondary={[action("Import from Machine"), action("Manage Groups"), action("Import from Git")]}
+      primary={action("New Skill")}
+    />,
   );
   try {
     const { container } = view;
@@ -78,11 +76,11 @@ test("the page header owns the page title and orders its actions for priority+ o
     assert.equal(container.querySelector(".page-desc")?.textContent,
       "Write a skill once, then choose which machines and agents get it.");
 
-    // §3.2: [switcher] [secondaries] [⋯] [primary]. Only the two nearest the primary are buttons;
-    // the third lives in ⋯ at every width, which marks ⋯ as always present.
+    // §3.2: [secondaries] [⋯] [primary]. Only the two nearest the primary are buttons; the third
+    // lives in ⋯ at every width, which marks ⋯ as always present. No instance switcher: the phone
+    // app bar is never reached in the desktop app (#1970).
     const actions = [...container.querySelector(".page-actions")!.children];
     assert.deepEqual(actions.map((element) => element.className), [
-      "instance-selector-trigger",
       "btn page-action",
       "btn page-action",
       "overflow-menu page-more",
@@ -211,21 +209,19 @@ test("the detail bar names Back for its destination and keeps destructive action
   }
 });
 
-test("a detail bar keeps the phone app bar's instance switcher, and Tab leaves ⋯ from its trigger", async () => {
+test("a detail bar renders no instance control, and Tab leaves ⋯ from its trigger", async () => {
   const view = await mount(
-    <PageChromeProvider appBarControl={<button type="button" className="instance-selector-trigger">I</button>}>
-      <DetailBar
-        title="Final QA Run"
-        backLabel="Back to Multi-Agent Runs"
-        onBack={() => undefined}
-        menu={[{ label: "Rename…", onClick: () => undefined }]}
-      />
-    </PageChromeProvider>,
+    <DetailBar
+      title="Final QA Run"
+      backLabel="Back to Multi-Agent Runs"
+      onBack={() => undefined}
+      menu={[{ label: "Rename…", onClick: () => undefined }]}
+    />,
   );
   try {
     const actions = view.container.querySelector(".detail-bar-actions")!;
-    assert.equal(actions.firstElementChild?.className, "instance-selector-trigger",
-      "a detail route on a phone still offers instance switching, as the top bar did");
+    assert.equal(actions.firstElementChild?.className, "overflow-menu",
+      "the instance tile lives only in the desktop rail (#1970)");
 
     const more = view.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!;
     await act(async () => more.click());

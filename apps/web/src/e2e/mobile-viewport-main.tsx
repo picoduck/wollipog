@@ -104,19 +104,10 @@ declare global {
 function Topbar({ view }: { view: View }) {
   return (
     <header className="topbar">
+      {/* No controls: Settings moved into the rail's More sheet (#458), and the phone layout has no
+          instance switcher (#1970). A fixture that renders a control production does not build
+          answers a different selector. */}
       <h1>{viewTitle(view)}</h1>
-      <div className="topbar-actions topbar-mobile-controls">
-        {/* The instance switcher only, because that is what production renders here since Settings
-            moved into the rail's More sheet (#458) — and class-for-class rather than approximately:
-            a fixture that spells a control differently from production is a fixture that answers a
-            different selector. InstanceSelector needs the store and a live control plane; the
-            element shape a selector sees does not. */}
-        <div className="instance-selector compact">
-          <button type="button" className="instance-selector-trigger" aria-label="Instance">
-            <span className="instance-selector-label">Local</span>
-          </button>
-        </div>
-      </div>
     </header>
   );
 }

@@ -12,7 +12,7 @@ import { useStoreActions, useStoreSelector, type View } from "./store.js";
 import { useApi } from "./api-context.js";
 import { notifier } from "./notify.js";
 import { CONTROL_PLANE_HTTP, CONTROL_PLANE_WS } from "./config.js";
-import { useConnectionLostFor } from "./connection-lost.js";
+import { useConnectionLost, useConnectionLostFor } from "./connection-lost.js";
 import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken, parsePairingInput, storeDeviceToken } from "./device-token.js";
 import {
   adoptManagedDesktopPairing,
@@ -21,7 +21,7 @@ import {
 import { createBrowserInstanceRuntime } from "./instance-runtime.js";
 import { InstanceRuntimeHost } from "./InstanceRuntimeHost.js";
 import { InstanceProvider, desktopMultiInstanceAvailable } from "./InstanceProvider.js";
-import { useInstances } from "./instances-context.js";
+import { activeInstanceConnection, useInstances } from "./instances-context.js";
 import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type PushSetting } from "./push.js";
 import { pickTopmost } from "./layers.js";
 import { useIsMobile } from "./components/useIsMobile.js";
@@ -87,7 +87,8 @@ import { useSessionsViewModeMemory } from "./use-sessions-view-mode-memory.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { ProjectsView } from "./components/ProjectsView.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
-import { PageChromeProvider, PageHeader } from "./components/PageHeader.js";
+import { RemoteInstanceBanner } from "./components/RemoteInstanceBanner.js";
+import { PageHeader } from "./components/PageHeader.js";
 import { Rail } from "./components/Rail.js";
 import { InstancesPanel } from "./components/InstancesPanel.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
@@ -228,7 +229,7 @@ function InstanceRecoveryShell() {
           <img className="brand-mark" src="/icons/icon-192.png" alt="" aria-hidden="true" />
           <div className="brand-name">Wollipog</div>
         </div>
-        <InstanceSelector />
+        <InstanceSelector labelled />
       </aside>
       <main className="main">
         <header className="topbar"><h1>Instances</h1></header>
@@ -291,6 +292,9 @@ export function Shell() {
   const conn = useStoreSelector((s) => s.conn);
   const authRequired = useStoreSelector((s) => s.authRequired);
   const offlineHeld = useConnectionLostFor(conn, 2000);
+  // The rail tile agrees with the banners below: it is never Online while one is shown (#1970).
+  const connectionLost = useConnectionLost(conn);
+  const instanceConnection = activeInstanceConnection({ conn, authRequired, connectionLost });
   useEffect(() => {
     if (!desktopMultiInstance || activeInstanceKind !== "remote") return;
     if (authRequired) {
@@ -439,12 +443,7 @@ export function Shell() {
     navigate({ name: "session", id: sessionId });
   }, [navigate]);
   const isMobile = useIsMobile();
-  // The phone rail's bar has room for five destinations and nothing else, and the switcher opens
-  // its own popup so it cannot nest inside the More sheet either. So on phones it sits in the app
-  // bar: the page header on destinations and the top bar on a Session. Settings has no such
-  // constraint: it is a route, and it lives in the More sheet (see Rail.tsx).
-  const appBarControl = isMobile ? <InstanceSelector compact /> : undefined;
-  // The breakpoint-specific controls (the instance selector and gear) are unmounted by a
+  // The breakpoint-specific controls (the instance tile and gear) are unmounted by a
   // crossing, and a keyboard user standing on one is left on <body>. Accessibility zoom crosses
   // 760px too, so this is not only a window-drag case.
   //
@@ -723,7 +722,8 @@ export function Shell() {
         onlineConnections={onlineRunners}
         onNavigate={navigate}
         {...(isMobile ? {} : {
-          instanceControl: <InstanceSelector compact />,
+          // The desktop app's tile; the browser build keeps the brand (§4.1).
+          instanceControl: desktopMultiInstance ? <InstanceSelector connection={instanceConnection} /> : undefined,
           settingsControl: <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />,
           onSearch: () => setPaletteOpen(true),
         })}
@@ -735,7 +735,6 @@ export function Shell() {
         {view.name === "session" && isMobile && (
           <Header
             view={view}
-            mobileInstanceControl={appBarControl}
             sessionActions={sessionPanelControls}
             sessionTitle={sessions.get(view.id)?.title ?? "Session"}
             onSessionBack={() => navigate(sessionsDestination(instanceScope))}
@@ -761,7 +760,6 @@ export function Shell() {
           data-focus-zone="main"
           tabIndex={-1}
         >
-          <PageChromeProvider appBarControl={appBarControl}>
           <ErrorBoundary
             name={viewSubjectName(view)}
             resetKey={viewPath(view)}
@@ -876,7 +874,6 @@ export function Shell() {
             />
           )}
           </ErrorBoundary>
-          </PageChromeProvider>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
             while toggled on; keyed by session so tab selection never bleeds across navigations. */}
@@ -920,38 +917,15 @@ export function Shell() {
   );
 }
 
-function RemoteInstanceBanner({ authenticationRequired = false }: { authenticationRequired?: boolean }) {
-  const instances = useInstances();
-  return (
-    <Notice pageBanner tone="warning" role="status" actions={(
-      <>
-        {!authenticationRequired && (
-          <button type="button" className="btn primary sm" onClick={() => void instances.retryActive()}>Retry</button>
-        )}
-        <button type="button" className="btn sm" onClick={instances.manageInstances}>
-          {authenticationRequired ? "Re-Pair in Instances" : "Manage Instances"}
-        </button>
-      </>
-    )}>
-      {authenticationRequired
-        ? `${instances.activeProfile.label} requires a new pairing credential.`
-        : `Can't reach ${instances.activeProfile.label} at ${instances.activeProfile.origin}.`}
-    </Notice>
-  );
-}
-
 export function Header({
   view,
-  mobileInstanceControl,
   sessionActions,
   sessionTitle,
   onSessionBack,
 }: {
   view: View;
-  /** The instance switcher, moved out of the rail on phone widths. Settings is not here: it is a
-   * row in the rail's More sheet. */
-  mobileInstanceControl?: React.ReactNode;
-  /** Session panel-control cluster rendered here only on phone widths. */
+  /** Session panel-control cluster rendered here only on phone widths. Settings is not here: it is
+   * a row in the rail's More sheet, and the phone layout has no instance switcher (#1970). */
   sessionActions?: React.ReactNode;
   sessionTitle?: string;
   onSessionBack?: () => void;
@@ -977,14 +951,8 @@ export function Header({
       ) : (
         <h1 id="page-title" tabIndex={-1}>{title}</h1>
       )}
-      {mobileInstanceControl && (
-        <div className="topbar-actions topbar-mobile-controls">
-          {mobileInstanceControl}
-          {view.name === "session" && sessionActions}
-        </div>
-      )}
-      {!mobileInstanceControl && view.name === "session" && sessionActions && (
-        <div className="topbar-actions">{sessionActions}</div>
+      {view.name === "session" && sessionActions && (
+        <div className="topbar-actions topbar-mobile-controls">{sessionActions}</div>
       )}
     </header>
   );

@@ -14,13 +14,15 @@ const RAIL_TOOLTIP_OFFSET_PX = 8;
 
 /**
  * Anything in the rail that carries `data-rail-tip` gets a tooltip: its name, and the keycap from
- * `data-rail-keys` when it has one. Settings is rendered by the shell and passed in, so the rail
- * reads these attributes rather than owning a list of what may be tipped.
+ * `data-rail-keys` when it has one, or the dimmer detail from `data-rail-detail` (the instance tile's
+ * status). Settings and the instance tile are rendered by the shell and passed in, so the rail reads
+ * these attributes rather than owning a list of what may be tipped.
  */
 interface RailTip {
   anchor: HTMLElement;
   name: string;
   keys: string | null;
+  detail: string | null;
   /** A focus tip stays while its item has focus, whatever the pointer does. */
   source: "pointer" | "focus";
   top: number;
@@ -83,6 +85,7 @@ export function useRailTooltip(enabled: boolean) {
       anchor,
       name,
       keys: anchor.dataset["railKeys"] || null,
+      detail: anchor.dataset["railDetail"] || null,
       source,
       top: item.top + item.height / 2,
       left: railEdge + RAIL_TOOLTIP_OFFSET_PX,
@@ -131,7 +134,7 @@ export function useRailTooltip(enabled: boolean) {
       commit(settle());
       return;
     }
-    if (next.name !== current.name || next.keys !== current.keys || next.top !== current.top || next.left !== current.left) {
+    if (next.name !== current.name || next.keys !== current.keys || next.detail !== current.detail || next.top !== current.top || next.left !== current.left) {
       commit(next);
     }
   }, [commit, measure, settle]);
@@ -203,6 +206,7 @@ export function useRailTooltip(enabled: boolean) {
       style={{ top: tip.top, left: tip.left }}
     >
       {tip.name}
+      {tip.detail && <span className="rail-tooltip-detail">{tip.detail}</span>}
       {tip.keys && <kbd>{tip.keys}</kbd>}
     </div>
   ) : null;

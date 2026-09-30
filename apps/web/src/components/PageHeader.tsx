@@ -1,4 +1,4 @@
-import React, { createContext, Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import React, { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
@@ -29,20 +29,6 @@ export interface PageMenuAction extends PageAction {
   danger?: boolean;
 }
 
-/**
- * What the shell lends a page header. On phones the page header is the app bar, and the Tauri
- * instance switcher that used to sit in the phone top bar stays in it (§15.1).
- */
-interface PageChrome {
-  appBarControl?: ReactNode;
-}
-
-const PageChromeContext = createContext<PageChrome>({});
-
-export function PageChromeProvider({ appBarControl, children }: { appBarControl?: ReactNode; children: ReactNode }) {
-  return <PageChromeContext.Provider value={{ appBarControl }}>{children}</PageChromeContext.Provider>;
-}
-
 /** The number of secondaries the widest header shows beside its primary (§3.3). */
 export const PAGE_HEADER_VISIBLE_SECONDARIES = 2;
 
@@ -69,7 +55,6 @@ export function PageHeader({
   /** Optional underline tabs, drawn as the header's last row. */
   tabs?: ReactNode;
 }) {
-  const { appBarControl } = useContext(PageChromeContext);
   // Slot 1 is the secondary beside the primary. Visibility by slot lives in the stylesheet, where
   // the width tiers and the header's own @container width both apply (§3.3, §15.2).
   const slots = secondary.map((action, index) => ({ action, slot: secondary.length - index }));
@@ -81,9 +66,8 @@ export function PageHeader({
           <h1 id="page-title" className="page-title" tabIndex={-1}>{title}</h1>
           {description && <p className="page-desc" title={description}>{description}</p>}
         </div>
-        {(appBarControl || primary || secondary.length > 0 || menu.length > 0) && (
+        {(primary || secondary.length > 0 || menu.length > 0) && (
           <div className="page-actions">
-            {appBarControl}
             {slots.filter(({ slot }) => slot <= PAGE_HEADER_VISIBLE_SECONDARIES).map(({ action, slot }) => (
               <button
                 key={action.label}
@@ -148,8 +132,6 @@ export function DetailBar({
   /** ⋯ contents. Destructive actions belong only here (§3.3). */
   menu?: PageMenuAction[];
 }) {
-  // On phones a detail bar is the app bar too, so it keeps the instance switcher (§15.1).
-  const { appBarControl } = useContext(PageChromeContext);
   return (
     <header className="detail-bar">
       <button type="button" className="icon-btn detail-bar-back" onClick={onBack} title={backLabel} aria-label={backLabel}>
@@ -159,9 +141,8 @@ export function DetailBar({
         <h1 id="page-title" className="detail-bar-title" tabIndex={-1} title={title}>{title}</h1>
         {status}
       </div>
-      {(appBarControl || primary || secondary || menu.length > 0) && (
+      {(primary || secondary || menu.length > 0) && (
         <div className="detail-bar-actions">
-          {appBarControl}
           {secondary && (
             <button type="button" className="btn" disabled={secondary.disabled} title={secondary.title} onClick={secondary.onClick}>
               {secondary.label}

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { MOBILE_BREAKPOINT_PX } from "./components/useIsMobile.js";
 
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const offlineBanner = readFileSync(new URL("./components/OfflineBanner.tsx", import.meta.url), "utf8");
+const remoteInstanceBanner = readFileSync(new URL("./components/RemoteInstanceBanner.tsx", import.meta.url), "utf8");
 const feedbackProvider = readFileSync(new URL("./components/FeedbackProvider.tsx", import.meta.url), "utf8");
 const rail = readFileSync(new URL("./components/Rail.tsx", import.meta.url), "utf8");
 const railTooltip = readFileSync(new URL("./components/RailTooltip.tsx", import.meta.url), "utf8");
@@ -32,9 +34,12 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   const combined = [app, rail, inbox, shortcuts, css].join("\n");
   // docs/design-system.md §13.3: the offline and pairing banners are one Notice page banner, whose
   // tone icon is the scalable status icon treatment.
-  // The offline banner lives in its own component, so its Retry Now and build variants are testable.
-  assert.equal(app.match(/<Notice pageBanner /g)?.length, 2,
+  // The offline banner lives in its own component, so its Retry Now and build variants are testable,
+  // and the remote instance banner in its own, so the instance harness can show it (#1970).
+  assert.equal(app.match(/<Notice pageBanner /g)?.length, 1,
     "every pairing banner renders the Notice page banner");
+  assert.equal(remoteInstanceBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
+    "the remote instance banner renders the Notice page banner");
   assert.equal(offlineBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
     "the offline banner renders the Notice page banner");
   // The banner is the live region, so its pairing error is not a second one.
@@ -62,11 +67,11 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.match(rail, /export const RAIL_ICON_SIZE = 20;[\s\S]*const TAB_ICON_SIZE = 24;[\s\S]*<Icon size=\{isMobile \? TAB_ICON_SIZE : RAIL_ICON_SIZE\}/);
   assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/);
   assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/);
-  // On phones the instance switcher lives in the app bar: the page header on destinations (#1801)
-  // and the Session top bar on a Session.
-  assert.match(app, /const appBarControl = isMobile \? <InstanceSelector compact \/> : undefined;/);
-  assert.match(app, /<PageChromeProvider appBarControl=\{appBarControl\}>/);
-  assert.match(app, /mobileInstanceControl=\{appBarControl\}/);
+  // The instance tile is desktop-app only and lives at the top of the rail (#1970). The desktop
+  // app's 940px minimum width never reaches the phone layout, so no phone bar carries a switcher.
+  assert.match(app, /instanceControl: desktopMultiInstance \? <InstanceSelector connection=\{instanceConnection\} \/> : undefined/);
+  assert.doesNotMatch(app, /appBarControl|PageChromeProvider|mobileInstanceControl/);
+  assert.doesNotMatch(pageHeader, /appBarControl|PageChrome/);
   assert.doesNotMatch(app, /mobileSettingsControl/,
     "Settings left the phone topbar for the rail's More sheet");
   assert.match(css, /--rail-w: 64px;/);
@@ -494,12 +499,10 @@ test("Settings survives the breakpoint because it is a route", () => {
 });
 
 test("the phone topbar cannot push its controls off-screen", () => {
-  // The icon-only treatment existed but was scoped to .rail-instance, which this row does not use,
-  // so a long instance name pushed Settings past the right edge with no way to scroll it back.
-  assert.match(css, /\.topbar-mobile-controls \.instance-selector-label,\s*\n\s*\.topbar-mobile-controls \.instance-selector-chevron \{ display: none; \}/,
-    "the instance trigger must be icon-only in the phone topbar");
-  assert.match(css, /\.topbar-mobile-controls \.instance-selector-trigger \{[^}]*flex: none/,
-    "and must not grow with the instance name");
+  // The instance switcher left every phone bar (#1970): the desktop app cannot reach this layout.
+  assert.doesNotMatch(css, /instance-selector-(trigger|label|chevron)/,
+    "no rule for the retired trigger survives, in the rail or in a phone bar");
+  assert.match(css, /\.topbar-mobile-controls > \* \{ flex: none; \}/, "no control grows to push the others off");
   assert.match(css, /\.topbar:has\(\.topbar-mobile-controls\) h1 \{[^}]*text-overflow: ellipsis/,
     "the title must yield before any control does");
   assert.match(css, /\.topbar:has\(\.mobile-session-back\) \{[^}]*height: calc\(40px/,
@@ -527,31 +530,31 @@ test("Session menu triggers clear popovers without rising to the modal backdrop 
     "sibling triggers should clear the menu backdrop but stay below every modal");
 });
 
-test("the phone app bar leads with the instance switcher, with Settings gone", () => {
+test("the phone app bar holds only the Session's own actions", () => {
   // Settings used to be pinned to this cluster's trailing edge (#210, #304). It is a rail
-  // destination now (#458), so the invariant that survives is the ORDER of what remains and the
-  // fact that no Settings control is mounted here at any width. Destination create actions left the
-  // top bar for each page header (#1801), where the switcher still leads the phone app bar.
+  // destination now (#458), destination create actions moved to each page header (#1801), and the
+  // instance switcher left for the desktop rail (#1970). What remains is the Session's actions.
   const start = app.indexOf('<div className="topbar-actions topbar-mobile-controls">');
   const end = app.indexOf("</div>", start);
   assert.ok(start >= 0 && end > start, "the phone controls must share one ordered cluster");
-
   const mobileCluster = app.slice(start, end);
-  const instanceIndex = mobileCluster.indexOf("mobileInstanceControl");
-  const sessionActionsIndex = mobileCluster.indexOf("sessionActions");
-  assert.ok(instanceIndex >= 0 && sessionActionsIndex >= 0,
-    "the phone cluster must include every remaining control category");
-  assert.ok(instanceIndex < sessionActionsIndex,
-    "the instance control must lead the cluster");
-  assert.doesNotMatch(mobileCluster, /SettingsTrigger|mobileSettingsControl|topbar-create/,
-    "the phone topbar mounts no Settings control and no destination action");
+  assert.match(mobileCluster, /\{sessionActions\}/);
+  assert.doesNotMatch(mobileCluster, /Instance|SettingsTrigger|mobileSettingsControl|topbar-create/,
+    "the phone topbar mounts no instance or Settings control and no destination action");
   assert.match(css, /\.topbar-mobile-controls \{[^}]*flex-wrap: nowrap/,
     "the unified control cluster must stay on one line");
+});
 
-  const actions = pageHeader.slice(pageHeader.indexOf('<div className="page-actions">'));
-  assert.ok(actions.indexOf("{appBarControl}") >= 0 &&
-    actions.indexOf("{appBarControl}") < actions.indexOf("page-primary"),
-    "the page header's app bar leads with the switcher and ends with the primary");
+test("the desktop app never reaches the phone layout, which is why no phone bar has a switcher", () => {
+  // If this fails, the instance must become the first row of the More sheet instead (#1970).
+  for (const config of ["tauri.conf.json", "tauri.e2e.conf.json"]) {
+    const parsed = JSON.parse(readFileSync(new URL(`../../desktop/src-tauri/${config}`, import.meta.url), "utf8")) as {
+      app: { windows: Array<{ minWidth?: number }> };
+    };
+    for (const window of parsed.app.windows) {
+      assert.ok((window.minWidth ?? 0) > MOBILE_BREAKPOINT_PX, `${config}: minWidth ${window.minWidth}`);
+    }
+  }
 });
 
 test("the Multi-Agent Run and Pod create actions are page header primaries", () => {

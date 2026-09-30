@@ -107,10 +107,8 @@ test("secondaries overflow into ⋯ by tier and header width, and phones show a 
   assert.equal(phone(".page-actions > .page-primary")["width"], "var(--control-h)");
   assert.equal(phone(".page-primary-label")["clip-path"], "inset(50%)",
     "the label is clipped, not removed, so it stays the accessible name");
-  // The instance switcher is icon-only in both phone bars, so a long name never takes the title's room.
-  assert.equal(declarations(topLevelRule(css,
-    ":is(.page-actions, .detail-bar-actions) .instance-selector-label, :is(.page-actions, .detail-bar-actions) .instance-selector-chevron",
-  ))["display"], "none");
+  // Neither phone bar carries an instance switcher: it is the desktop rail's tile (#1970).
+  assert.doesNotMatch(css, /:is\(\.page-actions, \.detail-bar-actions\) \.instance-/);
 });
 
 test("the detail bar is one 48px bar on --bg with a hairline and a truncating title", () => {

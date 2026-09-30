@@ -808,6 +808,8 @@ kbd {
   white-space: nowrap;
   transform: translateY(-50%);
 }
+/* The instance tile's status after its name (#1970). */
+.rail-tooltip-detail { color: var(--text-dim); }
 /* Covers the gap back to the item (the rail's side padding plus the 8px offset in RailTooltip.tsx),
    so the pointer can move onto the tooltip without closing it. */
 .rail-tooltip::before {
@@ -885,39 +887,20 @@ kbd {
 /* --- Phone "More" sheet (see phoneBarViews) --- */
 .rail-more { position: relative; display: none; }
 .rail-spacer { flex: 1; }
-.rail-instance,
 .rail-settings { display: flex; justify-content: center; width: 100%; }
-.rail-instance .instance-selector-trigger {
-  width: 44px;
-  height: 44px;
-  justify-content: center;
-  padding: 0;
-  border-color: transparent;
-}
-.rail-instance .instance-status-dot { width: 12px; height: 12px; }
-.rail-instance .instance-selector-label,
-.rail-instance .instance-selector-chevron { display: none; }
-
-/* The phone topbar carries the instance trigger and the view's own actions in one fixed-height
-   non-wrapping row. The instance trigger grew with the instance NAME, so a long name pushed the
-   trailing controls — on session views the editor, pinned-summary, terminal and side-panel
-   buttons — past the right edge with nothing to scroll them back into view.
-
-   The icon-only treatment already existed but was scoped to .rail-instance, which this row does
-   not use. The visible label is safe to drop: .instance-selector-trigger carries its own
-   aria-label ("Switch Instance, Current <name>"), so the accessible name is unaffected. */
-.topbar-mobile-controls { min-width: 0; flex: none; flex-wrap: nowrap; }
-.topbar-mobile-controls > * { flex: none; }
-.topbar-mobile-controls .instance-selector-trigger {
-  width: 44px;
-  height: 44px;
+/* The instance tile's row, in the brand's place and with its spacing (§4.1, #1970). */
+.rail-instance {
+  display: flex;
   flex: none;
   justify-content: center;
-  padding: 0;
-  border-color: transparent;
+  width: 100%;
+  margin-bottom: 2px;
 }
-.topbar-mobile-controls .instance-selector-label,
-.topbar-mobile-controls .instance-selector-chevron { display: none; }
+
+/* The phone Session topbar carries the view's own actions in one fixed-height non-wrapping row,
+   so no control can push the others past the right edge. */
+.topbar-mobile-controls { min-width: 0; flex: none; flex-wrap: nowrap; }
+.topbar-mobile-controls > * { flex: none; }
 
 /* And the title yields before any control does, rather than the controls being pushed off. */
 .topbar:has(.topbar-mobile-controls) h1 {
@@ -1012,43 +995,104 @@ kbd {
 .instance-selector {
   z-index: var(--z-sticky);
 }
-.instance-selector-trigger {
-  width: 100%;
-  min-width: 0;
-  /* Its own 38px on a mouse, and at least one control height (44px) on touch. */
-  min-height: max(38px, var(--control-h));
-  display: flex;
+/* The instance tile (§4.1, #1970) sits in a rail item's square, which like every rail item has no
+   fill or border at rest: the old trigger's were the only ones in the rail, so it read as the
+   current item. */
+.instance-tile-trigger {
+  display: inline-flex;
+  flex: none;
   align-items: center;
-  gap: 8px;
-  padding: 0 9px;
-  border: 1px solid var(--border);
+  justify-content: center;
+  gap: var(--space-2);
+  width: var(--control-h-lg);
+  height: var(--control-h-lg);
+  padding: 0;
+  border: 0;
   border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
+  background: transparent;
   color: var(--text);
   cursor: pointer;
-  font-size: 12.5px;
-  text-align: left;
+  text-align: start;
 }
-.instance-selector-trigger:hover,
-.instance-selector-trigger[aria-expanded="true"] {
-  border-color: var(--border-strong);
+@media (hover: hover) {
+  .instance-tile-trigger:hover { background: var(--bg-elev-2); }
+  .instance-tile-trigger:hover .instance-tile-dot { border-color: var(--bg-elev-2); }
+}
+/* A neutral monogram: identity is the letters, never a per-instance colour, because colour means
+   state (§11.2). 24px in the menu's rows, 32px as the rail's tile. */
+.instance-monogram {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
   background: var(--bg-elev-3);
+  color: var(--text);
+  font: var(--type-micro);
+  font-weight: var(--weight-semibold);
 }
-.instance-selector-label {
+.instance-monogram.tile {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  font: var(--type-label);
+  font-weight: var(--weight-semibold);
+}
+/* The active instance's status in the machine vocabulary, on the tile's corner and ringed in the
+   rail's own surface. Hollow when the state is not known to be current (Offline, Reconnecting). */
+.instance-tile-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--bg-elev);
+  border-radius: var(--radius-pill);
+  background: var(--tone);
+}
+.instance-tile-dot.hollow {
+  background: var(--bg-elev);
+  box-shadow: inset 0 0 0 2px var(--tone);
+}
+/* A navigation wide enough for the name shows it and the status beside the tile. */
+.instance-selector.labelled .instance-tile-trigger {
+  justify-content: flex-start;
+  width: 100%;
+  height: auto;
+  min-height: var(--control-h-lg);
+  padding: var(--space-1);
+}
+.instance-tile-text {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+}
+.instance-tile-name {
+  overflow: hidden;
+  font: var(--type-body-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.instance-tile-status {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* The instance flyout (§9.1): 24px monograms in the icon slot, and a name and origin that each
+   keep to one line, however long. */
+.instance-menu .menu-icon {
+  width: 24px;
+  height: 24px;
+}
+.instance-menu .menu-item:has(.menu-desc) { align-items: center; }
+.instance-menu .menu-item:has(.menu-desc) .menu-icon { margin-top: 0; }
+.instance-menu .menu-item:has(.menu-desc) .menu-text,
+.instance-menu .menu-desc {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 600;
-}
-.instance-selector-chevron {
-  flex: none;
-  margin-left: auto;
-  color: var(--text-faint);
-  transition: transform var(--dur-fast) var(--ease-out);
-}
-.instance-selector-trigger[aria-expanded="true"] .instance-selector-chevron {
-  transform: rotate(180deg);
 }
 .instance-status-dot {
   width: 8px;
@@ -1263,20 +1307,6 @@ kbd {
   .page-actions > .page-action { display: none; }
   .page-more[data-overflow] { display: block; }
 }
-
-/* The Tauri instance switcher, in the phone app bar and the phone detail bar: its icon only. The
-   trigger carries its own accessible name ("Switch Instance, Current <name>"), so dropping the
-   visible label is safe, and a long instance name can never take the title's room. */
-:is(.page-actions, .detail-bar-actions) .instance-selector-trigger {
-  width: var(--control-h);
-  height: var(--control-h);
-  flex: none;
-  justify-content: center;
-  padding: 0;
-  border-color: transparent;
-}
-:is(.page-actions, .detail-bar-actions) .instance-selector-label,
-:is(.page-actions, .detail-bar-actions) .instance-selector-chevron { display: none; }
 
 /* Entity pages: one 48px bar with Back, the entity title as the page's h1, one status badge, then
    the actions (§4.3). The title takes the free space and truncates; the badge follows it. */
@@ -12984,7 +13014,6 @@ body.shell-dock-dragging * {
     letter-spacing: 0;
   }
   .topbar:has(.mobile-session-back) .mobile-session-back,
-  .topbar:has(.mobile-session-back) .topbar-mobile-controls .instance-selector-trigger,
   .topbar:has(.mobile-session-back) .topbar-mobile-controls .icon-btn {
     width: 36px;
     min-width: 36px;

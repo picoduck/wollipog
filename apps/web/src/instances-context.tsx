@@ -2,6 +2,7 @@ import React, { createContext, useContext, type ReactNode } from "react";
 import type { InstanceProfile, InstanceRegistrySnapshot } from "./desktop-instances.js";
 import type { InstanceRuntime } from "./instance-runtime.js";
 import type { ViewNavigation } from "./navigation.js";
+import type { ConnState } from "./store.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN } from "./config.js";
 import { statusMeta, type StatusMeta } from "./status-meta.js";
 
@@ -20,6 +21,38 @@ export function instanceAvailabilityMeta(status: InstanceAvailability): StatusMe
   return statusMeta("machine", status === "authentication-required" || status === "missing-credential"
     ? "sign_in_required"
     : status === "incompatible" ? "update_required" : status);
+}
+
+/**
+ * The instance tile's monogram (§4.1): the first letter or digit of each of the label's first two
+ * words, so "Home Studio" is "HS" and "Studio" is "S". Words with neither, such as "·", are skipped.
+ */
+export function instanceMonogram(label: string): string {
+  const initials = label.trim().split(/\s+/)
+    .map((word) => word.match(/[\p{L}\p{N}]/u)?.[0])
+    .filter((initial): initial is string => Boolean(initial))
+    .slice(0, 2)
+    .join("");
+  return (initials || Array.from(label.trim())[0] || "").toLocaleUpperCase();
+}
+
+/**
+ * What the shell's connection banner says about the active instance, which the rail tile must agree
+ * with (#1970): a lost connection is "reconnecting" from its first offline report until it is back,
+ * and a rejected credential needs signing in again. Null while the connection is live or first
+ * opening. The banner shows only in these states, so the tile is never Online beside it.
+ */
+export type ActiveInstanceConnection = "reconnecting" | "sign-in-required";
+
+export function activeInstanceConnection(input: {
+  conn: ConnState;
+  authRequired: boolean;
+  /** The connection has been lost since its last online state (useConnectionLostFor). */
+  connectionLost: boolean;
+}): ActiveInstanceConnection | null {
+  if (input.conn === "online") return null;
+  if (input.authRequired) return "sign-in-required";
+  return input.connectionLost || input.conn === "offline" ? "reconnecting" : null;
 }
 
 export type InstanceShellPhase = "loading" | "opening" | "ready" | "failed" | "missing";

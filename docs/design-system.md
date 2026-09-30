@@ -576,6 +576,19 @@ Rules
   in Settings › Appearance › Navigation, and the palette action "Show Navigation Labels" / "Hide
   Navigation Labels" (#1978). It never applies at 760px or below, and the Settings row is not shown
   there.
+- **Instance tile (desktop app).** A 32px neutral tile (`--bg-elev-3`, `--radius-sm`) in a rail
+  item's square, which has no fill or border at rest. Its monogram (12px/600) is the first letter of
+  each of the profile label's first two words; there are no per-instance colors, because color
+  means state. The corner dot is `instanceAvailabilityMeta`'s tone (§11.2), hollow when offline.
+  While the shell shows the offline or sign-in banner, the tile agrees with it
+  (`activeInstanceConnection`): hollow and neutral, "Reconnecting…", never Online. Accessible
+  name "Switch Instance: <label>"; the tooltip gives the name and the status in sentence case. It
+  opens the instance menu as a 300px flyout to the right of the rail, top-aligned with the tile
+  (§9.1): `menuitemradio` rows with a 24px monogram, the name, and the origin ("On this machine"
+  for the local profile) as a second line; a check on the current instance; a known status other
+  than Online as text in its tone; a "Remote" label before remote profiles; then "Add Remote
+  Instance…" and "Manage Instances". The browser build keeps the decorative brand. No phone bar
+  carries a switcher: the desktop app's 940px minimum width never reaches the phone layout (#1970).
 - **One name per destination**, used for the rail tooltip, `aria-label`, page title, phone app bar,
   More sheet, palette, shortcut reference and Settings › Appearance › Navigation: Sessions,
   Automations, Projects, Multi-Agent Runs, Pods, Connections, Agent Skills, Archived Sessions, Usage
@@ -1191,6 +1204,9 @@ workflow step list is a different component and keeps a local name.
   every menu and flips it when the space below is short (#1803). An area design that draws
   `.menu.flip-up` or `.drop-up` means this placement, and there is no class for it: the placement is
   inline, and a class with a rule of its own would change what the menu draws.
+- **Flyout.** A menu opened from the rail (the instance menu, §4.1) opens 4px to the right of the
+  rail rather than below its trigger, top-aligned with it and moved up only as far as the viewport
+  needs, so it never covers rail items. `MenuSurface`'s `beside` names the ancestor it opens beside.
 - **Height.** A desktop menu scrolls inside past 480px: one cap, held by `Menu.tsx` and the `.menu`
   rule, on the menu surface itself (#1803). An area design that draws `.menu-scroll` means this cap.
   Per-popup caps (the old `.plus-pop` and `.cbar-pop`) are gone.

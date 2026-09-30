@@ -87,7 +87,7 @@ function mount(element: React.ReactElement) {
 
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
 
-test("instance selector remains keyboard-managed and exposes switching plus management", async () => {
+test("the instance menu switches, adds and manages, and keeps focus on the tile", async () => {
   const switched: string[] = [];
   let managed = 0;
   const value = manager({
@@ -95,29 +95,56 @@ test("instance selector remains keyboard-managed and exposes switching plus mana
     manageInstances() { managed += 1; },
   });
   const mounted = mount(
-    <InstancesContextProvider value={value}><InstanceSelector /></InstancesContextProvider>,
+    <InstancesContextProvider value={value}><FeedbackProvider><InstanceSelector /></FeedbackProvider></InstancesContextProvider>,
   );
   await mounted.render();
   try {
-    const trigger = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Switch Instance, Current This Machine"]',
-    )!;
+    const trigger = mounted.container.querySelector<HTMLButtonElement>('[aria-label="Switch Instance: This Machine"]')!;
+    assert.ok(trigger, "the accessible name holds the visible name in the same form");
+    assert.equal(trigger.querySelector(".instance-monogram.tile")?.textContent, "TM");
     await act(async () => { trigger.click(); });
     const menu = mounted.container.querySelector<HTMLElement>('[role="menu"]')!;
-    assert.equal(menu.querySelectorAll('[role="menuitemradio"]').length, 2);
-    assert.equal(menu.querySelector('[aria-checked="true"]')?.textContent?.includes("This Machine"), true);
-    const remoteItem = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'))
-      .find((button) => button.textContent?.includes("Home Workstation"))!;
-    await act(async () => { remoteItem.click(); await tick(); });
+    const rows = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'));
+    assert.deepEqual(rows.map((row) => row.querySelector(".menu-text")?.textContent), ["This Machine", "Home Workstation"]);
+    assert.deepEqual(rows.map((row) => row.querySelector(".instance-monogram")?.textContent), ["TM", "HW"]);
+    assert.deepEqual(rows.map((row) => row.querySelector(".menu-desc")?.textContent), ["On this machine", remote.origin]);
+    assert.equal(rows[0]!.getAttribute("aria-checked"), "true");
+    assert.ok(rows[0]!.querySelector(".menu-check"), "the current instance has a trailing check");
+    assert.ok(!rows[1]!.querySelector(".menu-check"));
+    // Status is text, not colour alone: the online local row has none, the remote one says why.
+    assertNoDomNode(rows[0]!.querySelector(".status"));
+    assert.equal(rows[1]!.querySelector(".status")?.textContent, "Sign-In Required");
+    assert.ok(rows[1]!.querySelector(".status")?.classList.contains("t-warning"));
+    const describedBy = rows[1]!.getAttribute("aria-describedby")!.split(" ");
+    assert.ok(describedBy.some((id) => domWindow.document.getElementById(id)?.textContent === "Sign-In Required"),
+      "a screen reader hears the status the row shows");
+    // A "Remote" section label precedes the remote profiles; the local one has none.
+    const labels = Array.from(menu.querySelectorAll(".menu-label")).map((label) => label.textContent);
+    assert.deepEqual(labels, ["Remote"]);
+    assert.ok(menu.querySelector(".menu-label")!.compareDocumentPosition(rows[1]! as never) & 4, "the label precedes the row");
+
+    await act(async () => { rows[1]!.click(); await tick(); });
     assert.deepEqual(switched, [remote.id]);
 
     await act(async () => { trigger.click(); });
-    const manage = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
-      .find((button) => button.textContent === "Manage Instances")!;
-    await act(async () => { manage.click(); });
+    const actions = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+    assert.deepEqual(actions.map((item) => item.textContent), ["Add Remote Instance…", "Manage Instances"]);
+    assert.ok(actions.every((item) => item.querySelector(".menu-icon svg")), "each action has its own icon");
+    await act(async () => { actions[1]!.click(); });
     assert.equal(managed, 1);
 
-    // Dismissing through the shared backdrop hands focus back to the trigger: the backdrop takes
+    await act(async () => { trigger.click(); });
+    const add = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .find((item) => item.textContent === "Add Remote Instance…")!;
+    await act(async () => { add.click(); await tick(); });
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
+    const dialog = mounted.container.querySelector<HTMLElement>('[role="dialog"]');
+    assert.match(dialog?.textContent ?? "", /Add Remote Instance/, "Add Remote Instance… opens the existing add dialog");
+    const cancel = Array.from(dialog!.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent === "Cancel")!;
+    await act(async () => { cancel.click(); await tick(); });
+
+    // Dismissing through the shared backdrop hands focus back to the tile: the backdrop takes
     // the click, so nothing underneath it would otherwise receive focus.
     await act(async () => { trigger.click(); });
     await act(async () => {
@@ -126,14 +153,73 @@ test("instance selector remains keyboard-managed and exposes switching plus mana
     });
     assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
     // Identity, not assert.equal: a failed diff of two DOM nodes serialises the whole tree.
-    assert.ok(domWindow.document.activeElement === (trigger as never), "focus returns to the trigger, not <body>");
+    assert.ok(domWindow.document.activeElement === (trigger as never), "focus returns to the tile, not <body>");
   } finally {
     await act(async () => { mounted.root.unmount(); });
     mounted.mountPoint.remove();
   }
 });
 
-test("compact instance selector stays bottom-anchored inside the real desktop Rail", async () => {
+test("the tile's dot and tooltip say the active instance's status, and agree with the banner", async () => {
+  const cases: Array<{
+    name: string;
+    value: InstanceManager;
+    connection?: "reconnecting" | "sign-in-required";
+    tone: string;
+    hollow: boolean;
+    detail: string;
+  }> = [
+    { name: "online", value: manager(), tone: "t-success", hollow: false, detail: "Online" },
+    {
+      name: "connecting",
+      value: manager({ statusByProfile: {}, phase: "opening" }),
+      tone: "t-info",
+      hollow: false,
+      detail: "Connecting",
+    },
+    {
+      name: "remote offline",
+      value: manager({ activeProfile: remote, statusByProfile: { [remote.id]: { availability: "offline" } } }),
+      tone: "t-neutral",
+      hollow: true,
+      detail: "Offline",
+    },
+    {
+      name: "remote sign-in",
+      value: manager({ activeProfile: remote }),
+      tone: "t-warning",
+      hollow: false,
+      detail: "Sign-in required",
+    },
+    // The instance manager still records Online a moment after the socket drops; the banner wins.
+    { name: "banner offline", value: manager(), connection: "reconnecting", tone: "t-neutral", hollow: true, detail: "Reconnecting…" },
+    { name: "banner sign-in", value: manager(), connection: "sign-in-required", tone: "t-warning", hollow: false, detail: "Sign-in required" },
+  ];
+  for (const example of cases) {
+    const mounted = mount(
+      <InstancesContextProvider value={example.value}>
+        <InstanceSelector connection={example.connection ?? null} />
+      </InstancesContextProvider>,
+    );
+    await mounted.render();
+    try {
+      const trigger = mounted.mountPoint.querySelector<HTMLButtonElement>(".instance-tile-trigger")!;
+      const dot = trigger.querySelector(".instance-tile-dot")!;
+      assert.ok(dot.classList.contains(example.tone), `${example.name}: ${dot.className}`);
+      assert.equal(dot.classList.contains("hollow"), example.hollow, example.name);
+      assert.equal(trigger.getAttribute("data-rail-tip"), example.value.activeProfile.label, example.name);
+      assert.equal(trigger.getAttribute("data-rail-detail"), example.detail, `${example.name}: sentence case`);
+      const status = domWindow.document.getElementById(trigger.getAttribute("aria-describedby")!);
+      assert.ok(status?.textContent, `${example.name}: the status is the tile's description`);
+      assert.ok(!dot.classList.contains("t-success") || !example.connection, "never Online beside the banner");
+    } finally {
+      await act(async () => { mounted.root.unmount(); });
+      mounted.mountPoint.remove();
+    }
+  }
+});
+
+test("the tile takes the brand's place in the desktop rail, and its menu flies out beside the rail", async () => {
   const priorWidth = domWindow.innerWidth;
   const priorHeight = domWindow.innerHeight;
   Object.defineProperty(domWindow, "innerWidth", { configurable: true, value: 1024 });
@@ -146,28 +232,24 @@ test("compact instance selector stays bottom-anchored inside the real desktop Ra
         stalledCount={0}
         onlineConnections={1}
         onNavigate={() => undefined}
-        instanceControl={<InstanceSelector compact />}
+        instanceControl={<InstanceSelector />}
         settingsControl={<button type="button">Settings</button>}
       />
     </InstancesContextProvider>,
   );
   await mounted.render();
   try {
-    const rail = mounted.container.querySelector(".app-rail");
-    const trigger = rail?.querySelector<HTMLButtonElement>(
-      '[aria-label="Switch Instance, Current This Machine"]',
-    );
-    assert.ok(trigger, "the compact selector is mounted through Rail.instanceControl");
-    trigger.getBoundingClientRect = () => ({
-      top: 548,
-      right: 55,
-      bottom: 592,
-      left: 11,
-      width: 44,
-      height: 44,
-      x: 11,
-      y: 548,
-      toJSON: () => ({}),
+    const rail = mounted.container.querySelector<HTMLElement>(".app-rail")!;
+    assertNoDomNode(rail.querySelector(".rail-brand"), "the tile replaces the brand");
+    assert.equal(rail.firstElementChild?.className, "rail-instance", "the tile is at the top of the rail");
+    const trigger = rail.querySelector<HTMLButtonElement>('[aria-label="Switch Instance: This Machine"]');
+    assert.ok(trigger, "the tile is mounted through Rail.instanceControl");
+    const tile = trigger.querySelector<HTMLElement>(".instance-monogram.tile")!;
+    rail.getBoundingClientRect = () => ({
+      top: 0, right: 64, bottom: 640, left: 0, width: 64, height: 640, x: 0, y: 0, toJSON: () => ({}),
+    });
+    tile.getBoundingClientRect = () => ({
+      top: 10, right: 48, bottom: 42, left: 16, width: 32, height: 32, x: 16, y: 10, toJSON: () => ({}),
     });
 
     // The shared menu is placed from its own rendered size; happy-dom has no layout, so give the
@@ -187,16 +269,48 @@ test("compact instance selector stays bottom-anchored inside the real desktop Ra
     const menu = domWindow.document.querySelector('[role="menu"][aria-label="Switch Instance"]') as unknown as HTMLElement;
     assert.ok(menu);
     assert.ok(menu.classList.contains("menu"), "the shared menu surface, fixed by the stylesheet");
-    assert.equal(menu.style.top, "auto");
-    assert.equal(menu.style.bottom, "96px", "4px above the trigger, which sits near the bottom of the rail");
-    assert.equal(menu.style.left, "11px");
-    assert.equal(menu.style.width, "260px");
+    assert.equal(menu.style.top, "10px", "top-aligned with the tile");
+    assert.equal(menu.style.left, "68px", "4px beside the rail's edge, so it covers no rail item");
+    assert.equal(menu.style.width, "300px");
     assert.equal(menu.style.maxHeight, "188px", "a short menu is not given more room than it uses");
   } finally {
     await act(async () => { mounted.root.unmount(); });
     mounted.mountPoint.remove();
     Object.defineProperty(domWindow, "innerWidth", { configurable: true, value: priorWidth });
     Object.defineProperty(domWindow, "innerHeight", { configurable: true, value: priorHeight });
+  }
+});
+
+test("the browser build shows no tile, and the rail keeps its decorative brand", async () => {
+  const mounted = mount(
+    <InstancesContextProvider value={manager({ desktopMultiInstance: false })}>
+      <InstanceSelector />
+    </InstancesContextProvider>,
+  );
+  await mounted.render();
+  try {
+    assertNoDomNode(mounted.mountPoint.querySelector(".instance-selector"));
+  } finally {
+    await act(async () => { mounted.root.unmount(); });
+    mounted.mountPoint.remove();
+  }
+  const rail = mount(
+    <Rail
+      view={{ name: "inbox" }}
+      blockedCount={0}
+      stalledCount={0}
+      onlineConnections={0}
+      onNavigate={() => undefined}
+      settingsControl={<button type="button">Settings</button>}
+    />,
+  );
+  await rail.render();
+  try {
+    assert.equal(rail.mountPoint.querySelector(".rail-brand")?.getAttribute("aria-hidden"), "true");
+    assertNoDomNode(rail.mountPoint.querySelector(".rail-instance"));
+  } finally {
+    await act(async () => { rail.root.unmount(); });
+    rail.mountPoint.remove();
   }
 });
 

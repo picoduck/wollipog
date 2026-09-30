@@ -2174,7 +2174,6 @@ function FixtureSurface() {
   const mobileSessionShell = INCLUDE_SESSION_SHELL && isMobile && view.name === "session" ? (
     <Header
       view={view}
-      mobileInstanceControl={<button type="button" className="instance-selector-trigger" aria-label="Switch Instance">I</button>}
       sessionActions={(
         <>
           <button type="button" className="icon-btn" aria-label="Toggle Pinned Summary">P</button>
