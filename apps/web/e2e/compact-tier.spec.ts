@@ -161,6 +161,31 @@ test.describe("at 940×600 with a mouse, the desktop app's minimum window", () =
       .toBeGreaterThanOrEqual(2 * (36 + 2));
   });
 
+  test("the labelled rail fits too, and switching labels moves no icon at the short size", async ({ page }) => {
+    await open(page, "path=%2Finbox", "Sessions");
+    const icons = () => page.evaluate(() => {
+      const centre = (element: Element) => {
+        const box = element.getBoundingClientRect();
+        return box.left + box.width / 2;
+      };
+      return [
+        centre(document.querySelector(".rail-brand")!),
+        ...[...document.querySelectorAll(".app-rail .rail-item > svg")].map(centre),
+        centre(document.querySelector(".rail-foot > button")!),
+      ];
+    });
+    const before = await icons();
+    await page.getByRole("navigation", { name: "Primary Navigation" })
+      .getByRole("button", { name: "Expand Navigation", exact: true }).click();
+    await expect(page.locator(".app-rail.labelled")).toBeVisible();
+    expect(await icons(), "each icon stays where the 64px rail centres it").toEqual(before);
+    const chrome = await measureChrome(page);
+    expect(chrome.railOverflow).toBeLessThanOrEqual(0);
+    expect(chrome.railItemsOutside).toEqual([]);
+    const foot = (await page.locator(".rail-foot > button").boundingBox())!;
+    expect(foot.y + foot.height, "the labels toggle is on screen").toBeLessThanOrEqual(600);
+  });
+
   test("a detail bar that would leave its title unreadable shows its status as a dot", async ({ page }) => {
     await open(page, "view=pod", "Active Collaboration Pod");
     const badge = page.locator(".detail-bar-status");
