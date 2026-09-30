@@ -186,6 +186,12 @@ test("the Sessions footer re-measures when a hidden count's text changes", async
     : [...footerOf(element).querySelectorAll(".inbox-activity-minor")]
       .reduce((width, span) => width + span.textContent!.length * PER_CHARACTER, 0);
   const prototype = domWindow.HTMLElement.prototype as unknown as object;
+  // happy-dom declares these getters on this very prototype, so the originals are put back rather
+  // than the overrides deleted; deleting would leave later tests in the process with no getter.
+  const original = {
+    clientWidth: Object.getOwnPropertyDescriptor(prototype, "clientWidth"),
+    scrollWidth: Object.getOwnPropertyDescriptor(prototype, "scrollWidth"),
+  };
   Object.defineProperty(prototype, "clientWidth", {
     configurable: true,
     get(this: Element) {
@@ -240,8 +246,13 @@ test("the Sessions footer re-measures when a hidden count's text changes", async
     await act(async () => root.unmount());
     assert.equal(footer.getAttribute("data-fit"), null, "unmounting leaves no answer behind");
   } finally {
-    delete (prototype as Record<string, unknown>).clientWidth;
-    delete (prototype as Record<string, unknown>).scrollWidth;
+    for (const [name, descriptor] of Object.entries(original)) {
+      if (descriptor) Object.defineProperty(prototype, name, descriptor);
+      else delete (prototype as Record<string, unknown>)[name];
+    }
     container.remove();
+  }
+  for (const [name, descriptor] of Object.entries(original)) {
+    assert.deepEqual(Object.getOwnPropertyDescriptor(prototype, name), descriptor, `${name} is put back as it was`);
   }
 });
