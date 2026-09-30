@@ -500,6 +500,8 @@ export function Rail({
           </button>
         </div>
       )}
+      {/* Last in the DOM, so the first child stays the brand or tile: it is placed absolutely. */}
+      <RailDragStrip />
       {tooltip.tooltip}
     </nav>
   );
@@ -518,4 +520,13 @@ function railTab(labelled: boolean, name: string, icon: ReactNode): ReactNode {
       <span className="rail-tab-label">{name}</span>
     </>
   );
+}
+
+/**
+ * The strip at the top of the rail that the macOS desktop app's traffic lights sit in, and that
+ * drags the window (#1979). styles.css shows it only under `.macos-title-bar`: everywhere else the
+ * rail starts at its first item, and a browser ignores the attribute.
+ */
+export function RailDragStrip() {
+  return <div className="rail-drag-strip" data-tauri-drag-region="" aria-hidden="true" />;
 }

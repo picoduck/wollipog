@@ -53,6 +53,7 @@ import { useIsMobile } from "../components/useIsMobile.js";
 import { Header, Shell } from "../App.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
+import { browserInstanceManager, InstancesContextProvider } from "../instances-context.js";
 import { viewFromPath, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -2270,6 +2271,17 @@ function ToastHook() {
   return null;
 }
 
+/**
+ * `?fullShell=1&desktopApp=mac` renders the real Shell as the macOS desktop app lays it out (#1979):
+ * the instance tile in the rail, and the strip its traffic lights sit in. A browser cannot draw the
+ * native window, so this is the web content's side of it.
+ */
+const MAC_DESKTOP_APP = FIXTURE_QUERY.get("fullShell") === "1" && FIXTURE_QUERY.get("desktopApp") === "mac";
+if (MAC_DESKTOP_APP) document.documentElement.classList.add("macos-title-bar");
+const fullShell = MAC_DESKTOP_APP
+  ? <InstancesContextProvider value={{ ...browserInstanceManager, desktopMultiInstance: true }}><Shell /></InstancesContextProvider>
+  : <Shell />;
+
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
 createRoot(root).render(
@@ -2279,7 +2291,7 @@ createRoot(root).render(
         <FeedbackProvider>
           <ToastHook />
           <StoreProvider connection={connection} navigation={navigation}>
-            {FIXTURE_QUERY.get("fullShell") === "1" ? <ThemeProvider><Shell /></ThemeProvider> : SCENARIO === "permission-mode-layout" ? (
+            {FIXTURE_QUERY.get("fullShell") === "1" ? <ThemeProvider>{fullShell}</ThemeProvider> : SCENARIO === "permission-mode-layout" ? (
               <div className="app">
                 <main className="main">
                   <div className="main-body inbox-main-body">

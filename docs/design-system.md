@@ -322,6 +322,7 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 | `--rail-w` | 64px | The desktop rail (§4.1). |
 | `--rail-w-labelled` | 208px | The labelled desktop rail, when the user turns it on (§4.1). |
 | `--instance-tile` | 32px | The desktop app's instance tile at the top of the rail (§4.1). |
+| `--title-bar-h` | 40px | The macOS desktop app's strip at the top of the rail, which the traffic lights sit in (§4.1). |
 | `--bar-h` | 48px | Every bar: desktop session bar, detail bar, phone app bar, compact page header. §4.4. |
 | `--page-gutter` | 24px (16px phone) | Left and right padding of the page container. |
 | `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Pods. Left-aligned. |
@@ -610,6 +611,17 @@ Rules
   (ellipsized) and the status text, the monogram stays centred at x = 32px, and there is no
   tooltip. The browser build keeps the decorative brand. No phone bar
   carries a switcher: the desktop app's 940px minimum width never reaches the phone layout (#1970).
+- **Window (desktop app).** On macOS the window has no separate title bar (`titleBarStyle: "Overlay"`,
+  `hiddenTitle`). The traffic lights sit in the rail's top-left (`trafficLightPosition` x 8, y 18,
+  so all three clear the rail's 1px hairline) inside a `--title-bar-h` strip of rail padding, above
+  the instance tile. The strip, and any part of the page header, detail bar or Session bar that is
+  not a control, drags the window (`data-tauri-drag-region`); buttons, links, inputs, tabs and other
+  focusable controls in them stay clickable. Windows and Linux keep their native title bar, which
+  follows the resolved theme (Tauri's `setTheme`; a System preference passes none, so the window
+  follows the operating system). The browser build is unchanged. #1979.
+- **Window title.** Every route sets `document.title` to "<Page> – Wollipog", with the page title
+  from `viewTitle` ("Agent Skills – Wollipog"; a Session, Multi-Agent Run or Pod by its own title),
+  and the desktop app copies it to the native window for the taskbar and window switcher.
 - **One name per destination**, used for the rail tooltip, `aria-label`, page title, phone app bar,
   More sheet, palette, shortcut reference and Settings › Appearance › Navigation: Sessions,
   Automations, Projects, Multi-Agent Runs, Pods, Connections, Agent Skills, Archived Sessions, Usage

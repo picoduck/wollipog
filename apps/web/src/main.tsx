@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { installMobileViewportFallback } from "./mobile-viewport.js";
+import { installDesktopWindowChrome } from "./desktop-window.js";
 import { App } from "./App.js";
 import { SharedTranscript } from "./components/SharedTranscript.js";
 import { adoptPairingFragment } from "./device-token.js";
@@ -44,6 +45,8 @@ async function bootstrap(): Promise<void> {
   // Fallback for browsers that ignore interactive-widget=resizes-content; a no-op where the
   // layout viewport already tracks the keyboard. Installed for the app's lifetime.
   installMobileViewportFallback();
+  // Room for the macOS traffic lights before the first paint (#1979).
+  installDesktopWindowChrome();
 
   createRoot(root).render(
     <React.StrictMode>

@@ -52,6 +52,7 @@ import { Notice } from "./Notice.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
+import { windowDragRegion } from "../desktop-window.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 
 /** The badges the measured status row may hide into "+N": the lifecycle and change groups, and the
@@ -499,7 +500,7 @@ export function SessionHeader({
   };
 
   return (
-    <div className="detail-head">
+    <div className="detail-head" {...windowDragRegion()}>
       {!isMobile && (
         <>
           <button className="icon-btn back" onClick={onBack} title="Back to sessions" aria-label={backLabel("inbox")}>

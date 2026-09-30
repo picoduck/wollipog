@@ -3,6 +3,7 @@ import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useIsCompact } from "./useIsMobile.js";
+import { windowDragRegion } from "../desktop-window.js";
 
 /**
  * Page anatomy (docs/design-system.md §4.2, §4.3, §4.5).
@@ -61,7 +62,7 @@ export function PageHeader({
   const slots = secondary.map((action, index) => ({ action, slot: secondary.length - index }));
   const overflow = secondary.length > PAGE_HEADER_VISIBLE_SECONDARIES || menu.length > 0;
   return (
-    <header className="page-header">
+    <header className="page-header" {...windowDragRegion()}>
       <div className="page-header-row">
         <div className="page-heading">
           <h1 id="page-title" className="page-title" tabIndex={-1}>{title}</h1>
@@ -187,7 +188,7 @@ export function DetailBar({
     );
   };
   return (
-    <header className="detail-bar">
+    <header className="detail-bar" {...windowDragRegion()}>
       <button type="button" className="icon-btn detail-bar-back" onClick={onBack} title={backLabel} aria-label={backLabel}>
         <ChevronLeftIcon />
       </button>

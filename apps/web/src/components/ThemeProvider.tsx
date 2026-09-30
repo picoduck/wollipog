@@ -16,6 +16,7 @@ import {
   type ThemePreference,
 } from "../theme.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
+import { useNativeWindowTheme } from "../desktop-window.js";
 
 type ThemeContextValue = {
   preference: ThemePreference;
@@ -67,6 +68,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [previewScheme, setPreviewScheme] = useState<ColorScheme | null>(null);
   const [density, setDensity] = useState<Density>(storedDensity);
   const resolved = resolveTheme(preference, systemDark);
+  // The desktop window's own title bar follows too, where the platform lets it (#1979).
+  useNativeWindowTheme(preference, resolved);
 
   // The head bootstrap already applies the first palette before CSS paints. Keep the DOM,
   // browser chrome, and persisted preference in sync before subsequent React paints.

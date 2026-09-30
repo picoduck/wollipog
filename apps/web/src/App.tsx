@@ -47,6 +47,7 @@ import { closeGuardLinks } from "./desktop-close-guard.js";
 import { DesktopUpdateNotifier } from "./components/DesktopUpdateNotifier.js";
 import { useDesktopUpdateSetting } from "./desktop-updates.js";
 import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRouter.js";
+import { useWindowTitle, windowDragRegion } from "./desktop-window.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { CommandPalette } from "./components/CommandPalette.js";
 import { ShortcutReference } from "./components/ShortcutReference.js";
@@ -89,7 +90,7 @@ import { ProjectsView } from "./components/ProjectsView.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
 import { RemoteInstanceBanner } from "./components/RemoteInstanceBanner.js";
 import { PageHeader } from "./components/PageHeader.js";
-import { Rail } from "./components/Rail.js";
+import { Rail, RailDragStrip } from "./components/Rail.js";
 import { InstancesPanel } from "./components/InstancesPanel.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
 import { useSessionsViewToggleKey } from "./useSessionsViewToggleKey.js";
@@ -224,6 +225,7 @@ function CloseGuardSessionSource() {
 function InstanceRecoveryShell() {
   const instances = useInstances();
   const loading = instances.phase === "loading" || instances.phase === "opening";
+  useWindowTitle("Instances");
   return (
     <div className="app instance-recovery-app">
       <aside className="instance-recovery-nav" aria-label="Instance Navigation">
@@ -232,9 +234,10 @@ function InstanceRecoveryShell() {
           <div className="brand-name">Wollipog</div>
         </div>
         <InstanceSelector labelled />
+        <RailDragStrip />
       </aside>
       <main className="main">
-        <header className="topbar"><h1>Instances</h1></header>
+        <header className="topbar" {...windowDragRegion()}><h1>Instances</h1></header>
         <div className="main-body instance-recovery-body">
           {loading ? (
             <div className="instance-recovery-state" role="status" aria-live="polite">
@@ -321,6 +324,8 @@ export function Shell() {
   const experiments = useExperiments();
   const openExperimentalSettings = () => navigate({ name: "settings", section: "experimental" });
   const activeSession = view.name === "session" ? sessions.get(view.id) : undefined;
+  // "<Page> – Wollipog" in the window, the taskbar and a browser tab; a Session by its own title.
+  useWindowTitle(viewTitle(view, view.name === "session" ? activeSession?.title : entityTitle));
   const activeRunnerProtocol = activeSession ? runners.get(activeSession.runnerId)?.protocolVersion : undefined;
   const terminalSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionShells");
   const filesSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionFiles");

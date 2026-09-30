@@ -450,6 +450,9 @@
   --rail-inset: calc((var(--rail-w) - 1px - var(--control-h-lg)) / 2);
   /* The rail's instance tile (#1970, §4.1), which also sets the labelled row's inset. */
   --instance-tile: 32px;
+  /* The macOS desktop app's title bar strip at the top of the rail, which the traffic lights sit in
+     (#1979, §4.1). tauri.conf.json's trafficLightPosition places them inside it. */
+  --title-bar-h: 40px;
 
   /* The two mobile Session-header rows share these trailing-column metrics. The inset includes the
      physical right safe area because the interface currently has a left-to-right layout. */
@@ -734,6 +737,24 @@ kbd {
   width: 260px;
   align-items: stretch;
   padding: 12px 10px;
+}
+/* The macOS desktop app has no separate title bar (#1979, §4.1): its traffic lights sit in the rail's
+   top-left, in a strip of top padding that also drags the window. The strip is absolutely placed, so
+   it takes no part in the rail's gap, and the rail's own padding keeps everything else below it. The
+   window's 940px minimum never reaches the phone bar, which has no strip. */
+.rail-drag-strip { display: none; }
+@media (min-width: 761px) {
+  :root.macos-title-bar .app-rail,
+  :root.macos-title-bar .instance-recovery-nav {
+    position: relative;
+    padding-top: var(--title-bar-h);
+  }
+  :root.macos-title-bar .rail-drag-strip {
+    display: block;
+    position: absolute;
+    inset: 0 0 auto;
+    height: var(--title-bar-h);
+  }
 }
 /* Decoration since #1958: Sessions is the item directly below it. */
 .rail-brand {
