@@ -9,7 +9,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { InboxSplit } from "../inbox.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
+import { archiveRowStatus, ProjectSplitMenu } from "./ProjectSplitMenu.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -743,4 +743,24 @@ test("the archive confirmation lists the split's sessions with their status, the
 
   await act(async () => { root.unmount(); });
   mountPoint.remove();
+});
+
+test("an archive row's badge follows the shared human-owned attention projection", () => {
+  const approval = { requestId: "request-1", title: "Run Bash", options: [] };
+  const label = (overrides: Partial<SessionView>) => archiveRowStatus({ ...session("row"), ...overrides }).label;
+  // A request only a child agent owns does not claim the row: it reads as the session's lifecycle.
+  assert.equal(label({
+    status: "running",
+    pendingApproval: approval,
+    pendingRequestOwners: { human: 0, orchestrator: 1, requests: [{ requestId: "request-1", owner: "orchestrator" }] },
+  } as Partial<SessionView>), "Running");
+  assert.equal(label({ status: "input_required", pendingApproval: approval }), "Approval Required");
+  assert.equal(label({ status: "input_required", pendingApproval: { ...approval, kind: "question" } }), "Answer Required");
+  // A campaign's human-owned requests claim the row even with no request of its own.
+  assert.equal(label({
+    status: "running",
+    orchestratorCampaign: { pendingRequests: { human: 2, orchestrator: 0 } } as SessionView["orchestratorCampaign"],
+  }), "Needs Your Input");
+  // A bare input status with nothing behind it keeps its lifecycle wording.
+  assert.equal(label({ status: "input_required" }), "Awaiting Input");
 });

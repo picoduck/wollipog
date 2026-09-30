@@ -37,11 +37,17 @@ export interface ProjectSplitMenuProps {
 }
 
 /**
- * A row's badge: what the session is waiting on when it has a pending request, otherwise its
- * lifecycle, including a Stop already under way. One badge per row, attention first (§11.1).
+ * A row's badge: the attention a person owes the session, otherwise its lifecycle, including a Stop
+ * already under way. One badge per row, attention first (§11.1). Attention is the shared human-owned
+ * projection, so a request only a child agent or the Orchestrator owns does not claim the row, and a
+ * campaign's human-owned requests do. A bare "input_required" status with no request behind it is
+ * that projection's legacy fallback, which the lifecycle already says as "Awaiting Input".
  */
 export function archiveRowStatus(session: SessionView): StatusMeta {
-  if (session.pendingApproval) return statusMeta("attention", sessionAttentionStatus(session)?.kind ?? "approval_required");
+  const attention = sessionAttentionStatus(session);
+  const legacyInput = attention?.kind === "input_required" && !session.pendingApproval &&
+    !session.orchestratorCampaign?.pendingRequests?.human;
+  if (attention && !legacyInput) return statusMeta("attention", attention.kind);
   return sessionLifecycleMeta(session.status, {
     archiveStatus: session.archiveStatus,
     stopOperation: session.stopOperation,
