@@ -154,6 +154,17 @@ test("a missing trailing newline changes the last line and is reported per side"
   assert.equal(both.newLineCount, 2);
 });
 
+test("no line content can imitate a missing trailing newline", () => {
+  // A NUL-suffixed terminated line once compared equal to the same text without a newline.
+  const nul = diffTextLines("review", "review\u0000\n");
+  assert.equal(nul.added, 1);
+  assert.equal(nul.removed, 1);
+  assert.deepEqual(nul.hunks[0]!.lines.map((line) => line.status).join(""), "-+");
+  const [entry] = diffSkillFiles([text("SKILL.md", "review")], [text("SKILL.md", "review\u0000\n")]);
+  assert.equal(entry!.change, "changed");
+  assert.equal(entry!.hunks.length, 1);
+});
+
 test("an empty file and a file of one empty line are different", () => {
   const { hunks, added } = diffTextLines("", "\n");
   assert.equal(added, 1);

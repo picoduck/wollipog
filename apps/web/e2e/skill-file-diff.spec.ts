@@ -7,6 +7,7 @@ const lines = (count: number, changedAt?: number) => Array.from({ length: count 
   index + 1 === changedAt ? `Step ${index + 1}: check the tests before approving.` : `Step ${index + 1}: review the diff.`);
 const library = `---\nname: code-review\n---\n${lines(197).join("\n")}\n`;
 const edited = `---\nname: code-review\n---\n${lines(197, 97).join("\n")}\n`;
+const reference = Array.from({ length: 3000 }, (_, index) => `Reference note ${index + 1}.`).join("\n") + "\n";
 const drifted = {
   removalReporting: "supported",
   driftReporting: "supported",
@@ -28,10 +29,12 @@ async function openReview(page: Page, width: number) {
     files: [
       { path: "SKILL.md", content: edited, encoding: "utf8" },
       { path: "scripts/check.sh", content: "#!/bin/sh\nset -eu\nnpm test\n", encoding: "utf8" },
+      { path: "references/notes.md", content: reference, encoding: "utf8" },
     ],
     previousFiles: [
       { path: "SKILL.md", content: library, encoding: "utf8" },
       { path: "scripts/check.sh", content: "#!/bin/sh\nnpm test\n", encoding: "utf8" },
+      { path: "references/notes.md", content: reference, encoding: "utf8" },
     ],
     digest: observedDigest, importable: true, disposition: "update", publishedFromLatest: true, pinned: false, assignmentCount: 2,
   } }));
@@ -40,7 +43,7 @@ async function openReview(page: Page, width: number) {
   await page.getByRole("button", { name: /code-review/i }).click();
   await page.locator(".skills-machine").getByRole("button", { name: "Import Edit as New Version" }).click();
   const dialog = page.getByRole("dialog", { name: "Import Edit as New Version" });
-  await expect(dialog.locator(".skill-diff-file")).toHaveCount(2);
+  await expect(dialog.locator(".skill-diff-file")).toHaveCount(3);
   return dialog;
 }
 
@@ -150,4 +153,18 @@ test("in forced colours each changed line keeps a visible edge and its sign", as
   expect(await edge(".diff-line-del")).toEqual({ width: "4px", style: "dashed" });
   await expect(file.locator(".diff-line-add .diff-sign")).toHaveText("+");
   await expect(file.locator(".diff-line-del .diff-sign")).toHaveText("−");
+});
+
+test("an unchanged file is listed collapsed and renders its lines only once opened", async ({ page }) => {
+  const dialog = await openReview(page, 1280);
+  const file = dialog.locator(".skill-diff-file", { hasText: "references/notes.md" });
+  await expect(file.locator(".skill-diff-file-head .status")).toHaveText(["Unchanged"]);
+  await expect(file).not.toHaveAttribute("open", "");
+  // Collapsed, its 3,000 lines are not in the document at all.
+  await expect(file.locator(".diff-line")).toHaveCount(0);
+  await file.locator(".skill-diff-file-head").click();
+  await expect(file.locator(".diff-line")).toHaveCount(3000);
+  await expect(file.locator(".diff-line-ctx").last()).toContainText("Reference note 3000.");
+  await file.locator(".skill-diff-file-head").click();
+  await expect(file.locator(".diff-line")).toHaveCount(0);
 });

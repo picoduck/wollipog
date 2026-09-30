@@ -177,9 +177,10 @@ function hunksFromScript(script: Edit[], oldLines: string[], newLines: string[],
 export function diffTextLines(oldText: string, newText: string, context = DIFF_CONTEXT_LINES) {
   const before = splitText(oldText);
   const after = splitText(newText);
-  // A last line without a newline differs from the same line with one, as in `git diff`.
+  // A last line without a newline differs from the same line with one, as in `git diff`. The
+  // termination state is a leading tag rather than a suffix, so no line content can imitate it.
   const key = (side: SplitText) => side.keys.map((line, index) =>
-    side.noEol && index === side.keys.length - 1 ? `${line}\u0000` : line);
+    `${side.noEol && index === side.keys.length - 1 ? "u" : "t"}${line}`);
   const script = lineEditScript(key(before), key(after));
   const hunks = hunksFromScript(script, before.display, after.display, context);
   return {

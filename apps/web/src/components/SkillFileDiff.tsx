@@ -145,8 +145,13 @@ function SkillFileDiffBlock({ entry, layout, unchangedContent }: {
   unchangedContent?: SkillFile;
 }) {
   const counts = entry.binary === null && entry.change !== "unchanged";
+  // A body is mounted only while its file is open: a collapsed file (every unchanged one, to start)
+  // would otherwise render each of its lines, which for a long reference file is tens of thousands
+  // of rows nobody asked to read.
+  const [open, setOpen] = useState(entry.change !== "unchanged");
   return (
-    <details className="skill-diff-file disclosure" open={entry.change !== "unchanged"}>
+    <details className="skill-diff-file disclosure" open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary className="skill-diff-file-head">
         <ChevronRightIcon className="disclosure-chevron" />
         <span className="skill-diff-path">{entry.path}</span>
@@ -164,9 +169,11 @@ function SkillFileDiffBlock({ entry, layout, unchangedContent }: {
           </span>
         )}
       </summary>
-      <div className="skill-diff-file-body">
-        <FileBody entry={entry} layout={layout} unchangedContent={unchangedContent} />
-      </div>
+      {open && (
+        <div className="skill-diff-file-body">
+          <FileBody entry={entry} layout={layout} unchangedContent={unchangedContent} />
+        </div>
+      )}
     </details>
   );
 }
