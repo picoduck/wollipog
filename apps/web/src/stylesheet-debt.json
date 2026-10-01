@@ -177,7 +177,6 @@
     "|.pod-receipt|font-size|11",
     "|.pod-reconcile-arrow|font-size|18",
     "|.pod-reconcile-receipt|font-size|11",
-    "|.project-assignment-menu .project-assignment-note,.project-assignment-menu .project-assignment-empty|font-size|11.5",
     "|.project-counts span|font-size|11",
     "|.project-counts strong|font-size|18",
     "|.project-detail-heading h2|font-size|20",
@@ -261,7 +260,6 @@
     "|.workflow-node-outcome|font-size|12",
     "|.workflow-role-bindings label>span|font-size|12",
     "|.ws-chosen-path|font-size|12",
-    "|.ws-create-name|font-size|13",
     "|.ws-name|font-size|12.5",
     "|.ws-path|font-size|11.5"
   ],
@@ -715,7 +713,6 @@
     "|.project-manager-empty,.project-manager-unavailable|gap|8px",
     "|.project-manager-empty>div|gap|8px",
     "|.project-manager-search|gap|8px",
-    "|.project-move-list|gap|2px",
     "|.project-name-form|gap|10px",
     "|.project-section-heading|gap|18px",
     "|.provider-account-form,.provider-account-form label|gap|8px",
@@ -893,8 +890,6 @@
     "|.workspace-reference-picker .ui-inline-listbox-option|gap|8px",
     "|.workspace-reference-picker|gap|2px",
     "|.ws-chosen|gap|6px",
-    "|.ws-create-actions|gap|8px",
-    "|.ws-create|gap|8px",
     "|.ws-select|gap|6px"
   ],
   "paddingLiterals": [
@@ -1486,9 +1481,6 @@
     "|.ws-chosen|padding|6px",
     "|.ws-chosen|padding|6px",
     "|.ws-chosen|padding|6px",
-    "|.ws-create-name|padding|7px",
-    "|.ws-create-name|padding|9px",
-    "|.ws-create|padding|2px",
     "|:not(pre)>code|padding|2px",
     "|:not(pre)>code|padding|7px"
   ],

@@ -109,3 +109,74 @@ export function sessionProjectChoices(
     current: true,
   }, ...choices];
 }
+
+/** What the Move to Project primary does, named by its outcome (#2163). Sharing wins over linking:
+ * a team or unknown audience is the consequence a person must see in the button they press. */
+export interface ProjectMovePlan {
+  primary: "Move Session" | "Add Folder and Move" | "Move and Share";
+  linkLocation: boolean;
+  audience: "team" | "unknown" | null;
+}
+
+export function projectMovePlan(
+  session: SessionView,
+  target: ProjectView | undefined,
+  choice: SessionProjectChoice | undefined,
+): ProjectMovePlan {
+  const linkLocation = Boolean(choice && !choice.current && choice.linkable);
+  const audience = target ? projectAssignmentAudienceConfirmation(session, target) : null;
+  return {
+    primary: audience ? "Move and Share" : linkLocation ? "Add Folder and Move" : "Move Session",
+    linkLocation,
+    audience,
+  };
+}
+
+/** The owning team's name, when the Project is team-owned and the person can read its teams. */
+export function projectTeamName(
+  project: ProjectView | undefined,
+  teams: readonly { teamId: string; name: string }[] | undefined,
+): string | null {
+  const owner = project?.scope?.owner;
+  if (owner?.kind !== "team") return null;
+  return teams?.find((team) => team.teamId === owner.teamId)?.name ?? null;
+}
+
+function teamPhrase(teamName: string | null): string {
+  return teamName ? `the ${teamName} team` : "the owning team";
+}
+
+/** A Move to Project row's one line: whether it includes this folder, then who it is shared with. */
+export function projectMoveRowDescription(choice: SessionProjectChoice, teamName: string | null): string {
+  const folder = choice.compatible ? "Includes this folder."
+    : choice.current ? "Doesn't include this folder."
+      : "Adds this folder to the project.";
+  return choice.audience === "team" ? `${folder} Shared with ${teamPhrase(teamName)}.` : folder;
+}
+
+/** Why a row cannot be chosen, in plain words; null when it can. */
+export function projectMoveRowRefusal(session: SessionView, choice: SessionProjectChoice): string | null {
+  if (choice.current || choice.compatible || choice.linkable) return null;
+  return session.adopted && session.importLocationReady !== true
+    ? "Waiting for the machine to check this folder."
+    : "Only people who manage this project can add this folder.";
+}
+
+/** The inline notice for the selected row, replacing the separate consent dialog (#2163). */
+export function projectMoveNotice(
+  plan: ProjectMovePlan,
+  projectName: string,
+  folder: string,
+  teamName: string | null,
+): { tone: "info" | "warning"; text: string } | null {
+  const link = plan.linkLocation
+    ? `${projectName} will include ${folder}. New sessions in that folder may be filed there too.`
+    : null;
+  const sharing = plan.audience === "team"
+    ? `Members of ${teamPhrase(teamName)} will be able to read this conversation. Moving it out later doesn't remove their access.`
+    : plan.audience === "unknown"
+      ? "This Wollipog doesn't report who can read this project, so moving the session may change who can read this conversation."
+      : null;
+  if (sharing) return { tone: "warning", text: link ? `${link} ${sharing}` : sharing };
+  return link ? { tone: "info", text: link } : null;
+}

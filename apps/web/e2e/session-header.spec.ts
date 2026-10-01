@@ -1267,14 +1267,31 @@ test("legacy control planes keep mobile Workspace re-filing in More Actions", as
   await expect(rows.nth(1)).toHaveAttribute("role", "separator");
   await menu.getByRole("menuitem", { name: "Move to Another Workspace…" }).click();
   const dialog = page.getByRole("dialog", { name: "Move to Workspace" });
-  await expect(dialog.getByRole("radio", { name: /Alpha Secondary/ })).toBeVisible();
-  await dialog.getByRole("button", { name: "New Workspace…" }).click();
-  const createDialog = page.getByRole("dialog", { name: "Create Workspace" });
-  await expect(createDialog.getByRole("textbox", { name: "Workspace Name" })).toBeVisible();
-  await expect(createDialog.getByRole("button", { name: "Browse for a Folder…" })).toBeVisible();
+  const moveSession = dialog.getByRole("button", { name: "Move Session" });
+  // The same selection model as Move to Project (#2163): the current workspace is selected, and the
+  // primary waits for a different one.
+  await expect(moveSession).toBeDisabled();
+  await expect(dialog.getByText("Choose a different workspace.")).toBeVisible();
+  // New Workspace… is a body action; the footer keeps Cancel and the primary.
+  const newWorkspace = dialog.getByRole("button", { name: "New Workspace…" });
+  await expect(dialog.locator(".modal-body").getByRole("button", { name: "New Workspace…" })).toBeVisible();
+  await expect(dialog.locator(".modal-foot").getByRole("button")).toHaveText(["Cancel", "Move Session"]);
+  await newWorkspace.click();
+  const createDialog = page.getByRole("dialog", { name: "New Workspace" });
+  await expect(createDialog.getByRole("textbox", { name: "Name" })).toBeVisible();
+  await expect(createDialog.getByRole("textbox", { name: "Folder" })).toHaveAttribute("readonly", "");
+  await expect(createDialog.getByRole("button", { name: "Browse…" })).toBeVisible();
   await createDialog.getByRole("button", { name: "Cancel" }).click();
   const returnedDialog = page.getByRole("dialog", { name: "Move to Workspace" });
-  await returnedDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(returnedDialog.getByRole("button", { name: "New Workspace…" })).toBeFocused();
+
+  await returnedDialog.getByRole("radio", { name: /Alpha Secondary/ }).click();
+  expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.workspaceMoveCount())).toBe(0);
+  await returnedDialog.getByRole("button", { name: "Move Session" }).click();
+  await expect(returnedDialog).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
+    .find((session) => session.id === "session-alpha")?.workspaceId)).toBe("alpha-secondary-workspace");
+  expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.workspaceMoveCount())).toBe(1);
   await expect(moreActions).toBeFocused();
 });
 

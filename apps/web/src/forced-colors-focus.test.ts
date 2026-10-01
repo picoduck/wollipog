@@ -46,7 +46,6 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".project-manager-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
   [".inbox-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
   [".archive-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
-  [".ws-create-name:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],
   [".shell-search:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],
   [".shell-input:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],
   [":where( input:not([type=\"checkbox\"], [type=\"radio\"], [type=\"range\"], [type=\"file\"], [type=\"color\"]), textarea, select, .ui-select-trigger, .ui-searchable-combobox-input ):focus-visible { border-color: var(--focus); outline: 1px solid var(--focus); outline-offset: 0 }",

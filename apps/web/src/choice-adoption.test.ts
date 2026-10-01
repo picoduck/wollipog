@@ -127,8 +127,11 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],
   /* Down from 6 on 2026-08-12: the Move to Project dialog adopted ChoiceCards (now ChoiceRows),
-     retiring the durable Project chip's bespoke menuitemradio popover. */
-  ["components/SessionDetail.tsx", "raw-radiogroup", 4],
+     retiring the durable Project chip's bespoke menuitemradio popover. Down from 4 with #2163,
+     which moved the workspace form out of the menu. Two of the three are the Move to Workspace
+     menu's §9.1 radio-like MenuItem rows (No Workspace and one per workspace) with the trailing
+     check: a menu that files the session, not a form choice. */
+  ["components/SessionDetail.tsx", "raw-radiogroup", 3],
 ];
 
 /**

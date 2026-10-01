@@ -7,8 +7,14 @@ import {
   projectAudienceVisibilityLabel,
   projectAudienceVisibilitySummary,
   projectAudienceLabel,
+  projectMoveNotice,
+  projectMovePlan,
+  projectMoveRowDescription,
+  projectMoveRowRefusal,
+  projectTeamName,
   sessionProjectChoices,
   shouldSubmitProjectAssignment,
+  type SessionProjectChoice,
 } from "./session-project-assignment.js";
 import { Store } from "./store.js";
 
@@ -216,4 +222,74 @@ test("Project assignment copy identifies audiences and fails closed when sharing
   assert.equal(projectAssignmentAudienceConfirmation(session({ audience: "user" }), project(
     "legacy-project", "runner-1", "workspace-1",
   )), "unknown", "an older control plane cannot silently bypass transcript-sharing consent");
+});
+
+function choice(overrides: Partial<SessionProjectChoice> = {}): SessionProjectChoice {
+  return { id: "p", name: "Billing", compatible: true, linkable: false, current: false, ...overrides };
+}
+
+test("the Move to Project primary names the outcome, and sharing wins over linking (#2163)", () => {
+  const personal = session({ audience: "user" });
+  const own = { ...project("own", "runner-1", "workspace-1"), audience: "user" as const };
+  const team = { ...project("team", "runner-1", "workspace-1"), audience: "team" as const };
+  assert.deepEqual(projectMovePlan(personal, undefined, undefined),
+    { primary: "Move Session", linkLocation: false, audience: null });
+  assert.deepEqual(projectMovePlan(personal, own, choice()),
+    { primary: "Move Session", linkLocation: false, audience: null });
+  assert.deepEqual(projectMovePlan(personal, own, choice({ compatible: false, linkable: true })),
+    { primary: "Add Folder and Move", linkLocation: true, audience: null });
+  assert.deepEqual(projectMovePlan(personal, team, choice({ compatible: false, linkable: true })),
+    { primary: "Move and Share", linkLocation: true, audience: "team" });
+  assert.deepEqual(projectMovePlan(session(), own, choice()),
+    { primary: "Move and Share", linkLocation: false, audience: "unknown" });
+  assert.equal(projectMovePlan(personal, own, choice({ current: true, compatible: false, linkable: true })).linkLocation, false,
+    "the current project is never re-linked from this dialog");
+});
+
+test("Move to Project rows say whether they include this folder and who they are shared with", () => {
+  assert.equal(projectMoveRowDescription(choice(), null), "Includes this folder.");
+  assert.equal(projectMoveRowDescription(choice({ compatible: false, linkable: true }), null), "Adds this folder to the project.");
+  assert.equal(projectMoveRowDescription(choice({ compatible: false, current: true }), null), "Doesn't include this folder.");
+  assert.equal(projectMoveRowDescription(choice({ audience: "team" }), "Platform"), "Includes this folder. Shared with the Platform team.");
+  assert.equal(projectMoveRowDescription(choice({ audience: "team" }), null), "Includes this folder. Shared with the owning team.");
+  assert.equal(projectMoveRowRefusal(session(), choice()), null);
+  assert.equal(projectMoveRowRefusal(session({ adopted: true, importLocationReady: false }), choice({ compatible: false })),
+    "Waiting for the machine to check this folder.");
+  assert.equal(projectMoveRowRefusal(session({ adopted: true, importLocationReady: true }), choice({ compatible: false })),
+    "Only people who manage this project can add this folder.");
+});
+
+test("Move to Project notices replace the separate consent dialog", () => {
+  const plan = (overrides: Partial<ReturnType<typeof projectMovePlan>>) =>
+    ({ primary: "Move Session" as const, linkLocation: false, audience: null, ...overrides });
+  assert.equal(projectMoveNotice(plan({}), "Billing", "/repos/billing", null), null);
+  assert.deepEqual(projectMoveNotice(plan({ linkLocation: true }), "Billing", "/repos/billing", null), {
+    tone: "info",
+    text: "Billing will include /repos/billing. New sessions in that folder may be filed there too.",
+  });
+  assert.deepEqual(projectMoveNotice(plan({ audience: "team" }), "Billing", "/repos/billing", "Platform"), {
+    tone: "warning",
+    text: "Members of the Platform team will be able to read this conversation. Moving it out later doesn't remove their access.",
+  });
+  assert.deepEqual(projectMoveNotice(plan({ audience: "team", linkLocation: true }), "Billing", "/repos/billing", null), {
+    tone: "warning",
+    text: "Billing will include /repos/billing. New sessions in that folder may be filed there too. " +
+      "Members of the owning team will be able to read this conversation. Moving it out later doesn't remove their access.",
+  });
+  assert.deepEqual(projectMoveNotice(plan({ audience: "unknown" }), "Billing", "/repos/billing", null), {
+    tone: "warning",
+    text: "This Wollipog doesn't report who can read this project, so moving the session may change who can read this conversation.",
+  });
+});
+
+test("a team project's name comes from the identity teams, and is null when they cannot be read", () => {
+  const team = {
+    ...project("team", "runner-1", "workspace-1"),
+    audience: "team" as const,
+    scope: { organizationId: "org", owner: { kind: "team" as const, teamId: "team-1" } },
+  };
+  assert.equal(projectTeamName(team, [{ teamId: "team-1", name: "Platform" }]), "Platform");
+  assert.equal(projectTeamName(team, undefined), null);
+  assert.equal(projectTeamName(team, [{ teamId: "team-2", name: "Other" }]), null);
+  assert.equal(projectTeamName(project("p", "runner-1", "workspace-1"), [{ teamId: "team-1", name: "Platform" }]), null);
 });

@@ -60,7 +60,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
-import { DirectoryPicker } from "./DirectoryPicker.js";
+import { MoveToProjectDialog, MoveToWorkspaceDialog, NewWorkspaceDialog } from "./SessionMoveDialogs.js";
 import {
   advanceAutomaticAccountSwitchNotice,
   type AutomaticAccountSwitchNoticeState,
@@ -231,14 +231,7 @@ import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
 import { workerRoster, isCurrentWorker } from "../worker-roster.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
-import {
-  projectAssignmentAudienceConfirmation,
-  projectAudienceLabel,
-  persistProjectAssignment,
-  sessionProjectChoices,
-  shouldSubmitProjectAssignment,
-} from "../session-project-assignment.js";
-import { ChoiceRows, Select, type ChoiceRowOption } from "./ui/ChoiceControls.js";
+import { Select } from "./ui/ChoiceControls.js";
 import {
   clearDurableQueuedEditRecoveriesForAccount,
   clearDurableQueuedEditRecovery,
@@ -5036,7 +5029,7 @@ function SessionDetailLoaded({
           renderMoveProjectDialog={({ onClose, returnFocusRef }) => projectsSupported ? (
             <MoveToProjectDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
           ) : (
-            <LegacyWorkspaceMoveDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
+            <MoveToWorkspaceDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
           )}
           topbarControls={topbarControls}
           activeSubagents={activeWorkerCount ? {
@@ -6372,19 +6365,42 @@ function useProjectButtonFold(
         (dropped && focusHeld.current);
       if (open) close();
       if (!hadFocus) return;
-      // More Actions is disabled while a session action runs, and a disabled button cannot take
-      // focus; the page title always can.
-      const more = bar?.querySelector<HTMLButtonElement>('.detail-actions [aria-label="More Actions"]');
-      if (more && !more.disabled && more.getClientRects().length > 0) {
-        more.focus();
-        if (trigger.ownerDocument.activeElement === more) return;
+      const target = projectButtonHandoffTarget(trigger);
+      target?.focus();
+      if (target && target !== trigger.ownerDocument.getElementById("page-title") &&
+        trigger.ownerDocument.activeElement !== target) {
+        trigger.ownerDocument.getElementById("page-title")?.focus();
       }
-      trigger.ownerDocument.getElementById("page-title")?.focus();
     });
     observer.observe(trigger);
     if (bar) observer.observe(bar);
     return () => observer.disconnect();
   }, [open, close, triggerRef, surfaceRef]);
+}
+
+/**
+ * Where focus belongs for the project button: the button while it is shown, More Actions once the
+ * compact tier folds the button away, or the page title while More Actions is disabled (a session
+ * action is running) — a disabled button cannot take focus, and the title always can.
+ */
+function projectButtonHandoffTarget(trigger: HTMLButtonElement | null): HTMLElement | null {
+  if (!trigger) return null;
+  if (trigger.isConnected && trigger.getClientRects().length > 0) return trigger;
+  const more = trigger.closest<HTMLElement>(".session-bar")
+    ?.querySelector<HTMLButtonElement>('.detail-actions [aria-label="More Actions"]');
+  if (more && !more.disabled && more.getClientRects().length > 0) return more;
+  return trigger.ownerDocument.getElementById("page-title");
+}
+
+/**
+ * A dialog opened from the project button returns focus to a visible target (§16.1): the window
+ * can narrow while it is open and fold the button away, which used to leave focus on nothing. The
+ * target is resolved as the dialog closes, not as it opens.
+ */
+function useProjectButtonReturnFocus(triggerRef: RefObject<HTMLButtonElement | null>): { current: HTMLElement | null } {
+  return useMemo(() => ({
+    get current() { return projectButtonHandoffTarget(triggerRef.current); },
+  }), [triggerRef]);
 }
 
 /** Assigns durable Project organization without changing the session's execution Location. */
@@ -6408,6 +6424,7 @@ function DurableProjectMenuButton({ session }: { session: SessionView }) {
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-project-menu");
   const closeFolded = useCallback(() => menu.close(false), [menu.close]);
   useProjectButtonFold(menuOpen, closeFolded, menu.triggerRef, menu.menuRef);
+  const returnFocusRef = useProjectButtonReturnFocus(menu.triggerRef);
   const currentName = (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName;
 
   return (
@@ -6462,383 +6479,34 @@ function DurableProjectMenuButton({ session }: { session: SessionView }) {
         <MoveToProjectDialog
           session={session}
           onClose={() => setMoveOpen(false)}
-          returnFocusRef={menu.triggerRef}
+          returnFocusRef={returnFocusRef}
         />
       )}
     </>
   );
 }
 
-function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
-  session: SessionView;
-  onClose: () => void;
-  /** The project button or More Actions: the menu item that opened this dialog unmounts with its menu. */
-  returnFocusRef?: { current: HTMLElement | null };
-}) {
-  const api = useApi();
-  const { confirm } = useFeedback();
-  const projects = useStoreSelector((state) => state.projects);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const choices = useMemo(() => sessionProjectChoices(session, projects.values()), [session, projects]);
-
-  const pick = async (projectId: string | null, linkLocation = false) => {
-    if (busy || !shouldSubmitProjectAssignment(session.projectId, projectId, linkLocation)) return;
-    const target = projectId ? projects.get(projectId) : undefined;
-    const audienceConfirmation = target ? projectAssignmentAudienceConfirmation(session, target) : null;
-    if (target && (audienceConfirmation || linkLocation)) {
-      const accepted = await confirm({
-        title: linkLocation
-          ? "Link Location and Move Session"
-          : audienceConfirmation === "team"
-            ? "Share and Move Session"
-            : "Move Session",
-        message: linkLocation
-          ? `This registers the imported working directory as a Location in “${target.name}” without moving files, and it can also change how future imported sessions in this directory are filed. ${audienceConfirmation === "team"
-            ? "The team will also be able to read the transcript, and moving the session out again does not remove that access."
-            : audienceConfirmation === "unknown"
-              ? "This Wollipog server does not report sharing details, so this may also change who can read the transcript, and moving the session back may not undo that."
-              : "You can move the session again or remove the Location later."}`
-          : audienceConfirmation === "team"
-            ? `Moving this session to the team-owned Project “${target.name}” lets that team read its transcript, and moving it out again does not remove that access. Files and the execution Location stay unchanged.`
-            : `This Wollipog server does not report sharing details, so moving this session to “${target.name}” may change who can read its transcript, and moving it back may not undo that. Files and the execution Location stay unchanged.`,
-        confirmLabel: linkLocation
-          ? "Link Location and Move"
-          : audienceConfirmation === "team" ? "Share and Move" : "Move Session",
-      });
-      if (!accepted) return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await persistProjectAssignment(api.setProject, session.id, projectId, linkLocation);
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const options: ChoiceRowOption<string>[] = [
-    {
-      value: "",
-      title: "No Project",
-      description: "Keep this session outside Project organization.",
-      disabled: busy,
-    },
-    ...choices.map((choice) => ({
-      value: choice.id,
-      title: choice.name,
-      description: `${projectAudienceLabel(choice.audience) ? `${projectAudienceLabel(choice.audience)}. ` : ""}${
-        choice.compatible
-          ? "Linked to this exact Location."
-          : choice.linkable
-            ? "Link this imported Location when moving."
-            : session.adopted && session.importLocationReady !== true
-              ? "Waiting for the runner to verify this imported Location."
-            : choice.current
-              ? "Current assignment; exact Location not linked."
-              : "Project management permission is required to link this Location."}`,
-      disabled: busy || (!choice.compatible && !choice.linkable),
-      disabledReason: busy || choice.compatible
-        ? undefined
-        : choice.linkable
-          ? undefined
-          : session.adopted && session.importLocationReady !== true
-            ? "Waiting for the runner to verify this imported Location."
-            : "Project management permission is required to link this Location.",
-    })),
-  ];
-
-  return (
-    <Modal
-      title="Move to Project"
-      onClose={() => { if (!busy) onClose(); }}
-      returnFocusRef={returnFocusRef}
-      footer={<button className="btn" type="button" onClick={onClose} disabled={busy}>Cancel</button>}
-    >
-      <div className="project-assignment-menu project-move-list">
-        <p className="muted project-assignment-note">
-          Changing this organizes the session without moving files or changing its execution Location. Team sharing is confirmed separately.
-        </p>
-        <ChoiceRows
-          label="Project"
-          options={options}
-          value={session.projectId ?? ""}
-          onChange={(picked) => {
-            const choice = choices.find((candidate) => candidate.id === picked);
-            void pick(picked === "" ? null : picked, choice?.linkable ?? false);
-          }}
-        />
-        {choices.length === 0 && (
-          <p className="muted project-assignment-empty">No Project is linked to this session's exact Location.</p>
-        )}
-        {error && <div className="form-error" role="alert">{error}</div>}
-      </div>
-    </Modal>
-  );
-}
-
-/** Preserves compatibility-only Workspace re-filing when the mobile Project crumb is absent. */
-function LegacyWorkspaceMoveDialog({ session, onClose, returnFocusRef }: {
-  session: SessionView;
-  onClose: () => void;
-  returnFocusRef?: { current: HTMLElement | null };
-}) {
-  const api = useApi();
-  const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
-  const workspaces = runner?.workspaces ?? [];
-  const runnerOnline = runner?.status === "online";
-  const browseSupported = runnerSupportsProtocol(runner?.protocolVersion, "directoryListing");
-  const sessionAgent = runner?.agents.find((agent) => agent.id === session.agentId);
-  const browseDistro = sessionAgent?.context?.kind === "wsl" ? sessionAgent.context.distro : undefined;
-  const [creating, setCreating] = useState(false);
-  const [name, setName] = useState("");
-  const [browsedPath, setBrowsedPath] = useState<string | null>(null);
-  const [browsing, setBrowsing] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const resetCreate = () => {
-    setCreating(false);
-    setName("");
-    setBrowsedPath(null);
-    setBrowsing(false);
-    setError(null);
-  };
-
-  const pick = async (workspaceId: string | null) => {
-    if (busy || workspaceId === session.workspaceId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.setWorkspace(session.id, workspaceId);
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const createWorkspaceGroup = async () => {
-    const trimmed = name.trim();
-    if (busy || !trimmed || !browsedPath) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const { workspace } = await api.createWorkspace(session.runnerId, { name: trimmed, path: browsedPath });
-      await api.setWorkspace(session.id, workspace.id);
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const options: ChoiceRowOption<string>[] = [
-    {
-      value: "",
-      title: "No Workspace",
-      description: "Keep this session outside legacy Workspace grouping.",
-      disabled: busy,
-    },
-    ...workspaces.map((workspace) => ({
-      value: workspace.id,
-      title: workspace.name,
-      description: shortenPath(workspace.path),
-      disabled: busy,
-    })),
-  ];
-
-  return (
-    <Modal
-      title={creating ? "Create Workspace" : "Move to Workspace"}
-      onClose={() => { if (!busy) onClose(); }}
-      returnFocusRef={returnFocusRef}
-      footer={creating ? (
-        <>
-          <button className="btn" type="button" onClick={resetCreate} disabled={busy}>Cancel</button>
-          <button
-            className="btn primary"
-            type="button"
-            onClick={() => void createWorkspaceGroup()}
-            disabled={busy || !name.trim() || !browsedPath}
-          >
-            {busy ? "Creating…" : "Create Workspace"}
-          </button>
-        </>
-      ) : (
-        <>
-          <button
-            className="btn ghost"
-            type="button"
-            onClick={() => {
-              setCreating(true);
-              setError(null);
-            }}
-            disabled={!runnerOnline}
-            title={runnerOnline ? undefined : "Runner offline — start it to browse for a folder"}
-          >
-            New Workspace…
-          </button>
-          <button className="btn" type="button" onClick={onClose} disabled={busy}>Cancel</button>
-        </>
-      )}
-    >
-      {creating ? (
-        <div className="project-assignment-menu project-move-list">
-          <label className="field-label" htmlFor="legacy-workspace-name">Workspace Name</label>
-          <input
-            id="legacy-workspace-name"
-            className="input"
-            value={name}
-            autoFocus
-            spellCheck={false}
-            placeholder="Workspace Name"
-            onChange={(event) => setName(event.target.value)}
-          />
-          {browsedPath ? (
-            <div className="ws-chosen">
-              <span className="ws-chosen-path" title={browsedPath}>{shortenPath(browsedPath)}</span>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="Clear Workspace Selection"
-                title="Clear — pick another folder"
-                onClick={() => setBrowsedPath(null)}
-              >
-                ✕
-              </button>
-            </div>
-          ) : browsing ? (
-            <DirectoryPicker
-              runnerId={session.runnerId}
-              protocolVersion={runner?.protocolVersion}
-              distro={browseDistro}
-              onPick={(path) => {
-                setBrowsedPath(path);
-                setBrowsing(false);
-              }}
-              onCancel={() => setBrowsing(false)}
-            />
-          ) : (
-            <button
-              type="button"
-              className="btn ghost"
-              onClick={() => setBrowsing(true)}
-              disabled={!browseSupported}
-              title={browseSupported
-                ? "Browse the runner for a workspace folder"
-                : runnerCapabilityRequirement(runner?.protocolVersion, "directoryListing", "Directory browsing")}
-            >
-              Browse for a Folder…
-            </button>
-          )}
-          {error && <div className="form-error" role="alert">{error}</div>}
-        </div>
-      ) : (
-        <div className="project-assignment-menu project-move-list">
-          <p className="muted project-assignment-note">
-            Changing this legacy grouping does not move files or change the session's execution path.
-          </p>
-          <ChoiceRows
-            label="Workspace"
-            options={options}
-            value={session.workspaceId ?? ""}
-            onChange={(picked) => { void pick(picked === "" ? null : picked); }}
-          />
-          {error && <div className="form-error" role="alert">{error}</div>}
-        </div>
-      )}
-    </Modal>
-  );
-}
-
-/** The session bar's project button on control planes without Projects: the folder icon and the
- * session's legacy workspace grouping, opening a small menu to re-file it. The assignment is CP-owned view state (no runner round-trip), so
- * it works even while the runner is offline — the store's last-registered workspace list is fine. */
+/** The session bar's project button on control planes without Projects (#2163, §9.1): the folder
+ * icon and the session's workspace, opening a radio-like menu titled Move to Workspace. Choosing a
+ * workspace files the session there; New Workspace… opens its own dialog, so no form grows inside
+ * the menu. The assignment is CP-owned view state (no runner round-trip), so it works while the
+ * runner is offline — the store's last-registered workspace list is fine. */
 function LegacyWorkspaceChip({ session }: { session: SessionView }) {
   const api = useApi();
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
+  const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
   const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
   const workspaces = runner?.workspaces ?? [];
   const runnerOnline = runner?.status === "online";
-  const browseSupported = runnerSupportsProtocol(runner?.protocolVersion, "directoryListing");
-  // Browse in the session agent's context: a WSL-context agent must browse its distro, not the
-  // runner's native host (mirrors NewSessionDialog). Without this the picker lists C:\ for WSL sessions.
-  const sessionAgent = runner?.agents.find((a) => a.id === session.agentId);
-  const browseDistro = sessionAgent?.context?.kind === "wsl" ? sessionAgent.context.distro : undefined;
-
-  // Compatibility-only workspace grouping for control planes without durable Projects.
-  const [creating, setCreating] = useState(false);
-  const [name, setName] = useState("");
-  const [browsedPath, setBrowsedPath] = useState<string | null>(null);
-  const [browsing, setBrowsing] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const menu = useAccessibleMenu(open, setOpen, "workspace-menu");
-
-  const resetCreate = () => {
-    setCreating(false);
-    setName("");
-    setBrowsedPath(null);
-    setBrowsing(false);
-    setBusy(false);
-    setError(null);
-  };
-  const close = () => {
-    menu.close(true);
-    resetCreate();
-  };
-  const closeFolded = useCallback(() => {
-    menu.close(false);
-    setCreating(false);
-    setBrowsing(false);
-  }, [menu.close]);
+  const closeFolded = useCallback(() => menu.close(false), [menu.close]);
   useProjectButtonFold(open, closeFolded, menu.triggerRef, menu.menuRef);
-  const focusWorkspaceControl = (selector: string) => {
-    window.setTimeout(() => menu.menuRef.current?.querySelector<HTMLElement>(selector)?.focus(), 0);
-  };
-  const cancelCreate = () => {
-    resetCreate();
-    focusWorkspaceControl('[role="menuitemradio"][aria-checked="true"], [role="menuitem"]');
-  };
-  const cancelBrowse = () => {
-    setBrowsing(false);
-    focusWorkspaceControl(".ws-browse");
-  };
-  const chooseBrowsedPath = (path: string) => {
-    setBrowsedPath(path);
-    setBrowsing(false);
-    focusWorkspaceControl(".ws-chosen button");
-  };
-  const clearBrowsedPath = () => {
-    setBrowsedPath(null);
-    focusWorkspaceControl(".ws-browse");
-  };
+  const returnFocusRef = useProjectButtonReturnFocus(menu.triggerRef);
 
   const pick = (workspaceId: string | null) => {
-    close();
+    menu.close(true);
     if (workspaceId !== session.workspaceId) void api.setWorkspace(session.id, workspaceId);
-  };
-
-  const createWorkspaceGroup = async () => {
-    const trimmed = name.trim();
-    if (busy || !trimmed || !browsedPath) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const { workspace } = await api.createWorkspace(session.runnerId, { name: trimmed, path: browsedPath });
-      // Apply the new compatibility group without changing the pinned execution path.
-      await api.setWorkspace(session.id, workspace.id);
-      close();
-    } catch (e) {
-      setError((e as Error).message);
-      setBusy(false);
-    }
   };
 
   return (
@@ -6848,10 +6516,10 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
         type="button"
         className="btn ghost session-project-button"
         data-empty={session.workspaceName ? undefined : ""}
-        title="Workspace — change legacy grouping"
+        title={session.workspaceName ?? "No Workspace"}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
-        aria-haspopup={creating ? "dialog" : "menu"}
+        aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menu.menuId}
       >
@@ -6864,112 +6532,46 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
           surfaceRef={menu.menuRef}
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
-          kind={creating ? "popover" : "menu"}
-          role={creating ? "dialog" : "menu"}
-          label={creating ? "Create Workspace" : "Choose Workspace"}
-          onDismiss={close}
-          onKeyDown={creating
-            ? (event) => {
-                if (event.key !== "Escape" || browsing) return;
-                event.preventDefault();
-                event.stopPropagation();
-                close();
-              }
-            : menu.onMenuKeyDown}
+          label="Move to Workspace"
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
         >
-          {creating ? (
-            <div className="ws-create">
-              <div className="menu-label">New Workspace</div>
-              <input
-                className="ws-create-name"
-                value={name}
-                autoFocus
-                spellCheck={false}
-                placeholder="Workspace Name"
-                onChange={(e) => setName(e.target.value)}
-                aria-label="Workspace Name"
-              />
-              {browsedPath ? (
-                <div className="ws-chosen">
-                  <span className="ws-chosen-path" title={browsedPath}>
-                    {shortenPath(browsedPath)}
-                  </span>
-                  <button type="button" className="icon-btn" aria-label="Clear Workspace Selection" title="Clear — pick another folder" onClick={clearBrowsedPath}>
-                    ✕
-                  </button>
-                </div>
-              ) : browsing ? (
-                <DirectoryPicker
-                  runnerId={session.runnerId}
-                  protocolVersion={runner?.protocolVersion}
-                  distro={browseDistro}
-                  onPick={chooseBrowsedPath}
-                  onCancel={cancelBrowse}
-                />
-              ) : (
-                <button
-                  type="button"
-                  className="btn ghost sm ws-browse"
-                  onClick={() => setBrowsing(true)}
-                  disabled={!browseSupported}
-                  title={
-                    browseSupported
-                      ? "Browse the runner for a workspace folder"
-                      : runnerCapabilityRequirement(runner?.protocolVersion, "directoryListing", "Directory browsing")
-                  }
-                >
-                  Browse for a Folder…
-                </button>
-              )}
-              {error && <div className="form-error" role="alert">{error}</div>}
-              <div className="ws-create-actions">
-                <button type="button" className="btn ghost sm" onClick={cancelCreate} disabled={busy}>
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="btn primary sm"
-                  onClick={() => void createWorkspaceGroup()}
-                  disabled={busy || !name.trim() || !browsedPath}
-                >
-                  {busy ? "Creating…" : "Create"}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <MenuLabel>Workspace</MenuLabel>
-              <MenuItem
-                role="menuitemradio"
-                checked={session.workspaceId == null}
-                description="Not Grouped"
-                onClick={() => pick(null)}
-              >
-                No Workspace
-              </MenuItem>
-              {workspaces.map((ws) => (
-                <MenuItem
-                  key={ws.id}
-                  role="menuitemradio"
-                  checked={session.workspaceId === ws.id}
-                  description={<span title={ws.path}>{shortenPath(ws.path)}</span>}
-                  onClick={() => pick(ws.id)}
-                >
-                  {ws.name}
-                </MenuItem>
-              ))}
-              <MenuSeparator />
-              <MenuItem
-                icon={<PlusIcon size={16} />}
-                disabled={!runnerOnline}
-                description={runnerOnline ? undefined : "Runner offline. Start it to browse for a folder."}
-                onClick={() => setCreating(true)}
-              >
-                New Workspace
-              </MenuItem>
-            </>
-          )}
+          <MenuLabel>Move to Workspace</MenuLabel>
+          <MenuItem
+            role="menuitemradio"
+            checked={session.workspaceId == null}
+            description="Keep the session ungrouped."
+            onClick={() => pick(null)}
+          >
+            No Workspace
+          </MenuItem>
+          {workspaces.map((ws) => (
+            <MenuItem
+              key={ws.id}
+              role="menuitemradio"
+              checked={session.workspaceId === ws.id}
+              description={<span title={ws.path}>{shortenPath(ws.path)}</span>}
+              onClick={() => pick(ws.id)}
+            >
+              {ws.name}
+            </MenuItem>
+          ))}
+          <MenuSeparator />
+          <MenuItem
+            icon={<PlusIcon size={16} />}
+            disabled={!runnerOnline}
+            description={runnerOnline ? undefined : `${runnerDisplay(runner, box, session.runnerId).name} is offline.`}
+            onClick={() => {
+              menu.close(false);
+              setCreating(true);
+            }}
+          >
+            New Workspace…
+          </MenuItem>
         </MenuSurface>
+      )}
+      {creating && (
+        <NewWorkspaceDialog session={session} onClose={() => setCreating(false)} returnFocusRef={returnFocusRef} />
       )}
     </>
   );

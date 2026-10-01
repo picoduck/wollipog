@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -22,12 +22,18 @@ export function DirectoryPicker({
   distro,
   onPick,
   onCancel,
+  onLocationChange,
+  hideActions = false,
 }: {
   runnerId: string;
   protocolVersion: number | null | undefined;
   distro?: string;
   onPick: (path: string) => void;
   onCancel: () => void;
+  /** The folder Use This Folder would pick, or null while none is listed. For a dialog that puts
+   * Cancel and Use This Folder in its own footer (`hideActions`). */
+  onLocationChange?: (path: string | null) => void;
+  hideActions?: boolean;
 }) {
   const api = useApi();
   const [path, setPath] = useState(""); // "" ⇒ the runner's $HOME
@@ -84,6 +90,10 @@ export function DirectoryPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const onLocationChangeRef = useRef(onLocationChange);
+  onLocationChangeRef.current = onLocationChange;
+  useEffect(() => { onLocationChangeRef.current?.(listing?.path ?? null); }, [listing]);
+
   const go = () => {
     const p = pathInput.trim();
     if (p) setPath(p);
@@ -133,7 +143,7 @@ export function DirectoryPicker({
           </button>
         ))}
       </div>
-      <div className="dir-actions">
+      {!hideActions && <div className="dir-actions">
         <button type="button" className="btn ghost sm" onClick={onCancel}>
           Cancel
         </button>
@@ -145,7 +155,7 @@ export function DirectoryPicker({
         >
           Use This Folder
         </button>
-      </div>
+      </div>}
     </div>
   );
 }

@@ -5577,22 +5577,36 @@ textarea {
   outline: 2px dashed var(--accent);
   outline-offset: 2px;
 }
-.project-assignment-menu .project-assignment-note,
-.project-assignment-menu .project-assignment-empty {
-  margin: 4px 8px 8px;
-  font-size: 11.5px;
-  line-height: 1.4;
+/* Move to Project, Move to Workspace and New Workspace (#2163). Why the primary is disabled
+   (§7.3): the footer's left slot, small and dim; its own row on a phone, above the two buttons. */
+.modal-foot > .session-move-reason {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0 auto 0 0;
+  color: var(--text-dim);
+  font: var(--type-small);
 }
-/* Move to Project dialog: the popover row styles reused inside a modal. */
-.project-move-list {
+@media (max-width: 760px) {
+  .modal-foot > .session-move-reason { flex-basis: 100%; }
+}
+.session-move-unlisted {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* New Workspace… is a body action (§7.5): a ghost button with its offline reason under it. */
+.session-move-create {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  align-items: flex-start;
+  gap: var(--space-1);
 }
-.project-move-list .project-assignment-note {
-  margin-left: 0;
-  margin-right: 0;
+.new-workspace-folder {
+  display: flex;
+  gap: var(--space-2);
 }
+.new-workspace-folder > .btn { flex: none; }
+.new-workspace-folder-path { font-family: var(--font-mono); }
 .cctx-dot {
   width: 7px;
   height: 7px;
@@ -5999,33 +6013,6 @@ textarea,
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
   border: 0;
-}
-.ws-create {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 2px;
-}
-.ws-create-name {
-  width: 100%;
-  padding: 7px 9px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-size: 13px;
-}
-.ws-create-name:focus {
-  outline: none;
-  border-color: var(--focus);
-}
-.ws-browse {
-  align-self: flex-start;
-}
-.ws-create-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
 }
 .mode-pill {
   display: inline-flex;

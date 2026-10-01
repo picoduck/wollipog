@@ -10,6 +10,7 @@ import {
   type CreateWorkspaceReferenceRequest,
   type ControlPlaneToUi,
   type DescendantRequestView,
+  type TeamView,
   type GitStatusInfo,
   type GitSummaryInfo,
   type InvokeSessionCommandRequest,
@@ -1479,7 +1480,7 @@ const client = {
     },
     organizations: [],
     memberships: [],
-    teams: [],
+    teams: structuredClone(identityTeams),
   }),
   artifactExport: async () => {
     const encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -2168,7 +2169,38 @@ const client = {
     };
     return { reference };
   },
+  // Legacy workspace re-filing (#2163): control planes without projects.
+  setWorkspace: async (id: string, workspaceId: string | null) => {
+    workspaceMoveCount += 1;
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    const workspace = workspaceId ? runner.workspaces.find((candidate) => candidate.id === workspaceId) : undefined;
+    if (workspaceId && !workspace) throw new Error("workspace not found");
+    value.workspaceId = workspaceId;
+    value.workspaceName = workspace?.name ?? null;
+    value.updatedAt += 1;
+    saveModel();
+    window.setTimeout(() => socket?.push({ type: "session_upsert", session: structuredClone(value) }), 0);
+    return structuredClone(value);
+  },
+  createWorkspace: async (_runnerId: string, body: { name: string; path: string }) => {
+    const workspace = { id: `created-workspace-${runner.workspaces.length + 1}`, name: body.name, path: body.path };
+    runner.workspaces.push(workspace);
+    window.setTimeout(() => socket?.push({ type: "runner_upsert", runner: structuredClone(runner) }), 0);
+    return { workspace: structuredClone(workspace) };
+  },
+  listDirectory: async (_runnerId: string, path: string) => {
+    const at = path || "/repos";
+    const parent = at === "/" ? null : at.slice(0, at.lastIndexOf("/")) || "/";
+    const entries = at === "/repos"
+      ? ["alpha", "billing-service", "loose"].map((name) => ({ name, path: `/repos/${name}`, isDir: true }))
+      : [];
+    return { path: at, parent, entries };
+  },
 } as ApiClient;
+
+let workspaceMoveCount = 0;
+let identityTeams: TeamView[] = [];
 
 let nextProjectUpdateError: string | null = null;
 
@@ -2270,11 +2302,17 @@ declare global {
       settleDeferredDescendantRequests(): void;
       failNextDescendantRequests(): void;
       descendantRequestCallCount(): number;
+      workspaceMoveCount(): number;
+      setIdentityTeams(teams: TeamView[]): void;
     };
   }
 }
 
 window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
+  workspaceMoveCount: () => workspaceMoveCount,
+  setIdentityTeams(teams) {
+    identityTeams = structuredClone(teams);
+  },
   setDescendantRequests(state) {
     descendantRequestRows = state === "one" ? [descendantRequestFixture()] : [];
   },

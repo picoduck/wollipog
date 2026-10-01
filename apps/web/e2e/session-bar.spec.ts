@@ -10,9 +10,14 @@ const GENERATED_TITLE = "Add a dark mode toggle to the site header.\n\nRequireme
 const LONG_TITLE =
   "Add a dark mode toggle to the site header and keep the chosen theme across reloads and new windows.\n\nRequirements:\n- x";
 
-async function openBar(page: Page, width: number, options: { session?: RegExp; height?: number } = {}) {
+async function openBar(
+  page: Page,
+  width: number,
+  options: { session?: RegExp; height?: number; legacyWorkspaces?: boolean } = {},
+) {
   await page.setViewportSize({ width, height: options.height ?? 900 });
-  await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&reviewReady=1&fullShell=1");
+  await page.goto(`/command-inbox-projects-e2e.html?scenario=git-visibility&reviewReady=1&fullShell=1${
+    options.legacyWorkspaces ? "&legacyWorkspaces=1" : ""}`);
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   // Changes are a Pinned Summary fact (#2160), so two campaign request badges keep the row under
@@ -184,6 +189,93 @@ test("folding while More Actions is disabled by a running export hands focus to 
   await expect(button).toBeHidden();
   await expect(page.getByRole("menu", { name: "Project Actions" })).toHaveCount(0);
   await expect(bar.locator("h1#page-title")).toBeFocused();
+});
+
+// Delivered from #2146's follow-up in #2163: a dialog opened from the project button returns focus
+// to a visible target when the window narrows while it is open and folds the button away.
+test("cancelling Move to Project after the bar folds hands focus to More Actions, not the hidden button", async ({ page }) => {
+  await openBar(page, 1440);
+  const bar = page.locator("header.session-bar");
+  const button = bar.locator(".session-project-button");
+  await button.click();
+  await page.getByRole("menuitem", { name: "Move to Another Project…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Move to Project" });
+  await expect(dialog).toBeVisible();
+
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await expect(button).toBeHidden();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(bar.getByRole("button", { name: "More Actions" })).toBeFocused();
+
+  // Wide again, the button itself takes focus back.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(button).toBeVisible();
+  await button.click();
+  await page.getByRole("menuitem", { name: "Move to Another Project…" }).click();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(button).toBeFocused();
+});
+
+test("cancelling Move to Project after the bar folds while More Actions is disabled hands focus to the title", async ({ page }) => {
+  await page.route("**/api/sessions/*/export*", () => undefined);
+  await openBar(page, 1440);
+  const bar = page.locator("header.session-bar");
+  await bar.getByRole("button", { name: "Share" }).click();
+  await page.getByRole("menuitem", { name: "Export Markdown" }).click();
+  await expect(bar.getByRole("button", { name: "More Actions" })).toBeDisabled();
+  const button = bar.locator(".session-project-button");
+  await button.click();
+  await page.getByRole("menuitem", { name: "Move to Another Project…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Move to Project" });
+  await expect(dialog).toBeVisible();
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await expect(button).toBeHidden();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(bar.locator("h1#page-title")).toBeFocused();
+});
+
+test("on a control plane without projects the workspace menu files the session, and New Workspace… is a dialog", async ({ page }) => {
+  await openBar(page, 1440, { legacyWorkspaces: true });
+  const bar = page.locator("header.session-bar");
+  const button = bar.locator(".session-project-button");
+  await button.click();
+  const menu = page.getByRole("menu", { name: "Move to Workspace" });
+  await expect(menu.locator(".menu-label")).toHaveText("Move to Workspace");
+  await expect(menu.getByRole("menuitemradio", { name: "Alpha", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(menu.getByRole("menuitemradio", { name: "No Workspace" })).toHaveAccessibleDescription("Keep the session ungrouped.");
+  await expect(menu.locator("input")).toHaveCount(0);
+
+  await menu.getByRole("menuitem", { name: "New Workspace…" }).click();
+  await expect(menu).toHaveCount(0);
+  const dialog = page.getByRole("dialog", { name: "New Workspace" });
+  const name = dialog.getByRole("textbox", { name: "Name" });
+  await expect(name).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "Create and Move" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Browse…" }).click();
+  const chooser = page.getByRole("dialog", { name: "Choose Folder" });
+  await expect(chooser).toBeVisible();
+  // Stacked: the form stays visible under the picker.
+  await expect(dialog).toBeVisible();
+  await expect(chooser.locator(".modal-foot").getByRole("button")).toHaveText(["Cancel", "Use This Folder"]);
+  await chooser.getByRole("button", { name: "billing-service" }).click();
+  await expect(chooser.locator(".dir-path-input")).toHaveValue("/repos/billing-service");
+  await chooser.getByRole("button", { name: "Use This Folder" }).click();
+  await expect(chooser).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Browse…" })).toBeFocused();
+  await expect(dialog.getByRole("textbox", { name: "Folder" })).toHaveValue("/repos/billing-service");
+
+  await name.fill("Billing Service");
+  await dialog.getByRole("button", { name: "Create and Move" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(button).toHaveText("Billing Service");
+  await expect(button).toBeFocused();
+
+  // Choosing a workspace in the menu files the session there at once.
+  await button.click();
+  await page.getByRole("menu", { name: "Move to Workspace" }).getByRole("menuitemradio", { name: "Alpha", exact: true }).click();
+  await expect(button).toHaveText("Alpha");
 });
 
 test("a long transient note keeps to one line inside the 48px bar", async ({ page, context }) => {

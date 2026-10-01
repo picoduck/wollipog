@@ -1358,11 +1358,23 @@ test("session Project assignment changes organization without changing execution
   const projectChip = page.locator(".session-bar .session-project-button").filter({ hasText: "Alpha" });
   await expect(projectChip).toBeVisible();
   let dialog = await openMoveToProjectDialog(page);
-  await expect(dialog.getByText(
-    "Changing this organizes the session without moving files or changing its execution Location. Team sharing is confirmed separately.",
-  ))
-    .toBeVisible();
+  await expect(dialog).toHaveAccessibleDescription(
+    "Files stay where they are. Only the project that lists this session changes.",
+  );
+  // The current project is selected, so the primary waits for a different choice (#2163).
+  await expect(dialog.getByRole("button", { name: "Move Session" })).toBeDisabled();
+  await expect(dialog.getByText("Choose a different project.")).toBeVisible();
+  // Gamma has no Location for this folder and Secret's is another folder's, so they are not listed.
+  await expect(dialog.getByRole("radio", { name: /Gamma/ })).toHaveCount(0);
+  await expect(dialog.getByText("Projects you can't add this folder to aren't listed.")).toBeVisible();
+  await expect(dialog.getByRole("link", { name: "Manage Projects" })).toBeVisible();
+  // Choosing a row only selects it.
   await dialog.getByRole("radio", { name: /No Project/ }).click();
+  await expect(dialog.getByRole("radio", { name: /No Project/ })).toBeChecked();
+  await expect(dialog.getByText("Choose a different project.")).toHaveCount(0);
+  expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
+    .find((session) => session.id === "session-alpha")?.projectId)).toBe("alpha");
+  await dialog.getByRole("button", { name: "Move Session" }).click();
   await expect(dialog).toBeHidden();
   await expect.poll(() => page.evaluate(() => {
     const value = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions.find((session) => session.id === "session-alpha");
@@ -1372,6 +1384,7 @@ test("session Project assignment changes organization without changing execution
   await expect(page.locator(".session-bar .session-project-button").filter({ hasText: "No Project" })).toBeVisible();
   dialog = await openMoveToProjectDialog(page);
   await dialog.getByRole("radio", { name: /Alpha/ }).click();
+  await dialog.getByRole("button", { name: "Move Session" }).click();
   await expect.poll(() => page.evaluate(() => {
     const value = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions.find((session) => session.id === "session-alpha");
     return [value?.projectId, value?.projectLocationId, value?.workspaceId];
@@ -1389,13 +1402,15 @@ test("an imported session can link its verified Location while moving to a manag
   await page.getByRole("button", { name: "Expand Session" }).click();
   const moveDialog = await openMoveToProjectDialog(page);
   const gammaChoice = moveDialog.getByRole("radio", { name: /Gamma/ });
-  await expect(gammaChoice).toHaveAccessibleDescription(/Link this imported Location when moving\./);
+  await expect(gammaChoice).toHaveAccessibleDescription(/Adds this folder to the project\./);
   await gammaChoice.click();
 
-  const confirmation = page.getByRole("dialog", { name: "Link Location and Move Session" });
-  await expect(confirmation).toContainText("registers the imported working directory as a Location");
-  await expect(confirmation).toContainText("can also change how future imported sessions in this directory are filed");
-  await confirmation.getByRole("button", { name: "Link Location and Move" }).click();
+  // The consent sits beside the choice, and the primary names the outcome (#2163).
+  await expect(moveDialog.locator(".notice")).toHaveText(
+    "Gamma will include /repos/loose. New sessions in that folder may be filed there too.",
+  );
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await moveDialog.getByRole("button", { name: "Add Folder and Move" }).click();
 
   await expect(page.locator(".session-bar .session-project-button").filter({ hasText: "Gamma" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Stop Turn" })).toBeEnabled();
@@ -1407,11 +1422,22 @@ test("an imported session can link its verified Location while moving to a manag
   })).toEqual(["gamma", "loose-workspace", "/repos/loose"]);
 });
 
-test("personal sessions require explicit confirmation before joining a team Project", async ({ page }) => {
+test("personal sessions join a team Project only through Move and Share, beside a notice naming the team", async ({ page }) => {
   await page.evaluate(() => {
     const model = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model();
     const alpha = model.projects.find((project) => project.id === "alpha")!;
-    window.__WOLLIPOG_PROJECT_INBOX_E2E__.upsertProject({ ...alpha, audience: "team" });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setIdentityTeams([{
+      teamId: "team-platform",
+      organizationId: "fixture-organization",
+      name: "Platform",
+      memberUserIds: ["fixture-user"],
+      createdAt: 1,
+    }]);
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.upsertProject({
+      ...alpha,
+      audience: "team",
+      scope: { organizationId: "fixture-organization", owner: { kind: "team", teamId: "team-platform" } },
+    });
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
       projectId: null,
       projectName: null,
@@ -1425,13 +1451,17 @@ test("personal sessions require explicit confirmation before joining a team Proj
   await page.getByRole("button", { name: "Expand Session" }).click();
   const moveDialog = await openMoveToProjectDialog(page);
   const alphaChoice = moveDialog.getByRole("radio", { name: /Alpha/ });
-  await expect(alphaChoice).toHaveAccessibleDescription(/Team Project\. Linked to this exact Location\./);
+  await expect(alphaChoice).toHaveAccessibleDescription("Includes this folder. Shared with the Platform team.");
   await alphaChoice.click();
 
-  const confirmation = page.getByRole("dialog", { name: "Share and Move Session" });
-  await expect(confirmation).toContainText("lets that team read its transcript");
-  await expect(confirmation).toContainText("moving it out again does not remove that access");
-  await confirmation.getByRole("button", { name: "Share and Move" }).click();
+  // A warning beside the choice names the team and what becomes visible (#2163).
+  const notice = moveDialog.locator(".notice");
+  await expect(notice).toHaveClass(/warning/);
+  await expect(notice).toHaveText(
+    "Members of the Platform team will be able to read this conversation. Moving it out later doesn't remove their access.",
+  );
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await moveDialog.getByRole("button", { name: "Move and Share" }).click();
 
   await expect.poll(() => page.evaluate(() => {
     const value = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions.find((session) => session.id === "session-alpha");
@@ -1458,10 +1488,12 @@ test("older control planes with missing audience metadata fail closed before Pro
   const moveDialog = await openMoveToProjectDialog(page);
   await moveDialog.getByRole("radio", { name: /Alpha/ }).click();
 
-  const confirmation = page.getByRole("dialog", { name: "Move Session" });
-  await expect(confirmation).toContainText("does not report sharing details");
-  await expect(confirmation).toContainText("may change who can read its transcript");
-  await confirmation.getByRole("button", { name: "Cancel" }).click();
+  await expect(moveDialog.locator(".notice")).toHaveText(
+    "This Wollipog doesn't report who can read this project, so moving the session may change who can read this conversation.",
+  );
+  await expect(moveDialog.getByRole("button", { name: "Move and Share" })).toBeEnabled();
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await moveDialog.getByRole("button", { name: "Cancel" }).click();
   await expect.poll(() => page.evaluate(() => {
     const value = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions.find((session) => session.id === "session-alpha");
     return value?.projectId;
