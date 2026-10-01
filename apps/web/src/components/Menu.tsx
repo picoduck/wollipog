@@ -122,7 +122,7 @@ function useMenuPlacement(
     // What the containing block was last measured for, and what it measured.
     let measuredFor = "";
     let measured = VIEWPORT_BOX;
-    const containingBlock = (rect: DOMRect): FixedContainingBlockOffset => {
+    const containingBlock = (rect: Pick<DOMRect, "left" | "top" | "bottom">): FixedContainingBlockOffset => {
       if (!inline) return VIEWPORT_BOX;
       const key = `${rect.left},${rect.top},${rect.bottom},${window.innerWidth},${window.innerHeight}`;
       if (key === measuredFor) return measured;
