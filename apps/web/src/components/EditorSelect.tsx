@@ -86,7 +86,9 @@ function DestinationIcon({ destination, size = 16 }: { destination: OpenDestinat
  * Session-root destination split button (docs/design-system.md §3.2). The server resolves the root
  * from the session ID; the browser can choose only a discovered editor ID or the fixed file-manager
  * reveal action. It is a quiet control: two ghost segments on a hairline, because opening the folder
- * is never the page's primary action. With one destination it is a single button with no menu.
+ * is never the page's primary action. With one destination it is a single button with no menu,
+ * except while the machine is offline: the button then opens the same Open In menu, so its note
+ * shows why the folder cannot open (§9.3: a disabled reason is never only in a tooltip).
  */
 export function EditorSelect({ sessionId }: { sessionId: string }) {
   const api = useApi();
@@ -95,6 +97,8 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
   const runners = useStoreSelector((s) => s.runners);
   const boxes = useStoreSelector((s) => s.boxes);
   const [open, setOpen] = useState(false);
+  // The control that opened the menu: the split's caret, or a single Open Folder on an offline machine.
+  const [menuOwner, setMenuOwner] = useState<"caret" | "folder">("caret");
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const noteId = `${useId().replace(/:/g, "")}-offline`;
@@ -113,20 +117,23 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
 
   const session = sessions.get(sessionId);
   const runner = session ? runners.get(session.runnerId) : undefined;
-  // Rediscovery can take away the last editor while the menu is open. The caret and the menu go
-  // with it, so close the menu and give the focus it held to the Open Folder button that remains.
+  // The menu lasts as long as the control that opened it. Rediscovery can take away the last editor
+  // while the caret's menu is open, or bring one back while Open Folder's is, and a reconnect takes
+  // away the reason Open Folder's menu exists. Close the menu then and give the focus it held to the
+  // Open button that remains.
   const singleDestination = (runner?.editors?.length ?? 0) === 0;
+  const offline = runner?.status !== "online";
+  const menuOpen = open && (menuOwner === "caret" ? !singleDestination : singleDestination && offline);
   useLayoutEffect(() => {
-    if (!open || !singleDestination) return;
+    if (!open || menuOpen) return;
     setOpen(false);
     const focused = document.activeElement;
     if (!focused || focused === document.body || !focused.isConnected) mainRef.current?.focus();
-  }, [open, singleDestination]);
+  }, [open, menuOpen]);
   if (!session) return null;
   const isRemote = [...boxes.values()].some((b) => b.runnerId === session.runnerId);
   if (!runner || isRemote || !runnerSupportsProtocol(runner.protocolVersion, "hostActions")) return null;
 
-  const offline = runner.status !== "online";
   const offlineNote = offlineDestinationNote(runnerDisplay(runner, undefined, runner.runnerId).name);
   const editors = (runner.editors ?? []).map(editorDestination);
   const reveal: OpenDestination = { kind: "reveal", key: REVEAL_DESTINATION_KEY, name: fileManagerLabel(runner.os) };
@@ -182,17 +189,35 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
     </MenuItem>
   );
 
+  // A single Open Folder on an offline machine opens the menu instead of the folder, so the note it
+  // is described by is visible text (§9.1), and it is the trigger Escape returns focus to.
+  const folderMenu = only && offline;
+  const setMainRef = (element: HTMLButtonElement | null) => {
+    mainRef.current = element;
+    if (only) menu.triggerRef.current = element;
+  };
+
   return (
     <div className={only ? "editor-select" : "editor-select split"}>
       <button
-        ref={mainRef}
+        ref={setMainRef}
         type="button"
         className="btn ghost editor-main"
         aria-disabled={offline || busy}
         aria-describedby={offline ? noteId : undefined}
-        onClick={() => void launch(chosen)}
+        onClick={() => {
+          if (!folderMenu) {
+            void launch(chosen);
+            return;
+          }
+          setMenuOwner("folder");
+          menu.toggle();
+        }}
         title={mainLabel}
         aria-label={mainLabel}
+        aria-haspopup={folderMenu ? "menu" : undefined}
+        aria-expanded={folderMenu ? menuOpen : undefined}
+        aria-controls={folderMenu ? menu.menuId : undefined}
       >
         <DestinationIcon destination={chosen} size={16} />
         <span className="editor-main-label">{only ? mainLabel : "Open"}</span>
@@ -203,20 +228,28 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
           type="button"
           className="btn ghost"
           aria-disabled={busy}
-          onClick={() => { if (!busy) menu.toggle(); }}
-          onKeyDown={(event) => { if (!busy) menu.onTriggerKeyDown(event); }}
+          onClick={() => {
+            if (busy) return;
+            setMenuOwner("caret");
+            menu.toggle();
+          }}
+          onKeyDown={(event) => {
+            if (busy) return;
+            setMenuOwner("caret");
+            menu.onTriggerKeyDown(event);
+          }}
           title={CHOOSE_DESTINATION_LABEL}
           aria-label={CHOOSE_DESTINATION_LABEL}
           aria-haspopup="menu"
-          aria-expanded={open}
+          aria-expanded={menuOpen}
           aria-controls={menu.menuId}
         >
           <ChevronDownIcon size={14} />
         </button>
       )}
       {/* The note the disabled Open points to while the menu that shows it is closed. */}
-      {offline && !(open && !only) && <span id={noteId} hidden>{offlineNote}</span>}
-      {open && !only && (
+      {offline && !menuOpen && <span id={noteId} hidden>{offlineNote}</span>}
+      {menuOpen && (
         <MenuSurface
           surfaceRef={menu.menuRef}
           anchor={{ trigger: menu.triggerRef }}

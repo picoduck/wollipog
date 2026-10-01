@@ -122,6 +122,52 @@ test("offline, Open is disabled and the menu explains why above destinations tha
   await expect(choose).toBeFocused();
 });
 
+for (const width of [1440, 940]) {
+  test(`offline, a single Open Folder shows why in the Open In menu at ${width}px (#2273)`, async ({ page }) => {
+    await openFixture(page, width, "offline=1&editors=none");
+    const select = page.locator(".editor-select");
+    await expect(select.getByRole("button")).toHaveCount(1);
+    const folder = select.getByRole("button", { name: "Open Folder", exact: true });
+    await expect(folder).toBeDisabled();
+    await expect(folder).toHaveAttribute("title", "Open Folder");
+    await expect(folder).toHaveAttribute("aria-haspopup", "menu");
+    await expect(folder).toHaveAccessibleDescription(OFFLINE_NOTE);
+    if (width === 940) await expect(folder.locator(".editor-main-label")).toBeHidden();
+
+    const menu = page.getByRole("menu", { name: "Open In" });
+    for (const key of ["Enter", "Space"]) {
+      await folder.focus();
+      await page.keyboard.press(key);
+      await expect(menu).toBeVisible();
+      await expect(menu).toBeFocused();
+      await expect(folder).toHaveAttribute("aria-expanded", "true");
+      const note = menu.locator(".menu-note");
+      await expect(note).toBeVisible();
+      await expect(note).toHaveText(OFFLINE_NOTE);
+      await expect(folder).toHaveAccessibleDescription(OFFLINE_NOTE);
+      const radios = menu.getByRole("menuitemradio");
+      await expect(radios).toHaveText(["File Manager"]);
+      await expect(radios).toBeDisabled();
+      // The note sits at the bottom, below the disabled file manager.
+      const [itemBox, noteBox] = [await radios.boundingBox(), await note.boundingBox()];
+      expect(noteBox!.y).toBeGreaterThanOrEqual(itemBox!.y + itemBox!.height);
+      const menuBox = await menu.boundingBox();
+      expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+      expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(width);
+      await page.keyboard.press("Escape");
+      await expect(menu).toHaveCount(0);
+      await expect(folder).toBeFocused();
+    }
+
+    // A pointer click too; `force` because Playwright waits for an aria-disabled control to enable.
+    await folder.click({ force: true });
+    await expect(menu.locator(".menu-note")).toBeVisible();
+    await menu.getByRole("menuitemradio", { name: "File Manager" }).dispatchEvent("click");
+    await expect(menu).toBeVisible();
+    expect(await page.evaluate(() => window.hostActions)).toEqual([]);
+  });
+}
+
 test("a failed launch is an error toast, not a note under the button", async ({ page }) => {
   await openFixture(page, 1440, "fail=1");
   await page.getByRole("button", { name: "Open in VS Code" }).click();
