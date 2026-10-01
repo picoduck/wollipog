@@ -88,6 +88,14 @@ their authorizing checkpoint. Windows byte-range fencing uses a range beyond the
 so ordinary reads of the guard do not conflict with its own lock. Microsoft documents
 [locking beyond EOF and conflicts through other handles](https://learn.microsoft.com/en-us/windows/win32/fileio/locking-and-unlocking-byte-ranges-in-files).
 
+A guard publication interrupted after linking can leave its generated root staging name as a
+hard link to the permanent guard. Under the held fence, Windows classifies that staging handle
+by exact volume/file identity before accepting any bytes. Only that same guard inode receives
+guard-compatible shared-write access, with deletion sharing denied, full-byte equality to the
+pinned guard, stable fingerprints and a named-identity recheck. Every other staging inode is
+closed and reopened with ordinary no-shared-write access and its discovery identity rechecked;
+matching bytes alone do not supply guard identity or ownership authority.
+
 Only the fixed retirement alias can change which currently selected manifest tuple it holds.
 Readers still require its full digest and exact device/inode to match a committed tuple and
 recheck its named identity after reading. Every ordinary retired path requires its own named
@@ -146,10 +154,10 @@ images. Windows tests include interrupted retirement move and flush boundaries.
 
 A 512/512/1,024 native/helper/mixed handoff run measured at most 31/31/27 metadata records and
 19,348/19,720/17,880 bytes respectively. Native whole-handoff read instrumentation also counts
-trusted helper-binary integrity checks: its observed maximum was 15,615,263 bytes; helper-only
-journal reads were at most 333,412 bytes. These measurements do not replace the enforced limits.
-Maximum padded legacy migration (4,090 transitions) completed in approximately 50 seconds
-native and 52 seconds helper on the development filesystem. Its complete largest transaction
+trusted helper-binary integrity checks: its latest observed maximum was 16,421,141 bytes;
+helper-only journal reads were at most 332,998 bytes. These measurements do not replace the
+enforced limits. Maximum padded legacy migration (4,090 transitions) completed in approximately
+77 seconds native and 49 seconds helper on the development filesystem. Its complete largest transaction
 used 57,307 record operations / 221,215,834 read-or-hashed bytes native, and 73,669 /
 166,524,777 helper, below both negotiated work ceilings. The selected checkpoint was roughly
 1.54 MiB after subsequent cross-reader handoffs. These are workload measurements, not latency

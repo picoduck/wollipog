@@ -193,8 +193,41 @@ test("a published guard staging hard link is readable without another process or
   assert.equal(registry.releaseHome(home), true);
 });
 
+test("Windows guard discovery keeps same-byte substituted staging under strong ordinary sharing", { skip: process.platform !== "win32", timeout: 120_000 }, async (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-lease-guard-substitution-")));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const root = seed(home), registry = new ProviderHomeLeaseRegistry(owner);
+  registry.acquireHome(home);
+  const guard = join(root, "mutable-home.lock", "protocol-v4.json");
+  const staging = join(root, `.provider-home-lease-${randomUUID()}.tmp`);
+  linkSync(guard, staging);
+  assert.doesNotThrow(() => readLeaseIoSnapshot(root));
+  // Substitute the generated name with identical bytes on a different inode. The discovery
+  // handle must never make this an accepted shared-write guard witness.
+  renameSync(staging, join(home, "previous-guard-alias"));
+  writeFileSync(staging, readFileSync(guard));
+  assert.notEqual(lstatSync(staging, { bigint: true }).ino, lstatSync(guard, { bigint: true }).ino);
+  const before = leaseEvidence(root), marker = join(home, "ordinary-writer-ready");
+  const writer = holdFence(staging, marker, false, 60);
+  t.after(() => { if (writer.exitCode === null && writer.signalCode === null) writer.kill("SIGKILL"); });
+  await fenceReady(writer, marker);
+  assert.throws(() => readLeaseIoSnapshot(root), (error: unknown) => {
+    assert.ok(error instanceof Error); assert.match(error.message, /Windows code 32/);
+    assert.ok(error.message.includes(staging.slice(root.length + 1))); return true;
+  });
+  assert.deepEqual(leaseEvidence(root), before);
+  const ended = new Promise<void>(resolve => writer.once("close", () => resolve()));
+  writer.kill("SIGKILL"); await ended;
+  const snapshot = readLeaseIoSnapshot(root);
+  const ordinary = snapshot.entries.find(entry => entry.directory === "root" && entry.name === staging.slice(root.length + 1))!;
+  const permanent = snapshot.entries.find(entry => entry.directory === "lock" && entry.name === "protocol-v4.json")!;
+  assert.notEqual(ordinary.inode, permanent.inode);
+  assert.deepEqual(ordinary.raw, permanent.raw, "bytes alone did not grant compatible sharing");
+  assert.equal(registry.releaseHome(home), true);
+});
+
 test("portable selected checkpoints preserve unsafe evidence and reject foreign or substituted authority", { timeout: 600_000 }, (t) => {
-  const cases = ["owner", "host", "live-pid", "guard", "anchor", "unknown", "ancestry", ...(process.platform === "win32" ? ["alias", "alias-inode"] : [])];
+  const cases = ["owner", "host", "live-pid", "guard", "guard-inode", "anchor", "unknown", "ancestry", ...(process.platform === "win32" ? ["alias", "alias-inode"] : [])];
   for (const scenario of cases) {
     const home = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-portable-refusal-")));
     t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -210,6 +243,12 @@ test("portable selected checkpoints preserve unsafe evidence and reject foreign 
       writeFileSync(tipPath, `${JSON.stringify({ ...tip, state: "active", pid: scenario === "live-pid" ? process.pid : 999999,
         ...(scenario === "owner" ? { ownerHash: "b".repeat(64) } : {}), ...(scenario === "host" ? { hostname: "foreign-host" } : {}) })}\n`);
     } else if (scenario === "guard") writeFileSync(join(lock, "protocol-v4.json"), `${readFileSync(join(lock, "protocol-v4.json"), "utf8")} `);
+    else if (scenario === "guard-inode") {
+      const guard = join(lock, "protocol-v4.json"), raw = readFileSync(guard);
+      renameSync(guard, join(home, "previous-guard"));
+      writeFileSync(guard, raw);
+      assert.notEqual(lstatSync(guard, { bigint: true }).ino, lstatSync(join(home, "previous-guard"), { bigint: true }).ino);
+    }
     else if (scenario === "anchor") writeFileSync(anchor, `${readFileSync(anchor, "utf8")} `);
     else if (scenario === "unknown") writeFileSync(join(root, "unproven.json"), "{}", { mode: 0o600 });
     else if (scenario === "alias") writeFileSync(join(root, ".mutable-home.retired"), "corrupt selected-manifest alias");

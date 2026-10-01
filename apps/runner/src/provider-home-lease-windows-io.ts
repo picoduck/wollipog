@@ -83,9 +83,9 @@ public static class WollipogProviderHomeLeaseIo {
   static bool Name(string value){if(value.Length<1||value.Length>255||value=="."||value=="..")return false;foreach(char c in value)if(!((c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='.'||c=='-'||c=='_'))return false;return true;}
   static bool Slot(string value){return value==".mutable-home.checkpoint.pending"||value==".mutable-home.checkpoint.pending-2";}
   static string PathFor(byte dir,string name){Need(dir<2&&Name(name)&&(dir==0||lockHandle!=null),"invalid lease relative path");return Path.Combine(dir==0?root:lockPath,name);}
-  static SafeFileHandle Open(string path,bool directory,bool write=false,bool deletion=false,bool shareWrite=false){
+  static SafeFileHandle Open(string path,bool directory,bool write=false,bool deletion=false,bool shareWrite=false,bool guardWitness=false){
     uint access=READ|(write?WRITE:0)|(deletion?DELETE:0);uint sharing=SHARE_READ|(directory||shareWrite?SHARE_WRITE:0)|(directory?0:SHARE_DELETE);
-    if(Path.GetFileName(path)==GUARD)sharing&=~SHARE_DELETE;
+    if(Path.GetFileName(path)==GUARD||guardWitness)sharing&=~SHARE_DELETE;
     SafeFileHandle handle;var elapsed=Stopwatch.StartNew();
     for(;;){handle=CreateFileW(path,access,sharing,IntPtr.Zero,3,REPARSE|(directory?BACKUP:0)|(write?WRITE_THROUGH:0),IntPtr.Zero);
       if(!handle.IsInvalid)break;int error=Marshal.GetLastWin32Error();handle.Dispose();
@@ -121,7 +121,25 @@ public static class WollipogProviderHomeLeaseIo {
     using(var borrowed=new SafeFileHandle(handle.DangerousGetHandle(),false))using(var stream=new FileStream(borrowed,FileAccess.Read,65536,false)){stream.Position=0;int offset=0;while(offset<raw.Length){int count=stream.Read(raw,offset,raw.Length-offset);Need(count>0,"lease record changed during read");offset+=count;}Need(stream.ReadByte()<0,"lease record expanded during read");}
     Need(Fingerprint(handle)==stamp,"lease record changed during read");return raw;
   }
-  static Entry Read(byte dir,string name,bool shareWrite=false){Alive();using(var handle=Open(PathFor(dir,name),false,false,false,shareWrite||name==GUARD)){INFO info=Info(handle);Need(Size(info)<=4096||(dir==0&&(Slot(name)||name==ANCHOR||name==ALIAS)),"ordinary lease record byte limit exceeded");byte[] raw=ReadBytes(handle);return new Entry{Dir=dir,Name=name,Dev=Dev(info),Ino=Ino(info),Stamp=Fingerprint(handle),Mode=0x81b6,Links=info.Links,Uid=0,Raw=raw};}}
+  static bool GuardStaging(string name){Guid id;return name.Length==61&&name.StartsWith(".provider-home-lease-",StringComparison.Ordinal)&&name.EndsWith(".tmp",StringComparison.Ordinal)&&Guid.TryParseExact(name.Substring(21,36),"D",out id);}
+  static bool SameFile(INFO a,INFO b){return a.Volume==b.Volume&&a.IndexHigh==b.IndexHigh&&a.IndexLow==b.IndexLow;}
+  static Entry ReadHandle(SafeFileHandle handle,byte dir,string name){INFO info=Info(handle);Need(Size(info)<=4096||(dir==0&&(Slot(name)||name==ANCHOR||name==ALIAS)),"ordinary lease record byte limit exceeded");byte[] raw=ReadBytes(handle);return new Entry{Dir=dir,Name=name,Dev=Dev(info),Ino=Ino(info),Stamp=Fingerprint(handle),Mode=0x81b6,Links=info.Links,Uid=0,Raw=raw};}
+  static Entry Read(byte dir,string name,bool shareWrite=false){
+    Alive();string path=PathFor(dir,name);
+    if(dir==0&&guardHandle!=null&&GuardStaging(name)){
+      // Discovery accepts no bytes or proof. A staged hard link to the permanent guard
+      // needs its guard's sharing flags; every other inode is reopened without shared writes.
+      INFO discovered;using(var probe=Open(path,false,false,false,true))discovered=Info(probe);
+      bool witness=SameFile(discovered,Info(guardHandle));
+      using(var handle=Open(path,false,false,false,witness,witness)){
+        INFO actual=Info(handle);Need(SameFile(discovered,actual)&&(!witness||SameFile(actual,Info(guardHandle))),"lease staging identity changed during discovery");
+        Entry entry=ReadHandle(handle,dir,name);
+        if(witness){Need(BytesEqual(entry.Raw,ReadBytes(guardHandle)),"guard staging bytes changed");CheckNamed(path,handle,entry.Dev,entry.Ino,entry.Stamp);Pinned();}
+        return entry;
+      }
+    }
+    using(var handle=Open(path,false,false,false,shareWrite||name==GUARD))return ReadHandle(handle,dir,name);
+  }
   static string Key(Entry entry){return entry.Dir+"/"+entry.Name;}
   static bool BytesEqual(byte[] a,byte[] b){if(a.Length!=b.Length)return false;for(int i=0;i<a.Length;i++)if(a[i]!=b[i])return false;return true;}
   static void Actor(byte[] raw){string value=Utf8.GetString(raw);int depth=0,found=0;bool key=false;for(int i=0;i<value.Length;i++){char c=value[i];if(c=='"'){int begin=++i;bool escaped=false;for(;i<value.Length&&value[i]!='"';i++)if(value[i]=='\\'){escaped=true;i++;}Need(i<value.Length,"invalid acquired lease JSON");if(depth==1&&key){key=false;if(!escaped&&i-begin==3&&value.Substring(begin,3)=="pid"){int at=i+1;while(at<value.Length&&Char.IsWhiteSpace(value[at]))at++;Need(at<value.Length&&value[at++]==':',"invalid acquired PID");while(at<value.Length&&Char.IsWhiteSpace(value[at]))at++;int digits=at;while(at<value.Length&&value[at]>='0'&&value[at]<='9')at++;uint pid;Need(at>digits&&at-digits<=10&&UInt32.TryParse(value.Substring(digits,at-digits),out pid)&&pid==parentId&&found++==0,"acquired token does not belong to helper parent");}}}else if(c=='{'||c=='['){depth++;if(depth==1)key=true;}else if(c=='}'||c==']'){Need(depth>0,"invalid acquired lease JSON");depth--;}else if(c==','&&depth==1)key=true;}Need(found==1&&depth==0,"acquired token PID could not be proven");}
