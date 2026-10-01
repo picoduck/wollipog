@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -31,7 +31,7 @@ interface LiveStack {
   receiptPath: string;
   sessionId: string;
   logs(): string;
-  restart(): Promise<void>;
+  restart(restartRunner?: boolean): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -167,6 +167,7 @@ async function startLiveStack(
   provider: "claude" | "codex" = "claude",
   codexScenario: "question" | "dogfood-question" | "async-question" = "question",
   restartRecovery = false,
+  asyncDelivery?: "accepted" | "rejected",
 ): Promise<LiveStack> {
   const port = await reservePort();
   const httpBase = `http://127.0.0.1:${port}`;
@@ -281,6 +282,10 @@ async function startLiveStack(
           env: {
             WOLLIPOG_FAKE_CODEX_SCENARIO: codexScenario,
             WOLLIPOG_FAKE_CODEX_RECEIPT: receiptPath,
+            ...(asyncDelivery ? {
+              WOLLIPOG_FAKE_CODEX_ASYNC_DELIVERY: asyncDelivery,
+              WOLLIPOG_FAKE_CODEX_ASYNC_RELEASE: receiptPath + ".release",
+            } : {}),
             ...(restartRecovery ? { WOLLIPOG_FAKE_QUESTION_STATE: recoveryStatePath } : {}),
           },
         }
@@ -332,18 +337,23 @@ async function startLiveStack(
     }
     if (!sessionId) throw new Error(`session was never created (${lastCreateFailure})\n${logs()}`);
 
-    const restart = async () => {
-      await stopChild(runner);
-      runner = null;
+    const restart = async (restartRunner = true) => {
+      if (restartRunner) {
+        await stopChild(runner);
+        runner = null;
+      }
       await stopChild(controlPlane);
       controlPlane = null;
       const restartedControlPlane = spawnControlPlane();
       await waitForHealth(httpBase, restartedControlPlane, logs);
-      const restartedRunner = spawnRunner();
+      const restartedRunner = restartRunner ? spawnRunner() : runner!;
       let lastSession: SessionView | null = null;
       for (let attempt = 0; attempt < 100; attempt += 1) {
         const session = await fetchSession({ httpBase, ownerToken, sessionId });
         lastSession = session;
+        if (!restartRunner && asyncDelivery && session.pendingApproval === null &&
+            session.queued?.length === 1) return;
+        if (asyncDelivery && session.pendingApproval === null && existsSync(receiptPath)) return;
         if (session.pendingApproval?.kind === "question" && (
           codexScenario === "async-question"
             ? session.pendingApproval.async === true && session.status === "idle"
@@ -577,6 +587,107 @@ for (const viewport of [
     await stack.stop();
   }
 });
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test.describe(`Async Answer Delivery on ${viewport.name}`, () => {
+    const evidenceDir = process.env.WOLLIPOG_ISSUE_2306_EVIDENCE_DIR;
+    test.use({
+      viewport: { width: viewport.width, height: viewport.height },
+    });
+    for (const delivery of ["accepted", "rejected"] as const) {
+      test(`running async answers ${delivery === "accepted" ? "steer automatically" : "stay queued"} without reopening`, async ({ page: fixturePage, browser, baseURL }) => {
+        test.setTimeout(180_000);
+        const recording = evidenceDir ? await browser.newContext({
+          baseURL,
+          viewport: { width: viewport.width, height: viewport.height },
+          recordVideo: { dir: evidenceDir, size: { width: viewport.width, height: viewport.height } },
+        }) : null;
+        const page = recording ? await recording.newPage() : fixturePage;
+        const stack = await startLiveStack("codex", "async-question", false, delivery);
+        const prefix = `${delivery}-${viewport.name}`;
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        const beat = async (milliseconds: number) => {
+          if (evidenceDir) await page.waitForTimeout(milliseconds);
+        };
+        const capture = async (stage: string) => {
+          if (!evidenceDir) return;
+          mkdirSync(evidenceDir, { recursive: true });
+          for (const theme of ["dark", "light"] as const) {
+            await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+            await page.screenshot({ path: join(evidenceDir, `${prefix}-${stage}-${theme}.png`) });
+          }
+          await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+        };
+        try {
+          expect((await fetchSession(stack)).status).toBe("running");
+          const fragment = new URLSearchParams({
+            origin: stack.httpBase, token: stack.ownerToken, sessionId: stack.sessionId,
+            actualAsyncMessage: "1", queued: "1", liveQueue: "1",
+          });
+          await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "composer"));
+          await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+          const answer = page.locator(".composer-answer-input");
+          await expect(answer).toBeVisible();
+          await capture("before");
+          await beat(2_500);
+          await answer.fill("1");
+          await beat(1_500);
+          await page.getByRole("button", { name: "Submit Answers" }).click();
+          await expect(answer).toHaveCount(0);
+          await expect(page.locator(".composer-input")).toBeVisible();
+          await expect.poll(async () => existsSync(stack.receiptPath + ".steer")).toBe(true);
+          await expect.poll(async () => (await fetchSession(stack)).pendingApproval).toBeNull();
+          await expect.poll(async () => (await fetchSession(stack)).queued?.length ?? 0)
+            .toBe(delivery === "rejected" ? 1 : 0);
+          await page.reload();
+          await expect(answer).toHaveCount(0);
+          await expect(page.getByRole("region", { name: "Agent Questions" })).toHaveCount(0);
+          await expect(page.locator(".composer-input")).toBeVisible();
+          if (delivery === "rejected") {
+            await expect(page.locator(".queued-item")).toHaveCount(1);
+            await expect(page.locator(".queued-item")).toContainText("Answer: Patch");
+            expect(existsSync(stack.receiptPath)).toBe(false);
+          } else {
+            expect(JSON.parse(await readFile(stack.receiptPath, "utf8"))).toMatchObject({ delivery: "steer", answer: "Patch" });
+            expect((await fetchSession(stack)).status).toBe("running");
+          }
+          await capture("after");
+          await beat(3_000);
+          if (delivery === "rejected") {
+            // Reconnect the live runner to a restarted CP while delivery remains queued.
+            // Journal tests separately prove replay after a runner process is lost.
+            await stack.restart(false);
+            await page.reload();
+            await expect(answer).toHaveCount(0);
+            await expect(page.locator(".queued-item")).toHaveCount(1);
+            writeFileSync(stack.receiptPath + ".release", "release");
+            await expect.poll(async () => existsSync(stack.receiptPath)).toBe(true);
+            expect(JSON.parse(await readFile(stack.receiptPath, "utf8"))).toMatchObject({ delivery: "queue", answer: "Patch" });
+          } else {
+            writeFileSync(stack.receiptPath + ".release", "release");
+          }
+          await expect.poll(async () => (await fetchSession(stack)).status).toBe("idle");
+          expect(errors).toEqual([]);
+          if (evidenceDir) {
+            await beat(3_000);
+            const video = page.video();
+            await page.close();
+            await video?.saveAs(join(evidenceDir, `${prefix}.webm`));
+          }
+        } catch (error) {
+          throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stack.logs()}`);
+        } finally {
+          await stack.stop();
+          await recording?.close();
+        }
+      });
+    }
+  });
+}
 
 for (const provider of ["claude", "codex"] as const) {
   for (const style of ["interactive", "composer"] as const) {

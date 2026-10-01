@@ -569,6 +569,117 @@ test("a late async dismissal cannot clear a reused provider request id", () => {
   }
 });
 
+for (const outcome of ["accepted", "rejected", "uncertain"] as const) {
+  test(`a durable async answer uses steering and handles ${outcome} delivery without reopening`, async () => {
+    const { sm, sent, store, cleanup } = makeHarness(true);
+    try {
+      const entry = (sm as any).active.get("s_perm");
+      entry.activeTurnId = "running-turn";
+      entry.activeTurnConfig = {};
+      entry.providerReady = true;
+      entry.context = { kind: "native" };
+      entry.client.agentSessionId = () => "codex-thread";
+      entry.client.activeSteeringTurnId = () => "provider-turn";
+      const steers: Array<{ submissionId: string; text: string }> = [];
+      entry.client.steer = async (input: { submissionId: string; text: string }) => {
+        steers.push(input);
+        return { outcome, providerTurnId: "provider-turn", reason: "fixture delivery result" };
+      };
+      store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex",
+        agentSessionId: "codex-thread", status: "running" });
+      (sm as any).emitEvent("s_perm", {
+        kind: "question_request", async: true, requestId: "codex-async:steer",
+        questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+      });
+      const recoveryId = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+      const transitions: string[] = [];
+      sm.answerRecoveredQuestion("s_perm", "codex-async:steer", recoveryId, { "0": "Patch" }, {
+        commandId: "async_steer_command",
+        beginSteering: () => { transitions.push("steering"); },
+        steeringRejected: () => { transitions.push("requeued"); },
+        queued: () => { transitions.push("queued"); },
+        started: () => { transitions.push("started"); },
+        completed: () => { transitions.push("completed"); },
+        failed: (error) => { assert.fail(error); },
+        uncertain: () => { transitions.push("uncertain"); },
+      });
+      for (let attempt = 0; attempt < 40 &&
+        (sm as any).steeringLaneRunning.has("s_perm"); attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      assert.equal(steers.length, 1);
+      assert.match(steers[0]!.text, /Question: Which path\?\nAnswer: Patch/u);
+      assert.equal(steers[0]!.submissionId, "async_steer_command");
+      assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+      assert.equal(entry.running, true);
+      const messages = eventsOf(sent, "user_message") as Array<{
+        payload: { commandId?: string; deliveryIntent?: string; turnId?: string };
+      }>;
+      if (outcome === "accepted") {
+        assert.deepEqual(transitions, ["queued", "steering", "started", "completed"]);
+        assert.equal(messages.length, 1);
+        assert.equal(messages[0]!.payload.commandId, "async_steer_command");
+        assert.equal(messages[0]!.payload.deliveryIntent, "steer");
+        assert.equal(messages[0]!.payload.turnId, "running-turn");
+        assert.equal(entry.queue.length, 0);
+      } else {
+        assert.deepEqual(transitions, ["queued", "steering", outcome === "uncertain" ? "uncertain" : "requeued"]);
+        assert.equal(messages.length, 0);
+        assert.equal(entry.queue.length, outcome === "rejected" ? 1 : 0);
+        assert.equal(entry.reservedPromotions.size, 0);
+        if (outcome === "rejected") {
+          entry.running = false;
+          (sm as any).emitStatus("s_perm", "idle");
+          (sm as any).scheduleDrain("s_perm");
+          for (let attempt = 0; attempt < 40 && !transitions.includes("completed"); attempt += 1) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+          assert.equal(transitions.at(-1), "completed");
+        }
+      }
+      assert.equal((sm as any).steerFences(entry).size, 0);
+      sm.reconcileStore();
+      assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    } finally {
+      cleanup();
+    }
+  });
+}
+
+test("a durably queued async answer stops presenting its question while the turn runs", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex",
+      agentSessionId: "codex-thread", status: "running" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:queued",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    const recoveryId = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "queued_async_answer",
+      queued: () => {}, started: () => {}, completed: () => {},
+      failed: (error) => { assert.fail(error); }, uncertain: (error) => { assert.fail(error); },
+    };
+    sm.answerRecoveredQuestion("s_perm", "codex-async:queued", recoveryId, { "0": "Patch" }, lifecycle);
+    assert.equal((sm as any).active.get("s_perm").queue.length, 1);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null,
+      "a queued answer must keep its exact question occurrence out of the response form");
+    const resolution = eventsOf(sent, "question_resolved") as Array<{
+      payload: { commandId?: string; startsTurn?: boolean; occurrenceId: string };
+    }>;
+    assert.equal(resolution.length, 1);
+    assert.equal(resolution[0]!.payload.occurrenceId, recoveryId);
+    assert.equal(resolution[0]!.payload.commandId, undefined);
+    assert.equal(resolution[0]!.payload.startsTurn, undefined);
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null,
+      "restart must not reconstruct a question whose answer was accepted");
+  } finally {
+    cleanup();
+  }
+});
+
 test("an accepted async answer outruns older queued prompts and survives a later question", async () => {
   const { sm, sent, store, cleanup } = makeHarness(true);
   try {
@@ -607,13 +718,13 @@ test("an accepted async answer outruns older queued prompts and survives a later
       options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
     });
     assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval)
-      .map((request) => request.requestId), ["continued-work-approval", "codex-async:older"]);
+      .map((request) => request.requestId), ["continued-work-approval"]);
     sm.resolvePermission("s_perm", "continued-work-approval", "allow");
     (sm as any).onDriverEvent("s_perm", {
       kind: "question_request", async: true, requestId: "codex-async:newer",
       questions: [{ id: "0", question: "New question?", options: [] }],
     });
-    assert.equal(eventsOf(sent, "question_resolved").length, 0);
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
     entry.running = false;
     (sm as any).emitStatus("s_perm", "idle");
     (sm as any).scheduleDrain("s_perm");
@@ -732,7 +843,7 @@ test("campaign continuation keeps a resumable async question until its exact lat
     assert.deepEqual(answerTransitions, ["queued", "started", "completed"]);
     assert.match(prompts[1]!, /Which path\?\nAnswer: Patch/u);
     const resolved = eventsOf(sent, "question_resolved");
-    assert.equal(resolved.length, 1);
+    assert.equal(resolved.length, 2);
     assert.equal((resolved[0] as { payload: { occurrenceId: string } }).payload.occurrenceId, occurrence);
     assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
   } finally {
@@ -819,7 +930,7 @@ test("an accepted async answer runs before a queued campaign continuation", asyn
     assert.match(prompts[0]!, /Which path\?\nAnswer: Patch/u);
     assert.equal(prompts[1], "Campaign queued");
     assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
-    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+    assert.equal(eventsOf(sent, "question_resolved").length, 2);
   } finally {
     cleanup();
   }

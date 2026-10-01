@@ -44,6 +44,8 @@ interface DurableCommandRecord {
   error?: string;
   code?: DurableSessionCommandErrorCode;
   userEventSeq?: number;
+  /** An interrupted steering attempt stays started, including when read by older runners. */
+  steeringPending?: boolean;
 }
 
 export interface DurableCommandReceipt {
@@ -268,7 +270,7 @@ export class DurableCommandStore {
   transition(
     prior: DurableCommandRecord,
     state: DurableSessionCommandState,
-    patch: { error?: string; code?: DurableSessionCommandErrorCode; userEventSeq?: number },
+    patch: { error?: string; code?: DurableSessionCommandErrorCode; userEventSeq?: number; steeringPending?: boolean },
     takeOwnership = false,
   ): DurableCommandRecord {
     const next = this.withCommandLock(prior.commandId, () =>
@@ -288,14 +290,17 @@ export class DurableCommandStore {
   private transitionLocked(
     prior: DurableCommandRecord,
     state: DurableSessionCommandState,
-    patch: { error?: string; code?: DurableSessionCommandErrorCode; userEventSeq?: number },
+    patch: { error?: string; code?: DurableSessionCommandErrorCode; userEventSeq?: number; steeringPending?: boolean },
     takeOwnership = false,
   ): DurableCommandRecord {
     const current = this.read(prior.commandId);
     if (!current || current.revision !== prior.revision) throw new Error("durable command receipt changed concurrently");
     if (!takeOwnership && current.ownerId !== this.ownerId) throw new Error("durable command receipt is owned by another runner process");
     const replayReset = takeOwnership && current.state === "queued" && state === "accepted";
-    if (!replayReset && !transitionAllowed(current.state, state)) {
+    const rejectedSteeringReset = !takeOwnership && current.kind === "answer_recovered_question" &&
+      current.state === "started" && state === "queued" && current.steeringPending === true &&
+      patch.steeringPending === false && current.userEventSeq === undefined;
+    if (!replayReset && !rejectedSteeringReset && !transitionAllowed(current.state, state)) {
       throw new Error(`invalid durable command transition ${current.state} -> ${state}`);
     }
     const next: DurableCommandRecord = {
@@ -307,6 +312,7 @@ export class DurableCommandStore {
       error: patch.error ? patch.error.slice(0, MAX_ERROR) : undefined,
       code: patch.code,
       ...(patch.userEventSeq !== undefined ? { userEventSeq: patch.userEventSeq } : {}),
+      steeringPending: patch.steeringPending ?? current.steeringPending,
     };
     this.writeAtomic(this.recordPath(next.commandId), next);
     return next;
@@ -486,8 +492,23 @@ export class DurableCommandHandle {
     return this.nonterminal(() => this.store.transition(this.record, "queued", { error, code }));
   }
 
+  /** Persist before turn/steer writes. Keep this boundary local: the CP receipt remains queued
+   * until acceptance, while a crashed runner (including an older version) sees started. */
+  beginSteering(): void {
+    if (this.record.kind !== "answer_recovered_question" || this.record.state !== "queued") {
+      throw new Error("only a queued question answer can begin durable steering");
+    }
+    this.nonterminal(() => this.store.transition(this.record, "started", { steeringPending: true }));
+  }
+
+  /** Called only for a definite provider refusal, before any provider-delivery event exists. */
+  steeringRejected(): DurableCommandReceipt {
+    if (!this.record.steeringPending) throw new Error("no durable steering attempt to return to the queue");
+    return this.nonterminal(() => this.store.transition(this.record, "queued", { steeringPending: false }));
+  }
+
   started(userEventSeq?: number): DurableCommandReceipt {
-    return this.nonterminal(() => this.store.transition(this.record, "started", { userEventSeq }));
+    return this.nonterminal(() => this.store.transition(this.record, "started", { userEventSeq, steeringPending: false }));
   }
 
   completed(): DurableCommandReceipt {
@@ -567,7 +588,9 @@ function receipt(record: DurableCommandRecord, duplicate: boolean): DurableComma
   return {
     commandId: record.commandId,
     sessionId: record.sessionId,
-    state: record.state,
+    // Reconnects must not publish the local crash fence as proof of delivery. A new owner
+    // still reads started from disk and settles it as uncertain before any replay.
+    state: record.state === "started" && record.steeringPending ? "queued" : record.state,
     revision: record.revision,
     duplicate,
     ...(record.error ? { error: record.error } : {}),

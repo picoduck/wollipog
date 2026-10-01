@@ -368,6 +368,8 @@ export interface DurableCommandLifecycle {
   readonly commandId: string;
   queued(error?: string, code?: DurableSessionCommandErrorCode): void;
   started(userEventSeq?: number): void;
+  beginSteering?(): void;
+  steeringRejected?(): void;
   completed(): void;
   failed(error: string, code?: DurableSessionCommandErrorCode): void;
   uncertain(error: string): void;
@@ -8285,7 +8287,8 @@ export class SessionManager {
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
       recoveredQuestion
-        ? event.payload.kind === "question_resolved" && event.payload.commandId === durable.commandId
+        ? (event.payload.kind === "question_resolved" || event.payload.kind === "user_message") &&
+          event.payload.commandId === durable.commandId
         : event.payload.kind === "user_message" && event.payload.commandId === durable.commandId)) {
       // The correlated turn marker is written and fsynced before `started`. If a journal write
       // failed at that boundary, replaying could submit the provider turn twice. Fail visibly into
@@ -8991,7 +8994,9 @@ export class SessionManager {
       };
     }
     if (!prompt) return { eligible: true };
-    if (prompt.durable || prompt.sessionCommand || prompt.syntheticRecovery) {
+    if ((prompt.durable && (!prompt.recoveredQuestion?.pendingQuestion.async ||
+        !prompt.durable.beginSteering || !prompt.durable.steeringRejected)) ||
+        prompt.sessionCommand || prompt.syntheticRecovery) {
       return {
         eligible: false,
         reason: "configuration_mismatch",
@@ -9111,6 +9116,7 @@ export class SessionManager {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "session lifecycle discarded the promotion");
     }
 
+    operation.source?.durable?.beginSteering?.();
     operation.providerStarted = true;
     const [steeringImages, steeringReferenceText] = materialized.value!;
     const providerPromise = entry.client.steer({
@@ -9121,6 +9127,11 @@ export class SessionManager {
     });
     const provider = await this.awaitSteeringDeadline(providerPromise, operation.deadlineAt, operation.lifecyclePromise);
     if (provider.cancelled) {
+      if (operation.source?.durable) {
+        return this.makeSteeringResult(request, "uncertain", "transport_uncertain", {
+          message: "session lifecycle changed during async answer steering",
+        });
+      }
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "session lifecycle discarded steering");
     }
     if (provider.timedOut) {
@@ -9149,12 +9160,14 @@ export class SessionManager {
       return this.handleDefiniteSteeringFailure(operation, "provider_rejected", outcome.reason);
     }
 
+    source?.durable?.started();
     const persisted = this.appendAcceptedSteeringEvent(
       request.sessionId,
       request.turnId,
       request.submissionId,
       displayText,
       imageInputs,
+      source?.durable,
     );
     if (!persisted) {
       return this.makeSteeringResult(request, "uncertain", "history_integrity_failure", {
@@ -9292,6 +9305,7 @@ export class SessionManager {
     message?: string,
   ): SteeringResult {
     if (operation.source) {
+      if (operation.providerStarted) operation.source.durable?.steeringRejected?.();
       this.restorePromotedPrompt(operation);
       return this.makeSteeringResult(operation.request, "rejected", reason, { message });
     }
@@ -9404,6 +9418,7 @@ export class SessionManager {
     submissionId: string,
     text: string,
     images: PromptImageInput[],
+    durable?: DurableCommandLifecycle,
   ): boolean {
     if (this.active.get(sessionId)?.historyIntegrityFailure) return false;
     try {
@@ -9414,6 +9429,7 @@ export class SessionManager {
         turnId,
         submissionId,
         deliveryIntent: "steer",
+        ...(durable ? { commandId: durable.commandId } : {}),
       };
       const stored = this.store.appendEvent(sessionId, payload);
       if (!stored) throw new Error("session metadata disappeared before steering history append");
@@ -9469,7 +9485,16 @@ export class SessionManager {
       const source = operation.source;
       const entry = this.active.get(operation.request.sessionId);
       if (source && entry) this.reservedPromotions(entry).delete(source.id);
+      source?.durable?.completed();
       operation.source = undefined;
+    } else if (result.disposition === "uncertain" && operation.source?.durable) {
+      // A durable answer has its own terminal receipt. Never offer Queue Again on the steering
+      // reservation: its journal is terminal and provider delivery may already have happened.
+      operation.source.durable.uncertain(result.message ?? "async answer steering delivery is uncertain");
+      const entry = this.active.get(operation.request.sessionId) ?? operation.fenceEntry;
+      if (entry) this.reservedPromotions(entry).delete(operation.source.id);
+      operation.source = undefined;
+      operation.resolved = true;
     }
     operation.resolve(result);
     // Promise continuations (the index handler emits the correlated result) run before this queued
@@ -14631,7 +14656,7 @@ export class SessionManager {
         pendingQuestion,
       };
     }
-    this.prompt(
+    const accepted = this.prompt(
       sessionId,
       retained?.text ?? recoveredQuestionContinuationText(requestId, recoveredQuestion.pendingQuestion, answers),
       retained?.images ?? [],
@@ -14644,6 +14669,28 @@ export class SessionManager {
       undefined,
       recoveredQuestion,
     );
+    if (!accepted || !recoveredQuestion.pendingQuestion.async) return;
+    // "Submitted" resolves the user's input, not provider delivery. No commandId/startsTurn is
+    // written here: only the later command-tagged delivery event proves provider submission.
+    if (!this.emitEvent(sessionId, {
+      kind: "question_resolved", requestId, occurrenceId: recoveryId, answered: true,
+      resolutionReason: "submitted",
+      ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+    })) return;
+    this.store.flush(sessionId);
+
+    const entry = this.active.get(sessionId);
+    const queued = entry?.queue.find((prompt) => prompt.durable?.commandId === durable.commandId);
+    if (!entry || !queued || !this.steeringEligibility(entry, queued).eligible) return;
+    void this.steerSession({
+      sessionId, turnId: entry.activeTurnId!, submissionId: durable.commandId,
+      promotePromptId: queued.id,
+    }).then((result) => {
+      this.log(JSON.stringify({
+        event: "async_answer_delivery", sessionId, commandId: durable.commandId,
+        disposition: result.disposition, reason: result.reason,
+      }));
+    });
   }
 
   /** Stop refreshing and release a session's lock (idempotent). */

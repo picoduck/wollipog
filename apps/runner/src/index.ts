@@ -1297,6 +1297,8 @@ function durableLifecycle(handle: DurableCommandHandle): DurableCommandLifecycle
   };
   return {
     commandId: handle.commandId,
+    beginSteering: () => handle.beginSteering(),
+    steeringRejected: () => transition(() => handle.steeringRejected()),
     queued: (error, code) => transition(() => handle.queued(error, code)),
     started: (userEventSeq) => transition(() => handle.started(userEventSeq)),
     completed: () => bestEffort(() => handle.completed()),

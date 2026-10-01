@@ -29,6 +29,9 @@ const recoveryStatePath = process.env.WOLLIPOG_FAKE_QUESTION_STATE;
 const recovering = Boolean(recoveryStatePath && existsSync(recoveryStatePath));
 let dogfoodTurnCount = 0;
 let asyncTurnCount = 0;
+const asyncDelivery = process.env.WOLLIPOG_FAKE_CODEX_ASYNC_DELIVERY;
+const asyncReceiptPath = process.env.WOLLIPOG_FAKE_CODEX_RECEIPT;
+const asyncReleasePath = process.env.WOLLIPOG_FAKE_CODEX_ASYNC_RELEASE;
 const expectedQueuedDogfoodPrompts = [
   "Keep this long message queued until both structured questions are answered.",
   "The complete two-question form must remain visible and reachable above the composer.",
@@ -95,6 +98,23 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
+  if (scenario === "async-question" && asyncDelivery && message.method === "turn/steer") {
+    const text = message.params?.input?.find((input) => input?.type === "text")?.text;
+    if (!text?.includes("Question: Which path should I use?") || !text?.includes("Answer: Patch")) {
+      send({ id: message.id, error: { code: -32602, message: "uncorrelated async answer" } });
+      return;
+    }
+    writeFileSync(asyncReceiptPath + ".steer", JSON.stringify({ attempted: true }));
+    if (asyncDelivery === "rejected") {
+      send({ id: message.id, error: { code: -32602, message: "fixture steering unavailable" } });
+    } else {
+      writeFileSync(asyncReceiptPath, JSON.stringify({
+        requestId: "codex-async:async-ask", answer: "Patch", delivery: "steer",
+      }));
+      send({ id: message.id, result: { turnId: message.params.expectedTurnId } });
+    }
+    return;
+  }
   if (message.method === "turn/start") {
     if (scenario === "dogfood-question") dogfoodTurnCount += 1;
     if (scenario === "async-question") asyncTurnCount += 1;
@@ -111,7 +131,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           return;
         }
         const receipt = process.env.WOLLIPOG_FAKE_CODEX_RECEIPT;
-        if (receipt) writeFileSync(receipt, JSON.stringify({ requestId: "codex-async:async-ask", answer: "Patch" }));
+        if (receipt) writeFileSync(receipt, JSON.stringify({
+          requestId: "codex-async:async-ask", answer: "Patch",
+          ...(asyncDelivery ? { delivery: "queue" } : {}),
+        }));
         send({ method: "item/completed", params: { threadId, turnId, item: {
           type: "agentMessage", id: "async-answer", text: "Async answer received by Codex.",
         } } });
@@ -124,7 +147,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           type: "commandExecution", id: "continued-work", command: "inspect files", status: "completed", exitCode: 0,
         } } });
       }
-      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+      if (asyncDelivery && !text?.includes("Answer: Patch")) {
+        const release = setInterval(() => {
+          if (!existsSync(asyncReleasePath)) return;
+          clearInterval(release);
+          send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+        }, 50);
+      } else {
+        send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+      }
       return;
     }
     if (scenario === "question") {

@@ -155,6 +155,7 @@ import {
   type WorkflowDecisionView,
   type PromptImageReference,
   type PromptSessionMessage,
+  type AnswerRecoveredQuestionCommand,
   type ProjectLocationAvailability,
   type ProjectLocationSource,
   type ProjectLocationView,
@@ -13183,11 +13184,10 @@ export class ControlPlaneDb {
     }
     const status = keepPolicyPause ? "input_required" : snap.status;
     const currentPending = parseJson<PendingApproval>(existing?.pending_approval ?? null);
-    const pendingJson = keepPolicyPause
-      ? existing!.pending_approval
-      : snap.pendingApproval
-        ? JSON.stringify(pendingApprovalWithOccurrenceIds(snap.pendingApproval, currentPending))
-        : null;
+    const pending = this.withoutSubmittedAsyncQuestions(id, keepPolicyPause
+      ? currentPending
+      : snap.pendingApproval ? pendingApprovalWithOccurrenceIds(snap.pendingApproval, currentPending) : null);
+    const pendingJson = pending ? JSON.stringify(pending) : null;
     const snapshotTitleSource = snap.titleSource ?? "generated";
     // The control plane owns explicit rename order. A runner snapshot can carry an OLDER user
     // title (the runner learned the launch-time title but not a later CP-only rename), so even an
@@ -16733,11 +16733,34 @@ export class ControlPlaneDb {
       .run(usage.inputTokens ?? 0, usage.outputTokens ?? 0, usage.costUsd ?? 0, now, id);
   }
 
+  /** Durable answer acceptance owns the question even while an older runner snapshot or
+   * history page still describes it as pending. Match the exact occurrence, never just its id. */
+  private withoutSubmittedAsyncQuestions(
+    sessionId: string,
+    approval: PendingApproval | null,
+  ): PendingApproval | null {
+    let remaining = approval;
+    for (const request of pendingRequests(approval)) {
+      if (request.kind !== "question" || !request.async || !request.occurrenceId) continue;
+      const submitted = this.stmt(
+        `SELECT 1 FROM session_prompt_commands
+         WHERE session_id=? AND (command_id=? OR (json_extract(payload_json,'$.type')='answer_recovered_question'
+           AND json_extract(payload_json,'$.requestId')=?
+           AND json_extract(payload_json,'$.recoveryId')=?)) LIMIT 1`,
+      ).get(sessionId, `answer_${createHash("sha256")
+        .update(JSON.stringify([sessionId, request.requestId, request.occurrenceId])).digest("hex")}`,
+        request.requestId, request.occurrenceId);
+      if (submitted) remaining = removePendingRequest(remaining, request.requestId);
+    }
+    return remaining;
+  }
+
   setPendingApproval(id: string, approval: PendingApproval | null): void {
     const existing = parseJson<PendingApproval>((this.stmt(
       "SELECT pending_approval FROM sessions WHERE id=?",
     ).get(id) as { pending_approval: string | null } | undefined)?.pending_approval ?? null);
-    const identified = approval ? pendingApprovalWithOccurrenceIds(approval, existing) : null;
+    const identified = this.withoutSubmittedAsyncQuestions(id,
+      approval ? pendingApprovalWithOccurrenceIds(approval, existing) : null);
     this.stmt("UPDATE sessions SET pending_approval=? WHERE id=?")
       .run(identified ? JSON.stringify(identified) : null, id);
   }
@@ -20138,6 +20161,21 @@ export class ControlPlaneDb {
     });
   }
 
+  private promptCommandDisplay(payloadJson: string): {
+    text: string; hasImages: boolean; retryable: boolean;
+  } | null {
+    const command = JSON.parse(payloadJson) as PromptSessionMessage | AnswerRecoveredQuestionCommand;
+    if (command?.type === "answer_recovered_question") {
+      return {
+        text: Object.values(command.answers).map((answer) => `Answer: ${String(answer)}`).join("\n"),
+        hasImages: false,
+        retryable: false,
+      };
+    }
+    if (command?.type !== "prompt_session" || command.campaignContinuation) return null;
+    return { text: command.text, hasImages: Boolean(command.images?.length), retryable: true };
+  }
+
   /** Commands not yet started remain visible across CP or runner restarts. A live runner queue
    * overlay replaces this projection once admission creates its own steer/cancel identities. */
   private pendingSessionPromptQueue(sessionId: string): QueuedPromptView[] {
@@ -20157,15 +20195,15 @@ export class ControlPlaneDb {
     }>;
     return rows.flatMap((row) => {
       try {
-        const command = JSON.parse(row.payload_json) as PromptSessionMessage;
-        if (command.type !== "prompt_session" || command.campaignContinuation) return [];
+        const command = this.promptCommandDisplay(row.payload_json);
+        if (!command) return [];
         const durableDeliveryState = row.state === "queued" || row.state === "failed" || row.state === "uncertain"
           ? row.state
           : "pending";
         return [{
           id: row.command_id,
           text: command.text.length > 500 ? `${command.text.slice(0, 500)}…` : command.text,
-          hasImages: Boolean(command.images?.length),
+          hasImages: command.hasImages,
           steerable: false,
           steerDisabledReason: isTerminalDurableDeliveryState(durableDeliveryState)
             ? (row.error ?? "Durable delivery did not complete.")
@@ -20190,17 +20228,17 @@ export class ControlPlaneDb {
     ).all(sessionId) as unknown as SessionPromptCommandRow[];
     return rows.flatMap((row) => {
       if (row.state === "completed") return [];
-      let command: PromptSessionMessage;
+      let command: { text: string; hasImages: boolean; retryable: boolean } | null;
       try {
-        command = JSON.parse(row.payload_json) as PromptSessionMessage;
+        command = this.promptCommandDisplay(row.payload_json);
       } catch {
         return [];
       }
-      if (command?.type !== "prompt_session" || command.campaignContinuation) return [];
+      if (!command) return [];
       return [{
         commandId: row.command_id,
         text: command.text.length > 4_096 ? `${command.text.slice(0, 4_095)}…` : command.text,
-        hasImages: Boolean(command.images?.length),
+        hasImages: command.hasImages,
         state: row.state,
         revision: row.revision,
         attemptCount: row.attempt_count,
@@ -20211,7 +20249,7 @@ export class ControlPlaneDb {
         updatedAt: row.updated_at,
         ...(row.state === "pending" ? { canCancel: true } : {}),
         ...(row.state === "failed" || row.state === "uncertain" ? { canDismiss: true } : {}),
-        ...(row.state === "failed" && !isTerminal(sessionStatus) &&
+        ...(command.retryable && row.state === "failed" && !isTerminal(sessionStatus) &&
           (row.error_code === "PROVIDER_AUTHENTICATION_REQUIRED" ||
             row.error_code === "WORKTREE_RECOVERY_REQUIRED") &&
           row.user_event_seq == null ? { canRetry: true } : {}),

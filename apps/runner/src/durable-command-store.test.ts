@@ -41,6 +41,54 @@ function message(
   };
 }
 
+for (const rejected of [false, true]) {
+  test(`durable async steering ${rejected ? "confirmed refusal remains replayable" : "interrupted delivery is never replayed"}`, () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-command-async-steer-"));
+    let now = 1;
+    try {
+      const command: DurableSessionCommand = {
+        type: "answer_recovered_question", sessionId: "s_test",
+        requestId: "question-1", recoveryId: "occurrence-1", answers: { target: "Production" },
+      };
+      const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => now, ownerStaleMs: 10 });
+      const claimed = store.claim(message(command));
+      assert.equal(claimed.kind, "new");
+      if (claimed.kind !== "new") return;
+      claimed.handle.queued();
+      claimed.handle.beginSteering();
+      assert.equal(store.read("cmd_test")?.state, "started");
+      assert.equal(store.recentUpdates()[0]?.state, "queued", "reconnect cannot advance the CP delivery receipt");
+      if (rejected) assert.equal(claimed.handle.steeringRejected().state, "queued");
+      now = 20;
+      const restarted = new DurableCommandStore(root, { ownerId: "owner-b", now: () => now, ownerStaleMs: 10 });
+      const replay = restarted.claim(message(command));
+      assert.equal(replay.kind, rejected ? "reclaimed" : "duplicate");
+      assert.equal(replay.receipt.state, rejected ? "accepted" : "uncertain");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("accepted durable async steering cannot be reset to queued", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-async-steer-accepted-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    const claimed = store.claim(message({
+      type: "answer_recovered_question", sessionId: "s_test",
+      requestId: "question-1", recoveryId: "occurrence-1", answers: { target: "Production" },
+    }));
+    if (claimed.kind !== "new") return assert.fail("command was not claimed");
+    claimed.handle.queued();
+    claimed.handle.beginSteering();
+    claimed.handle.started(3);
+    assert.throws(() => claimed.handle.steeringRejected(), /no durable steering attempt/u);
+    assert.equal(claimed.handle.completed().state, "completed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("recovered question answers use the same content-free durable dedupe journal", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-command-recovered-answer-"));
   try {

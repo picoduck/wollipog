@@ -3480,6 +3480,57 @@ test("updateSessionStatus clears pending approval when leaving input_required", 
   assert.equal(db.getSession("sess-1")!.pendingApproval, null);
 });
 
+test("accepted async answers suppress stale snapshots and hydration by exact occurrence", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  const question: PendingApproval = {
+    requestId: "codex-async:queued", occurrenceId: "occurrence-1", recoveryId: "occurrence-1",
+    kind: "question", async: true, title: "Which path?", options: [],
+    questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+  };
+  db.setPendingApproval("sess-1", question);
+  const payloadJson = JSON.stringify({
+    type: "answer_recovered_question", sessionId: "sess-1",
+    requestId: question.requestId, recoveryId: question.occurrenceId, answers: { "0": "Patch" },
+  });
+  const commandId = `answer_${createHash("sha256")
+    .update(JSON.stringify(["sess-1", question.requestId, question.occurrenceId])).digest("hex")}`;
+  db.stageSessionPromptCommand({
+    commandId, sessionId: "sess-1", runnerId: "runner-1",
+    payloadJson, payloadSha256: createHash("sha256").update(payloadJson).digest("hex"),
+    expiresAt: 100_000, now: 2_000,
+  });
+  db.setPendingApproval("sess-1", question);
+  assert.equal(db.getSession("sess-1")?.pendingApproval, null);
+  assert.equal(db.getSession("sess-1")?.queued?.[0]?.text, "Answer: Patch");
+  assert.equal(db.getSession("sess-1")?.pendingPrompts?.[0]?.commandId, commandId);
+  db.updateSessionFromSnapshot("sess-1", snapshot({
+    id: "sess-1", status: "running", pendingApproval: question,
+  }), 3_000);
+  assert.equal(db.getSession("sess-1")?.pendingApproval, null);
+  const blocking: PendingApproval = { requestId: "tool-approval", title: "Run Command", options: [] };
+  db.setPendingApproval("sess-1", { ...blocking, additionalRequests: [question] });
+  assert.equal(db.getSession("sess-1")?.pendingApproval?.requestId, "tool-approval");
+  assert.equal(db.getSession("sess-1")?.pendingApproval?.additionalRequests, undefined);
+  db.recordSessionPromptCommandReceipt({
+    commandId, runnerId: "runner-1", sessionId: "sess-1",
+    state: "uncertain", revision: 4, error: "Delivery unknown", now: 3_100,
+  });
+  assert.equal(db.getSession("sess-1")?.queued?.[0]?.durableDeliveryState, "uncertain");
+  assert.equal(db.getSession("sess-1")?.pendingPrompts?.[0]?.canDismiss, true);
+  db.recordSessionPromptCommandReceipt({
+    commandId, runnerId: "runner-1", sessionId: "sess-1",
+    state: "completed", revision: 5, now: 3_200,
+  });
+  db.setPendingApproval("sess-1", question);
+  assert.equal(db.getSession("sess-1")?.pendingApproval, null, "scrubbed completion still fences stale questions");
+  assert.equal(db.getSession("sess-1")?.queued, undefined);
+  const newer = { ...question, occurrenceId: "occurrence-2", recoveryId: "occurrence-2" };
+  db.setPendingApproval("sess-1", newer);
+  assert.equal(db.getSession("sess-1")?.pendingApproval?.occurrenceId, "occurrence-2");
+  db.close();
+});
+
 test("async questions survive nonterminal status changes while blocking asks clear", () => {
   const db = withRunner();
   db.createSession(newSession());

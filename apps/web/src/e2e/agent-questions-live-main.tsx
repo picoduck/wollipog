@@ -16,6 +16,7 @@ const origin = params.get("origin") ?? "";
 const token = params.get("token") ?? "";
 const sessionId = params.get("sessionId") ?? "";
 const showQueuedPrompts = params.get("queued") === "1";
+const showLiveQueue = params.get("liveQueue") === "1";
 const showActualAsyncMessage = params.get("actualAsyncMessage") === "1";
 
 function LiveQuestionFixture() {
@@ -39,7 +40,7 @@ function LiveQuestionFixture() {
       ? { kind: "user_message", id: index + 1, text: `Earlier question ${index / 2 + 1}` }
       : { kind: "agent_message", id: index + 1, text: `Earlier answer ${(index + 1) / 2}` }
   )), []);
-  const queuedPrompts = [
+  const queuedPrompts = showLiveQueue ? session?.queued ?? [] : [
     { id: "queued-1", text: "Keep this long message queued until both structured questions are answered." },
     { id: "queued-2", text: "The complete two-question form must remain visible and reachable above the composer." },
   ];
@@ -162,6 +163,7 @@ function LiveQuestionFixture() {
                     <ComposerQuestionResponse
                       sessionId={session.id}
                       requestId={pendingQuestion.requestId}
+                      occurrenceId={pendingQuestion.occurrenceId}
                       questions={pendingQuestion.questions ?? []}
                       runnerOnline
                       active={answerActive}
