@@ -867,7 +867,13 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   undefined,
   undefined,
   config.agents.map((agent) => agent.context ?? { kind: "native" as const }),
-  async (meta) => {
+  async (meta, cancellation) => {
+    const assertPreparationCurrent = () => {
+      if (cancellation?.signal?.aborted || cancellation?.isCurrent?.() === false) {
+        throw new Error("provider launch preparation was cancelled");
+      }
+    };
+    assertPreparationCurrent();
     meta.env = meta.adopted && !meta.agentId
       ? adoptedLaunchEnvironment(meta)
       : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
@@ -882,8 +888,9 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       const accountHome = pluginProvider === "claude" ? meta.env.CLAUDE_CONFIG_DIR : meta.env.CODEX_HOME;
       if (meta.context.kind === "native" && accountHome &&
           (!meta.executionTarget || meta.executionTarget.adapter === "host")) {
-        sessions.acquireSkillReconciliationProviderHome(accountHome);
+        await sessions.acquireSkillReconciliationProviderHome(accountHome, cancellation);
       }
+      assertPreparationCurrent();
       if (pluginProvider === "claude") {
         inheritProviderPlugins(meta, pluginProvider);
         log(JSON.stringify({ event: "provider_plugin_inheritance_prepared", entryPoint: "session_launch",
@@ -3071,7 +3078,6 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           // `provision` writes an agent-control credential file or registers a credential (#1379).
           assertSessionNotDeleted: (sessionId) => void agentTuiSessionMeta(sessionId),
           assertLaunchCurrent: assertCurrent,
-          acquireProviderHome: (prepared) => sessions.acquireAgentTuiProviderHome(prepared),
           provision: async (prepared) => {
             prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
             if (prepared.providerCredentialHome && prepared.providerAccountProvider) {

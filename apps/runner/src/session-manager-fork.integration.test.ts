@@ -222,8 +222,12 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     const archivedForks: string[] = [];
     let piInitializations = 0;
     let racedPrompts = 0;
+    let constructions = 0;
+    let preparationWait: (() => Promise<void>) | undefined;
     let manager!: SessionManager;
-    const factory = (kind: AgentDriverKind, options: DriverOptions, _callbacks: DriverCallbacks): Driver => ({
+    const factory = (kind: AgentDriverKind, options: DriverOptions, _callbacks: DriverCallbacks): Driver => {
+      constructions++;
+      return ({
       get pid() { return undefined; },
       initialize: async () => {
         if (kind === "pi") piInitializations++;
@@ -244,7 +248,8 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       cancel: () => {},
       resolvePermission: () => false,
       dispose: () => {},
-    });
+      });
+    };
     const sent: RunnerToControlPlane[] = [];
     const stateTransfers: Array<{ source: string; target: string }> = [];
     const stateRemovals: string[] = [];
@@ -270,7 +275,8 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
         verifiedForks.push(providerSessionId);
       },
       [],
-      (launchMeta) => {
+      async (launchMeta) => {
+        await preparationWait?.();
         if (launchMeta.driver === "codex-app-server") {
           return { codexLaunchArgs: ["-c", "plugins.review@local.enabled=true"] };
         }
@@ -584,6 +590,53 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       (store.readEvents(piSource.sessionId).at(-1)?.payload as { message?: string }).message ?? "",
       /conversation fork is in progress/,
     );
+    // Both preparation paths must retain the exact source and target reservation while their
+    // plugin ownership wait is pending. Exercise cancellation before any helper is constructed.
+    store.patchMeta("s_claude_source", { turnCount: 2 });
+    const internals = manager as unknown as { deleted: Set<string>; latestLaunchGenerations: Map<string, number> };
+    const removalsBeforeCancelledPreparation = stateRemovals.length;
+    const cancelledTargets: string[] = [];
+    for (const sourceId of ["s_claude_source", "s_pi_source"]) {
+      for (const change of ["target-deleted", "source-deleted", "epoch", "credential"] as const) {
+        await t.test(`${sourceId} preparation refuses ${change}`, async () => {
+          let entered!: () => void, release!: () => void;
+          const enteredPromise = new Promise<void>(resolve => { entered = resolve; });
+          const gate = new Promise<void>(resolve => { release = resolve; });
+          preparationWait = () => { entered(); return gate; };
+          const targetId = `s_wait_${sourceId}_${change}`;
+          cancelledTargets.push(targetId);
+          const prior = store.readMeta(sourceId)!;
+          const home = prior.providerCredentialHome;
+          const epoch = internals.latestLaunchGenerations.get(sourceId);
+          const beforeConstructions = constructions, beforeForks = forkSources.length;
+          const preparing = manager.forkConversation(sourceId, targetId, 2, "Deferred Fork");
+          await enteredPromise;
+          assert.equal(constructions, beforeConstructions);
+          if (change === "target-deleted") internals.deleted.add(targetId);
+          if (change === "source-deleted") internals.deleted.add(sourceId);
+          if (change === "epoch") internals.latestLaunchGenerations.set(sourceId, 999);
+          if (change === "credential") store.patchMeta(sourceId, { providerCredentialHome: join(storeRoot, "changed-home") });
+          release();
+          try {
+            const result = await preparing;
+            assert.equal(result.ok, false);
+            assert.match(result.error ?? "", /preparation was cancelled/);
+            assert.equal(constructions, beforeConstructions);
+            assert.equal(forkSources.length, beforeForks);
+            assert.equal(store.has(targetId), false);
+          } finally {
+            preparationWait = undefined;
+            internals.deleted.delete(sourceId); internals.deleted.delete(targetId);
+            if (epoch === undefined) internals.latestLaunchGenerations.delete(sourceId);
+            else internals.latestLaunchGenerations.set(sourceId, epoch);
+            store.patchMeta(sourceId, { providerCredentialHome: home });
+          }
+        });
+      }
+    }
+    // Every refused fork retires only its own target partition, exactly once.
+    assert.deepEqual(stateRemovals.slice(removalsBeforeCancelledPreparation), cancelledTargets);
+    stateRemovals.splice(removalsBeforeCancelledPreparation);
     await manager.delete("s_target");
     await manager.delete("s_claude_target");
     await manager.delete("s_pi_target");

@@ -162,6 +162,7 @@ import {
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
 import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation } from "./provider-home-lease-async.js";
+import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
   ProviderStateCleanupJournal,
@@ -1387,6 +1388,9 @@ export class SessionManager {
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: AsyncProviderHomeLeaseRegistry;
   private readonly providerAuthOperations = new Set<string>();
+  private readonly providerAuthPreparations = new Map<string, {
+    sessionId: string; requestId: string; controller: AbortController;
+  }>();
   private readonly providerAuthInspections = new Map<string, Promise<ProviderAuthenticationInspectionResult>>();
   /** In-flight selected-account handoffs; tests and shutdown can await their settlement. */
   readonly providerAuthSelections = new Map<string, Promise<void>>();
@@ -1444,6 +1448,7 @@ export class SessionManager {
     /** Refresh runner-local launch material immediately before every provider process spawn. */
     private readonly prepareLaunch?: (
       meta: SessionMeta,
+      cancellation?: LeaseCancellation,
     ) => void | SessionLaunchPreparation | Promise<void | SessionLaunchPreparation>,
     /** Materialize verified references only at the provider edge. */
     private readonly resolvePromptImages?: PromptImageResolver,
@@ -4205,9 +4210,49 @@ export class SessionManager {
 
   /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire the
    * registry's process-lifetime lease before reconciliation touches those shared directories. */
-  async acquireSkillReconciliationProviderHome(home: string): Promise<void> {
-    await this.providerHomeLeases?.acquireHome(home, "skills", { isCurrent: () => !this.shuttingDown });
-    if (this.shuttingDown) throw new Error("provider-home acquisition was cancelled by shutdown");
+  async acquireSkillReconciliationProviderHome(home: string, cancellation: LeaseCancellation = {}): Promise<void> {
+    const isCurrent = () => !this.shuttingDown && !cancellation.signal?.aborted &&
+      (cancellation.isCurrent?.() ?? true);
+    await this.providerHomeLeases?.acquireHome(home, "skills", { ...cancellation, isCurrent });
+    if (!isCurrent()) throw new Error("provider-home acquisition was cancelled");
+  }
+
+  /** Capture identity before launch preparation refreshes its mutable argument object. */
+  private providerPreparationCurrent(meta: SessionMeta): () => boolean {
+    const identity = (candidate: SessionMeta) => JSON.stringify([
+      candidate.driver, candidate.command, candidate.context, candidate.executionTarget,
+      candidate.agentSessionId, candidate.providerAccountId, candidate.providerAccountProvider,
+      candidate.providerCredentialHome, candidate.providerConversationHome,
+      candidate.providerCredentialIdentityId, candidate.providerCredentialIdentityEvidence,
+      candidate.worktreePath, candidate.worktreeBranch,
+    ]);
+    const expected = identity(meta), epoch = this.agentTuiLaunchEpoch(meta.sessionId);
+    const wasStopped = meta.status === "stopped";
+    return () => {
+      const current = this.store.readMeta(meta.sessionId);
+      return !this.shuttingDown && this.sessionCanOpen(meta.sessionId) && !!current &&
+        (current.status !== "stopped" || wasStopped) &&
+        this.agentTuiLaunchEpoch(meta.sessionId) === epoch && identity(current) === expected;
+    };
+  }
+
+  private providerAuthenticationPreparationCurrent(meta: SessionMeta): () => boolean {
+    const current = this.providerPreparationCurrent(meta);
+    const recoveryId = meta.providerAuthBlock?.recoveryId;
+    const scopeId = meta.providerAuthBlock?.credentialScopeId;
+    const requestId = meta.pendingApproval?.requestId;
+    return () => {
+      const latest = this.store.readMeta(meta.sessionId);
+      return current() && latest?.providerAuthBlock?.recoveryId === recoveryId &&
+        latest?.providerAuthBlock?.credentialScopeId === scopeId &&
+        latest?.pendingApproval?.requestId === requestId;
+    };
+  }
+
+  private isProviderPreparationCancellation(error: unknown): boolean {
+    return error instanceof Error && [LEASE_WORKER_ERRORS.cancelled,
+      "provider-home acquisition was cancelled", "provider launch preparation was cancelled",
+      "authentication preparation was cancelled"].includes(error.message);
   }
 
   /** Provider sign-in is a short-lived supervised mutation of one exact credential home. */
@@ -7333,7 +7378,9 @@ export class SessionManager {
       }
       const priorCapabilities = meta.capabilities;
       const priorSessionSlashCommands = meta.sessionSlashCommands;
-      launchPreparation = await this.prepareLaunch?.(meta);
+      launchPreparation = await this.prepareLaunch?.(meta, {
+        isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration),
+      });
       // Launch preparation may await filesystem/provider discovery. A restart can replace this
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
@@ -11039,6 +11086,7 @@ export class SessionManager {
     meta: SessionMeta,
     account?: BoundProviderAccount,
   ): Promise<SessionMeta> {
+    const isCurrent = this.providerAuthenticationPreparationCurrent(meta);
     const probe = structuredClone(meta);
     if (account) {
       probe.providerAccountId = account.id;
@@ -11046,7 +11094,8 @@ export class SessionManager {
       probe.providerAccountProvider = account.provider;
       probe.providerCredentialHome = account.credentialHome;
     }
-    await this.prepareLaunch?.(probe);
+    await this.prepareLaunch?.(probe, { isCurrent });
+    if (!isCurrent()) throw new Error("authentication preparation was cancelled");
     return probe;
   }
 
@@ -11157,7 +11206,16 @@ export class SessionManager {
     };
     let handedOff = false;
     try {
-      const probe = await this.providerAuthenticationProbeMeta(meta, target);
+      const preparationIsCurrent = this.providerAuthenticationPreparationCurrent(meta);
+      let probe: SessionMeta;
+      try {
+        probe = await this.providerAuthenticationProbeMeta(meta, target);
+      } catch (error) {
+        if (!preparationIsCurrent() && this.isProviderPreparationCancellation(error)) {
+          return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
+        }
+        throw error;
+      }
       const targetScope = controller.describe(probe);
       if (!targetScope) {
         return refuse("account_unavailable", "Wollipog cannot check authentication for that account in this session's context.");
@@ -12882,6 +12940,10 @@ export class SessionManager {
     if (this.forking.has(sourceSessionId)) return { ok: false, error: "a conversation fork is already in progress" };
     this.forking.add(sourceSessionId);
     this.forkingTargets.add(targetSessionId);
+    const sourceIsCurrent = this.providerPreparationCurrent(source);
+    const forkIsCurrent = () => sourceIsCurrent() && this.forking.has(sourceSessionId) &&
+      this.forkingTargets.has(targetSessionId) && !this.deleting.has(targetSessionId) &&
+      !this.deleted.has(targetSessionId) && !this.store.isDeleted(targetSessionId);
     let seatbeltForkAdmission = false;
     if (this.executionIsolation.mode === "seatbelt" && !this.admitted.has(sourceSessionId)) {
       if (!(await this.acquireAdmission(sourceSessionId))) {
@@ -13009,7 +13071,8 @@ export class SessionManager {
       if (!client && source.driver !== "pi") {
         const priorCapabilities = source.capabilities;
         const priorSessionSlashCommands = source.sessionSlashCommands;
-        const launchPreparation = await this.prepareLaunch?.(source);
+        const launchPreparation = await this.prepareLaunch?.(source, { isCurrent: forkIsCurrent });
+        if (!forkIsCurrent()) throw new Error("conversation fork preparation was cancelled");
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
         }
@@ -13042,10 +13105,8 @@ export class SessionManager {
           context: source.context,
           env: source.env,
           isolation,
-        }, { isCurrent: () => !this.shuttingDown &&
-          this.store.readMeta(sourceSessionId)?.agentSessionId === source.agentSessionId &&
-          !this.deleting.has(sourceSessionId) });
-        if (this.shuttingDown || this.store.readMeta(sourceSessionId)?.agentSessionId !== source.agentSessionId || this.deleting.has(sourceSessionId)) {
+        }, { isCurrent: forkIsCurrent });
+        if (!forkIsCurrent()) {
           throw new Error("source session changed during provider-home acquisition");
         }
         temporary = this.createDriver(
@@ -13102,8 +13163,9 @@ export class SessionManager {
       if (source.driver === "pi") {
         const priorCapabilities = source.capabilities;
         const priorSessionSlashCommands = source.sessionSlashCommands;
-        const launchPreparation = this.prepareLaunch?.(source);
+        const launchPreparation = this.prepareLaunch?.(source, { isCurrent: forkIsCurrent });
         if (launchPreparation) await launchPreparation;
+        if (!forkIsCurrent()) throw new Error("conversation fork preparation was cancelled");
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
         }
@@ -13158,10 +13220,8 @@ export class SessionManager {
           context: source.context,
           env: source.env,
           isolation: forkIsolation,
-        }, { isCurrent: () => !this.shuttingDown &&
-          this.store.readMeta(sourceSessionId)?.agentSessionId === source.agentSessionId &&
-          !this.deleting.has(sourceSessionId) });
-        if (this.shuttingDown || this.store.readMeta(sourceSessionId)?.agentSessionId !== source.agentSessionId || this.deleting.has(sourceSessionId)) {
+        }, { isCurrent: forkIsCurrent });
+        if (!forkIsCurrent()) {
           throw new Error("source session changed during provider-home acquisition");
         }
         temporary = this.createDriver(
@@ -17544,13 +17604,21 @@ export class SessionManager {
       const owner = this.providerAuthenticationOwner(scopeId);
       if (!owner?.providerAuthBlock || !this.providerAuthRecovery || this.shuttingDown) return;
       let timedOut = false;
+      const preparation = new AbortController();
+      const ownerIsCurrent = this.providerAuthenticationPreparationCurrent(owner);
+      const isCurrent = () => !timedOut && ownerIsCurrent();
       let timer: ReturnType<typeof setTimeout> | undefined;
       let observation: ProviderAuthObservation;
       try {
         observation = await Promise.race([
           (async (): Promise<ProviderAuthObservation> => {
-            await this.prepareLaunch?.(owner);
-            if (timedOut || this.shuttingDown || this.providerAuthRecovery!.describe(owner)?.id !== scopeId) {
+            try {
+              await this.prepareLaunch?.(owner, { signal: preparation.signal, isCurrent });
+            } catch (error) {
+              if (!isCurrent() && this.isProviderPreparationCancellation(error)) return { status: "unknown" };
+              throw error;
+            }
+            if (!isCurrent() || this.providerAuthRecovery!.describe(owner)?.id !== scopeId) {
               return { status: "unknown" };
             }
             return this.providerAuthRecovery!.revalidate(owner);
@@ -17558,6 +17626,7 @@ export class SessionManager {
           new Promise<ProviderAuthObservation>((resolve) => {
             timer = setTimeout(() => {
               timedOut = true;
+              preparation.abort();
               resolve({ status: "unknown" });
             }, 20_000);
             timer.unref();
@@ -17565,6 +17634,7 @@ export class SessionManager {
         ]);
       } finally {
         if (timer) clearTimeout(timer);
+        preparation.abort();
       }
       if (this.shuttingDown || observation.status !== "authenticated" || !observation.identityId) return;
       const current = this.store.readMeta(owner.sessionId);
@@ -17665,6 +17735,10 @@ export class SessionManager {
         this.emitStatus(sessionId, "input_required", "Provider authentication recovery is still settling");
         return;
       }
+      const preparing = block && this.providerAuthPreparations.get(block.credentialScopeId);
+      if (preparing && preparing.sessionId === sessionId && preparing.requestId === requestId) {
+        preparing.controller.abort();
+      }
       if (block?.loginOperationId) this.providerAuthRecovery?.cancel(block.credentialScopeId);
       const current = this.store.readMeta(sessionId);
       if (!current || current.pendingApproval?.requestId !== requestId) return;
@@ -17704,6 +17778,10 @@ export class SessionManager {
     const controller = this.providerAuthRecovery;
     if (!controller || !block || requestId !== providerAuthenticationRequestId(block)) return;
     if (optionId === "auth:cancel" || optionId === null) {
+      const preparing = this.providerAuthPreparations.get(block.credentialScopeId);
+      if (preparing?.sessionId === sessionId && preparing.requestId === requestId) {
+        preparing.controller.abort();
+      }
       controller.cancel(block.credentialScopeId);
       this.emitProviderAuthenticationCard(meta, block, "The runner-owned sign-in was canceled. No prompt was retried.");
       return;
@@ -17715,7 +17793,21 @@ export class SessionManager {
     }
     this.providerAuthOperations.add(block.credentialScopeId);
     try {
-      await this.prepareLaunch?.(meta);
+      const preparation = { sessionId, requestId, controller: new AbortController() };
+      const cardIsCurrent = this.providerAuthenticationPreparationCurrent(meta);
+      const isCurrent = () => !preparation.controller.signal.aborted && cardIsCurrent();
+      this.providerAuthPreparations.set(block.credentialScopeId, preparation);
+      try {
+        await this.prepareLaunch?.(meta, { signal: preparation.controller.signal, isCurrent });
+      } catch (error) {
+        if (!isCurrent() && this.isProviderPreparationCancellation(error)) return;
+        throw error;
+      } finally {
+        if (this.providerAuthPreparations.get(block.credentialScopeId) === preparation) {
+          this.providerAuthPreparations.delete(block.credentialScopeId);
+        }
+      }
+      if (!isCurrent()) return;
       const currentScope = controller.describe(meta);
       if (!currentScope || currentScope.id !== block.credentialScopeId) {
         this.emitProviderAuthenticationCard(meta, block, "The provider installation or credential context changed. Start recovery from the current session card.");
@@ -17819,7 +17911,14 @@ export class SessionManager {
         continue;
       }
       if (meta.sessionId !== targetSessionId) {
-        await this.prepareLaunch?.(meta);
+        const isCurrent = this.providerAuthenticationPreparationCurrent(meta);
+        try {
+          await this.prepareLaunch?.(meta, { isCurrent });
+        } catch (error) {
+          if (!isCurrent() && this.isProviderPreparationCancellation(error)) continue;
+          throw error;
+        }
+        if (!isCurrent()) continue;
         const currentScope = this.providerAuthRecovery?.describe(meta);
         if (!currentScope || currentScope.id !== block.credentialScopeId) continue;
         if (!await this.waitForAuthenticationTurnSettlement(meta.sessionId)) continue;

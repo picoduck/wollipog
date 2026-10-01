@@ -36,6 +36,16 @@ requires an exact compensating receipt before subsequent work can execute. A ret
 cannot redirect cancellation to a different registry entry. Callers repeat launch-generation,
 account, TUI and skill-authorization checks after their awaits.
 
+The launch-preparation adapter also awaits account-HOME ownership before plugin inheritance and
+guard preparation. Its seven callers cover ordinary launch, authentication inspection/account
+selection, temporary-provider and Pi forks, automatic authentication revalidation, explicit
+recovery and recovery of another session sharing the scope. Each wait retains its launch epoch,
+credential identity and, where applicable, exact recovery card/request or fork target reservation.
+Cancelled or stale preparation cannot continue into plugin writes, probes or provider launch.
+The existing automatic-revalidation timeout cancels only its pending wait and keeps its unknown
+result. Cancelling or dismissing recovery aborts the exact pending preparation; unrelated failures
+still propagate through the existing error handling.
+
 A missing, late, malformed, duplicate or mismatched completion, failed cancellation unwind, worker
 error or unexpected exit poisons the lane. It rejects further work, retains canonical evidence and
 never transparently creates another registry to reconstruct private authority. Terminating a worker
@@ -82,6 +92,11 @@ alias retargeting, worker loss, live-parent refusal and generated reference-coun
 loss, deadlines and queue saturation. `provider-home-lease-heartbeat.test.ts` covers maximal migration,
 cold/failure paths, actual fence contention and killed-runner recovery. Existing native, portable,
 checkpoint and I/O suites retain the ownership, durability and private-token proofs.
+`session-manager-lease-preparation.test.ts` executes the production plugin ownership phase with
+isolated controllers, including stale card/account/epoch checks, recovery cancellation, the
+automatic timeout and unrelated-error preservation. The fork integration tests defer both
+preparation paths and verify source/target deletion, epoch and credential replacement before any
+temporary provider is constructed; existing plugin argument assertions remain in place.
 
 The Platform Isolation matrix runs Linux, macOS and both Windows images. It runs the focused source
 tests and `verify-provider-home-worker-binary.mjs --source`, then builds the real native SEA and runs
