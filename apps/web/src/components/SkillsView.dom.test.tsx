@@ -2800,7 +2800,8 @@ test("a grouped skill's Manual Only error offers no fix until the group's rules 
   const client = {
     ...api,
     listSkills: async () => ({ skills: [skill] }),
-    listSkillGroups: async () => ({ groups: [{ id: "group-1", name: "Platform", sortOrder: 0 }] }),
+    listSkillGroups: async () => ({ groups: [{ id: "group-1", name: "Platform", sortOrder: 0,
+      scope: { organizationId: "org", owner: { kind: "organization" } } }] }),
     getSkill: async () => ({ skill, latestVersion: { ...skill.latestVersion, files: [] } }),
     // The skill's own instance-wide rule; the group's runner-scoped rule outranks it on this machine.
     listSkillAssignments: async () => ({ assignments: [{ id: "direct", skillId: "skill-1", scopeKind: "instance", agentSelector: { kind: "all" },
@@ -2826,6 +2827,11 @@ test("a grouped skill's Manual Only error offers no fix until the group's rules 
   await view.click(view.listItem("collect"));
   assert.deepEqual([...view.slot()!.querySelectorAll(".notice-actions > button")].map((button) => button.textContent), ["Edit in Groupsâ€¦"]);
   assert.match(view.slot()!.textContent ?? "", /Switch the group's assignment to Agent Invocable/);
+  // The slot already names the group's rule, so its row doesn't repeat it, and the direct rule the
+  // group's outranks on this machine reaches nobody (#2287).
+  assert.deepEqual([...view.container.querySelectorAll(".skill-assignments .skill-assignment")]
+    .map((row) => [row.getAttribute("data-assignment-id"), row.querySelector(".skill-assignment-warning")?.textContent ?? null]),
+  [["direct", null], ["group-rule", null]]);
   assert.deepEqual(patches, []);
   await view.unmount();
 });
@@ -3053,6 +3059,92 @@ test("a group's rules are read-only rows under From Groups, and Edit in Groupsâ€
   } finally {
     await view.unmount();
   }
+});
+
+test("a direct rule names the agents it can't reach in amber, except under All Agents and where the notice slot already says so (#2287)", async () => {
+  const agents = [
+    { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true },
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" as const, available: true },
+    // ACP agents: skill deployment can't reach them.
+    { id: "gemini", name: "Gemini CLI", command: "gemini", args: [], env: {}, available: true },
+    { id: "goose", name: "Goose", command: "goose", args: [], env: {}, available: true },
+  ];
+  const machine: RunnerView = { ...runner, displayName: "Studio Workstation", agents, providerAccounts: [] };
+  let grouped = false;
+  let groupRead: "fail" | "ok" = "ok";
+  /** Whether the machine was told to deploy Manual Only to Codex, which the notice slot reports. */
+  let reported = true;
+  const skill = () => ({ id: "skill-1", name: "collect", ...(grouped ? { groupId: "group-1" } : {}), assignmentCount: 3,
+    latestVersion: { id: "v1", digest: "d1", versionNumber: 1 } });
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [skill()] }),
+    listSkillGroups: async () => ({ groups: [{ id: "group-1", name: "Platform", sortOrder: 0,
+      scope: { organizationId: "org", owner: { kind: "organization" } } }] }),
+    getSkill: async () => ({ skill: skill(), latestVersion: { ...skill().latestVersion, files: [] } }),
+    listSkillAssignments: async () => ({ assignments: [
+      { id: "d-all", skillId: "skill-1", scopeKind: "instance", agentSelector: { kind: "all" }, enabled: true, invocation: "agent" },
+      { id: "d-acp", skillId: "skill-1", scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "driver", driver: "acp" },
+        enabled: true, invocation: "agent" },
+      { id: "d-manual", skillId: "skill-1", scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "driver", driver: "codex" },
+        enabled: true, invocation: "manual" },
+    ] }),
+    listSkillGroupAssignments: async () => {
+      if (groupRead === "fail") throw new Error("HTTP 503");
+      return { assignments: [] };
+    },
+    runnerSkills: async () => ({ desired: [{ name: "collect", versionDigest: "d1", targets: [
+      { agentId: "claude", invocation: "agent" }, ...(reported ? [{ agentId: "codex", invocation: "manual" }] : [])] }], reported: null }),
+  } as unknown as ApiClient;
+  const warnings = (view: Awaited<ReturnType<typeof mountSkills>>) => [...view.container
+    .querySelectorAll<HTMLElement>(".skill-assignment-list[aria-label='Direct Assignments'] > .skill-assignment")]
+    .map((row) => row.querySelector(".skill-assignment-warning")?.textContent ?? null);
+
+  // The slot reports the Manual Only rule, so its row doesn't say it again; All Agents is never
+  // flagged for the ACP agents it includes; the ACP rule names both agents.
+  let view = await mountSkills(client, "skills-direct-warning", [machine]);
+  await view.click(view.listItem("collect"));
+  assert.equal(view.slot()?.dataset.notice, "manual-only");
+  assert.equal(view.slot()!.querySelector(".notice-title")?.textContent, "Codex Can't Run Manual-Only Skills");
+  assert.deepEqual(warnings(view), [
+    null,
+    "Gemini CLI and Goose on Studio Workstation can't receive managed skills.",
+    null,
+  ]);
+  const acpRow = view.container.querySelector<HTMLElement>('[data-assignment-id="d-acp"]')!;
+  assert.equal(acpRow.querySelector(".skill-assignment-warning")?.parentElement?.className, "skill-assignment-text",
+    "the sentence sits under the rule's title, as on a group row");
+  await view.unmount();
+
+  // Until the machine reports the skip, the slot is silent, so the Manual Only rule's row says it.
+  reported = false;
+  view = await mountSkills(client, "skills-direct-warning-unreported", [machine]);
+  await view.click(view.listItem("collect"));
+  assertNoDomNode(view.slot());
+  assert.deepEqual(warnings(view), [
+    null,
+    "Gemini CLI and Goose on Studio Workstation can't receive managed skills.",
+    "Codex on Studio Workstation can't run manual-only skills.",
+  ]);
+  await view.unmount();
+
+  // While the skill's group's rules are unread, one of them could win, so no direct rule is warned.
+  grouped = true;
+  groupRead = "fail";
+  view = await mountSkills(client, "skills-direct-warning-group-unread", [machine]);
+  await view.click(view.listItem("collect"));
+  assert.deepEqual(warnings(view), [null, null, null]);
+  await view.unmount();
+
+  groupRead = "ok";
+  view = await mountSkills(client, "skills-direct-warning-group-read", [machine]);
+  await view.click(view.listItem("collect"));
+  assert.deepEqual(warnings(view), [
+    null,
+    "Gemini CLI and Goose on Studio Workstation can't receive managed skills.",
+    "Codex on Studio Workstation can't run manual-only skills.",
+  ]);
+  await view.unmount();
 });
 
 test("a legacy group keeps its one-sentence explanation, and unreadable group rules say so", async () => {
