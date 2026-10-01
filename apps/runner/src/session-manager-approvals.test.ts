@@ -569,7 +569,7 @@ test("a late async dismissal cannot clear a reused provider request id", () => {
   }
 });
 
-for (const outcome of ["accepted", "rejected", "uncertain"] as const) {
+for (const outcome of ["accepted", "rejected", "uncertain", "cancelled"] as const) {
   test(`a durable async answer uses steering and handles ${outcome} delivery without reopening`, async () => {
     const { sm, sent, store, cleanup } = makeHarness(true);
     try {
@@ -583,6 +583,7 @@ for (const outcome of ["accepted", "rejected", "uncertain"] as const) {
       const steers: Array<{ submissionId: string; text: string }> = [];
       entry.client.steer = async (input: { submissionId: string; text: string }) => {
         steers.push(input);
+        if (outcome === "cancelled") return new Promise(() => {});
         return { outcome, providerTurnId: "provider-turn", reason: "fixture delivery result" };
       };
       store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex",
@@ -603,6 +604,12 @@ for (const outcome of ["accepted", "rejected", "uncertain"] as const) {
         failed: (error) => { assert.fail(error); },
         uncertain: () => { transitions.push("uncertain"); },
       });
+      if (outcome === "cancelled") {
+        for (let attempt = 0; attempt < 40 && steers.length === 0; attempt += 1) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        (sm as any).clearSteeringState("s_perm", "replacement discarded an in-flight answer");
+      }
       for (let attempt = 0; attempt < 40 &&
         (sm as any).steeringLaneRunning.has("s_perm"); attempt += 1) {
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -623,7 +630,7 @@ for (const outcome of ["accepted", "rejected", "uncertain"] as const) {
         assert.equal(messages[0]!.payload.turnId, "running-turn");
         assert.equal(entry.queue.length, 0);
       } else {
-        assert.deepEqual(transitions, ["queued", "steering", outcome === "uncertain" ? "uncertain" : "requeued"]);
+        assert.deepEqual(transitions, ["queued", "steering", outcome === "rejected" ? "requeued" : "uncertain"]);
         assert.equal(messages.length, 0);
         assert.equal(entry.queue.length, outcome === "rejected" ? 1 : 0);
         assert.equal(entry.reservedPromotions.size, 0);

@@ -8249,10 +8249,13 @@ export class SessionManager {
     for (const operation of this.steeringRegistry.get(sessionId)?.values() ?? []) {
       operation.resolveLifecycle();
       if (!operation.settled) {
+        const durable = operation.source?.durable;
+        const uncertain = Boolean(durable && operation.providerStarted);
+        if (durable && !uncertain) durable.failed(message, "COMMAND_CANCELLED");
         this.settleSteering(operation, this.makeSteeringResult(
           operation.request,
-          "rejected",
-          "policy_blocked",
+          uncertain ? "uncertain" : "rejected",
+          uncertain ? "transport_uncertain" : "policy_blocked",
           { message },
         ));
       }
