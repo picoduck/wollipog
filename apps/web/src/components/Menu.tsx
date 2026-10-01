@@ -121,9 +121,9 @@ function useMenuPlacement(
     // What the containing block was last measured for, and what it measured.
     let measuredFor = "";
     let measured = VIEWPORT_BOX;
-    const containingBlock = (rect: Pick<DOMRect, "left" | "top" | "bottom"> | undefined): FixedContainingBlockOffset => {
+    const containingBlock = (anchorRect: Pick<DOMRect, "left" | "top" | "bottom"> | undefined): FixedContainingBlockOffset => {
       if (!inline) return VIEWPORT_BOX;
-      const key = `${rect?.left},${rect?.top},${rect?.bottom},${window.innerWidth},${window.innerHeight}`;
+      const key = `${anchorRect?.left},${anchorRect?.top},${anchorRect?.bottom},${window.innerWidth},${window.innerHeight}`;
       if (key === measuredFor) return measured;
       measuredFor = key;
       // The surface's parent shares its ancestors, so it resolves against the same box.
@@ -132,17 +132,22 @@ function useMenuPlacement(
       setBox((current) => sameBox(current, measured) ? current : measured);
       return measured;
     };
+    if (!inline) setBox(VIEWPORT_BOX);
     if (sheet) {
       setPlacement(undefined);
-      if (!inline) {
-        setBox(VIEWPORT_BOX);
-        return;
-      }
-      // A sheet docks to the edges of the box it resolves against, so an inline one measures it.
-      const dock = () => void containingBlock(undefined);
+      if (!inline) return;
+      // A sheet docks to the edges of the box it resolves against, so an inline one measures that
+      // box, again whenever the surface's parent has moved (a dialog sheet sliding in, a scroll).
+      const dock = () => void containingBlock(surfaceRef.current?.parentElement?.getBoundingClientRect());
       dock();
       window.addEventListener("resize", dock);
-      return () => window.removeEventListener("resize", dock);
+      window.addEventListener("scroll", dock, true);
+      document.addEventListener("animationend", dock, true);
+      return () => {
+        window.removeEventListener("resize", dock);
+        window.removeEventListener("scroll", dock, true);
+        document.removeEventListener("animationend", dock, true);
+      };
     }
     const update = () => {
       const surface = surfaceRef.current;

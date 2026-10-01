@@ -380,7 +380,8 @@ test("an inline menu renders where it is written, inside its dialog, rather than
 
 /**
  * Stubs layout, which happy-dom lacks: a fixed probe (fixed-containing-block.ts) lands at the given
- * ancestor box, `.stub-trigger` at (300, 200), and anything else is 200px wide with no height.
+ * ancestor box, `.stub-trigger` at (300, 200), and anything else (the menu, its parent) is 200px
+ * wide with no height, at the box's corner, so it moves when the box does.
  */
 function stubLayout(box: { left: number; top: number; bottom: number }): { probes: () => number; restore: () => void } {
   const original = domWindow.HTMLElement.prototype.getBoundingClientRect;
@@ -393,7 +394,7 @@ function stubLayout(box: { left: number; top: number; bottom: number }): { probe
       return rect(box.left, box.top, 0, domWindow.innerHeight - box.bottom - box.top);
     }
     if (this.classList.contains("stub-trigger")) return rect(300, 200, 80, 28);
-    return rect(0, 0, 200, 0);
+    return rect(box.left, box.top, 200, 0);
   } as never;
   return {
     probes: () => probes,
@@ -460,7 +461,8 @@ test("an inline menu under a fixed containing block opens beside its trigger; a 
 });
 
 test("an inline phone sheet under a fixed containing block still docks to the viewport's edges", async () => {
-  const layout = stubLayout({ left: 16, top: 40, bottom: 60 });
+  const box = { left: 16, top: 40, bottom: 60 };
+  const layout = stubLayout(box);
   const restore = stubViewport(true);
   const mounted = await mount(<ContainedHarness inline />);
   try {
@@ -469,6 +471,29 @@ test("an inline phone sheet under a fixed containing block still docks to the vi
     assert.equal(menu.style.left, "-16px");
     assert.equal(menu.style.width, "100vw");
     assert.equal(menu.style.bottom, "calc(var(--keyboard-inset, 0px) - 60px)");
+    // The box moves (a dialog sheet sliding in): the sheet docks again once the motion ends.
+    Object.assign(box, { left: 0, top: 20, bottom: 30 });
+    await act(async () => { doc().dispatchEvent(new domWindow.Event("animationend") as never); });
+    assert.equal(menu.style.left, "0px");
+    assert.equal(menu.style.bottom, "calc(var(--keyboard-inset, 0px) - 30px)");
+  } finally {
+    await unmount(mounted);
+    restore();
+    layout.restore();
+  }
+});
+
+test("a menu that stops rendering in place drops the offsets it measured there", async () => {
+  const layout = stubLayout({ left: 100, top: 50, bottom: 50 });
+  const restore = stubViewport(false);
+  const mounted = await mount(<ContainedHarness inline />);
+  try {
+    assert.equal(doc().querySelector<HTMLElement>(".menu-backdrop")!.style.left, "-100px");
+    await act(async () => { mounted.root.render(<ContainedHarness inline={false} />); });
+    const menu = doc().querySelector<HTMLElement>('[role="menu"]')!;
+    assert.equal(menu.parentElement, doc().body);
+    assert.equal(menu.style.left, "300px");
+    assert.equal(doc().querySelector(".menu-backdrop")!.getAttribute("style"), null);
   } finally {
     await unmount(mounted);
     restore();
