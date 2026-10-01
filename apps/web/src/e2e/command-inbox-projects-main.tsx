@@ -1201,7 +1201,7 @@ const noticeSkills = [
   { id: "skill-n5", name: "orchestrate-issues", description: ORCHESTRATE_DESCRIPTION, builtIn: { release: "0.29.1", heldUpdate: null },
     recommendation: { dismissed: false }, latestVersion: noticeVersion(5, 1), assignmentCount: 0 },
   { id: "skill-n6", name: "deploy-bot", description: "Ships signed builds.", latestVersion: noticeVersion(6, 9), assignmentCount: 1 },
-];
+].map((skill, index) => ({ ...skill, updatedAt: Date.now() - (index + 1) * 3_600_000 }));
 type NoticeRule = { id: string; skillId: string; scopeKind: "instance" | "runner"; runnerId?: string; agentSelector: { kind: string; driver?: string };
   enabled: boolean; invocation: "agent" | "manual"; updatedAt: number };
 const noticeRules: NoticeRule[] = [
@@ -1232,13 +1232,16 @@ const noticeMachine = (runnerId: string) => {
       deployed: desired.map((entry) => ({ name: entry.name, digest: entry.versionDigest, links: entry.targets.map((target) =>
         studio && entry.name === "deploy-bot"
           ? { agentId: target.agentId, status: "error" as const, detail: "Permission denied: ~/.codex/skills/deploy-bot is owned by root." }
-          : { agentId: target.agentId, status: "linked" as const }) })),
+          // As the runner reports it: only Claude Code can enforce manual-only invocation.
+          : target.invocation === "manual" && target.agentId !== "claude"
+            ? { agentId: target.agentId, status: "unsupported" as const, detail: "Manual-only invocation is not supported for this agent." }
+            : { agentId: target.agentId, status: "linked" as const }) })),
       drift: studio ? [
         { name: "lint-rules", digest: noticeSkills[1]!.latestVersion.digest, variant: "manual" as const, observedDigest: "e2".padEnd(64, "0"), held: true },
         { name: "collect", digest: noticeSkills[0]!.latestVersion.digest, variant: "manual" as const, observedDigest: "e1".padEnd(64, "0"), held: true },
       ] : [],
       unmanaged: [],
-      updatedAt: 1_700_000_000_000,
+      updatedAt: Date.now() - 5 * 60_000,
     },
   });
 };
