@@ -1,35 +1,27 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 /**
- * #784: background work is a status like any other, and it has to look like one.
+ * #784 and #2182: background work is a status like any other, and it has to look like one.
  *
- * Two claims are measured here, at mobile and desktop widths, with a lifecycle status, background
- * work, an attention status and a change status all live at once:
+ * The Session bar shows ONE status, chosen by `sessionStatusSummary()` rather than by how much room
+ * a row has, so what it shows is the same at every width:
  *
- *  - PLACEMENT. The background-work badge sits in the ordinary status row, on the same line as the
- *    lifecycle badge, and never takes a line of its own — the header is exactly as tall while a job
- *    is running as it is when none is. When the row cannot hold everything, the passive change
- *    status moves into the `+N` disclosure and background work keeps the row.
- *  - GEOMETRY. The responsive background-work label is the same height, type size, weight,
- *    vertical padding and dot size as the lifecycle badge beside it — including "Running" itself
- *    — in the header, and the same size as the card's Running pill in the Sessions list.
+ *  - PLACEMENT. One status control sits on the bar's line at every width, and on a phone it leads
+ *    the second line beside Share and More Actions without pushing them. Attention comes first;
+ *    with nothing needing the person, running background work leads while the session awaits its
+ *    next prompt. The header is exactly as tall while a job is running as it is when none is.
+ *  - GEOMETRY. The background-work badge is the same height, type size, weight, vertical padding
+ *    and dot size as any other badge, in the bar and in the Session Status popover, and the same
+ *    size as the card's Running pill in the Sessions list.
  *
- * Geometry is read with every measured badge temporarily un-hidden, because the narrow widths are
- * exactly where the row hides one: a size regression on a `display: none` badge would otherwise
- * measure 0 and pass.
- *
- * A `running` session never carries a change status (`sessionMayShowChangeStatus`), so the
- * four-dimension scenario runs on an idle session and Running is measured in its own pass. Every
- * one is the same `.status` recipe (docs/design-system.md §11.1), which is the thing being sized.
+ * Every one is the same `.status` recipe (docs/design-system.md §11.1), which is the thing sized.
  */
 
 const MOBILE_WIDTHS = [320, 360, 390] as const;
 const WIDTHS = [...MOBILE_WIDTHS, 768, 1280] as const;
-const BACKGROUND_LABEL = "Background Work: Waiting on External Job";
 
 interface BadgeMetrics {
   height: number;
-  width: number;
   fontSize: string;
   fontWeight: string;
   paddingTop: string;
@@ -44,12 +36,12 @@ async function loadInbox(page: Page, width: number) {
   await applyStatuses(page, { status: "idle", backgroundWorkState: "running" });
 }
 
-async function applyStatuses(page: Page, patch: { status: string; backgroundWorkState: string }) {
-  await page.evaluate(({ status, backgroundWorkState }) => {
+async function applyStatuses(page: Page, patch: { status: string; backgroundWorkState: string; approval?: boolean }) {
+  await page.evaluate(({ status, backgroundWorkState, approval }) => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       status,
       backgroundWorkState,
-      pendingApproval: {
+      pendingApproval: approval === false ? null : {
         kind: "permission",
         requestId: "background-approval",
         title: "Review external work",
@@ -60,9 +52,8 @@ async function applyStatuses(page: Page, patch: { status: string; backgroundWork
 }
 
 /**
- * An Orchestrator Action badge fills the row again at phone widths. Since changes became a Pinned
- * Summary fact (#2160) and Fork Conversation left the action line (#2161), the plain fixture fits at
- * 390px; with this badge the row overflows at 390px and below and still fits at 768px.
+ * A passive condition beside the approval: an Orchestrator Action is a row of the Session Status
+ * popover, so it must never take the bar's one badge or count toward its "+N" (#2182).
  */
 async function addOrchestratorAction(page: Page) {
   await page.evaluate(() => {
@@ -79,170 +70,114 @@ async function openSession(page: Page) {
   await expect(page.locator(".session-bar")).toBeVisible();
 }
 
-/** Header badge geometry and placement, with the row's displaced badges temporarily restored. */
-async function readHeader(page: Page) {
-  return page.evaluate(() => {
-    const header = document.querySelector<HTMLElement>(".session-bar")!;
-    const statuses = header.querySelector<HTMLElement>(".session-header-statuses")!;
-    const measured = [...statuses.querySelectorAll<HTMLElement>(
-      ".session-status-indicators > .status, " +
-      ".change-status-indicators > .status, " +
-      ":scope > .status[data-group='background-work'], " +
-      ":scope > .active-subagents-badge",
-    )];
-    const label = (element: HTMLElement) => element.getAttribute("aria-label") ?? "";
-    const box = (element: HTMLElement) => element.getBoundingClientRect();
-    const visible = measured.filter((element) => !element.hidden).map((element) => ({
-      label: label(element), y: box(element).y, right: box(element).right,
-    }));
-    const hidden = measured.filter((element) => element.hidden).map(label);
-
-    const wasHidden = measured.map((element) => element.hidden);
-    for (const element of measured) element.hidden = false;
-    const read = (element: HTMLElement) => {
-      const style = getComputedStyle(element);
-      // The dot is the recipe's `::before`, so it is read from the pseudo-element's computed box.
-      const dotStyle = getComputedStyle(element, "::before");
-      const dot = { width: parseFloat(dotStyle.width), height: parseFloat(dotStyle.height) };
-      return {
-        height: box(element).height,
-        width: box(element).width,
-        fontSize: style.fontSize,
-        fontWeight: style.fontWeight,
-        paddingTop: style.paddingTop,
-        paddingBottom: style.paddingBottom,
-        dotWidth: dot.width,
-        dotHeight: dot.height,
-      };
-    };
-    const backgroundBadge = statuses.querySelector<HTMLElement>(":scope > .status[data-group='background-work']");
-    const geometry = {
-      lifecycle: read(statuses.querySelector<HTMLElement>('[aria-label^="Activity:"]')!),
-      background: backgroundBadge ? read(backgroundBadge) : null,
-    };
-    measured.forEach((element, index) => { element.hidden = wasHidden[index]!; });
-
+function badgeMetrics(badge: Locator): Promise<BadgeMetrics> {
+  return badge.evaluate((element) => {
+    const style = getComputedStyle(element);
+    // The dot is the recipe's `::before`, so it is read from the pseudo-element's computed box.
+    const dot = getComputedStyle(element, "::before");
     return {
-      geometry,
-      visible,
-      hidden,
-      backgroundIsHidden: backgroundBadge?.hidden ?? null,
-      backgroundParent: backgroundBadge?.parentElement?.className ?? "",
-      backgroundRight: backgroundBadge ? box(backgroundBadge).right : null,
-      statusesRight: box(statuses).right,
-      statusesWidth: box(statuses).width,
-      actionsLeft: box(header.querySelector<HTMLElement>(".detail-actions")!).left,
-      headerHeight: box(header).height,
-      overflowCount: header.querySelector<HTMLElement>(".session-status-overflow-trigger")
-        ?.textContent?.replace("+", "") ?? null,
-      pageOverflows: document.documentElement.scrollWidth > window.innerWidth,
-      // A line of its own for background work is exactly what this used to be.
-      dedicatedBackgroundLine: header.querySelectorAll(
-        ":scope > .status[data-group='background-work'], :scope > .session-header-background-work",
-      ).length,
+      height: element.getBoundingClientRect().height,
+      fontSize: style.fontSize,
+      fontWeight: style.fontWeight,
+      paddingTop: style.paddingTop,
+      paddingBottom: style.paddingBottom,
+      dotWidth: parseFloat(dot.width),
+      dotHeight: parseFloat(dot.height),
     };
   });
 }
 
-function expectMatchingBadges(background: BadgeMetrics, lifecycle: BadgeMetrics) {
-  expect(background.fontSize).toBe(lifecycle.fontSize);
-  expect(background.fontWeight).toBe(lifecycle.fontWeight);
-  expect(background.paddingTop).toBe(lifecycle.paddingTop);
-  expect(background.paddingBottom).toBe(lifecycle.paddingBottom);
-  expect(background.dotWidth).toBe(lifecycle.dotWidth);
-  expect(background.dotHeight).toBe(lifecycle.dotHeight);
-  expect(Math.abs(background.height - lifecycle.height)).toBeLessThanOrEqual(0.5);
+/** The bar's one status control, its badge, and where it sits beside the actions. */
+async function readHeader(page: Page) {
+  const badge = await badgeMetrics(page.locator(".session-bar .session-status-button .status"));
+  const layout = await page.evaluate(() => {
+    const header = document.querySelector<HTMLElement>(".session-bar")!;
+    const control = header.querySelector<HTMLElement>(".session-status-button")!;
+    const box = (element: Element) => element.getBoundingClientRect();
+    const share = header.querySelector<HTMLElement>('[aria-label="Share"]')!;
+    return {
+      name: control.getAttribute("aria-label"),
+      badges: header.querySelectorAll(".status").length,
+      controlRight: box(control).right,
+      controlCenter: box(control).y + box(control).height / 2,
+      shareCenter: box(share).y + box(share).height / 2,
+      actionsLeft: box(header.querySelector(".detail-actions")!).left,
+      headerHeight: box(header).height,
+      pageOverflows: document.documentElement.scrollWidth > window.innerWidth,
+    };
+  });
+  return { ...layout, badge };
+}
+
+function expectMatchingBadges(background: BadgeMetrics, other: BadgeMetrics) {
+  expect(background.fontSize).toBe(other.fontSize);
+  expect(background.fontWeight).toBe(other.fontWeight);
+  expect(background.paddingTop).toBe(other.paddingTop);
+  expect(background.paddingBottom).toBe(other.paddingBottom);
+  expect(background.dotWidth).toBe(other.dotWidth);
+  expect(background.dotHeight).toBe(other.dotHeight);
+  expect(Math.abs(background.height - other.height)).toBeLessThanOrEqual(0.5);
 }
 
 for (const width of WIDTHS) {
-  test(`the Session header keeps background work inline beside its lifecycle badge at ${width}px`, async ({ page }) => {
+  test(`the Session bar shows one status, attention first, and sizes background work like it at ${width}px`, async ({ page }) => {
     await loadInbox(page, width);
     await openSession(page);
-    const badge = page.locator(".session-header-statuses > .status[data-group='background-work']");
-    await expect(badge).toHaveCount(1);
-    const wideLabel = badge.locator(".status-label-wide");
-    const narrowLabel = badge.locator(".status-label-narrow");
-    if (width <= 390) {
-      await expect(narrowLabel).toBeVisible();
-      await expect(narrowLabel).toHaveText("Job");
-      await expect(wideLabel).toBeHidden();
-    } else {
-      await expect(wideLabel).toBeVisible();
-      await expect(narrowLabel).toBeHidden();
-    }
-    // The accessible name survives whether or not the row had room to paint the badge.
-    await expect(page.locator(`.session-bar .sr-only [aria-label="${BACKGROUND_LABEL}"]`))
-      .toHaveCount(1);
-
+    const control = page.locator(".session-bar .session-status-button");
+    // The approval needs the person, so it is the badge at every width; background work waits in the
+    // popover, and its live region still announces it.
+    await expect(control).toHaveAccessibleName("Session Status: Approval Required");
+    await expect(page.locator('.session-bar [data-live="background-work"]'))
+      .toHaveText("Background Work: Waiting on External Job");
     const header = await readHeader(page);
-
-    // A phone's status row is the measured one: `nowrap`, clipped, and single-line by contract, so
-    // whatever it shows sits on one line. Desktop keeps its pre-existing `flex-wrap: wrap`, where a
-    // wide enough set of badges takes a second line at any badge size — a wrap that depends on the
-    // machine's font stack, and therefore not something a test can assert either way.
-    const phone = width <= 390;
-    expect(header.backgroundParent).toContain("session-header-statuses");
-    expect(header.dedicatedBackgroundLine).toBe(0);
-    if (phone) {
-      expect(new Set(header.visible.map((status) => Math.round(status.y))).size).toBe(1);
-    }
-    // The phone label is deliberately short enough to keep authoritative background work inline,
-    // including the 320px floor where its previous copy could only live in the disclosure.
-    if (phone) expect(header.visible.map((status) => status.label)).toContain(BACKGROUND_LABEL);
-    if (width === 390) expect(header.visible.some((status) => status.label.startsWith("Activity:"))).toBe(true);
-    expect(header.backgroundRight!).toBeLessThanOrEqual(header.statusesRight + 0.5);
-    expect(header.backgroundRight!).toBeLessThanOrEqual(header.actionsLeft + 0.5);
+    expect(header.badges).toBe(1);
+    expect(header.controlRight).toBeLessThanOrEqual(header.actionsLeft + 0.5);
+    expect(Math.abs(header.controlCenter - header.shareCenter)).toBeLessThanOrEqual(1);
     expect(header.pageOverflows).toBe(false);
-
-    expectMatchingBadges(header.geometry.background!, header.geometry.lifecycle);
     // The retired 10px `--text-2xs` is gone: every header badge is the recipe's 11px (§2.3, §11.1).
-    expect(header.geometry.lifecycle.fontSize).toBe("11px");
+    expect(header.badge.fontSize).toBe("11px");
 
-    // The same parity against Running itself, which an idle session cannot show at the same time as
-    // a change status.
-    await applyStatuses(page, { status: "running", backgroundWorkState: "running" });
-    await expect(page.locator('.session-header-statuses [aria-label="Activity: Running"]'))
-      .toHaveCount(1);
+    await control.click();
+    const dialog = page.getByRole("dialog", { name: "Session Status" });
+    const backgroundRow = dialog.locator(".session-status-row").filter({ hasText: "Waiting on External Job" });
+    const popoverBackground = await badgeMetrics(backgroundRow.locator(".status"));
+    expectMatchingBadges(popoverBackground, header.badge);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    // With the approval answered, running background work is the badge while the session awaits its
+    // next prompt (#784), and it measures like Running itself.
+    await applyStatuses(page, { status: "idle", backgroundWorkState: "running", approval: false });
+    await expect(control).toHaveAccessibleName("Session Status: Waiting on External Job");
+    const background = await readHeader(page);
+    await applyStatuses(page, { status: "running", backgroundWorkState: "resumed", approval: false });
+    await expect(control).toHaveAccessibleName("Session Status: Running");
     const running = await readHeader(page);
-    expectMatchingBadges(running.geometry.background!, running.geometry.lifecycle);
-
-    // The header is no taller for carrying background work than it is without it — the whole point
-    // of #784 on a phone, where the badge used to buy itself a line. On desktop the badge is one
-    // wrapping flex item among several, which is how that row has always behaved.
-    await applyStatuses(page, { status: "running", backgroundWorkState: "resumed" });
-    await expect(badge).toHaveCount(0);
-    const withoutBackgroundWork = await page.locator(".session-bar")
-      .evaluate((element) => element.getBoundingClientRect().height);
-    if (phone) expect(running.headerHeight).toBeLessThanOrEqual(withoutBackgroundWork + 0.5);
+    expectMatchingBadges(background.badge, running.badge);
+    // The header is no taller for carrying background work than it is without it.
+    expect(background.headerHeight).toBeLessThanOrEqual(running.headerHeight + 0.5);
   });
 }
 
 for (const width of MOBILE_WIDTHS) {
-  test(`a full status row sheds passive statuses before background work at ${width}px`, async ({ page }) => {
+  test(`a phone shows attention at first paint and never pushes Share or More Actions at ${width}px`, async ({ page }) => {
     await loadInbox(page, width);
     await addOrchestratorAction(page);
     await openSession(page);
-    const trigger = page.locator(".session-status-overflow-trigger");
-    await expect(trigger).toBeVisible();
-
-    const header = await readHeader(page);
-    // The narrow widths actually exercise the path: something had to leave the row.
-    expect(header.hidden.length).toBeGreaterThan(0);
-    expect(header.overflowCount).toBe(String(header.hidden.length));
-    // Background work remains authoritative even when font metrics change which lower-priority
-    // status can use the row's remaining space.
-    expect(header.hidden).not.toContain(BACKGROUND_LABEL);
-    expect(header.backgroundIsHidden).toBe(false);
-
-    // The disclosure carries the whole status set, displaced or not.
-    await trigger.click();
-    const dialog = page.getByRole("dialog", { name: "Session Statuses" });
-    await expect(dialog.locator(".status[data-group='background-work']")).toHaveAccessibleName(BACKGROUND_LABEL);
-    for (const displaced of header.hidden) {
-      await expect(dialog.locator(`[aria-label="${displaced}"]`)).toBeVisible();
+    const header = page.locator(".session-bar");
+    const control = header.locator(".session-status-button");
+    await expect(control.locator(".status")).toHaveText("Approval Required");
+    await expect(header.getByText("Detached Work")).toHaveCount(0);
+    for (const name of ["Share", "More Actions"]) {
+      const action = header.getByRole("button", { name, exact: true });
+      await expect(action).toBeVisible();
+      const hit = await action.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const painted = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+        return painted === element || (painted !== null && element.contains(painted));
+      });
+      expect(hit, `${name} stays hittable`).toBe(true);
     }
-    await page.keyboard.press("Escape");
-    await expect(trigger).toBeFocused();
   });
 }
 
@@ -283,62 +218,16 @@ for (const width of [390, 1280] as const) {
   });
 }
 
-/**
- * The row is measured by applying a candidate set and reading geometry back, so every badge is
- * briefly `display: none` — including the one the row is about to keep. A `display: none` element
- * cannot hold focus, so without care a resize, a font load or a live status update silently drops
- * keyboard focus to <body> mid-measurement.
- */
-test("remeasuring the row keeps focus on the badge it keeps", async ({ page }) => {
+test("a live status change and a resize keep focus on the status control", async ({ page }) => {
   await loadInbox(page, 390);
   await openSession(page);
-  const badge = page.locator(".session-header-statuses > .status[data-group='background-work']");
-  await expect(badge).toBeVisible();
-  await badge.focus();
-  await expect(badge).toBeFocused();
-
-  // A resize re-measures the row. The badge survives this one, and so must its focus.
+  const control = page.locator(".session-bar .session-status-button");
+  await control.focus();
+  await expect(control).toBeFocused();
+  // The control is one element whatever it shows, so nothing is measured away from under focus.
+  await applyStatuses(page, { status: "idle", backgroundWorkState: "running", approval: false });
+  await expect(control).toHaveAccessibleName("Session Status: Waiting on External Job");
+  await expect(control).toBeFocused();
   await page.setViewportSize({ width: 430, height: 900 });
-  await expect(badge).toBeVisible();
-  await expect(badge).toBeFocused();
-});
-
-test("a badge that loses the row hands focus to the existing disclosure", async ({ page }) => {
-  await loadInbox(page, 600);
-  // With the Orchestrator Action badge the row already overflows at 600px, while Attention keeps
-  // its place (540–610px in both this machine's UI font and CI's DejaVu Sans).
-  await addOrchestratorAction(page);
-  await openSession(page);
-  const badge = page.locator(
-    '.session-header-statuses > .session-status-indicators > [aria-label="Attention: Approval Required"]',
-  );
-  await expect(page.locator(".session-status-overflow-trigger")).toBeVisible();
-  await expect(badge).toBeVisible();
-  await badge.focus();
-  await expect(badge).toBeFocused();
-
-  // At 390px the higher-priority lifecycle and background-work badges displace Attention into the
-  // disclosure — and focus goes with it rather than falling to <body>.
-  await page.setViewportSize({ width: 390, height: 900 });
-  await expect(badge).toBeHidden();
-  await expect(page.locator(".session-status-overflow-trigger")).toBeFocused();
-});
-
-test("the first overflow hands focus to the disclosure once it exists", async ({ page }) => {
-  // At 768px every badge fits, so there is no `+N` trigger to hand focus to at measurement time:
-  // this is the deferred path, where the handover waits for the trigger to render.
-  await loadInbox(page, 768);
-  await addOrchestratorAction(page);
-  await openSession(page);
-  await expect(page.locator(".session-status-overflow-trigger")).toHaveCount(0);
-  const badge = page.locator(
-    '.session-header-statuses > .session-status-indicators > [aria-label="Attention: Approval Required"]',
-  );
-  await expect(badge).toBeVisible();
-  await badge.focus();
-  await expect(badge).toBeFocused();
-
-  await page.setViewportSize({ width: 390, height: 900 });
-  await expect(badge).toBeHidden();
-  await expect(page.locator(".session-status-overflow-trigger")).toBeFocused();
+  await expect(control).toBeFocused();
 });

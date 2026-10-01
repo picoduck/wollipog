@@ -14,7 +14,9 @@ import {
   sessionAttentionBreakdown,
 } from "@wollipog/protocol";
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
-import { statusMeta, type StatusMeta } from "../status-meta.js";
+import { quarantinedStatusMeta, queueReasonLabel, sessionLifecycleMeta, statusMeta, type StatusMeta } from "../status-meta.js";
+
+export { quarantinedStatusMeta, sessionLifecycleMeta };
 import { reminderBadgeDescription, reminderBadgeLabel, type SnoozedAttentionReason } from "../session-reminders.js";
 import { useOptionalStoreSelector } from "../store.js";
 import { CheckIcon, CopyIcon, ErrorIcon, PinIcon } from "./Icons.js";
@@ -189,35 +191,6 @@ export function CopyButton({
   );
 }
 
-/**
- * The lifecycle a session's badge shows. A Stop operation outranks the provider lifecycle it is
- * stopping; a quarantined conversation outranks "Awaiting Prompt".
- *
- * A pending Stop whose runner is offline is not being delivered: the operation stays pending (so
- * runtime capacity may still be held) but nothing is progressing until the runner reconnects, so it
- * reads "Stop Waiting for Runner" without a pulse rather than the pulsing "Stop Pending" (#208).
- * `runnerOnline` defaults to true so a surface that cannot see the runner keeps the conservative
- * delivery wording.
- */
-export function sessionLifecycleMeta(
-  status: SessionStatus,
-  options: {
-    archiveStatus?: ArchiveStatus;
-    archiveOperation?: ArchiveOperationView;
-    stopOperation?: StopOperationView;
-    historyQuarantine?: SessionView["historyQuarantine"];
-    runnerOnline?: boolean;
-  } = {},
-): StatusMeta {
-  const operation = options.stopOperation ?? options.archiveOperation;
-  const operationStatus = operation?.status ?? options.archiveStatus;
-  if (operationStatus === "stop_pending") {
-    return statusMeta("session", options.runnerOnline === false ? "stop_waiting_for_runner" : "stop_pending");
-  }
-  if (operationStatus === "stop_failed") return statusMeta("session", "stop_failed");
-  return quarantinedStatusMeta(status, options.historyQuarantine) ?? statusMeta("session", status);
-}
-
 export function SessionStatusBadge({ status, archiveStatus, archiveOperation, stopOperation, historyQuarantine, runnerOnline, ariaLabel }: {
   status: SessionStatus;
   archiveStatus?: ArchiveStatus;
@@ -236,16 +209,6 @@ export function SessionStatusBadge({ status, archiveStatus, archiveOperation, st
  * an attention badge already says the session needs the user, "Awaiting Input" is not said again. */
 export function lifecycleRepeatsAttention(lifecycle: StatusMeta, attention: unknown): boolean {
   return Boolean(attention) && lifecycle.label === statusMeta("session", "input_required").label;
-}
-
-/** A quarantined conversation is idle only in the sense that nothing is running. It can never
- * accept another prompt, so "Awaiting Prompt" would invite exactly the retry that cannot work. */
-export function quarantinedStatusMeta(
-  status: SessionStatus,
-  historyQuarantine: SessionView["historyQuarantine"],
-): StatusMeta | null {
-  if (!historyQuarantine || status === "completed" || status === "failed" || status === "stopped") return null;
-  return statusMeta("session", "quarantined");
 }
 
 export function AttentionBadge({ session, ariaLabel, onOpen }: {
@@ -326,24 +289,6 @@ export function AttentionPills({ session, compact = false }: {
       {group.count > 1 && <StatusCount>{group.count}</StatusCount>}
     </StatusBadge>;
   })}</>;
-}
-
-function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>["kind"]): string {
-  return kind === "runner_capacity"
-    ? "Runner Capacity"
-    : kind === "agent_quota"
-      ? "Agent Quota"
-      : kind === "target_quota"
-        ? "Target Quota"
-        : kind === "exclusive_group"
-          ? "Provider Slot"
-          : kind === "request_weight"
-            ? "Agent Weight"
-            : kind === "active_turn_capacity"
-              ? "Active Turn Capacity"
-              : kind === "capacity_lock"
-                ? "Capacity Sync"
-                : "Queue Order";
 }
 
 export function SessionStatusIndicators({
@@ -444,11 +389,9 @@ export function backgroundWorkAccessibleName(state: Exclude<BackgroundWorkState,
   return `Background Work: ${label}`;
 }
 
-export function BackgroundWorkBadge({ state, compact = false, responsiveCompact = false, announce = true, onOpen }: {
+export function BackgroundWorkBadge({ state, compact = false, announce = true, onOpen }: {
   state: BackgroundWorkState;
   compact?: boolean;
-  /** Switch compact visible text again on narrow phones; the accessible name stays complete. */
-  responsiveCompact?: boolean;
   announce?: boolean;
   onOpen?: () => void;
 }) {
@@ -460,12 +403,7 @@ export function BackgroundWorkBadge({ state, compact = false, responsiveCompact 
   const visible = compact ? (
     <>
       <span className="sr-only">{label}</span>
-      {responsiveCompact && meta.shortLabel ? (
-        <>
-          <span className="status-label-wide" aria-hidden="true">{meta.label}</span>
-          <span className="status-label-narrow" aria-hidden="true">{meta.shortLabel}</span>
-        </>
-      ) : <span aria-hidden="true">{meta.label}</span>}
+      <span aria-hidden="true">{meta.label}</span>
     </>
   ) : label;
   if (onOpen) {
@@ -516,17 +454,6 @@ export function UntrackedBackgroundWorkBadge({ onOpen }: { onOpen?: () => void }
         ? "Open Background Work details"
         : "This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."}
       onClick={onOpen} />
-  );
-}
-
-export function ActiveSubagentsBadge({ count, onOpen, workers = false }: { count: number; onOpen: () => void; workers?: boolean }) {
-  if (count < 1) return null;
-  const noun = workers ? "Worker" : "Subagent";
-  const visibleLabel = `${count} ${noun}${count === 1 ? "" : "s"}`;
-  const label = `${visibleLabel} Active`;
-  return (
-    <StatusBadge tone="info" pulse className="active-subagents-badge" ariaLabel={label} title={label} onClick={onOpen}
-      label={<><span className="sr-only">{label}</span><span aria-hidden="true">{visibleLabel}</span></>} />
   );
 }
 

@@ -1,5 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { StatusBadge, StatusCount } from "./StatusBadge.js";
+import React, { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   isTerminal,
   runnerCapabilityRequirement,
@@ -26,12 +25,7 @@ import { reminderMenuActionLabel } from "../session-reminders.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
 import { DEVELOPMENT_BUILD } from "../config.js";
 import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
-import {
-  ActiveSubagentsBadge,
-  BackgroundDeliveryBadge,
-  BackgroundWorkBadge,
-  SessionStatusIndicators,
-} from "./common.js";
+import { backgroundWorkAccessibleName } from "./common.js";
 import {
   useAccessibleMenu,
   useDismissiblePopover,
@@ -43,42 +37,9 @@ import { ChevronLeftIcon, DownloadIcon, LinkIcon, MoreVerticalIcon, RefreshIcon,
 import { useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
 import { sessionDisplayTitle } from "../session-title.js";
-import { DETAIL_TITLE_READABLE_PX } from "./PageHeader.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
-
-/** The badges the measured status row may hide into "+N": the lifecycle and change groups, and the
- * background-work and active-worker badges that sit directly in the row. */
-export const MEASURED_STATUS_SELECTOR =
-  ".session-status-indicators > .status, " +
-  ".change-status-indicators > .status, " +
-  ":scope > .status[data-group='background-work'], " +
-  ":scope > .active-subagents-badge";
-
-/**
- * The order badges are offered a place in the measured status row when it cannot hold them all
- * (#784).
- *
- * Background work is claimed first. It is authoritative and it has no other home on a phone — a
- * session waiting on an external job is invisible everywhere else on that screen — so the lifecycle
- * group and then the passive change statuses yield to it, rather than it taking a line of its own.
- * Within a tier the leftmost badge is claimed first, so what survives still reads left to right.
- *
- * Offering rather than reserving is the point: narrow phones shorten the badge's visible copy,
- * while this fitter still keeps any status that fits and moves the rest into `+N`. Clipping is
- * never an option, and the badge's accessible name remains complete in both locations.
- */
-export function statusKeepOrder(items: HTMLElement[]): HTMLElement[] {
-  // Workers are foreground work, so the active-subagents badge ranks with the lifecycle group they
-  // run inside, not with background work.
-  const tier = (item: HTMLElement) =>
-    item.dataset["group"] === "background-work"
-      ? 0
-      : item.parentElement?.classList.contains("change-status-indicators") ? 2 : 1;
-  return items
-    .map((item, index) => ({ item, index }))
-    .sort((left, right) => tier(left.item) - tier(right.item) || left.index - right.index)
-    .map(({ item }) => item);
-}
+import { sessionStatusSummary } from "../status-meta.js";
+import { SessionStatusButton } from "./SessionStatusButton.js";
 
 /** The second line of an item that waits on another session action already running. */
 const BUSY_REASON = "Available when the current action finishes.";
@@ -115,7 +76,8 @@ async function writeClipboardText(text: string, current: () => boolean): Promise
 
 /**
  * The responsive Session bar (docs/design-system.md §4.3). Desktop keeps one 48px row: Back, the
- * project menu button, the title, the statuses, then Share / More Actions and the shell controls.
+ * project menu button, the title, the Session Status control, then Share / More Actions and the
+ * shell controls.
  * Mobile identity moves into the app topbar, leaving this component as the single status/action
  * line above the transcript.
  */
@@ -206,15 +168,10 @@ export function SessionHeader({
   const [menuOpen, setMenuOpen] = useState(false);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [statusPopoverOpen, setStatusPopoverOpen] = useState(false);
-  const [hiddenStatusCount, setHiddenStatusCount] = useState(0);
-  // Set when a focused badge is measured out of the row before its `+N` trigger exists to take the
-  // focus; the effect below hands it over once that trigger has rendered.
-  const focusDisclosureRef = useRef(false);
   const [moveProjectOpen, setMoveProjectOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [switchAccountDialogOpen, setSwitchAccountDialogOpen] = useState(false);
-  const statusesRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const projectSlotRef = useRef<HTMLDivElement>(null);
   // Where the project button is hidden (the compact tier, §15.2) or absent (phones), its actions
@@ -231,20 +188,6 @@ export function SessionHeader({
     setStatusPopoverOpen,
     "session-status-popover",
   );
-  const statusLayoutKey = JSON.stringify([
-    session.status,
-    session.pendingApproval,
-    session.orchestratorCampaign?.pendingRequests,
-    session.archiveStatus,
-    session.archiveOperation,
-    session.stopOperation,
-    session.backgroundWorkState,
-    session.backgroundWorkTracking,
-    session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState,
-    runnerOnline,
-    activeSubagents?.count,
-    descendantRequests?.count,
-  ]);
   const terminal = isTerminal(session.status);
   const showRetryStop = session.stopOperation?.status === "stop_failed" && !session.archiveStatus;
   const showRestart = terminal && runnerOnline && session.stopOperation?.status !== "stop_failed" &&
@@ -257,8 +200,6 @@ export function SessionHeader({
   const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
     ? undefined
     : session.backgroundWorkState;
-  const backgroundDeliveryState = session.backgroundDeliveries
-    ?.find((delivery) => delivery.watchdogState)?.watchdogState;
   const reprocessSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionReprocess");
   const logoutSupported = runnerSupportsProtocol(runnerProtocolVersion, "acpLogout");
   const accountSwitchSupported = runnerSupportsProtocol(
@@ -296,52 +237,11 @@ export function SessionHeader({
     ? `${archiveAction}…`
     : archiveAction;
   const signOutOffered = session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported;
-  const renderBackgroundWork = () => visibleBackgroundWorkState && (
-    <BackgroundWorkBadge state={visibleBackgroundWorkState} compact responsiveCompact announce={false}
-      onOpen={onOpenBackgroundWork ? () => {
-        // A direct badge stays mounted; only restore focus when dismissing its popover copy.
-        closeStatusPopover(statusPopoverOpen);
-        onOpenBackgroundWork();
-      } : undefined} />
-  );
-  const renderNoninteractiveStatuses = () => (
-    <>
-      <SessionStatusIndicators
-        session={session}
-        disconnected={!runnerOnline}
-        onOpenAttention={onOpenAttention ? () => {
-          closeStatusPopover(false);
-          onOpenAttention();
-        } : undefined}
-        onOpenCampaignRequests={onOpenCampaignRequests ? () => {
-          closeStatusPopover(false);
-          onOpenCampaignRequests();
-        } : undefined}
-      />
-      {descendantRequests && descendantRequests.count > 0 && !session.orchestratorCampaign?.pendingRequests && (
-        <StatusBadge
-          tone="warning"
-          label="Descendant Requests"
-          ariaLabel={`Descendant Requests: ${descendantRequests.count} Unresolved`}
-          ariaControls="right-panel"
-          title="Open Descendant Requests"
-          onClick={() => {
-            closeStatusPopover(false);
-            descendantRequests.onOpen();
-          }}
-        >
-          <StatusCount>{descendantRequests.count}</StatusCount>
-        </StatusBadge>
-      )}
-      {renderBackgroundWork()}
-      {backgroundDeliveryState && (
-        <BackgroundDeliveryBadge state={backgroundDeliveryState} onOpen={onOpenBackgroundWork ? () => {
-          closeStatusPopover(statusPopoverOpen);
-          onOpenBackgroundWork();
-        } : undefined} />
-      )}
-    </>
-  );
+  const statusSummary = sessionStatusSummary(session, {
+    runnerOnline,
+    descendantRequests: descendantRequests?.count,
+    activeWorkers: activeSubagents?.count,
+  });
   const closeMenu = (restoreFocus = false) => {
     menu.close(restoreFocus);
   };
@@ -375,158 +275,6 @@ export function SessionHeader({
   const closeStatusPopover = (restoreFocus = false) => {
     statusPopover.close(restoreFocus);
   };
-
-  useLayoutEffect(() => {
-    const container = statusesRef.current;
-    if (!container) return;
-
-    const statusItems = () => Array.from(container.querySelectorAll<HTMLElement>(MEASURED_STATUS_SELECTOR));
-    const measure = () => {
-      const items = statusItems();
-      // Measuring applies candidate sets, so every badge is briefly `display: none` — including the
-      // one the row keeps — and a `display: none` element cannot hold focus. Chromium runs its focus
-      // fixup at the next rendering update, by which time the winner is visible again, but that is
-      // an implementation detail to lean on rather than a guarantee. Remember what was focused and
-      // put focus back where it belongs once the row has settled.
-      const focusedBadge = items.find((item) => item === document.activeElement) ?? null;
-      // Each measurement decides the handover afresh, so a pending one from a previous measurement
-      // can never outlive the layout that asked for it.
-      focusDisclosureRef.current = false;
-      for (const item of items) item.hidden = false;
-      if (!isMobile || items.length === 0) {
-        setHiddenStatusCount(0);
-        return;
-      }
-
-      const containerBox = container.getBoundingClientRect();
-      const shareTrigger = shareMenu.triggerRef.current;
-      const overflowTrigger = statusPopover.triggerRef.current;
-      if (!shareTrigger) return;
-      const actions = shareTrigger.closest<HTMLElement>(".detail-actions");
-      const actionsStyle = actions ? getComputedStyle(actions) : null;
-      const gap = Number.parseFloat(actionsStyle?.columnGap || actionsStyle?.gap || "0") || 0;
-      const overflowWidth = overflowTrigger?.getBoundingClientRect().width ??
-        shareTrigger.getBoundingClientRect().width;
-      const occupiedOverflowWidth = overflowTrigger ? overflowWidth + gap : 0;
-      const availableWithoutTrigger = containerBox.width + occupiedOverflowWidth;
-      const availableWithTrigger = Math.max(0, availableWithoutTrigger - overflowWidth - gap);
-      // The row's right edge, measured from the container's own left. An item past the container's
-      // clip still has real geometry, and the container's left never moves: only its width changes
-      // with the disclosure trigger, which the two budgets above already account for.
-      const usedWidth = () => {
-        let right = 0;
-        for (const item of items) {
-          if (item.hidden) continue;
-          right = Math.max(right, item.getBoundingClientRect().right - containerBox.left);
-        }
-        return right;
-      };
-
-      if (usedWidth() <= availableWithoutTrigger + 0.5) {
-        setHiddenStatusCount(0);
-        restoreRowFocus(focusedBadge);
-        return;
-      }
-
-      // Claim the row in priority order and keep a badge only if the row still fits with it in.
-      // Re-measured every time rather than cut as a suffix of one initial layout: a badge's
-      // position depends on which badges BEFORE it are in the row, so what fits is only knowable
-      // with the candidate set actually applied.
-      for (const item of items) item.hidden = true;
-      let hiddenCount = items.length;
-      for (const item of statusKeepOrder(items)) {
-        item.hidden = false;
-        if (usedWidth() > availableWithTrigger + 0.5) item.hidden = true;
-        else hiddenCount -= 1;
-      }
-      setHiddenStatusCount(hiddenCount);
-      restoreRowFocus(focusedBadge);
-    };
-
-    /**
-     * Keyboard focus follows the badge: back onto it when the row keeps it, and onto the disclosure
-     * that now holds it when the row does not. Without this, a resize or a live status change drops
-     * the user at <body>, where the next Tab restarts from the top of the document.
-     */
-    function restoreRowFocus(focusedBadge: HTMLElement | null) {
-      if (!focusedBadge || document.activeElement === focusedBadge) return;
-      if (!focusedBadge.hidden) {
-        focusedBadge.focus();
-        return;
-      }
-      const trigger = statusPopover.triggerRef.current;
-      if (trigger) trigger.focus();
-      else focusDisclosureRef.current = true;
-    }
-
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    let cancelled = false;
-    let measurementFrame: number | null = null;
-    const scheduleMeasure = () => {
-      if (cancelled || measurementFrame !== null) return;
-      measurementFrame = window.requestAnimationFrame(() => {
-        measurementFrame = null;
-        if (!cancelled) measure();
-      });
-    };
-    const observer = new ResizeObserver(scheduleMeasure);
-    observer.observe(container);
-    const header = container.closest<HTMLElement>(".session-bar");
-    if (header) observer.observe(header);
-    void document.fonts?.ready.then(scheduleMeasure);
-    return () => {
-      cancelled = true;
-      observer.disconnect();
-      if (measurementFrame !== null) window.cancelAnimationFrame(measurementFrame);
-    };
-  }, [isMobile, statusLayoutKey, shareMenu.triggerRef, statusPopover.triggerRef]);
-
-  // In the compact tier the title keeps a readable width before the statuses give way (§15.2), but
-  // never more than its own text: a short title must not reserve empty space. Its natural width is
-  // its scroll width, which does not depend on how far the bar has squeezed it — once the previous
-  // floor is lifted, since a floor wider than a new, shorter title would widen its box and be read
-  // back as its width.
-  useLayoutEffect(() => {
-    const title = titleRef.current;
-    if (!title) return;
-    const measure = () => {
-      title.style.removeProperty("--session-title-readable");
-      title.style.setProperty("--session-title-readable", `${Math.min(DETAIL_TITLE_READABLE_PX, title.scrollWidth)}px`);
-    };
-    measure();
-    let cancelled = false;
-    void document.fonts?.ready.then(() => {
-      if (!cancelled) measure();
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [displayTitle, isMobile]);
-
-  useEffect(() => {
-    if (!focusDisclosureRef.current) return;
-    // The measurement that set the flag ran in a layout effect, so the commit that renders the
-    // trigger has not happened yet and this effect first sees the old state. Hold the flag rather
-    // than spending it on a null ref; the next measurement clears it if the row changes its mind.
-    const trigger = statusPopover.triggerRef.current;
-    if (!trigger) return;
-    focusDisclosureRef.current = false;
-    // Only claim focus nobody else has taken. This effect runs a commit after the measurement, and
-    // in that window the user may have focused something else — a menu, a dialog, the composer —
-    // which a bare focus() would yank them out of. Same rule as the async action path below:
-    // reclaim a dropped focus, never move a live one.
-    if (document.activeElement === document.body || document.activeElement === null) {
-      trigger.focus();
-    }
-  });
-
-  useEffect(() => {
-    if (hiddenStatusCount === 0 && statusPopoverOpen) {
-      closeStatusPopover(false);
-      shareMenu.triggerRef.current?.focus();
-    }
-  }, [hiddenStatusCount, statusPopoverOpen]);
 
   const run = async (
     fn: () => Promise<unknown>,
@@ -910,80 +658,40 @@ export function SessionHeader({
           </h1>
         </>
       )}
-      <div className="session-header-statuses" ref={statusesRef}>
-        {renderNoninteractiveStatuses()}
-        {activeSubagents && (
-          <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} workers={activeSubagents.workers} />
-        )}
-      </div>
-      {visibleBackgroundWorkState && (
-        <span className="sr-only">
-          <BackgroundWorkBadge state={visibleBackgroundWorkState} compact responsiveCompact />
-        </span>
-      )}
+      <SessionStatusButton
+        summary={statusSummary}
+        open={statusPopoverOpen}
+        popover={statusPopover}
+        onToggle={() => {
+          if (!statusPopoverOpen) {
+            closeShareMenu(false);
+            closeMenu(false);
+          }
+          statusPopover.toggle();
+        }}
+        onTriggerKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            closeShareMenu(false);
+            closeMenu(false);
+          }
+          statusPopover.onTriggerKeyDown(event);
+        }}
+        titleRef={isMobile ? undefined : titleRef}
+        small={isMobile}
+        actions={{
+          onOpenAttention,
+          onOpenCampaignRequests: onOpenCampaignRequests ?? onOpenAttention,
+          onOpenDescendantRequests: descendantRequests?.onOpen,
+          onOpenBackgroundWork,
+          onOpenWorkers: activeSubagents?.onOpen,
+        }}
+      />
+      {/* Background work changes are announced politely wherever the badge shows (#784). The region
+          stays mounted, so its first state is announced too, and it is text, not a second badge. */}
+      <span className="sr-only" data-live="background-work" role="status" aria-live="polite">
+        {visibleBackgroundWorkState ? backgroundWorkAccessibleName(visibleBackgroundWorkState) : ""}
+      </span>
       <div className="detail-actions">
-        {hiddenStatusCount > 0 && (
-          <div className="overflow-menu">
-            <button
-              ref={statusPopover.triggerRef}
-              className={`icon-btn${actionSize} session-header-action session-status-overflow-trigger`}
-              type="button"
-              onClick={() => {
-                if (!statusPopoverOpen) {
-                  closeShareMenu(false);
-                  closeMenu(false);
-                }
-                statusPopover.toggle();
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "ArrowDown") {
-                  closeShareMenu(false);
-                  closeMenu(false);
-                }
-                statusPopover.onTriggerKeyDown(event);
-              }}
-              aria-label={`+${hiddenStatusCount}: Show ${hiddenStatusCount} Hidden ${hiddenStatusCount === 1 ? "Status" : "Statuses"}`}
-              title={`Show ${hiddenStatusCount} Hidden ${hiddenStatusCount === 1 ? "Status" : "Statuses"}`}
-              aria-haspopup="dialog"
-              aria-expanded={statusPopoverOpen}
-              aria-controls={statusPopover.panelId}
-            >
-              +{hiddenStatusCount}
-            </button>
-            {statusPopoverOpen && (
-              <MenuSurface
-                surfaceRef={statusPopover.panelRef}
-                anchor={{ trigger: statusPopover.triggerRef }}
-                id={statusPopover.panelId}
-                kind="popover"
-                role="dialog"
-                label="Session Statuses"
-                align="end"
-                onDismiss={() => closeStatusPopover(true)}
-                onKeyDown={statusPopover.onPanelKeyDown}
-              >
-                <div
-                  className="session-status-popover-content"
-                  role="group"
-                  tabIndex={0}
-                  aria-label="All Session Statuses"
-                >
-                  {renderNoninteractiveStatuses()}
-                  {activeSubagents && (
-                    <ActiveSubagentsBadge
-                      count={activeSubagents.count}
-                      workers={activeSubagents.workers}
-                      onOpen={() => {
-                        closeStatusPopover(false);
-                        activeSubagents.onOpen();
-                      }}
-                    />
-                  )}
-                </div>
-              </MenuSurface>
-            )}
-          </div>
-        )}
         <div className="overflow-menu">
           <button
             ref={shareMenu.triggerRef}

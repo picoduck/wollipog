@@ -113,9 +113,11 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
     "the Share icon keeps its desktop size while phone CSS owns mobile compaction");
   assertNoDomNode(page().querySelector('header [aria-label="Fork Conversation"]'),
     "the bar has no Fork button; Fork Conversation lives in More Actions (#2161)");
-  assert.match(page().textContent ?? "", /Background Work: Waiting on External Job/);
-  assert.ok(page().querySelector('[role="status"][aria-label="Background Work: Waiting on External Job"]'));
-  await act(async () => { button(page(), "1 Subagent Active").click(); });
+  assert.equal(page().querySelector('[role="status"][data-live="background-work"]')?.textContent,
+    "Background Work: Waiting on External Job");
+  // Workers are a row of the Session Status popover (#2182), which opens Agents.
+  await act(async () => { page().querySelector<HTMLButtonElement>(".session-status-button")!.click(); });
+  await act(async () => { button(page(), "Open Agents").click(); });
   assert.equal(activeSubagentOpens, 1);
   const moreActions = button(page(), "More Actions");
   assert.ok(moreActions.classList.contains("session-header-action"), "the trigger carries the fixed-geometry class");

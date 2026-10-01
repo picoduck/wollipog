@@ -236,8 +236,10 @@ test("exporting reports a toast, and a failure is an error toast with the server
     await act(async () => { item(menu, "Export as Markdown").click(); await tick(); await tick(); });
     assert.deepEqual(downloads, ["markdown"]);
     assert.deepEqual(ok.toasts, [{ message: "Transcript exported.", tone: "success" }]);
-    assertNoDomNode(page().querySelector(".session-header-note, .detail-note, header [role='status'][aria-live]"),
-      "the bar never shows a transient note");
+    // The only live region the bar keeps announces background work (#784, #2182), never a result.
+    assertNoDomNode(page().querySelector(
+      ".session-header-note, .detail-note, header [role='status'][aria-live]:not([data-live='background-work'])",
+    ), "the bar never shows a transient note");
   } finally {
     await ok.unmount();
   }

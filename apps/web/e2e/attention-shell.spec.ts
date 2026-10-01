@@ -201,12 +201,18 @@ for (const width of [390, 1280]) test(`real shell threads an exact attention rou
   await expect(request.getByText("Exact Child Request 3", { exact: true })).toBeVisible();
   if (width === 1280) {
     const closePanel = page.getByRole("button", { name: "Close Panel", exact: true });
-    const headerAttention = page.getByRole("button", { name: "Attention: 2 Actions Required", exact: true });
+    // The bar's Session Status popover opens the requests through the same entry point (#2182).
+    const status = page.locator(".session-bar .session-status-button");
+    const reviewRequest = async () => {
+      await status.click();
+      await page.getByRole("dialog", { name: "Session Status" })
+        .getByRole("button", { name: "Review Request" }).first().click();
+    };
     await closePanel.click();
-    await headerAttention.click();
+    await reviewRequest();
     await expect(panel).toBeVisible();
     await closePanel.click();
-    await headerAttention.click();
+    await reviewRequest();
     await expect(panel).toBeVisible();
   }
   await page.screenshot({ path: `.agents/tmp/attention-followup/shell-route-${width}.png`, fullPage: true });

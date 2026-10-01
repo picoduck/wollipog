@@ -142,8 +142,8 @@ test("every label is Title Case copy, with no glyph and no CSS transform needed"
     "job", "background_work", "queuedMessage", "delivery", "notification", "workflow", "pod", "member", "provider_account",
     "share", "usage"] as const) {
     for (const value of statusValues(domain)) {
-      const { label, shortLabel } = statusMeta(domain, value);
-      for (const text of [label, shortLabel].filter((entry): entry is string => Boolean(entry))) {
+      const { label } = statusMeta(domain, value);
+      for (const text of [label]) {
         assert.doesNotMatch(text, /[⚠⛔✓×]/u, `${domain}/${value}`);
         for (const word of text.split(/[\s—-]+/).filter(Boolean)) {
           if (["for", "on", "of", "to", "in"].includes(word)) continue;

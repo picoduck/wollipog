@@ -1980,12 +1980,6 @@ button.status { cursor: pointer; }
   border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--tone) 22%, transparent);
 }
-/* The narrow visible form of a long status; the full label stays in the accessible name. */
-.status-label-narrow { display: none; }
-@media (max-width: 420px) {
-  .session-header-statuses .status-label-wide { display: none; }
-  .session-header-statuses .status-label-narrow { display: inline; }
-}
 @media (prefers-reduced-motion: reduce) {
   .status.pulse::before { animation: none; }
 }
@@ -3369,41 +3363,41 @@ textarea {
   flex: none;
   color: var(--text-faint);
 }
-/* The title absorbs the width pressure: its shrink factor dwarfs the status row's, so the row gives
-   way only once the title is at its floor, and then clips rather than wrapping or pushing the
-   actions out of the bar. */
+/* The title absorbs the width pressure: its shrink factor dwarfs every other item's, so it gives
+   way before any control does and the actions never leave the bar. */
 .session-bar-title { flex: 0 1000 auto; }
-.session-header-statuses {
-  display: flex;
-  align-items: center;
-  flex: 0 1 auto;
-  flex-wrap: nowrap;
-  min-width: 0;
-  gap: 5px;
+/* The Session Status control (§4.3, #2182): a ghost button right after the title holding the one
+   status badge and, when other conditions need the person, a plain "+N". */
+.session-status-button {
+  min-width: var(--control-h);
+  gap: var(--space-1);
+  padding: 0 var(--space-1);
 }
-.session-bar > .session-header-statuses { overflow-x: clip; }
-/* Nor does the status group inside it wrap: a group that wraps elsewhere would otherwise stack its
-   badges into a second line the moment the row is a fraction of a pixel short. */
-.session-bar > .session-header-statuses > .session-status-indicators {
-  flex: none;
-  flex-wrap: nowrap;
+.session-status-more {
+  color: var(--text);
+  font: var(--type-micro);
+  font-variant-numeric: tabular-nums;
+}
+/* In the compact tier (761–1099px, §15.2) the status badge is drawn as its dot and label. Where the
+   label would leave a truncated title under 200px, SessionStatusButton marks it and the badge
+   becomes its dot alone, with the label in the tooltip. The label stays in the text, clipped, so
+   the button's size is all that changes. At 1100px and wider it is always the full badge. */
+.session-status-button[data-compact] > .status {
+  padding: 0;
+  background: none;
+}
+.session-status-button[data-dot] > .status {
+  width: 6px;
+  gap: var(--space-2);
+  overflow: hidden;
 }
 .session-bar > .detail-actions { margin-left: auto; }
 /* The compact tier (§15.2): the project button and its separator give way to the head of More
-   Actions, and the title keeps a readable width (SessionHeader sets the custom property to the
-   smaller of 200px and its text) before the statuses give way. */
+   Actions. */
 @container app (max-width: 1099px) {
   .session-bar > .session-bar-project { display: none; }
-  .session-bar > .session-bar-title { min-width: var(--session-title-readable, 0px); }
 }
 .session-header-action { padding: 0; }
-.session-status-overflow-trigger {
-  border-color: var(--border-strong);
-  color: var(--text);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
 .session-header-action:disabled {
   color: var(--text-faint);
   cursor: not-allowed;
@@ -3418,9 +3412,11 @@ textarea {
   flex: none;
   gap: 7px;
 }
-/* Keep both sibling menu buttons reachable above the active menu's dismissing backdrop. This lets
-   one trigger replace the other menu in a single click while the rest of the page still dismisses. */
-.detail-actions:has(.session-header-action[aria-expanded="true"]) .session-header-action {
+/* Keep the bar's popup triggers (Session Status, Share and More Actions) reachable above the open
+   popup's dismissing backdrop. This lets one trigger replace another's popup in a single click
+   while the rest of the page still dismisses. */
+.session-bar:has(:is(.session-status-button, .session-header-action)[aria-expanded="true"])
+  :is(.session-status-button, .session-header-action) {
   position: relative;
   z-index: var(--z-popovercontent);
 }
@@ -3441,22 +3437,49 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-status-popover-content {
+/* The Session Status popover (§9.2): its title, then one row per condition, with the badge and the
+   action that resolves it on one line and one sentence under them. On a phone the title is the
+   sheet's title row. */
+.session-status-head {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
-  padding: 4px 10px 6px;
-  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-3);
+  font: var(--type-section);
 }
-/* The shadow is the ring; the transparent outline replaces the global one and paints nothing, but
-   forced colors drops the shadow and repaints the outline, so focus stays visible there. */
-.session-status-popover-content:focus-visible {
-  box-shadow: 0 0 0 2px var(--accent);
-  outline: 2px solid transparent;
+.session-status-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.session-status-popover-content .session-status-indicators {
+/* The action keeps the row's trailing edge while it fits beside the badge and drops below it when
+   it does not, so a long badge (a request named for its owner, "Audit · Reviewer · Approval
+   Required") never runs under it. A badge wider than the row wraps its own label rather than
+   clipping the kind at its end. */
+.session-status-row {
+  display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+.session-status-row > .status {
+  max-width: 100%;
+  height: auto;
+  min-height: 20px;
+  white-space: normal;
+}
+.session-status-fact {
+  color: var(--text);
+  font: var(--type-label);
+}
+.session-status-action { margin-left: auto; }
+.session-status-text {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
 }
 .detail-scroll {
   flex: 1;
@@ -13518,41 +13541,22 @@ body.shell-dock-dragging * {
     padding-right: var(--mobile-session-trailing-inset);
     border-bottom: 1px solid var(--border);
   }
-  .session-bar > .session-header-statuses {
-    /* Statuses stay in the leading grid track so the action track is always complete. The
-       measured badge row hides only its overflowing suffix and hands the exact hidden count to the
-       fixed disclosure / Share / More Actions surface without adding a horizontal scroller. */
+  /* The status control leads the line at the actions' 36px and never pushes Share and More
+     Actions: it keeps the full badge and its "+N" in the leading track, and the badge clips there
+     rather than widening it (§15.1). The button itself does not clip, so its touch target does
+     not either. */
+  .session-bar > .session-status-button {
     grid-column: 1;
     grid-row: 1;
+    justify-self: start;
     min-width: 0;
-    align-self: center;
-    flex-wrap: nowrap;
-    gap: 4px;
-    overflow: clip;
-    contain: paint;
+    max-width: 100%;
+    height: 36px;
   }
-  .session-bar > .session-header-statuses > .active-subagents-badge {
-    order: -1;
-    flex: none;
-  }
-  .session-bar > .session-header-statuses .session-status-indicators {
-    flex: none;
-    flex-wrap: nowrap;
-    min-height: 36px;
-  }
-  /* The badges keep the shared recipe's 11px type (docs/design-system.md §11.1). CI and user
-     devices do not share the same system font, so the width headroom comes from the inset instead:
-     the status surface, rather than individual badges, owns narrow-width clipping, and the line
-     truncates to "+N" before it pushes Share and More Actions (§21). */
-  .session-bar > .session-header-statuses .status {
-    padding-inline: var(--space-1);
-  }
-  .session-bar > .session-header-statuses [hidden] {
-    display: none;
-  }
-  .session-bar > .session-header-statuses
-    .session-status-indicators:not(:has(> .status:not([hidden]))) {
-    display: none;
+  .session-bar > .session-status-button > .status {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
   }
   .session-bar .session-header-action { width: 36px; height: 36px; }
   .session-bar .session-header-action svg { width: var(--icon); height: var(--icon); }
@@ -13566,10 +13570,6 @@ body.shell-dock-dragging * {
     align-self: center;
     gap: var(--mobile-session-action-gap);
   }
-  /* Background work used to take a full-width line of its own here, which separated it from the
-     lifecycle badge it belongs beside and made the header taller the moment a job started (#784).
-     It now rides the measured status row: the row's priority order keeps it visible and pushes
-     passive statuses into the +N disclosure instead. */
   .detail-scroll {
     padding: 12px 0;
   }

@@ -716,8 +716,8 @@ extending the settled one-bar session chrome app-wide.
 - The session bar (`header.detail-bar.session-bar`, #2146) shares the classes, not `DetailBar`: it
   holds Back ("Back to Sessions"), one project menu button (`.btn.ghost`: the projects icon, the
   name, a 14px caret; `flex: none` up to 220px, "No Project" in `--text-faint`), a `/` separator,
-  the title, the statuses, then Share, More Actions, a divider, the Open split button, a divider and
-  the panel toggles. The project menu is headed by the name and holds Open Project and Move to
+  the title, the Session Status control, then Share, More Actions, a divider, the Open split button,
+  a divider and the panel toggles. The project menu is headed by the name and holds Open Project and Move to
   Another Project… (only Move to a Project… without one); the name does not navigate on its own.
   The title is the only element that absorbs width, and shows `sessionDisplayTitle()`: the stored
   title's first non-empty line, whitespace collapsed, a trailing period dropped. Control planes
@@ -732,6 +732,19 @@ extending the settled one-bar session chrome app-wide.
   only here, never as a bar button; it is left out where the session can never fork. Every
   disabled item says why on its second line, and results are toasts (§13.1), never a note in the
   bar.
+- The Session Status control (`SessionStatusButton`, #2182) is the bar's one status: a `.btn.ghost`
+  holding one status badge and, when other conditions need the person, a plain "+N". Its accessible
+  name says both ("Session Status: Approval Required and 1 More"). `sessionStatusSummary()` in
+  `status-meta.ts` chooses the badge, the first that applies: each attention kind in
+  `sessionAttentionBreakdown()` order, then human-owned campaign requests, then descendant requests;
+  Background Work Lost; Disconnected; Waiting on External Job while the session otherwise awaits its
+  next prompt; the lifecycle, including Stop Pending and Stop Failed. "+N" counts only the other
+  conditions that need the person, never passive states, so it is the same at every width. The
+  Sessions rows, the preview bar and the Board cards use the same function.
+- It opens the Session Status popover (§9.2, 340px; a bottom sheet on phones): the title, then one
+  row per condition with its badge, one sentence and the action that resolves it where one exists
+  (Review Request, Answer, Sign In…, Open for Background Work, Open Agents, Open Requests). The
+  lifecycle is listed only when nothing needs the person. Queue reasons are rows, not badges.
 
 ### 4.4 Bar Height: 48px
 
@@ -1888,15 +1901,16 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   fields on one row; each column is at least as wide as its label on one line, and Arbitration as
   wide as its longest mode.
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
-  with the label in its tooltip plus `+N` for extra attention kinds; the project crumb is dropped;
+  with the label in its tooltip, keeping the session bar's `+N`; the project crumb is dropped;
   text buttons become icon buttons with tooltips. `DetailBar` (Run, Pod, Project) does this now. Its
   badge becomes a dot, with the label in the tooltip, when keeping the full badge would leave the
   truncated title under 200px (`DETAIL_TITLE_READABLE_PX`). A `primary` or `secondary` that carries
   an `icon` becomes a square icon button whose label is its tooltip and accessible name. The session
   bar (#2146) hides its project button and separator here, and Open <Project> and Move to Another
-  Project… lead More Actions above a separator instead, as they do on phones. Its status row never
-  wraps and clips instead, and the title keeps `DETAIL_TITLE_READABLE_PX` (or its own width, if
-  shorter) before the statuses give way.
+  Project… lead More Actions above a separator instead, as they do on phones. Its Session Status
+  badge is drawn as its dot and label, and becomes the dot alone, with the label in its tooltip,
+  when keeping the label would leave the truncated title under `DETAIL_TITLE_READABLE_PX`, measured
+  as `DetailBar` does. At 1100px and wider it is always the full badge.
 - Right panel docks at 320px or overlays as a sheet from the right with a scrim when the chat column
   would drop below 480px.
 
@@ -2281,15 +2295,15 @@ These trade-offs are deliberate. Keep them in mind when a screen seems to argue 
 1. **Density vs 44px on touch laptops.** `@media (pointer: coarse)` also fires on touch-screen
    laptops running the Tauri app at desktop widths, so every row grows 8px there. That is intended:
    touch needs the size. Do not add a width condition to avoid it.
-2. **The session bar status.** The desktop session bar shows status as a dot with a tooltip, while
-   §9.3 says a tooltip must never be the only carrier of needed information. The docked Pinned
-   Summary is the always-visible label, and compact widths show dot plus label when it fits
-   (§15.2). If the dot proves too quiet in use, add a status chip to the session footer rather
-   than a second pill in the bar.
-3. **The phone session header's badge line.** The phone session header keeps full pills beside
-   Share and More Actions on its second line. With several attention kinds (one pill per kind)
-   that line can hold two or three pills. Treat per-kind attention pills as one badge group that
-   truncates to "+N" before it pushes the two buttons.
+2. **The session bar status.** The desktop session bar shows a full status badge at 1100px and
+   wider and a dot only at compact widths (§15.2), where a long title would otherwise drop under a
+   readable width. §9.3 says a tooltip must never be the only carrier of needed information, so
+   wherever only a dot shows, the Session Status popover is the visible label: the control is a
+   button, and the popover lists every condition in words.
+3. **The phone session header's badge line.** The phone session header keeps one full badge and
+   "+N" at the start of its second line, beside Share and More Actions. §11.1 allows one pill per
+   attention kind, but the line cannot hold them, so the other kinds are counted in "+N" and listed
+   in the Session Status sheet; the control clips rather than pushing the two buttons.
 4. **Top-left empty states in tall panes.** This system top-aligns every state. In a 900px right
    panel a top-left state can read as part of the header, so inside panels use `.state.compact`
    (24px top).

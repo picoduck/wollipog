@@ -75,7 +75,7 @@ async function mobileSessionHeaderGeometry(page: Page) {
       viewportRight: window.innerWidth,
       titleRight: topbar.querySelector("h1")!.getBoundingClientRect().right,
       paneActionsLeft: paneActions.getBoundingClientRect().left,
-      statusesRight: header.querySelector(".session-header-statuses")!.getBoundingClientRect().right,
+      statusesRight: header.querySelector(".session-status-button")!.getBoundingClientRect().right,
       sessionActionsLeft: sessionActions.getBoundingClientRect().left,
       hasPageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
     };
@@ -169,8 +169,11 @@ test("the Requests panel stays open until descendant polling authoritatively set
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBe(1);
 
-  const trigger = page.getByRole("button", { name: "Needs Your Input: 1 Requests" });
+  // The campaign request is the bar's one status (#2182); its popover row opens the Requests panel.
+  const trigger = page.locator(".session-bar .session-status-button");
+  await expect(trigger).toHaveAccessibleName("Session Status: Needs Your Input, 1 Request");
   await trigger.click();
+  await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Requests" }).click();
   const panel = page.getByRole("complementary", { name: "Requests" });
   await expect(panel).toBeVisible();
   await expect(panel.getByRole("heading", { name: "Loading Requests" })).toBeVisible();
@@ -411,15 +414,20 @@ test("desktop Session actions stay contained with concurrent status indicators",
   });
 
   const header = page.locator(".session-bar");
-  await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
+  // One status (#2182): with nothing needing the person, running background work leads while the
+  // session awaits its next prompt, and the rest are rows of the Session Status popover.
+  const status = header.locator(".session-status-button");
+  await expect(status).toHaveAccessibleName("Session Status: Waiting on External Job");
+  await expect(header.locator(".status")).toHaveCount(1);
   // Changes are a Git fact in the Pinned Summary (#2160), never a status in the bar.
   await expect(header.getByText(/Ready for Review|Uncommitted Changes|Changes Present/)).toHaveCount(0);
-  await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
-  await expect(header.locator(
-    '.session-header-statuses > [aria-label="Background Work: Waiting on External Job"]',
-  )).toBeVisible();
-  await expect(header.getByRole("button", { name: "1 Worker Active" })).toBeVisible();
-  await expect(header.locator(".session-status-overflow-trigger")).toHaveCount(0);
+  await expect(header.locator('[data-live="background-work"]')).toHaveText("Background Work: Waiting on External Job");
+  await status.click();
+  const statusPopover = page.getByRole("dialog", { name: "Session Status" });
+  await expect(statusPopover.locator(".session-status-row .status"))
+    .toHaveText(["Waiting on External Job", "Awaiting Prompt", "1 Worker"]);
+  await page.keyboard.press("Escape");
+  await expect(statusPopover).toHaveCount(0);
   await capture(page, "desktop-concurrent");
   const longProjectName = "Alpha Project with a deliberately long name for project button truncation";
   await page.evaluate((name) => {
@@ -445,7 +453,7 @@ test("desktop Session actions stay contained with concurrent status indicators",
       const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
       const moreActions = element.querySelector('[aria-label="More Actions"]')!.getBoundingClientRect();
       const title = element.querySelector("h1")!.getBoundingClientRect();
-      const statuses = element.querySelector(".session-header-statuses")!.getBoundingClientRect();
+      const statuses = element.querySelector(".session-status-button")!.getBoundingClientRect();
       const clippingPane = element.closest(".inbox-preview-pane");
       return {
         hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
@@ -470,7 +478,7 @@ test("desktop Session actions stay contained with concurrent status indicators",
     expect(geometry.headerHeight, `${width}px stays one row`).toBe(48);
     expect(geometry.headerRight - geometry.actionsRight).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
     expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
-    // The title keeps 200px, or all of itself when shorter, before the five statuses clip (§15.2).
+    // The title keeps 200px, or all of itself when shorter: the badge gives up its label first (§15.2).
     expect(geometry.titleWidth, `${width}px title stays readable`)
       .toBeGreaterThanOrEqual(Math.min(200, geometry.titleNatural) - 0.5);
     expect(geometry.titleRight).toBeLessThanOrEqual(geometry.statusesLeft + 0.5);
@@ -510,7 +518,8 @@ test("managed background indicators open a responsive inspectable inventory and 
     });
   });
 
-  await header.getByRole("button", { name: "Background Work: Waiting on External Job" }).click();
+  await header.locator(".session-status-button").click();
+  await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Background Work" }).click();
   const panel = page.locator("#right-panel");
   await expect(panel).toHaveAccessibleName("Background Work");
   await expect(panel.getByText("Shell Job 1", { exact: true })).toBeVisible();
@@ -548,7 +557,8 @@ test("managed background indicators open a responsive inspectable inventory and 
       }],
     });
   });
-  await expect(header.getByLabel("Background Work: Waiting on External Job")).toHaveCount(0);
+  await expect(header.locator(".session-status-button")).not.toHaveAccessibleName(/Waiting on External Job/);
+  await expect(header.locator('[data-live="background-work"]')).toHaveText("");
   await expect(panel.getByText("Completed", { exact: true })).toBeVisible();
   await expect(panel.getByText("Result Delivered", { exact: true })).toBeVisible();
   await expect(panel).not.toContainText("private-continuation-id");
@@ -592,13 +602,11 @@ test("mobile Session pane and action controls share trailing columns", async ({ 
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       backgroundWorkState: "running",
-      // Two campaign request badges take the place the change badges held before #2160, so the row
-      // still overflows into its disclosure.
       orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 1 } } as never,
     });
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "aligned-mobile-subagent");
   });
-  await expect(page.locator(".session-status-overflow-trigger")).toBeVisible();
+  await expect(page.locator(".session-bar .session-status-button")).toBeVisible();
 
   expectMobileSessionColumnsAligned(await mobileSessionHeaderGeometry(page));
 
@@ -610,9 +618,8 @@ test("mobile Session pane and action controls share trailing columns", async ({ 
   expectMobileSessionColumnsAligned(await mobileSessionHeaderGeometry(page));
 });
 
-// #784 put background work into this measured row, so five badges compete for it and the row
-// prefers background work over everything else. The compact phone label now keeps background work
-// inline at the 320px floor, and the disclosure carries lower-priority statuses, workers included.
+// #2182: the phone's second line leads with one Session Status control, chosen by what needs the
+// person rather than by what fits, and the popover is a bottom sheet listing every condition.
 for (const viewport of [
   { name: "320-pixel phone", width: 320 },
   { name: "360-pixel phone", width: 360 },
@@ -622,13 +629,12 @@ for (const viewport of [
     // Its 44px menu rows are a touch size, keyed to the pointer rather than the viewport (#1799).
     test.use({ hasTouch: true });
 
-    test(`the session bar discloses overflowed statuses on a ${viewport.name}`, async ({ page }) => {
+    test(`the session bar leads with the Session Status control on a ${viewport.name}`, async ({ page }) => {
       await page.setViewportSize({ width: viewport.width, height: 800 });
       await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
       await page.evaluate(() => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
           backgroundWorkState: "running",
-          // Two campaign request badges take the place the change badges held before #2160.
           orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 1 } } as never,
         });
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "active-mobile-subagent");
@@ -645,28 +651,16 @@ for (const viewport of [
       // test pins is now anchored on the trailing pane control instead of the gear.
       await expect(topbar.getByRole("button", { name: "Settings" })).toHaveCount(0);
       await expect(header.locator(".detail-bar-back, .session-bar-project, h1, .editor-select")).toHaveCount(0);
-      await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toHaveCount(1);
       await expect(header.locator('[aria-label^="Changes:"]')).toHaveCount(0);
-      const inlineBackgroundWork = header.locator(
-        '.session-header-statuses > [aria-label="Background Work: Waiting on External Job"]',
-      );
-      await expect(inlineBackgroundWork).toHaveCount(1);
-      await expect(inlineBackgroundWork).toBeVisible();
-      await expect(header.locator(
-        '.sr-only > [role="status"][aria-label="Background Work: Waiting on External Job"]',
-      )).toHaveCount(1);
-      // Workers rank with the lifecycle group, so at these widths the badge is disclosed rather than
-      // inline; the popover copy below is asserted enabled, which is where it stays reachable.
-      // A CSS locator, not a role locator: a displaced badge leaves the accessibility tree, and its
-      // presence in the row's measured set is exactly what is being asserted here.
-      const activeSubagent = header.locator('[aria-label="1 Worker Active"]');
-      await expect(activeSubagent).toHaveCount(1);
-      const activeSubagentInline = await activeSubagent.evaluate((element) => !element.hidden);
-      const overflowTrigger = header.locator(".session-status-overflow-trigger");
-      await expect(overflowTrigger).toBeVisible();
-      const hiddenCount = Number.parseInt((await overflowTrigger.textContent())?.replace("+", "") ?? "", 10);
-      expect(hiddenCount).toBeGreaterThan(0);
-      await expect(overflowTrigger).toHaveAccessibleName(`+${hiddenCount}: Show ${hiddenCount} Hidden Statuses`);
+      await expect(header.getByText("Detached Work")).toHaveCount(0);
+      // The campaign request needs the person, so it is the one badge; background work, the worker
+      // and the Orchestrator's request are rows of the popover, never "+N".
+      const status = header.locator(".session-status-button");
+      await expect(status).toHaveAccessibleName("Session Status: Needs Your Input, 1 Request");
+      await expect(header.locator(".status")).toHaveCount(1);
+      await expect(status.locator(".session-status-more")).toHaveCount(0);
+      await expect(header.locator('[data-live="background-work"]'))
+        .toHaveText("Background Work: Waiting on External Job");
       const metrics = await header.evaluate((element) => {
         const rect = (node: Element) => {
           const value = node.getBoundingClientRect();
@@ -676,25 +670,11 @@ for (const viewport of [
           };
         };
         const clippingPane = element.closest(".inbox-preview-pane");
-        const allBadges = [...element.querySelectorAll<HTMLElement>(
-          ".session-header-statuses .status, " +
-          ".session-header-statuses > .status[data-group='background-work']",
-        )];
-        const badges = allBadges.filter((node) => !node.hidden).map((node) => ({
-          ...rect(node),
-          label: node.getAttribute("aria-label") ?? node.textContent?.trim() ?? "unknown status",
-        }));
-        const statuses = element.querySelector(".session-header-statuses") as HTMLElement;
+        const control = element.querySelector(".session-status-button") as HTMLElement;
+        const badge = control.querySelector(".status") as HTMLElement;
         const actions = element.querySelector(".detail-actions") as HTMLElement;
         const share = element.querySelector('[aria-label="Share"]') as HTMLElement;
-        const overflow = element.querySelector('.session-status-overflow-trigger') as HTMLElement;
         const moreActions = element.querySelector('[aria-label="More Actions"]') as HTMLElement;
-        const activeSubagent = element.querySelector('[aria-label="1 Worker Active"]') as HTMLElement;
-        const statusStyle = getComputedStyle(statuses);
-        const pageScrollWidth = document.documentElement.scrollWidth;
-        statuses.style.display = "none";
-        const pageScrollWidthWithoutStatuses = document.documentElement.scrollWidth;
-        statuses.style.removeProperty("display");
         const centerTarget = (target: HTMLElement) => {
           const box = target.getBoundingClientRect();
           const painted = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
@@ -702,31 +682,22 @@ for (const viewport of [
         };
         return {
           display: getComputedStyle(element).display,
-          statuses: rect(statuses),
-          firstVisibleStatus: badges[0],
+          control: rect(control),
+          badge: rect(badge),
+          badgeClipped: badge.scrollWidth > badge.clientWidth + 0.5,
           actions: rect(actions),
           hasForkButton: element.querySelector('[aria-label="Fork Conversation"]') !== null,
-          overflow: rect(overflow),
           share: rect(share),
           shareIcon: rect(element.querySelector('[aria-label="Share"] svg')!),
           moreActions: rect(moreActions),
           moreActionsIcon: rect(element.querySelector('[aria-label="More Actions"] svg')!),
-          activeSubagent: rect(activeSubagent),
-          badges,
-          totalBadgeCount: allBadges.length,
-          badgeRows: new Set(badges.map((badge) => Math.round(badge.y))).size,
           headerHeight: element.getBoundingClientRect().height,
+          headerX: element.getBoundingClientRect().x,
           hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
-          statusAddsPageOverflow: pageScrollWidth > pageScrollWidthWithoutStatuses,
-          statusIsClipped: Math.max(...badges.map((badge) => badge.right)) >
-            statuses.getBoundingClientRect().right,
-          statusOverflowX: statusStyle.overflowX,
-          statusFlexWrap: statusStyle.flexWrap,
-          statusMaskImage: statusStyle.maskImage || statusStyle.webkitMaskImage,
+          pageOverflows: document.documentElement.scrollWidth > window.innerWidth,
+          controlIsTopmostAtCenter: centerTarget(control),
           shareIsTopmostAtCenter: centerTarget(share),
           moreActionsIsTopmostAtCenter: centerTarget(moreActions),
-          activeSubagentIsTopmostAtCenter: centerTarget(activeSubagent),
-          headerRight: element.getBoundingClientRect().right,
           clippingRight: Math.min(
             window.innerWidth, clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
           ),
@@ -786,93 +757,80 @@ for (const viewport of [
       expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
       expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
       expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
-      // #784: background work rides the measured status/action line, so a running job no longer buys
-      // the header a line of its own. The topbar, that line, and the worktree identity are all of it.
+      // A running job buys the header no line of its own (#784): the topbar, the status/action line
+      // and the worktree identity are all of it.
       expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(113);
       expect(metrics.share.width).toBeGreaterThanOrEqual(36);
       expect(metrics.share.height).toBeGreaterThanOrEqual(36);
       expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
       expect(metrics.moreActions.height).toBeGreaterThanOrEqual(36);
-      expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.actions.x - 6);
+      // The control leads the line, keeps its whole badge, and never pushes the actions (§15.1).
+      expect(metrics.control.x - metrics.headerX).toBeLessThanOrEqual(16);
+      expect(metrics.control.right).toBeLessThanOrEqual(metrics.actions.x - 6);
+      expect(metrics.badge.right).toBeLessThanOrEqual(metrics.control.right);
+      expect(metrics.badgeClipped).toBe(false);
+      // The line's small size, like Share, borrowing a 44px target on touch (§2.8).
+      expect(metrics.control.height).toBe(36);
       expect(metrics.headerHeight).toBeLessThanOrEqual(79);
       expect(metrics.hasHorizontalOverflow).toBe(false);
-      expect(metrics.statusAddsPageOverflow).toBe(false);
-      expect(metrics.statusIsClipped).toBe(false);
-      expect(metrics.statusOverflowX).toBe("clip");
-      expect(metrics.statusFlexWrap).toBe("nowrap");
-      expect(metrics.statusMaskImage).toBe("none");
+      expect(metrics.pageOverflows).toBe(false);
+      expect(metrics.controlIsTopmostAtCenter).toBe(true);
       expect(metrics.shareIsTopmostAtCenter).toBe(true);
       expect(metrics.moreActionsIsTopmostAtCenter).toBe(true);
-      if (activeSubagentInline) {
-        expect(metrics.activeSubagentIsTopmostAtCenter).toBe(true);
-        expect(metrics.activeSubagent.x).toBeGreaterThanOrEqual(metrics.statuses.x);
-        expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
-      }
-      expect(metrics.overflow.right).toBeLessThanOrEqual(metrics.share.x);
-      expect(metrics.share.x - metrics.overflow.right).toBeCloseTo(8, 0); // 8px apart, so the borrowed 44px hit areas meet without overlapping (§2.8)
       expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
       expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
-      expect(metrics.totalBadgeCount).toBe(5);
-      expect(metrics.badges.length).toBe(5 - hiddenCount);
-      expect(metrics.badgeRows).toBe(1);
       const center = (box: { y: number; height: number }) => box.y + box.height / 2;
-      expect(Math.abs(center(metrics.actions) - center(metrics.firstVisibleStatus))).toBeLessThanOrEqual(1);
-      for (let index = 0; index < metrics.badges.length; index += 1) {
-        for (let other = index + 1; other < metrics.badges.length; other += 1) {
-          const left = metrics.badges[index]!;
-          const right = metrics.badges[other]!;
-          const overlaps = left.x < right.right && left.right > right.x &&
-            left.y < right.bottom && left.bottom > right.y;
-          expect(overlaps).toBe(false);
-        }
-      }
+      expect(Math.abs(center(metrics.actions) - center(metrics.control))).toBeLessThanOrEqual(1);
 
-      await overflowTrigger.click();
-      const statusPopover = page.getByRole("dialog", { name: "Session Statuses" });
+      await status.click();
+      const statusPopover = page.getByRole("dialog", { name: "Session Status" });
       await expect(statusPopover).toBeVisible();
-      await expect(statusPopover.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
-      await expect(statusPopover.getByText("Waiting on External Job", { exact: true })).toBeVisible();
-      await expect(statusPopover.getByRole("button", { name: "1 Worker Active" })).toBeEnabled();
-      await expect(statusPopover.getByLabel("All Session Statuses")).toBeFocused();
+      const rows = statusPopover.locator(".session-status-row");
+      await expect(rows.locator(".status")).toHaveText(["Needs Your Input1, 1 Request", "Waiting on External Job", "1 Worker", "Orchestrator Action1, 1 Request"]);
+      await expect(rows.locator("button")).toHaveText(["Open Requests", "Open", "Open Agents", "Open Requests"]);
       // On a phone every popover is a bottom sheet across the screen (docs/design-system.md §9.2).
       await dialogMotionSettled(page);
       const popoverGeometry = await statusPopover.evaluate((element) => {
         const box = element.getBoundingClientRect();
+        const head = element.querySelector(".session-status-head")!;
         return {
           left: box.left,
           right: box.right,
           bottom: box.bottom,
           grabber: getComputedStyle(element.querySelector(".sheet-grabber")!).display,
-          contentWrap: getComputedStyle(element.querySelector(".session-status-popover-content")!).flexWrap,
+          title: head.textContent,
+          titleHeight: head.getBoundingClientRect().height,
+          titleTransform: getComputedStyle(head).textTransform,
         };
       });
       expect(popoverGeometry.left).toBe(0);
       expect(popoverGeometry.right).toBe(viewport.width);
       expect(popoverGeometry.bottom).toBeCloseTo(page.viewportSize()!.height, 0);
       expect(popoverGeometry.grabber).toBe("block");
-      expect(popoverGeometry.contentWrap).toBe("wrap");
+      expect(popoverGeometry.title).toBe("Session Status");
+      expect(popoverGeometry.titleHeight).toBe(48);
+      expect(popoverGeometry.titleTransform).toBe("none");
       await capture(page, `narrow-${viewport.width}-status-popover`);
       if (viewport.width === 390) {
-        await statusPopover.getByRole("button", { name: "Background Work: Waiting on External Job" }).click();
+        await rows.filter({ hasText: "Waiting on External Job" }).getByRole("button", { name: "Open Background Work" }).click();
         await expect(page.locator("#right-panel")).toHaveAccessibleName("Background Work");
-        await expect(overflowTrigger).toBeFocused();
         await page.getByRole("button", { name: "Close Panel" }).click();
       } else {
         await page.keyboard.press("Escape");
+        await expect(status).toBeFocused();
       }
       await expect(statusPopover).toHaveCount(0);
-      if (viewport.width !== 390) await expect(overflowTrigger).toBeFocused();
 
-      await overflowTrigger.click();
-      await page.locator(".menu-backdrop").click({ position: { x: 300, y: 700 } });
+      await status.click();
+      await page.locator(".menu-backdrop").click({ position: { x: 300, y: 300 } });
       await expect(statusPopover).toHaveCount(0);
-      await expect(overflowTrigger).toBeFocused();
+      await expect(status).toBeFocused();
 
-      await overflowTrigger.click();
+      await status.click();
       await header.getByRole("button", { name: "Share" }).click();
       await expect(statusPopover).toHaveCount(0);
       await expect(page.getByRole("menu", { name: "Share" })).toBeVisible();
-      await overflowTrigger.click();
+      await status.click();
       await expect(page.getByRole("menu", { name: "Share" })).toHaveCount(0);
       await expect(statusPopover).toBeVisible();
 
@@ -884,10 +842,10 @@ for (const viewport of [
       await expect(menu.locator(".session-menu-statuses")).toHaveCount(0);
       // The project leads the phone sheet (§15.1): Open <Project>, Move to Another Project…, then a
       // separator before the session's own actions.
-      const rows = menu.locator("[role='menuitem'], [role='separator']");
-      await expect(rows.nth(0)).toHaveText("Open Alpha");
-      await expect(rows.nth(1)).toHaveText("Move to Another Project…");
-      await expect(rows.nth(2)).toHaveAttribute("role", "separator");
+      const menuRows = menu.locator("[role='menuitem'], [role='separator']");
+      await expect(menuRows.nth(0)).toHaveText("Open Alpha");
+      await expect(menuRows.nth(1)).toHaveText("Move to Another Project…");
+      await expect(menuRows.nth(2)).toHaveAttribute("role", "separator");
       await expect(menu.getByRole("menuitem", { name: "Copy Session Link" })).toHaveCount(0);
       // Read the rows once the sheet has finished sliding up: mid-motion boxes are fractional.
       await dialogMotionSettled(page);
@@ -917,81 +875,60 @@ for (const viewport of [
   });
 }
 
-test("status overflow count follows width and live Session status changes", async ({ page }) => {
+test("the phone status follows live Session changes, attention first, at every width", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       backgroundWorkState: "running",
-      // Two campaign request badges take the place the change badges held before #2160.
-      orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 1 } } as never,
-    });
-    window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "dynamic-status-subagent");
+      pendingApproval: {
+        kind: "permission", requestId: "phone-approval", title: "Run the tests", options: [],
+        additionalRequests: [{ kind: "question", requestId: "phone-question", title: "Which branch?", options: [], questions: [] }],
+      },
+    } as never);
   });
-
   const header = page.locator(".session-bar");
-  // Five badges compete for the row since #784 put background work in it.
-  const overflowTrigger = header.locator(".session-status-overflow-trigger");
-  await expect(overflowTrigger).toBeVisible();
-  const initialHiddenCount = Number.parseInt((await overflowTrigger.textContent())!.replace("+", ""), 10);
-  expect(initialHiddenCount).toBeGreaterThan(0);
-
-  await page.setViewportSize({ width: 390, height: 800 });
-  const landscapeOverflowTrigger = header.locator(".session-status-overflow-trigger");
-  await expect(landscapeOverflowTrigger).toHaveText(/^\+[34]$/);
-  await landscapeOverflowTrigger.click();
-  await expect(page.getByRole("dialog", { name: "Session Statuses" })).toBeVisible();
-
-  await page.setViewportSize({ width: 800, height: 800 });
-  await expect(header.locator('.session-status-overflow-trigger')).toHaveCount(0);
-  await expect(header.locator('.session-header-statuses [hidden]')).toHaveCount(0);
-  await expect(header.getByRole("button", { name: "Share" })).toBeFocused();
-
-  await page.setViewportSize({ width: 320, height: 800 });
-  await expect(overflowTrigger).toBeVisible();
-  const beforeRemoval = Number.parseInt((await overflowTrigger.textContent())!.replace("+", ""), 10);
+  const status = header.locator(".session-status-button");
+  // Two kinds need the person: the first is the badge, the other is "+1", whatever the width.
+  await expect(status).toHaveAccessibleName(/^Session Status: (Answer|Approval) Required and 1 More$/);
+  await expect(status.locator(".session-status-more")).toHaveText("+1");
+  for (const width of [390, 800, 320]) {
+    await page.setViewportSize({ width, height: 800 });
+    await expect(status.locator(".session-status-more")).toHaveText("+1");
+    await expect(header.locator(".status")).toHaveCount(1);
+  }
+  // Answered, the session awaits its next prompt with a job still running (#784).
   await page.evaluate(() => {
-    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
-      backgroundWorkState: "resumed",
-    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { pendingApproval: null } as never);
   });
-  // Losing the badge removes it from both the row and disclosure. The fitter may use the freed
-  // width for another badge, so pin the authoritative membership rather than a font-dependent count.
-  await expect(header.locator(
-    '.session-header-statuses > [aria-label^="Background Work:"]',
-  )).toHaveCount(0);
-  const afterRemoval = Number.parseInt((await overflowTrigger.textContent())!.replace("+", ""), 10);
-  expect(afterRemoval).toBeGreaterThan(0);
-  expect(afterRemoval).toBeLessThanOrEqual(beforeRemoval);
-  await overflowTrigger.click();
-  const popover = page.getByRole("dialog", { name: "Session Statuses" });
+  await expect(status).toHaveAccessibleName("Session Status: Waiting on External Job");
+  await expect(status.locator(".session-status-more")).toHaveCount(0);
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { backgroundWorkState: "resumed" });
+  });
+  await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt");
+  await status.click();
+  const popover = page.getByRole("dialog", { name: "Session Status" });
   await expect(popover.getByText("Waiting on External Job", { exact: true })).toHaveCount(0);
-  await expect(popover.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
+  await expect(popover.locator(".session-status-row .status")).toHaveText(["Awaiting Prompt"]);
 });
 
-test("a fitting phone status row does not render an overflow control", async ({ page }) => {
-  await page.setViewportSize({ width: 320, height: 800 });
-  await openSession(page, "preview-follow", { sessionShell: "1" });
-  const header = page.locator(".session-bar");
-  await expect(header.locator('.session-status-overflow-trigger')).toHaveCount(0);
-  await expect(header.locator(".session-header-statuses .status")).toBeVisible();
-});
-
-test("measured background work leaves phone actions hittable when no change status is available", async ({ page }) => {
+test("background work as the phone status leaves the actions hittable", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   await openSession(page, "preview-follow", { sessionShell: "1" });
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      status: "idle",
       backgroundWorkState: "running",
     });
   });
 
   const header = page.locator(".session-bar");
   await expect(header.locator(".change-status-indicators")).toHaveCount(0);
-  await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
+  await expect(header.locator(".session-status-button")).toHaveAccessibleName("Session Status: Waiting on External Job");
+  await expect(header.getByRole("status").filter({ hasText: "Background Work: Waiting on External Job" })).toHaveCount(1);
   const metrics = await header.evaluate((element) => {
-    const badge = element.querySelector(".status[data-group='background-work']")!.getBoundingClientRect();
-    const statuses = element.querySelector(".session-header-statuses")!.getBoundingClientRect();
+    const control = element.querySelector(".session-status-button")!.getBoundingClientRect();
     const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
     const isTopmostAtCenter = (target: Element) => {
       const box = target.getBoundingClientRect();
@@ -999,16 +936,52 @@ test("measured background work leaves phone actions hittable when no change stat
       return painted === target || (painted !== null && target.contains(painted));
     };
     return {
-      paintedBadgeRight: Math.min(badge.right, statuses.right),
+      controlRight: control.right,
       actionsLeft: actions.x,
       shareIsTopmost: isTopmostAtCenter(element.querySelector('[aria-label="Share"]')!),
       moreActionsIsTopmost: isTopmostAtCenter(element.querySelector('[aria-label="More Actions"]')!),
     };
   });
-  expect(metrics.paintedBadgeRight).toBeLessThan(metrics.actionsLeft);
+  expect(metrics.controlRight).toBeLessThan(metrics.actionsLeft);
   expect(metrics.shareIsTopmost).toBe(true);
   expect(metrics.moreActionsIsTopmost).toBe(true);
 });
+
+for (const width of [1440, 320]) {
+  test(`a worker's request shows its kind in the bar and names the worker in the popover at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await openSession(page, "git-visibility", width > 760 ? { fullShell: "1" } : { sessionShell: "1" });
+    await page.evaluate(() => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+        status: "input_required",
+        pendingApproval: { kind: "permission", requestId: "owned", title: "Run the audit", options: [], ownerToolUseId: "tool-audit" },
+        attentionOwners: [{ requestId: "owned", toolCallId: "tool-audit", resolved: true, name: "Dependency Audit Worker", role: "security reviewer" }],
+        backgroundWorkState: "running",
+      } as never);
+    });
+    const status = page.locator(".session-bar .session-status-button");
+    await expect(status).toHaveAccessibleName("Session Status: Approval Required");
+    await expect(status.locator(".status")).toHaveText("Approval Required");
+    await status.click();
+    const dialog = page.getByRole("dialog", { name: "Session Status" });
+    const row = dialog.locator(".session-status-row").first();
+    await expect(row.locator(".session-status-text")).toContainText("Dependency Audit Worker · Security Reviewer owns this request.");
+    await dialogMotionSettled(page);
+    // Every row keeps its badge clear of its action and inside the popover.
+    const rows = await dialog.locator(".session-status-row").evaluateAll((elements) => elements.map((element) => {
+      const badge = element.querySelector(".status, .session-status-fact")!.getBoundingClientRect();
+      const action = element.querySelector("button")?.getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      return {
+        overlap: action ? badge.right > action.left && badge.left < action.right &&
+          badge.bottom > action.top && badge.top < action.bottom : false,
+        inside: badge.left >= box.left - 0.5 && badge.right <= box.right + 0.5,
+      };
+    }));
+    expect(rows.length).toBe(2);
+    for (const metrics of rows) expect(metrics).toEqual({ overlap: false, inside: true });
+  });
+}
 
 test("long session titles truncate before the statuses without hiding actions", async ({ page }) => {
   await page.setViewportSize({ width: 780, height: 800 });
@@ -1023,7 +996,7 @@ test("long session titles truncate before the statuses without hiding actions", 
     const headerRect = element.getBoundingClientRect();
     const title = element.querySelector("h1") as HTMLElement;
     const titleBox = title.getBoundingClientRect();
-    const statuses = rect(".session-header-statuses");
+    const statuses = rect(".session-status-button");
     const actions = rect(".detail-actions");
     const clippingPane = element.closest(".inbox-preview-pane");
     if (!clippingPane) throw new Error("expanded Session bar is not mounted in the clipping pane");

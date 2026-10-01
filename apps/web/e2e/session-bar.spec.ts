@@ -23,8 +23,8 @@ async function openBar(
     if (theme) localStorage.setItem("wollipog.theme", theme);
   }, options.theme);
   await page.reload();
-  // Changes are a Pinned Summary fact (#2160), so two campaign request badges keep the row under
-  // the pressure of three statuses that the review and change badges used to supply.
+  // A human campaign request needs the person, and an Orchestrator request is a passive row: the bar
+  // shows the first as its one status (#2182), and the popover lists both.
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 1 } },
@@ -42,37 +42,29 @@ async function setTitle(page: Page, title: string) {
   }, title);
 }
 
-/** The three statuses the scenario reports: lifecycle and the two campaign request kinds. */
-async function expectThreeStatuses(page: Page) {
-  const statuses = page.locator("header.session-bar .session-header-statuses");
-  await expect(statuses.getByText("Awaiting Prompt", { exact: true })).toBeAttached();
-  await expect(statuses.locator('[aria-label^="Needs Your Input"]')).toBeAttached();
-  await expect(statuses.locator('[aria-label^="Orchestrator Action"]')).toBeAttached();
-  // The facts the bar used to carry are in the Pinned Summary.
-  await expect(statuses.getByText(/Ready for Review|Uncommitted Changes|Changes Present/)).toHaveCount(0);
-}
+const STATUS_NAME = "Session Status: Needs Your Input, 1 Request";
 
-/** Every status badge the row paints sits on one line: the row clips, it never wraps (§15.2). */
-async function expectStatusesOnOneLine(page: Page) {
-  const tops = await page.locator("header.session-bar .session-header-statuses").evaluate((row) =>
-    [...row.querySelectorAll<HTMLElement>(".status")]
-      .filter((badge) => badge.getClientRects().length > 0)
-      .map((badge) => Math.round(badge.getBoundingClientRect().top)));
-  expect(tops.length).toBeGreaterThanOrEqual(3);
-  expect(new Set(tops).size, `badge tops ${tops.join(", ")}`).toBe(1);
+/** The bar shows one status (#2182): the campaign request that needs the person, as one badge. */
+async function expectOneStatus(page: Page) {
+  const bar = page.locator("header.session-bar");
+  const control = bar.locator(".session-status-button");
+  await expect(control).toHaveAccessibleName(STATUS_NAME);
+  await expect(bar.locator(".status")).toHaveCount(1);
+  await expect(control.locator(".status")).toContainText("Needs Your Input");
+  // The facts the bar used to carry are in the Pinned Summary, and the rest is in the popover.
+  await expect(bar.getByText(/Ready for Review|Uncommitted Changes|Changes Present|Orchestrator Action/)).toHaveCount(0);
 }
 
 test("at 1440px the bar is one 48px row and every control in it is 32px tall", async ({ page }) => {
   await openBar(page, 1440);
   // A title long enough to put the row under pressure, as in a real generated title.
   await setTitle(page, LONG_TITLE);
-  await expectThreeStatuses(page);
+  await expectOneStatus(page);
   const bar = page.locator("header.session-bar");
   const geometry = await bar.evaluate((element) => {
     const box = element.getBoundingClientRect();
     const controls = [...element.querySelectorAll<HTMLElement>("button, a.btn")]
-      // Status badges are statuses, not controls; they keep the badge recipe's height (§11.1).
-      .filter((control) => !control.closest(".session-header-statuses") && control.getClientRects().length > 0)
+      .filter((control) => control.getClientRects().length > 0)
       .map((control) => ({
         name: control.getAttribute("aria-label") ?? control.textContent?.trim() ?? "",
         height: control.getBoundingClientRect().height,
@@ -82,16 +74,15 @@ test("at 1440px the bar is one 48px row and every control in it is 32px tall", a
   });
   expect(geometry.height).toBe(48);
   const names = geometry.controls.map((control) => control.name);
-  for (const name of ["Back to Sessions", "Alpha", "Share", "More Actions", "Pinned Summary", "Terminal", "Side Panel"]) {
+  for (const name of ["Back to Sessions", "Alpha", STATUS_NAME, "Share", "More Actions", "Pinned Summary", "Terminal", "Side Panel"]) {
     expect(names).toContain(name);
   }
-  expect(geometry.controls.length).toBeGreaterThanOrEqual(8);
+  expect(geometry.controls.length).toBeGreaterThanOrEqual(9);
   for (const control of geometry.controls) {
     expect(control.height, control.name).toBe(32);
     // Centred in the row: the 47px above the bottom hairline leaves 7.5px of air either side.
     expect(control.top, control.name).toBe(7.5);
   }
-  await expectStatusesOnOneLine(page);
   await expect(bar.locator("h1#page-title")).toHaveCSS("font-size", "16px");
   await expect(bar.locator("h1#page-title")).toHaveCSS("font-weight", "600");
   // One divider before the Open picker and one after it, ahead of the panel toggles.
@@ -288,7 +279,8 @@ test("a menu result is a toast, and the bar never shows a transient note", async
   await bar.getByRole("button", { name: "Share" }).click();
   await page.getByRole("menuitem", { name: "Copy Session Link" }).click();
   await expect(page.locator(".toast", { hasText: "Link copied." })).toBeVisible();
-  await expect(bar.locator(".session-header-note, .detail-note, [role='status'][aria-live]")).toHaveCount(0);
+  // The only live region the bar keeps announces background work (#784, #2182), never a result.
+  await expect(bar.locator(".session-header-note, .detail-note, [role='status'][aria-live]:not([data-live='background-work'])")).toHaveCount(0);
   expect(await bar.evaluate((element) => element.getBoundingClientRect().height)).toBe(48);
 });
 
@@ -317,7 +309,7 @@ for (const width of [761, 834, 940, 1099]) {
   test(`at ${width}px the bar holds one row with a readable title and the project in More Actions`, async ({ page }) => {
     await openBar(page, width);
     await setTitle(page, LONG_TITLE);
-    await expectThreeStatuses(page);
+    await expectOneStatus(page);
     const bar = page.locator("header.session-bar");
     await expect(bar.locator(".session-project-button")).toBeHidden();
     await expect(bar.locator(".session-bar-sep")).toBeHidden();
@@ -334,19 +326,22 @@ for (const width of [761, 834, 940, 1099]) {
         bar: box,
         children,
         title: rect(element.querySelector("h1")!),
-        statuses: rect(element.querySelector(".session-header-statuses")!),
+        statuses: rect(element.querySelector(".session-status-button")!),
         actions: rect(element.querySelector(".detail-actions")!),
         overflow: element.scrollWidth > element.clientWidth,
+        dot: element.querySelector(".session-status-button")!.hasAttribute("data-dot"),
+        tooltip: element.querySelector(".session-status-button")!.getAttribute("title"),
       };
     });
     expect(geometry.bar.bottom - geometry.bar.top).toBe(48);
-    await expectStatusesOnOneLine(page);
     for (const child of geometry.children) {
       expect(child.top, child.name).toBeGreaterThanOrEqual(geometry.bar.top);
       expect(child.bottom, child.name).toBeLessThanOrEqual(geometry.bar.bottom);
     }
     expect(geometry.overflow).toBe(false);
+    // The badge gives up its label before the title drops under its readable width (§15.2).
     expect(geometry.title.width).toBeGreaterThanOrEqual(200);
+    if (geometry.dot) expect(geometry.tooltip).toBe("Needs Your Input");
     expect(geometry.title.right).toBeLessThanOrEqual(geometry.statuses.left + 0.5);
     expect(geometry.statuses.right).toBeLessThanOrEqual(geometry.actions.left + 0.5);
     expect(geometry.actions.right).toBeLessThanOrEqual(geometry.bar.right);
@@ -356,6 +351,94 @@ for (const width of [761, 834, 940, 1099]) {
     await expect(rows.nth(0)).toHaveText("Open Alpha");
     await expect(rows.nth(1)).toHaveText("Move to Another Project…");
     await expect(rows.nth(2)).toHaveAttribute("role", "separator");
+  });
+}
+
+/** An authentication request: the longest attention label, so it is the first to need the room. */
+async function signInRequired(page: Page) {
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      status: "input_required",
+      orchestratorCampaign: undefined,
+      pendingApproval: { kind: "authentication", requestId: "sign-in", title: "Sign in", options: [] },
+    } as never);
+  });
+}
+
+/** The bar's title width, the status badge's width, and the control's box. */
+function statusGeometry(page: Page) {
+  return page.locator("header.session-bar").evaluate((element) => ({
+    title: element.querySelector("h1")!.getBoundingClientRect().width,
+    badge: element.querySelector(".session-status-button .status")!.getBoundingClientRect().width,
+    control: element.querySelector(".session-status-button")!.getBoundingClientRect(),
+  }));
+}
+
+test("at 940px a long title keeps 200px: the badge keeps its label only while it leaves that much", async ({ page }) => {
+  await openBar(page, 940);
+  // The labelled rail is the narrowest a 940px window gets.
+  await page.getByRole("button", { name: "Expand Navigation" }).click();
+  await signInRequired(page);
+  await setTitle(page, LONG_TITLE);
+  const control = page.locator("header.session-bar .session-status-button");
+  await expect(control).toHaveAccessibleName("Session Status: Authentication Required");
+  await expect(control).toHaveAttribute("data-compact", "");
+  const geometry = await statusGeometry(page);
+  expect(geometry.title).toBeGreaterThanOrEqual(200);
+  // Whichever form the font leaves room for, a dot always carries its label as the tooltip.
+  if (await control.getAttribute("data-dot") !== null) {
+    await expect(control).toHaveAttribute("title", "Authentication Required");
+  } else {
+    await expect(control.locator(".status")).toHaveText("Authentication Required");
+  }
+});
+
+test("in the compact tier a long title collapses the status badge to its dot before the title drops under 200px", async ({ page }) => {
+  // 800px is inside the compact tier (761–1099px) with room enough to measure both forms.
+  await openBar(page, 800);
+  await page.getByRole("button", { name: "Expand Navigation" }).click();
+  await signInRequired(page);
+  const control = page.locator("header.session-bar .session-status-button");
+  await setTitle(page, "Fix it");
+  await expect(control).toHaveAccessibleName("Session Status: Authentication Required");
+  await expect(control).not.toHaveAttribute("data-dot");
+  // Dot and label, without the pill, where the label fits.
+  await expect(control).toHaveAttribute("data-compact", "");
+  await expect(control.locator(".status")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(control.locator(".status")).toHaveText("Authentication Required");
+
+  await setTitle(page, LONG_TITLE);
+  await expect(control).toHaveAttribute("data-dot", "");
+  await expect(control).toHaveAttribute("title", "Authentication Required");
+  await expect(control).toHaveAccessibleName("Session Status: Authentication Required");
+  const geometry = await statusGeometry(page);
+  expect(geometry.title).toBeGreaterThanOrEqual(200);
+  expect(geometry.badge).toBe(6);
+  // Still a 32px target, and the popover is its visible label.
+  expect(geometry.control.width).toBeGreaterThanOrEqual(32);
+  expect(geometry.control.height).toBe(32);
+  await control.click();
+  await expect(page.getByRole("dialog", { name: "Session Status" }).locator(".session-status-row .status").first())
+    .toHaveText("Authentication Required");
+});
+
+for (const width of [1100, 1440]) {
+  test(`at ${width}px the status is the full badge, never a dot, whatever the title's length`, async ({ page }) => {
+    await openBar(page, width);
+    await page.getByRole("button", { name: "Expand Navigation" }).click();
+    await setTitle(page, `${LONG_TITLE} ${LONG_TITLE}`);
+    const control = page.locator("header.session-bar .session-status-button");
+    await expect(control).toHaveAccessibleName(STATUS_NAME);
+    await expect(control).not.toHaveAttribute("data-dot");
+    await expect(control).not.toHaveAttribute("data-compact");
+    await expect(control).not.toHaveAttribute("title");
+    await expect(control.locator(".status")).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    const badge = await control.locator(".status").evaluate((element) => ({
+      width: element.getBoundingClientRect().width,
+      clipped: element.scrollWidth > element.clientWidth + 0.5,
+    }));
+    expect(badge.width).toBeGreaterThan(80);
+    expect(badge.clipped).toBe(false);
   });
 }
 
@@ -520,14 +603,11 @@ test.describe("phone", () => {
         return { name: button.getAttribute("aria-label"), width: box.width, height: box.height, corners };
       });
     });
-    // How many statuses the disclosure holds depends on the UI font (one here, two in CI's DejaVu
-    // Sans); this test is about the controls and their hit areas, so it reads the disclosure as +N.
-    expect(targets.map((target) => target.name?.replace(/^\+\d+: Show \d+ Hidden Status(es)?$/, "+N"))).toEqual([
+    expect(targets.map((target) => target.name)).toEqual([
       "Back to Sessions",
       "Pinned Summary",
       "Terminal",
       "Side Panel",
-      "+N",
       "Share",
       "More Actions",
     ]);
@@ -536,6 +616,29 @@ test.describe("phone", () => {
       expect(target.height, target.name!).toBe(36);
       expect(target.corners, target.name!).toEqual([true, true, true, true]);
     }
+
+    // The status control leads the second line with the full badge (§15.1): 36px like Share, with
+    // the same borrowed 44px touch target.
+    const control = page.locator(".session-bar .session-status-button");
+    await expect(control).toHaveAccessibleName(STATUS_NAME);
+    const status = await control.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const share = document.querySelector(".session-bar [aria-label='Share']")!.getBoundingClientRect();
+      const line = element.closest(".session-bar")!.getBoundingClientRect();
+      const centerY = box.top + box.height / 2;
+      const hit = (x: number, y: number) => {
+        const target = document.elementFromPoint(x, y);
+        return target === element || element.contains(target);
+      };
+      return {
+        height: box.height, left: box.left - line.left, right: box.right, shareLeft: share.left,
+        target: [hit(box.left + 8, centerY - 21), hit(box.left + 8, centerY + 21)],
+      };
+    });
+    expect(status.height).toBe(36);
+    expect(status.target).toEqual([true, true]);
+    expect(status.right).toBeLessThan(status.shareLeft);
+    expect(status.left).toBeLessThanOrEqual(16);
 
     await page.locator(".session-bar").getByRole("button", { name: "More Actions" }).click();
     const sheet = page.getByRole("menu", { name: "More Actions" });

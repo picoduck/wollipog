@@ -109,8 +109,6 @@ test("every referenced custom property is defined in the shared root scope", () 
     "--zone-line-top",
     "--zone-line-left",
     "--zone-line-width",
-    // SessionHeader measures the bar title's readable width; absent means no compact-tier floor.
-    "--session-title-readable",
   ]);
 
   // Component-local by design (docs/design-system.md §19.4 rejects promoting them): each is
@@ -412,58 +410,30 @@ test("unavailable message actions keep their slash in forced colors", () => {
   ]));
 });
 
-test("mobile Session statuses stay on one measured line before fixed actions", () => {
+test("the phone Session status control leads its line without pushing the fixed actions", () => {
   // Changes are a Git fact in the Pinned Summary now (#2160), not a status group in the bar.
   assert.doesNotMatch(css, /\.change-status-indicators\b/);
+  // One status control replaced the measured badge row and its "+N" disclosure (#2182).
+  assert.doesNotMatch(css, /\.session-header-statuses\b|\.session-status-overflow-trigger\b|\.status-label-narrow\b/);
   const phoneRule = mediaBlocks(css).find((block) =>
     block.maxWidths.includes(760) &&
-    block.containsSelector(".session-bar > .session-header-statuses"));
-  assert.ok(phoneRule, "the phone layout must define the compact shared status row");
-  const statuses = phoneRule
-    .declarationsForSelector(".session-bar > .session-header-statuses");
-  assert.deepEqual(statuses.get("grid-column"), ["1"],
-    "statuses must stop before the dedicated action track");
-  assert.deepEqual(statuses.get("flex-wrap"), ["nowrap"]);
-  assert.deepEqual(statuses.get("overflow"), ["clip"],
-    "clipped statuses must not create a horizontal scroller");
-  assert.deepEqual(statuses.get("contain"), ["paint"],
-    "paint containment keeps long badge geometry out of the page overflow area across engines");
-  assert.equal(statuses.has("mask-image"), false,
-    "a hidden-count disclosure replaces the ambiguous clipped-edge fade");
-  assert.deepEqual(
-    phoneRule.declarationsForSelector(
-      ".session-bar > .session-header-statuses [hidden]",
-    ).get("display"),
-    ["none"],
-    "overflowed badges must not remain partially painted",
-  );
-  const interactiveStatus = phoneRule.declarationsForSelector(
-    ".session-bar > .session-header-statuses > .active-subagents-badge",
-  );
-  assert.deepEqual(interactiveStatus.get("order"), ["-1"],
-    "active subagents must lead the row without reordering every actionable status badge");
-  assert.deepEqual(interactiveStatus.get("flex"), ["none"]);
-  const lifecycle = phoneRule
-    .declarationsForSelector(
-      ".session-bar > .session-header-statuses .session-status-indicators",
-    );
-  assert.deepEqual(lifecycle.get("flex"), ["none"],
-    "the lifecycle group must retain stable intrinsic geometry for overflow measurement");
-  assert.deepEqual(lifecycle.get("flex-wrap"), ["nowrap"]);
-  assert.deepEqual(lifecycle.get("min-height"), ["36px"],
-    "the single status line must align with the compact Session actions");
-  assert.equal(lifecycle.has("padding-right"), false,
-    "the action grid track, not lifecycle padding, must reserve action space");
-  // Every header badge is the one `.status` recipe (docs/design-system.md §11.1), so the phone keeps
-  // its 11px type rather than dropping to the retired 10px `--text-2xs`; the width headroom for
-  // wider system fonts now comes from the inset alone, and the line truncates to "+N" (§21).
-  const headerBadge = phoneRule.declarationsForSelector(
-    ".session-bar > .session-header-statuses .status",
-  );
-  assert.deepEqual(headerBadge.get("padding-inline"), ["var(--space-1)"],
-    "header badges need enough width headroom for wider system fonts");
-  assert.equal(headerBadge.has("font-size"), false,
-    "header badges keep the shared recipe's size instead of shrinking below --text-xs");
+    block.containsSelector(".session-bar > .session-status-button"));
+  assert.ok(phoneRule, "the phone layout must place the Session status control");
+  const status = phoneRule.declarationsForSelector(".session-bar > .session-status-button");
+  assert.deepEqual(status.get("grid-column"), ["1"],
+    "the status control must stop before the dedicated action track");
+  assert.deepEqual(status.get("justify-self"), ["start"], "it leads the line");
+  assert.deepEqual(status.get("min-width"), ["0"]);
+  assert.deepEqual(status.get("max-width"), ["100%"],
+    "a long label must not widen its track into Share and More Actions");
+  assert.deepEqual(status.get("height"), ["36px"], "the control is the line's small size, like Share");
+  assert.equal(status.has("overflow"), false, "clipping the button would clip its borrowed touch target");
+  assert.deepEqual(phoneRule.declarationsForSelector(".session-bar > .session-status-button > .status")
+    .get("overflow"), ["hidden"], "the badge clips inside its track instead");
+  // The header badge is the one `.status` recipe (docs/design-system.md §11.1), so the phone keeps
+  // its 11px type rather than dropping to the retired 10px `--text-2xs`.
+  assert.equal(phoneRule.declarationsForSelector(".session-bar > .session-status-button > .status").has("font-size"),
+    false, "the phone keeps the shared badge recipe's size");
   assert.match(soleRuleBody(".status"), /^font: var\(--type-micro\);$/m,
     "the status recipe sets 11px/500 through --type-micro");
   // `.sm` is also a 12px text utility later in the sheet; the badge's own size class has to win.

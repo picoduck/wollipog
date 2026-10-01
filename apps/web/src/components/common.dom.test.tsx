@@ -8,7 +8,6 @@ import {
   BackgroundDeliveryBadge,
   BackgroundNotificationBadge,
   BackgroundWorkBadge,
-  ActiveSubagentsBadge,
   AttentionBadge,
   COPY_RESULT_MS,
   CopyButton,
@@ -272,33 +271,6 @@ test("presentational background-work badges do not create a duplicate live regio
   }
 });
 
-test("responsive compact background-work badges carry wide and narrow visible labels under one accessible name", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  try {
-    for (const [state, full, wide, narrow] of [
-      ["running", "Waiting on External Job", "Waiting on External Job", "Job"],
-      ["continuation_pending", "Continuation Pending", "Continuation Pending", "Pending"],
-      ["orphaned", "Lost", "Background Work Lost", "Lost"],
-    ] as const) {
-      await act(async () => {
-        root.render(<BackgroundWorkBadge state={state} compact responsiveCompact announce={false} />);
-      });
-      const badge = container.querySelector('.status[data-group="background-work"]')!;
-      assert.equal(badge.getAttribute("aria-label"), `Background Work: ${full}`);
-      assert.equal(badge.querySelector(".status-label-wide")?.textContent, wide);
-      assert.equal(badge.querySelector(".status-label-narrow")?.textContent, narrow);
-      assert.equal(badge.querySelector(".status-label-wide")?.getAttribute("aria-hidden"), "true");
-      assert.equal(badge.querySelector(".status-label-narrow")?.getAttribute("aria-hidden"), "true");
-    }
-  } finally {
-    await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
 test("background-work indicators become keyboard-native panel controls when actionable", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
@@ -330,28 +302,6 @@ test("background-work indicators become keyboard-native panel controls when acti
     assert.equal(opens, 4);
   } finally {
     await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("active subagent badges expose their count and open the active work", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  let opens = 0;
-  try {
-    await act(async () => {
-      root.render(<ActiveSubagentsBadge count={2} onOpen={() => { opens += 1; }} />);
-    });
-    const badge = container.querySelector<HTMLButtonElement>('button[aria-label="2 Subagents Active"]');
-    assert.equal(badge?.querySelector(".sr-only")?.textContent, "2 Subagents Active");
-    assert.equal(badge?.querySelector('[aria-hidden="true"]:last-child')?.textContent, "2 Subagents");
-    assert.equal(badge?.title, "2 Subagents Active");
-    await act(async () => { badge?.click(); });
-    assert.equal(opens, 1);
-  } finally {
-    await act(async () => { root.unmount(); });
     container.remove();
   }
 });

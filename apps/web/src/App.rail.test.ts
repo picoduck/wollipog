@@ -541,7 +541,7 @@ test("the phone Session topbar owns Back and the live Session title without Open
 });
 
 test("Session menu triggers clear popovers without rising to the modal backdrop layer", () => {
-  assert.match(css, /\.detail-actions:has\(\.session-header-action\[aria-expanded="true"\]\) \.session-header-action \{[^}]*z-index: var\(--z-popovercontent\);/,
+  assert.match(css, /\.session-bar:has\(:is\(\.session-status-button, \.session-header-action\)\[aria-expanded="true"\]\)\s+:is\(\.session-status-button, \.session-header-action\) \{[^}]*z-index: var\(--z-popovercontent\);/,
     "sibling triggers should clear the menu backdrop but stay below every modal");
 });
 

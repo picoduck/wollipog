@@ -11,6 +11,18 @@
  * derived by the caller and named here.
  */
 
+import {
+  sessionAttentionBreakdown,
+  sessionAttentionStatus,
+  type ArchiveOperationView,
+  type ArchiveStatus,
+  type SessionAttentionKind,
+  type SessionStatus,
+  type SessionView,
+  type StopOperationView,
+} from "@wollipog/protocol";
+import { BACKGROUND_DELIVERY_STATUS } from "./background-delivery-status.js";
+
 export type StatusTone = "info" | "success" | "warning" | "danger" | "neutral";
 
 export interface StatusMeta {
@@ -20,8 +32,6 @@ export interface StatusMeta {
   pulse: boolean;
   /** A hollow dot: the state is not known to be current, because its source is offline. */
   hollow?: boolean;
-  /** A shorter visible label for the narrowest surfaces; the full label stays the accessible name. */
-  shortLabel?: string;
   /** Other words a search should match for this value, such as the server's own labels. */
   aliases?: readonly string[];
 }
@@ -140,9 +150,9 @@ const VOCABULARY = {
   },
   /** A session's aggregate background work, as its header shows it. */
   background_work: {
-    running: info("Waiting on External Job", { pulse: true, shortLabel: "Job" }),
-    continuation_pending: info("Continuation Pending", { pulse: true, shortLabel: "Pending" }),
-    orphaned: danger("Background Work Lost", { shortLabel: "Lost" }),
+    running: info("Waiting on External Job", { pulse: true }),
+    continuation_pending: info("Continuation Pending", { pulse: true }),
+    orphaned: danger("Background Work Lost"),
   },
   /**
    * A message the user sent that the agent has not taken yet: the transcript's pending bubbles
@@ -259,4 +269,308 @@ export function toolStatusMeta(status: string): StatusMeta {
 /** Every value of a domain, in vocabulary order. */
 export function statusValues<D extends StatusDomain>(domain: D): StatusValue<D>[] {
   return Object.keys(VOCABULARY[domain]) as StatusValue<D>[];
+}
+
+/**
+ * The lifecycle a session's badge shows. A Stop operation outranks the provider lifecycle it is
+ * stopping; a quarantined conversation outranks "Awaiting Prompt".
+ *
+ * A pending Stop whose runner is offline is not being delivered: the operation stays pending (so
+ * runtime capacity may still be held) but nothing is progressing until the runner reconnects, so it
+ * reads "Stop Waiting for Runner" without a pulse rather than the pulsing "Stop Pending" (#208).
+ * `runnerOnline` defaults to true so a surface that cannot see the runner keeps the conservative
+ * delivery wording.
+ */
+export function sessionLifecycleMeta(
+  status: SessionStatus,
+  options: {
+    archiveStatus?: ArchiveStatus;
+    archiveOperation?: ArchiveOperationView;
+    stopOperation?: StopOperationView;
+    historyQuarantine?: SessionView["historyQuarantine"];
+    runnerOnline?: boolean;
+  } = {},
+): StatusMeta {
+  const operation = options.stopOperation ?? options.archiveOperation;
+  const operationStatus = operation?.status ?? options.archiveStatus;
+  if (operationStatus === "stop_pending") {
+    return statusMeta("session", options.runnerOnline === false ? "stop_waiting_for_runner" : "stop_pending");
+  }
+  if (operationStatus === "stop_failed") return statusMeta("session", "stop_failed");
+  return quarantinedStatusMeta(status, options.historyQuarantine) ?? statusMeta("session", status);
+}
+
+/** A quarantined conversation is idle only in the sense that nothing is running. It can never
+ * accept another prompt, so "Awaiting Prompt" would invite exactly the retry that cannot work. */
+export function quarantinedStatusMeta(
+  status: SessionStatus,
+  historyQuarantine: SessionView["historyQuarantine"],
+): StatusMeta | null {
+  if (!historyQuarantine || status === "completed" || status === "failed" || status === "stopped") return null;
+  return statusMeta("session", "quarantined");
+}
+
+/** What one condition of a session is, so a surface can attach the action that resolves it. */
+export type SessionConditionKind =
+  /** One attention kind (`sessionAttentionBreakdown()`): a request the person answers. */
+  | "attention"
+  /** Human-owned campaign requests, listed in the Requests panel. */
+  | "campaign_requests"
+  /** Unresolved requests of descendant sessions, listed in the Requests panel. */
+  | "descendant_requests"
+  /** Campaign requests assigned to the Orchestrator rather than to the person. */
+  | "orchestrator_requests"
+  /** The session's aggregate background work: Lost, Waiting on External Job, Continuation Pending. */
+  | "background_work"
+  /** A background result that has not come back to the conversation. */
+  | "background_delivery"
+  /** The session's machine is offline. */
+  | "disconnected"
+  /** Live workers. */
+  | "workers"
+  /** Why a queued session is waiting: capacity, or a worktree or account handoff. */
+  | "queue_reason"
+  /** The session lifecycle, including Stop Pending and Stop Failed. */
+  | "lifecycle";
+
+/** One condition a session is in, as the Session Status control and its popover show it. */
+export interface SessionCondition {
+  kind: SessionConditionKind;
+  /** Label, tone and pulse. The label is the badge's text; a count is in the label or in `count`. */
+  meta: StatusMeta;
+  /** One sentence saying what the condition means. */
+  description: string;
+  /** The person must act on it. Only these count toward "+N". */
+  needsYou: boolean;
+  /** Requests behind the condition, where it stands for several. */
+  count?: number;
+  /** For an attention condition, which kind of request it is. */
+  attentionKind?: SessionAttentionKind;
+  /** A fact rather than a state (§11.2): listed as a plain row, never drawn as a badge. */
+  fact?: boolean;
+}
+
+/** The session's one status, the number of other things that need the person, and every condition. */
+export interface SessionStatusSummary {
+  /** The one badge a surface shows for the session. Always `conditions[0]`. */
+  primary: SessionCondition;
+  /** How many OTHER conditions need the person: the "+N". Never counts passive states. */
+  more: number;
+  /** Every condition, in rank order, for the Session Status popover. The lifecycle is listed only
+   * when nothing needs the person. */
+  conditions: SessionCondition[];
+}
+
+/** What a surface knows about a session beyond the session record itself. */
+export interface SessionStatusContext {
+  /** The session's machine is connected. Unknown counts as connected; only offline is Disconnected. */
+  runnerOnline?: boolean;
+  /** Unresolved requests of descendant sessions (the Requests panel's count). */
+  descendantRequests?: number;
+  /** Live workers (the Agents panel's count). */
+  activeWorkers?: number;
+}
+
+/** The session fields the ranking reads. */
+export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
+  Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners" |
+    "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
+    "queueHold" | "holds" | "backgroundWorkState" | "backgroundDeliveries">>;
+
+const LIFECYCLE_DESCRIPTIONS: Partial<Record<StatusValue<"session">, string>> = {
+  queued: "The session is waiting for a slot to start.",
+  starting: "The agent is starting.",
+  running: "The agent is working on its turn.",
+  stopping: "The agent is stopping.",
+  input_required: "The agent is waiting for your input.",
+  idle: "The agent finished its turn and is waiting for your next prompt.",
+  stalled: "The agent stopped reporting progress.",
+  failed: "The session ended with an error.",
+  completed: "The session finished.",
+  stopped: "The session was stopped.",
+  quarantined: "This conversation's history is quarantined, so it cannot take another prompt.",
+  stop_pending: "A Stop is being delivered to the session's machine.",
+  stop_waiting_for_runner: "A Stop is waiting for the session's machine to reconnect; runtime capacity may still be held.",
+  stop_failed: "The Stop failed, so runtime capacity may still be held.",
+};
+
+function lifecycleDescription(meta: StatusMeta): string {
+  const value = statusValues("session").find((candidate) => statusMeta("session", candidate).label === meta.label);
+  return (value && LIFECYCLE_DESCRIPTIONS[value]) ?? "The session's current state.";
+}
+
+function plural(count: number, one: string, many: string): string {
+  return count === 1 ? one : many;
+}
+
+/** The short name of why a queued session is waiting for capacity. */
+export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>["kind"]): string {
+  return kind === "runner_capacity"
+    ? "Runner Capacity"
+    : kind === "agent_quota"
+      ? "Agent Quota"
+      : kind === "target_quota"
+        ? "Target Quota"
+        : kind === "exclusive_group"
+          ? "Provider Slot"
+          : kind === "request_weight"
+            ? "Agent Weight"
+            : kind === "active_turn_capacity"
+              ? "Active Turn Capacity"
+              : kind === "capacity_lock"
+                ? "Capacity Sync"
+                : "Queue Order";
+}
+
+/**
+ * Which one status a session shows, and how many other things need the person (#2182). The Session
+ * bar, and later the Sessions rows, the preview bar and the Board cards, all choose their badge here.
+ *
+ * The badge is the first of these that applies:
+ * 1. What needs the person: each attention kind in `sessionAttentionBreakdown()` order (the Sessions
+ *    list's priority), then human-owned campaign requests, then descendant requests.
+ * 2. Background Work Lost.
+ * 3. Disconnected, when the session's machine is offline.
+ * 4. Waiting on External Job (or Continuation Pending) while the session is otherwise awaiting its
+ *    next prompt, so running background work stays visible at a glance (#784).
+ * 5. The lifecycle, including Stop Pending and Stop Failed.
+ *
+ * `more` counts the other conditions in rule 1, never a passive state, so "+N" is the same at every
+ * width. `conditions` lists everything in that order for the popover, followed by the passive rows
+ * (background work while the agent is busy, a result still coming back, workers, Orchestrator
+ * requests and queue reasons).
+ */
+export function sessionStatusSummary(
+  session: SessionStatusSource,
+  context: SessionStatusContext = {},
+): SessionStatusSummary {
+  const runnerOnline = context.runnerOnline ?? true;
+  const needs: SessionCondition[] = [];
+  const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
+  const groups = sessionAttentionBreakdown(session)
+    // With no request of the person's own, the breakdown falls back to the campaign's "Needs Your
+    // Input", which is the campaign-request condition below.
+    .filter((group) => !(group.count === 0 && humanCampaignRequests > 0));
+  // The badge says the kind, which is what a glance needs; a single request's sentence names the
+  // worker that owns it ("Audit · Reviewer owns this request…"), which would not fit in a badge.
+  const single = groups.length === 1 && groups[0]!.count <= 1 ? sessionAttentionStatus(session) : null;
+  for (const group of groups) {
+    needs.push({
+      kind: "attention",
+      meta: { ...statusMeta("attention", group.kind), label: group.label },
+      description: (single ?? group).description,
+      needsYou: true,
+      count: group.count > 1 ? group.count : undefined,
+      attentionKind: group.kind,
+    });
+  }
+  if (humanCampaignRequests > 0) {
+    needs.push({
+      kind: "campaign_requests",
+      meta: statusMeta("attention", "input_required"),
+      description: `${humanCampaignRequests} human-owned campaign ${plural(humanCampaignRequests, "request needs", "requests need")} your input.`,
+      needsYou: true,
+      count: humanCampaignRequests,
+    });
+  }
+  // A campaign's request counts already include its descendants' requests.
+  const descendantRequests = context.descendantRequests ?? 0;
+  if (descendantRequests > 0 && !session.orchestratorCampaign?.pendingRequests) {
+    needs.push({
+      kind: "descendant_requests",
+      meta: { label: "Descendant Requests", tone: "warning", pulse: false },
+      description: `${descendantRequests} ${plural(descendantRequests, "request from a descendant session is", "requests from descendant sessions are")} unresolved.`,
+      needsYou: true,
+      count: descendantRequests,
+    });
+  }
+
+  const lifecycle = sessionLifecycleMeta(session.status, {
+    archiveStatus: session.archiveStatus,
+    archiveOperation: session.archiveOperation,
+    stopOperation: session.stopOperation,
+    historyQuarantine: session.historyQuarantine,
+    runnerOnline,
+  });
+  const backgroundState = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
+  const background: SessionCondition | null = backgroundState ? {
+    kind: "background_work",
+    meta: statusMeta("background_work", backgroundState),
+    description: backgroundState === "orphaned"
+      ? "Managed background work was lost and will not return its result."
+      : backgroundState === "running"
+        ? "A background job is still running, and its result returns to this conversation when it finishes."
+        : "A background job finished, and the conversation continues with its result.",
+    needsYou: false,
+  } : null;
+  const lost = backgroundState === "orphaned" ? background : null;
+  const disconnected: SessionCondition | null = runnerOnline ? null : {
+    kind: "disconnected",
+    meta: { label: "Disconnected", tone: "danger", pulse: false },
+    description: "The session's machine is offline, so its status may not be current.",
+    needsYou: false,
+  };
+  const awaitingPrompt = lifecycle.label === statusMeta("session", "idle").label;
+  const waiting = !lost && awaitingPrompt ? background : null;
+
+  const conditions: SessionCondition[] = [...needs];
+  if (lost) conditions.push(lost);
+  if (disconnected) conditions.push(disconnected);
+  if (waiting) conditions.push(waiting);
+  if (needs.length === 0) {
+    conditions.push({ kind: "lifecycle", meta: lifecycle, description: lifecycleDescription(lifecycle), needsYou: false });
+  }
+  if (background && background !== lost && background !== waiting) conditions.push(background);
+  const delivery = session.backgroundDeliveries?.find((candidate) => candidate.watchdogState)?.watchdogState;
+  if (delivery) {
+    const copy = BACKGROUND_DELIVERY_STATUS[delivery];
+    conditions.push({
+      kind: "background_delivery",
+      meta: { label: copy.label, tone: copy.severity === "pending" ? "info" : "warning", pulse: false },
+      description: copy.description,
+      needsYou: false,
+    });
+  }
+  const workers = context.activeWorkers ?? 0;
+  if (workers > 0) {
+    conditions.push({
+      kind: "workers",
+      meta: { label: `${workers} ${plural(workers, "Worker", "Workers")}`, tone: "info", pulse: true },
+      description: `${workers} ${plural(workers, "worker is", "workers are")} running for this session.`,
+      needsYou: false,
+    });
+  }
+  const orchestratorRequests = session.orchestratorCampaign?.pendingRequests?.orchestrator ?? 0;
+  if (orchestratorRequests > 0) {
+    conditions.push({
+      kind: "orchestrator_requests",
+      meta: { label: "Orchestrator Action", tone: "neutral", pulse: false },
+      description: `The Orchestrator has ${orchestratorRequests} descendant ${plural(orchestratorRequests, "request", "requests")} assigned to it.`,
+      needsYou: false,
+      count: orchestratorRequests,
+    });
+  }
+  if (session.status === "queued" && session.capacityWait) {
+    conditions.push({
+      kind: "queue_reason",
+      meta: { label: queueReasonLabel(session.capacityWait.kind), tone: "neutral", pulse: false },
+      description: session.capacityWait.description,
+      needsYou: false,
+      fact: true,
+    });
+  } else if (session.status === "queued" && session.queueHold) {
+    const reason = session.holds?.find((hold) => hold.holdId === session.queueHold?.holdId)?.reason;
+    conditions.push({
+      kind: "queue_reason",
+      meta: {
+        label: session.queueHold.kind === "worktree_rebind" ? "Worktree Handoff" : "Account Handoff",
+        tone: "neutral",
+        pulse: false,
+      },
+      description: reason ?? "A handoff is waiting on background work.",
+      needsYou: false,
+      fact: true,
+    });
+  }
+  return { primary: conditions[0]!, more: Math.max(0, needs.length - 1), conditions };
 }
