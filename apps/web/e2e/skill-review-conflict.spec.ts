@@ -108,7 +108,7 @@ const reviews: Review[] = [{
     await page.route("**/api/skill-drift/review-1", (route) => route.fulfill({ status: 204, body: "" }));
     await page.goto("/skills-removals-e2e.html?drift=1");
     await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-    await page.locator(".skills-machine").getByRole("button", { name: "Import Edit as New Version" }).click();
+    await page.locator(".skill-notice-slot").getByRole("button", { name: "Review Edit…" }).click();
     return page.getByRole("dialog", { name: "Import Edit as New Version" });
   },
 }, {
@@ -150,7 +150,7 @@ const reviews: Review[] = [{
       } }));
     await page.goto("/skills-removals-e2e.html?builtIn=1");
     await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-    await page.getByRole("button", { name: "Review Built-In Update", exact: true }).click();
+    await page.locator(".skill-notice-slot").getByRole("button", { name: "Review Update…" }).click();
     return page.getByRole("dialog", { name: "Review Built-In Update" });
   },
 }, {
