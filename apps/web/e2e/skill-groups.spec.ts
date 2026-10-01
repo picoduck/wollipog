@@ -234,6 +234,75 @@ for (const width of [1440, 390]) test(`the dialog's in-place menus at ${width} h
   await expect(dialog).toBeVisible();
 });
 
+// The guard above keeps containment out of this dialog's own styles, but a containing block can still
+// form between an in-place menu and the viewport: a floor engine's size container, or a dialog's
+// transform while it animates (#2284). Layout containment forced on the dialog's body stands in for
+// one; each menu must still open beside its trigger, dismiss on any click outside it, and on a phone
+// dock to the viewport's bottom edge.
+for (const width of [1440, 390]) test(`the dialog's in-place menus at ${width} open beside their triggers under a fixed containing block`, async ({ page }) => {
+  await installSkillGroupsFixture(page, { library: "full" });
+  const height = width > 760 ? 900 : 844;
+  await page.setViewportSize({ width, height });
+  await page.goto("/skills-removals-e2e.html?groups=1");
+  await choosePageAction(page, "Manage Groups…");
+  const dialog = manageGroups(page);
+  if (width <= 760) await dialog.locator(".skill-groups-list > .row").first().click();
+  await expect(dialog.locator(".skill-assignment")).toHaveCount(2);
+  await page.waitForFunction(() => !document.getAnimations().some((animation) => animation.playState === "running"));
+  await page.addStyleTag({ content: ".skill-groups-body { contain: layout !important; }" });
+  const body = await dialog.locator(".skill-groups-body").evaluate((element) => {
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px";
+    element.appendChild(probe);
+    const fixed = probe.getBoundingClientRect();
+    probe.remove();
+    const own = element.getBoundingClientRect();
+    return { probe: { x: fixed.left, y: fixed.top }, box: { x: own.left, y: own.top, bottom: own.bottom } };
+  });
+  expect(body.probe, "the dialog's body is the fixed containing block").toEqual({ x: body.box.x, y: body.box.y });
+  expect(body.box.x + body.box.y, "it is offset from the viewport, so an uncorrected menu would move").toBeGreaterThan(0);
+
+  const triggers = [
+    dialog.getByRole("button", { name: "Add Skill", exact: true }),
+    dialog.getByRole("button", { name: "More Actions for Review Team", exact: true }),
+    dialog.locator('[data-rule-control="invocation"]').first(),
+    dialog.locator('[data-rule-control="more"]').first(),
+  ];
+  for (const trigger of triggers) {
+    await trigger.click();
+    const menu = page.locator(`#${await trigger.getAttribute("aria-controls")}`);
+    await expect(menu).toBeVisible();
+    await page.waitForFunction(() => !document.getAnimations().some((animation) => animation.playState === "running"));
+    const boxes = await menu.evaluate((element, triggerId) => {
+      const button = document.querySelector(`[aria-controls="${triggerId}"]`)!.getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      const backdrop = element.previousElementSibling!.getBoundingClientRect();
+      return {
+        contained: Boolean(element.closest(".skill-groups-body")),
+        gap: Math.round(box.top - button.bottom),
+        right: Math.round(button.right - box.right),
+        sheet: { left: Math.round(box.left), right: Math.round(box.right), bottom: Math.round(box.bottom) },
+        backdrop: [backdrop.left, backdrop.top, backdrop.right, backdrop.bottom].map(Math.round),
+      };
+    }, await trigger.getAttribute("aria-controls"));
+    expect(boxes.contained, "the menu is under the containing block").toBe(true);
+    expect(boxes.backdrop, "the backdrop covers the whole viewport").toEqual([0, 0, width, height]);
+    if (width > 760) {
+      expect(boxes.gap).toBe(4);
+      expect(Math.abs(boxes.right)).toBeLessThanOrEqual(2);
+    } else {
+      expect(boxes.sheet, "the sheet docks to the viewport's edges").toEqual({ left: 0, right: width, bottom: height });
+    }
+    // A click away from the menu lands on its backdrop and dismisses it. (The dialog's scrolling body
+    // still clips anything under a containing block inside it, the backdrop included.)
+    const [x, y] = [body.box.x + 8, body.box.y + 8];
+    expect(await page.evaluate(([x, y]) => document.elementFromPoint(x!, y!)?.className, [x, y])).toBe("menu-backdrop");
+    await page.mouse.click(x, y);
+    await expect(menu).toHaveCount(0);
+  }
+  await expect(dialog).toBeVisible();
+});
+
 test("at 390px the list and the group are two steps of one sheet, with Back and one Done", async ({ page }) => {
   await installSkillGroupsFixture(page, { library: "full" });
   await page.setViewportSize({ width: 390, height: 844 });

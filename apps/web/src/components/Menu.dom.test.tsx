@@ -377,3 +377,101 @@ test("an inline menu renders where it is written, inside its dialog, rather than
   }
   restore();
 });
+
+/**
+ * Stubs layout, which happy-dom lacks: a fixed probe (fixed-containing-block.ts) lands at the given
+ * ancestor box, `.stub-trigger` at (300, 200), and anything else is 200px wide with no height.
+ */
+function stubLayout(box: { left: number; top: number; bottom: number }): { probes: () => number; restore: () => void } {
+  const original = domWindow.HTMLElement.prototype.getBoundingClientRect;
+  let probes = 0;
+  const rect = (left: number, top: number, width: number, height: number) =>
+    ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON() {} });
+  domWindow.HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    if (this.style.position === "fixed" && this.style.height === "100%") {
+      probes += 1;
+      return rect(box.left, box.top, 0, domWindow.innerHeight - box.bottom - box.top);
+    }
+    if (this.classList.contains("stub-trigger")) return rect(300, 200, 80, 28);
+    return rect(0, 0, 200, 0);
+  } as never;
+  return {
+    probes: () => probes,
+    restore: () => { domWindow.HTMLElement.prototype.getBoundingClientRect = original; },
+  };
+}
+
+function ContainedHarness({ inline }: { inline: boolean }) {
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <div role="dialog" aria-modal="true">
+      <button ref={triggerRef} type="button" className="stub-trigger">More Actions</button>
+      <MenuSurface surfaceRef={surfaceRef} anchor={{ trigger: triggerRef }} label="More Actions" inline={inline}
+        onDismiss={() => undefined}>
+        <MenuItem>Adoption Recovery…</MenuItem>
+      </MenuSurface>
+    </div>
+  );
+}
+
+test("an inline menu under a fixed containing block opens beside its trigger; a portalled one is unchanged", async () => {
+  // An ancestor stands 100px right of and 50px below the viewport's corner, 50px above its bottom.
+  const layout = stubLayout({ left: 100, top: 50, bottom: 50 });
+  const restore = stubViewport(false);
+  try {
+    for (const inline of [true, false]) {
+      const before = layout.probes();
+      const mounted = await mount(<ContainedHarness inline={inline} />);
+      try {
+        const menu = doc().querySelector<HTMLElement>('[role="menu"]')!;
+        const backdrop = doc().querySelector<HTMLElement>(".menu-backdrop")!;
+        if (inline) {
+          // 4px below the trigger (§2.9), in the ancestor's coordinates.
+          assert.equal(menu.style.top, `${228 + 4 - 50}px`);
+          assert.equal(menu.style.left, `${300 - 100}px`);
+          assert.ok(layout.probes() > before, "the containing block is measured");
+          // The backdrop reaches back out to the viewport's corner and covers all of it.
+          assert.equal(backdrop.style.top, "-50px");
+          assert.equal(backdrop.style.left, "-100px");
+          assert.equal(backdrop.style.width, "100vw");
+          assert.equal(backdrop.style.height, "100vh");
+        } else {
+          assert.equal(menu.style.top, `${228 + 4}px`, "a portalled menu is placed in viewport coordinates");
+          assert.equal(menu.style.left, "300px");
+          assert.equal(layout.probes(), before, "and measures no containing block");
+          assert.equal(backdrop.getAttribute("style"), null);
+        }
+        // A scroll or resize that moved nothing measures nothing more.
+        const placed = layout.probes();
+        await act(async () => {
+          domWindow.dispatchEvent(new domWindow.Event("scroll"));
+          domWindow.dispatchEvent(new domWindow.Event("resize"));
+        });
+        assert.equal(layout.probes(), placed);
+      } finally {
+        await unmount(mounted);
+      }
+    }
+  } finally {
+    restore();
+    layout.restore();
+  }
+});
+
+test("an inline phone sheet under a fixed containing block still docks to the viewport's edges", async () => {
+  const layout = stubLayout({ left: 16, top: 40, bottom: 60 });
+  const restore = stubViewport(true);
+  const mounted = await mount(<ContainedHarness inline />);
+  try {
+    const menu = doc().querySelector<HTMLElement>('[role="menu"]')!;
+    assert.equal(menu.style.top, "", "a sheet has no anchored placement");
+    assert.equal(menu.style.left, "-16px");
+    assert.equal(menu.style.width, "100vw");
+    assert.equal(menu.style.bottom, "calc(var(--keyboard-inset, 0px) - 60px)");
+  } finally {
+    await unmount(mounted);
+    restore();
+    layout.restore();
+  }
+});
