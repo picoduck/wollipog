@@ -1013,7 +1013,7 @@ test("Instructions shows every file, one at a time: chips choose it, Markdown re
   const files = [
     { path: "scripts/collect.sh", content: script, encoding: "utf8" },
     { path: "SKILL.md", content: skillMd, encoding: "utf8" },
-    { path: "references/guide.md", content: "## Guide\n\nRead this.\n", encoding: "utf8" },
+    { path: "references/guide.md", content: "---\n\n## Required Setup\n\nBack up the database first.\n\n---\n\n### Guide\n\nRead this.\n", encoding: "utf8" },
   ];
   const skill = { id: "skill-files", name: "collect", latestVersion: { id: "v1", digest: "d1", createdAt: 1 } };
   const { client, reads } = filesClient(skill, files);
@@ -1054,9 +1054,12 @@ test("Instructions shows every file, one at a time: chips choose it, Markdown re
     await view.click(copyScript);
     assert.deepEqual(clipboard.written, [skillMd, script]);
 
-    // Another Markdown file renders as Markdown too.
+    // Another Markdown file renders as Markdown too, and only SKILL.md has frontmatter to strip: a
+    // reference that opens with a rule keeps everything up to the next one.
     await view.click(chips()[1]);
-    assert.equal(shown().querySelector("h2")?.textContent, "Guide");
+    assert.equal(shown().querySelector("h2")?.textContent, "Required Setup");
+    assert.match(shown().textContent ?? "", /Back up the database first\./);
+    assert.equal(shown().querySelector("h3")?.textContent, "Guide");
     assert.equal(reads.count, 1, "choosing a file shows what the version returned; nothing more is fetched");
   } finally {
     clipboard.restore();
@@ -1268,6 +1271,29 @@ test("Automatic Updates is a switch: one click applies it, it shows busy, then S
     assert.equal(toggle().querySelector(".ui-row-saved")?.textContent, "Saved");
     assert.equal(view.section("Source")!.querySelector('.skill-source > [role="status"]')?.textContent, "Automatic Updates saved");
     assert.equal(description(), "Checks main every hour. Waiting for the first check.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a failed Automatic Updates change keeps the confirmed value, shows no Saved, and says what went wrong", async () => {
+  const source = { url: "https://example.test/skills.git", ref: "main", subdirectory: "", path: "", commit: "c1".repeat(20) };
+  const skill = { id: "skill-auto-fail", name: "lint-rules", gitSource: source, gitAutoUpdate: { enabled: false, intervalMs: 3_600_000 },
+    latestVersion: { id: "v1", digest: "d1", createdAt: 1, gitSource: source } };
+  const { client } = filesClient(skill, [{ path: "SKILL.md", content: "Lint.\n", encoding: "utf8" }], {
+    setSkillGitAutoUpdate: async () => { throw new Error("Automatic updates could not be saved."); },
+  });
+  const view = await mountSkills(client, "skills-auto-switch-fail");
+  try {
+    await view.click(view.listItem("lint-rules"));
+    const toggle = () => view.section("Source")!.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    await view.click(toggle());
+    assert.equal(toggle().getAttribute("aria-checked"), "false", "nothing changed, so nothing says it did");
+    assert.equal(toggle().getAttribute("aria-busy"), null);
+    assert.equal(toggle().disabled, false, "and it can be tried again");
+    assertNoDomNode(toggle().querySelector(".ui-row-saved"));
+    assert.equal(view.section("Source")!.querySelector('.skill-source > [role="status"]')?.textContent, "");
+    assert.match(view.container.querySelector('[role="alert"]')?.textContent ?? "", /Automatic updates could not be saved\./);
   } finally {
     await view.unmount();
   }

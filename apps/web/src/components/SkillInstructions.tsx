@@ -68,7 +68,8 @@ export function SkillInstructions({ files }: { files: ReadonlyArray<SkillFile> }
           {!text ? (
             <p id={binaryId} className="skills-hint">This file isn't text, so it can't be shown or copied here.</p>
           ) : isMarkdown(file.path) ? (
-            <Markdown highlightEligible={false}>{skillMarkdownBody(file.content)}</Markdown>
+            // Frontmatter is SKILL.md's format; in any other file a leading `---` is a rule to keep.
+            <Markdown highlightEligible={false}>{file.path === "SKILL.md" ? skillMarkdownBody(file.content) : file.content}</Markdown>
           ) : (
             <pre className="skill-file-code"><code>{file.content}</code></pre>
           )}
