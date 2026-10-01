@@ -553,3 +553,38 @@ test("Version History keeps focus in the dialog through every phone pane change 
     await unmount();
   } finally { phoneWidth = false; }
 });
+
+test("Version History keeps focus in the dialog when the chosen row is disabled by a running restore (review CR-E2-4.1)", async () => {
+  const restoring = deferred<void>();
+  const client = {
+    ...api,
+    listSkillVersions: async () => ({ versions: [{ id: "skillv_3", versionNumber: 3, digest: "c" }, { id: "skillv_2", versionNumber: 2, digest: "b" }], nextCursor: null }),
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => ({
+      version: { id: versionId, versionNumber: Number(versionId.slice(7)), digest: versionId.padEnd(64, "0"), files: [file(versionId)] },
+      currentVersion: { id: "skillv_3", versionNumber: 3, digest: "skillv_3", files: [file("current")] },
+    }),
+    restoreSkillVersion: () => restoring.promise,
+  } as unknown as ApiClient;
+  const resize = async (phone: boolean) => {
+    phoneWidth = phone;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+    await settle();
+  };
+  phoneWidth = true;
+  try {
+    const unmount = await history(client);
+    await click(rows()[1]!);
+    await click(dialog().querySelector<HTMLButtonElement>('button[aria-label="Back to Versions"]')!);
+    await resize(false);
+    await click(dialog().querySelector<HTMLInputElement>('.review-consent input[type="checkbox"]')!);
+    await click([...dialog().querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Restore v2")!);
+    // The restore is still running, so every row is disabled.
+    assert.ok(rows().every((row) => row.disabled));
+    await act(async () => { dialog().querySelector<HTMLButtonElement>('button[aria-label="Copy Fingerprint"]')!.focus(); });
+    await resize(true);
+    assert.ok(dialog().contains(document.activeElement), "focus stays inside the dialog while the chosen row is disabled");
+    await act(async () => { restoring.resolve(); });
+    await settle();
+    await unmount();
+  } finally { phoneWidth = false; }
+});

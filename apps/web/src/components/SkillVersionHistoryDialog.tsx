@@ -163,7 +163,9 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
     const target = detailStep
       ? dialog.querySelector<HTMLElement>('button[aria-label="Back to Versions"]')
       : listRef.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? listRef.current?.querySelector<HTMLElement>("button");
-    (target ?? dialog).focus();
+    target?.focus();
+    // A row disabled while a restore runs refuses focus; the dialog takes it then.
+    if (!dialog.contains(document.activeElement)) dialog.focus();
   }, [panes]);
 
   const list = pages.loading ? <div className="skill-version-loading" role="status">
