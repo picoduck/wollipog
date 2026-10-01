@@ -21,9 +21,11 @@ import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
+/** Whether the window is phone-width: max-width queries match while it is set. */
+let phoneWidth = false;
 Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
-  value: (query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }),
+  value: (query: string) => ({ matches: phoneWidth && query.includes("max-width"), media: query, addEventListener() {}, removeEventListener() {} }),
 });
 for (const [name, value] of Object.entries({
   window: domWindow,
@@ -458,4 +460,34 @@ test("Machine Version keeps a pin it can't reach selectable when an older page f
   assert.equal(checked(), "Pin to v1Current");
   assert.ok(!titles().some((title) => title?.includes("Earlier Version")));
   await unmount();
+});
+
+test("Version History keeps a version chosen on a phone when the window widens past the breakpoint (review CR-E2-1.1)", async () => {
+  const previewed: string[] = [];
+  const client = {
+    ...api,
+    listSkillVersions: async () => ({ versions: [
+      { id: "skillv_3", versionNumber: 3, digest: "c" }, { id: "skillv_2", versionNumber: 2, digest: "b" }, { id: "skillv_1", versionNumber: 1, digest: "a" },
+    ], nextCursor: null }),
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => {
+      previewed.push(versionId);
+      return { version: { id: versionId, versionNumber: Number(versionId.slice(7)), digest: versionId, files: [file(versionId)] },
+        currentVersion: { id: "skillv_3", versionNumber: 3, digest: "skillv_3", files: [file("current")] } };
+    },
+  } as unknown as ApiClient;
+  phoneWidth = true;
+  try {
+    const unmount = await history(client);
+    // A phone opens on the list, with nothing chosen.
+    assert.deepEqual(previewed, []);
+    await click(rows()[2]!);
+    assert.deepEqual(previewed, ["skillv_1"]);
+    phoneWidth = false;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+    await settle();
+    assert.equal(rows()[2]!.getAttribute("aria-current"), "true");
+    assert.equal(heading(), "Changes If You Restore v1");
+    assert.deepEqual(previewed, ["skillv_1"]);
+    await unmount();
+  } finally { phoneWidth = false; }
 });

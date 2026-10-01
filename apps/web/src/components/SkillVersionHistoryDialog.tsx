@@ -85,10 +85,11 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
   };
 
   // On desktop the detail is never empty: it opens on the version before the current one, the one
-  // a restore most often wants, or the current one when there is no other. A phone starts on the list.
+  // a restore most often wants, or the current one when there is no other. A phone starts on the list,
+  // and a version chosen there is kept when the window widens.
   const opened = useRef(false);
   useEffect(() => {
-    if (opened.current || phone || pages.loading || versions.length === 0) return;
+    if (opened.current || chosen || phone || pages.loading || versions.length === 0) return;
     opened.current = true;
     const first = versions[1] ?? versions[0];
     if (first) select(first);
