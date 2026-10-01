@@ -491,3 +491,27 @@ test("Version History keeps a version chosen on a phone when the window widens p
     await unmount();
   } finally { phoneWidth = false; }
 });
+
+test("Version History keeps focus in the dialog when a phone-width crossing hides the focused row (review CR-E2-2.1)", async () => {
+  const client = {
+    ...api,
+    listSkillVersions: async () => ({ versions: [{ id: "skillv_3", versionNumber: 3, digest: "c" }, { id: "skillv_2", versionNumber: 2, digest: "b" }], nextCursor: null }),
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => ({
+      version: { id: versionId, versionNumber: Number(versionId.slice(7)), digest: versionId, files: [file(versionId)] },
+      currentVersion: { id: "skillv_3", versionNumber: 3, digest: "skillv_3", files: [file("current")] },
+    }),
+  } as unknown as ApiClient;
+  try {
+    const unmount = await history(client);
+    await act(async () => { rows()[1]!.focus(); });
+    assert.equal(document.activeElement, rows()[1]);
+    phoneWidth = true;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+    await settle();
+    // The sheet shows the chosen version; the row that had focus is gone, and focus is on Back.
+    assert.equal(rows().length, 0);
+    assert.ok(dialog().contains(document.activeElement), "focus stays inside the dialog");
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "Back to Versions");
+    await unmount();
+  } finally { phoneWidth = false; }
+});

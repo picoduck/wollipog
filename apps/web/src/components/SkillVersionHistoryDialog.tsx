@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import { relativeTime } from "../format.js";
 import {
@@ -136,6 +136,20 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
     catch { setError("The version was restored, but the Skills page didn't refresh. Reopen it to refresh."); }
   };
 
+  // Crossing to a phone while a version row has focus hides the list and the row with it, which drops
+  // focus on the page behind the sheet. Keep it in the dialog: on Back, or else on the dialog itself.
+  const detailRef = useRef<HTMLDivElement>(null);
+  const shownPhone = useRef(phone);
+  useLayoutEffect(() => {
+    // Only a crossing: opening the dialog places focus itself (Modal, §7.2).
+    if (shownPhone.current === phone) return;
+    shownPhone.current = phone;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    const dialog = detailRef.current?.closest<HTMLElement>('[role="dialog"]');
+    const back = dialog?.querySelector<HTMLElement>('button[aria-label="Back to Versions"]');
+    (back ?? dialog)?.focus();
+  }, [phone]);
+
   const reasonId = useId();
   const reason = isCurrent ? CURRENT_VERSION_REASON : null;
   const listStep = !phone || step === "list";
@@ -216,6 +230,6 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
       </BusyButton>
     </>}>
     {listStep && <div className="skill-version-pane list">{list}</div>}
-    {detailStep && <div className="skill-version-pane detail">{detail}</div>}
+    {detailStep && <div className="skill-version-pane detail" ref={detailRef}>{detail}</div>}
   </Modal>;
 }
