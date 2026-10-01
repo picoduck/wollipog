@@ -506,3 +506,30 @@ test("focus on a row that a reload removes moves to Cancel instead of leaving th
     await view.unmount();
   }
 });
+
+test("focus stays in the dialog when the account changes under a running switch and the primary goes", async () => {
+  let answer: (accounts: SessionProviderAccountOption[]) => void = () => undefined;
+  const view = await renderDialog({
+    deferSwitch: true,
+    machineAccounts: [MACHINE[1]!],
+    load: (call) => call === 1 ? Promise.resolve([OTHERS[0]!]) : new Promise((resolve) => { answer = resolve; }),
+  });
+  try {
+    const primary = button(view.body, "Switch Account");
+    assert.ok(primary);
+    await act(async () => { primary.focus(); primary.click(); await tick(); });
+    assert.deepEqual(view.switches, ["work"]);
+    // The runner reports the new account before the switch request returns, and the machine has
+    // no other account to list.
+    await view.rerender({ ...SESSION, providerAccountId: "work", providerAccountLabel: "work.me@example.com" });
+    await act(async () => { answer([]); await tick(); await tick(); });
+    assertNoDomNode(button(view.body, "Switch Account") ?? null, "the primary is gone");
+    assert.equal(button(view.body, "Done")?.disabled, true, "dismissal waits for the switch");
+    const dialog = view.body.querySelector('[role="dialog"]');
+    assert.ok(dialog && domWindow.document.activeElement === (dialog as unknown), "focus is on the dialog, not <body>");
+    await act(async () => { view.finish({ ok: true }); await tick(); });
+    assert.equal(view.closed(), 1);
+  } finally {
+    await view.unmount();
+  }
+});

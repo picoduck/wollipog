@@ -122,12 +122,15 @@ export function SwitchAccountDialog({
     return () => document.removeEventListener("focusin", track);
   }, []);
   // After every commit: focus that was in the dialog and is now lost goes to Cancel (or Done), which
-  // every state renders. Focus that is still somewhere is never moved.
+  // every state renders, or to the dialog itself while a switch disables it. Focus that is still
+  // somewhere is never moved.
   useLayoutEffect(() => {
     const dismiss = dismissRef.current;
     const active = dismiss?.ownerDocument.activeElement;
-    if (!dismiss || !focusInsideRef.current || dismiss.disabled) return;
-    if (!active || active === dismiss.ownerDocument.body || !active.isConnected) dismiss.focus();
+    if (!dismiss || !focusInsideRef.current) return;
+    if (active && active !== dismiss.ownerDocument.body && active.isConnected) return;
+    const target = dismiss.disabled ? dismiss.closest<HTMLElement>('[role="dialog"]') : dismiss;
+    target?.focus();
   });
 
   const close = () => {
