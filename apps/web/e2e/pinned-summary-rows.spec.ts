@@ -8,7 +8,7 @@ import { dialogMotionSettled } from "./dialog-motion.js";
 const FIXTURE = "/command-inbox-projects-e2e.html?fullShell=1&scenario=pinned-summary&psActivity=1";
 const LONG_BRANCH = "feature/session-alpha-with-a-deliberately-long-branch-name-for-narrow-layout-validation";
 
-async function openSession(page: Page, width: number, storage: Record<string, string> = {}) {
+async function openSession(page: Page, width: number, storage: Record<string, string> = {}, fixture = FIXTURE) {
   await page.setViewportSize({ width, height: 900 });
   await page.addInitScript((values) => {
     // Seed storage on the first document only, so a reload inside a test keeps what the app wrote.
@@ -17,7 +17,7 @@ async function openSession(page: Page, width: number, storage: Record<string, st
     localStorage.clear();
     for (const [key, value] of Object.entries(values)) localStorage.setItem(key, value);
   }, storage);
-  await page.goto(FIXTURE);
+  await page.goto(fixture);
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
@@ -37,6 +37,20 @@ async function openSheet(page: Page): Promise<Locator> {
   await expect(sheet).toBeVisible();
   await dialogMotionSettled(page);
   return sheet;
+}
+
+// #2277: the Machine row names the machine as the session bar does (runnerDisplay's name) and keeps
+// the hostname or SSH target in its tooltip.
+for (const machine of [
+  { kind: "local", query: "&machineName=Studio%20Mac", value: "Studio Mac", title: "Local machine: fixture-runner" },
+  { kind: "remote", query: "&machineName=Build%20Box&remoteMachine=1", value: "Build Box", title: "Remote machine: pat@build.example.com" },
+]) {
+  test(`a named ${machine.kind} machine reads its name in the Machine row, its technical identity in the tooltip`, async ({ page }) => {
+    await openSession(page, 1440, { "wollipog.pinned.open": "1" }, `${FIXTURE}${machine.query}`);
+    const machineRow = row(docked(page), "Machine");
+    await expect(machineRow.locator(".v")).toHaveText(machine.value);
+    await expect(machineRow).toHaveAttribute("title", machine.title);
+  });
 }
 
 test("sections and rows read in Title Case, with values in sentence case", async ({ page }) => {

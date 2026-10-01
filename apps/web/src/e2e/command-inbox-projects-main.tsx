@@ -80,6 +80,9 @@ const LONG_AGENT = FIXTURE_QUERY.get("longAgent") === "1";
 const SESSION_REMINDERS = FIXTURE_QUERY.get("reminders") === "1";
 /** The runner's agent is an ACP agent that can sign out (Sign Out of Agent, #2162). */
 const ACP_LOGOUT = FIXTURE_QUERY.get("acpLogout") === "1";
+/** `?machineName=<name>` names the fixture runner; `?remoteMachine=1` reaches it over SSH (#2277). */
+const MACHINE_NAME = FIXTURE_QUERY.get("machineName");
+const REMOTE_MACHINE = FIXTURE_QUERY.get("remoteMachine") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 /**
  * A routed session that is not in the snapshot is looked up by id (#2202). `?lookup=pending` never
@@ -811,7 +814,7 @@ function codexAccount(
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "fixture-runner",
-  ...(ACP_LOGOUT ? { displayName: "Studio Mac" } : {}),
+  ...(ACP_LOGOUT ? { displayName: "Studio Mac" } : MACHINE_NAME ? { displayName: MACHINE_NAME } : {}),
   os: "linux",
   version: "1",
   status: "online",
@@ -910,7 +913,10 @@ function snapshot(): UiSnapshotMessage {
     runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner]
       : SHELL_SKILLS_MODE === "notices" ? [noticeStudio, noticeLaptop]
       : shellOfflineRunner ? [runner, shellOfflineRunner] : [runner],
-    boxes: [],
+    boxes: REMOTE_MACHINE ? [{
+      boxId: "box-fixture", sshTarget: "pat@build.example.com", runnerId: runner.runnerId, status: "online",
+      lastError: null, createdAt: 1,
+    }] : [],
     ...(LEGACY_WORKSPACES ? {} : { projects: structuredClone(model.projects) }),
     sessions: structuredClone(model.sessions.filter((candidate) => !candidate.archived)),
     runs: [structuredClone(activeRun)],
