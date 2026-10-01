@@ -164,6 +164,8 @@ test("Upload Folder picks a folder through Choose Folder…, never a native file
   const files = dialog.getByRole("list", { name: "Files to Upload" }).getByRole("listitem");
   await expect(files).toHaveText(["SKILL.mdRemove", "scripts/check.shScriptRemove"]);
   await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("code-review");
+  // An empty Description takes the folder's too (#2290).
+  await expect(dialog.getByLabel("Description", { exact: true })).toHaveValue("Reviews code.");
   await dialog.getByRole("button", { name: "Remove scripts/check.sh", exact: true }).click();
   await expect(files).toHaveText(["SKILL.mdRemove"]);
 });
@@ -185,6 +187,8 @@ test("a dropped folder's files are listed like a chosen one", async ({ page }) =
   await expect(dialog.getByRole("list", { name: "Files to Upload" }).getByRole("listitem"))
     .toHaveText(["SKILL.mdRemove", "notes.mdRemove"]);
   await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("dropped");
+  // Read once: Name above already waited for the same upload, and an empty value is the start state.
+  expect(await dialog.getByLabel("Description", { exact: true }).inputValue()).toBe("");
 });
 
 test("selects fill their field and open lists at least as wide as their trigger", async ({ page }) => {
