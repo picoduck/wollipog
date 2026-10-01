@@ -1,64 +1,174 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-test.use({ video: "on" });
-const current = { id: "v1", digest: "a".repeat(64), files: [{ path: "SKILL.md", encoding: "utf8", content: "Review the diff and all callers." }, { path: "scripts/check.sh", encoding: "utf8", content: "echo check" }] };
-const historical = { id: "v0", digest: "b".repeat(64), createdAt: 1700000000000, note: "Initial reviewed version", files: [{ path: "SKILL.md", encoding: "utf8", content: "Review the diff." }] };
-for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
-  test(`history previews and restores with explicit acceptance at ${width} in ${theme}`, async ({ page }, info) => {
-    await page.setViewportSize({ width, height: 900 });
-    let restores = 0;
-    await page.route("**/api/skills/skill-1/versions", (route) => route.fulfill({ json: { versions: [historical], nextCursor: null } }));
-    await page.route("**/api/skills/skill-1/versions/v0", (route) => route.fulfill({ json: { version: historical, currentVersion: current } }));
-    await page.route("**/api/skills/skill-1/restore", async (route) => {
-      expect(route.request().postDataJSON()).toEqual({ versionId: "v0", expectedLatestVersionId: "v1" });
-      restores++;
-      await route.fulfill({ json: { version: { ...historical, id: "v2" } } });
-    });
-    await page.goto("/skills-removals-e2e.html");
-    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
-    await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-    await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
-    await page.getByRole("menuitem", { name: "Version History…", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Restore Version", exact: true })).toBeDisabled();
-    await page.getByRole("button", { name: "Preview Version v0", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Restore Preview" })).toBeVisible();
-    // One highlighted diff (#1948): a file the restored version lacks is all − lines.
-    const skill = page.locator(".skill-diff-file", { hasText: "SKILL.md" });
-    await expect(skill.locator(".skill-diff-file-head .status")).toHaveText(["Changed"]);
-    await expect(skill.locator(".diff-line-del")).toContainText("Review the diff and all callers.");
-    await expect(skill.locator(".diff-line-add")).toContainText("Review the diff.");
-    const script = page.locator(".skill-diff-file", { hasText: "scripts/check.sh" });
-    await expect(script.locator(".skill-diff-file-head .status")).toHaveText(["Script", "Removed"]);
-    await expect(script.locator(".diff-line-del")).toHaveCount(1);
-    await expect(script.locator(".diff-line-add, .diff-line-ctx")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Restore Version", exact: true })).toBeDisabled();
-    expect(restores).toBe(0);
-    await page.screenshot({ path: info.outputPath(`history-preview-${width}-${theme}.png`), fullPage: true });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.locator(".modal-foot").getByRole("checkbox", { name: "Deploy to machines that track the latest version", exact: true }).check();
-    await page.getByRole("button", { name: "Restore Version", exact: true }).click();
-    await expect(page.getByRole("status").filter({ hasText: "Version restored" })).toBeVisible();
-    expect(restores).toBe(1);
-    await expect(page.getByRole("button", { name: "Restore Version", exact: true })).toBeDisabled();
-  });
+// Version History (#1984): numbered versions with their notes in a list beside the selected one's
+// facts and diff; Restore names the version; older versions load as the list scrolls.
+
+const hour = 3_600_000;
+const day = 24 * hour;
+const file = (content: string) => ({ path: "SKILL.md", encoding: "utf8", content });
+const v3 = { id: "skillv_c3c3c3c3c3c3c3c3c3c3", versionNumber: 3, digest: "c".repeat(64), createdAt: Date.now() - 2 * hour,
+  note: "Add migration and test-coverage checks" };
+const v2 = { id: "skillv_b2b2b2b2b2b2b2b2b2b2", versionNumber: 2, digest: "b".repeat(64), createdAt: Date.now() - 3 * day,
+  note: "Tighten the review checklist" };
+const v1 = { id: "skillv_a1a1a1a1a1a1a1a1a1a1", versionNumber: 1, digest: "a".repeat(64), createdAt: Date.now() - 20 * day, note: null };
+const files = {
+  [v3.id]: [file("Review the diff and all callers.\nCheck migrations and test coverage."), { path: "scripts/check.sh", encoding: "utf8", content: "echo check" }],
+  [v2.id]: [file("Review the diff and all callers.")],
+  [v1.id]: [file("Review the diff.")],
+};
+
+/** A capture once the sheet and every row have finished moving. */
+async function capture(page: Page, path: string) {
+  await page.mouse.move(0, 0);
+  // Endless ones (a pulsing status dot) never finish, so only the finite ones are waited for.
+  await page.waitForFunction(() => document.getAnimations().every((animation) =>
+    animation.playState !== "running" || animation.effect?.getComputedTiming().iterations === Infinity));
+  await page.screenshot({ path });
 }
-test("history paginates and stale restore invalidates acceptance; current versions cannot be restored", async ({ page }) => {
-  await page.route("**/api/skills/skill-1/versions*", (route) => route.fulfill({ json: route.request().url().includes("?before=") ? { versions: [historical], nextCursor: null } : { versions: [current], nextCursor: "v1" } }));
-  await page.route("**/api/skills/skill-1/versions/v1", (route) => route.fulfill({ json: { version: current, currentVersion: current } }));
-  await page.route("**/api/skills/skill-1/versions/v0", (route) => route.fulfill({ json: { version: historical, currentVersion: current } }));
-  await page.route("**/api/skills/skill-1/restore", (route) => route.fulfill({ status: 409, json: { error: "The library changed after preview. Preview the version again." } }));
+
+async function openHistory(page: Page) {
   await page.goto("/skills-removals-e2e.html");
   await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
   await page.getByRole("menuitem", { name: "Version History…", exact: true }).click();
-  await page.getByRole("button", { name: "Preview Version v1", exact: true }).click();
-  await expect(page.getByText("This is the current version.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Restore Version", exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: "Load Older Versions" }).click();
-  await page.getByRole("button", { name: "Preview Version v0", exact: true }).click();
-  await page.getByRole("checkbox", { name: "Deploy to machines that track the latest version", exact: true }).check();
-  await page.getByRole("button", { name: "Restore Version", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("library changed");
-  await expect(page.getByRole("heading", { name: "Restore Preview" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Restore Version", exact: true })).toBeDisabled();
+  return page.getByRole("dialog", { name: "Version History" });
+}
+
+/** Routes the version list (`listed()` each time) and every version's preview against the newest. */
+async function routeVersions(page: Page, listed: () => Array<typeof v1 | typeof v2 | typeof v3>) {
+  await page.route("**/api/skills/skill-1/versions", (route) => route.fulfill({ json: { versions: listed(), nextCursor: null } }));
+  await page.route("**/api/skills/skill-1/versions/skillv_*", (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").pop()!;
+    const current = listed()[0]!;
+    const version = listed().find((entry) => entry.id === id)!;
+    return route.fulfill({ json: {
+      version: { ...version, files: files[version.id as keyof typeof files] ?? files[v2.id], gitSource: { url: "https://github.com/example/skills.git", ref: "main", subdirectory: "skills", path: "skills/code-review", commit: "9f8e7d6c5b4a".padEnd(40, "0") } },
+      currentVersion: { ...current, files: files[current.id as keyof typeof files] ?? files[v2.id] },
+    } });
+  });
+}
+
+for (const theme of ["dark", "light"]) {
+  test(`numbered versions, notes and Restore v2 at 1440 in ${theme}`, async ({ page }, info) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const v4 = { id: "skillv_d4d4d4d4d4d4d4d4d4d4", versionNumber: 4, digest: v2.digest, createdAt: Date.now(), note: `Restored from ${v2.id}` };
+    let listed = [v3, v2, v1];
+    const restores: unknown[] = [];
+    await routeVersions(page, () => listed);
+    await page.route("**/api/skills/skill-1/restore", async (route) => {
+      restores.push(route.request().postDataJSON());
+      listed = [v4, v3, v2, v1];
+      await route.fulfill({ json: { version: v4 } });
+    });
+    const dialog = await openHistory(page);
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    const rows = dialog.getByRole("group", { name: "Versions" }).getByRole("button");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(0)).toContainText("v3Current");
+    await expect(rows.nth(0)).toContainText("Add migration and test-coverage checks");
+    await expect(rows.nth(0).locator(".row-trail")).toHaveText("2h ago");
+    await expect(rows.nth(1)).toContainText("Tighten the review checklist");
+    await expect(rows.nth(2)).toContainText("No note");
+    await expect(rows.nth(2).locator(".row-trail")).toHaveText("20d ago");
+
+    // The detail opens on the version before the current one.
+    await expect(rows.nth(1)).toHaveAttribute("aria-current", "true");
+    await expect(dialog.getByRole("heading", { name: "Changes If You Restore v2" })).toBeVisible();
+    await expect(dialog.locator(".skill-review-facts")).toContainText("Git commit 9f8e7d6");
+    await expect(dialog.locator(".skill-version-hash .mono")).toHaveText("b".repeat(12));
+    await expect(dialog.getByRole("button", { name: "Copy Fingerprint" })).toBeVisible();
+    const script = dialog.locator(".skill-diff-file", { hasText: "scripts/check.sh" });
+    await expect(script.locator(".skill-diff-file-head .status")).toHaveText(["Script", "Removed"]);
+    const foot = dialog.locator(".modal-foot");
+    const restore = foot.getByRole("button", { name: "Restore v2", exact: true });
+    await expect(restore).toBeDisabled();
+    await expect(foot.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+    const text = await dialog.innerText();
+    expect(text).not.toMatch(/skillv_/);
+    expect(text).not.toMatch(/[0-9a-f]{64}/);
+    await capture(page, info.outputPath(`history-older-1440-${theme}.png`));
+
+    // One scroll box per pane: the body itself never scrolls.
+    const body = await dialog.locator(".modal-body").evaluate((element) => ({
+      overflow: getComputedStyle(element).overflowY, scrolls: element.scrollHeight > element.clientHeight,
+    }));
+    expect(body).toEqual({ overflow: "hidden", scrolls: false });
+
+    await foot.getByRole("checkbox", { name: "Deploy to machines that track the latest version", exact: true }).check();
+    await restore.click();
+    await expect(dialog.getByRole("status").filter({ hasText: "Restored v2." })).toBeVisible();
+    expect(restores).toEqual([{ versionId: v2.id, expectedLatestVersionId: v3.id }]);
+    // The restore is the new current version, named by number in its note.
+    await expect(rows).toHaveCount(4);
+    await expect(rows.nth(0)).toContainText("v4Current");
+    await expect(rows.nth(0)).toContainText("Restored from v2");
+    await expect(rows.nth(0)).toHaveAttribute("aria-current", "true");
+    await expect(foot.getByRole("button", { name: "Restore v4", exact: true })).toBeDisabled();
+    await expect(foot).toContainText("This is the current version.");
+
+    await rows.nth(1).click();
+    await expect(dialog.getByRole("heading", { name: "Changes If You Restore v3" })).toBeVisible();
+    await expect(foot).not.toContainText("This is the current version.");
+    await rows.nth(0).click();
+    await expect(dialog.getByRole("heading", { name: "Files in v4" })).toBeVisible();
+    await expect(foot.getByRole("checkbox")).toHaveCount(0);
+    await expect(foot.getByRole("button", { name: "Restore v4", exact: true })).toBeDisabled();
+    await expect(foot.locator(".skill-version-reason")).toHaveText("This is the current version.");
+    await capture(page, info.outputPath(`history-current-1440-${theme}.png`));
+  });
+
+  test(`a phone sheet shows the list, then the version with Back, at 390 in ${theme}`, async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await routeVersions(page, () => [v3, v2, v1]);
+    const dialog = await openHistory(page);
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    const rows = dialog.getByRole("group", { name: "Versions" }).getByRole("button");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(1)).not.toHaveAttribute("aria-current", "true");
+    await expect(dialog.locator(".skill-review-changes")).toHaveCount(0);
+    await capture(page, info.outputPath(`history-list-390-${theme}.png`));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+
+    await rows.nth(1).click();
+    await expect(dialog.getByRole("heading", { name: "Changes If You Restore v2" })).toBeVisible();
+    await expect(dialog.getByRole("group", { name: "Versions" })).toHaveCount(0);
+    await expect(dialog.locator(".modal-foot").getByRole("button", { name: "Restore v2", exact: true })).toBeDisabled();
+    await capture(page, info.outputPath(`history-older-390-${theme}.png`));
+    await dialog.getByRole("button", { name: "Back to Versions" }).click();
+    await expect(rows).toHaveCount(3);
+    await rows.nth(0).click();
+    await expect(dialog.getByRole("heading", { name: "Files in v3" })).toBeVisible();
+    await expect(dialog.locator(".modal-foot")).toContainText("This is the current version.");
+    await capture(page, info.outputPath(`history-current-390-${theme}.png`));
+  });
+}
+
+test("older versions load as the list scrolls to its end", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const make = (n: number) => ({ id: `skillv_n${n}`, versionNumber: n, digest: n.toString(16).padStart(64, "0"), createdAt: Date.now() - (61 - n) * day, note: `Revision ${n}` });
+  const newer = Array.from({ length: 50 }, (_, index) => make(60 - index));
+  const older = Array.from({ length: 10 }, (_, index) => make(10 - index));
+  const requested: string[] = [];
+  await page.route("**/api/skills/skill-1/versions*", (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/versions")) {
+      const before = url.searchParams.get("before");
+      requested.push(before ?? "first");
+      return route.fulfill({ json: before ? { versions: older, nextCursor: null } : { versions: newer, nextCursor: newer.at(-1)!.id } });
+    }
+    const id = url.pathname.split("/").pop()!;
+    return route.fulfill({ json: { version: { ...make(Number(id.slice(8))), files: [file(id)] }, currentVersion: { ...newer[0], files: [file("current")] } } });
+  });
+  const dialog = await openHistory(page);
+  const rows = dialog.getByRole("group", { name: "Versions" }).getByRole("button");
+  await expect(rows).toHaveCount(50);
+  await expect(dialog.getByRole("button", { name: "Load Older Versions" })).toHaveCount(0);
+  expect(requested).toEqual(["first"]);
+  const pane = dialog.locator(".skill-version-pane.list");
+  expect(await pane.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  await pane.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(rows).toHaveCount(60);
+  expect(requested).toEqual(["first", newer.at(-1)!.id]);
+  await expect(rows.last()).toContainText("v1");
+  await expect(dialog.locator(".skill-version-list-end")).toHaveCount(0);
 });

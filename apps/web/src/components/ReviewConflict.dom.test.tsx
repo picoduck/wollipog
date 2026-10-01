@@ -213,22 +213,26 @@ test("Version History: a conflict asks for a fresh preview of the same version",
   const previewed: string[] = [];
   const client = {
     ...api,
-    listSkillVersions: async () => ({ versions: [{ id: "v1", digest: "a".repeat(64), createdAt: 1 }], nextCursor: null }),
+    listSkillVersions: async () => ({ versions: [
+      { id: "v2", versionNumber: 2, digest: "b".repeat(64), createdAt: 2 },
+      { id: "v1", versionNumber: 1, digest: "a".repeat(64), createdAt: 1 },
+    ], nextCursor: null }),
     previewSkillVersion: async (_id: string, versionId: string) => {
       previewed.push(versionId);
       const { deploymentImpact } = preview();
-      return { version: { id: "v1", digest: "a".repeat(64), files: [file("Old")] },
-        currentVersion: { id: "v2", digest: "b".repeat(64), files: [file("New")] }, deploymentImpact };
+      return { version: { id: "v1", versionNumber: 1, digest: "a".repeat(64), files: [file("Old")] },
+        currentVersion: { id: "v2", versionNumber: 2, digest: "b".repeat(64), files: [file("New")] }, deploymentImpact };
     },
     restoreSkillVersion: async (_id: string, _versionId: string, _expectedLatestVersionId: string, expected?: string) => {
       server.accept(expected);
     },
   } as ApiClient;
   const unmount = await mount(client, <SkillVersionHistoryDialog skillId="skill-1" onClose={() => undefined} onRestored={async () => undefined} />);
-  await click(buttonNamed("Preview Version v1"));
+  // The dialog opens on the version before the current one (#1984).
   const consent = "Deploy to machines that track the latest version";
-  await assertConflictRoundTrip("Restore Version", { consent, freshConsent: consent });
-  assert.deepEqual(previewed, ["v1", "v1"], "Preview Again reads the same version");
+  await assertConflictRoundTrip("Restore v1", { consent, freshConsent: consent });
+  // Preview Again reads the same version; once restored, the dialog shows the current one.
+  assert.deepEqual(previewed, ["v1", "v1", "v2"], "Preview Again reads the same version");
   assert.deepEqual(server.sent, ["impact-1", "impact-2"]);
   await unmount();
 });

@@ -17,8 +17,8 @@ test("version picker explains when no compatible machines exist", async ({ page 
   await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
   await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
   await expect(page.getByText(/No compatible machines are available/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Preview Version Policy" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeDisabled();
+  await expect(page.getByRole("radiogroup", { name: "Version" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save Version", exact: true })).toBeDisabled();
 });
 /** The Deployment table's row group for a machine (#1981). */
 const machineGroup = (page: import("@playwright/test").Page, name: string) =>
@@ -102,15 +102,13 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
       await cdp.detach();
     }
     await build.getByRole("button", { name: "Manage Version…", exact: true }).click();
-    await expect(page.getByRole("button", { name: /^Version Policy: Pin v0/ })).toBeVisible();
-    await page.getByRole("button", { name: "Preview Version Policy" }).click();
-    await expect(page.getByText("Proposed policy: pin v0.")).toBeVisible();
-    await page.getByRole("button", { name: /^Version Policy:/ }).click();
-    await page.getByRole("option", { name: "Track Latest", exact: true }).click();
-    await page.getByRole("button", { name: "Preview Version Policy" }).click();
+    const choices = page.getByRole("dialog", { name: "Machine Version" }).getByRole("radiogroup", { name: "Version" });
+    await expect(choices.getByRole("radio", { name: /^Pin to v1/ })).toBeChecked();
+    await expect(page.getByRole("button", { name: "Save Version", exact: true })).toBeDisabled();
+    await choices.getByText("Track Latest", { exact: true }).click();
     await page.locator(".modal-foot").getByRole("checkbox", { name: /^Switch \d+ agents? to the latest version$/ }).check();
-    await page.getByRole("button", { name: "Save Version Policy" }).click();
-    await expect(page.getByRole("status").filter({ hasText: "Version policy saved" })).toBeVisible();
+    await page.getByRole("button", { name: "Save Version", exact: true }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Build Machine tracks the latest version now." })).toBeVisible();
     await page.getByRole("button", { name: "Close", exact: true }).last().click();
     await expect(build).not.toContainText("Pinned to v1");
     await expect(build).toContainText("Track Latest");
@@ -130,8 +128,9 @@ test("failed reads do not show unassigned or tracking defaults", async ({ page }
   await expect(build).not.toContainText("Track Latest");
   await expect(page.getByRole("region", { name: "Deployment", exact: true })).not.toContainText("Not Deployed Anywhere");
   await build.getByRole("button", { name: "Manage Version…", exact: true }).click();
-  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("Current version policy could not be loaded");
-  await expect(page.getByRole("button", { name: "Preview Version Policy" })).toBeDisabled();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("The machine's current version couldn't be loaded");
+  await expect(page.getByRole("dialog").getByRole("radiogroup", { name: "Version" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save Version", exact: true })).toBeDisabled();
 });
 test("manual sync preserves unknown desired state until authoritative refresh", async ({ page }) => {
   await installSkillMatrixFixture(page);
@@ -157,12 +156,13 @@ test("older control planes use the authorized preview to initialize the saved pi
   await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
   await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
-  await expect(page.getByRole("button", { name: /^Version Policy: Pin v0/ })).toBeEnabled();
-  await page.getByRole("button", { name: "Preview Version Policy" }).click();
-  await expect(page.getByText("Current policy: pinned to v0.")).toBeVisible();
-  // Previewing the pin already in force changes nothing the machine runs: no consent to give (#1948).
+  const choices = page.getByRole("dialog", { name: "Machine Version" }).getByRole("radiogroup", { name: "Version" });
+  await expect(choices.getByRole("radio", { name: /^Pin to v1/ })).toBeChecked();
+  await expect(choices.getByRole("radio", { name: /^Pin to v1/ })).toBeEnabled();
+  // The pin already in force changes nothing: nothing to read, consent to or save (#1984).
   await expect(page.getByRole("dialog").getByRole("checkbox")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Save Version", exact: true })).toBeDisabled();
+  await expect(page.locator(".modal-foot")).toContainText("Choose a different version to save.");
 });
 test("late policy response cannot overwrite a newly selected machine", async ({ page }) => {
   await installSkillMatrixFixture(page);
@@ -174,9 +174,11 @@ test("late policy response cannot overwrite a newly selected machine", async ({ 
   await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
   await page.getByRole("button", { name: /^Machine:/ }).click();
   await page.getByRole("option", { name: "Other Machine", exact: true }).click();
-  await expect(page.getByRole("button", { name: /^Version Policy: Track Latest/ })).toBeEnabled();
+  const choices = page.getByRole("dialog", { name: "Machine Version" }).getByRole("radiogroup", { name: "Version" });
+  await expect(choices.getByRole("radio", { name: /^Track Latest/ })).toBeChecked();
   release();
-  await page.getByRole("button", { name: "Preview Version Policy" }).click();
-  await expect(page.getByText("Current policy: track latest.")).toBeVisible();
-  await expect(page.getByText("Proposed policy: track latest, including future library updates.")).toBeVisible();
+  // The first machine's pin, answered late, marks nothing on the machine now chosen.
+  await page.waitForTimeout(300);
+  await expect(choices.getByRole("radio", { name: /^Track Latest/ })).toBeChecked();
+  await expect(choices.locator(".choice-row-title")).toHaveText(["Track LatestCurrent", "Pin to v2", "Pin to v1"]);
 });

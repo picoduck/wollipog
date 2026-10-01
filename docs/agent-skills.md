@@ -189,10 +189,14 @@ The Skills dashboard exposes group creation, conversion, membership, and inherit
 
 ## Machine-Wide Version Pins
 
-**Machine Versions** selects one version policy for a skill on a machine: **Track Latest** or a
-specific immutable revision. Preview the current and proposed files and explicitly accept the
-machine-wide impact before saving. Pins affect every assigned agent on that machine without
-creating assignments or changing targeting. Offline machines apply the policy when they reconnect.
+**Machine Version** (the skill's ⋯ **Machine Version…**, or a machine row's **Manage Version…**)
+chooses which version of a skill one machine runs: **Track Latest** or **Pin to v2**, one radio row
+per version with its note and date, the machine's own marked **Current**. Choosing a different one
+shows what changes on the machine without another click; when the machine's agents would run
+different content, the consent names how many agents switch and to which version, and **Save
+Version** waits for it. Choosing the version already in force leaves Save Version disabled. Pins
+affect every assigned agent on that machine without creating assignments or changing targeting.
+Offline machines switch when they reconnect.
 Library imports, updates, and rollback do not advance pinned machines. Returning to **Track Latest**
 adopts the current library revision and future updates. Concurrent library or policy changes reject
 stale previews, including changes away from and back to the same policy.
@@ -205,13 +209,16 @@ source adoption are described below.
 
 ## Version History and Library Rollback
 
-Open a skill's **Version History** to browse immutable revisions, 50 at a time.
-**Preview Version** compares every historical file with the current library content, including
-removed files, scripts, and binary content. Preview does not run instructions or scripts.
-After accepting the diff and assignment impact, **Restore Version** copies the selected content
-into a new immutable revision and syncs assignments on unpinned machines. Earlier and newer revisions remain
-available, with original Git and machine-snapshot provenance preserved. The restore note identifies
-the source revision. A concurrent library update rejects the restore; preview again before retrying.
+Open a skill's **Version History** to browse its immutable versions, newest first: "v3" with a
+**Current** flag, each version's note and when it was made. Older versions load as the list
+scrolls. Selecting one shows its date, source (Git commit, machine snapshot, built-in release or
+library edit) and 12-character fingerprint, then **Changes If You Restore v2**: every file compared
+with the current version, including removed files, scripts, and binary content. Reading a version
+does not run instructions or scripts. After accepting the assignment impact, **Restore v2** copies
+the selected content into a new version and syncs assignments on unpinned machines. Earlier and
+newer versions remain available, with original Git and machine-snapshot provenance preserved. The
+new version's note names the restored one ("Restored from v2"). A concurrent library update rejects
+the restore; preview again before retrying.
 
 This is library-wide rollback; pinned machines keep their selected revision. Offline machines
 reconcile when they reconnect; unsupported platforms retain their existing no-write behavior.

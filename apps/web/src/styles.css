@@ -14204,8 +14204,8 @@ body.shell-dock-dragging * {
 .skills-section { display: grid; gap: 10px; }
 .skills-section h4, .skills-section h5 { margin: 0; }
 .skill-detail .skills-section > .btn { justify-self: start; }
-/* Dialogs keep the card until each is rebuilt; #1984 (Version History, Machine Version), #1983
-   (Import from Git), #1963 (Import from Machine) and #1985 (Manage Groups) delete this rule. */
+/* Dialogs keep the card until each is rebuilt; #1983 (Import from Git) and #1985 (Manage Groups)
+   delete this rule. */
 .modal .skills-section {
   padding: var(--space-3);
   border: 1px solid var(--border);
@@ -14282,8 +14282,9 @@ body.shell-dock-dragging * {
 /* The edited-copy, orphaned-copy and built-in reviews (#1973): the header's one sentence, then a
    facts row, at most one compact notice and the diff under its heading, each block on the body's
    16px gap. The facts are a strip whose values read at body size (§5.4: a region sets the size). */
-.skill-review .skill-review-facts dd { font: var(--type-body); }
-.skill-review .skill-review-facts .skeleton-bar {
+/* Version History (#1984) shows its date, source and fingerprint the same way. */
+:is(.skill-review, .skill-version-history) .skill-review-facts dd { font: var(--type-body); }
+:is(.skill-review, .skill-version-history) .skill-review-facts .skeleton-bar {
   display: inline-block;
   width: 72px;
   vertical-align: middle;
@@ -14387,7 +14388,7 @@ body.shell-dock-dragging * {
 /* With only the runner-update notice, the Machine field keeps a field's width (§8.3). */
 .skill-machine-import-pane.only > .field { max-width: 360px; }
 /* Why the primary is disabled (§7.3): the footer's left slot, small and dim. */
-.modal-foot > .skill-machine-import-reason {
+.modal-foot > :is(.skill-machine-import-reason, .skill-version-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin-right: auto;
@@ -14407,9 +14408,73 @@ body.shell-dock-dragging * {
 }
 .skill-adoption-recovery .row > .btn { flex: none; }
 @media (max-width: 760px) {
-  .modal-foot > .skill-machine-import-reason { flex-basis: 100%; }
+  .modal-foot > :is(.skill-machine-import-reason, .skill-version-reason) { flex-basis: 100%; }
 }
 .skills-machine-import { min-width: 0; overflow-wrap: anywhere; }
+/* Version History (#1984): Import from Machine's shape, a `.modal.lg` at full height whose body is two
+   panes, the versions beside the selected one, each scrolling on its own so the body never does. On a
+   phone sheet the body is one column and shows one step at a time (the dialog renders only that pane). */
+@media (min-width: 761px) {
+  .modal.lg:has(> .modal-panel-host > .skill-version-history) { height: calc(100dvh - 48px); }
+  .skill-version-history > .modal-body {
+    flex-direction: row;
+    gap: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+  .skill-version-pane {
+    min-height: 0;
+    padding: var(--space-5);
+    overflow-y: auto;
+  }
+  .skill-version-pane.list {
+    flex: 0 0 300px;
+    border-right: 1px solid var(--border);
+  }
+  .skill-version-pane.detail { flex: 1 1 auto; }
+}
+.skill-version-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+:is(.skill-version-history, .skill-machine-version) :is(h3, p) { margin: 0; }
+.skill-version-history .row-sub.is-empty { color: var(--text-faint); }
+.skill-version-history .row-title.mono,
+.skill-version-hash .mono { font-family: var(--font-mono); font-size: var(--text-sm); }
+/* A fingerprint is one 12-character run beside its Copy button, never broken across lines. */
+.skill-version-hash {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+.skill-version-note {
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+.skill-version-loading,
+.skill-version-list-end {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.skill-version-list-end { margin-top: var(--space-2); }
+.skill-version-list-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* Machine Version (#1984): the Machine select and the version rows share the body's one column. */
+.skill-machine-version-choices {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
 /* The notice slot directly under the skill detail's header (§13.2, #1972): one notice, closer to the
    header than the 32px between sections. On a phone its actions stack at full width, the one
    exception to "buttons never stretch" (§3.1, §3.3). */
@@ -14491,7 +14556,6 @@ body.shell-dock-dragging * {
 .skills-table .col-invocation { width: 170px; }
 .skills-table .col-enabled { width: 80px; }
 .skills-table .col-actions { width: 90px; }
-.skill-version-list { max-height: 18rem; overflow: auto; display: grid; gap: 8px; }
 /* Deployment (#1981): one §14 table for every machine, so agent rows line up from one machine to
    the next. Each machine is a row group led by a full-width machine row; an agent's reason wraps
    under its name (the `.cell-note` rule). Under a 560px container the generic two-line rows apply

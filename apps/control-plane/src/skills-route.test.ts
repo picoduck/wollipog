@@ -285,7 +285,9 @@ test("skill history is paginated without payloads and restore preserves history 
   const first = (await app.inject(`/api/skills/${skill.id}/versions`)).json();
   assert.equal(first.versions.length, 50);
   assert.ok(first.nextCursor);
-  assert.deepEqual(Object.keys(first.versions[0]).sort(), ["createdAt", "digest", "id", "versionNumber"]);
+  assert.deepEqual(Object.keys(first.versions[0]).sort(), ["createdAt", "digest", "id", "note", "versionNumber"]);
+  // The note names what made each version without its files (#1984); a plain library edit has none.
+  assert.equal(first.versions[0].note, null);
   const second = (await app.inject(`/api/skills/${skill.id}/versions?before=${first.nextCursor}`)).json();
   assert.equal(second.versions.length, 3);
   assert.equal(second.nextCursor, null);
@@ -305,7 +307,9 @@ test("skill history is paginated without payloads and restore preserves history 
   assert.notEqual(restored.id, current.id);
   assert.deepEqual(restored.files, original.files);
   assert.equal(restored.digest, original.digest);
-  assert.equal(restored.note, `Restored from ${original.id}`);
+  // Named by its number, never by its id (#1984).
+  assert.equal(restored.note, `Restored from v${original.versionNumber}`);
+  assert.equal((await app.inject(`/api/skills/${skill.id}/versions`)).json().versions[0].note, restored.note);
   assert.deepEqual(db.getSkillVersion(original.id), original);
   assert.deepEqual(db.getSkillVersion(current.id), current);
   assert.deepEqual(db.listSkillAssignments(skill.id), [assignment]);

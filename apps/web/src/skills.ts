@@ -35,12 +35,16 @@ export interface SkillVersionSummary {
   /** 1-based, in creation order within the skill, from the control plane (#1962): shown as "v3".
    * Absent from an older control plane, where a version is named by its short digest instead. */
   versionNumber?: number;
-  note?: string;
+  /** What made the version ("Restored from v2"). A listed version carries it, or null, from a control
+   * plane that lists notes (#1984); undefined means the note was not read. */
+  note?: string | null;
   manifest?: unknown;
   files?: SkillFile[];
   gitSource?: SkillGitSource & { path: string; commit: string };
   machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
     context?: AgentContext; providerAccountId?: string };
+  /** The Wollipog release whose built-in content this version is. */
+  builtInSource?: SkillBuiltInRelease;
 }
 
 export interface SkillGitSource { url: string; ref: string; subdirectory: string }
@@ -788,6 +792,36 @@ export interface SkillRecentChange {
   at: number;
   /** Line 2, sentence case. */
   detail: string;
+}
+
+/**
+ * A version's note on one line (#1984). Restores used to name the restored version by its internal
+ * id, which never shows: it reads as that version's number when `known` has it, and in words when not.
+ * Null for a version without a note; undefined when the note was not read (an older control plane).
+ */
+export function skillVersionNote(
+  version: SkillVersionSummary,
+  known?: ReadonlyMap<string, SkillVersionSummary>,
+): string | null | undefined {
+  if (version.note === undefined) return undefined;
+  const text = oneLine(version.note);
+  if (!text) return null;
+  return text.replace(/skillv_[A-Za-z0-9_-]+/g, (id) => {
+    const number = skillVersionNumber(known?.get(id));
+    return number === null ? "an earlier version" : `v${number}`;
+  });
+}
+
+/** Where a version's content came from (#1984), for a version history's Source fact. A restored
+ * version keeps the source of the content it repeats. */
+export function skillVersionSource(version: SkillVersionSummary, machineName?: (runnerId: string) => string | undefined): string {
+  if (version.builtInSource) return `Built-in release ${version.builtInSource.release}`;
+  if (version.gitSource) return `Git commit ${version.gitSource.commit.slice(0, 7)}`;
+  if (version.machineSource) {
+    const machine = machineName?.(version.machineSource.runnerId);
+    return machine ? `Machine snapshot from ${machine}` : "Machine snapshot";
+  }
+  return "Library edit";
 }
 
 /** A restore's note names the restored version by its internal id, which never shows. */

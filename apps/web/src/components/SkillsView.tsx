@@ -875,12 +875,12 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       {dialog === "new-skill" && (
         <NewSkillDialog busy={busy} error={error} onClose={closeErrorDialog} onCreate={createSkill} />
       )}
-      {dialog === "version-history" && detail && <SkillVersionHistoryDialog key={detail.id} skillId={detail.id} onClose={() => setDialog(null)} onRestored={async () => {
+      {dialog === "version-history" && detail && <SkillVersionHistoryDialog key={detail.id} skillId={detail.id} machineName={(runnerId) => machineLabels.get(runnerId)} onClose={() => setDialog(null)} onRestored={async () => {
         await refreshList();
         await refreshDetail(detail.id);
         await refreshMachines();
       }} />}
-      {dialog === "machine-versions" && detail && <SkillMachineVersionDialog key={detail.id} skillId={detail.id} runners={runners} initialRunnerId={versionRunnerId} onClose={() => { setDialog(null); setVersionRunnerId(undefined); }} onSaved={refreshMachines} />}
+      {dialog === "machine-versions" && detail && <SkillMachineVersionDialog key={detail.id} skillId={detail.id} runners={runners} machineLabels={machineLabels} initialRunnerId={versionRunnerId} onClose={() => { setDialog(null); setVersionRunnerId(undefined); }} onSaved={refreshMachines} />}
       {dialog === "machine-import" && <SkillMachineImportDialog runners={runners} libraryNames={libraryNames} machineLabels={machineLabels} onClose={() => setDialog(null)} onImported={async () => {
         await refreshList();
         if (selectedId) await refreshDetail(selectedId);

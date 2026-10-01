@@ -89,7 +89,7 @@ function contextHunk(content: string): GitHunk | null {
  * never the only signal: every changed line keeps its `+`/`−` sign and is announced as an added or
  * removed line. Reviewing never runs anything: contents are rendered as text.
  */
-export function SkillFileDiff({ previousFiles, files, executablePaths, label = "File Changes" }: {
+export function SkillFileDiff({ previousFiles, files, executablePaths, label = "File Changes", collapsed = false }: {
   /** The version being replaced; empty for a new skill, so every file reads as Added. */
   previousFiles: readonly SkillFile[];
   files: readonly SkillFile[];
@@ -97,6 +97,8 @@ export function SkillFileDiff({ previousFiles, files, executablePaths, label = "
   executablePaths?: readonly string[];
   /** Accessible name of the whole diff. */
   label?: string;
+  /** Every file starts closed, under its counts: for a review read beside a choice (#1984). */
+  collapsed?: boolean;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const entries = useMemo(
@@ -132,6 +134,7 @@ export function SkillFileDiff({ previousFiles, files, executablePaths, label = "
           key={entry.path}
           entry={entry}
           layout={layout}
+          collapsed={collapsed}
           unchangedContent={entry.change === "unchanged" ? files.find((file) => file.path === entry.path) : undefined}
         />
       ))}
@@ -139,16 +142,17 @@ export function SkillFileDiff({ previousFiles, files, executablePaths, label = "
   );
 }
 
-function SkillFileDiffBlock({ entry, layout, unchangedContent }: {
+function SkillFileDiffBlock({ entry, layout, collapsed, unchangedContent }: {
   entry: SkillFileDiffEntry;
   layout: Layout;
+  collapsed: boolean;
   unchangedContent?: SkillFile;
 }) {
   const counts = entry.binary === null && entry.change !== "unchanged";
   // A body is mounted only while its file is open: a collapsed file (every unchanged one, to start)
   // would otherwise render each of its lines, which for a long reference file is tens of thousands
   // of rows nobody asked to read.
-  const [open, setOpen] = useState(entry.change !== "unchanged");
+  const [open, setOpen] = useState(!collapsed && entry.change !== "unchanged");
   return (
     <details className="skill-diff-file disclosure" open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}>

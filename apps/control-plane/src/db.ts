@@ -7739,16 +7739,18 @@ export class ControlPlaneDb {
   }
 
   /** Keyset pagination never loads historical file payloads into a library listing. */
-  listSkillVersions(skillId: string, before?: string): { versions: SkillVersionSummary[]; nextCursor: string | null } {
+  /** Each listed version carries its note ("Restored from v2"), or null, so a version history can say
+   * what each version is without reading its files (#1984). */
+  listSkillVersions(skillId: string, before?: string): { versions: Array<SkillVersionSummary & { note: string | null }>; nextCursor: string | null } {
     const cursor = before ? this.stmt("SELECT created_at, rowid AS seq FROM skill_versions WHERE id=? AND skill_id=?").get(before, skillId) as { created_at: number; seq: number } | undefined : undefined;
     if (before && !cursor) throw new Error("invalid version cursor");
     const rows = (cursor
-      ? this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE skill_id=? AND (created_at < ? OR (created_at = ? AND rowid < ?)) ORDER BY created_at DESC, rowid DESC LIMIT 51").all(skillId, cursor.created_at, cursor.created_at, cursor.seq)
-      : this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE skill_id=? ORDER BY created_at DESC, rowid DESC LIMIT 51").all(skillId)) as unknown as Array<{ id: string; digest: string; created_at: number }>;
+      ? this.stmt("SELECT id, digest, created_at, note FROM skill_versions WHERE skill_id=? AND (created_at < ? OR (created_at = ? AND rowid < ?)) ORDER BY created_at DESC, rowid DESC LIMIT 51").all(skillId, cursor.created_at, cursor.created_at, cursor.seq)
+      : this.stmt("SELECT id, digest, created_at, note FROM skill_versions WHERE skill_id=? ORDER BY created_at DESC, rowid DESC LIMIT 51").all(skillId)) as unknown as Array<{ id: string; digest: string; created_at: number; note: string | null }>;
     // A page is newest first and contiguous in the numbering order, so one count numbers all of it.
     const newest = rows[0] ? this.skillVersionNumber(skillId, rows[0].id) : 0;
     const versions = rows.slice(0, 50).map((row, index) => ({
-      id: row.id, digest: row.digest, createdAt: row.created_at, versionNumber: newest - index,
+      id: row.id, digest: row.digest, createdAt: row.created_at, versionNumber: newest - index, note: row.note ?? null,
     }));
     return { versions, nextCursor: rows.length > 50 ? versions[versions.length - 1]!.id : null };
   }
@@ -7763,7 +7765,7 @@ export class ControlPlaneDb {
         throw new SkillImportConflictError("The library changed after preview. Preview the version again.");
       }
       if (target.id === current.latestVersion.id) return target;
-      const restored = this.addSkillVersion(skillId, { ...target, note: `Restored from ${target.id}` })!;
+      const restored = this.addSkillVersion(skillId, { ...target, note: `Restored from v${this.skillVersionNumber(skillId, target.id)}` })!;
       if (target.gitSource) this.stmt("INSERT INTO skill_git_provenance (version_id, source) VALUES (?, ?)").run(restored.id, JSON.stringify(target.gitSource));
       if (target.machineSource) this.stmt("INSERT INTO skill_machine_provenance (version_id, source) VALUES (?, ?)").run(restored.id, JSON.stringify(target.machineSource));
       if (target.builtInSource) this.stmt("INSERT INTO skill_built_in_provenance (version_id, source) VALUES (?, ?)").run(restored.id, JSON.stringify(target.builtInSource));

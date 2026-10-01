@@ -44,7 +44,9 @@ const runner: RunnerView = {
       ? "windows" : "linux",
   version: "1",
   status: "online",
-  displayName: "Build Machine",
+  // `?longMachine=1` (#1984): a 60-character name, which the Machine select truncates.
+  displayName: new URLSearchParams(location.search).has("longMachine")
+    ? "Build Machine in the Third-Floor Lab Rack With Two GPU Cards" : "Build Machine",
   agents: [
     {
       id: "claude",

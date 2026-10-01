@@ -159,11 +159,11 @@ const reviews: Review[] = [{
 }, {
   title: "Version History",
   first: 2, fresh: 3, consent: "Deploy to machines that track the latest version",
-  freshConsent: "Deploy to machines that track the latest version", primary: "Restore Version",
+  freshConsent: "Deploy to machines that track the latest version", primary: "Restore v1",
   async open(page, server) {
-    const historical = { id: "v0", digest: "b".repeat(64), createdAt: 1_700_000_000_000, note: "Initial reviewed version", files: [skillFile(library)] };
-    const current = { id: "v1", digest: "a".repeat(64), files: [skillFile(edited)] };
-    await page.route("**/api/skills/skill-1/versions", (route) => route.fulfill({ json: { versions: [historical], nextCursor: null } }));
+    const historical = { id: "v0", versionNumber: 1, digest: "b".repeat(64), createdAt: 1_700_000_000_000, note: "Initial reviewed version", files: [skillFile(library)] };
+    const current = { id: "v1", versionNumber: 2, digest: "a".repeat(64), createdAt: 1_700_000_100_000, note: null, files: [skillFile(edited)] };
+    await page.route("**/api/skills/skill-1/versions", (route) => route.fulfill({ json: { versions: [current, historical], nextCursor: null } }));
     await page.route("**/api/skills/skill-1/versions/v0", (route) => {
       const { deploymentImpact } = server.impact();
       return route.fulfill({ json: { version: historical, currentVersion: current, deploymentImpact } });
@@ -174,7 +174,8 @@ const reviews: Review[] = [{
     await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
     await page.getByRole("menuitem", { name: "Version History…", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Version History" });
-    await dialog.getByRole("button", { name: "Preview Version v0", exact: true }).click();
+    // v1 is the older version (#1984); the list opens on it on desktop, and a phone taps it.
+    await dialog.getByRole("group", { name: "Versions" }).getByRole("button", { name: /^v1\b/ }).click();
     return dialog;
   },
 }];

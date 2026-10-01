@@ -1965,7 +1965,7 @@ test("each ⋯ item opens its dialog, and Add Assignment… opens the existing o
       return title;
     };
     assert.equal(await open("Version History…"), "Version History");
-    assert.equal(await open("Machine Version…"), "Machine Versions");
+    assert.equal(await open("Machine Version…"), "Machine Version");
     assert.equal(await open("Check for Updates…"), "Check for Skill Updates");
     await act(async () => buttonNamed(head, "Add Assignment…")[0]!.click());
     const dialog = container.querySelector('[role="dialog"]');

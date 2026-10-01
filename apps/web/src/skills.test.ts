@@ -29,6 +29,8 @@ import {
   skillSourceKind,
   skillSourceLabel,
   skillVersionLabel,
+  skillVersionNote,
+  skillVersionSource,
   skillFromPayload,
   skillGroupsFromPayload,
   skillLibrarySummary,
@@ -113,6 +115,29 @@ test("a version is named by its number, or by its short digest against a control
   assert.deepEqual(skillVersionLabel({ digest: "0123456789abcdef", versionNumber: 1.5 }), { text: "0123456789ab", mono: true });
   assert.equal(skillVersionLabel({ id: "skillv_a" }), null);
   assert.equal(skillVersionLabel(null), null);
+});
+
+test("a version's note is one line and names a restored version by number, never by id (#1984)", () => {
+  const v2 = { id: "skillv_b2", versionNumber: 2 };
+  const known = new Map([[v2.id, v2]]);
+  assert.equal(skillVersionNote({ note: "Add migration\n  and test-coverage checks" }), "Add migration and test-coverage checks");
+  assert.equal(skillVersionNote({ note: "Restored from v2" }), "Restored from v2");
+  // Restores before #1984 wrote the internal id.
+  assert.equal(skillVersionNote({ note: "Restored from skillv_b2" }, known), "Restored from v2");
+  assert.equal(skillVersionNote({ note: "Restored from skillv_zz9" }, known), "Restored from an earlier version");
+  assert.equal(skillVersionNote({ note: null }), null);
+  assert.equal(skillVersionNote({ note: "  " }), null);
+  // A control plane that does not list notes: not "No note", which would be a claim.
+  assert.equal(skillVersionNote({ id: "skillv_b2" }), undefined);
+});
+
+test("a version's source names where its content came from (#1984)", () => {
+  assert.equal(skillVersionSource({ builtInSource: { release: "1.4.0", digest: "d" } }), "Built-in release 1.4.0");
+  assert.equal(skillVersionSource({ gitSource: { url: "u", ref: "main", subdirectory: "", path: "p", commit: "9f8e7d6c5b4a3210" } }), "Git commit 9f8e7d6");
+  const machineSource = { runnerId: "runner-1", sourceDirectory: ".claude/skills", name: "x", digest: "d", importedAt: 1 };
+  assert.equal(skillVersionSource({ machineSource }, (id) => id === "runner-1" ? "Build Machine" : undefined), "Machine snapshot from Build Machine");
+  assert.equal(skillVersionSource({ machineSource }), "Machine snapshot");
+  assert.equal(skillVersionSource({ id: "skillv_a" }), "Library edit");
 });
 
 test("a review finds the versions it names a page at a time, and stops once it has them (#1973)", async () => {

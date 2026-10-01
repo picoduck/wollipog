@@ -29,7 +29,7 @@ export function SkillReviewFacts({ facts }: { facts: readonly SkillReviewFact[] 
 }
 
 /** "Reviewing and importing never run skill contents.": the one line under every review's diff heading. */
-export function skillReviewSafetyNote(verb: "importing" | "accepting"): string {
+export function skillReviewSafetyNote(verb: "importing" | "accepting" | "restoring" | "saving"): string {
   return `Review every file, including scripts. Reviewing and ${verb} never run skill contents.`;
 }
 
@@ -38,13 +38,15 @@ export function skillReviewSafetyNote(verb: "importing" | "accepting"): string {
  * with one skeleton block that names what is being read (§12.3), so the dialog does not jump; a
  * read that failed shows `failure` there instead.
  */
-export function SkillReviewChanges({ title, note, files, loading, failure }: {
+export function SkillReviewChanges({ title, note, files, loading, failure, collapsed }: {
   title: string;
   note: string;
   files: { previous: readonly SkillFile[]; current: readonly SkillFile[]; executablePaths?: readonly string[] } | null;
   /** Sentence-case status while the files are read: "Reading the edited copy…". */
   loading: string;
   failure?: ReactNode;
+  /** Every file starts closed (#1984). */
+  collapsed?: boolean;
 }) {
   const titleId = `skill-review-changes-${useId().replace(/:/g, "")}`;
   return (
@@ -54,7 +56,7 @@ export function SkillReviewChanges({ title, note, files, loading, failure }: {
         <p className="skill-review-changes-note">{note}</p>
       </div>
       {files
-        ? <SkillFileDiff label={title} previousFiles={files.previous} files={files.current} executablePaths={files.executablePaths} />
+        ? <SkillFileDiff label={title} previousFiles={files.previous} files={files.current} executablePaths={files.executablePaths} collapsed={collapsed} />
         : failure || <div className="skill-review-loading" role="status">{loading}</div>}
     </section>
   );
