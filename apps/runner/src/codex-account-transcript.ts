@@ -52,9 +52,18 @@ export async function transferCodexAccountTranscript(
       if (!prior) { selected.set(child.id, child.file); changed = true; }
     }
   }
+  // Reuse each target's existing path: its private index may point at an archived or
+  // differently dated rollout. Creating a second copy can resume stale history.
+  const targetFiles = await inventory(target, sharedLeaves);
+  const destinations = new Map<string, string>();
+  for (const [threadId, file] of selected) {
+    const existing = targetFiles.filter((candidate) => candidate.endsWith(`-${threadId}.jsonl`));
+    if (existing.length > 1) throw new Error("ambiguous target Codex conversation");
+    destinations.set(file, existing[0] ?? join(target, relative(sourceHome, file)));
+  }
   // Publish descendants first; no replacement provider can run until every copy completes.
   for (const file of [...selected.values()].reverse()) {
-    const destination = join(target, relative(sourceHome, file));
+    const destination = destinations.get(file)!;
     if (await realpath(file) === await realpath(destination).catch(() => null)) continue;
     await ensureDirectories(target, relative(target, dirname(destination)));
     const existing = await lstat(destination).catch(() => null);
@@ -130,6 +139,7 @@ inventory() {
   done
 }
 all=$(inventory "$source_home")
+target_all=$(inventory "$target_home")
 scan() {
   printf '%s\\n' "$1" | while IFS= read -r file; do
     case "$file" in *-"$2".jsonl) printf '%s\\n' "$file";; esac
@@ -137,7 +147,7 @@ scan() {
 }
 matches=$(scan "$all" "$id")
 if [ -z "$matches" ]; then
-  existing=$(scan "$(inventory "$target_home")" "$id")
+  existing=$(scan "$target_all" "$id")
   if [ -z "$existing" ]; then printf 'missing\\n'; exit 0; fi
   [ "$(printf '%s\\n' "$existing" | wc -l)" = 1 ]
   exit 0
@@ -148,6 +158,14 @@ copy_thread() (
   case " $ancestors " in *" $current_id "*) exit 0;; esac
   selected=$(scan "$all" "$current_id")
   [ -n "$selected" ] && [ "$(printf '%s\\n' "$selected" | wc -l)" = 1 ]
+  existing=$(scan "$target_all" "$current_id")
+  if [ -n "$existing" ]; then
+    [ "$(printf '%s\\n' "$existing" | wc -l)" = 1 ]
+    destination=$existing
+  else
+    relative=\${selected#"$source_home/"}
+    destination=$target_home/$relative
+  fi
   printf '%s\\n' "$all" | while IFS= read -r child; do
     [ -n "$child" ] || continue
     header=$(dd if="$child" bs=1048576 count=1 2>/dev/null | head -n 1)
@@ -161,8 +179,6 @@ copy_thread() (
     case "$child" in *-"$child_id".jsonl) ;; *) exit 1;; esac
     copy_thread "$child_id" "$ancestors $current_id"
   done
-  relative=\${selected#"$source_home/"}
-  destination=$target_home/$relative
   if [ "$(readlink -f -- "$selected")" = "$(readlink -f -- "$destination" || true)" ]; then exit 0; fi
   directory=\${destination%/*}
   remainder=\${directory#"$target_home/"}

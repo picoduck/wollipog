@@ -81,6 +81,39 @@ for (const implementation of ["native", "WSL shell"] as const) {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  test(`${implementation}: Codex updates existing active and archived paths without creating stale duplicates`, { skip }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-transfer-archive-"));
+    try {
+      const source = join(root, "source"); const target = join(root, "target");
+      write(path(source), header(id) + "latest parent turn\n");
+      write(path(source, childId, true), header(childId, id) + "latest child turn\n");
+      write(path(target, id, true), header(id) + "older archived parent\n");
+      write(path(target, childId), header(childId, id) + "older active child\n");
+      assert.equal(await run(source, target), true);
+      assert.match(readFileSync(path(target, id, true), "utf8"), /latest parent turn/);
+      assert.match(readFileSync(path(target, childId), "utf8"), /latest child turn/);
+      assert.equal(existsSync(path(target)), false);
+      assert.equal(existsSync(path(target, childId, true)), false);
+      write(path(target, id, true), header(id) + "switch-back parent turn\n");
+      assert.equal(await run(target, source), true);
+      assert.match(readFileSync(path(source), "utf8"), /switch-back parent turn/);
+      assert.equal(existsSync(path(source, id, true)), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test(`${implementation}: Codex refuses ambiguous target paths before replacing their history`, { skip }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-transfer-target-ambiguity-"));
+    try {
+      const source = join(root, "source"); const target = join(root, "target");
+      write(path(source), header(id) + "latest source\n");
+      write(path(target), header(id) + "active target\n");
+      write(path(target, id, true), header(id) + "archived target\n");
+      await assert.rejects(run(source, target));
+      assert.match(readFileSync(path(target), "utf8"), /active target/);
+      assert.match(readFileSync(path(target, id, true), "utf8"), /archived target/);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   test(`${implementation}: Codex accepts a configured home alias and refuses transcript and directory symlinks`, { skip: skip || process.platform === "win32" }, async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-transfer-link-"));
     try {
