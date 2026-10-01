@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 
 /** Lease-only native handles. This shares no skill/adoption or account ownership state. */
 export const WINDOWS_LEASE_IO_TYPES = String.raw`
@@ -21,6 +21,7 @@ public static class WollipogProviderHomeLeaseIo {
   const uint BACKUP=0x02000000, REPARSE=0x00200000, WRITE_THROUGH=0x80000000, DIRECTORY=0x10, REPARSE_ATTRIBUTE=0x400;
   const string GUARD="protocol-v4.json", ANCHOR="mutable-home.recovery.json", ALIAS=".mutable-home.retired";
   const int MAX_FILE=2*1024*1024, MAX_INPUT=64*1024*1024, MAX_WORK=256*1024*1024;
+  static uint fenceWaitMs;
   static readonly UTF8Encoding Utf8=new UTF8Encoding(false,true);
   [StructLayout(LayoutKind.Sequential)] struct FT { public uint Low,High; }
   [StructLayout(LayoutKind.Sequential)] struct INFO { public uint Attributes; public FT Created,Accessed,Written; public uint Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow; }
@@ -105,7 +106,11 @@ public static class WollipogProviderHomeLeaseIo {
   static void Fence(bool exclusive){
     if(guardHandle==null){try{guardHandle=Open(PathFor(1,GUARD),false,true,false,true);}catch(Exception error){if(!exclusive&&Missing(error))return;throw;}
       INFO info=Info(guardHandle);Need(info.Links>=1&&info.Links<=3,"unsafe permanent lease fence");guardStamp=Fingerprint(guardHandle);}
-    var overlap=new OVERLAPPED{Offset=0xffffffff};if(!LockFileEx(guardHandle,(exclusive?2u:0u)|1u,0,1,0,ref overlap))throw new Refusal(2,"provider HOME already in use: checkpoint publication is in progress; retry");
+    var overlap=new OVERLAPPED{Offset=0xffffffff};var elapsed=Stopwatch.StartNew();
+    while(!LockFileEx(guardHandle,(exclusive?2u:0u)|1u,0,1,0,ref overlap)){
+      int error=Marshal.GetLastWin32Error();Alive();Need(error==33,"permanent lease fence unavailable");
+      if(elapsed.ElapsedMilliseconds>=fenceWaitMs)throw new Refusal(2,"provider HOME already in use: checkpoint publication is in progress; retry");Thread.Sleep(10);
+    }
   }
   static byte[] ReadBytes(SafeFileHandle handle){INFO before=Info(handle);long size=Size(before);Need(size>=0&&size<=MAX_FILE&&before.Links>=1&&before.Links<=3,"unsafe lease record");
     Need(++reads<=allowedReads&&(bytes+=(ulong)size)<=allowedBytes,"lease verification work limit exceeded");string stamp=Fingerprint(handle);byte[] raw=new byte[(int)size];
@@ -175,34 +180,61 @@ public static class WollipogProviderHomeLeaseIo {
   }
   public static void Run(){
     input=new BinaryReader(Console.OpenStandardInput(),Utf8);output=new BinaryWriter(Console.OpenStandardOutput(),Utf8);ancestry=new List<SafeFileHandle>();
-    try{Need(Encoding.ASCII.GetString(input.ReadBytes(5))=="WPLL4","invalid lease I/O protocol");byte operation=input.ReadByte();uint parent=input.ReadUInt32();allowedReads=input.ReadUInt32();allowedBytes=input.ReadUInt64();Need(allowedReads<=131072&&allowedBytes<=268435456,"invalid remaining lease work budget");parentId=parent;PBI info;int returned;Need(NtQueryInformationProcess(Process.GetCurrentProcess().Handle,0,out info,Marshal.SizeOf(typeof(PBI)),out returned)==0&&(ulong)info.Parent.ToInt64()==parent,"lease helper parent identity changed");parentHandle=OpenProcess(0x1000|0x100000,false,parent);Alive();FT parentCreated,selfCreated,exited,kernel,user;Need(GetProcessTimes(parentHandle,out parentCreated,out exited,out kernel,out user)&&GetProcessTimes(Process.GetCurrentProcess().Handle,out selfCreated,out exited,out kernel,out user)&&(((ulong)parentCreated.High<<32)|parentCreated.Low)<=(((ulong)selfCreated.High<<32)|selfCreated.Low),"lease helper parent PID was reused");Roots(Text(32768));if(operation==0){if(lockHandle!=null)Fence(false);OutputSnapshot(Snapshot());}else Apply(operation);
+    try{Need(Encoding.ASCII.GetString(input.ReadBytes(5))=="WPLL4","invalid lease I/O protocol");byte operation=input.ReadByte();uint parent=input.ReadUInt32();allowedReads=input.ReadUInt32();allowedBytes=input.ReadUInt64();fenceWaitMs=input.ReadUInt32();Need((fenceWaitMs==0||fenceWaitMs==10000)&&allowedReads<=131072&&allowedBytes<=268435456,"invalid remaining lease work budget");parentId=parent;PBI info;int returned;Need(NtQueryInformationProcess(Process.GetCurrentProcess().Handle,0,out info,Marshal.SizeOf(typeof(PBI)),out returned)==0&&(ulong)info.Parent.ToInt64()==parent,"lease helper parent identity changed");parentHandle=OpenProcess(0x1000|0x100000,false,parent);Alive();FT parentCreated,selfCreated,exited,kernel,user;Need(GetProcessTimes(parentHandle,out parentCreated,out exited,out kernel,out user)&&GetProcessTimes(Process.GetCurrentProcess().Handle,out selfCreated,out exited,out kernel,out user)&&(((ulong)parentCreated.High<<32)|parentCreated.Low)<=(((ulong)selfCreated.High<<32)|selfCreated.Low),"lease helper parent PID was reused");Roots(Text(32768));if(operation==0){if(lockHandle!=null)Fence(false);OutputSnapshot(Snapshot());}else Apply(operation);
     }catch(Exception error){try{var refusal=error as Refusal;var native=error as Win32Exception;output.Write((byte)'E');output.Write(refusal==null?(byte)1:refusal.Code);Put(refusal==null?"provider-HOME native lease I/O failed"+(native==null?"":" (Windows code "+native.NativeErrorCode+")")+"; preserve all evidence":refusal.Message);output.Flush();}catch{}}
     finally{if(anchorHandle!=null)anchorHandle.Dispose();if(guardHandle!=null)guardHandle.Dispose();for(int i=ancestry.Count-1;i>=0;i--)ancestry[i].Dispose();if(parentHandle!=IntPtr.Zero)CloseHandle(parentHandle);}
   }
 }
 `;
 
-let assembly: { path: string; sha256: string } | undefined;
+let assembly: { path: string; sha256: string; dev: bigint; ino: bigint } | undefined;
 const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
 const sha256 = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
 
 /** Load verified assembly bytes into memory instead of reopening a mutable path after hashing. */
-export function windowsLeaseIoCommand(): { command: string; args: string[] } {
+export function windowsLeaseIoCommand(roots = [tmpdir()]): { command: string; args: string[] } {
   if (process.platform !== "win32") throw new Error("native Windows lease I/O requires Windows");
+  if (assembly && existsSync(assembly.path)) {
+    if (!roots.some(root => { const path = relative(root, assembly!.path); return path !== ".." && !path.startsWith("..\\") && !isAbsolute(path); })) throw new Error("safe Windows lease helper staging directory unavailable");
+    const file = lstatSync(assembly.path, { bigint: true });
+    if (!file.isFile() || file.isSymbolicLink() || file.nlink !== 1n || file.dev !== assembly.dev || file.ino !== assembly.ino || sha256(readFileSync(assembly.path)) !== assembly.sha256) throw new Error("trusted Windows lease helper changed");
+  }
   if (!assembly || !existsSync(assembly.path) || sha256(readFileSync(assembly.path)) !== assembly.sha256) {
     assembly = undefined;
-    const directory = mkdtempSync(join(tmpdir(), "wollipog-provider-home-lease-io-"));
+    const stagingRoot = roots.find(root => { try { const stat = lstatSync(root); return stat.isDirectory() && !stat.isSymbolicLink(); } catch { return false; } });
+    if (!stagingRoot) throw new Error("safe Windows lease helper staging directory unavailable");
+    const directory = mkdtempSync(join(stagingRoot, "wollipog-provider-home-lease-io-"));
+    const directoryStat = lstatSync(directory, { bigint: true });
     const path = join(directory, "lease-io.dll");
+    let fileIdentity: { dev: bigint; ino: bigint } | undefined;
+    const cleanup = () => {
+      try {
+        const current = lstatSync(directory, { bigint: true });
+        if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== directoryStat.dev || current.ino !== directoryStat.ino) return;
+        if (fileIdentity) {
+          const file = lstatSync(path, { bigint: true });
+          if (!file.isFile() || file.isSymbolicLink() || file.dev !== fileIdentity.dev || file.ino !== fileIdentity.ino) return;
+          unlinkSync(path);
+        }
+        rmdirSync(directory);
+      } catch { /* Retain unknown or substituted cache entries. */ }
+    };
     const program = `$ErrorActionPreference='Stop';$source=[Console]::In.ReadToEnd();Add-Type -TypeDefinition $source -OutputAssembly ${quote(path)}`;
     const compiled = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program],
       { input: WINDOWS_LEASE_IO_TYPES, encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true });
+    if (existsSync(path)) {
+      const file = lstatSync(path, { bigint: true });
+      if (file.isFile() && !file.isSymbolicLink() && file.nlink === 1n) fileIdentity = { dev: file.dev, ino: file.ino };
+    }
     if (compiled.error || compiled.status !== 0) {
-      rmSync(directory, { recursive: true, force: true });
+      cleanup();
       throw new Error("the fixed Windows provider-HOME lease helper could not be compiled", {
         cause: new Error((compiled.stderr ?? "").slice(0, 2_048)),
       });
     }
-    assembly = { path, sha256: sha256(readFileSync(path)) };
+    if (!fileIdentity) { cleanup(); throw new Error("unsafe Windows lease helper staging file"); }
+    assembly = { path, sha256: sha256(readFileSync(path)), ...fileIdentity };
+    process.once("exit", cleanup);
   }
   const program = `$ErrorActionPreference='Stop';$bytes=[IO.File]::ReadAllBytes(${quote(assembly.path)});$sha=[Security.Cryptography.SHA256]::Create();$hash=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant();if($hash -ne ${quote(assembly.sha256)}){throw 'trusted lease helper changed'};$loaded=[Reflection.Assembly]::Load($bytes);$loaded.GetType('WollipogProviderHomeLeaseIo').GetMethod('Run').Invoke($null,@())|Out-Null`;
   return { command: "powershell.exe", args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program] };

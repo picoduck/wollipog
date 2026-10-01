@@ -141,6 +141,13 @@ def exact_identity(device, inode):
 
 fence_state = None
 anchor_override = None
+fence_wait_seconds = 0
+
+def with_critical_lease_fence(action):
+    global fence_wait_seconds
+    previous = fence_wait_seconds; fence_wait_seconds = 10
+    try: return action()
+    finally: fence_wait_seconds = previous
 
 lease_ancestry = {}
 
@@ -204,8 +211,15 @@ def with_lease_fence(lock, exclusive, action):
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022 or not 1 <= info.st_nlink <= 3: fail("unsafe permanent lease fence")
-        try: fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
-        except BlockingIOError: fail("provider HOME already in use: checkpoint publication is in progress; retry")
+        deadline = time.monotonic() + fence_wait_seconds
+        while True:
+            try:
+                fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, InterruptedError):
+                if os.getppid() != lease_parent_pid: fail("lease helper parent exited; preserve all evidence")
+                if time.monotonic() >= deadline: fail("provider HOME already in use: checkpoint publication is in progress; retry")
+                time.sleep(0.01)
         lease_record_cache.clear()
         fence_state = (fd, exclusive, (info.st_dev, info.st_ino))
         return action()

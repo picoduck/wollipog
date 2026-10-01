@@ -1484,6 +1484,7 @@ export class SessionManager {
     });
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash, {
       onDiagnostic: (diagnostic) => this.log(JSON.stringify(diagnostic)),
+      helperDataDir: dataDir ?? join(store.rootPath(), ".runner-data"),
     }) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);

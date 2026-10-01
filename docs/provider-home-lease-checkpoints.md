@@ -25,6 +25,7 @@ token; matching a disk PID, an empty mirror directory, or a missing mirror never
 | Complete verification or compaction work | 131,072 record operations / 256 MiB read or hashed |
 | Native helper IPC | 64 MiB |
 | Native I/O transaction timeout | 120 seconds |
+| Critical permanent-fence acquisition grace | 10 seconds, polling every 10 ms |
 | Mount inventory in the Linux helper | 1 MiB |
 
 The limits are configured in `provider-home-lease-checkpoint.ts` and independently enforced by
@@ -95,6 +96,30 @@ open target proof handles and refuses unsupported APIs. See the
 [write-through NTFS metadata semantics](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
 and [FlushFileBuffers access requirements](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers). Process-kill tests
 validate interruption recovery, not a physical power-loss experiment.
+
+The fixed native helper is execution-probed before creating HOME lease evidence. POSIX runners
+stage their trusted helper bytes in a private temporary directory, then try the explicitly
+configured existing runner data directory if temporary execution is unavailable (for example,
+`noexec`). A failed probe does not publish a lease and reports helper availability rather than
+advising journal quarantine. Normal exit removes only the exact process-owned helper inode and
+private directory; unknown entries and substitutions are retained. Killed runners can leave
+external helper caches, which are outside the canonical journal bounds.
+
+Initial unowned admission takes the permanent fence without waiting. Critical publication,
+post-publication continuation and release allow at most 10 seconds to obtain it, using a
+monotonic deadline, 10 ms polling and parent-liveness checks. The exact preimage is checked
+after obtaining the fence. The helper transaction timeout remains 120 seconds. A registry
+retains its exact private acquisition digest before later verification or mirroring can fail;
+a deadline failure grants no HOME access. Only that registry can complete the unchanged pending
+publication without republishing or adding a borrowed reference. Failed release retains the
+held and pending tokens and emits a bounded, deduplicated diagnostic so exact release can be
+retried; transient contention carries retry advice without a quarantine remedy.
+
+Lease I/O is synchronous today. A maximal admitted migration measured roughly 50–52 seconds,
+so runner event-loop timers and heartbeat work can be delayed during the transaction. The
+physical record/byte budgets bound work; they are not a low-latency or heartbeat guarantee.
+Truncated or unproven checkpoint candidates remain untouched, even if another slot is free;
+the documented growth cap then stops admission while preserving the last valid chain.
 
 After an interrupted completed candidate, the new owner first acquires successor Q. It may adopt
 candidate P only if P commits to the currently verified anchor and historical active tip, its full

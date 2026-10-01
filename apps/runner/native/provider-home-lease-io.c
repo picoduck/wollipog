@@ -32,6 +32,11 @@
 #define MAX_READS 131072U
 #define GUARD "protocol-v4.json"
 #define ANCHOR "mutable-home.recovery.json"
+static uint32_t fence_wait_ms;
+static uint64_t monotonic_ms(void) {
+  struct timespec now; if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) exit(1);
+  return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+}
 
 typedef struct { unsigned dir; char *name; char *dev; char *ino; char *stamp;
   unsigned mode, links, uid; uint32_t size; unsigned char *raw; unsigned optional; } Entry;
@@ -180,7 +185,14 @@ static void fence(int exclusive) {
     require(fstat(guard_fd, &guard_identity) == 0 && S_ISREG(guard_identity.st_mode) && guard_identity.st_nlink >= 1 && guard_identity.st_nlink <= 3 &&
       guard_identity.st_uid == getuid() && !(guard_identity.st_mode & 0022), "unsafe permanent lease fence");
   }
-  if (flock(guard_fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0) fail(2, "provider HOME already in use: checkpoint publication is in progress; retry");
+  uint64_t deadline = monotonic_ms() + fence_wait_ms;
+  while (flock(guard_fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0) {
+    int error = errno;
+    alive();
+    require(error == EWOULDBLOCK || error == EAGAIN || error == EINTR, "permanent lease fence unavailable");
+    if (monotonic_ms() >= deadline) fail(2, "provider HOME already in use: checkpoint publication is in progress; retry");
+    struct timespec delay = {0, 10000000}; nanosleep(&delay, NULL);
+  }
 }
 static void boundary(const char *stage) {
   pinned();
@@ -268,9 +280,11 @@ static void select_checkpoint(const char *name) {
   require(anchor_fd >= 0 && fstat(anchor_fd, &anchor_identity) == 0, "selected checkpoint unavailable");
   boundary("selection-published"); sync_fd(root_fd); boundary("selection-durable");
 }
-int main(void) {
+int main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "--probe")) return 0;
+  require(argc == 1, "unsupported lease helper arguments");
   unsigned char magic[5]; input(magic, sizeof(magic)); require(!memcmp(magic, "WPLL4", 5), "invalid lease I/O protocol");
-  unsigned operation = in8(); parent = (pid_t)in32(); allowed_reads = in32(); allowed_bytes = in64(); require(allowed_reads <= MAX_READS && allowed_bytes <= MAX_WORK, "invalid remaining lease work budget"); alive(); root_path = in_text(32768);
+  unsigned operation = in8(); parent = (pid_t)in32(); allowed_reads = in32(); allowed_bytes = in64(); fence_wait_ms = in32(); require((fence_wait_ms == 0 || fence_wait_ms == 10000) && allowed_reads <= MAX_READS && allowed_bytes <= MAX_WORK, "invalid remaining lease work budget"); alive(); root_path = in_text(32768);
 #ifdef __linux__
   require(prctl(PR_SET_PDEATHSIG, SIGKILL) == 0, "lease helper parent lifecycle protection unavailable"); alive();
 #endif

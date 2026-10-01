@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -13,6 +13,28 @@ const modulePath = new URL("./provider-home-lease.ts", import.meta.url).href;
 const commonBoundaries = ["before-guard", "guard-temp-written", "guard-file-durable", "guard-published", "guard-durable",
   "before-candidate", "candidate-written", "candidate-file-durable", "candidate-durable", "before-selection",
   "selection-published", "selection-durable", "before-retire", "after-retire", "retirement-durable"];
+
+function holdFence(guard: string, marker: string, exclusive: boolean, seconds: number): ChildProcess {
+  if (process.platform !== "win32") return spawn("python3", ["-c", `import fcntl,time;f=open(${JSON.stringify(guard)},'rb');fcntl.flock(f,fcntl.${exclusive ? "LOCK_EX" : "LOCK_SH"});open(${JSON.stringify(marker)},'w').write('ready');time.sleep(${seconds})`], { stdio: ["ignore", "pipe", "pipe"] });
+  const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
+  const types = `using System;using System.Runtime.InteropServices;public class FenceTest{[StructLayout(LayoutKind.Sequential)]public struct O{public IntPtr I,H;public uint Offset,High;public IntPtr Event;}[DllImport("kernel32.dll",SetLastError=true)]public static extern bool LockFileEx(IntPtr f,uint flags,uint reserved,uint low,uint high,ref O o);}`;
+  return spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `Add-Type -TypeDefinition ${quote(types)};$f=[IO.File]::Open(${quote(guard)},[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$o=New-Object FenceTest+O;$o.Offset=[uint32]::MaxValue;if(-not [FenceTest]::LockFileEx($f.SafeFileHandle.DangerousGetHandle(),${exclusive ? 3 : 1},0,1,0,[ref]$o)){throw 'test fence unavailable'};[IO.File]::WriteAllText(${quote(marker)},'ready');Start-Sleep -Milliseconds ${seconds * 1000};$f.Dispose()`], { stdio: ["ignore", "pipe", "pipe"] });
+}
+
+async function fenceReady(child: ChildProcess, marker: string): Promise<void> {
+  let output = ""; child.stderr?.on("data", (value) => { output += value; });
+  const deadline = performance.now() + 30_000;
+  while (!existsSync(marker)) {
+    assert.equal(child.exitCode, null, output);
+    assert.ok(performance.now() < deadline, `test fence timeout: ${output}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function leaseEvidence(root: string): Array<[string, string]> {
+  return [root, join(root, "mutable-home.lock")].flatMap((directory) => readdirSync(directory).filter((name) => name !== "mutable-home.lock")
+    .map((name): [string, string] => [`${directory}/${name}`, createHash("sha256").update(readFileSync(join(directory, name))).digest("hex")]));
+}
 
 /** A real v2 chain avoids spending eight provider lifetimes preparing each crash fixture. */
 function seed(home: string): string {
@@ -35,6 +57,73 @@ function seed(home: string): string {
   }
   return root;
 }
+
+test("orderly release waits for a real shared-fence reader and hands off after the origin exits", { timeout: 120_000 }, async (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-lease-release-reader-")));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const root = seed(home), ownerReady = join(home, "owner-ready"), go = join(home, "release-go"), script = join(home, "owner.mts");
+  writeFileSync(script, `import{ProviderHomeLeaseRegistry}from${JSON.stringify(modulePath)};import{existsSync,writeFileSync}from'node:fs';const r=new ProviderHomeLeaseRegistry(${JSON.stringify(owner)});r.acquireHome(${JSON.stringify(home)});writeFileSync(${JSON.stringify(ownerReady)},'ready');while(!existsSync(${JSON.stringify(go)}))await new Promise(r=>setTimeout(r,10));if(!r.releaseHome(${JSON.stringify(home)}))throw Error('orderly release failed');console.log('released');`);
+  const origin = spawn(process.execPath, ["--import", "tsx", script], { stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => { if (origin.exitCode === null && origin.signalCode === null) origin.kill("SIGKILL"); });
+  let originOutput = ""; origin.stdout?.on("data", b => { originOutput += b; }); origin.stderr?.on("data", b => { originOutput += b; });
+  const exited = new Promise<number | null>(resolve => origin.once("close", code => resolve(code)));
+  await fenceReady(origin, ownerReady);
+  const marker = join(home, "reader-ready"), reader = holdFence(join(root, "mutable-home.lock", "protocol-v4.json"), marker, false, 2);
+  t.after(() => { if (reader.exitCode === null && reader.signalCode === null) reader.kill("SIGKILL"); });
+  await fenceReady(reader, marker); writeFileSync(go, "go");
+  assert.equal(await exited, 0, originOutput); assert.match(originOutput, /released/);
+  const next = new ProviderHomeLeaseRegistry("b".repeat(64));
+  assert.equal(next.acquireHome(home), true); assert.equal(next.releaseHome(home), true);
+});
+
+test("post-publication deadline retains an immutable completion token without adding references or records", { timeout: 120_000 }, async (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-lease-pending-fence-")));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const root = seed(home), setup = new ProviderHomeLeaseRegistry(owner);
+  setup.acquireHome(home); assert.equal(setup.releaseHome(home), true);
+  const marker = join(home, "writer-ready"); let writer: ChildProcess | undefined;
+  const registry = new ProviderHomeLeaseRegistry(owner, { afterTransitionPublishForTest: () => {
+    writer = holdFence(join(root, "mutable-home.lock", "protocol-v4.json"), marker, true, 13);
+    const deadline = performance.now() + 30_000;
+    while (!existsSync(marker)) { assert.ok(performance.now() < deadline); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); }
+  } });
+  t.after(() => { if (writer && writer.exitCode === null && writer.signalCode === null) writer.kill("SIGKILL"); });
+  const started = performance.now();
+  assert.throws(() => registry.acquireHome(home), (error: unknown) => {
+    assert.ok(error instanceof Error); assert.match(error.message, /publication is in progress/); assert.doesNotMatch(error.message, /quarantine/); return true;
+  });
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= 9_900 && elapsed < 30_000, `finite fence grace: ${elapsed}`);
+  const before = leaseEvidence(root);
+  assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /publication is in progress/);
+  assert.deepEqual(leaseEvidence(root), before);
+  await new Promise<void>(resolve => writer!.once("close", () => resolve()));
+  assert.equal(registry.acquireHome(home), true, "same registry completes its own publication");
+  const after = leaseEvidence(root);
+  assert.deepEqual(after.filter(([path]) => !path.startsWith(`${root}/mutable-home.lock/`)),
+    before.filter(([path]) => !path.startsWith(`${root}/mutable-home.lock/`)), "no republished canonical successor or checkpoint");
+  for (const [path, hash] of before) assert.equal(new Map(after).get(path), hash, "existing proof bytes preserved; exact mirror completion is allowed");
+  assert.equal(registry.releaseHome(home), true, "retry did not add a borrowed reference");
+});
+
+test("releaseAll preserves failed tokens and unchanged evidence until the finite reader grace expires", { timeout: 120_000 }, async (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-lease-release-deadline-")));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const root = seed(home), registry = new ProviderHomeLeaseRegistry(owner);
+  registry.acquireHome(home);
+  const before = leaseEvidence(root), marker = join(home, "reader-ready");
+  const reader = holdFence(join(root, "mutable-home.lock", "protocol-v4.json"), marker, false, 13);
+  t.after(() => { if (reader.exitCode === null && reader.signalCode === null) reader.kill("SIGKILL"); });
+  await fenceReady(reader, marker); const ended = new Promise<void>(resolve => reader.once("close", () => resolve()));
+  const started = performance.now(); registry.releaseAll();
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= 9_900 && elapsed < 30_000, `finite release grace: ${elapsed}`);
+  assert.deepEqual(leaseEvidence(root), before);
+  assert.equal(registry.getDiagnostics().filter(message => message.includes("release unpublished")).length, 1);
+  await ended; registry.releaseAll();
+  const next = new ProviderHomeLeaseRegistry("b".repeat(64));
+  assert.equal(next.acquireHome(home), true); assert.equal(next.releaseHome(home), true);
+});
 
 test("native POSIX and Windows checkpoints recover actual killed-parent publication boundaries", { timeout: 600_000 }, async (t) => {
   const boundaries = process.platform === "win32" ? [...commonBoundaries, "retirement-moved", "retirement-flushed"] : commonBoundaries;
@@ -59,7 +148,11 @@ test("native POSIX and Windows checkpoints recover actual killed-parent publicat
       readdirSync(directory).filter((name) => name !== "mutable-home.lock").map((name) =>
         [directory, name, createHash("sha256").update(readFileSync(join(directory, name))).digest("hex")]));
     const before = evidence();
-    assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /already in use/, `${boundary}: live writer/fence`);
+    // Before the permanent guard is published Windows denies a reader sharing the writer's
+    // open staging file. Refusal still preserves every byte and grants no HOME authority.
+    const liveRefusal = process.platform === "win32" && ["guard-temp-written", "guard-file-durable"].includes(boundary)
+      ? /already in use|cannot be verified/ : /already in use/;
+    assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), liveRefusal, `${boundary}: live writer/fence`);
     assert.deepEqual(evidence(), before, `${boundary}: contender changed live writer evidence`);
     const ended = new Promise<void>((resolve) => child.once("close", () => resolve()));
     child.kill("SIGKILL"); await ended;

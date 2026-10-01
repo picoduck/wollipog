@@ -49,7 +49,7 @@ jobs:
         run: node --import tsx --test apps/runner/src/execution-isolation.test.ts apps/runner/src/runner-data-dir.test.ts apps/runner/src/spawn.test.ts
 
       - name: Verify Native Provider-HOME Lease Protocol
-        run: node --import tsx --test apps/runner/src/provider-home-lease.test.ts apps/runner/src/provider-home-lease-portable.test.ts
+        run: node --import tsx --test apps/runner/src/provider-home-lease.test.ts apps/runner/src/provider-home-lease-portable.test.ts apps/runner/src/provider-home-lease-io.test.ts
 
       # The managed-worktree read-only rule and the hook-state mask (#1336) are only meaningful
       # against a real kernel mount, so this job installs bubblewrap and runs the enforcement tests

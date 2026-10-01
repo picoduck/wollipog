@@ -15,11 +15,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, hostname as systemHostname } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import type { SpawnIsolation } from "./spawn.js";
-import { readLeaseIoSnapshot, applyLeaseIoPlan, LeaseIoError, type LeaseIoSnapshot, type LeaseIoEntry, type LeaseIoJob } from "./provider-home-lease-io.js";
+import { readLeaseIoSnapshot, applyLeaseIoPlan, ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError, type LeaseIoSnapshot, type LeaseIoEntry, type LeaseIoJob } from "./provider-home-lease-io.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS, type LeaseCheckpointProof, type LeaseRetirementEntry } from "./provider-home-lease-checkpoint.js";
 
 const OWNER_HASH = /^[a-f0-9]{64}$/u;
@@ -118,17 +118,19 @@ interface FailedInitialization {
 }
 
 export interface ProviderHomeLeaseOptions {
+  helperDataDir?: string;
   pid?: number;
   hostname?: string;
   isProcessAlive?: (pid: number) => boolean;
   beforeMarkerWriteForTest?: () => void;
   beforeTransitionPublishForTest?: () => void;
+  afterTransitionPublishForTest?: () => void;
   afterInitializationPublishForTest?: () => void;
   beforeInitializationMirrorForTest?: (mirror: string) => void;
   nativeCheckpointBarrierForTest?: { boundary: string; marker: string };
   onCheckpointFailureForTest?: (error: unknown) => void;
   disableCompactionForTest?: boolean;
-  onDiagnostic?: (diagnostic: { event: "provider_home_checkpoint_unavailable"; leaseId: string; message: string }) => void;
+  onDiagnostic?: (diagnostic: { event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished"; leaseId: string; message: string }) => void;
 }
 
 function boundedEntries(path: string): string[] {
@@ -272,7 +274,9 @@ function refusal(lockDir: string, reason: string): Error {
 function verificationRefusal(lockDir: string, error: unknown): Error {
   // Preserve the complete remedy once, and never put malformed record contents from a parser's
   // exception into operator-visible output.
-  return refusal(lockDir, error instanceof ProviderHomeLeaseRefusal ? error.reason : error instanceof LeaseIoError && error.kind === "busy" ? "is already in use: checkpoint publication is in progress; retry" : "cannot be verified: metadata is unsafe or unreadable");
+  if (error instanceof LeaseIoError && error.kind === "busy") return new LeaseIoError("busy", `provider home lease directory ${lockDir} is already in use: checkpoint publication is in progress; preserve evidence and retry`);
+  if (error instanceof LeaseIoError && error.kind === "unavailable") return error;
+  return refusal(lockDir, error instanceof ProviderHomeLeaseRefusal ? error.reason : "cannot be verified: metadata is unsafe or unreadable");
 }
 
 function recordsHash(records: Array<{ name: string; hash: string }>): string {
@@ -337,6 +341,11 @@ function verifyCheckpoint(anchor: ReadLeaseRecord, lockDir: string): LeaseRetire
       entry.name === `next-${tip.previousLeaseId}.json` && entry.hash === proof.previousTipHash)) throw unexpectedEntries(lockDir);
   if (checkpointHistory(proof) !== proof.historyHash) throw unexpectedEntries(lockDir);
   return proof.retired;
+}
+
+/** Isolate proof validation in tests from later chain and filesystem refusal checks. */
+export function verifyLeaseCheckpointForTest(raw: string): void {
+  verifyCheckpoint({ record: JSON.parse(raw) as ProviderHomeLeaseRecord, raw, hash: hashText(raw) }, "test checkpoint");
 }
 
 function verifyRetired(root: string, lockDir: string, retired: LeaseRetirementEntry[]): Set<string> {
@@ -534,13 +543,13 @@ function sameAcquiredTip(tip: ReadLeaseRecord, acquiredHash: string): boolean {
  */
 function publishRecord(root: string, target: string, record: ProviderHomeLeaseRecordV2 | (Omit<ProviderHomeLeaseRecordV2, "version"> & { version: 4; protocol: string }), boundary?: (stage: string) => void): void {
   if (dirname(target) === root && basename(target).startsWith("next-") && lstatExists(join(root, "mutable-home.lock", FORMAT_GUARD))) {
-    withVerificationBudget(() => {
+    withLeaseIoOptions({ fenceWaitMs: 10000 }, () => withVerificationBudget(() => {
       const snapshot = capture(root);
       const chain = withSnapshot(snapshot, () => readChainAt(join(root, "mutable-home.lock"), root));
       if (record.version !== 2 || record.previousLeaseId !== chain.tip.record.leaseId || record.previousRecordHash !== chain.tip.hash) throw new Error("provider home lease changed during recovery; retry");
       const work = applyLeaseIoPlan(ioPlan(snapshot, chain.tip, [{ name: `next-${chain.tip.record.leaseId}.json`, raw: Buffer.from(`${JSON.stringify(record)}\n`), copiesOwner: false, retire: [] }]), 2, remainingBudget());
       spendVerificationWork(work.records, work.bytes);
-    });
+    }));
     return;
   }
 
@@ -613,6 +622,9 @@ export class ProviderHomeLeaseRegistry {
   private readonly nativeCheckpointBarrierForTest?: ProviderHomeLeaseOptions["nativeCheckpointBarrierForTest"];
   private readonly onCheckpointFailureForTest?: ProviderHomeLeaseOptions["onCheckpointFailureForTest"];
   private readonly pendingMigrations = new Set<string>();
+  private readonly pendingCompletions = new Map<string, ProviderHomeLeaseRecordV2>();
+  private readonly helperDataDir?: string;
+  private readonly afterTransitionPublishForTest?: () => void;
   private readonly disableCompactionForTest: boolean;
   private readonly diagnostics: string[] = [];
   private readonly onDiagnostic?: ProviderHomeLeaseOptions["onDiagnostic"];
@@ -630,6 +642,8 @@ export class ProviderHomeLeaseRegistry {
     this.onCheckpointFailureForTest = options.onCheckpointFailureForTest;
     this.disableCompactionForTest = options.disableCompactionForTest ?? false;
     this.onDiagnostic = options.onDiagnostic;
+    this.helperDataDir = options.helperDataDir;
+    this.afterTransitionPublishForTest = options.afterTransitionPublishForTest;
   }
 
   getDiagnostics(): readonly string[] { return this.diagnostics; }
@@ -655,6 +669,15 @@ export class ProviderHomeLeaseRegistry {
 
   /** Acquire the whole mutable HOME for a non-launch mutation such as managed skill links. */
   acquireHome(requestedHome: string, provider = "skills"): boolean {
+    let providerHome = resolve(requestedHome);
+    try { providerHome = realpathSync(requestedHome); } catch { /* A fresh HOME must not be created before probing. */ }
+    return withLeaseIoOptions({ helperDataDir: this.helperDataDir, providerHome }, () => {
+      ensureLeaseIoAvailable();
+      return this.acquireHomeAvailable(requestedHome, provider);
+    });
+  }
+
+  private acquireHomeAvailable(requestedHome: string, provider: string): boolean {
     if (!PROVIDER_KEY.test(provider)) throw new Error("provider home lease key is invalid");
     if (!isAbsolute(requestedHome)) throw new Error("provider HOME must be absolute");
     let home: string;
@@ -674,6 +697,8 @@ export class ProviderHomeLeaseRegistry {
     const key = home;
     const borrowed = this.held.get(key);
     if (borrowed) {
+      const pending = this.pendingCompletions.get(key);
+      if (pending) return withLeaseIoOptions({ fenceWaitMs: 10000 }, () => this.finishAcquisition(key, root, lockDir, pending));
       if (this.pendingMigrations.has(key)) {
         if (!this.compactHeld(borrowed.root, borrowed.lockDir, borrowed.leaseId)) throw refusal(borrowed.lockDir, "requires successful bounded catch-up before this HOME can be granted");
         this.pendingMigrations.delete(key);
@@ -742,30 +767,43 @@ export class ProviderHomeLeaseRegistry {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         }
         delete record.recoveredEntriesHash;
-        this.transitionExistingLease(root, lockDir, record);
+        this.transitionExistingLease(key, root, lockDir, record);
       }
     } else {
-      this.transitionExistingLease(root, lockDir, record);
+      this.transitionExistingLease(key, root, lockDir, record);
     }
+    this.rememberAcquisition(key, root, lockDir, record);
+    return withLeaseIoOptions({ fenceWaitMs: 10000 }, () => this.finishAcquisition(key, root, lockDir, record));
+  }
+
+  private rememberAcquisition(key: string, root: string, lockDir: string, record: ProviderHomeLeaseRecordV2): void {
+    this.held.set(key, { leaseId: record.leaseId, acquiredHash: createHash("sha256").update(`${JSON.stringify(record)}\n`).digest("hex"), lockDir, root, references: 1 });
+    this.pendingCompletions.set(key, record);
+  }
+
+  private finishAcquisition(key: string, root: string, lockDir: string, record: ProviderHomeLeaseRecordV2): boolean {
+    const held = this.held.get(key);
+    if (!held || !sameAcquiredTip(readChain(lockDir).tip, held.acquiredHash)) throw unexpectedEntries(lockDir);
+    if (record.previousLeaseId) this.mirrorRecord(root, lockDir, `next-${record.previousLeaseId}.json`);
     // This fixed incompatible marker prevents a rollback binary from ignoring the external
     // journal even when crash recovery recreated an empty directory.
     if (readChain(lockDir).anchor?.record.version === 2) {
       this.mirrorRecord(root, lockDir, RECOVERY_MARKER, "checkpoint.json", true);
       readChain(lockDir);
     }
-    this.held.set(key, { leaseId: record.leaseId, acquiredHash: createHash("sha256").update(`${JSON.stringify(record)}\n`).digest("hex"), lockDir, root, references: 1 });
     const migrationRequired = (() => { const chain = readChain(lockDir); return chain.external && chain.transitions >= LIMITS.hardTransitions - 1; })();
     if (migrationRequired) this.pendingMigrations.add(key);
     const compacted = this.compactHeld(root, lockDir, record.leaseId);
     if (migrationRequired && !compacted) throw refusal(lockDir, "requires successful bounded catch-up before this HOME can be granted; preserve the acquired reservation and retry with this registry");
     this.pendingMigrations.delete(key);
     try {
-      const confirmed = readChain(lockDir).tip.record;
-      if (confirmed.version === 1 || confirmed.state !== "active" || confirmed.leaseId !== record.leaseId) throw unexpectedEntries(lockDir);
+      const confirmed = readChain(lockDir).tip;
+      if (confirmed.record.version === 1 || confirmed.record.state !== "active" || confirmed.record.leaseId !== record.leaseId ||
+          !sameAcquiredTip(confirmed, held.acquiredHash)) throw unexpectedEntries(lockDir);
     } catch (error) {
-      this.held.delete(key);
       throw verificationRefusal(lockDir, error);
     }
+    this.pendingCompletions.delete(key);
     return true;
   }
 
@@ -832,7 +870,7 @@ export class ProviderHomeLeaseRegistry {
     };
   }
 
-  private transitionExistingLease(root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {
+  private transitionExistingLease(key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {
     let chain: LeaseChain;
     try {
       chain = readChain(lockDir);
@@ -841,7 +879,7 @@ export class ProviderHomeLeaseRegistry {
       // evidence must never trigger another recovery that could erase an ownership boundary.
       try { lstatSync(join(root, RECOVERY_MARKER)); } catch (markerError) {
         if ((markerError as NodeJS.ErrnoException).code === "ENOENT") {
-          this.recoverPartialJournal(root, lockDir, replacement);
+          this.recoverPartialJournal(key, root, lockDir, replacement);
           return;
         }
       }
@@ -875,12 +913,8 @@ export class ProviderHomeLeaseRegistry {
       }
       throw error;
     }
-    if (chain.external) this.mirrorRecord(root, lockDir, name);
-    const published = readChain(lockDir).tip;
-    if (published.record.version !== 2 || published.record.state !== "active" ||
-        published.record.leaseId !== replacement.leaseId) {
-      throw new Error("provider home lease changed during recovery; retry");
-    }
+    this.rememberAcquisition(key, root, lockDir, replacement);
+    this.afterTransitionPublishForTest?.();
   }
 
   private assertAbandoned(record: ProviderHomeLeaseRecord, lockDir: string): void {
@@ -889,7 +923,7 @@ export class ProviderHomeLeaseRegistry {
     if (record.ownerHash !== this.ownerHash) throw refusal(lockDir, "has a stale lease from another attested owner");
   }
 
-  private recoverPartialJournal(root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {
+  private recoverPartialJournal(key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {
     const snapshot = () => {
       const stat = lstatSync(lockDir);
       if (!stat.isDirectory() || stat.isSymbolicLink()) throw unexpectedEntries(lockDir);
@@ -942,11 +976,8 @@ export class ProviderHomeLeaseRegistry {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("provider home lease changed during recovery; retry");
       throw error;
     }
-    this.mirrorRecord(root, lockDir, RECOVERY_MARKER, "checkpoint.json");
-    const published = readChain(lockDir).tip;
-    if (!sameTip(published, readRecord(join(root, RECOVERY_MARKER)))) {
-      throw new Error("provider home lease changed during recovery; retry");
-    }
+    this.rememberAcquisition(key, root, lockDir, replacement);
+    this.afterTransitionPublishForTest?.();
   }
 
   private mirrorRecord(root: string, lockDir: string, name: string, mirror = name, required = false): void {
@@ -1088,13 +1119,21 @@ export class ProviderHomeLeaseRegistry {
   }
 
   releaseAll(): void {
-    for (const held of this.held.values()) this.releaseHeld(held);
-    this.held.clear();
-    this.pendingMigrations.clear();
+    withLeaseIoOptions({ helperDataDir: this.helperDataDir, fenceWaitMs: 10000 }, () => {
+      for (const [home, held] of this.held) {
+        if (!withLeaseIoOptions({ providerHome: home }, () => this.releaseHeld(held))) continue;
+        this.held.delete(home); this.pendingMigrations.delete(home); this.pendingCompletions.delete(home);
+      }
+    });
   }
 
   /** Release one exact home after its supervised process tree is reaped. */
   releaseHome(requestedHome: string): boolean {
+    let providerHome = resolve(requestedHome); try { providerHome = realpathSync(requestedHome); } catch { /* release fails closed below */ }
+    return withLeaseIoOptions({ helperDataDir: this.helperDataDir, fenceWaitMs: 10000, providerHome }, () => this.releaseHomeAvailable(requestedHome));
+  }
+
+  private releaseHomeAvailable(requestedHome: string): boolean {
     let home: string;
     try {
       home = realpathSync(requestedHome);
@@ -1109,6 +1148,7 @@ export class ProviderHomeLeaseRegistry {
     }
     if (!this.releaseHeld(held)) return false;
     this.held.delete(home);
+    this.pendingMigrations.delete(home); this.pendingCompletions.delete(home);
     return true;
   }
 
@@ -1118,7 +1158,7 @@ export class ProviderHomeLeaseRegistry {
       const chain = readChain(lockDir);
       const current = chain.tip;
       if (current.record.version === 1 || current.record.state !== "active" ||
-          current.record.leaseId !== leaseId || !sameAcquiredTip(current, acquiredHash)) return false;
+          current.record.leaseId !== leaseId || !sameAcquiredTip(current, acquiredHash)) throw unexpectedEntries(lockDir);
       const released: ProviderHomeLeaseRecordV2 = {
         ...current.record,
         version: 2,
@@ -1137,6 +1177,10 @@ export class ProviderHomeLeaseRegistry {
       return true;
     } catch {
       // Never remove or supersede unreadable or replacement ownership evidence.
+      const message = "Provider-home lease release unpublished; preserve the exact acquired reservation and retry release after fence contention or helper availability recovers. Do not grant this HOME to another owner until an exact verified release succeeds.";
+      if (!this.diagnostics.includes(message) && this.diagnostics.length < 16) {
+        this.diagnostics.push(message); this.onDiagnostic?.({ event: "provider_home_release_unpublished", leaseId, message });
+      }
       return false;
     }
   }

@@ -851,7 +851,19 @@ test("a long journal remains valid and never empties across repeated orderly han
   t.after(() => rmSync(home, { recursive: true, force: true }));
   for (let pass = 0; pass < 64; pass++) {
     const registry = new ProviderHomeLeaseRegistry(pass % 2 === 0 ? OWNER_A : OWNER_B);
-    registry.acquire(request(home)); registry.releaseAll();
+    try { registry.acquire(request(home)); registry.releaseAll(); }
+    catch (error) {
+      // Fixture records contain no provider credentials. Keep physical retirement witnesses
+      // visible on actual-platform failures instead of losing them in the public remedy.
+      const { root, lock } = leasePaths(home);
+      t.diagnostic(`failed handoff ${pass}: ${String(error)}`);
+      for (const directory of [root, lock]) for (const name of readdirSync(directory)) {
+        if (name === "mutable-home.lock") continue;
+        const raw = readFileSync(join(directory, name), "utf8");
+        t.diagnostic(`${directory === root ? "root" : "lock"}/${name}: ${raw}`);
+      }
+      throw error;
+    }
     assert.ok(readdirSync(leasePaths(home).lock).length > 0);
     assert.deepEqual(registry.getDiagnostics(), []);
   }

@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { windowsLeaseIoCommand } from "./provider-home-lease-windows-io.js";
@@ -16,7 +16,28 @@ const IPC_BYTES = 64 * 1024 * 1024;
 const RECORD_BYTES = 2 * 1024 * 1024;
 const NAME = /^[a-z0-9._-]{1,255}$/u;
 const DECIMAL = /^(?:0|[1-9][0-9]{0,19})$/u;
-let executable: { path: string; digest: string } | undefined;
+let executable: { path: string; digest: string; dev: bigint; ino: bigint } | undefined;
+let ioOptions: { helperDataDir?: string; fenceWaitMs?: number; providerHome?: string } = {};
+export function withLeaseIoOptions<T>(options: typeof ioOptions, action: () => T): T {
+  const previous = ioOptions; ioOptions = { ...previous, ...options };
+  try { return action(); } finally { ioOptions = previous; }
+}
+const HELPER_UNAVAILABLE = "provider-HOME lease helper unavailable; restore the packaged fixed helper and an executable temporary or configured runner data directory; preserve all lease evidence and retry";
+function insideProviderHome(path: string): boolean {
+  if (!ioOptions.providerHome) return false;
+  const name = relative(ioOptions.providerHome, path);
+  return name === "" || (!isAbsolute(name) && name !== ".." && !name.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`));
+}
+function stagingRoots(): string[] {
+  return [...new Set([tmpdir(), ...(ioOptions.helperDataDir ? [ioOptions.helperDataDir] : [])].flatMap(root => {
+    try {
+      const stat = lstatSync(root);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return [];
+      const canonical = realpathSync(root);
+      return insideProviderHome(canonical) ? [] : [canonical];
+    } catch { return []; }
+  }))];
+}
 
 export interface LeaseIoIdentity { device: string; inode: string }
 export interface LeaseIoEntry extends LeaseIoIdentity {
@@ -58,30 +79,72 @@ function digest(bytes: Uint8Array): string { return createHash("sha256").update(
 /** Every build ships these exact bytes. Source checkouts compile into a private per-process
  * directory; no installation/account state or persistent permission is modified. */
 function nativeExecutable(): string {
-  if (executable && existsSync(executable.path) && digest(readFileSync(executable.path)) === executable.digest) return executable.path;
-  executable = undefined;
-  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-home-lease-io-"));
-  chmodSync(root, 0o700);
-  const path = join(root, "lease-io");
-  if (isSea()) {
-    let bytes: Uint8Array;
-    try { bytes = new Uint8Array(getAsset(ASSET)); } catch { throw new Error("the packaged provider-HOME lease helper is unavailable"); }
-    writeFileSync(path, bytes, { flag: "wx", mode: 0o700 });
-  } else {
-    const source = fileURLToPath(new URL("../native/provider-home-lease-io.c", import.meta.url ?? pathToFileURL(__filename).href));
-    const compiler = process.platform === "darwin" ? "/usr/bin/clang" : "/usr/bin/cc";
-    const args = ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", ...(process.platform === "linux" ? ["-static"] : []), source, "-o", path];
-    const compiled = spawnSync(compiler, args, { encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 });
-    if (compiled.error || compiled.status !== 0) {
-      rmSync(root, { recursive: true, force: true });
-      throw new Error("the fixed provider-HOME lease helper could not be compiled", {
-        cause: new Error((compiled.stderr ?? "").slice(0, 2_048)),
-      });
-    }
-    chmodSync(path, 0o700);
+  if (executable && existsSync(executable.path)) {
+    if (insideProviderHome(executable.path)) throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE);
+    const file = lstatSync(executable.path, { bigint: true });
+    if (file.isFile() && !file.isSymbolicLink() && file.dev === executable.dev && file.ino === executable.ino && file.nlink === 1n && digest(readFileSync(executable.path)) === executable.digest) return executable.path;
+    throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE);
   }
-  executable = { path, digest: digest(readFileSync(path)) };
-  return path;
+  executable = undefined;
+  const roots = stagingRoots();
+  for (const parent of roots) {
+    let cleanup: (() => void) | undefined;
+    try {
+      if (!isAbsolute(parent)) continue;
+      const parentStat = lstatSync(parent);
+      if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) continue;
+      const root = mkdtempSync(join(parent, "wollipog-provider-home-lease-io-"));
+      chmodSync(root, 0o700);
+      const rootStat = lstatSync(root, { bigint: true }); const path = join(root, "lease-io");
+      let fileIdentity: { dev: bigint; ino: bigint } | undefined;
+      cleanup = () => {
+        try {
+          const current = lstatSync(root, { bigint: true });
+          if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== rootStat.dev || current.ino !== rootStat.ino) return;
+          if (fileIdentity) {
+            const file = lstatSync(path, { bigint: true });
+            if (!file.isFile() || file.isSymbolicLink() || file.dev !== fileIdentity.dev || file.ino !== fileIdentity.ino) return;
+            unlinkSync(path);
+          }
+          rmdirSync(root);
+        } catch { /* Keep unproven or unexpected evidence; never recursively clean a shared root. */ }
+      };
+      if (isSea()) {
+        let bytes: Uint8Array;
+        try { bytes = new Uint8Array(getAsset(ASSET)); } catch { throw new Error("the packaged provider-HOME lease helper is unavailable"); }
+        writeFileSync(path, bytes, { flag: "wx", mode: 0o700 });
+      } else {
+        const source = fileURLToPath(new URL("../native/provider-home-lease-io.c", import.meta.url ?? pathToFileURL(__filename).href));
+        const compiler = process.platform === "darwin" ? "/usr/bin/clang" : "/usr/bin/cc";
+        const args = ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", ...(process.platform === "linux" ? ["-static"] : []), source, "-o", path];
+        const compiled = spawnSync(compiler, args, { encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 });
+        if (existsSync(path)) { const created = lstatSync(path, { bigint: true }); if (created.isFile() && !created.isSymbolicLink()) fileIdentity = { dev: created.dev, ino: created.ino }; }
+        if (compiled.error || compiled.status !== 0) {
+          throw new Error("the fixed provider-HOME lease helper could not be compiled", {
+            cause: new Error((compiled.stderr ?? "").slice(0, 2_048)),
+          });
+        }
+        chmodSync(path, 0o700);
+      }
+      const file = lstatSync(path, { bigint: true });
+      if (!file.isFile() || file.isSymbolicLink() || file.nlink !== 1n || file.uid !== BigInt(process.getuid!()) || (file.mode & 0o077n)) throw new Error("unsafe helper staging file");
+      fileIdentity = { dev: file.dev, ino: file.ino };
+      const hash = digest(readFileSync(path));
+      const probe = spawnSync(path, ["--probe"], { timeout: 10_000, maxBuffer: 1024, env: {} });
+      const verified = lstatSync(path, { bigint: true });
+      if (probe.error || probe.status !== 0 || !verified.isFile() || verified.isSymbolicLink() || verified.dev !== file.dev || verified.ino !== file.ino || digest(readFileSync(path)) !== hash) throw new Error("helper execution probe failed");
+      executable = { path, digest: hash, dev: file.dev, ino: file.ino };
+      process.once("exit", cleanup);
+      return path;
+    } catch { cleanup?.(); }
+  }
+  throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE);
+}
+
+/** Prove availability before creating any HOME lease publication. */
+export function ensureLeaseIoAvailable(): void {
+  try { if (process.platform === "win32") windowsLeaseIoCommand(stagingRoots()); else nativeExecutable(); }
+  catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
 }
 
 class Writer {
@@ -122,15 +185,17 @@ class Reader {
 
 function header(operation: number, root: string, budget: LeaseIoWork): Writer {
   if (!Number.isSafeInteger(budget.records) || !Number.isSafeInteger(budget.bytes) || budget.records < 0 || budget.bytes < 0 || budget.records > DEFAULT_BUDGET.records || budget.bytes > DEFAULT_BUDGET.bytes) throw new Error("invalid remaining lease work budget");
-  const writer = new Writer(); writer.bytes(Buffer.from("WPLL4")); writer.u8(operation); writer.u32(process.pid); writer.u32(budget.records); writer.u64(budget.bytes); writer.text(root); return writer;
+  const writer = new Writer(); writer.bytes(Buffer.from("WPLL4")); writer.u8(operation); writer.u32(process.pid); writer.u32(budget.records); writer.u64(budget.bytes); writer.u32(ioOptions.fenceWaitMs ?? 0); writer.text(root); return writer;
 }
 export class LeaseIoError extends Error {
-  constructor(readonly kind: "busy" | "refusal", message: string) { super(message); }
+  constructor(readonly kind: "busy" | "refusal" | "unavailable", message: string) { super(message); }
 }
 function run(input: Buffer): Reader {
-  const command = process.platform === "win32" ? windowsLeaseIoCommand() : { command: nativeExecutable(), args: [] };
+  let command: { command: string; args: string[] };
+  try { command = process.platform === "win32" ? windowsLeaseIoCommand(stagingRoots()) : { command: nativeExecutable(), args: [] }; }
+  catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
   const result = spawnSync(command.command, command.args, { input, timeout: 120_000, killSignal: "SIGKILL", maxBuffer: IPC_BYTES, windowsHide: true });
-  if (result.error) throw new LeaseIoError("refusal", "provider-HOME lease I/O helper unavailable or timed out; preserve all evidence");
+  if (result.error) throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE);
   const reader = new Reader(result.stdout ?? Buffer.alloc(0));
   const tag = reader.u8();
   if (tag === 69) { const code = reader.u8(); const message = reader.text(512); reader.end(); throw new LeaseIoError(code === 2 ? "busy" : "refusal", message); }

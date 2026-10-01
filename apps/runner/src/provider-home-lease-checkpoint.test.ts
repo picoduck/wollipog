@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import fc from "fast-check";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { ProviderHomeLeaseRegistry, observeLeaseVerificationWorkForTest } from "./provider-home-lease.js";
+import { ProviderHomeLeaseRegistry, observeLeaseVerificationWorkForTest, verifyLeaseCheckpointForTest } from "./provider-home-lease.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS } from "./provider-home-lease-checkpoint.js";
 import { observeLeaseIoWorkForTest, readLeaseIoSnapshot } from "./provider-home-lease-io.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
@@ -42,6 +42,67 @@ function nativePass(home: string, options: ConstructorParameters<typeof Provider
 function seed(home: string, passes = 8) {
   for (let i = 0; i < passes; i++) nativePass(home);
 }
+
+test("Python orderly release waits for a real reader and transfers authority after the owner exits", { skip: process.platform !== "linux", timeout: 60_000 }, async (t) => {
+  const home = fixture(t); seed(home);
+  const marker = join(home, "helper-ready"), go = join(home, "release-go"), readerMarker = join(home, "reader-ready");
+  const code = `home_fd,_=open_root(os.environ["HOME"])\nlease=acquire_lease(home_fd,"${owner}")\nopen(${JSON.stringify(marker)},"w").write("ready")\nwhile not os.path.exists(${JSON.stringify(go)}): time.sleep(0.01)\nrelease_lease(lease)\nos.close(home_fd)\nprint("released")`;
+  const origin = spawn("python3", ["-c", program(code)], { env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => { if (origin.exitCode === null && origin.signalCode === null) origin.kill("SIGKILL"); });
+  let output = ""; origin.stdout.on("data", b => { output += b; }); origin.stderr.on("data", b => { output += b; });
+  const exited = new Promise<number | null>(resolve => origin.once("close", code => resolve(code)));
+  await ready(origin, marker, () => output);
+  const guard = join(paths(home).lock, "protocol-v4.json");
+  const reader = spawn("python3", ["-c", `import fcntl,time;f=open(${JSON.stringify(guard)},'rb');fcntl.flock(f,fcntl.LOCK_SH);open(${JSON.stringify(readerMarker)},'w').write('ready');time.sleep(2)`]);
+  t.after(() => { if (reader.exitCode === null && reader.signalCode === null) reader.kill("SIGKILL"); });
+  await ready(reader, readerMarker, () => "reader"); fs.writeFileSync(go, "go");
+  assert.equal(await exited, 0, output); assert.match(output, /released/);
+  const next = new ProviderHomeLeaseRegistry("b".repeat(64));
+  assert.equal(next.acquireHome(home), true); assert.equal(next.releaseHome(home), true);
+});
+
+test("Python retains a private pending completion across an actual exclusive-fence deadline", { skip: process.platform !== "linux", timeout: 60_000 }, (t) => {
+  const home = fixture(t); seed(home, 9);
+  const code = `import subprocess
+original_publish=publish_lease
+holder=None
+def interrupted_publish(root, lock, target, value):
+    global holder
+    original_publish(root, lock, target, value)
+    if value.get("state")=="active" and target.startswith("next-"):
+        marker=os.path.join(os.environ["HOME"],"fence-ready")
+        guard=os.path.join(fd_path(root),"mutable-home.lock",FORMAT_GUARD)
+        source="import fcntl,time;f=open(%r,'rb');fcntl.flock(f,fcntl.LOCK_EX);open(%r,'w').write('ready');time.sleep(13)" % (guard,marker)
+        holder=subprocess.Popen([sys.executable,"-c",source])
+        deadline=time.monotonic()+5
+        while not os.path.exists(marker):
+            assert holder.poll() is None and time.monotonic()<deadline, "test fence did not become ready"
+            time.sleep(0.01)
+publish_lease=interrupted_publish
+home_fd,_=open_root(os.environ["HOME"])
+started=time.monotonic()
+try: acquire_lease(home_fd,"${owner}"); raise AssertionError("HOME granted during deadline")
+except RuntimeError as error:
+    assert "publication is in progress" in str(error) and "quarantine" not in str(error), str(error)
+assert 9.9 <= time.monotonic()-started < 20
+assert len(helper_pending_completions)==1 and len(helper_acquired_proofs)==1
+root=next(iter(helper_pending_completions))
+def canonical():
+    return {name:hashlib.sha256(open(os.path.join(fd_path(root),name),"rb").read()).hexdigest() for name in os.listdir(root) if name!="mutable-home.lock"}
+before=canonical()
+holder.wait(timeout=10)
+publish_lease=original_publish
+lease=acquire_lease(home_fd,"${owner}")
+assert lease[0]==root and not helper_pending_completions and canonical()==before
+release_lease(lease)
+assert not helper_acquired_proofs
+os.close(home_fd)
+print("exact pending completion released")`;
+  const result = spawnSync("python3", ["-c", program(code)], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /exact pending completion released/);
+  const next = new ProviderHomeLeaseRegistry("b".repeat(64));
+  assert.equal(next.acquireHome(home), true); assert.equal(next.releaseHome(home), true);
+});
 function program(code: string, helper = WSL_SKILLS_HELPER): string {
   const boundary = helper.lastIndexOf("\ntry:\n    main(bounded_json())");
   assert.ok(boundary > 0);
@@ -295,10 +356,28 @@ test("checkpoint proof rejects arbitrary traversal manifests in both readers wit
   const home = fixture(t);
   seed(home, 9);
   const anchor = fs.readFileSync(paths(home).anchor, "utf8");
+  verifyLeaseCheckpointForTest(anchor);
   fc.assert(fc.property(fc.string({ maxLength: 128 }), (segment) => {
     const value = JSON.parse(anchor);
-    value.checkpoint.retired[0].name = `../${segment}`;
-    fs.writeFileSync(paths(home).anchor, `${JSON.stringify(value)}\n`);
+    const proof = value.checkpoint;
+    const tip = JSON.parse(proof.previousTip);
+    // Keep the mandatory previous-tip witness intact so only the name guard rejects this proof.
+    const entry = proof.retired.find((item: { directory: string; name: string }) =>
+      item.directory !== "root" || item.name !== `next-${tip.previousLeaseId}.json`);
+    assert.ok(entry);
+    entry.name = `../${segment}`;
+    proof.historyHash = createHash("sha256").update(JSON.stringify([
+      proof.previousHistoryHash, proof.previousAnchorHash, proof.previousTipHash, proof.guardHash,
+      proof.guardDevice, proof.guardInode, proof.migration,
+      proof.retired.map((item: { directory: string; name: string; hash: string; device: string; inode: string }) =>
+        [item.directory, item.name, item.hash, item.device, item.inode]),
+    ])).digest("hex");
+    const raw = `${JSON.stringify(value)}\n`;
+    assert.throws(() => verifyLeaseCheckpointForTest(raw), /unexpected/);
+    const helperProof = spawnSync("python3", ["-c", program(`value=json.loads(${JSON.stringify(JSON.stringify(value))})\nverify_checkpoint(value)\n`)], { encoding: "utf8", timeout: 10_000 });
+    assert.notEqual(helperProof.status, 0);
+    assert.match(helperProof.stderr, /checkpoint manifest is invalid/);
+    fs.writeFileSync(paths(home).anchor, raw);
     const before = evidence(home);
     assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /unexpected|cannot be verified/);
     assert.notEqual(helperPass(home).status, 0);
