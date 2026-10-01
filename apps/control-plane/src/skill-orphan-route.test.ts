@@ -174,6 +174,24 @@ test("an edited copy of a deleted skill carries when the library deleted it, and
   assert.equal(db.getSkillDeletedAt("retired"), 1_800_000_000_000, "deleting a missing skill records nothing");
 });
 
+test("a skill deletion record stays true when an older control plane also writes the database (#2289)", (t) => {
+  const { db, report } = setup(t);
+  const retired = payload("retired", "Library");
+  assert.equal(db.deleteSkill(db.createSkill({ name: "retired", files: retired.files, manifest: retired.manifest,
+    digest: retired.digest }).id, 1_700_000_000_000), true);
+  // An older control plane (a rollback) writes skills rows without knowing the record exists.
+  const raw = db.raw();
+  raw.prepare(`INSERT INTO skills (id, name, source, created_at, updated_at) VALUES ('skill_old', 'retired', 'library', 1, 1)`).run();
+  assert.equal(db.getSkillDeletedAt("retired"), null, "a skill an older writer creates with the name clears the record");
+  const before = Date.now();
+  raw.prepare("DELETE FROM skills WHERE id='skill_old'").run();
+  const recorded = db.getSkillDeletedAt("retired");
+  assert.ok(recorded !== null && recorded >= before - 1 && recorded <= Date.now() + 1,
+    `an older writer's deletion is recorded when it happens, never as the earlier deletion (${recorded})`);
+  report({ drift: [{ name: "retired", digest: "1".repeat(64), variant: "agent", observedDigest: "2".repeat(64), held: false }] });
+  assert.equal(listOrphanedSkillCopies(db, owner, "runner-1")[0]?.skillDeletedAt, recorded);
+});
+
 test("an older runner's kept-aside report is never stored", (t) => {
   const { db, report } = setup(t, { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift });
   report({ keptAside: [{ id: randomUUID(), name: "alpha", observedDigest: "b".repeat(64) }] });

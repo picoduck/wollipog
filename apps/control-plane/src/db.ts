@@ -2621,11 +2621,24 @@ CREATE TABLE IF NOT EXISTS skill_recommendation_dismissals (
 
 -- When the library last deleted a skill with this name, so an edited copy a machine still keeps can
 -- say when its skill was deleted (#2289). Names deleted before this table existed have no row, and a
--- skill that takes the name again clears it.
+-- skill that takes the name again clears it. Triggers keep it true when an older control plane also
+-- writes the database (a rollback): any deletion is recorded, and deleteSkill's exact time wins.
 CREATE TABLE IF NOT EXISTS skill_deletions (
   name       TEXT PRIMARY KEY,
   deleted_at INTEGER NOT NULL
 );
+CREATE TRIGGER IF NOT EXISTS skill_deletions_clear_after_insert
+AFTER INSERT ON skills
+BEGIN
+  DELETE FROM skill_deletions WHERE name = NEW.name;
+END;
+CREATE TRIGGER IF NOT EXISTS skill_deletions_record_after_delete
+AFTER DELETE ON skills
+BEGIN
+  INSERT INTO skill_deletions (name, deleted_at)
+  VALUES (OLD.name, CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+  ON CONFLICT(name) DO NOTHING;
+END;
 `;
 
 /**
@@ -7631,7 +7644,6 @@ export class ControlPlaneDb {
         `INSERT INTO skills (id, name, description, group_id, source, latest_version_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'library', ?, ?, ?)`,
       ).run(skillId, input.name, input.description ?? null, input.groupId ?? null, versionId, now, now);
-      this.stmt("DELETE FROM skill_deletions WHERE name=?").run(input.name);
       this.stmt(
         `INSERT INTO skill_versions (id, skill_id, digest, manifest, files, note, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
