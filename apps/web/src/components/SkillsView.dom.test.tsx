@@ -2297,6 +2297,78 @@ test("with nothing to review, Needs Attention is one line after a green dot, and
   }
 });
 
+test("a manual-only skip, a conflict and an unsupported agent show in the list, Needs Attention and Deployment alike (#2282)", async () => {
+  const agents = [
+    { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true },
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" as const, available: true },
+  ];
+  const studio = { ...runner, displayName: "Studio Workstation", agents, providerAccounts: [] };
+  const skills = ["conflicted", "fine", "manual", "unsupported"].map((name, index) =>
+    ({ id: `s-${name}`, name, description: `The ${name} skill`, latestVersion: versionAt(daysAgo(index + 1)) }));
+  const told = (name: string, invocation: "agent" | "manual") => ({ name, versionDigest: "d1",
+    targets: [{ agentId: "claude", invocation }, { agentId: "codex", invocation }] });
+  const deployed = (name: string, codex?: { status: "conflict" | "unsupported"; detail: string }) => ({ name, digest: "d1", links: [
+    { agentId: "claude", status: "linked" as const }, ...(codex ? [{ agentId: "codex", ...codex }] : [{ agentId: "codex", status: "linked" as const }]),
+  ] });
+  const machine: RunnerSkillsResponse = {
+    keptAsideReporting: "supported",
+    desired: [told("conflicted", "agent"), told("fine", "agent"), told("manual", "manual"), told("unsupported", "agent")],
+    reported: {
+      deployed: [
+        deployed("conflicted", { status: "conflict", detail: "An unmanaged directory is in the way." }),
+        deployed("fine"),
+        { name: "manual", digest: "d1", links: [{ agentId: "claude", status: "linked" }] },
+        deployed("unsupported", { status: "unsupported", detail: "This agent can't load skills from a shared folder." }),
+      ],
+      updatedAt: 1,
+    },
+  };
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async (id: string) => ({ skill: skills.find((entry) => entry.id === id), latestVersion: { id: "v1", digest: "d1", files: [] } }),
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => machine,
+  } as unknown as ApiClient;
+  const expected = [
+    ["conflicted", "Error", "Codex on Studio Workstation: An unmanaged directory is in the way."],
+    ["manual", "Error", "Codex on Studio Workstation: Can't run manual-only skills."],
+    ["unsupported", "Error", "Codex on Studio Workstation: This agent can't load skills from a shared folder."],
+  ];
+  const view = await mountRouted(client, "skills-overview-deployment-status", { name: "skills" }, false, undefined, [studio]);
+  try {
+    const { container } = view;
+    const rows = () => [...overviewSection(container, "Needs Attention")!.querySelectorAll<HTMLElement>(".surface > .row")];
+    assert.deepEqual(rows().map((row) => [
+      row.querySelector(".row-title")?.textContent,
+      row.querySelector(".status")?.textContent,
+      row.querySelector(".row-sub")?.textContent,
+    ]), expected, "Needs Attention names each, with Deployment's reason");
+    const marked = [...container.querySelectorAll(".master-detail-list .skill-row")]
+      .filter((row) => row.querySelector(".skill-row-status"))
+      .map((row) => [row.querySelector(".row-title")?.textContent, row.querySelector(".skill-row-status")?.textContent]);
+    assert.deepEqual(marked, expected.map(([name, status]) => [name, status]), "the list marks the same skills, and not the healthy one");
+
+    await act(async () => rows()[0]!.querySelector("button")!.click());
+    await act(settle);
+    assert.deepEqual(view.pushed.at(-1), { name: "skills", id: "s-conflicted" }, "Review opens the skill");
+    for (const [name, , reason] of expected) {
+      const listRow = [...container.querySelectorAll<HTMLElement>(".master-detail-list-body .skill-row")]
+        .find((row) => row.querySelector(".row-title")?.textContent === name)!;
+      await act(async () => listRow.click());
+      await act(settle);
+      const codexRow = [...container.querySelectorAll<HTMLElement>(".skill-deployment-agent")]
+        .find((row) => row.querySelector(".skill-deployment-agent-name")?.textContent === "Codex")!;
+      assert.equal(codexRow.querySelector(".status")?.textContent, "Error", `${name}: Deployment shows Error`);
+      assert.equal(`Codex on Studio Workstation: ${codexRow.querySelector(".skill-deployment-reason")?.textContent}`, reason,
+        `${name}: Deployment gives the same reason`);
+    }
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("Recommended by Wollipog assigns from a menu or dismisses, and never counts as attention", async () => {
   const skills = [
     { id: "s-using", name: "using-wollipog", description: "Operate Wollipog sessions.", builtIn: { release: "0.29.0", heldUpdate: null },

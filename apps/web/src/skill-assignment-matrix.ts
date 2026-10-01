@@ -93,6 +93,32 @@ export interface SkillDeploymentError {
   detail?: string;
 }
 
+/** A machine whose Deployment rows show Error for this skill, with those rows in agent order. */
+export interface SkillMachineErrors {
+  runnerId: string;
+  rows: SkillAgentDeployment[];
+}
+
+/** Machines whose Deployment rows show Error for this skill, in the order given: a reported error,
+ * a Manual Only target the agent cannot run, a Conflict or an Unsupported link. The list's Error
+ * status and the Library Overview's reason read this, so they agree with Deployment (#2282). A
+ * machine whose report has not loaded says nothing, and an agent nothing targets that holds no link
+ * says nothing about a machine-wide error. */
+export function skillMachineErrors(
+  skillName: string,
+  runners: ReadonlyArray<RunnerView>,
+  machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
+): SkillMachineErrors[] {
+  return runners.flatMap((runner) => {
+    const state = machineSkills[runner.runnerId];
+    if (!state || state.loadError) return [];
+    const rows = runner.agents
+      .map((agent) => skillAgentDeployment(runner, agent, skillName, state))
+      .filter((row) => row.eligible && row.status === "error");
+    return rows.length ? [{ runnerId: runner.runnerId, rows }] : [];
+  });
+}
+
 /** Machines that deploy this skill and report an error for an agent that can receive it, in the
  * order given: the machines whose Deployment rows show Error for a reason the machine reported. A
  * machine whose report has not loaded says nothing. A skipped Manual Only agent is
@@ -102,20 +128,10 @@ export function skillDeploymentErrors(
   runners: ReadonlyArray<RunnerView>,
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
 ): SkillDeploymentError[] {
-  const errors: SkillDeploymentError[] = [];
-  for (const runner of runners) {
-    const state = machineSkills[runner.runnerId];
-    if (!state || state.loadError) continue;
-    // A machine-wide sync error is this skill's only on a machine that deploys it.
-    const deploys = state.desired.some((entry) => entry.name === skillName) ||
-      Boolean(state.reported?.deployed?.some((entry) => entry.name === skillName));
-    if (!deploys) continue;
-    const failed = runner.agents
-      .map((agent) => skillAgentDeployment(runner, agent, skillName, state))
-      .find((row) => row.eligible && row.status === "error" && !row.manualOnly);
-    if (failed) errors.push({ runnerId: runner.runnerId, ...(failed.reason ? { detail: failed.reason } : {}) });
-  }
-  return errors;
+  return skillMachineErrors(skillName, runners, machineSkills).flatMap(({ runnerId, rows }) => {
+    const failed = rows.find((row) => !row.manualOnly);
+    return failed ? [{ runnerId, ...(failed.reason ? { detail: failed.reason } : {}) }] : [];
+  });
 }
 
 /** One agent's row in Deployment: one status from the skill vocabulary (§11.2), and anything more

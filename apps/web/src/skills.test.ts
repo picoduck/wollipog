@@ -53,6 +53,7 @@ import {
   type RunnerSkillsResponse,
   type SkillSummary,
 } from "./skills.js";
+import { skillAgentDeployment } from "./skill-assignment-matrix.js";
 
 const skill = (overrides: Partial<SkillSummary> = {}): SkillSummary => ({
   id: "skill-1",
@@ -354,12 +355,75 @@ test("Needs Attention lists exactly the skills skillAttention() marks, most urge
     runners: [laptop], machineSkills, orphanCount: 0, machineLabel: (id) => labels[id]!,
   });
   assert.deepEqual(quiet.map((item) => item.reason), [
-    "Claude Code and Codex on Laptop reported a deployment error.",
+    "Claude Code and Codex on Laptop: Deployment didn't succeed.",
     "The update in Wollipog 0.30.0 waits for your review.",
   ]);
   assert.deepEqual(skillOverviewAttention({ skills: [skill({ name: "fine" })], runners: [studio], machineSkills, orphanCount: 0, machineLabel: String }), []);
   assert.equal(skillOverviewAttention({ skills: [], runners: [], machineSkills: {}, orphanCount: 1, machineLabel: String })[0]!.reason,
     "A machine keeps an edited copy that no library skill shows.");
+});
+
+test("the list and Needs Attention flag a manual-only skip, a conflict and an unsupported agent with Deployment's reason (#2282)", () => {
+  const claude = { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true };
+  const codex = { ...claude, id: "codex", name: "Codex", driver: "codex" as const };
+  const studio = { runnerId: "r1", os: "linux", status: "online", agents: [claude, codex], protocolVersion: 200 } as unknown as RunnerView;
+  const laptop = { ...studio, runnerId: "r2" } as RunnerView;
+  const labels: Record<string, string> = { r1: "Studio", r2: "Laptop" };
+  const told = (invocation: "agent" | "manual") => [{ name: "code-review", versionDigest: "d1",
+    targets: [{ agentId: "claude", invocation }, { agentId: "codex", invocation }] }];
+  type LinkStatus = "linked" | "conflict" | "unsupported" | "error";
+  const links = (claudeStatus: LinkStatus, codexStatus: LinkStatus, detail?: string) => ({ deployed: [{ name: "code-review", digest: "d1", links: [
+    { agentId: "claude", status: claudeStatus }, { agentId: "codex", status: codexStatus, ...(detail ? { detail } : {}) },
+  ] }] });
+  const overview = (machineSkills: Record<string, RunnerSkillsResponse>, runners = [studio]) =>
+    skillOverviewAttention({ skills: [skill()], runners, machineSkills, orphanCount: 0, machineLabel: (id) => labels[id]! });
+
+  const cases: Array<[string, RunnerSkillsResponse, string]> = [
+    ["a manual-only skip", { desired: told("manual"), reported: { deployed: [{ name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "linked" }] }] } },
+      "Codex on Studio: Can't run manual-only skills."],
+    ["a conflict", { desired: told("agent"), reported: links("linked", "conflict", "An unmanaged directory is in the way") },
+      "Codex on Studio: An unmanaged directory is in the way."],
+    ["a conflict without a detail", { desired: told("agent"), reported: links("linked", "conflict") },
+      "Codex on Studio: A file on this machine blocks the link."],
+    ["an unsupported agent", { desired: told("agent"), reported: links("linked", "unsupported", "The WSL distribution name is invalid.") },
+      "Codex on Studio: The WSL distribution name is invalid."],
+    ["an unsupported agent without a detail", { desired: told("agent"), reported: links("linked", "unsupported") },
+      "Codex on Studio: This agent can't load this skill."],
+  ];
+  for (const [label, state, reason] of cases) {
+    const row = skillAgentDeployment(studio, codex, "code-review", state);
+    assert.equal(row.status, "error", `${label}: Deployment shows Error`);
+    assert.equal(skillAttention(skill(), [studio], { r1: state }), "error", `${label}: the list shows Error`);
+    const items = overview({ r1: state });
+    assert.deepEqual(items.map((item) => [item.kind, item.reason]), [["error", reason]], `${label}: Needs Attention lists it`);
+    assert.ok(reason.endsWith(`: ${row.reason!.replace(/\.?$/, ".")}`), `${label}: in Deployment's words`);
+  }
+
+  // A skill with no deployment problem shows no attention anywhere; Manual Only on Claude Code alone is fine.
+  const healthy: RunnerSkillsResponse = { desired: told("agent"), reported: links("linked", "linked") };
+  const manualClaude: RunnerSkillsResponse = { desired: [{ name: "code-review", versionDigest: "d1", targets: [{ agentId: "claude", invocation: "manual" }] }],
+    reported: { deployed: [{ name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "linked" }] }] } };
+  for (const state of [healthy, manualClaude]) {
+    assert.equal(skillAgentDeployment(studio, codex, "code-review", state).status === "error", false);
+    assert.equal(skillAttention(skill(), [studio], { r1: state }), null);
+    assert.deepEqual(overview({ r1: state }), []);
+  }
+
+  // An edited copy holding its links reads Edited in Deployment, so it does in the list too.
+  const heldEdit: RunnerSkillsResponse = { desired: told("agent"),
+    reported: { ...links("conflict", "conflict"), drift: [{ name: "code-review", digest: "d1", variant: "agent", held: true }] } };
+  assert.equal(skillAgentDeployment(studio, codex, "code-review", heldEdit).status, "edited");
+  assert.equal(skillAttention(skill(), [studio], { r1: heldEdit }), "edited");
+
+  // Agents that fail for another reason, there or on other machines, are counted, not named.
+  const mixed: RunnerSkillsResponse = { desired: told("agent"), reported: links("conflict", "unsupported") };
+  assert.deepEqual(overview({ r1: mixed }).map((item) => item.reason),
+    ["Claude Code on Studio: A file on this machine blocks the link. 1 other agent there also reports errors."]);
+  assert.deepEqual(overview({ r1: mixed, r2: mixed }, [studio, laptop]).map((item) => item.reason),
+    ["Claude Code on Studio: A file on this machine blocks the link. 1 other agent there and 1 other machine also report errors."]);
+  const both: RunnerSkillsResponse = { desired: told("agent"), reported: links("conflict", "conflict") };
+  assert.deepEqual(overview({ r1: both, r2: mixed, r3: mixed }, [studio, laptop, { ...studio, runnerId: "r3" } as RunnerView]).map((item) => item.reason),
+    ["Claude Code and Codex on Studio: A file on this machine blocks the link. 2 other machines also report errors."]);
 });
 
 test("an offline machine's agents update when it reconnects", () => {

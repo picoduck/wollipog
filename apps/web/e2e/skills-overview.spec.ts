@@ -74,6 +74,48 @@ test.describe("at 1440×900", () => {
     await expect(page.locator('.master-detail-detail [aria-label="Orphaned Copies"]')).toBeVisible();
   });
 
+  test("a conflict, a manual-only skip and an unsupported agent show in the list and Needs Attention as Deployment shows them (#2282)", async ({ page }) => {
+    await page.goto(`${shell("/skills")}&skillErrors=1`);
+    await expect(page.locator("#page-title")).toBeVisible();
+    const rows = section(page, "Needs Attention").locator(".surface > .row");
+    await expect(rows.locator(".row-title")).toHaveText(
+      ["code-review", "deploy-bot", "triage-helper", "writing-tests", "release-notes", "lint-rules", "Orphaned Copies"]);
+    await expect(rows.locator(".row-line > :is(.status, .count-badge)")).toHaveText(
+      ["Error", "Error", "Error", "Error", "Edited", "Update Held", "4"]);
+    // Deployment's reason for Codex, in the machine's own words or ours; the overview ends it with a period.
+    const reasons = {
+      "code-review": "an unmanaged file or directory already exists at ~/.codex/skills/code-review",
+      "triage-helper": "Can't run manual-only skills.",
+      "writing-tests": "this agent's driver does not support managed skills",
+    };
+    const ended = (text: string) => text.endsWith(".") ? text : `${text}.`;
+    await expect(rows.locator(".row-sub")).toHaveText([
+      `Codex on Build Machine: ${ended(reasons["code-review"])}`,
+      "Codex on Build Machine: Permission denied writing ~/.codex/skills/deploy-bot.",
+      `Codex on Build Machine: ${reasons["triage-helper"]}`,
+      `Codex on Build Machine: ${ended(reasons["writing-tests"])}`,
+      "Build Machine has an edited copy of this skill.",
+      "An update to Git commit 9e2a00000000 waits for your review.",
+      "Machines keep 4 edited copies that no library skill shows.",
+    ]);
+    const listMarked = await page.locator(".master-detail-list .skill-row").evaluateAll((elements) => elements
+      .filter((row) => row.querySelector(".skill-row-status"))
+      .map((row) => `${row.querySelector(".row-title")!.textContent} ${row.querySelector(".skill-row-status")!.textContent}`)
+      .sort());
+    expect(listMarked).toEqual(["code-review Error", "deploy-bot Error", "lint-rules Update Held", "release-notes Edited",
+      "triage-helper Error", "writing-tests Error"]);
+
+    // Each Review opens the skill, whose Deployment row gives the same status and reason.
+    for (const [name, reason] of Object.entries(reasons)) {
+      await section(page, "Needs Attention").getByRole("button", { name: `Review ${name}`, exact: true }).click();
+      const codex = page.locator("table.skill-deployment tr.skill-deployment-agent")
+        .filter({ has: page.locator(".skill-deployment-agent-name", { hasText: "Codex" }) });
+      await expect(codex.locator(".status")).toHaveText("Error");
+      await expect(codex.locator(".skill-deployment-reason")).toHaveText(reason);
+      await page.goBack();
+    }
+  });
+
   test("with nothing to review the section is one line after a green dot, naming the offline machine", async ({ page }) => {
     await open(page, "/skills", "healthy");
     const attention = section(page, "Needs Attention");

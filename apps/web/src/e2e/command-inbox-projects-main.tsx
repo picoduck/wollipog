@@ -1149,8 +1149,17 @@ const SHELL_LIST_MACHINE = {
  * Git update and four orphaned copies, with a recommended built-in skill and recent versions and
  * assignment changes. `healthy` is the same library with nothing to review, all assigned, and an
  * offline second machine. Both name their machines and keep Assign and Dismiss in memory.
+ * `overview` with `skillErrors=1` (#2282) adds the Deployment errors no link reports as Error: a
+ * conflict on `code-review`, a Manual Only target Codex can't run on `triage-helper` and an
+ * unsupported link on `writing-tests`.
  */
 const SHELL_OVERVIEW = SHELL_SKILLS_MODE === "overview" || SHELL_SKILLS_MODE === "healthy";
+const SHELL_OVERVIEW_DEPLOY_ERRORS = SHELL_SKILLS_MODE === "overview" && FIXTURE_QUERY.get("skillErrors") === "1";
+const SHELL_OVERVIEW_LINKS: Record<string, { status: "conflict" | "unsupported"; detail: string } | null> = SHELL_OVERVIEW_DEPLOY_ERRORS ? {
+  "code-review": { status: "conflict", detail: "an unmanaged file or directory already exists at ~/.codex/skills/code-review" },
+  "triage-helper": null,
+  "writing-tests": { status: "unsupported", detail: "this agent's driver does not support managed skills" },
+} : {};
 const SHELL_OVERVIEW_NOW = Date.now();
 const shellAgo = (minutes: number) => SHELL_OVERVIEW_NOW - minutes * 60_000;
 const SHELL_OVERVIEW_SKILLS = [
@@ -1190,10 +1199,14 @@ const shellOverviewMachine = () => {
   const names = SHELL_OVERVIEW_SKILLS.filter((skill) => skill.assignmentCount > 0).map((skill) => skill.name);
   return {
     removalReporting: "supported" as const, driftReporting: "supported" as const, keptAsideReporting: "supported" as const,
-    desired: names.map(shellListTarget),
+    desired: names.map((name) => name === "triage-helper" && SHELL_OVERVIEW_DEPLOY_ERRORS
+      ? { ...shellListTarget(name), targets: [{ agentId: "codex", invocation: "manual" as const }] }
+      : shellListTarget(name)),
     reported: {
-      deployed: names.map((name) => ({ name, digest: "d1", links: [{ agentId: "codex",
-        ...(name === "deploy-bot" && !healthy ? { status: "error" as const, detail: "Permission denied writing ~/.codex/skills/deploy-bot" } : { status: "linked" as const }) }] })),
+      // The runner skips a Manual Only target Codex can't run, so it reports no link for it.
+      deployed: names.map((name) => ({ name, digest: "d1", links: SHELL_OVERVIEW_LINKS[name] === null ? [] : [{ agentId: "codex",
+        ...(name === "deploy-bot" && !healthy ? { status: "error" as const, detail: "Permission denied writing ~/.codex/skills/deploy-bot" }
+          : SHELL_OVERVIEW_LINKS[name] ?? { status: "linked" as const }) }] })),
       drift: healthy ? [] : [{ name: "release-notes", digest: "d1", variant: "agent" as const, observedDigest: "e1".padEnd(64, "0") }],
       unmanaged: [],
       updatedAt: SHELL_OVERVIEW_NOW,

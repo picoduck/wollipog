@@ -22,7 +22,7 @@ import {
 } from "@wollipog/protocol";
 // A cycle (the matrix reads invocationLabel and skillEligibleAgents from here) that only function
 // declarations cross, so neither module reads the other while it is still evaluating.
-import { skillAgentMatrixCell } from "./skill-assignment-matrix.js";
+import { skillMachineErrors } from "./skill-assignment-matrix.js";
 
 /* --- Response DTOs. Every field beyond identity is optional on purpose: the control-plane routes
  * are versioned separately from this dashboard, so a shape difference must degrade to a blank
@@ -540,28 +540,21 @@ export type SkillAttention = "error" | "edited" | "update_held";
 
 /**
  * The one status a skill shows in the list, and the reason the Library Overview (#1971) lists it:
- * Error when any eligible agent reports a deployment error for it (each agent's reported link), then
- * Edited when a machine reports an edited copy, then Update Held for a held Git or built-in update.
- * Machines whose report has not loaded say nothing.
+ * Error when any agent's Deployment row shows Error for it (a reported error, a Manual Only target
+ * the agent cannot run, a Conflict or an Unsupported link: `skillMachineErrors`), then Edited when a
+ * machine reports an edited copy, then Update Held for a held Git or built-in update. Machines whose
+ * report has not loaded say nothing.
  */
 export function skillAttention(
   skill: Pick<SkillSummary, "name" | "gitAutoUpdate" | "builtIn">,
   runners: ReadonlyArray<RunnerView>,
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
 ): SkillAttention | null {
-  let edited = false;
-  for (const runner of runners) {
+  if (skillMachineErrors(skill.name, runners, machineSkills).length) return "error";
+  const edited = runners.some((runner) => {
     const state = machineSkills[runner.runnerId];
-    if (!state || state.loadError) continue;
-    // A machine-wide sync error is this skill's only on a machine that deploys it.
-    const deploys = state.desired.some((entry) => entry.name === skill.name) ||
-      Boolean(state.reported?.deployed?.some((entry) => entry.name === skill.name));
-    if (deploys && runner.agents.some((agent) => {
-      const cell = skillAgentMatrixCell(runner, agent, skill.name, state);
-      return cell.desired !== "Unavailable" && cell.reported === "Error";
-    })) return "error";
-    if (reportedSkillDrift(state.reported, skill.name).length) edited = true;
-  }
+    return Boolean(state && !state.loadError && reportedSkillDrift(state.reported, skill.name).length);
+  });
   if (edited) return "edited";
   return skill.gitAutoUpdate?.held || skill.builtIn?.heldUpdate ? "update_held" : null;
 }
@@ -731,23 +724,23 @@ function skillAttentionReason(
     return state && !state.loadError ? [{ runner, state }] : [];
   });
   if (kind === "error") {
-    // Each agent's reported link: the eligible agents whose link reports Error, per machine.
-    const failing = loaded.flatMap(({ runner, state }) => {
-      const deploys = state.desired.some((entry) => entry.name === skill.name) ||
-        Boolean(state.reported?.deployed?.some((entry) => entry.name === skill.name));
-      if (!deploys) return [];
-      const cells = runner.agents.flatMap((agent) => {
-        const cell = skillAgentMatrixCell(runner, agent, skill.name, state);
-        return cell.desired !== "Unavailable" && cell.reported === "Error" ? [{ agent, detail: cell.detail }] : [];
-      });
-      return cells.length ? [{ runner, cells }] : [];
-    });
-    const first = failing[0];
+    // Deployment's own rows and reasons: the first failing machine's first reason, with every agent
+    // there that gives it, then a count of what else shows Error.
+    const [first, ...others] = skillMachineErrors(skill.name, runners, machineSkills);
     if (!first) return "A machine reported a deployment error.";
-    const who = `${joinNames(first.cells.map(({ agent }) => agent.name))} on ${machineLabel(first.runner.runnerId)}`;
-    const detail = first.cells.find((cell) => cell.detail)?.detail;
-    const more = failing.length > 1 ? ` ${counted(failing.length - 1, "other machine also reports", "other machines also report")} errors.` : "";
-    return (detail ? `${who}: ${sentence(oneLine(detail))}` : `${who} reported a deployment error.`) + more;
+    const reasonOf = (row: (typeof first.rows)[number]) => row.reason ?? "Deployment didn't succeed.";
+    const reason = reasonOf(first.rows[0]!);
+    const named = first.rows.filter((row) => reasonOf(row) === reason);
+    const who = `${joinNames(named.map((row) => row.agent.name || row.agent.id))} on ${machineLabel(first.runnerId)}`;
+    const agentsThere = first.rows.length - named.length;
+    const elsewhere = [
+      ...(agentsThere ? [counted(agentsThere, "other agent there", "other agents there")] : []),
+      ...(others.length ? [counted(others.length, "other machine", "other machines")] : []),
+    ];
+    const more = elsewhere.length
+      ? ` ${elsewhere.join(" and ")} also ${agentsThere + others.length === 1 ? "reports" : "report"} errors.`
+      : "";
+    return `${who}: ${sentence(oneLine(reason))}${more}`;
   }
   if (kind === "edited") {
     const machines = loaded.filter(({ state }) => reportedSkillDrift(state.reported, skill.name).length > 0)
