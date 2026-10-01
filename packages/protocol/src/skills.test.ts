@@ -218,6 +218,22 @@ test("a SKILL.md built from fields parses as YAML to exactly the name and descri
   }
 });
 
+test("a SKILL.md built from fields writes every control character and a byte order mark as valid YAML", () => {
+  const controls = Array.from({ length: 0x20 }, (_, code) => String.fromCharCode(code)).join("");
+  for (const description of [controls, "\ufeffBOM first, \ufeff inside", "\r\nCRLF\r\n"]) {
+    const markdown = skillMarkdownFromFields({ name: "code-review", description, body: "" });
+    assert.equal(markdown.split("\n").length, 6, "the description stays on one line");
+    assert.deepEqual(generatedSkillMarkdown(markdown).frontmatter, { name: "code-review", description }, JSON.stringify(description));
+  }
+});
+
+test("a lone surrogate, which YAML cannot spell, becomes U+FFFD while pairs survive", () => {
+  const description = "half \ud83d then \ude00 then whole \ud83d\ude00";
+  const markdown = skillMarkdownFromFields({ name: "code-review", description, body: "" });
+  assert.deepEqual(generatedSkillMarkdown(markdown).frontmatter,
+    { name: "code-review", description: "half \ufffd then \ufffd then whole \ud83d\ude00" });
+});
+
 test("a SKILL.md built from fields keeps names YAML would retype as strings", () => {
   for (const name of ["code-review", "skill.v2_beta-1", "a", "1", "1.5", "1e3", "0x1f", "0o7", "true", "yes", "no", "on", "off", "y", "n", "null", "2026-09-30"]) {
     const markdown = skillMarkdownFromFields({ name, description: "Does things.", body: "" });

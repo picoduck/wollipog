@@ -1627,10 +1627,12 @@ const YAML_PLAIN_NON_STRINGS = new Set(["y", "n", "yes", "no", "on", "off", "tru
 
 /** A YAML double-quoted scalar that is also a JSON string, so YAML parsers and the runner's
  * JSON-based unquoting read the same text back. JSON leaves DEL, the C1 controls, the line and
- * paragraph separators and the two noncharacters raw; YAML forbids or folds them, so they are
- * escaped too. */
+ * paragraph separators, the byte order mark and the two noncharacters raw; YAML forbids or folds
+ * them, so they are escaped too. A lone surrogate has no YAML spelling (its escape names no
+ * character), so it becomes U+FFFD first. */
 function yamlQuoted(value: string): string {
-  return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029\ufffe\uffff]/g,
+  const wellFormed = value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\ufffd");
+  return JSON.stringify(wellFormed).replace(/[\u007f-\u009f\u2028\u2029\ufeff\ufffe\uffff]/g,
     (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
