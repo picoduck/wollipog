@@ -203,3 +203,19 @@ try {
   await new Promise(resolveClose => server.close(resolveClose));
   rmSync(root, { recursive: true, force: true });
 }
+
+if (process.platform === "win32") {
+  // Only the coordinator's ConPTY output threads may remain here. Every daemon's native exit,
+  // the second daemon's orderly release, all assertions and complete fixture cleanup precede this
+  // tail. An exception anywhere above cannot reach it; closing a PTY never substitutes for proof.
+  assert.ok(children.every(child => Number.isSafeInteger(child.exitCode)), "every owned daemon needs a native exit receipt");
+  assert.equal(process.exitCode ?? 0, 0, "a failed coordinator cannot exit successfully");
+  const controller = new AbortController();
+  try {
+    await Promise.race([
+      new Promise((resolveFlush, rejectFlush) => process.stdout.write("", error => error ? rejectFlush(error) : resolveFlush())),
+      pause(30_000, undefined, { signal: controller.signal }).then(() => { throw new Error("verifier stdout flush deadline"); }),
+    ]);
+  } finally { controller.abort(); }
+  process.exit(0);
+}
