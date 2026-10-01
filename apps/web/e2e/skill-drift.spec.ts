@@ -64,14 +64,17 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     const { requests } = await openDrift(page, width, theme);
     const machine = page.locator(".skills-machine");
     await expect(machine.locator(".status")).toHaveText("Edited");
-    await expect(machine.getByRole("heading", { name: "Edited Copies" })).toBeVisible();
-    await expect(machine).toContainText("Agent Invocable Copy · Version 4f1c00000000");
+    // The edited copy is the notice under the skill's header (#1972); Deployment keeps the badge.
+    const notice = page.locator(".skill-notice-slot .notice");
+    await expect(notice.locator(".notice-title")).toHaveText("Build Machine Has an Edited Copy");
+    await expect(notice).toContainText("Claude's copy differs from 4f1c00000000. Updates on that machine wait until you import the edit or restore 4f1c00000000.");
+    await expect(machine.getByRole("heading", { name: "Edited Copies" })).toHaveCount(0);
     await expect(machine).toContainText("Updates and removals are held");
     await machine.scrollIntoViewIfNeeded();
     await page.screenshot({ path: info.outputPath(`drift-status-${width}-${theme}.png`), fullPage: true });
     expect(await noHorizontalOverflow(page)).toBe(true);
 
-    await machine.getByRole("button", { name: "Import Edit as New Version" }).click();
+    await notice.getByRole("button", { name: "Review Edit…" }).click();
     const dialog = page.getByRole("dialog", { name: "Import Edit as New Version" });
     await expect(dialog).toContainText("This machine is pinned to a version of this skill.");
     // One highlighted diff (#1948): the changed file is open, its header counts the change, and the
@@ -105,7 +108,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
 
 test("an edit whose skill has no assignments imports without a consent row", async ({ page }) => {
   const { requests } = await openDrift(page, 1280, "dark", 0);
-  await page.locator(".skills-machine").getByRole("button", { name: "Import Edit as New Version" }).click();
+  await page.locator(".skill-notice-slot").getByRole("button", { name: "Review Edit…" }).click();
   const dialog = page.getByRole("dialog", { name: "Import Edit as New Version" });
   await expect(dialog.locator(".skill-diff-file")).toHaveCount(1);
   await expect(dialog.getByRole("checkbox")).toHaveCount(0);
@@ -121,7 +124,7 @@ for (const width of [1280, 320]) {
   test(`restoring the library version requires confirmation at ${width}`, async ({ page }, info) => {
     const { requests } = await openDrift(page, width, "dark");
     const machine = page.locator(".skills-machine");
-    await machine.getByRole("button", { name: "Restore Library Version" }).click();
+    await page.locator(".skill-notice-slot").getByRole("button", { name: "Restore Library Version…" }).click();
     const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog"));
     await expect(confirmation).toContainText("The edited copy of “code-review”");
     await expect(confirmation).toContainText("is discarded and cannot be recovered.");

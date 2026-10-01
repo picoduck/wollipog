@@ -776,6 +776,7 @@ function snapshot(): UiSnapshotMessage {
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
     },
     runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner]
+      : SHELL_SKILLS_MODE === "notices" ? [noticeStudio, noticeLaptop]
       : shellOfflineRunner ? [runner, shellOfflineRunner] : [runner],
     boxes: [],
     ...(LEGACY_WORKSPACES ? {} : { projects: structuredClone(model.projects) }),
@@ -1163,6 +1164,114 @@ const secondSkillRunner: RunnerView = {
   ...runner, runnerId: "runner-2", hostname: "build-box", displayName: "Build Box", workspaces: [],
 };
 const detailMode = SHELL_SKILLS_MODE === "detail";
+/**
+ * `?skills=notices` (#1972): one skill per notice the slot under the header can show. `collect` has a
+ * Manual Only rule that Codex and Pi cannot run, and also an edited copy, which takes the slot once
+ * the rule is fixed; `lint-rules` an edited Claude Code copy; `fetch-docs` a held Git update;
+ * `using-wollipog` a recommended built-in skill whose release update is held; `orchestrate-issues`
+ * a recommendation; and `deploy-bot` a machine's own deployment error. Assignments, dismissals and
+ * rule changes apply to the fixture, so each notice clears the way it would.
+ */
+const noticesMode = SHELL_SKILLS_MODE === "notices";
+const noticeAgent = (id: string, name: string, driver: "claude-code" | "codex" | "pi") => ({
+  id, name, command: id, args: [], env: {}, driver, context: { kind: "native" as const }, available: true,
+});
+const noticeStudio: RunnerView = {
+  ...runner, runnerId: "runner-studio", hostname: "studio", displayName: "Studio Workstation", workspaces: [],
+  agents: [noticeAgent("claude", "Claude Code", "claude-code"), noticeAgent("codex", "Codex", "codex"), noticeAgent("pi", "Pi", "pi")],
+};
+const noticeLaptop: RunnerView = {
+  ...noticeStudio, runnerId: "runner-laptop", hostname: "laptop", displayName: "Travel Laptop", status: "offline",
+  agents: noticeStudio.agents.slice(0, 2),
+};
+const noticeVersion = (index: number, number: number) => ({
+  id: `skillv_n${index}`, digest: `${index.toString(16).padStart(4, "0")}`.padEnd(64, "b"), createdAt: 1_700_000_000_000, versionNumber: number,
+});
+const noticeGitSource = { url: "https://github.com/example/skills.git", ref: "main", subdirectory: "fetch-docs", path: "fetch-docs", commit: "a1b2".padEnd(40, "0") };
+const noticeSkills = [
+  { id: "skill-n1", name: "collect", description: "Collects build artifacts and uploads them for review.", latestVersion: noticeVersion(1, 4), assignmentCount: 1 },
+  { id: "skill-n2", name: "lint-rules", description: "Keeps the team's lint rules current.", latestVersion: noticeVersion(2, 3), assignmentCount: 1 },
+  { id: "skill-n3", name: "fetch-docs", description: "Fetches vendor documentation into the workspace.", gitSource: noticeGitSource,
+    gitAutoUpdate: { enabled: true, intervalMs: 3_600_000, checkedAt: 1_700_000_000_000, checkedCommit: "c3d4e5f6a7b8".padEnd(40, "9"),
+      held: { commit: "c3d4e5f6a7b8".padEnd(40, "9"), reason: "scripts" as const, scriptPaths: ["scripts/collect.sh", "tool.py"], heldAt: 1_700_000_000_000 } },
+    latestVersion: { ...noticeVersion(3, 6), gitSource: noticeGitSource }, assignmentCount: 1 },
+  { id: "skill-n4", name: "using-wollipog", description: "Operate Wollipog sessions from inside an agent session.",
+    builtIn: { release: "0.29.1", heldUpdate: { release: "0.30.0", digest: "f".repeat(64) } } as { release: string; heldUpdate: { release: string; digest: string } | null },
+    recommendation: { dismissed: false }, latestVersion: noticeVersion(4, 2), assignmentCount: 0 },
+  { id: "skill-n5", name: "orchestrate-issues", description: ORCHESTRATE_DESCRIPTION, builtIn: { release: "0.29.1", heldUpdate: null },
+    recommendation: { dismissed: false }, latestVersion: noticeVersion(5, 1), assignmentCount: 0 },
+  { id: "skill-n6", name: "deploy-bot", description: "Ships signed builds.", latestVersion: noticeVersion(6, 9), assignmentCount: 1 },
+];
+type NoticeRule = { id: string; skillId: string; scopeKind: "instance" | "runner"; runnerId?: string; agentSelector: { kind: string; driver?: string };
+  enabled: boolean; invocation: "agent" | "manual"; updatedAt: number };
+const noticeRules: NoticeRule[] = [
+  { id: "rule-collect", skillId: "skill-n1", scopeKind: "instance", agentSelector: { kind: "all" }, enabled: true, invocation: "manual", updatedAt: 1 },
+  { id: "rule-lint", skillId: "skill-n2", scopeKind: "instance", agentSelector: { kind: "driver", driver: "claude-code" }, enabled: true, invocation: "manual", updatedAt: 1 },
+  { id: "rule-fetch", skillId: "skill-n3", scopeKind: "instance", agentSelector: { kind: "all" }, enabled: true, invocation: "agent", updatedAt: 1 },
+  { id: "rule-deploy", skillId: "skill-n6", scopeKind: "runner", runnerId: "runner-studio", agentSelector: { kind: "driver", driver: "codex" }, enabled: true, invocation: "agent", updatedAt: 1 },
+];
+/** What a machine is told to deploy, from the fixture's rules, as the control plane resolves them. */
+const noticeDesired = (machine: RunnerView) => noticeSkills.flatMap((skill) => {
+  const rules = noticeRules.filter((rule) => rule.skillId === skill.id && (rule.scopeKind === "instance" || rule.runnerId === machine.runnerId));
+  const targets = machine.agents.flatMap((agent) => {
+    const winner = rules.filter((rule) => rule.agentSelector.kind === "all" || rule.agentSelector.driver === agent.driver)
+      .sort((a, b) => Number(b.scopeKind === "runner") - Number(a.scopeKind === "runner") ||
+        Number(b.agentSelector.kind !== "all") - Number(a.agentSelector.kind !== "all"))[0];
+    return winner?.enabled ? [{ agentId: agent.id, invocation: winner.invocation }] : [];
+  });
+  return targets.length ? [{ name: skill.name, versionDigest: skill.latestVersion.digest, targets }] : [];
+});
+const noticeMachine = (runnerId: string) => {
+  const machine = runnerId === noticeStudio.runnerId ? noticeStudio : noticeLaptop;
+  const desired = noticeDesired(machine);
+  const studio = machine === noticeStudio;
+  return structuredClone({
+    removalReporting: "supported" as const, driftReporting: "supported" as const, keptAsideReporting: "supported" as const,
+    desired,
+    reported: {
+      deployed: desired.map((entry) => ({ name: entry.name, digest: entry.versionDigest, links: entry.targets.map((target) =>
+        studio && entry.name === "deploy-bot"
+          ? { agentId: target.agentId, status: "error" as const, detail: "Permission denied: ~/.codex/skills/deploy-bot is owned by root." }
+          : { agentId: target.agentId, status: "linked" as const }) })),
+      drift: studio ? [
+        { name: "lint-rules", digest: noticeSkills[1]!.latestVersion.digest, variant: "manual" as const, observedDigest: "e2".padEnd(64, "0"), held: true },
+        { name: "collect", digest: noticeSkills[0]!.latestVersion.digest, variant: "manual" as const, observedDigest: "e1".padEnd(64, "0"), held: true },
+      ] : [],
+      unmanaged: [],
+      updatedAt: 1_700_000_000_000,
+    },
+  });
+};
+const noticesApi = {
+  listSkills: async () => ({ skills: structuredClone(noticeSkills) }),
+  listSkillGroups: async () => ({ groups: [] }),
+  getSkill: async (id: string) => {
+    const skill = noticeSkills.find((candidate) => candidate.id === id);
+    if (!skill) throw new Error("HTTP 404: skill not found");
+    return { skill: structuredClone(skill), latestVersion: { ...structuredClone(skill.latestVersion), files: detailFiles(skill.name) } };
+  },
+  getMachineSkillVersionPolicy: async () => ({ policy: null }),
+  listSkillAssignments: async (skillId?: string) => ({ assignments: structuredClone(noticeRules.filter((rule) => rule.skillId === skillId)) }),
+  runnerSkills: async (runnerId: string) => noticeMachine(runnerId),
+  syncRunnerSkills: async (runnerId: string) => noticeMachine(runnerId).reported,
+  createSkillAssignment: async (body: Omit<NoticeRule, "id" | "enabled" | "updatedAt">) => {
+    const rule: NoticeRule = { ...body, id: `rule-${noticeRules.length + 1}`, enabled: true, updatedAt: Date.now() };
+    noticeRules.push(rule);
+    const skill = noticeSkills.find((candidate) => candidate.id === body.skillId)!;
+    skill.assignmentCount += 1;
+    return { assignment: structuredClone(rule) };
+  },
+  updateSkillAssignment: async (id: string, body: Partial<Pick<NoticeRule, "enabled" | "invocation" | "agentSelector">>) => {
+    const rule = noticeRules.find((candidate) => candidate.id === id)!;
+    Object.assign(rule, body, { updatedAt: Date.now() });
+    return { assignment: structuredClone(rule) };
+  },
+  setSkillRecommendationDismissed: async (id: string, dismissed: boolean) => {
+    const skill = noticeSkills.find((candidate) => candidate.id === id)!;
+    skill.recommendation = { dismissed };
+    return { skill: structuredClone(skill) };
+  },
+};
 const shellSkillsApi = {
   listSkills: async () => {
     if (SHELL_SKILLS_MODE === "loading") return new Promise<never>(() => {});
@@ -1219,6 +1328,7 @@ const shellSkillsApi = {
 const client = {
   ...api,
   ...shellSkillsApi,
+  ...(noticesMode ? noticesApi : {}),
   // One page of the fixture's sessions as the Archived Sessions table lists them. The Archived
   // filter shows every session as archived, so the table has rows to lay out.
   archiveSessionPage: async (input: Parameters<typeof api.archiveSessionPage>[0]) => {

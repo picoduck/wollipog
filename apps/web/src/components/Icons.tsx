@@ -64,6 +64,7 @@ import {
   Shield as LucideShield,
   SlidersHorizontal as LucideSlidersHorizontal,
   Smartphone as LucideSmartphone,
+  Sparkles as LucideSparkles,
   Square as LucideSquare,
   SquareTerminal as LucideSquareTerminal,
   Tag as LucideTag,
@@ -196,6 +197,11 @@ export function ServiceTierIcon(props: IconProps) {
 
 export function SkillsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideWandSparkles} {...props} />;
+}
+
+/** Something Wollipog recommends: a built-in skill's recommendation notice (#1972). */
+export function RecommendedIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideSparkles} {...props} />;
 }
 
 /** Archived Sessions: an outline archive box, like every other rail glyph (§4.1). */

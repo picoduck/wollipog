@@ -8301,7 +8301,7 @@ export class ControlPlaneDb {
 
   updateSkillAssignment(
     assignmentId: string,
-    input: { enabled?: boolean; invocation?: SkillInvocationPolicy },
+    input: { enabled?: boolean; invocation?: SkillInvocationPolicy; agentSelector?: SkillAgentSelector },
     now = Date.now(),
   ): SkillAssignmentView | null {
     return this.atomic(() => {
@@ -8313,6 +8313,11 @@ export class ControlPlaneDb {
         now,
         assignmentId,
       );
+      // Rewritten only when given, so a selector the client never sent is stored exactly as before.
+      if (input.agentSelector) {
+        this.stmt("UPDATE skill_assignments SET agent_selector=? WHERE id=?")
+          .run(JSON.stringify(input.agentSelector), assignmentId);
+      }
       return this.getSkillAssignment(assignmentId);
     });
   }

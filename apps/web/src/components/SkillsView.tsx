@@ -29,6 +29,8 @@ import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
 import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
 import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
 import { SkillBuiltInSection } from "./SkillBuiltInSection.js";
+import { SkillNoticeSlot } from "./SkillNoticeSlot.js";
+import type { SkillRule } from "../skill-assignment-matrix.js";
 import { SkillBuiltInReviewDialog } from "./SkillBuiltInReviewDialog.js";
 import { SkillList } from "./SkillList.js";
 import { SkillDetailHeader, SkillDetailSection, skillDetailMenu } from "./SkillDetailHeader.js";
@@ -36,14 +38,12 @@ import { SkillsOverview } from "./SkillsOverview.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
-  driftVariantLabel,
   invocationLabel,
   normalizeRemovalReporting,
   omittedKeptAsideCopies,
   orphanedCopyKey,
   orphanedCopyRef,
   reportedOrphanedCopies,
-  reportedSkillDrift,
   reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
@@ -63,6 +63,7 @@ import {
   type OrphanedSkillCopyResolution,
   type SkillDriftCopy,
   type SkillDriftResolution,
+  type SkillGroupAssignmentView,
   type SkillGroupView,
   type SkillSummary,
 } from "../skills.js";
@@ -220,6 +221,9 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   // A detail loaded for an earlier selection is never shown under the current one.
   const detail = loadedDetail && loadedDetail.id === selectedId ? loadedDetail : null;
   const [assignments, setAssignments] = useState<SkillAssignmentView[]>([]);
+  /** The open skill's group's rules, which can be what deploys it; `revision` reloads them. */
+  const [groupRules, setGroupRules] = useState<{ groupId: string; rules: SkillGroupAssignmentView[] } | null>(null);
+  const [groupRulesRevision, setGroupRulesRevision] = useState(0);
   const [machineSkills, setMachineSkills] = useState<Record<string, RunnerSkillsResponse>>({});
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
@@ -358,6 +362,18 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
+  // A group's rule can be the one that skips an agent; its notice then sends the person to Groups.
+  // Unreadable rules leave the notice without a fix rather than blaming one of the skill's own.
+  const detailGroupId = detail?.groupId;
+  useEffect(() => {
+    if (!detailGroupId) return;
+    let active = true;
+    api.listSkillGroupAssignments(detailGroupId)
+      .then((result) => { if (active) setGroupRules({ groupId: detailGroupId, rules: result.assignments }); })
+      .catch(() => { if (active) setGroupRules(null); });
+    return () => { active = false; };
+  }, [api, detailGroupId, groupRulesRevision]);
+
   const mutate = async (work: () => Promise<unknown>, after?: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -417,6 +433,32 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     await mutate(() => api.setSkillRecommendationDismissed(skillId, dismissed), async () => {
       await refreshList();
       await refreshDetail(skillId);
+    });
+  };
+
+  /** The notice's close button leaves with the notice, so focus moves to the skill's heading first:
+   * the detail's title, or on a phone the detail bar's. */
+  const dismissRecommendation = (skillId: string) => {
+    const heading = isMobile
+      ? document.getElementById("page-title")
+      : detailRef.current?.querySelector<HTMLElement>(".skill-detail-title");
+    heading?.focus({ preventScroll: true });
+    void setRecommendationDismissed(skillId, true);
+  };
+
+  /** One atomic change to the rule behind a deployment error. A control plane that predates
+   * `agentSelector` on update ignores it, so the returned rule is checked rather than trusted. */
+  const updateRule = async (skillId: string, rule: SkillRule, patch: { invocation?: SkillInvocationPolicy; agentSelector?: SkillAgentSelector }) => {
+    await mutate(async () => {
+      const payload = await api.updateSkillAssignment(rule.id, patch);
+      const updated = "assignment" in payload ? payload.assignment : payload as SkillAssignmentView;
+      if (patch.agentSelector && JSON.stringify(updated?.agentSelector) !== JSON.stringify(patch.agentSelector)) {
+        throw new Error("This Wollipog server can't change which agents an assignment covers yet, so nothing changed. Update Wollipog, then try again.");
+      }
+    }, async () => {
+      await refreshList();
+      await refreshDetail(skillId);
+      await refreshMachines();
     });
   };
 
@@ -543,6 +585,10 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   const gitSource = detail?.gitSource ?? latest?.gitSource;
   const heldUpdate = detail?.gitAutoUpdate?.enabled ? detail.gitAutoUpdate.held : null;
   const skillMd = latest?.files?.find((file) => file.path === "SKILL.md" && file.encoding === "utf8");
+  const detailRules = useMemo<SkillRule[]>(() => [
+    ...assignments,
+    ...(detailGroupId && groupRules?.groupId === detailGroupId ? groupRules.rules : []),
+  ], [assignments, detailGroupId, groupRules]);
 
   const howId = `skills-how-${useId().replace(/:/g, "")}`;
   const skillName = detail?.name ?? skills?.find((skill) => skill.id === selectedId)?.name;
@@ -721,13 +767,35 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 addAssignment={addAssignment}
                 menu={detailMenu}
               />
-              <SkillBuiltInSection
-                key={`built-in-${detail.id}`}
+              {/* §13.2: one notice under the header, the most urgent thing this skill needs (#1972). */}
+              <SkillNoticeSlot
+                key={`notice-${detail.id}`}
                 skill={detail}
                 runners={runners}
                 machineLabels={machineLabels}
+                machineSkills={machineSkills}
+                rules={detailRules}
                 busy={busy}
+                syncingRunnerId={syncingRunnerId}
+                onSwitchToAgentInvocable={(rule) => void updateRule(detail.id, rule, { invocation: "agent" })}
+                onLimitToClaudeCode={(rule) => void updateRule(detail.id, rule, { agentSelector: { kind: "driver", driver: "claude-code" } })}
+                onEditGroups={() => setDialog("groups")}
+                onSync={(runnerId) => void syncMachine(runnerId)}
+                onReviewEdit={(runnerId, entry) => setDriftImport({
+                  runnerId,
+                  copy: { name: entry.name, digest: entry.digest, variant: entry.variant },
+                })}
+                onRestore={(runner, entry) => void restoreDrift(runner, entry)}
+                onReviewGitUpdate={() => setDialog("git-update")}
+                onReviewBuiltInUpdate={() => setDialog("built-in-review")}
                 onAssign={(runnerId) => void assignRecommended(detail.id, runnerId)}
+                onChooseAgents={addAssignment.onClick}
+                onDismissRecommendation={() => dismissRecommendation(detail.id)}
+              />
+              <SkillBuiltInSection
+                key={`built-in-${detail.id}`}
+                skill={detail}
+                busy={busy}
                 onDismiss={(dismissed) => void setRecommendationDismissed(detail.id, dismissed)}
                 onReview={() => setDialog("built-in-review")}
               />
@@ -752,10 +820,6 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                   const unmanaged = reportedUnmanagedSkills(machine?.reported);
                   const removals = reportedSkillLinkRemovals(machine?.reported);
                   const removalReporting = machine?.removalReporting ?? "unknown";
-                  const drift = reportedSkillDrift(machine?.reported, detail.name);
-                  const canResolveDrift = runner.status === "online" && !busy &&
-                    runnerSupportsProtocol(runner.protocolVersion, "skillDrift");
-                  const machineLabel = machineLabels.get(runner.runnerId) ?? runner.runnerId;
                   return (
                     <article className="skills-machine" key={runner.runnerId}>
                       <div className="skills-machine-head">
@@ -771,44 +835,6 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                         </button>
                       </div>
                       {badge.detail && <p className="skills-hint">{badge.detail}</p>}
-                      {drift.length > 0 && (
-                        <div className="skills-drift">
-                          <h5>Edited Copies</h5>
-                          <ul>
-                            {drift.map((entry) => (
-                              <li key={`${entry.variant}:${entry.digest}`}>
-                                <strong>{driftVariantLabel(entry.variant)}</strong>
-                                <span className="muted"> · Version {entry.digest.slice(0, 12)}</span>
-                                {entry.detail && <p className="skills-hint">{entry.detail}</p>}
-                                <div className="skills-drift-actions">
-                                  <button
-                                    type="button"
-                                    className="btn sm"
-                                    disabled={!canResolveDrift || !entry.observedDigest}
-                                    onClick={() => setDriftImport({
-                                      runnerId: runner.runnerId,
-                                      copy: { name: entry.name, digest: entry.digest, variant: entry.variant },
-                                    })}
-                                  >
-                                    Import Edit as New Version
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn ghost danger sm"
-                                    disabled={!canResolveDrift}
-                                    onClick={() => void restoreDrift(runner, entry)}
-                                  >
-                                    Restore Library Version
-                                  </button>
-                                </div>
-                              </li>
-                            ))}
-                          </ul>
-                          {runner.status === "online" && !runnerSupportsProtocol(runner.protocolVersion, "skillDrift") && (
-                            <p className="skills-hint">Update this machine's runner to resolve edited copies here.</p>
-                          )}
-                        </div>
-                      )}
                       {unmanaged.length > 0 && (
                         <div className="skills-unmanaged">
                           <h5>Unmanaged Skills</h5>
@@ -1003,6 +1029,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       )}
 
       {dialog === "groups" && <SkillGroupsDialog runners={runners} machineLabels={machineLabels} onClose={() => setDialog(null)} onChanged={async () => {
+        setGroupRulesRevision((revision) => revision + 1);
         await refreshList();
         if (selectedId) await refreshDetail(selectedId);
         await refreshMachines();

@@ -315,6 +315,9 @@ function defaultSkillScope(principal: HumanPrincipal): ResourceScope {
   };
 }
 
+/** The one refusal for an invalid selector, on create and on update alike. */
+const AGENT_SELECTOR_ERROR = "agentSelector must be {kind:'all'}, {kind:'driver',driver}, or {kind:'agent',agentId}";
+
 function parseInvocation(value: unknown): SkillInvocationPolicy | null | undefined {
   if (value === undefined) return undefined;
   return value === "agent" || value === "manual" ? value : null;
@@ -680,9 +683,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
       }
     }
     const agentSelector = parseSkillAgentSelector(body.agentSelector);
-    if (!agentSelector) {
-      return reply.code(400).send({ error: "agentSelector must be {kind:'all'}, {kind:'driver',driver}, or {kind:'agent',agentId}" });
-    }
+    if (!agentSelector) return reply.code(400).send({ error: AGENT_SELECTOR_ERROR });
     const invocation = parseInvocation(body.invocation);
     if (invocation === null) return reply.code(400).send({ error: "invocation must be agent or manual" });
     const assignment = db.createSkillAssignment({
@@ -704,15 +705,20 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (!existing || !canAccessAssignment(principal, existing)) {
       return reply.code(404).send({ error: "skill assignment not found" });
     }
-    const body = (req.body ?? {}) as { enabled?: unknown; invocation?: unknown };
+    const body = (req.body ?? {}) as { enabled?: unknown; invocation?: unknown; agentSelector?: unknown };
     if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
       return reply.code(400).send({ error: "enabled must be a boolean" });
     }
     const invocation = parseInvocation(body.invocation);
     if (invocation === null) return reply.code(400).send({ error: "invocation must be agent or manual" });
+    // Optional, validated exactly as on create, so a rule's agents change in the same atomic update
+    // as anything else in the request (the skill notice's Limit to Claude Code, #1972).
+    const agentSelector = body.agentSelector === undefined ? undefined : parseSkillAgentSelector(body.agentSelector);
+    if (agentSelector === null) return reply.code(400).send({ error: AGENT_SELECTOR_ERROR });
     const assignment = db.updateSkillAssignment(id, {
       ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
       ...(invocation === undefined ? {} : { invocation }),
+      ...(agentSelector === undefined ? {} : { agentSelector }),
     });
     if (!assignment) return reply.code(404).send({ error: "skill assignment not found" });
     pushAffected(assignment);

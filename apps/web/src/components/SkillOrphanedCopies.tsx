@@ -103,7 +103,7 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
                         )}
                       </dl>
                       {detail && <p className="skills-hint">{detail}</p>}
-                      <div className="skills-drift-actions">
+                      <div className="skills-orphan-actions">
                         <button
                           type="button"
                           className="btn sm"

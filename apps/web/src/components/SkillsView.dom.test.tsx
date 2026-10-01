@@ -292,8 +292,8 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
     ...api,
     listSkills: async () => ({ skills: [{ id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest } }] }),
     listSkillGroups: async () => ({ groups: [] }),
-    getSkill: async () => ({ skill: { id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest } },
-      latestVersion: { id: "v1", digest, files: [{ path: "SKILL.md", content: skillMd, encoding: "utf8" as const }] } }),
+    getSkill: async () => ({ skill: { id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest, versionNumber: 3 } },
+      latestVersion: { id: "v1", digest, versionNumber: 3, files: [{ path: "SKILL.md", content: skillMd, encoding: "utf8" as const }] } }),
     listSkillAssignments: async () => ({ assignments: [] }),
     listSkillVersions: async () => ({ versions: [], nextCursor: null }),
     getMachineSkillVersionPolicy: async () => ({ policy: null }),
@@ -365,12 +365,20 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
   await act(settle);
   const machine = container.querySelector(".skills-machine");
   assert.match(machine?.querySelector(".status")?.textContent ?? "", /^Edited$/);
-  assert.match(machine?.textContent ?? "", /Edited Copies/);
-  assert.match(machine?.textContent ?? "", /Agent Invocable Copy/);
+  // The edited copy is the slot's notice; Deployment no longer lists it.
+  assert.doesNotMatch(machine?.textContent ?? "", /Edited Copies|Import Edit as New Version/);
+  const slot = () => container.querySelector<HTMLElement>(".skill-notice-slot");
+  assert.equal(slot()?.dataset.notice, "edited");
+  assert.equal(slot()!.querySelector(".notice")?.classList.contains("t-warning"), true);
+  assert.equal(slot()!.querySelector(".notice-title")?.textContent, "Build Machine Has an Edited Copy");
+  assert.equal(slot()!.querySelector(".notice-body > p")?.textContent,
+    "Claude's copy differs from v3. Updates on that machine wait until you import the edit or restore v3.");
+  assert.deepEqual([...slot()!.querySelectorAll(".notice-actions > button")].map((action) => action.textContent),
+    ["Review Edit…", "Restore Library Version…"]);
   const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === label);
 
-  await act(async () => { button("Import Edit as New Version")!.click(); });
+  await act(async () => { button("Review Edit…")!.click(); });
   await act(settle);
   const dialog = container.querySelector('[role="dialog"]');
   assert.ok(dialog, "Import Edit as New Version opens a review dialog");
@@ -383,12 +391,12 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
   await act(async () => { importButton!.click(); });
   await act(settle);
   assertNoDomNode(container.querySelector('[role="dialog"]'));
-  assert.doesNotMatch(container.querySelector(".skills-machine")?.textContent ?? "", /Edited Copies/);
+  assertNoDomNode(slot(), "an imported edit needs nothing more");
 
   current = drifted;
   await act(async () => { button("Sync Now")?.click(); });
   await act(settle);
-  await act(async () => { button("Restore Library Version")!.click(); });
+  await act(async () => { button("Restore Library Version…")!.click(); });
   await act(settle);
   assert.deepEqual(confirmations, ["Restore Library Version|Restore Library Version"]);
   assert.deepEqual(calls, [
@@ -396,7 +404,7 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
     "import:review-1:true",
     "restore:runner-1:true:true",
   ]);
-  assert.doesNotMatch(container.querySelector(".skills-machine")?.textContent ?? "", /Edited Copies/);
+  assertNoDomNode(slot(), "a restored copy needs nothing more");
 
   await act(async () => root.unmount());
   mountPoint.remove();
@@ -595,7 +603,7 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
 });
 
 /** Mount the Skills view against a client and deliver a one-runner snapshot. */
-async function mountSkills(client: ApiClient, instanceId: string) {
+async function mountSkills(client: ApiClient, instanceId: string, runners: RunnerView[] = [runner]) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   // Dialogs are portalled to <body>, so the test queries the body.
@@ -621,7 +629,7 @@ async function mountSkills(client: ApiClient, instanceId: string) {
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+      runners, boxes: [], sessions: [], runs: [], pods: [],
     });
   });
   await act(settle);
@@ -631,8 +639,13 @@ async function mountSkills(client: ApiClient, instanceId: string) {
     .find((candidate) => candidate.querySelector(".row-title")?.textContent === name);
   /** The label of the list group a skill's row is in. */
   const groupOf = (name: string) => listItem(name)?.closest(".skill-list-group")?.getAttribute("aria-label");
+  /** An open menu's item, named by its label line alone (§9.1). */
+  const menuItem = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('[role="menu"] [role="menuitem"]')]
+    .find((candidate) => candidate.querySelector(".menu-text")?.textContent === label);
+  /** The notice slot under the skill detail's header, and which notice it shows. */
+  const slot = () => container.querySelector<HTMLElement>(".skill-notice-slot");
   return {
-    container, button, listItem, groupOf,
+    container, button, listItem, groupOf, menuItem, slot,
     async click(target: HTMLElement | undefined) {
       assert.ok(target);
       await act(async () => { target.click(); });
@@ -645,7 +658,7 @@ async function mountSkills(client: ApiClient, instanceId: string) {
   };
 }
 
-test("SkillsView marks built-in skills recommended, assigns one in a step, and dismisses the recommendation", async () => {
+test("SkillsView recommends a built-in skill in the notice slot, assigns it in one step, and dismisses it with the close button", async () => {
   const skillMd = "---\nname: using-wollipog\ndescription: Operate Wollipog sessions.\n---\nUse the CLI.\n";
   const skill = {
     id: "skill-builtin", name: "using-wollipog", description: "Operate Wollipog sessions.", source: "builtin",
@@ -681,7 +694,8 @@ test("SkillsView marks built-in skills recommended, assigns one in a step, and d
       return { skill: structuredClone(skill) };
     },
   } as unknown as ApiClient;
-  const view = await mountSkills(client, "skills-built-in");
+  const offline = { ...runner, runnerId: "runner-2", displayName: "Laptop", status: "offline" as const };
+  const view = await mountSkills(client, "skills-built-in", [runner, offline]);
   const badges = () => [...view.listItem("using-wollipog")!.querySelectorAll(".status")].map((badge) => badge.textContent);
   // Recommended is an offer, not a state: its own group at the top, and the row keeps only the flag.
   assert.deepEqual(badges(), ["Built-In"]);
@@ -690,35 +704,71 @@ test("SkillsView marks built-in skills recommended, assigns one in a step, and d
   await view.click(view.listItem("using-wollipog"));
   const section = () => view.container.querySelector('[aria-label="Built-In Skill"]');
   assert.match(section()?.textContent ?? "", /Ships with Wollipog 0\.28\.0/);
-  assert.match(section()?.textContent ?? "", /It is not deployed until you assign it/);
+  // The recommendation is the slot's notice, directly under the header, not part of the card.
+  assert.equal(view.slot()?.dataset.notice, "recommended");
+  assert.equal(view.slot()?.previousElementSibling?.className, "skill-detail-head");
+  assert.doesNotMatch(section()?.textContent ?? "", /Assign|recommends/);
+  const notice = () => view.slot()!.querySelector<HTMLElement>(".notice")!;
+  assert.equal(notice().querySelector(".notice-title")?.textContent, "Recommended by Wollipog");
+  assert.match(notice().textContent ?? "", /It isn't on any machine until you assign it; assigning deploys it to every supported agent/);
+  // Exactly two actions, and the close button sits in the title row.
+  assert.deepEqual([...notice().querySelectorAll(".notice-actions > button")].map((action) => action.textContent),
+    ["Assign to All Machines", "Assign to Machine"]);
+  const close = notice().querySelector<HTMLButtonElement>(".notice-head .notice-dismiss");
+  assert.equal(close?.getAttribute("aria-label"), "Dismiss Recommendation");
+  assert.equal(close?.getAttribute("title"), "Dismiss Recommendation");
+  assert.equal(view.button("Dismiss Recommendation"), undefined, "no Dismiss Recommendation text button remains");
 
   await view.click(view.button("Assign to All Machines"));
   assert.deepEqual(calls.at(-1), { skillId: "skill-builtin", scopeKind: "instance", agentSelector: { kind: "all" }, invocation: "agent" });
   assert.equal(view.groupOf("using-wollipog"), "No Group", "an assigned built-in skill is no longer recommended");
   assert.deepEqual(badges(), ["Built-In"]);
-  assert.equal(view.button("Assign to All Machines"), undefined);
+  assertNoDomNode(view.slot(), "an assigned skill needs nothing");
 
-  // Removing the assignment brings the recommendation back; a machine can be chosen instead.
+  // Removing the assignment brings the recommendation back; Assign to Machine is a menu of machines.
   await view.click(view.button("Delete"));
   assert.equal(view.groupOf("using-wollipog"), "Recommended");
-  await view.click(view.button("Assign to Machine"));
+  const assignToMachine = view.button("Assign to Machine")!;
+  assert.equal(assignToMachine.getAttribute("aria-haspopup"), "menu");
+  await view.click(assignToMachine);
+  const items = [...view.container.querySelectorAll('[role="menu"] [role="menuitem"]')];
+  assert.deepEqual(items.map((item) => [item.querySelector(".menu-text")?.textContent, item.querySelector(".menu-desc")?.textContent ?? null]),
+    [["Build Machine", "Online"], ["Laptop", "Offline"], ["Choose Agents…", null]]);
+  assert.ok(view.container.querySelector('[role="menu"] [role="separator"]'), "a separator before Choose Agents…");
+  await view.click(view.menuItem("Build Machine"));
   assert.deepEqual(calls.at(-1), {
     skillId: "skill-builtin", scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "all" }, invocation: "agent",
   });
 
+  // Choose Agents… opens Add Assignment for anything narrower.
   await view.click(view.button("Delete"));
-  await view.click(view.button("Dismiss Recommendation"));
-  assert.deepEqual(calls.at(-1), { id: "skill-builtin", dismissed: true });
+  await view.click(view.button("Assign to Machine"));
+  await view.click(view.menuItem("Choose Agents…"));
+  const dialog = view.container.querySelector('[role="dialog"]');
+  assert.match(dialog?.textContent ?? "", /Add Assignment/);
+  await view.click(view.button("Cancel", dialog!));
+
+  // The close button dismisses it without asking, and focus moves to the skill's heading.
+  const callCount = calls.length;
+  await view.click(view.slot()!.querySelector<HTMLButtonElement>(".notice-dismiss")!);
+  assert.deepEqual(calls.slice(callCount), [{ id: "skill-builtin", dismissed: true }]);
+  assert.equal(document.activeElement?.className, "skill-detail-title");
+  assertNoDomNode(view.slot());
   assert.equal(view.groupOf("using-wollipog"), "No Group", "a dismissed recommendation is hidden and the library entry stays");
   assert.match(section()?.textContent ?? "", /You dismissed this recommendation\./);
-  // Release content held by local library changes waits for review.
+
+  // A held built-in update outranks the recommendation in the slot.
   skill.builtIn.heldUpdate = { release: "0.29.0", digest: "d2" };
   await view.click(view.button("Show Recommendation"));
   assert.deepEqual(calls.at(-1), { id: "skill-builtin", dismissed: false });
   assert.equal(view.groupOf("using-wollipog"), "Recommended");
   assert.deepEqual(badges(), ["Built-In", "Update Held"], "a held built-in update is the row's one status");
-  assert.match(section()?.textContent ?? "", /Wollipog 0\.29\.0 includes an updated version/);
-  assert.ok(view.button("Review Built-In Update"));
+  assert.equal(view.slot()?.dataset.notice, "built-in-held");
+  assert.equal(view.slot()!.querySelector(".notice-title")?.textContent, "Built-In Update Held");
+  assert.match(view.slot()!.textContent ?? "",
+    /Wollipog 0\.29\.0 updates this skill, but the latest library version has changes made here, so it waits for your review\./);
+  assert.deepEqual([...view.slot()!.querySelectorAll(".notice-actions > button")].map((action) => action.textContent), ["Review Update…"]);
+  assert.equal(view.container.querySelectorAll(".skill-notice-slot .notice").length, 1);
   await view.unmount();
 });
 
@@ -810,7 +860,7 @@ test("a recommendation dismissed in the Skills view or the Inbox notice is dismi
   // Skills view to Inbox notice.
   const skillsView = await mountSkills(client, "skills-recommendation-surfaces");
   await skillsView.click(skillsView.listItem("using-wollipog"));
-  await skillsView.click(skillsView.button("Dismiss Recommendation"));
+  await skillsView.click(skillsView.slot()!.querySelector<HTMLButtonElement>('[aria-label="Dismiss Recommendation"]')!);
   await skillsView.unmount();
   let notice = await mountNotice();
   assert.deepEqual(notice.names(), ["orchestrate-issues"]);
@@ -1013,8 +1063,7 @@ test("SkillsView keeps following the selection when a mutation finishes after th
   await act(settle);
   const heading = () => container.querySelector(".skill-detail-title")?.textContent;
   assert.equal(heading(), "using-wollipog");
-  const dismiss = [...container.querySelectorAll<HTMLButtonElement>("button")]
-    .find((candidate) => candidate.textContent?.trim() === "Dismiss Recommendation")!;
+  const dismiss = container.querySelector<HTMLButtonElement>('.skill-notice-slot [aria-label="Dismiss Recommendation"]')!;
   await act(async () => { dismiss.click(); });
   await act(async () => { route(other.id); });
   await act(settle);
@@ -2189,4 +2238,71 @@ test("on a phone the list's first row is Library Overview with the attention cou
     await view.unmount();
     restore();
   }
+});
+
+test("Change Invocation… fixes the offending rule in one request each, and an older server's ignored selector changes nothing", async () => {
+  const agents = [
+    { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true },
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" as const, available: true },
+  ];
+  const machine = { ...runner, displayName: "Studio Workstation", agents, providerAccounts: [] };
+  const skill = { id: "skill-1", name: "collect", assignmentCount: 1, latestVersion: { id: "v1", digest: "d1", versionNumber: 1 } };
+  const manualRule = { id: "rule-1", skillId: "skill-1", scopeKind: "instance" as const, agentSelector: { kind: "all" } as Record<string, string>,
+    enabled: true, invocation: "manual" as "manual" | "agent" };
+  let rule = manualRule;
+  /** Whether this control plane applies `agentSelector` on update (#1972); an older one ignores it. */
+  let appliesSelector = false;
+  const patches: unknown[] = [];
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [skill] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => ({ skill, latestVersion: { ...skill.latestVersion, files: [] } }),
+    listSkillAssignments: async () => ({ assignments: [structuredClone(rule)] }),
+    runnerSkills: async () => ({
+      desired: [{ name: "collect", versionDigest: "d1", targets: agents
+        .filter((agent) => rule.agentSelector.kind === "all" || agent.driver === rule.agentSelector.driver)
+        .map((agent) => ({ agentId: agent.id, invocation: rule.invocation })) }],
+      reported: null,
+    }),
+    updateSkillAssignment: async (id: string, body: { invocation?: "agent" | "manual"; agentSelector?: Record<string, string> }) => {
+      patches.push({ id, ...body });
+      rule = { ...rule, ...(body.invocation ? { invocation: body.invocation } : {}),
+        ...(body.agentSelector && appliesSelector ? { agentSelector: body.agentSelector } : {}) };
+      return { assignment: structuredClone(rule) };
+    },
+  } as unknown as ApiClient;
+  let view = await mountSkills(client, "skills-manual-only", [machine]);
+  await view.click(view.listItem("collect"));
+  assert.equal(view.slot()?.dataset.notice, "manual-only");
+  assert.equal(view.slot()!.querySelector(".notice-title")?.textContent, "Codex Can't Run Manual-Only Skills");
+
+  // An older control plane ignores the selector: the page says so and changes nothing else.
+  await view.click(view.button("Change Invocation…"));
+  await view.click(view.menuItem("Limit to Claude Code"));
+  assert.deepEqual(patches, [{ id: "rule-1", agentSelector: { kind: "driver", driver: "claude-code" } }]);
+  const alert = view.container.querySelector('.page > .notice.t-danger[role="alert"]');
+  assert.match(alert?.textContent ?? "", /can't change which agents an assignment covers yet, so nothing changed/);
+  assert.deepEqual(rule, manualRule);
+  assert.equal(view.slot()?.dataset.notice, "manual-only", "the rule is unchanged, so the error stays");
+
+  // Limit to Claude Code: one request, Manual Only stays, and the notice clears after the refresh.
+  appliesSelector = true;
+  await view.click(view.button("Change Invocation…"));
+  await view.click(view.menuItem("Limit to Claude Code"));
+  assert.equal(patches.length, 2);
+  assert.deepEqual(rule, { ...manualRule, agentSelector: { kind: "driver", driver: "claude-code" } });
+  assertNoDomNode(view.slot());
+  assertNoDomNode(view.container.querySelector('.page > .notice.t-danger[role="alert"]'), "the newer success clears the error");
+  await view.unmount();
+
+  // Switch to Agent Invocable: one request, and the notice clears after the refresh.
+  rule = manualRule;
+  view = await mountSkills(client, "skills-manual-only-switch", [machine]);
+  await view.click(view.listItem("collect"));
+  await view.click(view.button("Change Invocation…"));
+  await view.click(view.menuItem("Switch to Agent Invocable"));
+  assert.deepEqual(patches.slice(2), [{ id: "rule-1", invocation: "agent" }]);
+  assertNoDomNode(view.slot());
+  await view.unmount();
 });

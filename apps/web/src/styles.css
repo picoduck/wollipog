@@ -14341,8 +14341,16 @@ body.shell-dock-dragging * {
 .skills-machine-import { min-width: 0; overflow-wrap: anywhere; }
 .skills-built-in { min-width: 0; overflow-wrap: anywhere; }
 .skills-built-in p { margin: 0; }
-.skills-built-in-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.skills-built-in-actions .btn { white-space: normal; }
+/* The notice slot directly under the skill detail's header (§13.2, #1972): one notice, closer to the
+   header than the 32px between sections. On a phone its actions stack at full width, the one
+   exception to "buttons never stretch" (§3.1, §3.3). */
+.skill-detail > .skill-notice-slot { margin-top: calc(var(--space-4) - var(--space-8)); }
+@media (max-width: 760px) {
+  .skill-notice-slot .notice-actions { flex-direction: column; align-items: stretch; }
+  .skill-notice-slot .notice-actions > .btn { max-width: none; }
+  /* A disclosure toggle keeps its own width, as in the session notice slot. */
+  .skill-notice-slot .notice-actions > .notice-details-toggle { align-self: flex-start; }
+}
 .skill-groups-dialog .skills-section-heading { flex-wrap: wrap; }
 .skill-groups-dialog .btn { white-space: normal; overflow-wrap: anywhere; }
 .skill-assignment-matrix, .skill-assignment-matrix > article { min-width: 0; overflow-wrap: anywhere; }
@@ -14360,14 +14368,12 @@ body.shell-dock-dragging * {
 .skills-unmanaged ul { margin: 4px 0; padding-left: 18px; display: grid; gap: 3px; }
 .skills-removals ul { margin: 4px 0; padding-left: 18px; display: grid; gap: 5px; }
 .skills-removals li { overflow-wrap: anywhere; }
-.skills-drift ul { margin: 4px 0; padding-left: 18px; display: grid; gap: 8px; }
-.skills-drift li { overflow-wrap: anywhere; }
-.skills-drift-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
-.skills-drift-actions .btn { white-space: normal; }
 .skills-orphans { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; }
 .skills-orphans li { display: grid; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
 .skills-orphans li + li { border-top: 1px dashed var(--border); padding-top: 12px; }
 .skills-orphan-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.skills-orphan-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.skills-orphan-actions .btn { white-space: normal; }
 .skills-hint { color: var(--text-dim); font-size: var(--text-sm); line-height: 1.5; margin: 0; }
 .skills-target-unavailable { border-left: 2px solid var(--warning); padding-left: 8px; overflow-wrap: anywhere; }
 

@@ -683,7 +683,9 @@ export function createApiClient(transport: ApiTransport) {
     body: JSON.stringify(body),
   }),
 
-  updateSkillAssignment: (id: string, body: { enabled?: boolean; invocation?: SkillInvocationPolicy }) =>
+  /** `agentSelector` needs a control plane that applies it (#1972); an older one ignores it, so the
+   * caller checks the returned assignment. */
+  updateSkillAssignment: (id: string, body: { enabled?: boolean; invocation?: SkillInvocationPolicy; agentSelector?: SkillAgentSelector }) =>
     req<SkillAssignmentPayload>(`/api/skill-assignments/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(body),

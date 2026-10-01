@@ -1,6 +1,113 @@
 import { runnerSupportsProtocol, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
 import { accountLabelText } from "./personal-identifiers.js";
-import { invocationLabel, skillEligibleAgents, type RunnerSkillsResponse } from "./skills.js";
+import {
+  invocationLabel,
+  skillEligibleAgents,
+  type RunnerSkillsResponse,
+  type SkillAgentSelector,
+  type SkillAssignmentView,
+} from "./skills.js";
+
+/** A rule that can target a skill: one of its own assignments, or (with `groupId`) its group's. */
+export type SkillRule = Pick<SkillAssignmentView, "id" | "scopeKind" | "runnerId" | "agentSelector" | "enabled" | "invocation" | "updatedAt"> & {
+  groupId?: string;
+};
+
+function selectorMatches(selector: SkillAgentSelector, agent: Pick<AgentDefinition, "id" | "driver">): boolean {
+  if (selector.kind === "all") return true;
+  if (selector.kind === "driver") return (agent.driver ?? "acp") === selector.driver;
+  return agent.id === selector.agentId;
+}
+
+/** The control plane's ranking (resolveDesiredSkillSnapshot): runner scope beats instance scope,
+ * an agent selector beats a driver selector beats all, then a skill's own rule beats its group's,
+ * then the newest update. */
+function ruleRank(rule: SkillRule): number {
+  return (rule.scopeKind === "runner" ? 10 : 0) +
+    (rule.agentSelector.kind === "agent" ? 3 : rule.agentSelector.kind === "driver" ? 2 : 1);
+}
+
+/** The one rule that decides whether and how a skill reaches this agent on this machine, as the
+ * control plane resolves it, or undefined when no rule matches. */
+export function winningSkillRule<T extends SkillRule>(rules: ReadonlyArray<T>, runnerId: string,
+  agent: Pick<AgentDefinition, "id" | "driver">): T | undefined {
+  return rules
+    .filter((rule) => (rule.scopeKind === "instance" || rule.runnerId === runnerId) && selectorMatches(rule.agentSelector, agent))
+    .sort((a, b) => ruleRank(b) - ruleRank(a) || Number(Boolean(a.groupId)) - Number(Boolean(b.groupId)) ||
+      (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (a.id < b.id ? 1 : -1))[0];
+}
+
+/** Agents a Manual Only rule targets but cannot reach: only Claude Code enforces manual-only
+ * invocation, so a machine skips every other agent it is assigned to (the runner's rule). */
+export interface SkillManualOnlyError<T extends SkillRule = SkillRule> {
+  /** The rule that targets them, or null when it is not among the rules this page has read. */
+  rule: T | null;
+  /** The machines that skip them, in the order given. */
+  runnerIds: string[];
+  /** The skipped agents, in the order found. */
+  agents: Array<Pick<AgentDefinition, "id" | "name" | "driver">>;
+}
+
+/** Every Manual Only rule that leaves agents unable to run this skill, one entry per rule, in the
+ * order its first skipped agent appears. Read from what each machine is told to deploy, so it is
+ * right before the machine reports, and it clears as soon as the rule changes. */
+export function skillManualOnlyErrors<T extends SkillRule>(
+  skillName: string,
+  runners: ReadonlyArray<Pick<RunnerView, "runnerId" | "agents">>,
+  machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
+  rules: ReadonlyArray<T>,
+): SkillManualOnlyError<T>[] {
+  const byRule = new Map<string, SkillManualOnlyError<T>>();
+  for (const runner of runners) {
+    const state = machineSkills[runner.runnerId];
+    if (!state || state.loadError) continue;
+    const desired = state.desired.find((entry) => entry.name === skillName);
+    for (const target of desired?.targets ?? []) {
+      if (target.invocation !== "manual") continue;
+      const agent = runner.agents.find((candidate) => candidate.id === target.agentId);
+      if (!agent || agent.driver === "claude-code") continue;
+      const winner = winningSkillRule(rules, runner.runnerId, agent);
+      // The rules this page read disagree with what the machine was told: say so without a fix.
+      const rule = winner?.enabled && winner.invocation === "manual" ? winner : null;
+      const key = rule ? `rule:${rule.id}` : "unknown";
+      const entry = byRule.get(key) ?? { rule, runnerIds: [], agents: [] };
+      if (!entry.runnerIds.includes(runner.runnerId)) entry.runnerIds.push(runner.runnerId);
+      entry.agents.push({ id: agent.id, name: agent.name, driver: agent.driver });
+      byRule.set(key, entry);
+    }
+  }
+  return [...byRule.values()];
+}
+
+/** A machine that reports a deployment error for this skill: the list's Error status, per machine. */
+export interface SkillDeploymentError {
+  runnerId: string;
+  /** The machine's own words, sanitized by the runner. */
+  detail?: string;
+}
+
+/** Machines that deploy this skill and report an error for an agent that can receive it, in the
+ * order given. A machine whose report has not loaded says nothing. */
+export function skillDeploymentErrors(
+  skillName: string,
+  runners: ReadonlyArray<RunnerView>,
+  machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
+): SkillDeploymentError[] {
+  const errors: SkillDeploymentError[] = [];
+  for (const runner of runners) {
+    const state = machineSkills[runner.runnerId];
+    if (!state || state.loadError) continue;
+    // A machine-wide sync error is this skill's only on a machine that deploys it.
+    const deploys = state.desired.some((entry) => entry.name === skillName) ||
+      Boolean(state.reported?.deployed?.some((entry) => entry.name === skillName));
+    if (!deploys) continue;
+    const failed = runner.agents
+      .map((agent) => skillAgentMatrixCell(runner, agent, skillName, state))
+      .find((cell) => cell.desired !== "Unavailable" && cell.reported === "Error");
+    if (failed) errors.push({ runnerId: runner.runnerId, ...(failed.detail ? { detail: failed.detail } : {}) });
+  }
+  return errors;
+}
 
 /** Display configuration separately from the last reported link; a shared harness may expose a
  * skill even when this specific agent has no desired target. Never infer successful removal. */

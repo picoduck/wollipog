@@ -50,6 +50,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
 | `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability. |
+| `RecommendedIcon` | Lucide | `Sparkles` | Something Wollipog recommends, such as a built-in skill. |
 | `ArchiveIcon` | Lucide | `Archive` | Archived Sessions destination, outline like every rail glyph. |
 | `UsageIcon` | Lucide | `ChartNoAxesColumn` | Usage metrics. |
 | `ChevronDownIcon` | Lucide | `ChevronDown` | Directional disclosure. |

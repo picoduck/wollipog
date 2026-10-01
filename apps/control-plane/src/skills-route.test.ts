@@ -491,6 +491,60 @@ test("assignment mutations push a fire-and-forget skills_sync to affected capabl
   assert.deepEqual(pushed.map((entry) => entry.runnerId), ["capable"]);
 });
 
+test("PATCH /api/skill-assignments/:id changes the agent selector atomically, validated as on create", async (t) => {
+  const { app, db, online, pushed } = await fixture();
+  t.after(() => app.close());
+  db.registerRunner(runnerMeta("capable"), 10, 90);
+  online.add("capable");
+  const created = await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("alpha-skill") });
+  const skillId = created.json().skill.id as string;
+  const assigned = await app.inject({
+    method: "POST",
+    url: "/api/skill-assignments",
+    payload: { skillId, scopeKind: "instance", agentSelector: { kind: "all" }, invocation: "manual" },
+  });
+  const assignmentId = assigned.json().assignment.id as string;
+
+  // An invalid selector is refused with create's exact error, and nothing in the request applies.
+  for (const agentSelector of [{ kind: "everything" }, { kind: "driver", driver: "emacs" }, { kind: "agent" }, null, "all"]) {
+    const refusedCreate = await app.inject({
+      method: "POST",
+      url: "/api/skill-assignments",
+      payload: { skillId, scopeKind: "instance", agentSelector },
+    });
+    const refused = await app.inject({
+      method: "PATCH",
+      url: `/api/skill-assignments/${assignmentId}`,
+      payload: { invocation: "agent", agentSelector },
+    });
+    assert.equal(refused.statusCode, 400, JSON.stringify(agentSelector));
+    assert.deepEqual(refused.json(), refusedCreate.json());
+  }
+  assert.deepEqual(db.getSkillAssignment(assignmentId)?.agentSelector, { kind: "all" });
+  assert.equal(db.getSkillAssignment(assignmentId)?.invocation, "manual");
+
+  // Without the field, the selector stays as it was.
+  const invocationOnly = await app.inject({
+    method: "PATCH", url: `/api/skill-assignments/${assignmentId}`, payload: { enabled: true },
+  });
+  assert.deepEqual(invocationOnly.json().assignment.agentSelector, { kind: "all" });
+
+  // Limit to Claude Code: one request narrows the rule, and the machine re-syncs to Claude only.
+  pushed.length = 0;
+  const limited = await app.inject({
+    method: "PATCH",
+    url: `/api/skill-assignments/${assignmentId}`,
+    payload: { agentSelector: { kind: "driver", driver: "claude-code" } },
+  });
+  assert.equal(limited.statusCode, 200);
+  assert.deepEqual(limited.json().assignment.agentSelector, { kind: "driver", driver: "claude-code" });
+  assert.equal(limited.json().assignment.invocation, "manual");
+  assert.deepEqual(db.getSkillAssignment(assignmentId)?.agentSelector, { kind: "driver", driver: "claude-code" });
+  assert.deepEqual(pushed.map((entry) => entry.runnerId), ["capable"]);
+  const sync = pushed[0]!.msg as SkillsSyncMessage;
+  assert.deepEqual(sync.skills[0]!.targets, [{ agentId: "claude", invocation: "manual" }]);
+});
+
 test("POST /api/runners/:id/skills/sync gates offline and capability, persists the correlated state", async (t) => {
   const { app, db, online, stubRequest } = await fixture();
   t.after(() => app.close());

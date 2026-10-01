@@ -50,7 +50,7 @@ export function SkillDetailHeader({ skill, groupName, showTitle, addAssignment, 
     <header className="skill-detail-head">
       {showTitle && (
         <div className="skill-detail-title-row">
-          <h2 className="skill-detail-title" title={skill.name}>{skill.name}</h2>
+          <h2 className="skill-detail-title" title={skill.name} tabIndex={-1}>{skill.name}</h2>
           <div className="actions">
             <button type="button" className="btn" disabled={addAssignment.disabled} onClick={addAssignment.onClick}>
               {addAssignment.label}
