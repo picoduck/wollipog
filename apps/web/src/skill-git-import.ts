@@ -36,18 +36,18 @@ export function gitRepositoryError(value: string): string | null {
   return null;
 }
 
-/** The Branch or Tag field's error. Empty means the repository's default branch. */
-export function gitRefError(value: string): string | null {
-  const ref = value.trim();
+/** The Branch or Tag field's error. Empty means the repository's default branch. Like the
+ * server, it takes the value as written: only the address is trimmed. */
+export function gitRefError(ref: string): string | null {
   if (!ref) return null;
   return ref.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(ref) ||
     ref.includes("..") || ref.includes("//") || ref.endsWith("/") || ref.endsWith(".lock")
     ? GIT_REF_FORMAT : null;
 }
 
-/** The Folder field's error. Empty searches the whole repository. */
-export function gitFolderError(value: string): string | null {
-  const folder = value.trim();
+/** The Folder field's error. Empty searches the whole repository. A folder is a literal path, so
+ * spaces at either end are part of it, as they are to the server. */
+export function gitFolderError(folder: string): string | null {
   if (!folder) return null;
   return folder.length > 512 || folder.startsWith("/") ||
     folder.split("/").some((part) => !part || part === "." || part === ".." || /[\\\x00-\x1f\x7f]/.test(part))

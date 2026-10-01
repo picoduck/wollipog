@@ -52,10 +52,13 @@ test("the Repository rule refuses credentials with the fix, and other shapes wit
 
 test("Branch or Tag and Folder follow the server's ref and subdirectory rules", () => {
   for (const value of ["", "main", "v1.2", "release/2026-10", "a".repeat(256)]) assert.equal(gitRefError(value), null, value);
-  for (const value of ["-main", "main..dev", "a//b", "main/", "main.lock", "a b", "a".repeat(257)]) {
+  for (const value of ["-main", "main..dev", "a//b", "main/", "main.lock", "a b", " main", "main ", "  ", "a".repeat(257)]) {
     assert.equal(gitRefError(value), GIT_REF_FORMAT, value);
   }
-  for (const value of ["", "skills", ".agents/skills", "skills/code-review"]) assert.equal(gitFolderError(value), null, value);
+  // Spaces are part of a folder's name, to the server as here (CR-1.3).
+  for (const value of ["", "skills", ".agents/skills", "skills/code-review", " skills/code-review", "skills / ", "  "]) {
+    assert.equal(gitFolderError(value), null, value);
+  }
   for (const value of ["/skills", "skills/", "a//b", "./skills", "skills/../x", "a\\b", "a".repeat(513)]) {
     assert.equal(gitFolderError(value), GIT_FOLDER_FORMAT, value);
   }

@@ -87,6 +87,9 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
   const focusField = useRef<SkillGitField | null>(null);
   /** Each preview request's number; a result for an older one is discarded, not shown. */
   const generation = useRef(0);
+  /** The preview request still running, superseded or not: the server reads one source at a time
+   * and refuses a second with 429, so a newer request waits for it to settle. */
+  const inFlight = useRef<Promise<unknown> | null>(null);
   const closed = useRef(false);
   const previewRef = useRef<SkillGitPreview | null>(null);
   previewRef.current = preview;
@@ -101,10 +104,14 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
   // state replacing the primary) drops focus on <body>, outside the dialog. Focus that was inside
   // moves to this state's anchor; focus that is still somewhere is never moved.
   useEffect(() => {
-    const onFocusIn = (event: FocusEvent) => {
+    const inside = (target: EventTarget | null) => {
       const panel = bodyRef.current?.closest("[role='dialog']");
-      focusInside.current = Boolean(panel && event.target instanceof Node && panel.contains(event.target));
+      return Boolean(panel && target instanceof Node && panel.contains(target));
     };
+    // Modal focuses its first field in a child effect, before this listener exists, so the focus
+    // already inside counts too: typing there and pressing Enter fires no focusin.
+    focusInside.current = inside(document.activeElement);
+    const onFocusIn = (event: FocusEvent) => { focusInside.current = inside(event.target); };
     document.addEventListener("focusin", onFocusIn);
     return () => document.removeEventListener("focusin", onFocusIn);
   }, []);
@@ -160,7 +167,8 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
       return;
     }
     const request = ++generation.current;
-    const source = { url: fields.url.trim(), ref: fields.ref.trim(), folder: fields.folder.trim() };
+    // The server trims the address only; a branch or folder is taken as written.
+    const source = { url: fields.url.trim(), ref: fields.ref, folder: fields.folder };
     const keep = again ? checked : [];
     setReviewed(source);
     setFinding(true);
@@ -169,7 +177,14 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
     setPreview(null);
     const current = () => request === generation.current && !closed.current;
     try {
-      const next = await api.previewGitSkills({ url: source.url, ref: source.ref, subdirectory: source.folder });
+      while (inFlight.current) {
+        await inFlight.current.catch(() => undefined);
+        if (!current()) return;
+      }
+      const reading = api.previewGitSkills({ url: source.url, ref: source.ref, subdirectory: source.folder });
+      inFlight.current = reading;
+      void reading.catch(() => undefined).finally(() => { if (inFlight.current === reading) inFlight.current = null; });
+      const next = await reading;
       if (!current()) { discard(next.previewId); return; }
       const paths = new Set(next.candidates.map((entry) => entry.path));
       const initial = again ? keep.filter((path) => paths.has(path))
@@ -281,7 +296,12 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
     </div>;
   };
 
-  const sourceStep = <form className="form skill-git-source" noValidate onSubmit={(event) => { event.preventDefault(); void find(); }}>
+  const sourceStep = <form className="form skill-git-source" noValidate onSubmit={(event) => {
+    event.preventDefault();
+    // Enter again while Find Skills runs is the busy primary's click: refused, as the server
+    // reads one source at a time.
+    if (!finding) void find();
+  }}>
     {field("url", "Repository", "owner/repository on GitHub, or an HTTPS or SSH address.", "e.g. org/skills")}
     <div className="field-row">
       {field("ref", "Branch or Tag", "Leave empty for the default branch.", "e.g. main")}
