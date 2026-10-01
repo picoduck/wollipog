@@ -229,17 +229,19 @@ A review's consent names what accepting deploys, such as "Deploy to 2 existing a
 preview with no assignments asks for no consent at all. So the accept is fenced on what the preview
 showed. Every preview that can add a new latest version (Import from Git, Import from Machine,
 Import Edit as New Version, Import Orphaned Copy, the built-in review and Version History) reports
-`deploymentImpact`, a digest of the skill's direct and group assignments, and the count its consent
-names, both from one read. The dashboard sends the digest back as `expectedDeploymentImpact`. When
-an assignment was added, removed or edited in between (an edit can change which of two equal rules
-wins), and the accept would deploy new content, the control plane refuses it with `409` and
-`code: "deployment_impact_changed"`, and nothing is committed or deployed. The review dialog then
-replaces its consent with the conflict and offers **Preview Again**, whose consent names the
-current assignments.
+`deploymentImpact`, a digest of the skill's direct and group assignments and its machine version
+pins, and the assignment count its consent names, all from one read. The dashboard sends the digest
+back as `expectedDeploymentImpact`. When an assignment was added, removed or edited in between (an
+edit can change which of two equal rules wins), or a machine was pinned, unpinned or re-pinned for
+the skill (a pinned machine does not receive the new latest version), and the accept would deploy
+new content, the control plane refuses it with `409` and `code: "deployment_impact_changed"`, and
+nothing is committed or deployed. The review dialog then replaces its consent with the conflict and
+offers **Preview Again**, whose consent names the current assignments. A pin change on another
+skill does not affect the review.
 
 An accept without `expectedDeploymentImpact`, from a dashboard that predates the fence, keeps its
-earlier behavior, so mixed-version deployments keep working. The fence covers assignments, not
-machine version pins or machines that register later under an existing assignment.
+earlier behavior, so mixed-version deployments keep working. The fence covers assignments and pins,
+not machines that register later under an existing assignment.
 Group assignments retain the selected machine-wide version policy when they expand dynamically.
 
 ## Implemented machine snapshot import

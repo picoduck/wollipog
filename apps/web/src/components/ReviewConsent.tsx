@@ -35,17 +35,17 @@ export function ReviewConsent({ label, checked, disabled, onChange }: {
   return <Checkbox consent className="review-consent" label={label} checked={checked} disabled={disabled} onChange={onChange} />;
 }
 
-/** Whether the server refused an accept because the skill's assignments changed after the preview
- * whose deployment impact it carried (#2129). */
+/** Whether the server refused an accept because the skill's assignments or machine version pins
+ * changed after the preview whose deployment impact it carried (#2129, #2281). */
 export function isDeploymentImpactConflict(cause: unknown): boolean {
   return cause instanceof ApiError && cause.code === "deployment_impact_changed";
 }
 
 /**
  * Takes the consent's footer slot when the server refused an accept because the skill's
- * assignments changed after the preview (#2129): the consent named an impact that no longer
- * holds, and nothing was deployed. Preview Again reads a fresh preview, whose consent names the
- * current assignments. The dialog keeps its primary disabled meanwhile.
+ * assignments or machine version pins changed after the preview (#2129, #2281): the consent named
+ * an impact that no longer holds, and nothing was deployed. Preview Again reads a fresh preview,
+ * whose consent names the current assignments. The dialog keeps its primary disabled meanwhile.
  */
 export function ReviewConflict({ name, busy, onPreviewAgain }: {
   /** The skill, where the dialog reviews more than one. */
@@ -55,6 +55,6 @@ export function ReviewConflict({ name, busy, onPreviewAgain }: {
 }) {
   return <Notice tone="warning" compact role="alert" className="review-conflict"
     actions={<button type="button" className="btn sm" disabled={busy} onClick={onPreviewAgain}>Preview Again</button>}>
-    Assignments for {name ?? "this skill"} changed after the preview, so it wasn't deployed.
+    Assignments or machine versions for {name ?? "this skill"} changed after the preview, so it wasn't deployed.
   </Notice>;
 }

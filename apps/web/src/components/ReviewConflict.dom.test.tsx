@@ -18,9 +18,10 @@ import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
 
 /**
  * #2129: every review dialog sends back the deployment impact its preview reported. When the server
- * refuses the accept because the skill's assignments changed since, the dialog replaces its consent
- * with the conflict, keeps its primary disabled, and Preview Again reads a fresh preview whose
- * consent names the current count; accepting that one carries the fresh impact.
+ * refuses the accept because the skill's assignments or machine version pins (#2281) changed since,
+ * the dialog replaces its consent with the conflict, keeps its primary disabled, and Preview Again
+ * reads a fresh preview whose consent names the current count; accepting that one carries the fresh
+ * impact.
  */
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -51,7 +52,7 @@ const settle = async () => {
 };
 
 const file = (body: string) => ({ path: "SKILL.md", encoding: "utf8" as const, content: `---\nname: code-review\n---\n${body}` });
-const conflict = () => new ApiError("Assignments for this skill changed. Preview it again.", 409, "deployment_impact_changed");
+const conflict = () => new ApiError("Assignments or machine versions for this skill changed. Preview it again.", 409, "deployment_impact_changed");
 
 /** The preview the fake server reports on each read: the first with `first` assignments, then `fresh`. */
 function previews(first: number, fresh: number) {
@@ -121,7 +122,7 @@ async function assertConflictRoundTrip(primary: string, options: { consent: stri
   const notice = footer().querySelector<HTMLElement>(".review-conflict");
   assert.ok(notice, "the conflict takes the consent's slot");
   assert.equal(notice.getAttribute("role"), "alert");
-  assert.match(notice.textContent ?? "", /changed after the preview, so it wasn't deployed/);
+  assert.match(notice.textContent ?? "", /^Assignments or machine versions for (this skill|code-review) changed after the preview, so it wasn't deployed\./);
   assertNoDomNode(consent(), "the stale consent is gone");
   assert.equal(isDisabled(buttonNamed(primary)), true, "the stale preview cannot be accepted");
   assertNoDomNode(document.querySelector(".form-error"), "the conflict is not shown as a failure as well");

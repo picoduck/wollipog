@@ -7651,6 +7651,12 @@ export class ControlPlaneDb {
    * equal rules wins. A review's preview reports both from this one read, so its consent names the
    * assignments its digest describes; the matching accept carries the digest back and is refused
    * instead of deploying where nobody consented. A skill that does not exist yet has no assignments.
+   *
+   * The skill's machine version pins are in the digest too (#2281): a machine pinned to an earlier
+   * version does not receive a new latest one, so pinning, unpinning or re-pinning a machine also
+   * changes where it deploys. Each write gives a pin a new revision, so a re-pin to the same version
+   * counts as well. They are not in the count, which names assignments, and a skill without pins
+   * keeps the digest it had before pins counted.
    */
   skillDeploymentImpact(skillId: string | null): { assignmentCount: number; deploymentImpact: string } {
     const rows = skillId ? this.stmt(`SELECT 'skill' AS kind, id, scope_kind, runner_id, agent_selector, enabled, updated_at
@@ -7661,8 +7667,13 @@ export class ControlPlaneDb {
       ORDER BY kind, id`).all(skillId, skillId) as Array<{
         kind: string; id: string; scope_kind: string; runner_id: string | null; agent_selector: string; enabled: number; updated_at: number;
       }> : [];
-    const targets = rows.map((row) =>
-      [row.kind, row.id, row.scope_kind, row.runner_id, row.agent_selector, Number(row.enabled), Number(row.updated_at)]);
+    const pins = skillId ? this.stmt("SELECT runner_id, version_id, revision FROM skill_machine_versions WHERE skill_id=? ORDER BY runner_id")
+      .all(skillId) as Array<{ runner_id: string; version_id: string | null; revision: string }> : [];
+    const targets = [
+      ...rows.map((row) =>
+        [row.kind, row.id, row.scope_kind, row.runner_id, row.agent_selector, Number(row.enabled), Number(row.updated_at)]),
+      ...pins.map((pin) => ["pin", pin.runner_id, pin.version_id, pin.revision]),
+    ];
     return { assignmentCount: rows.length, deploymentImpact: createHash("sha256").update(JSON.stringify(targets)).digest("hex") };
   }
 

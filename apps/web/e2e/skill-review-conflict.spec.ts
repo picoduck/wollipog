@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page, type Route } from "@playwright/t
 import { choosePageAction } from "./page-actions.js";
 
 // #2129: a review's accept carries back the deployment impact its preview reported. When the
-// skill's assignments changed in between, the server refuses with a conflict: every review dialog
+// skill's assignments or machine version pins (#2281) changed in between, the server refuses with a conflict: every review dialog
 // replaces its consent with the conflict, keeps its primary disabled, and Preview Again reads a fresh
 // preview whose consent names the current count.
 
@@ -30,7 +30,7 @@ function reviewServer(first: number, fresh: number) {
     async accept(route: Route, json: unknown) {
       accepts.push(route.request().postDataJSON());
       await (accepts.length === 1
-        ? route.fulfill({ status: 409, json: { error: "Assignments for this skill changed. Preview it again.", code: "deployment_impact_changed" } })
+        ? route.fulfill({ status: 409, json: { error: "Assignments or machine versions for this skill changed. Preview it again.", code: "deployment_impact_changed" } })
         : route.fulfill({ json }));
     },
   };
@@ -201,7 +201,7 @@ for (const review of reviews) for (const [width, height] of [[1440, 900], [390, 
     // The conflict takes the consent's slot; nothing stale can be accepted.
     const conflict = foot.locator(".review-conflict");
     await expect(conflict).toHaveAttribute("role", "alert");
-    await expect(conflict).toHaveText(/Assignments for (this skill|code-review) changed after the preview, so it wasn't deployed\.\s*Preview Again/u);
+    await expect(conflict).toHaveText(/Assignments or machine versions for (this skill|code-review) changed after the preview, so it wasn't deployed\.\s*Preview Again/u);
     await expect(foot.getByRole("checkbox")).toHaveCount(0);
     await expect(primary).toBeDisabled();
     await expect(dialog.locator(".form-error")).toHaveCount(0);

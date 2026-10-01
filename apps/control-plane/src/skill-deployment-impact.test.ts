@@ -7,7 +7,7 @@
  * dashboard, keeps the behavior it had before.
  */
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { test, type TestContext } from "node:test";
 import Fastify from "fastify";
 import {
@@ -96,6 +96,21 @@ async function assertDeploymentImpactFence(route: Route, options: { counts?: boo
   await refused("grown from 2 to 3", 2, () => { assign(); });
   const third = db.listSkillAssignments(skillId).at(-1)!.id;
   await refused("shrunk from 3 to 2", 3, () => { db.deleteSkillAssignment(third); });
+  // A machine pinned to an earlier version does not receive the new latest one (#2281), so pinning,
+  // re-pinning or unpinning a machine for the skill is refused too.
+  const runnerId = db.listRunners().at(-1)!.runnerId;
+  const pinned = () => db.getMachineSkillVersion(skillId, runnerId);
+  const pin = (versionId: string | null) =>
+    db.setMachineSkillVersion(skillId, runnerId, versionId, pinned()?.revision ?? null, latest());
+  await refused("pinned", 2, () => pin(latest()));
+  await refused("re-pinned to the same version", 2, () => pin(pinned()!.versionId));
+  await refused("unpinned", 2, () => pin(null));
+  // Another skill's pin does not change where this one deploys.
+  const other = payload("unrelated", "Other");
+  const unrelated = db.createSkill({ name: "unrelated", files: other.files, manifest: other.manifest, digest: other.digest });
+  const elsewhere = await reviewed(2);
+  db.setMachineSkillVersion(unrelated.id, runnerId, unrelated.latestVersion!.id, null, unrelated.latestVersion!.id);
+  await accepted("another skill's pin", elsewhere, elsewhere.deploymentImpact);
   // A fresh preview names the current count, and accepting it unchanged succeeds.
   const unchanged = await reviewed(2);
   await accepted("unchanged", unchanged, unchanged.deploymentImpact);
@@ -152,6 +167,53 @@ test("the deployment impact digests the direct and group assignments' targets", 
     assert.notEqual(impact(), replaced, "joining a group adds the group's assignments");
     assert.equal(db.skillDeploymentImpact(skill.id).assignmentCount, 2);
     assert.equal(db.getSkill(skill.id)!.assignmentCount, 2, "the count is the one the skill reports");
+  } finally { db.close(); }
+});
+
+test("the deployment impact digests the skill's machine version pins (#2281)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    for (const runnerId of ["runner-1", "runner-2"]) {
+      db.registerRunner({ runnerId, hostname: runnerId, os: "linux", version: "1", agents: AGENTS, workspaces: [] }, 1, 90);
+    }
+    const v1 = payload("alpha", "Original");
+    const skill = db.createSkill({ name: "alpha", files: v1.files, manifest: v1.manifest, digest: v1.digest });
+    const first = skill.latestVersion!.id;
+    const latest = db.addSkillVersion(skill.id, payload("alpha", "Second"))!.id;
+    const other = payload("beta", "Other");
+    const unrelated = db.createSkill({ name: "beta", files: other.files, manifest: other.manifest, digest: other.digest });
+    db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "all" } });
+    const impact = () => db.skillDeploymentImpact(skill.id).deploymentImpact;
+    const pin = (runnerId: string, versionId: string | null) => db.setMachineSkillVersion(skill.id, runnerId, versionId,
+      db.getMachineSkillVersion(skill.id, runnerId)?.revision ?? null, latest);
+
+    const unpinned = impact();
+    // A skill without pins keeps the digest of its assignments alone, as before pins counted.
+    const [assignment] = db.listSkillAssignments(skill.id);
+    const targets = [["skill", assignment!.id, "instance", null, JSON.stringify({ kind: "all" }), 1, assignment!.updatedAt]];
+    assert.equal(unpinned, createHash("sha256").update(JSON.stringify(targets)).digest("hex"));
+
+    db.setMachineSkillVersion(unrelated.id, "runner-1", unrelated.latestVersion!.id, null, unrelated.latestVersion!.id);
+    assert.equal(impact(), unpinned, "another skill's pin does not count");
+
+    pin("runner-1", first);
+    const pinned = impact();
+    assert.notEqual(pinned, unpinned, "pinning a machine changes where the skill deploys");
+    assert.equal(db.skillDeploymentImpact(skill.id).assignmentCount, 1, "pins are not assignments");
+    pin("runner-1", first);
+    const repinned = impact();
+    assert.notEqual(repinned, pinned, "re-pinning to the same version counts");
+    pin("runner-1", latest);
+    assert.notEqual(impact(), repinned, "moving a pin counts");
+    const moved = impact();
+    pin("runner-1", null);
+    assert.notEqual(impact(), moved, "unpinning counts");
+    assert.notEqual(impact(), unpinned, "an unpinned policy row is still a write since the preview");
+    const tracking = impact();
+    pin("runner-2", first);
+    assert.notEqual(impact(), tracking, "every machine's pin counts");
+    db.deleteRunner("runner-2");
+    assert.equal(impact(), tracking, "removing a pinned machine drops its pin");
   } finally { db.close(); }
 });
 
