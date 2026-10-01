@@ -1484,17 +1484,18 @@ function queueSkillsReconcile(requestId?: string): void {
     // Read at run time, not queue time: a pass queued behind another always applies the freshest
     // authoritative list, and replaying it under an older requestId still reports converged truth.
     const desired = lastDesiredSkills;
+    const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
     const reconciliationAgents = metadata.agents;
     const reconciliationAccounts = config.providerAccounts.map(account => ({
       id: account.id, provider: account.provider, directory: account.directory,
     }));
     const stillCurrent = () => desired === lastDesiredSkills && reconciliationAgents === metadata.agents &&
+      allowRemovals === (desired !== null && !chunkedSkillsSync.inProgress) &&
       config.providerAccounts.length === reconciliationAccounts.length && reconciliationAccounts.every((account, i) => {
         const current = config.providerAccounts[i];
         return current?.id === account.id && current.provider === account.provider && current.directory === account.directory;
       });
     try {
-      const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
       const accountScopesEnabled = runnerSupportsProtocol(
         controlPlaneProtocolVersion,
         "accountScopedAgentSkills",

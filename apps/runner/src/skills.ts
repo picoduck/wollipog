@@ -1607,6 +1607,10 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     try {
       await options.acquireProviderHomeLease();
     } catch (error) {
+      if (options.isCurrent && !options.isCurrent()) {
+        return scopedResult({ deployed: [], unmanaged: [], removedLinks: [],
+          error: "Skill synchronization was superseded while waiting for provider-home ownership." }, options.providerAccountId);
+      }
       const detail = `Provider-home lease unavailable: ${errText(error)}`;
       const scanDetail =
         "Unmanaged symlink inventory is limited to entry names because targets were not followed.";

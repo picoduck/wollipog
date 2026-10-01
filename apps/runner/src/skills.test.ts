@@ -16,10 +16,13 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { runInNewContext } from "node:vm";
+import { transformSync } from "esbuild";
 import type { AgentDefinition, SkillFile, SkillSyncEntry, SkillSyncTarget } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { skillReconciliationProviderAccountPlan } from "./provider-accounts.js";
+import { ChunkedSkillsSyncAssembler } from "./skills-sync.js";
 import {
   cacheSkillSyncEntry,
   mergeReconcileSkillsResults,
@@ -54,6 +57,95 @@ const codexAgent: AgentDefinition = {
   context: { kind: "native" },
 };
 const agents = [claudeAgent, codexAgent];
+
+for (const outcome of ["granted", "refused"] as const) {
+  test(`chunked content survives a superseded ${outcome} ownership wait and deploys on completion`, async () => {
+    const roots = makeRoots();
+    try {
+      const old = entry("alpha", [{ agentId: codexAgent.id, invocation: "agent" }]);
+      const next = entry("alpha", old.targets, skillFiles("alpha", "New content.\n"));
+      const assembler = new ChunkedSkillsSyncAssembler({
+        runnerId: "fixture",
+        needsContent: () => true,
+        cacheContent: (item) => cacheSkillSyncEntry(roots.dataDir, [codexAgent], item),
+      });
+      // Exercise the actual runner capture/predicate without starting a runner or live provider.
+      const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+      const start = source.indexOf("    const desired = lastDesiredSkills;", source.indexOf("function queueSkillsReconcile("));
+      const end = source.indexOf("    try {", start);
+      assert.ok(start > 0 && end > start);
+      const context: {
+        lastDesiredSkills: Omit<SkillSyncEntry, "files">[];
+        metadata: { agents: AgentDefinition[] };
+        config: { providerAccounts: [] };
+        chunkedSkillsSync: ChunkedSkillsSyncAssembler;
+      } = {
+        lastDesiredSkills: [old], metadata: { agents: [codexAgent] },
+        config: { providerAccounts: [] }, chunkedSkillsSync: assembler,
+      };
+      const capture = (): { allowRemovals: boolean; stillCurrent: () => boolean } => runInNewContext(
+        transformSync(`(() => {${source.slice(start, end)}return { allowRemovals, stillCurrent };})()`, { loader: "ts" }).code,
+        context,
+      );
+      const captured = capture();
+      assert.equal(captured.allowRemovals, true);
+      assert.equal(captured.stillCurrent(), true);
+      let arrived!: () => void;
+      let finish!: () => void;
+      const entered = new Promise<void>((resolve) => { arrived = resolve; });
+      const gate = new Promise<void>((resolve) => { finish = resolve; });
+      const pending = reconcileSkills({
+        ...roots, agents: [codexAgent], desired: context.lastDesiredSkills,
+        allowRemovals: captured.allowRemovals, isCurrent: captured.stillCurrent,
+        previousVersionGraceMs: 0,
+        acquireProviderHomeLease: async () => {
+          arrived();
+          await gate;
+          if (outcome === "refused") throw new Error("Fixture ownership refusal");
+        },
+      });
+      await entered;
+      assert.equal(assembler.begin({
+        type: "skills_sync_manifest", runnerId: "fixture", syncId: "next",
+        skills: [{ name: next.name, versionDigest: next.versionDigest, targets: next.targets }],
+      }).kind, "accepted");
+      assert.equal(assembler.acceptContent({
+        type: "skills_sync_content", runnerId: "fixture", syncId: "next",
+        name: next.name, versionDigest: next.versionDigest, files: next.files!,
+      }).kind, "accepted");
+      const staged = join(skillsStoreRoot(roots.dataDir), next.name, next.versionDigest);
+      assert.equal(existsSync(staged), true);
+      assert.equal(assembler.inProgress, true);
+      assert.equal(captured.stillCurrent(), false);
+      finish();
+      const stale = await pending;
+      assert.match(stale.error ?? "", /superseded/);
+      assert.deepEqual(stale.deployed, []);
+      assert.equal(existsSync(staged), true);
+      assert.equal(existsSync(join(roots.home, ".agents/skills/alpha")), false);
+      assert.equal(existsSync(join(roots.home, ".codex/skills/alpha")), false);
+      const completed = assembler.complete({ type: "skills_sync_complete", runnerId: "fixture", syncId: "next" });
+      assert.equal(completed.kind, "accepted");
+      if (completed.kind !== "accepted") assert.fail("Fixture completion must be accepted");
+      context.lastDesiredSkills = completed.desired;
+      const current = capture();
+      assert.equal(current.allowRemovals, true);
+      assert.equal(current.stillCurrent(), true);
+      const deployed = await reconcileSkills({
+        ...roots, agents: [codexAgent], desired: completed.desired,
+        allowRemovals: current.allowRemovals, isCurrent: current.stillCurrent,
+        previousVersionGraceMs: 0, acquireProviderHomeLease: () => undefined,
+      });
+      assert.equal(deployed.error, undefined);
+      assert.equal(deployed.deployed[0]?.error, undefined);
+      assert.equal(deployed.deployed[0]?.digest, next.versionDigest);
+      assert.equal(realpathSync(join(roots.home, ".agents/skills/alpha")), realpathSync(staged));
+      assert.equal(realpathSync(join(roots.home, ".codex/skills/alpha")), realpathSync(staged));
+    } finally {
+      rmSync(roots.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("legacy host sessions retain their provider harness scope after accounts are configured", () => {
   assert.deepEqual(legacySessionHarnessScopes([
