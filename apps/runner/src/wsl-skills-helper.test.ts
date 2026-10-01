@@ -159,6 +159,198 @@ ${acquireAndRelease}
   assert.equal(invokeLease(home, acquireAndRelease).status, 0);
 });
 
+test("helper confirming reads tolerate completed mirrors and refuse changed canonical or mirror evidence", (t) => {
+  for (const change of ["complete", "tip", "owner", "digest", "retained", "bytes", "malformed", "symlink", "oversized", "extra-link"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-wsl-mirror-${change}-`));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const root = join(home, ".agent-manager/provider-home-leases-v1");
+    const lock = join(root, "mutable-home.lock");
+    const retainedName = "next-11111111-1111-4111-8111-111111111111.json";
+    if (change === "retained") {
+      mkdirSync(lock, { recursive: true, mode: 0o700 });
+      writeFileSync(join(lock, retainedName), JSON.stringify({
+        version: 2, state: "active", ownerHash: owner, leaseId: "22222222-2222-4222-8222-222222222222",
+        previousLeaseId: "11111111-1111-4111-8111-111111111111", previousRecordHash: "c".repeat(64),
+        pid: 2_147_483_647, hostname: hostname(), provider: "skills", createdAt: "2026-08-19T00:00:00.000Z",
+      }));
+    }
+    const native = new ProviderHomeLeaseRegistry(owner, { isProcessAlive: () => false });
+    native.acquireHome(home);
+    native.releaseAll();
+    const proof = JSON.parse(readFileSync(join(root, "mutable-home.recovery.json"), "utf8"));
+    const releaseName = `next-${proof.leaseId}.json`;
+    rmSync(join(lock, releaseName));
+    const result = invokeLease(home, `
+root_path = ${JSON.stringify(root)}
+lock_path = ${JSON.stringify(lock)}
+name = ${JSON.stringify(releaseName)}
+source = os.path.join(root_path, name)
+mirror = os.path.join(lock_path, name)
+change = ${JSON.stringify(change)}
+original_read = read_owned_lease_chain
+reads = 0
+evidence = None
+def snapshot():
+    return [(directory, name, open(os.path.join(directory, name), "rb").read())
+        for directory in (root_path, lock_path) for name in sorted(os.listdir(directory)) if name != "mutable-home.lock"]
+def interleaved(root, lock, include_snapshot=False):
+    global reads, evidence
+    if include_snapshot:
+        reads += 1
+        if reads == 2:
+            if change == "complete": os.link(source, mirror)
+            elif change == "tip":
+                tip, tip_hash = original_read(root, lock)
+                publish_lease(root, root, "next-%s.json" % tip["leaseId"], lease_value("${owner}", "active", (tip["leaseId"], tip_hash)))
+            elif change == "owner":
+                value = json.load(open(source))
+                value["ownerHash"] = "${"b".repeat(64)}"
+                with open(source, "w") as stream: json.dump(value, stream)
+            elif change == "digest":
+                path = os.path.join(root_path, "mutable-home.recovery.json")
+                value = json.load(open(path))
+                value["recoveredEntriesHash"] = "${"c".repeat(64)}"
+                with open(path, "w") as stream: json.dump(value, stream)
+            elif change == "retained":
+                with open(os.path.join(lock_path, "${retainedName}"), "a") as stream: stream.write(" ")
+            elif change == "symlink": os.symlink(source, mirror)
+            elif change == "extra-link":
+                os.link(source, mirror)
+                os.link(source, os.path.join(os.environ["HOME"], "unexpected-alias"))
+            else:
+                raw = open(source, "rb").read() + b" " if change == "bytes" else b"{}" if change == "malformed" else b"x" * 4097
+                with open(mirror, "wb") as stream: stream.write(raw)
+            evidence = snapshot()
+    return original_read(root, lock, include_snapshot)
+read_owned_lease_chain = interleaved
+home_fd, _ = open_root(os.environ["HOME"])
+try:
+    lease = acquire_lease(home_fd, "${owner}")
+except Exception:
+    assert change != "complete"
+    assert reads == 2 and snapshot() == evidence, "refusal mutated ownership evidence"
+    print("refused unchanged")
+else:
+    assert change == "complete", "unsafe acquisition granted ownership"
+    assert reads == 2
+    release_lease(lease)
+    print("acquired once")
+finally: os.close(home_fd)
+`);
+    assert.equal(result.status, 0, `${change}: ${String(result.stderr)}`);
+    assert.match(String(result.stdout), change === "complete" ? /acquired once/ : /refused unchanged/);
+  }
+});
+
+test("real native and helper processes elect one winner while a release mirror finishes publication", async (t) => {
+  for (const contenders of ["native", "helper", "both"] as const) await t.test(contenders, async (t) => {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-wsl-release-window-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const released = join(home, "released");
+    const finishMirror = join(home, "finish-mirror");
+    const mirrored = join(home, "mirrored");
+    const finishWinner = join(home, "finish-winner");
+    const nativeReady = join(home, "native-ready");
+    const helperReady = join(home, "helper-ready");
+    const nativeResult = join(home, "native-result");
+    const helperResult = join(home, "helper-result");
+    const children: ReturnType<typeof spawn>[] = [];
+    const exits: Array<Promise<{ code: number | null; stderr: string }>> = [];
+    t.after(async () => {
+      for (const child of children) child.kill("SIGKILL");
+      await Promise.all(exits);
+    });
+    const launch = (command: string, args: string[]) => {
+      const child = spawn(command, args, { env: { ...process.env, HOME: home }, stdio: ["ignore", "ignore", "pipe"] });
+      children.push(child);
+      exits.push(new Promise((resolve, reject) => {
+        let stderr = "";
+        child.stderr!.on("data", (chunk) => { stderr += String(chunk); });
+        child.once("error", reject);
+        child.once("close", (code) => resolve({ code, stderr }));
+      }));
+    };
+    const waitFor = async (...paths: string[]) => {
+      const deadline = Date.now() + 10_000;
+      while (paths.some((path) => !existsSync(path)) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.ok(paths.every((path) => existsSync(path)), `publication barrier timed out: ${paths.join(", ")}`);
+    };
+    const publisher = instrumentHelper(
+      '        if canonical: mirror_external_lease(root, lock, name)\n',
+      '        if canonical:\n            hold_release(root, name)\n            mirror_external_lease(root, lock, name)\n            with open(' + JSON.stringify(mirrored) + ', "w") as stream: stream.write("done")\n',
+    );
+    launch("python3", ["-c", leaseProgram(`
+def hold_release(root, name):
+    with open(${JSON.stringify(released)}, "w") as stream: stream.write(name)
+    while not os.path.exists(${JSON.stringify(finishMirror)}): time.sleep(0.01)
+${acquireAndRelease}
+  `, publisher)]);
+    await waitFor(released);
+    const root = join(home, ".agent-manager/provider-home-leases-v1");
+    const releaseName = readFileSync(released, "utf8");
+    assert.ok(existsSync(join(root, releaseName)), "canonical release is already published");
+    assert.equal(existsSync(join(root, "mutable-home.lock", releaseName)), false, "release mirror has not been published");
+    const nativeProgram = join(home, "native-contender.ts");
+    writeFileSync(nativeProgram, `
+import { existsSync, writeFileSync } from "node:fs";
+import { ProviderHomeLeaseRegistry } from ${JSON.stringify(new URL("./provider-home-lease.ts", import.meta.url).href)};
+const wait = (path) => { const deadline = Date.now() + 10000; while (!existsSync(path)) {
+    if (Date.now() > deadline) throw new Error("publication barrier timed out");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+} };
+const registry = new ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, {
+    beforeTransitionPublishForTest: () => { writeFileSync(${JSON.stringify(nativeReady)}, "ready"); wait(${JSON.stringify(mirrored)}); },
+  });
+try {
+  registry.acquireHome(${JSON.stringify(home)});
+  writeFileSync(${JSON.stringify(nativeResult)}, "won");
+  wait(${JSON.stringify(finishWinner)});
+  registry.releaseAll();
+} catch (error) { writeFileSync(${JSON.stringify(nativeResult)}, "lost:" + error.message); }
+  `);
+    if (contenders !== "helper") launch(process.execPath, ["--import", "tsx", nativeProgram]);
+    if (contenders !== "native") launch("python3", ["-c", leaseProgram(`
+original_read = read_owned_lease_chain
+reads = 0
+def interleaved(root, lock, include_snapshot=False):
+    global reads
+    if include_snapshot:
+        reads += 1
+        if reads == 2:
+            with open(${JSON.stringify(helperReady)}, "w") as stream: stream.write("ready")
+            while not os.path.exists(${JSON.stringify(mirrored)}): time.sleep(0.01)
+    return original_read(root, lock, include_snapshot)
+read_owned_lease_chain = interleaved
+home_fd, _ = open_root(os.environ["HOME"])
+try:
+    lease = acquire_lease(home_fd, "${owner}")
+except Exception as error:
+    with open(${JSON.stringify(helperResult)}, "w") as stream: stream.write("lost:" + str(error))
+else:
+    with open(${JSON.stringify(helperResult)}, "w") as stream: stream.write("won")
+    while not os.path.exists(${JSON.stringify(finishWinner)}): time.sleep(0.01)
+    release_lease(lease)
+finally: os.close(home_fd)
+  `)]);
+    const readyPaths = contenders === "both" ? [nativeReady, helperReady] : [contenders === "native" ? nativeReady : helperReady];
+    const resultPaths = contenders === "both" ? [nativeResult, helperResult] : [contenders === "native" ? nativeResult : helperResult];
+    await waitFor(...readyPaths);
+    writeFileSync(finishMirror, "go");
+    await waitFor(...resultPaths);
+    const outcomes = resultPaths.map((path) => readFileSync(path, "utf8"));
+    assert.equal(outcomes.filter((result) => result === "won").length, 1, outcomes.join("\n"));
+    assert.equal(outcomes.filter((result) => result.startsWith("lost:")).length, contenders === "both" ? 1 : 0, outcomes.join("\n"));
+    if (contenders === "both") assert.match(outcomes.find((result) => result.startsWith("lost:"))!, /lease changed during recovery/);
+    assert.deepEqual(readFileSync(join(root, "mutable-home.lock", releaseName)), readFileSync(join(root, releaseName)));
+    writeFileSync(finishWinner, "done");
+    const statuses = await Promise.all(exits);
+    assert.deepEqual(statuses.map(({ code }) => code), contenders === "both" ? [0, 0, 0] : [0, 0], statuses.map(({ stderr }) => stderr).join("\n"));
+    assert.equal(invokeLease(home, acquireAndRelease).status, 0, "winner releases a usable canonical journal");
+  });
+});
+
 test("legacy helper readers refuse a freshly initialized canonical helper journal", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-wsl-rollback-reader-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));

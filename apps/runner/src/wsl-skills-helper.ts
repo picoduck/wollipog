@@ -144,12 +144,17 @@ def external_lease(root):
     try: os.stat("mutable-home.recovery.json", dir_fd=root, follow_symlinks=False); return True
     except FileNotFoundError: return False
 
-def read_owned_lease_chain(root, lock):
-    if not external_lease(root): return read_lease_chain(lock)
+def read_owned_lease_chain(root, lock, include_snapshot=False):
+    if not external_lease(root):
+        tip = read_lease_chain(lock)
+        if not include_snapshot: return tip
+        records = [{"name": name, "hash": read_lease_record(lock, name)[1]} for name in sorted(os.listdir(lock))]
+        return (*tip, hashlib.sha256(json.dumps(records, separators=(",", ":")).encode()).hexdigest())
     # Native initialization has three known links: canonical proof, checkpoint, and genesis
     # mirror. Other records retain the two-link bound. All reads remain descriptor-relative and
     # no-follow; a missing mirror never overrides the canonical owner's PID.
     value, record_hash = read_lease_record(root, "mutable-home.recovery.json", 3)
+    canonical_records = [{"name": "mutable-home.recovery.json", "hash": record_hash}]
     retained_hash = value.get("recoveredEntriesHash")
     if (value.get("version") != 2 or value.get("state") != "active" or
         value.get("previousLeaseId") is not None or value.get("previousRecordHash") is not None or
@@ -170,6 +175,7 @@ def read_owned_lease_chain(root, lock):
         name = "next-%s.json" % value["leaseId"]
         if name not in external_entries: break
         successor, successor_hash = read_lease_record(root, name)
+        canonical_records.append({"name": name, "hash": successor_hash})
         if (successor.get("version") != 2 or successor.get("previousLeaseId") != value["leaseId"] or
             successor.get("previousRecordHash") != record_hash): fail("provider home lease is incomplete or foreign")
         if successor["state"] == "released" and (value.get("state") != "active" or
@@ -187,6 +193,11 @@ def read_owned_lease_chain(root, lock):
     retained = [{"name": name, "hash": read_lease_record(lock, name)[1]} for name in entries if name not in consumed]
     digest = hashlib.sha256(json.dumps(retained, separators=(",", ":")).encode()).hexdigest()
     if external_consumed != external_entries or digest != retained_hash: fail("provider home lease is incomplete or foreign")
+    if include_snapshot:
+        # Mirrors are checked above, but completing an optional alias does not change ownership.
+        records = sorted(retained + canonical_records, key=lambda record: record["name"])
+        snapshot = hashlib.sha256(json.dumps(records, separators=(",", ":")).encode()).hexdigest()
+        return value, record_hash, snapshot
     return value, record_hash
 
 def mirror_external_lease(root, lock, name, mirror=None, required=False):
@@ -423,7 +434,7 @@ def acquire_external_lease(root, owner):
     try:
         try: lock = child_dir(root, "mutable-home.lock")
         except FileNotFoundError: pass
-        existing, existing_hash = read_owned_lease_chain(root, lock)
+        existing, existing_hash, existing_snapshot = read_owned_lease_chain(root, lock, True)
         if existing.get("state") != "released":
             if existing["hostname"] != os.uname().nodename: fail("provider home is leased by another host")
             if process_alive(existing["pid"]): fail("provider home is already in use")
@@ -432,8 +443,9 @@ def acquire_external_lease(root, owner):
             try: os.mkdir("mutable-home.lock", 0o700, dir_fd=root)
             except FileExistsError: pass
             lock = child_dir(root, "mutable-home.lock")
-        confirmed, confirmed_hash = read_owned_lease_chain(root, lock)
-        if confirmed["leaseId"] != existing["leaseId"] or confirmed_hash != existing_hash:
+        confirmed, confirmed_hash, confirmed_snapshot = read_owned_lease_chain(root, lock, True)
+        if (confirmed["leaseId"] != existing["leaseId"] or confirmed_hash != existing_hash or
+            confirmed_snapshot != existing_snapshot):
             fail("provider home lease changed during recovery")
         value = lease_value(owner, "active", (confirmed["leaseId"], confirmed_hash))
         name = "next-%s.json" % confirmed["leaseId"]

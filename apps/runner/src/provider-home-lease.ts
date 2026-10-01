@@ -197,6 +197,12 @@ function readChain(lockDir: string): LeaseChain {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const entrySet = new Set(entries);
+  const verifiedMirrors = new Map<string, string>();
+  const verifyMirror = (name: string, hash: string) => {
+    if (!entrySet.has(name)) return;
+    if (readRecord(join(lockDir, name)).hash !== hash) throw unexpectedEntries(lockDir);
+    verifiedMirrors.set(name, hash);
+  };
   let marker: string;
   let current: ReadLeaseRecord;
   let recovery: ReadLeaseRecord | undefined;
@@ -213,7 +219,7 @@ function readChain(lockDir: string): LeaseChain {
     }
     current = recovery;
     marker = `lease-${current.record.leaseId}.json`;
-    if (entrySet.has(marker) && readRecord(join(lockDir, marker)).hash !== current.hash) throw unexpectedEntries(lockDir);
+    verifyMirror(marker, current.hash);
   } else if (entries.length === 0) {
     throw refusal(lockDir, "is incomplete and has no ownership proof");
   } else if (entrySet.has(LEGACY_MARKER)) {
@@ -240,7 +246,7 @@ function readChain(lockDir: string): LeaseChain {
   // mirrors for inspection. A rollback binary must refuse this marker instead of acquiring
   // a lease while ignoring the canonical journal.
   if (recovery && entrySet.has("checkpoint.json")) {
-    if (readRecord(join(lockDir, "checkpoint.json")).hash !== recovery.hash) throw unexpectedEntries(lockDir);
+    verifyMirror("checkpoint.json", recovery.hash);
     consumed.add("checkpoint.json");
   }
   const externalEntries = recovery ? readdirSync(root).filter((name) => NEXT_MARKER.test(name)).sort() : [];
@@ -257,7 +263,7 @@ function readChain(lockDir: string): LeaseChain {
     if (recovery) {
       externalConsumed.add(nextMarker);
       canonicalRecords.push({ name: nextMarker, hash: next.hash });
-      if (entrySet.has(nextMarker) && readRecord(join(lockDir, nextMarker)).hash !== next.hash) throw unexpectedEntries(lockDir);
+      verifyMirror(nextMarker, next.hash);
     }
     // Only two transitions are ever published, and both constrain the successor: reclaim appends
     // an active record over an unreleased (v1 or active-v2) predecessor after proving the same
@@ -275,9 +281,16 @@ function readChain(lockDir: string): LeaseChain {
     if (externalConsumed.size !== externalEntries.length) throw unexpectedEntries(lockDir);
     if (recordsHash(retained) !== (recovery.record as ProviderHomeLeaseRecordV2).recoveredEntriesHash) throw unexpectedEntries(lockDir);
   } else if (retained.length) throw unexpectedEntries(lockDir);
+  const snapshotRecords = entries.map((name) => ({ name, hash: readRecord(join(lockDir, name)).hash }));
+  for (const { name, hash } of snapshotRecords) {
+    if (verifiedMirrors.has(name) && verifiedMirrors.get(name) !== hash) throw unexpectedEntries(lockDir);
+  }
+  // Optional mirrors are validated aliases, not ownership state. Their publication must not
+  // change the recovery snapshot; canonical bytes and every retained entry still do.
+  const snapshotEvidence = recovery ? snapshotRecords.filter(({ name }) => !consumed.has(name)) : snapshotRecords;
+  if (recovery && recordsHash(snapshotEvidence) !== (recovery.record as ProviderHomeLeaseRecordV2).recoveredEntriesHash) throw unexpectedEntries(lockDir);
   return { entries, tip: current, snapshotHash: recordsHash([
-    ...entries.map((name) => ({ name, hash: readRecord(join(lockDir, name)).hash })),
-    ...canonicalRecords,
+    ...snapshotEvidence, ...canonicalRecords,
   ]), external: recovery !== undefined };
 }
 

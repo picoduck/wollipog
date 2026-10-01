@@ -686,6 +686,83 @@ test("the exclusive successor elects one winner across real runner processes", a
   assert.equal(outcomes.filter((outcome) => outcome.startsWith("lost:")).length, 1);
 });
 
+test("completing a verified canonical mirror during takeover succeeds on the first attempt", (t) => {
+  for (const phase of ["checkpoint", "genesis", "release"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-provider-mirror-${phase}-`));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const holder = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a" });
+    holder.acquireHome(home);
+    holder.releaseAll();
+    const { root, lock } = leasePaths(home);
+    const proof = JSON.parse(readFileSync(join(root, "mutable-home.recovery.json"), "utf8"));
+    const name = phase === "checkpoint" ? "checkpoint.json" : phase === "genesis"
+      ? `lease-${proof.leaseId}.json` : `next-${proof.leaseId}.json`;
+    const source = join(root, phase === "release" ? name : "mutable-home.recovery.json");
+    rmSync(join(lock, name));
+    let completed = false;
+    const contender = new ProviderHomeLeaseRegistry(OWNER_B, {
+      pid: 202, hostname: "host-b", isProcessAlive: () => true,
+      beforeTransitionPublishForTest: () => {
+        assert.equal(completed, false, "only one attempt is needed");
+        linkSync(source, join(lock, name));
+        completed = true;
+      },
+    });
+    assert.equal(contender.acquireHome(home), true);
+    assert.equal(completed, true);
+    assert.deepEqual(readFileSync(join(lock, name)), readFileSync(source));
+    contender.releaseAll();
+  }
+});
+
+test("canonical takeover refuses changed evidence and unsafe completed mirrors without granting or publishing", (t) => {
+  for (const change of ["tip", "owner", "digest", "retained", "mirror-bytes", "mirror-malformed", "mirror-symlink", "mirror-oversized"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-provider-mirror-refusal-${change}-`));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    writePartialJournal(home, "next");
+    const holder = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a", isProcessAlive: () => false });
+    holder.acquireHome(home);
+    holder.releaseAll();
+    const { root, lock } = leasePaths(home);
+    const proofPath = join(root, "mutable-home.recovery.json");
+    const proof = JSON.parse(readFileSync(proofPath, "utf8"));
+    const releaseName = `next-${proof.leaseId}.json`;
+    const releasePath = join(root, releaseName);
+    const mirror = join(lock, releaseName);
+    rmSync(mirror);
+    let evidence: Array<{ directory: string; name: string; bytes: Buffer }> = [];
+    const snapshot = () => [root, lock].flatMap((directory) => readdirSync(directory).sort()
+      .filter((name) => name !== "mutable-home.lock")
+      .map((name) => ({ directory, name, bytes: readFileSync(join(directory, name)) })));
+    const contender = new ProviderHomeLeaseRegistry(OWNER_B, {
+      pid: 202, hostname: "host-b", isProcessAlive: () => true,
+      beforeTransitionPublishForTest: () => {
+        if (change === "tip") {
+          new ProviderHomeLeaseRegistry(OWNER_B, { pid: 303, hostname: "host-b" }).acquireHome(home);
+        } else if (change === "owner") {
+          const released = JSON.parse(readFileSync(releasePath, "utf8"));
+          writeFileSync(releasePath, JSON.stringify({ ...released, ownerHash: OWNER_B }));
+        } else if (change === "digest") {
+          writeFileSync(proofPath, JSON.stringify({ ...proof, recoveredEntriesHash: "c".repeat(64) }));
+        } else if (change === "retained") {
+          const path = join(lock, `next-${LEGACY_ID}.json`);
+          writeFileSync(path, `${readFileSync(path, "utf8")} `);
+        } else if (change === "mirror-symlink") {
+          symlinkSync(releasePath, mirror);
+        } else {
+          const bytes = change === "mirror-bytes" ? `${readFileSync(releasePath, "utf8")} `
+            : change === "mirror-malformed" ? "{}\n" : "x".repeat(4_097);
+          writeFileSync(mirror, bytes);
+        }
+        evidence = snapshot();
+      },
+    });
+    assert.throws(() => contender.acquireHome(home), /lease changed|unexpected entries|metadata/);
+    assert.equal(contender.releaseHome(home), false, "refused contender has no ownership grant");
+    assert.deepEqual(snapshot(), evidence, "refusal leaves canonical and mirror evidence unchanged");
+  }
+});
+
 test("a release racing stale recovery wins the same transition without stranding an empty lock", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-release-race-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
