@@ -1,5 +1,4 @@
 import { browserRandomUUID } from "../browser-crypto.js";
-import { backLabel } from "../navigation.js";
 import { State } from "./State.js";
 import {
   type KeyboardEvent,
@@ -57,6 +56,11 @@ import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } fro
 import { compareSessionNotices, SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { SessionPlaceholder } from "./SessionPlaceholder.js";
+import { sessionUnarchiveRestarts } from "../archive-actions.js";
+import { unarchiveSession } from "../session-unarchive.js";
+import { TranscriptSkeleton } from "./TranscriptSkeleton.js";
+import { clearRoutedSessionLookup, setRoutedSessionLookup, useRoutedSessionLookup } from "../routed-session-lookup.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
@@ -78,7 +82,7 @@ import {
 } from "./common.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
-import { statusMeta } from "../status-meta.js";
+import { sessionArchivedAtRest, statusMeta } from "../status-meta.js";
 import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest } from "./EventTimeline.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
@@ -123,11 +127,7 @@ import {
   recoverSessionHistoryWindow,
   shouldReadOpeningWindow,
 } from "../history-recovery.js";
-import {
-  routedSessionPlaceholder,
-  shouldHydrateRoutedSession,
-  type RoutedSessionLookup,
-} from "../detail-placeholder.js";
+import { routedSessionPlaceholder, shouldHydrateRoutedSession } from "../detail-placeholder.js";
 import { transcriptPresentation, transcriptRendersRequestRow } from "../transcript-presentation.js";
 import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
 import {
@@ -195,8 +195,7 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronDownIcon, ChevronLeftIcon, EditIcon, FolderIcon, ImageIcon, InfoIcon, MicIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
-import { windowDragRegion } from "../desktop-window.js";
+import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, InfoIcon, MicIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -541,11 +540,11 @@ export function SessionDetail(props: SessionDetailProps) {
   const snapshotRevision = useStoreSelector((s) => s.snapshotRevision);
   const isMobile = useIsMobile();
   const lastLookupKeyRef = useRef<string | null>(null);
-  const [sessionLookup, setSessionLookup] = useState<RoutedSessionLookup>({
-    sessionId,
-    complete: false,
-    error: null,
-  });
+  // The phone top bar titles the page from the same lookup (#2202).
+  const sessionLookup = useRoutedSessionLookup(sessionId);
+  // Retry reissues the lookup for the same route, snapshot and connection.
+  const [lookupAttempt, setLookupAttempt] = useState(0);
+  useEffect(() => () => clearRoutedSessionLookup(sessionId), [sessionId]);
 
   // Archived sessions are deliberately absent from the live snapshot. Resolve the exact routed id
   // through the normal authorized REST surface so copied links remain durable after archiving.
@@ -553,16 +552,16 @@ export function SessionDetail(props: SessionDetailProps) {
   // new snapshot generation so a deletion missed while offline still becomes authoritative.
   useEffect(() => {
     if (!shouldHydrateRoutedSession(session, snapshotRevision, conn)) return;
-    const lookupKey = JSON.stringify([sessionId, snapshotRevision, conn]);
+    const lookupKey = JSON.stringify([sessionId, snapshotRevision, conn, lookupAttempt]);
     if (lastLookupKeyRef.current === lookupKey) return;
     lastLookupKeyRef.current = lookupKey;
     let current = true;
-    setSessionLookup({ sessionId, complete: false, error: null });
+    setRoutedSessionLookup({ sessionId, complete: false, error: null });
     void api.session(sessionId)
       .then(({ session: loaded }) => {
         if (!current) return;
         loadSession(loaded);
-        setSessionLookup({ sessionId, complete: true, error: null });
+        setRoutedSessionLookup({ sessionId, complete: true, error: null });
       })
       .catch((cause: unknown) => {
         if (!current) return;
@@ -570,42 +569,21 @@ export function SessionDetail(props: SessionDetailProps) {
         if (notFound && session) {
           dispatch({ type: "msg", msg: { type: "session_removed", sessionId } });
         }
-        setSessionLookup({ sessionId, complete: true, error: notFound ? null : (cause as Error).message });
+        setRoutedSessionLookup({ sessionId, complete: true, error: notFound ? null : (cause as Error).message });
       });
     return () => { current = false; };
-  }, [api, sessionId, session, loadSession, dispatch, conn, snapshotRevision]);
+  }, [api, sessionId, session, loadSession, dispatch, conn, snapshotRevision, lookupAttempt]);
 
   if (!session) {
-    const placeholder = routedSessionPlaceholder(sessionId, sessionLookup, conn);
-    // On desktop the session route hides the app-level top bar, so even the loading,
-    // unavailable, and not-found states must own the page heading and the `page-title`
-    // focus-rescue anchor — otherwise view-change focus rescue lands on <body> and the
-    // page has no level-one heading (regression coverage).
-    const ownsPageTitle = props.mode !== "preview" && !isMobile;
     return (
-      <div className="session-detail expanded" data-session-surface-id={sessionId}>
-        {props.mode !== "preview" && !isMobile && (
-          <header className="detail-bar session-bar" {...windowDragRegion()}>
-            <button
-              type="button"
-              className="icon-btn detail-bar-back"
-              onClick={props.onBack ?? (() => navigate({ name: "inbox" }))}
-              title={backLabel("inbox")}
-              aria-label={backLabel("inbox")}
-            >
-              <ChevronLeftIcon />
-            </button>
-            <h1
-              className="detail-bar-title session-bar-title"
-              id={ownsPageTitle ? "page-title" : undefined}
-              tabIndex={ownsPageTitle ? -1 : undefined}
-            >
-              {placeholder.title}
-            </h1>
-          </header>
-        )}
-        <State variant={placeholder.variant} title={placeholder.title}>{placeholder.hint}</State>
-      </div>
+      <SessionPlaceholder
+        sessionId={sessionId}
+        placeholder={routedSessionPlaceholder(sessionId, sessionLookup, conn)}
+        preview={props.mode === "preview"}
+        isMobile={isMobile}
+        onBack={props.onBack ?? (() => navigate({ name: "inbox" }))}
+        onRetry={() => setLookupAttempt((attempt) => attempt + 1)}
+      />
     );
   }
 
@@ -842,7 +820,7 @@ function SessionDetailLoaded({
     [mutationKey],
   );
   const activeComposerMutation = useSyncExternalStore(subscribeMutation, readMutation, readMutation);
-  const { confirm, showToast } = useFeedback();
+  const { confirm, showToast, showUndo } = useFeedback();
   // Narrow selector subscriptions: this component must re-render for ITS session's events and
   // row, not for every token-usage upsert of every other session on the board.
   const {
@@ -2785,6 +2763,24 @@ function SessionDetailLoaded({
   // The failed switch's notice opens the same dialog as More Actions → Switch Account….
   const [switchAccountOpen, setSwitchAccountOpen] = useState(false);
   const switchAccountButtonRef = useRef<HTMLButtonElement | null>(null);
+  // The Session Archived notice's Unarchive (#2202): the same operation as More Actions' item.
+  const [unarchivePending, setUnarchivePending] = useState(false);
+  const unarchiveFromNotice = async (restarts: boolean) => {
+    if (unarchivePending) return;
+    setUnarchivePending(true);
+    try {
+      await unarchiveSession({
+        sessionId: session.id,
+        restarts,
+        api,
+        showToast,
+        showUndo,
+        reloadSession: async () => { loadSession((await api.session(session.id)).session); },
+      });
+    } finally {
+      setUnarchivePending(false);
+    }
+  };
   // The notice slot's order for the conditions that also stop a new message. Their slot entries
   // take it from here, so the composer names the one the slot shows first (#2037).
   const worktreeMissingOrder = worktreeRecovery && {
@@ -2796,15 +2792,22 @@ function SessionDetailLoaded({
   const accountSwitchFailedOrder = accountSwitchFailure && {
     key: `account-switch-failed:${accountSwitchFailureKey}`, severity: "warning", rank: SESSION_NOTICE_RANK.accountSwitchFailed,
   } as const;
+  // An archived session that has stopped says so in the slot, with Unarchive as the way back (#2202).
+  const archivedOrder = sessionArchivedAtRest(session) ? {
+    key: "archived", severity: "info", rank: SESSION_NOTICE_RANK.archived,
+  } as const : undefined;
   const sessionNoticeReason = [
     worktreeMissingOrder && { ...worktreeMissingOrder, reason: "Worktree recovery is required before sending another message." },
     historyQuarantineOrder && { ...historyQuarantineOrder, reason: "Conversation quarantined. Recover this session to continue." },
     accountSwitchFailedOrder && { ...accountSwitchFailedOrder, reason: "Choose another account before sending another message." },
+    archivedOrder && { ...archivedOrder, reason: "Unarchive the session to send a message." },
   ].filter((condition) => condition !== undefined).sort(compareSessionNotices)[0]?.reason;
   // A person the server refuses a prompt (a Viewer) gets a read-only composer that says why.
   const promptRefusal = sessionCommandRefusal(session, "prompt");
-  // Why the composer cannot send a new message now. Edit & Resend states the same reason.
+  // Why the composer cannot send a new message now. Edit & Resend states the same reason. An
+  // archived session is also stopped; its notice is in the slot, so the slot's order decides.
   const promptUnavailableReason = promptRefusal !== null ? promptRefusal
+    : archivedOrder && sessionNoticeReason !== undefined ? sessionNoticeReason
     : terminal ? `Session is ${session.status}.`
     : !runnerOnline ? "Runner is offline."
     : sessionNoticeReason !== undefined ? sessionNoticeReason
@@ -3906,6 +3909,37 @@ function SessionDetailLoaded({
           generating={setupSuggestion.generating} dismissing={setupSuggestion.dismissing} error={setupSuggestion.error}
           generateRefusal={setupSuggestion.generateRefusal}
           onGenerate={setupSuggestion.generate} onDismiss={setupSuggestion.dismiss} />
+      ),
+    });
+  }
+
+  if (archivedOrder) {
+    const unarchiveRestarts = sessionUnarchiveRestarts(session, unarchiveAndRestartSupported);
+    // A person the server would refuse (a Viewer) sees the action disabled, with the reason (#1843).
+    const unarchiveRefusal = sessionCommandRefusal(session, "unarchive");
+    sessionNotices.push({
+      ...archivedOrder,
+      title: "Session Archived",
+      // Not dismissible: it is the way back, and the composer's placeholder points to it.
+      render: ({ trailing }) => (
+        <Notice tone="info" role="status" ariaLabel="Session Archived" title="Session Archived"
+          trailing={trailing}
+          actions={(
+            <BusyButton
+              className="btn primary sm"
+              busy={unarchivePending}
+              progress="Restoring the session…"
+              disabled={unarchiveRefusal !== null}
+              title={unarchiveRefusal ?? undefined}
+              aria-describedby={unarchiveRefusal !== null ? "session-archived-refusal" : undefined}
+              onClick={() => void unarchiveFromNotice(unarchiveRestarts)}
+            >
+              {unarchiveRestarts ? "Unarchive and Restart" : "Unarchive"}
+            </BusyButton>
+          )}>
+          <p>This session is archived and stopped.</p>
+          {unarchiveRefusal !== null && <p className="notice-meta" id="session-archived-refusal">{unarchiveRefusal}</p>}
+        </Notice>
       ),
     });
   }
@@ -5473,7 +5507,18 @@ function SessionDetailLoaded({
             {/* The one notice slot (§13.2): the most severe session condition, the rest behind
                 "+N More". Session notices are entries of it, never banners of their own. */}
             <SessionNoticeSlot sessionId={session.id} entries={sessionNotices}
-              onFocusLost={() => inputRef.current?.focus()} />
+              onFocusLost={() => {
+                // The composer when it can take a message: a collapsed phone composer's own Edit
+                // Message control, so the layout does not change under the person. A composer that
+                // still refuses a message (a plain Unarchive leaves the session stopped) cannot hold
+                // focus, so the page title takes it (#2202).
+                const input = inputRef.current;
+                const target = !input || input.disabled ? null
+                  : composerIdleCollapsed ? input.closest(".composer-box")?.querySelector<HTMLElement>(".composer-idle-preview")
+                  : input;
+                target?.focus({ preventScroll: true });
+                if (!target || target.ownerDocument.activeElement !== target) document.getElementById("page-title")?.focus();
+              }} />
             {switchAccountOpen && (
               <SwitchAccountDialog
                 session={session}
@@ -7085,17 +7130,6 @@ function GuardrailHelp({ label, hint }: { label: string; hint: string }) {
         <span className="plus-budget-help-popover" id={popoverId} role="note" style={popover.style}>{hint}</span>
       )}
     </span>
-  );
-}
-
-function TranscriptSkeleton() {
-  return (
-    <div className="transcript-skeleton" role="status" aria-label="Loading Session Activity">
-      <span className="sr-only">Loading Session Activity…</span>
-      <div className="transcript-skeleton-row user" aria-hidden="true"><span /><span /></div>
-      <div className="transcript-skeleton-row agent" aria-hidden="true"><span /><span /><span /></div>
-      <div className="transcript-skeleton-row agent short" aria-hidden="true"><span /><span /></div>
-    </div>
   );
 }
 

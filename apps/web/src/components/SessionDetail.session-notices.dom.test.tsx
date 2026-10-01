@@ -147,12 +147,16 @@ async function flush(delay = 0) {
   });
 }
 
-async function mount(current: SessionView, { online = true, client: overrides = {}, events }: {
+async function mount(current: SessionView, { online = true, client: overrides = {}, events, unarchiveAndRestart = false }: {
   online?: boolean;
   client?: Partial<ApiClient>;
   /** Transcript events, delivered live once the session is in the store. */
   events?: SessionEvent["payload"][];
+  /** The control plane owns one preflighted Unarchive and Restart. */
+  unarchiveAndRestart?: boolean;
 } = {}) {
+  const toasts: string[] = [];
+  const undos: string[] = [];
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: current.id, runtimeKey: `${current.id}:1`, createSocket: () => socket, close() {},
@@ -177,7 +181,12 @@ async function mount(current: SessionView, { online = true, client: overrides = 
   const root = createRoot(container);
   await act(async () => root.render(
     <ApiProvider client={client}>
-      <FeedbackContext.Provider value={{ confirm: async () => true, showToast: () => 0, dismissToast: () => {} } as never}>
+      <FeedbackContext.Provider value={{
+        confirm: async () => true,
+        showToast: (message: string) => { toasts.push(message); return 0; },
+        showUndo: (message: string) => { undos.push(message); return 0; },
+        dismissToast: () => {},
+      } as never}>
         <StoreProvider connection={connection} navigation={navigation}>
           {events && <EventSeeder sessionId={current.id} payloads={events} />}
           <SessionDetail sessionId={current.id} mode="expanded" rightPanel={rightPanel}
@@ -188,13 +197,17 @@ async function mount(current: SessionView, { online = true, client: overrides = 
   ));
   await act(async () => socket.push({
     type: "snapshot",
-    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    capabilities: {
+      sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, unarchiveAndRestart,
+    },
     runners: [runnerView(online)], boxes: [], projects: [], sessions: [current], runs: [], pods: [],
   }));
   await flush();
   const slot = () => container.querySelector(".session-notice-slot") as HTMLElement | null;
   return {
     container,
+    toasts,
+    undos,
     slot,
     notices: () => [...container.querySelectorAll(".session-notice-slot .notice")] as HTMLElement[],
     button: (name: string) => [...(slot()?.querySelectorAll("button") ?? [])]
@@ -666,5 +679,158 @@ test("reasons that are not slot conditions keep their place around the slot's", 
       "a guardrail pause still comes after the slot's conditions");
   } finally {
     await paused.unmount();
+  }
+});
+
+// #2202: an archived session that has stopped says so in the slot, with the way back.
+
+test("an archived session shows Session Archived with Unarchive and Restart, and the composer points to it", async () => {
+  const unarchived: string[] = [];
+  const session = sessionView({ status: "stopped", archived: true });
+  const fixture = await mount(session, {
+    unarchiveAndRestart: true,
+    client: { unarchiveAndRestart: async (id: string) => { unarchived.push(id); return { ...session, archived: false, status: "starting" }; } },
+  });
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.equal(fixture.notices().length, 1);
+    assert.equal(notice.getAttribute("aria-label"), "Session Archived");
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Session Archived");
+    assert.equal(notice.querySelector(".notice-body")?.textContent, "This session is archived and stopped.");
+    assert.ok(notice.classList.contains("t-info"));
+    assertNoDomNode(notice.querySelector(".notice-dismiss"), "the way back is not dismissible");
+    const composer = fixture.container.querySelector(".composer-box textarea") as HTMLTextAreaElement;
+    assert.equal(composer.placeholder, "Unarchive the session to send a message.");
+    assert.equal(composer.disabled, true);
+
+    const action = fixture.button("Unarchive and Restart")!;
+    assert.ok(action, "the control plane's one operation is offered");
+    assert.equal(action.disabled, false);
+    await act(async () => {
+      action.focus();
+      action.click();
+    });
+    await flush();
+    assert.deepEqual(unarchived, [session.id]);
+    assert.deepEqual(fixture.toasts, ["Session restored and restarting."]);
+
+    // The restored session's notice leaves with the focused button; focus goes to the composer.
+    await fixture.update({ ...session, updatedAt: 2, archived: false, status: "starting" });
+    assertNoDomNode(fixture.slot());
+    assert.ok(domWindow.document.activeElement === (composer as never), "focus moves to the composer, not <body>");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("an older control plane offers a plain Unarchive, with Undo", async () => {
+  const calls: Array<[string, boolean]> = [];
+  const session = sessionView({ status: "completed", archived: true });
+  const fixture = await mount(session, {
+    client: { setArchived: async (id: string, archived: boolean) => { calls.push([id, archived]); return { ...session, archived }; } },
+  });
+  try {
+    assert.equal(fixture.button("Unarchive and Restart"), undefined);
+    await act(async () => fixture.button("Unarchive")!.click());
+    await flush();
+    assert.deepEqual(calls, [[session.id, false]]);
+    assert.deepEqual(fixture.undos, ["Session restored."]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a Viewer sees Session Archived with the action disabled and a visible reason", async () => {
+  const refusal = "Only the session's owner or an admin can unarchive it.";
+  const fixture = await mount(sessionView({
+    status: "stopped",
+    archived: true,
+    commandPermissions: {
+      stop: { allowed: false, reason: "No." },
+      restart: { allowed: false, reason: "No." },
+      stopBackgroundJob: { allowed: false, reason: "No." },
+      unarchive: { allowed: false, reason: refusal },
+    },
+  }), { unarchiveAndRestart: true });
+  try {
+    const action = fixture.button("Unarchive and Restart")!;
+    assert.equal(action.disabled, true);
+    assert.deepEqual(describedText(fixture.container, action), [refusal]);
+    assert.ok(fixture.notices()[0]!.textContent?.includes(refusal), "the reason is visible, not only a tooltip");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("an archived session's notice waits behind a more severe one, and the composer names that one", async () => {
+  const fixture = await mount(sessionView({ status: "stopped", archived: true, historyQuarantine: quarantine }));
+  try {
+    assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Conversation Quarantined");
+    assert.ok(fixture.button("+1 More"));
+    const composer = fixture.container.querySelector(".composer-box textarea") as HTMLTextAreaElement;
+    assert.equal(composer.placeholder, "Conversation quarantined. Recover this session to continue.");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("an archive whose Stop failed keeps its Stop recovery, not Session Archived", async () => {
+  const fixture = await mount(sessionView({ status: "running", archived: true, archiveStatus: "stop_failed" }));
+  try {
+    assert.equal(fixture.notices().some((notice) => notice.getAttribute("aria-label") === "Session Archived"), false);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a hidden Session Archived resolving under the shown notice's +1 More keeps focus in the slot", async () => {
+  const session = sessionView({ status: "stopped", archived: true, historyQuarantine: quarantine });
+  const fixture = await mount(session);
+  try {
+    const more = fixture.button("+1 More")!;
+    await act(async () => more.focus());
+    assert.ok(domWindow.document.activeElement === (more as never));
+    // Restored elsewhere: the archived entry resolves and the trigger it gave the quarantine goes.
+    await fixture.update({ ...session, updatedAt: 2, archived: false });
+    assert.equal(fixture.button("+1 More"), undefined);
+    const active = domWindow.document.activeElement as unknown as HTMLElement;
+    assert.ok(active !== (domWindow.document.body as never), "focus does not fall to <body>");
+    assert.ok(fixture.slot()?.contains(active), "focus stays in the slot");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a plain Unarchive leaves the composer stopped, so focus goes to the page title", async () => {
+  const session = sessionView({ status: "stopped", archived: true });
+  const fixture = await mount(session, { client: { setArchived: async (_id: string, archived: boolean) => ({ ...session, archived }) } });
+  try {
+    const action = fixture.button("Unarchive")!;
+    await act(async () => {
+      action.focus();
+      action.click();
+    });
+    await flush();
+    await fixture.update({ ...session, updatedAt: 2, archived: false });
+    assertNoDomNode(fixture.slot());
+    const title = domWindow.document.getElementById("page-title");
+    assert.ok(title, "the session bar owns the page title");
+    assert.ok(domWindow.document.activeElement === (title as never), "focus moves to the page title, not <body>");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("clicking away from the slot is a choice, so a later resolution does not pull focus back", async () => {
+  const session = sessionView({ status: "stopped", archived: true, historyQuarantine: quarantine });
+  const fixture = await mount(session);
+  try {
+    const more = fixture.button("+1 More")!;
+    await act(async () => more.focus());
+    await act(async () => more.blur());
+    await fixture.update({ ...session, updatedAt: 2, archived: false });
+    assert.ok(domWindow.document.activeElement === (domWindow.document.body as never), "focus stays where the person left it");
+  } finally {
+    await fixture.unmount();
   }
 });

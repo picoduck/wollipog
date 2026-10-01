@@ -2024,7 +2024,7 @@ button.status { cursor: pointer; }
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.notice-title { font: var(--type-body-strong); }
+.notice-title { margin: 0; font: var(--type-body-strong); }
 /* A titled notice keeps its trailing controls ("+N More", dismiss) in the title row, so the body
    and the actions below it use the full width (§13.2). */
 .notice.with-head { grid-template-columns: auto minmax(0, 1fr); }

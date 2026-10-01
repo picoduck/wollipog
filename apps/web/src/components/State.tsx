@@ -59,6 +59,9 @@ export interface StateProps {
   /** Render the title as a heading at this level, for a state that replaced a real heading. A
    * state that stands in for the whole window, with no page header above it, takes level 1. */
   headingLevel?: 1 | 2 | 3 | 4;
+  /** The title's id, for a state that owns the page title: the title is then focusable from
+   * script, so view-change focus rescue can land on it (`page-title`). */
+  titleId?: string;
   /** Raw detail behind a Show Details toggle at the end of the actions, as in `Notice`: not in the
    * DOM until the person opens it. */
   details?: ReactNode;
@@ -79,6 +82,7 @@ export function State({
   actions,
   compact = false,
   headingLevel,
+  titleId,
   details,
   live: announce = true,
   className,
@@ -89,7 +93,8 @@ export function State({
     // §12.4: an error is a danger notice in place of the content, with its recovery as the action
     // and the raw detail behind the notice's own Show Details.
     return (
-      <Notice tone="danger" role="alert" title={title} actions={actions} details={details}
+      <Notice tone="danger" role="alert" title={title} headingLevel={headingLevel} titleId={titleId}
+        actions={actions} details={details}
         className={["state-error", compact ? "compact-state" : "", className ?? ""].filter(Boolean).join(" ")}>
         {children}
       </Notice>
@@ -114,7 +119,7 @@ export function State({
     >
       {variant === "loading" && <Spinner decorative />}
       {icon && variant !== "loading" && <span className="state-icon" aria-hidden="true">{icon}</span>}
-      {title && <Title className="state-title">{title}</Title>}
+      {title && <Title className="state-title" id={titleId} tabIndex={titleId ? -1 : undefined}>{title}</Title>}
       {children != null && children !== false && <div className="state-body">{children}</div>}
       {(actions || hasDetails) && (
         <div className="actions">

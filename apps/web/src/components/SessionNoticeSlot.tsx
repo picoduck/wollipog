@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { ToneIcon } from "./Notice.js";
@@ -18,7 +18,7 @@ import { ToneIcon } from "./Notice.js";
  * `SESSION_NOTICE_RANK` (add one there, so the order stays in one table), a one-line Title Case
  * `title` for the menu, and a `render` that returns one `Notice` (or a component built on it) and
  * passes the context's `trailing` to the notice's `trailing` prop, and, for an info entry,
- * `onDismiss` to its `onDismiss`. A condition that also stops a new message defines its `key`,
+ * `onDismiss` to its `onDismiss` (except Session Archived, which is the way back). A condition that also stops a new message defines its `key`,
  * severity and rank once, beside the composer's reason for it in `SessionDetail`, and the entry
  * spreads them: the composer sorts those reasons with `compareSessionNotices`, so its placeholder
  * names the condition this slot shows first (#2037). The Approvals epic's request dock takes the
@@ -60,6 +60,7 @@ export const SESSION_NOTICE_RANK = {
   worktreeSetupFailed: 3,
   worktreeSetupConfigInvalid: 4,
   accountSwitchFailed: 5,
+  archived: 7,
   skillsUnavailable: 8,
   setupSuggestion: 9,
 } as const;
@@ -97,8 +98,8 @@ function dismissInfo(sessionId: string, key: string): void {
 export function SessionNoticeSlot({ sessionId, entries, onFocusLost }: {
   sessionId: string;
   entries: readonly SessionNoticeEntry[];
-  /** Where focus goes when every condition resolves while the "+N More" menu holds it, and the slot
-   * is gone: the composer. */
+  /** Where focus goes when the slot is gone while a control in it, or its "+N More" menu, held
+   * focus: the composer, or the page title when the composer cannot take it. */
   onFocusLost?: () => void;
 }) {
   const dismissed = useSyncExternalStore(
@@ -146,6 +147,45 @@ export function SessionNoticeSlot({ sessionId, entries, onFocusLost }: {
     } else if (focusLost) {
       menu.menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
     }
+  });
+  // With the menu closed, a condition can still resolve under focus: an entry's own action
+  // finishing (Unarchive and Restart restoring the session), or a hidden entry resolving and taking
+  // the shown notice's "+N More" with it (#2202). Only a focused control the commit removed counts,
+  // so a person who clicked away keeps their choice. Focus stays in the slot, or with the slot gone
+  // goes to `onFocusLost`.
+  const lastFocusedRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const doc = slotRef.current?.ownerDocument ?? window.document;
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+      lastFocusedRef.current = target instanceof HTMLElement && slotRef.current?.contains(target) ? target : null;
+    };
+    // Leaving a control that is still in the document is the person's own move (a click away
+    // leaves focus on <body>). A removal may also report focusout, so look once it has settled.
+    const onFocusOut = (event: FocusEvent) => {
+      const target = event.target;
+      if (target !== lastFocusedRef.current) return;
+      queueMicrotask(() => {
+        if (lastFocusedRef.current === target && (target as HTMLElement).isConnected) lastFocusedRef.current = null;
+      });
+    };
+    doc.addEventListener("focusin", onFocusIn);
+    doc.addEventListener("focusout", onFocusOut);
+    return () => {
+      doc.removeEventListener("focusin", onFocusIn);
+      doc.removeEventListener("focusout", onFocusOut);
+    };
+  }, []);
+  useLayoutEffect(() => {
+    const last = lastFocusedRef.current;
+    if (!last || last.isConnected || menuOpen) return;
+    lastFocusedRef.current = null;
+    const doc = last.ownerDocument;
+    if (doc.activeElement && doc.activeElement !== doc.body && doc.activeElement.isConnected) return;
+    const target = slotRef.current?.querySelector<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled)") ??
+      slotRef.current;
+    if (target) target.focus();
+    else onFocusLost?.();
   });
 
   if (!shown) return null;

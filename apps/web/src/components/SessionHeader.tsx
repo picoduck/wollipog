@@ -16,7 +16,6 @@ import {
   sessionArchiveActionLabel,
   sessionArchiveRequiresStop,
   sessionUnarchiveRestarts,
-  unarchiveAndRestartFailureMessage,
 } from "../archive-actions.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { discardComposerDraft } from "../composer-drafts.js";
@@ -42,6 +41,7 @@ import { sessionDisplayTitle } from "../session-title.js";
 import { deleteSessionMessage, signOutOfAgentMessage, stopSessionMessage } from "../session-confirmation-copy.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
+import { unarchiveSession } from "../session-unarchive.js";
 import { sessionStatusSummary } from "../status-meta.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
 
@@ -504,27 +504,14 @@ export function SessionHeader({
             }
             closeMenu(true);
             if (sessionUnarchiveRestarts(session, unarchiveAndRestartSupported)) {
-              // No Undo: re-archiving a relaunched session without a Stop would hide live work.
-              void run(async () => {
-                try {
-                  await api.unarchiveAndRestart(session.id);
-                  showToast("Session restored and restarting.");
-                } catch (cause) {
-                  const failure = unarchiveAndRestartFailureMessage(cause);
-                  showToast(failure.message, { tone: "error" });
-                  // The server may have restored and relaunched this session before the
-                  // response was lost; the header would otherwise keep showing it archived.
-                  // The reload can fail for the very reason the outcome was unconfirmed —
-                  // the toast already says so, and an escaping rejection would be unhandled.
-                  if (failure.ambiguous) {
-                    try {
-                      await onReloadSession?.();
-                    } catch {
-                      /* the session state stays as it was; the toast already reports the uncertainty */
-                    }
-                  }
-                }
-              });
+              void run(() => unarchiveSession({
+                sessionId: session.id,
+                restarts: true,
+                api,
+                showToast,
+                showUndo,
+                reloadSession: onReloadSession,
+              }));
               return;
             }
             void run(async () => {

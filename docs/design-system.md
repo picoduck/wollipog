@@ -738,7 +738,8 @@ extending the settled one-bar session chrome app-wide.
   `status-meta.ts` chooses the badge, the first that applies: each attention kind in
   `sessionAttentionBreakdown()` order, then human-owned campaign requests, then descendant requests;
   Background Work Lost; Disconnected; Waiting on External Job while the session otherwise awaits its
-  next prompt; the lifecycle, including Stop Pending and Stop Failed. "+N" counts only the other
+  next prompt; the lifecycle, including Stop Pending and Stop Failed, and Archived for an archived
+  session that has stopped with no Stop pending or failed (`sessionArchivedAtRest()`). "+N" counts only the other
   conditions that need the person, never passive states, so it is the same at every width. The
   Sessions rows, the preview bar and the Board cards use the same function.
 - It opens the Session Status popover (§9.2, 340px; a bottom sheet on phones): the title, then one
@@ -1682,6 +1683,21 @@ the same notice with Reload and Copy Error Details, top-left in the content area
   color beneath it and un-certifies the contrast checks. It stays readable, scrollable and operable
   (no `aria-hidden`, no `inert`). No screen uses it yet.
 
+**An entity page before its entity loads** (Session, Run, Pod; `detailPlaceholder()`, #2202) shows one
+state with a next step, in the person's terms (never "control plane"):
+
+| State | Title | Sentence and actions |
+| --- | --- | --- |
+| Loading | Loading Session… | Transcript skeleton rows after 300ms; no sentence. |
+| Not found | Session Not Found | "It may have been deleted, or you may not have access." **Back to Sessions**, **Search Sessions** (opens the palette; a Run or Pod offers Back only). |
+| Offline | Waiting to Reconnect | "Wollipog opens this session when the connection comes back." The offline banner has Retry Now. |
+| Not paired | Pair to Load Session | "This device needs to be paired before it can open sessions." The pairing banner is the next step. |
+| Load error | Couldn't Load Session | One sentence, **Retry**, and the raw error behind Show Details. |
+
+The page has one heading. On desktop the session bar keeps only Back and the state carries the `h1`
+(`#page-title`; Loading's is visually hidden). On phones the top bar shows the state's title, the
+state leaves its own out, and the bar has no panel toggles.
+
 ---
 
 ## 13. Toasts and Notices
@@ -1760,15 +1776,20 @@ session conditions `{ key, severity: "danger" | "warning" | "info", rank, title,
 exactly one: the most severe, then the lowest rank.
 
 - Ranks live in one table, `SESSION_NOTICE_RANK`: worktree missing 1, conversation quarantined 2,
-  worktree setup failed 3, invalid worktree setup configuration 4, account switch failed 5, skills
-  unavailable 8, setup suggestion 9. A new entry adds its rank there.
+  worktree setup failed 3, invalid worktree setup configuration 4, account switch failed 5, session
+  archived 7, skills unavailable 8, setup suggestion 9. A new entry adds its rank there.
 - The others are a `.btn.sm.ghost` "+N More" in the shown notice's title row. It opens a menu (§9.1)
   of their tone icons and one-line titles; choosing one shows it until the set of conditions changes,
   and focus moves to the new notice's "+N More".
 - `render` returns one `Notice` and passes the slot's `trailing` to it. Info conditions are
   dismissible per session (the slot passes `onDismiss`); danger and warning ones are not, except where
   the condition has its own dismissal (a failed account switch, which lets the person send with the
-  session's configured account).
+  session's configured account). Session Archived is the info exception: it is the way back, so it
+  is not dismissible.
+- **Session Archived** (info, #2202): an archived session that has stopped reads "This session is
+  archived and stopped." with **Unarchive and Restart** (the control plane's one preflighted
+  operation) or, on an older control plane, **Unarchive**. A person the server would refuse sees it
+  disabled with the reason. The composer's placeholder is "Unarchive the session to send a message."
 - Every session notice above the composer is an entry of this slot: the Composer epic's composer
   errors, attachment notes and queued-message errors join it rather than building a second slot.
 - A session notice says whether this session can take its next turn. A campaign notice describes an

@@ -40,7 +40,7 @@ import {
   saveDurableQueuedEditRecovery,
   type QueuedPromptEditRecovery,
 } from "../queued-edit-recovery.js";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider, useFeedback, type ToastOptions } from "../components/FeedbackProvider.js";
 import { CommandLineIcon, InfoIcon, PanelRightIcon } from "../components/Icons.js";
@@ -79,6 +79,17 @@ const SESSION_REMINDERS = FIXTURE_QUERY.get("reminders") === "1";
 /** The runner's agent is an ACP agent that can sign out (Sign Out of Agent, #2162). */
 const ACP_LOGOUT = FIXTURE_QUERY.get("acpLogout") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
+/**
+ * A routed session that is not in the snapshot is looked up by id (#2202). `?lookup=pending` never
+ * answers, so the page stays Loading; `?lookup=error` fails the first lookup with a transport error,
+ * and Retry then reaches the fixture as usual.
+ */
+const SESSION_LOOKUP_MODE = FIXTURE_QUERY.get("lookup");
+let sessionLookupFailed = false;
+/** `?pairingRequired=1` closes every socket as unpaired (1008), so the shell shows its pairing banner. */
+const PAIRING_REQUIRED = FIXTURE_QUERY.get("pairingRequired") === "1";
+/** `?unarchiveRestart=1` advertises the control plane's one preflighted Unarchive and Restart. */
+const UNARCHIVE_RESTART = FIXTURE_QUERY.get("unarchiveRestart") === "1";
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
 /** The `switch-account` scenario's machine (#2149): `default`, `removed` (the session's account was
  * removed from the machine), `none` (no other account) or `auth` (blocked on authentication). */
@@ -885,6 +896,7 @@ function snapshot(): UiSnapshotMessage {
       createProjectLocations: !LEGACY_WORKSPACES,
       nativeTuiLaunch: true,
       stopBeforeArchive: true,
+      ...(UNARCHIVE_RESTART ? { unarchiveAndRestart: true } : {}),
       ...(SESSION_REMINDERS ? { sessionReminders: true } : {}),
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
     },
@@ -941,6 +953,11 @@ const connection: UiConnectionRuntime = {
   runtimeKey: "project-inbox-e2e:1",
   createSocket() {
     if (offlineBannerLost) return new NeverOpenSocket();
+    if (PAIRING_REQUIRED) {
+      const unpaired = new NeverOpenSocket();
+      window.setTimeout(() => unpaired.onclose?.({ code: 1008 }), 0);
+      return unpaired;
+    }
     const opened = new FixtureSocket();
     socket = opened;
     if (OFFLINE_BANNER) {
@@ -1658,9 +1675,23 @@ const client = {
     return structuredClone(created);
   },
   session: async (id: string) => {
+    if (SESSION_LOOKUP_MODE === "pending") return new Promise<never>(() => {});
+    if (SESSION_LOOKUP_MODE === "error" && !sessionLookupFailed) {
+      sessionLookupFailed = true;
+      throw new Error("HTTP 502: upstream connect error or disconnect/reset before headers");
+    }
     const value = model.sessions.find((candidate) => candidate.id === id);
-    if (!value) throw new Error("session not found");
+    // The control plane answers a missing or hidden session with a fail-closed 404.
+    if (!value) throw new ApiError("Session not found", 404);
     return { session: structuredClone(value) };
+  },
+  unarchiveAndRestart: async (id: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new ApiError("Session not found", 404);
+    Object.assign(value, { archived: false, status: "starting" as const, updatedAt: value.updatedAt + 1 });
+    saveModel();
+    window.setTimeout(() => socket?.push({ type: "session_upsert", session: structuredClone(value) }), 0);
+    return structuredClone(value);
   },
   // #1780: the runner ends only this job; a Result Blocked sibling's result is then delivered.
   stopBackgroundJob: async (id: string, jobId: string) => {

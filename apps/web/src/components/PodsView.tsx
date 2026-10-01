@@ -416,7 +416,15 @@ function PodDetailContent({ podId }: { podId: string }) {
     return (
       <div className="run-detail pod-detail">
         <DetailBar title={viewTitle({ name: "pod", id: podId })} backLabel={backLabel("pods")} onBack={() => navigate({ name: "pods" })} />
-        <State variant={placeholder.variant} title={placeholder.title}>{placeholder.hint}</State>
+        <State
+          variant={placeholder.variant}
+          title={placeholder.title}
+          actions={placeholder.actions.includes("back") && (
+            <button type="button" className="btn primary" onClick={() => navigate({ name: "pods" })}>{backLabel("pods")}</button>
+          )}
+        >
+          {placeholder.hint}
+        </State>
       </div>
     );
   }

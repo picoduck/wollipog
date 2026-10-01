@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { sessionAttentionBreakdown, type PendingApproval } from "@wollipog/protocol";
-import { sessionStatusSummary, type SessionStatusSource } from "./status-meta.js";
+import { sessionArchivedAtRest, sessionStatusSummary, type SessionStatusSource } from "./status-meta.js";
 
 /**
  * `sessionStatusSummary()` is the one ranking every session surface uses to choose its badge
@@ -128,6 +128,32 @@ test("rule 5: with nothing else, the lifecycle shows, including the Stop states"
   // A Stop on an offline machine is Disconnected first; the popover still lists what the Stop is doing.
   assert.deepEqual(labels(session({ status: "running", ...stopPending }), { runnerOnline: false }),
     ["Disconnected", "Stop Waiting for Runner"]);
+});
+
+test("rule 5: an archived session that has stopped reads Archived, never Stopped (#2202)", () => {
+  for (const status of ["stopped", "completed", "failed"] as const) {
+    const summary = sessionStatusSummary(session({ status, archived: true }));
+    assert.equal(summary.primary.meta.label, "Archived");
+    assert.equal(summary.primary.kind, "lifecycle");
+    assert.equal(summary.primary.description, "This session is archived and stopped.");
+  }
+  assert.equal(sessionArchivedAtRest({ status: "stopped", archived: true }), true);
+  // A Stop in progress, or one that failed, keeps its own status and recovery.
+  for (const stop of [
+    { archiveStatus: "stop_pending" },
+    { archiveStatus: "stop_failed" },
+    { stopOperation: { status: "stop_pending" } },
+    { archiveOperation: { status: "stop_failed" } },
+  ] as Partial<SessionStatusSource>[]) {
+    assert.notEqual(sessionStatusSummary(session({ status: "running", archived: true, ...stop })).primary.meta.label, "Archived");
+    assert.equal(sessionArchivedAtRest({ status: "stopped", archived: true, ...stop } as Parameters<typeof sessionArchivedAtRest>[0]), false);
+  }
+  // A running session an older control plane archived without stopping keeps showing that it runs.
+  assert.equal(sessionStatusSummary(session({ status: "running", archived: true })).primary.meta.label, "Running");
+  assert.equal(sessionStatusSummary(session({ status: "stopped", archived: false })).primary.meta.label, "Stopped");
+  // What needs the person still comes first; Archived is the lifecycle, behind it.
+  const asking = session({ status: "stopped", archived: true, pendingApproval: approval });
+  assert.notEqual(sessionStatusSummary(asking).primary.meta.label, "Archived");
 });
 
 test("passive conditions are popover rows after the badge, never counted in +N", () => {

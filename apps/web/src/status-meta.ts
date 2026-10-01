@@ -12,6 +12,7 @@
  */
 
 import {
+  isTerminal,
   sessionAttentionBreakdown,
   sessionAttentionStatus,
   type ArchiveOperationView,
@@ -300,6 +301,22 @@ export function sessionLifecycleMeta(
   return quarantinedStatusMeta(status, options.historyQuarantine) ?? statusMeta("session", status);
 }
 
+/**
+ * An archived session that has stopped, with no Stop in progress or failed: the Session bar's
+ * lifecycle reads Archived and the notice slot offers Unarchive (#2202). A Stop Pending or Stop
+ * Failed archive keeps that status and its Stop recovery. An archived session that is still running
+ * (an older control plane archived without stopping it) keeps its lifecycle, since Archived would
+ * hide the running agent.
+ */
+export function sessionArchivedAtRest(
+  session: Pick<SessionView, "status"> &
+    Partial<Pick<SessionView, "archived" | "archiveStatus" | "archiveOperation" | "stopOperation">>,
+): boolean {
+  if (!session.archived || !isTerminal(session.status)) return false;
+  const operationStatus = (session.stopOperation ?? session.archiveOperation)?.status ?? session.archiveStatus;
+  return operationStatus !== "stop_pending" && operationStatus !== "stop_failed";
+}
+
 /** A quarantined conversation is idle only in the sense that nothing is running. It can never
  * accept another prompt, so "Awaiting Prompt" would invite exactly the retry that cannot work. */
 export function quarantinedStatusMeta(
@@ -373,7 +390,7 @@ export interface SessionStatusContext {
 
 /** The session fields the ranking reads. */
 export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-  Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners" |
+  Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
     "queueHold" | "holds" | "backgroundWorkState" | "backgroundDeliveries">>;
 
@@ -392,6 +409,7 @@ const LIFECYCLE_DESCRIPTIONS: Partial<Record<StatusValue<"session">, string>> = 
   stop_pending: "A Stop is being delivered to the session's machine.",
   stop_waiting_for_runner: "A Stop is waiting for the session's machine to reconnect; runtime capacity may still be held.",
   stop_failed: "The Stop failed, so runtime capacity may still be held.",
+  archived: "This session is archived and stopped.",
 };
 
 function lifecycleDescription(meta: StatusMeta): string {
@@ -433,7 +451,8 @@ export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>[
  * 3. Disconnected, when the session's machine is offline.
  * 4. Waiting on External Job (or Continuation Pending) while the session is otherwise awaiting its
  *    next prompt, so running background work stays visible at a glance (#784).
- * 5. The lifecycle, including Stop Pending and Stop Failed.
+ * 5. The lifecycle, including Stop Pending and Stop Failed, and Archived for an archived session at
+ *    rest (`sessionArchivedAtRest()`).
  *
  * `more` counts the other conditions in rule 1, never a passive state, so "+N" is the same at every
  * width. `conditions` lists everything in that order for the popover, followed by the passive rows
@@ -485,7 +504,7 @@ export function sessionStatusSummary(
     });
   }
 
-  const lifecycle = sessionLifecycleMeta(session.status, {
+  const lifecycle = sessionArchivedAtRest(session) ? statusMeta("session", "archived") : sessionLifecycleMeta(session.status, {
     archiveStatus: session.archiveStatus,
     archiveOperation: session.archiveOperation,
     stopOperation: session.stopOperation,

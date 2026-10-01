@@ -307,7 +307,15 @@ function RunDetailContent({ runId }: { runId: string }) {
     return (
       <div className="run-detail">
         <DetailBar title={viewTitle({ name: "run", id: runId })} backLabel={backLabel("runs")} onBack={back} />
-        <State variant={placeholder.variant} title={placeholder.title}>{placeholder.hint}</State>
+        <State
+          variant={placeholder.variant}
+          title={placeholder.title}
+          actions={placeholder.actions.includes("back") && (
+            <button type="button" className="btn primary" onClick={back}>{backLabel("runs")}</button>
+          )}
+        >
+          {placeholder.hint}
+        </State>
       </div>
     );
   }

@@ -8,52 +8,90 @@ import {
   shouldLookupRoutedSession,
 } from "./detail-placeholder.js";
 
+const RESOURCES = ["Session", "Run", "Pod"] as const;
+const CONNS = ["connecting", "online", "offline", "unauthorized"] as const;
+
 test("detail placeholders do not claim a resource is missing before authoritative data", () => {
   assert.deepEqual(detailPlaceholder("Session", { authoritative: false, conn: "connecting" }), {
-    title: "Loading Session…", hint: "Waiting for the control-plane snapshot.", variant: "loading",
+    title: "Loading Session…", hint: null, variant: "loading", actions: [],
   });
-  assert.equal(detailPlaceholder("Run", { authoritative: false, conn: "offline" }).title, "Run Unavailable");
+  assert.equal(detailPlaceholder("Run", { authoritative: false, conn: "offline" }).title, "Waiting to Reconnect");
   assert.equal(detailPlaceholder("Pod", { authoritative: false, conn: "unauthorized" }).title, "Pair to Load Pod");
 });
 
-test("detail placeholder loading and unpaired titles are in Title Case with sentence-case hints", () => {
-  for (const resource of ["Session", "Run", "Pod"] as const) {
+test("every detail placeholder names a next step in the person's terms, never the control plane (#2202)", () => {
+  for (const resource of RESOURCES) {
+    const noun = resource.toLowerCase();
     assert.deepEqual(detailPlaceholder(resource, { authoritative: false, conn: "connecting" }), {
-      title: `Loading ${resource}…`, hint: "Waiting for the control-plane snapshot.", variant: "loading",
+      title: `Loading ${resource}…`, hint: null, variant: "loading", actions: [],
+    });
+    assert.deepEqual(detailPlaceholder(resource, { authoritative: true, conn: "online" }), {
+      title: `${resource} Not Found`,
+      hint: "It may have been deleted, or you may not have access.",
+      variant: "empty",
+      actions: resource === "Session" ? ["back", "search"] : ["back"],
+    });
+    assert.deepEqual(detailPlaceholder(resource, { authoritative: false, conn: "offline" }), {
+      title: "Waiting to Reconnect",
+      hint: `Wollipog opens this ${noun} when the connection comes back.`,
+      variant: "offline",
+      actions: [],
     });
     assert.deepEqual(detailPlaceholder(resource, { authoritative: false, conn: "unauthorized" }), {
-      title: `Pair to Load ${resource}`, hint: "This device needs access to the control plane.", variant: "offline",
+      title: `Pair to Load ${resource}`,
+      hint: `This device needs to be paired before it can open ${noun}s.`,
+      variant: "offline",
+      actions: [],
     });
+    assert.deepEqual(detailPlaceholder(resource, { authoritative: false, conn: "online", error: "HTTP 502: bad gateway" }), {
+      title: `Couldn't Load ${resource}`,
+      hint: `Something went wrong while opening this ${noun}.`,
+      variant: "error",
+      actions: ["retry"],
+      details: "HTTP 502: bad gateway",
+    });
+  }
+  for (const resource of RESOURCES) {
+    for (const conn of CONNS) {
+      for (const authoritative of [false, true]) {
+        for (const error of [null, "control-plane snapshot failed"]) {
+          const placeholder = detailPlaceholder(resource, { authoritative, conn, error });
+          // The raw error is only behind Show Details, so it never reaches the hint.
+          assert.doesNotMatch(placeholder.hint ?? "", /control[ -]plane/iu, `${resource} ${conn} ${authoritative} ${error}`);
+          assert.doesNotMatch(placeholder.title, /control[ -]plane/iu);
+        }
+      }
+    }
   }
 });
 
-test("list placeholders name the loading, offline and unpaired states in Title Case", () => {
+test("list placeholders name the loading, offline and unpaired states without Wollipog's internals", () => {
   assert.deepEqual(listPlaceholder("runs", "connecting"), {
-    title: "Loading Multi-Agent Runs…", hint: "Waiting for the control-plane snapshot.", variant: "loading",
+    title: "Loading Multi-Agent Runs…", hint: null, variant: "loading",
   });
   assert.deepEqual(listPlaceholder("pods", "offline"), {
-    title: "Pods Unavailable", hint: "Reconnect to the control plane to load this list.", variant: "offline",
+    title: "Pods Unavailable", hint: "Wollipog loads pods when the connection comes back.", variant: "offline",
   });
   assert.deepEqual(listPlaceholder("runs", "unauthorized"), {
-    title: "Pair to Load Multi-Agent Runs", hint: "This device needs access to the control plane.", variant: "offline",
+    title: "Pair to Load Multi-Agent Runs",
+    hint: "This device needs to be paired before it can load multi-agent runs.",
+    variant: "offline",
   });
 });
 
 test("only an authoritative miss renders Not Found and transport errors stay distinct", () => {
   assert.equal(detailPlaceholder("Session", { authoritative: true, conn: "online" }).title, "Session Not Found");
-  assert.deepEqual(detailPlaceholder("Session", { authoritative: false, conn: "online", error: "request failed" }), {
-    title: "Session Unavailable", hint: "request failed", variant: "error",
-  });
+  const failed = detailPlaceholder("Session", { authoritative: false, conn: "online", error: "request failed" });
+  assert.equal(failed.title, "Couldn't Load Session");
+  assert.equal(failed.variant, "error");
+  assert.equal(failed.details, "request failed");
 });
 
 test("current pairing and offline state outrank a stale lookup error", () => {
   const failed = { sessionId: "session-a", complete: true, error: "request failed" };
-  assert.deepEqual(routedSessionPlaceholder("session-a", failed, "unauthorized"), {
-    title: "Pair to Load Session", hint: "This device needs access to the control plane.", variant: "offline",
-  });
-  assert.deepEqual(routedSessionPlaceholder("session-a", failed, "offline"), {
-    title: "Session Unavailable", hint: "Reconnect to the control plane to load this link.", variant: "offline",
-  });
+  assert.equal(routedSessionPlaceholder("session-a", failed, "unauthorized").title, "Pair to Load Session");
+  assert.equal(routedSessionPlaceholder("session-a", failed, "offline").title, "Waiting to Reconnect");
+  assert.equal(routedSessionPlaceholder("session-a", failed, "online").title, "Couldn't Load Session");
 });
 
 test("archived lookup retries as connection state recovers", () => {

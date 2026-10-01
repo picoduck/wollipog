@@ -18,6 +18,12 @@ export interface NoticeProps {
   icon?: ReactNode;
   /** Optional Title Case title, above a sentence-case body. */
   title?: ReactNode;
+  /** Render the title as a heading at this level, for a notice that stands in for a page's content
+   * and so names the page (a load error, §12.4). */
+  headingLevel?: 1 | 2 | 3 | 4;
+  /** The title's id. The title is then focusable from script, as the `page-title` focus-rescue
+   * anchor is. */
+  titleId?: string;
   /** The body: one or two sentences in sentence case. */
   children?: ReactNode;
   /** A left-aligned row of `.btn.sm` actions, the resolving action first. */
@@ -60,6 +66,8 @@ export function Notice({
   tone = "info",
   icon,
   title,
+  headingLevel,
+  titleId,
   children,
   actions,
   details,
@@ -94,6 +102,7 @@ export function Notice({
   // A titled notice carries its trailing controls in the title row; an untitled one keeps them in
   // their own column beside the body.
   const head = Boolean(title);
+  const Title = (headingLevel ? `h${headingLevel}` : "strong") as "strong" | "h1" | "h2" | "h3" | "h4";
   return (
     <Tag
       ref={noticeRef as React.Ref<HTMLDivElement>}
@@ -122,7 +131,7 @@ export function Notice({
       <div className="notice-content">
         {head && (
           <div className="notice-head">
-            <strong className="notice-title">{title}</strong>
+            <Title className="notice-title" id={titleId} tabIndex={titleId ? -1 : undefined}>{title}</Title>
             {(trailing || dismiss) && <div className="notice-trailing">{trailing}{dismiss}</div>}
           </div>
         )}

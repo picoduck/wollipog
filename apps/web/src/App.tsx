@@ -83,6 +83,9 @@ import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { sessionDisplayTitle } from "./session-title.js";
+import { routedSessionPlaceholder } from "./detail-placeholder.js";
+import { useRoutedSessionLookup } from "./routed-session-lookup.js";
+import { SearchPaletteContext } from "./components/search-palette-context.js";
 import { useInstanceScope } from "./instance-scope.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
 import { railViewForDigit, visibleRailViews } from "./rail-preferences.js";
@@ -330,6 +333,8 @@ export function Shell() {
   const experiments = useExperiments();
   const openExperimentalSettings = () => navigate({ name: "settings", section: "experimental" });
   const activeSession = view.name === "session" ? sessions.get(view.id) : undefined;
+  // The phone top bar titles a session that is not loaded with its page's placeholder (#2202).
+  const routedSessionLookup = useRoutedSessionLookup(view.name === "session" ? view.id : "");
   // "<Page> – Wollipog" in the window, the taskbar and a browser tab; a Session by its own title.
   useWindowTitle(viewTitle(view, view.name === "session" ? sessionDisplayTitle(activeSession?.title ?? "") : entityTitle));
   const activeRunnerProtocol = activeSession ? runners.get(activeSession.runnerId)?.protocolVersion : undefined;
@@ -686,7 +691,8 @@ export function Shell() {
   // Codex-style session control cluster. Desktop includes the host-side Open destination picker
   // inside SessionDetail. Mobile keeps only panel toggles in the app topbar: launching an editor
   // or file manager on the runner host is intentionally not a phone action.
-  const sessionPanelControls = view.name === "session" ? (
+  // Only a loaded session has panels: a missing one's page is a placeholder (#2202).
+  const sessionPanelControls = view.name === "session" && activeSession ? (
     <>
       {/* Keyed by session: transient state (open menu, in-flight launch)
           must not leak from one session's bar into the next. */}
@@ -738,7 +744,9 @@ export function Shell() {
           <Header
             view={view}
             sessionActions={sessionPanelControls}
-            sessionTitle={sessionDisplayTitle(sessions.get(view.id)?.title ?? "") || "Session"}
+            sessionTitle={activeSession
+              ? sessionDisplayTitle(activeSession.title) || "Session"
+              : routedSessionPlaceholder(view.id, routedSessionLookup, conn).title}
             onSessionBack={() => navigate(sessionsDestination(instanceScope))}
           />
         )}
@@ -762,6 +770,7 @@ export function Shell() {
           data-focus-zone="main"
           tabIndex={-1}
         >
+          <SearchPaletteContext.Provider value={openPalette}>
           <AppBarSearchProvider onSearch={isMobile ? openPalette : undefined}>
           <ErrorBoundary
             name={viewSubjectName(view)}
@@ -878,6 +887,7 @@ export function Shell() {
           )}
           </ErrorBoundary>
           </AppBarSearchProvider>
+          </SearchPaletteContext.Provider>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
             while toggled on; keyed by session so tab selection never bleeds across navigations. */}
