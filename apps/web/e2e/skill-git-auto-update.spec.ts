@@ -241,7 +241,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await expect(dialog).toBeVisible();
     expect(previews).toEqual([{ url: gitSource.url, ref: "main", subdirectory: "skills/code-review", commit: heldCommit }]);
     const moved = dialog.getByRole("region", { name: "Newer Commit on main" });
-    await expect(moved).toContainText("main is now at commit 0f9e8d7c6b5a. This review imports commit a1b2c3d4e5f6 only; review the newer commit on its own before importing it.");
+    await expect(moved).toContainText("main has moved from held commit a1b2c3d4e5f6 to commit 0f9e8d7c6b5a. Review the newer commit on its own before importing it.");
     await expect(dialog.locator(".skill-git-strip .skill-review-facts dd")).toHaveText([gitSource.url, "main", "a1b2c3d4e5f6"]);
     await expect(dialog.getByRole("checkbox", { name: "code-review", exact: true })).toBeChecked();
     await expect(dialog.locator(".skill-git-pane.review")).toContainText("git log -1");

@@ -274,7 +274,7 @@ test("Review Update… reads the held commit, names both commits once the branch
   const moved = notice("Newer Commit on main");
   assert.ok(moved, "the branch's move is a notice over the review");
   assert.equal(moved.querySelector(".notice-body")?.textContent,
-    "main is now at commit 0f9e8d7c6b5a. This review imports commit a1b2c3d4e5f6 only; review the newer commit on its own before importing it.");
+    "main has moved from held commit a1b2c3d4e5f6 to commit 0f9e8d7c6b5a. Review the newer commit on its own before importing it.");
   assert.match(document.querySelector(".skill-git-strip")?.textContent ?? "", /a1b2c3d4e5f6/);
   assert.ok(checkbox("code-review").checked);
   await act(async () => button("Import Update").click());
@@ -316,7 +316,7 @@ test("a held commit still at the branch's head shows no notice; an unreadable he
   const unknown = notice("Couldn't Check for Newer Commits");
   assert.ok(unknown);
   assert.equal(unknown.querySelectorAll("button").length, 0, "there is no newer commit to offer");
-  assert.match(unknown.textContent ?? "", /This review imports commit a1b2c3d4e5f6 only\./);
+  assert.match(unknown.textContent ?? "", /so it may have commits newer than held commit a1b2c3d4e5f6\./);
   await unmount();
 });
 

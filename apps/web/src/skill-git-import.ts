@@ -93,13 +93,14 @@ export function gitHeldCommitFailure(commit: string): string {
 export function gitHeldBranchNotice(ref: string, held: string, refCommit: string | null | undefined):
   { title: string; body: string; newer: boolean } | null {
   const named = !ref || ref === "HEAD" ? null : ref;
+  // Said the same way over a review and over Up to Date, where nothing is imported.
   if (refCommit === null) {
     return { title: "Couldn't Check for Newer Commits", newer: false,
-      body: `Wollipog couldn't read ${named ?? "the default branch"}, so it may have newer commits. This review imports commit ${shortCommit(held)} only.` };
+      body: `Wollipog couldn't read ${named ?? "the default branch"}, so it may have commits newer than held commit ${shortCommit(held)}.` };
   }
   if (!refCommit || refCommit === held) return null;
   return { title: named ? `Newer Commit on ${named}` : "Newer Commit on the Default Branch", newer: true,
-    body: `${named ?? "The default branch"} is now at commit ${shortCommit(refCommit)}. This review imports commit ${shortCommit(held)} only; review the newer commit on its own before importing it.` };
+    body: `${named ?? "The default branch"} has moved from held commit ${shortCommit(held)} to commit ${shortCommit(refCommit)}. Review the newer commit on its own before importing it.` };
 }
 
 function plural(count: number, noun: string): string {
