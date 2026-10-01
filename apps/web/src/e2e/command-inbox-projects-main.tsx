@@ -17,9 +17,11 @@ import {
   type PodView,
   type PromptImageInput,
   type ProjectView,
+  type ProviderAccountDefinition,
   type RunView,
   type RunnerView,
   type SessionConfig,
+  type SessionProviderAccountOption,
   type SessionCommandInvocationView,
   type SessionCapabilityOverlay,
   type SessionEvent,
@@ -76,6 +78,9 @@ const LONG_AGENT = FIXTURE_QUERY.get("longAgent") === "1";
 const SESSION_REMINDERS = FIXTURE_QUERY.get("reminders") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
+/** The `switch-account` scenario's machine (#2149): `default`, `removed` (the session's account was
+ * removed from the machine), `none` (no other account) or `auth` (blocked on authentication). */
+const SWITCH_ACCOUNTS = SCENARIO === "switch-account" ? FIXTURE_QUERY.get("accounts") ?? "default" : null;
 
 interface FixtureModel {
   projects: ProjectView[];
@@ -394,6 +399,21 @@ function initialModel(): FixtureModel {
           error: "Install Dependencies exited with 1",
         },
       }],
+    });
+  }
+  if (SWITCH_ACCOUNTS) {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      providerAccountId: "acct-current",
+      providerAccountLabel: "current.me@example.com",
+      ...(SWITCH_ACCOUNTS === "auth" ? {
+        status: "input_required",
+        pendingApproval: {
+          kind: "authentication",
+          requestId: "provider-auth:switch-account",
+          title: "Authentication Required — Codex",
+          options: [],
+        },
+      } : {}),
     });
   }
   if (SCENARIO === "invalid-setup-config") {
@@ -763,6 +783,15 @@ function saveModel(): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(model));
 }
 
+/** A Codex account on the fixture machine; its label is an email, which the dashboard masks. */
+function codexAccount(
+  id: string,
+  email: string,
+  authStatus: ProviderAccountDefinition["authStatus"] = "authenticated",
+): ProviderAccountDefinition {
+  return { id, label: email, provider: "codex", authStatus };
+}
+
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "fixture-runner",
@@ -797,6 +826,16 @@ const runner: RunnerView = {
   connectedAt: 1,
   lastSeen: 1,
   protocolVersion: PROTOCOL_VERSION,
+  ...(SWITCH_ACCOUNTS ? {
+    providerAccounts: [
+      ...(SWITCH_ACCOUNTS === "removed" ? [] : [codexAccount("acct-current", "current.me@example.com")]),
+      ...(SWITCH_ACCOUNTS === "none" ? [] : [
+        codexAccount("acct-work", "work.me@example.com"),
+        codexAccount("acct-spare", "spare.me@example.org"),
+        codexAccount("acct-old", "old.me@example.net", "unauthenticated"),
+      ]),
+    ],
+  } : {}),
 };
 if (SCENARIO === "conversation-handoff") runner.agents.push({
   id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code",
@@ -1427,9 +1466,39 @@ const shellSkillsApi = {
   } : {}),
 };
 
+function switchAccountOption(
+  id: string,
+  email: string,
+  freshness: SessionProviderAccountOption["freshness"],
+  fiveHourLeft: number,
+  weeklyLeft: number,
+): SessionProviderAccountOption {
+  return {
+    id, label: email, authStatus: "authenticated", usageState: "available", freshness,
+    buckets: [
+      { id: "five-hour", label: "5-Hour", remainingPercent: fiveHourLeft },
+      { id: "weekly", label: "Weekly", remainingPercent: weeklyLeft },
+    ],
+  };
+}
+
+/** The accounts the switch endpoint offers in the `switch-account` scenario: signed in, with headroom. */
+const switchAccountOptions: SessionProviderAccountOption[] = SWITCH_ACCOUNTS === "none" ? [] : [
+  switchAccountOption("acct-work", "work.me@example.com", "fresh", 78, 39),
+  switchAccountOption("acct-spare", "spare.me@example.org", "stale", 18, 64),
+];
+
 const client = {
   ...api,
   ...shellSkillsApi,
+  ...(SWITCH_ACCOUNTS ? {
+    sessionProviderAccounts: async () => structuredClone({ accounts: switchAccountOptions }),
+    // Held until the page settles it, so the busy primary can be observed.
+    switchSessionProviderAccount: () => new Promise<{ accepted: true; scheduled: boolean }>((resolve) => {
+      (window as unknown as { __settleSwitchAccount?: () => void }).__settleSwitchAccount =
+        () => resolve({ accepted: true, scheduled: false });
+    }),
+  } : {}),
   ...(noticesMode ? noticesApi : {}),
   // One page of the fixture's sessions as the Archived Sessions table lists them. The Archived
   // filter shows every session as archived, so the table has rows to lay out.

@@ -374,7 +374,8 @@ test("Account Switch Failed offers Switch Account… and names a plain label", a
     const dialog = domWindow.document.querySelector('[role="dialog"]');
     assert.ok(dialog, "Switch Account… opens the Switch Account dialog");
     assert.match(dialog.textContent ?? "", /Switch Account/);
-    assert.match(dialog.textContent ?? "", /another subscription account on this Machine/);
+    assert.match(dialog.textContent ?? "", /Continue this conversation with another Codex account on Build Box\./,
+      "the dialog names the provider and the session's machine");
   } finally {
     await fixture.unmount();
   }

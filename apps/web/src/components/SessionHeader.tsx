@@ -3,6 +3,7 @@ import {
   isTerminal,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
+  type ProviderAccountDefinition,
   type SessionReminderView,
   type SessionView,
 } from "@wollipog/protocol";
@@ -86,6 +87,8 @@ export function SessionHeader({
   onBack,
   runnerOnline,
   machineName,
+  machineAccounts,
+  onOpenConnections,
   runnerProtocolVersion,
   providerLogoutSupported,
   stopBeforeArchiveSupported,
@@ -117,6 +120,10 @@ export function SessionHeader({
   runnerOnline: boolean;
   /** The session's machine, named in the reasons its items are unavailable. */
   machineName?: string;
+  /** The machine's provider accounts, which Switch Account lists and checks the session's against. */
+  machineAccounts?: readonly ProviderAccountDefinition[];
+  /** Opens Connections, where Switch Account sends a person with no other account. */
+  onOpenConnections?: () => void;
   runnerProtocolVersion: number | null | undefined;
   providerLogoutSupported: boolean;
   stopBeforeArchiveSupported: boolean;
@@ -844,6 +851,9 @@ export function SessionHeader({
         {switchAccountDialogOpen && (
           <SwitchAccountDialog
             session={session}
+            machineName={machineName}
+            machineAccounts={machineAccounts}
+            onOpenConnections={onOpenConnections}
             onClose={() => setSwitchAccountDialogOpen(false)}
             onSwitched={(scheduled) => {
               showToast(scheduled ? "The account switches after the current turn." : "Account switched.", {

@@ -5006,6 +5006,8 @@ function SessionDetailLoaded({
           session={session}
           runnerOnline={runnerOnline}
           machineName={runnerDisp.name}
+          machineAccounts={runner?.providerAccounts}
+          onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
           runnerProtocolVersion={runner?.protocolVersion}
           stopBeforeArchiveSupported={stopBeforeArchiveSupported}
           unarchiveAndRestartSupported={unarchiveAndRestartSupported}
@@ -5475,6 +5477,9 @@ function SessionDetailLoaded({
             {switchAccountOpen && (
               <SwitchAccountDialog
                 session={session}
+                machineName={runnerDisp.name}
+                machineAccounts={runner?.providerAccounts}
+                onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
                 onClose={() => setSwitchAccountOpen(false)}
                 onSwitched={(scheduled) => showToast(scheduled
                   ? "Account switch scheduled for the next turn boundary."

@@ -116,7 +116,7 @@ test("Switch Account lists headroom and submits the selected account", async () 
   assert.equal(action.disabled, false);
   await act(async () => { action.click(); await tick(); await tick(); });
   assert.match(page().textContent ?? "", /Personal/);
-  assert.match(page().textContent ?? "", /5 Hour: 70% remaining/);
+  assert.match(page().textContent ?? "", /5 Hour · 70% left/);
   const submit = [...page().querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent?.trim() === "Switch Account");
   assert.ok(submit);
@@ -197,17 +197,17 @@ test("email-shaped account labels stay masked in the header and the Switch Accou
   try {
     await openSwitch();
     assert.equal(html().includes("@example."), false, "no account email is in the DOM before a reveal");
-    const titles = [...domWindow.document.querySelectorAll(".choice-row-title")].map((node) => node.textContent);
-    assert.deepEqual(titles, ["Hidden Account 1", "Hidden Account 2"]);
+    // A row's title is its first text; the "Current" chip follows it in the same line.
+    const titles = () => [...domWindow.document.querySelectorAll(".choice-row-title")]
+      .map((node) => node.firstChild?.textContent);
+    assert.deepEqual(titles(), ["Hidden Account", "Hidden Account 1", "Hidden Account 2"],
+      "the current account leads, and the listed accounts are numbered among themselves");
 
     const revealAll = buttonNamed("Show Emails");
     assert.ok(revealAll, "the picker offers one deliberate reveal");
     await act(async () => { revealAll.click(); });
-    assert.deepEqual(
-      [...domWindow.document.querySelectorAll(".choice-row-title")].map((node) => node.textContent),
-      ["work.me@example.com", "work.me@example.org"],
-    );
-    assert.equal(html().includes("current.me@example.com"), false, "the picker reveal does not reveal other values");
+    assert.deepEqual(titles(), ["current.me@example.com", "work.me@example.com", "work.me@example.org"],
+      "Show Emails reveals every row, the current one included");
 
     const cancel = buttonNamed("Cancel");
     assert.ok(cancel);
