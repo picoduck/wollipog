@@ -457,6 +457,32 @@ test("one destination is a single Open Folder button with no caret", async () =>
   }
 });
 
+test("losing the last editor while the menu is open closes it and hands focus to Open Folder", async () => {
+  const client = { ...api, hostAction: async () => ({ ok: true as const }) } as ApiClient;
+  const mounted = await mountEditor(client);
+  try {
+    const choose = mounted.container.querySelector<HTMLButtonElement>(`button[aria-label="${CHOOSE_DESTINATION_LABEL}"]`);
+    assert.ok(choose);
+    await act(async () => {
+      choose.focus();
+      choose.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as unknown as Event);
+    });
+    assert.equal(domWindow.document.activeElement, menuRadios()[0], "a destination has focus");
+    await mounted.pushRunner({ ...runner, editors: [] });
+    assertNoDomNode(doc().querySelector('[role="menu"]'), "the menu goes with its caret");
+    const folder = mounted.container.querySelector<HTMLButtonElement>('button[aria-label="Open Folder"]');
+    assert.ok(folder);
+    assert.equal(domWindow.document.activeElement, folder, "focus lands on the control that remains");
+
+    // Editors coming back restore the split, closed.
+    await mounted.pushRunner(runner);
+    assert.ok(mounted.container.querySelector(`button[aria-label="${CHOOSE_DESTINATION_LABEL}"]`));
+    assertNoDomNode(doc().querySelector('[role="menu"]'));
+  } finally {
+    await mounted.cleanup();
+  }
+});
+
 test("remote and unsupported runners expose no host action", async () => {
   const client = { ...api, hostAction: async () => ({ ok: true as const }) } as ApiClient;
   const unsupported = await mountEditor(client, { ...runner, protocolVersion: 21 });

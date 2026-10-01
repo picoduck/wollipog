@@ -1,5 +1,5 @@
 import { runnerSupportsProtocol, type EditorInfo, type OS } from "@wollipog/protocol";
-import { useId, useRef, useState, type ComponentType } from "react";
+import { useId, useLayoutEffect, useRef, useState, type ComponentType } from "react";
 import { useApi } from "../api-context.js";
 import { titleCaseLabel } from "../format.js";
 import { runnerDisplay } from "../runners.js";
@@ -109,9 +109,19 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
     }
   });
   const menu = useAccessibleMenu(open, setOpen, "editor-menu");
+  const mainRef = useRef<HTMLButtonElement>(null);
 
   const session = sessions.get(sessionId);
   const runner = session ? runners.get(session.runnerId) : undefined;
+  // Rediscovery can take away the last editor while the menu is open. The caret and the menu go
+  // with it, so close the menu and give the focus it held to the Open Folder button that remains.
+  const singleDestination = (runner?.editors?.length ?? 0) === 0;
+  useLayoutEffect(() => {
+    if (!open || !singleDestination) return;
+    setOpen(false);
+    const focused = document.activeElement;
+    if (!focused || focused === document.body || !focused.isConnected) mainRef.current?.focus();
+  }, [open, singleDestination]);
   if (!session) return null;
   const isRemote = [...boxes.values()].some((b) => b.runnerId === session.runnerId);
   if (!runner || isRemote || !runnerSupportsProtocol(runner.protocolVersion, "hostActions")) return null;
@@ -175,6 +185,7 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
   return (
     <div className={only ? "editor-select" : "editor-select split"}>
       <button
+        ref={mainRef}
         type="button"
         className="btn ghost editor-main"
         aria-disabled={offline || busy}
@@ -204,8 +215,8 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
         </button>
       )}
       {/* The note the disabled Open points to while the menu that shows it is closed. */}
-      {offline && !open && <span id={noteId} hidden>{offlineNote}</span>}
-      {open && (
+      {offline && !(open && !only) && <span id={noteId} hidden>{offlineNote}</span>}
+      {open && !only && (
         <MenuSurface
           surfaceRef={menu.menuRef}
           anchor={{ trigger: menu.triggerRef }}
