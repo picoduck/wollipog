@@ -62,14 +62,14 @@ const noHorizontalOverflow = (page: Page) =>
 for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
   test(`an edited deployed copy shows Edited and imports as a new version at ${width} in ${theme}`, async ({ page }, info) => {
     const { requests } = await openDrift(page, width, theme);
-    const machine = page.locator(".skills-machine");
-    await expect(machine.locator(".status")).toHaveText("Edited");
+    const machine = page.locator("table.skill-deployment");
+    await expect(machine.locator(".skill-deployment-agent .status")).toHaveText("Edited");
     // The edited copy is the notice under the skill's header (#1972); Deployment keeps the badge.
     const notice = page.locator(".skill-notice-slot .notice");
     await expect(notice.locator(".notice-title")).toHaveText("Build Machine Has an Edited Copy");
     await expect(notice).toContainText("Claude's copy differs from 4f1c00000000. Updates on that machine wait until you import the edit or restore 4f1c00000000.");
     await expect(machine.getByRole("heading", { name: "Edited Copies" })).toHaveCount(0);
-    await expect(machine).toContainText("Updates and removals are held");
+    await expect(machine).toContainText("Edited on this machine. Updates wait until you import or restore it.");
     await machine.scrollIntoViewIfNeeded();
     await page.screenshot({ path: info.outputPath(`drift-status-${width}-${theme}.png`), fullPage: true });
     expect(await noHorizontalOverflow(page)).toBe(true);
@@ -97,7 +97,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await consent.check();
     await importButton.click();
     await expect(dialog).toBeHidden();
-    await expect(machine.locator(".status")).toHaveText("Linked");
+    await expect(machine.locator(".skill-deployment-agent .status")).toHaveText("Linked");
     await expect(page.locator(".master-detail-list .row").getByText("Edited", { exact: true })).toHaveCount(0);
     expect(requests).toEqual([
       { url: "preview", body: { name: "code-review", digest, variant: "agent" } },
@@ -123,7 +123,7 @@ test("an edit whose skill has no assignments imports without a consent row", asy
 for (const width of [1280, 320]) {
   test(`restoring the library version requires confirmation at ${width}`, async ({ page }, info) => {
     const { requests } = await openDrift(page, width, "dark");
-    const machine = page.locator(".skills-machine");
+    const machine = page.locator("table.skill-deployment");
     await page.locator(".skill-notice-slot").getByRole("button", { name: "Restore Library Version…" }).click();
     const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog"));
     await expect(confirmation).toContainText("The edited copy of “code-review”");
@@ -131,7 +131,7 @@ for (const width of [1280, 320]) {
     await page.screenshot({ path: info.outputPath(`drift-restore-confirm-${width}.png`), fullPage: true });
     expect(await noHorizontalOverflow(page)).toBe(true);
     await confirmation.getByRole("button", { name: "Restore Library Version" }).click();
-    await expect(machine.locator(".status")).toHaveText("Linked");
+    await expect(machine.locator(".skill-deployment-agent .status")).toHaveText("Linked");
     expect(requests).toEqual([{ url: "restore", body: {
       name: "code-review", digest, variant: "agent", observedDigest, confirmation: "explicit",
     } }]);

@@ -16,7 +16,6 @@ import {
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
   skillAttention,
-  skillDeployBadge,
   skillDeployingMachineCount,
   skillEligibleAgents,
   skillFileByteLength,
@@ -417,156 +416,43 @@ test("deployable native agents are eligible and WSL agents require runner capabi
   assert.deepEqual(withWsl.map((agent) => agent.id), ["wsl"]);
 });
 
-test("deploy badges rank offline, conflict, error, digest and link gaps, then deployed", () => {
-  const desired = { versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" as const }] };
-  const linked = { deployed: [{ name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "linked" as const }] }] };
-
-  assert.equal(skillDeployBadge({ runnerOnline: false, desired, reported: linked, skillName: "code-review" }).status, "offline");
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired: undefined, reported: linked, skillName: "code-review" }).status, "pending");
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired, reported: null, skillName: "code-review" }).status, "pending");
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired, reported: { error: "boom" }, skillName: "code-review" }).status, "error");
-
-  const conflicted = { deployed: [{ name: "code-review", digest: "d1", links: [
-    { agentId: "claude", status: "conflict" as const, detail: "A real directory is in the way." },
-    { agentId: "codex", status: "error" as const },
-  ] }] };
-  const conflictBadge = skillDeployBadge({ runnerOnline: true, desired, reported: conflicted, skillName: "code-review" });
-  assert.equal(conflictBadge.status, "conflict");
-  assert.equal(conflictBadge.detail, "A real directory is in the way.");
-
-  const drift = [{ name: "code-review", digest: "a".repeat(64), variant: "agent" as const, held: true }];
-  const driftBadge = skillDeployBadge({ runnerOnline: true, desired, reported: { ...conflicted, drift }, skillName: "code-review" });
-  assert.equal(driftBadge.status, "drift", "an edited copy outranks the held links it causes");
-  assert.equal(driftBadge.label, "Edited");
-  assert.match(driftBadge.detail ?? "", /held until you import the edit or restore the library version/);
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired: undefined, skillName: "code-review",
-    reported: { drift: [{ ...drift[0]!, held: false }] } }).status, "drift", "a retained edit is shown without an assignment");
-  assert.equal(skillDeployBadge({ runnerOnline: false, desired, reported: { drift }, skillName: "code-review" }).status, "offline");
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired, reported: { ...linked, drift }, skillName: "other" }).status, "pending");
-  assert.deepEqual(reportedSkillDrift({ drift: [...drift, { name: "code-review", variant: "bogus" } as never] }, "code-review"), drift);
-
-  const accountConflict = skillDeployBadge({
-    runnerOnline: true,
-    desired,
-    skillName: "code-review",
-    providerAccounts: [{ id: "work", label: "Work" }, { id: "personal", label: "Personal" }],
-    reported: { deployed: [
-      { name: "code-review", digest: "d1", providerAccountId: "work",
-        links: [{ agentId: "claude", status: "linked" }] },
-      { name: "code-review", digest: "d1", providerAccountId: "personal",
-        links: [{ agentId: "claude", status: "conflict", detail: "A real directory is in the way." }] },
-    ] },
-  });
-  assert.equal(accountConflict.status, "conflict");
-  assert.equal(accountConflict.detail, "Personal: A real directory is in the way.");
-
-  const unsupported = { deployed: [{ name: "code-review", digest: "d1", links: [
-    { agentId: "claude", status: "unsupported" as const, detail: "Windows deployment is not yet supported" },
-  ] }] };
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired, reported: unsupported, skillName: "code-review" }).status, "error");
-
-  const stale = { deployed: [{ name: "code-review", digest: "d0", links: [{ agentId: "claude", status: "linked" as const }] }] };
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired, reported: stale, skillName: "code-review" }).status, "pending");
-
-  const partial = { deployed: [{ name: "code-review", digest: "d1", links: [] }] };
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired, reported: partial, skillName: "code-review" }).status, "pending");
-
-  const done = skillDeployBadge({ runnerOnline: true, desired, reported: linked, skillName: "code-review" });
-  assert.equal(done.status, "deployed");
-  // The chip speaks the shared skill-deployment vocabulary (docs/design-system.md §11.2).
-  assert.equal(done.label, "Linked");
-  assert.equal(done.tone, "success");
-
+test("a machine's unmanaged skills and link removals are read defensively", () => {
   assert.deepEqual(reportedUnmanagedSkills({ unmanaged: [{ agentId: "claude", name: "local-notes" }] }),
     [{ agentId: "claude", name: "local-notes" }]);
   assert.deepEqual(reportedUnmanagedSkills(null), []);
   assert.deepEqual(reportedSkillLinkRemovals({ removals: [{
     path: "~/.claude/skills/retired",
     reason: "No longer in the desired skill list.",
-  }] }), [{
+  }] }, null), [{
     path: "~/.claude/skills/retired",
     reason: "No longer in the desired skill list.",
   }]);
-  assert.deepEqual(reportedSkillLinkRemovals(null), []);
+  assert.deepEqual(reportedSkillLinkRemovals(null, null), []);
   assert.deepEqual(reportedSkillLinkRemovals({ removals: [
     { path: {} as never, reason: "bad" },
     { path: "~/.codex/skills/good", reason: "Good." },
-  ] }), [{ path: "~/.codex/skills/good", reason: "Good." }]);
+  ] }, null), [{ path: "~/.codex/skills/good", reason: "Good." }]);
 });
 
-test("account-scoped deploy badges require every applicable sibling account link", () => {
-  const desired = { versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" as const }] };
-  const agents = [{ id: "claude", driver: "claude-code" as const }];
-  const providerAccounts = [
-    { id: "work", label: "Work", provider: "claude" as const },
-    { id: "personal", label: "Personal", provider: "claude" as const },
-  ];
-  const deployed = [
-    { name: "code-review", digest: "d1", providerAccountId: "work",
-      links: [{ agentId: "claude", status: "linked" as const }] },
-    { name: "code-review", digest: "d1", providerAccountId: "personal", links: [] },
-  ];
-
-  const pending = skillDeployBadge({
-    runnerOnline: true, desired, agents, providerAccounts,
-    reported: { deployed }, skillName: "code-review",
-  });
-  assert.equal(pending.status, "pending");
-  assert.equal(pending.detail, "Personal: Awaiting link for claude.");
-
-  deployed[1]!.links = [{ agentId: "claude", status: "linked" }];
-  assert.equal(skillDeployBadge({
-    runnerOnline: true, desired, agents, providerAccounts,
-    reported: { deployed }, skillName: "code-review",
-  }).status, "deployed");
+test("a skill's link removals are only those whose path is that skill's directory (#1981)", () => {
+  const reported = { removals: [
+    { path: "~/.claude/skills/code-review", reason: "No longer in the desired skill list." },
+    { path: "~/.codex/skills/release-notes", reason: "No longer in the desired skill list." },
+    { path: "~/.codex/skills/code-review-extra", reason: "A longer name that starts the same." },
+    { path: "~\\.codex\\skills\\code-review", reason: "A Windows path." },
+    { path: "~/.agents/skills/code-review/", reason: "A trailing separator." },
+  ] };
+  assert.deepEqual(reportedSkillLinkRemovals(reported, "code-review").map((entry) => entry.reason), [
+    "No longer in the desired skill list.",
+    "A Windows path.",
+    "A trailing separator.",
+  ]);
+  assert.deepEqual(reportedSkillLinkRemovals(reported, "release-notes").map((entry) => entry.path),
+    ["~/.codex/skills/release-notes"]);
+  assert.deepEqual(reportedSkillLinkRemovals(reported, "deleted-skill"), []);
+  // Null is the machine's whole history, for Connections.
+  assert.equal(reportedSkillLinkRemovals(reported, null).length, 5);
 });
-
-test("account-scoped deploy badges ignore other providers and use unscoped WSL links", () => {
-  const providerAccounts = [
-    { id: "claude-work", label: "Claude Work", provider: "claude" as const },
-    { id: "codex-work", label: "Codex Work", provider: "codex" as const },
-  ];
-  const mixedProvider = skillDeployBadge({
-    runnerOnline: true,
-    desired: { versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" }] },
-    agents: [{ id: "claude", driver: "claude-code" }, { id: "codex", driver: "codex-app-server" }],
-    providerAccounts,
-    reported: { deployed: [{
-      name: "code-review", digest: "d1", providerAccountId: "claude-work",
-      links: [{ agentId: "claude", status: "linked" }],
-    }] },
-    skillName: "code-review",
-  });
-  assert.equal(mixedProvider.status, "deployed");
-
-  const wsl = skillDeployBadge({
-    runnerOnline: true,
-    desired: { versionDigest: "d1", targets: [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }] },
-    agents: [{ id: "codex-wsl-Ubuntu", driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } }],
-    providerAccounts,
-    reported: { deployed: [
-      { name: "code-review", digest: "d1",
-        links: [{ agentId: "codex-wsl-Ubuntu", status: "linked" }] },
-      { name: "code-review", digest: "d1", providerAccountId: "codex-work",
-        links: [{ agentId: "codex", status: "linked" }] },
-    ] },
-    skillName: "code-review",
-  });
-  assert.equal(wsl.status, "deployed");
-});
-
-test("legacy unscoped deploy badges retain flattened link behavior", () => {
-  const badge = skillDeployBadge({
-    runnerOnline: true,
-    desired: { versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" }] },
-    reported: { deployed: [{
-      name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "linked" }],
-    }] },
-    skillName: "code-review",
-  });
-  assert.equal(badge.status, "deployed");
-});
-
 test("folder uploads strip the picked root, sort by path, and split text from binary", () => {
   const text = new TextEncoder().encode("---\nname: code-review\n---\nBody\n");
   const binary = new Uint8Array([0, 159, 146, 150]);

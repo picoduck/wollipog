@@ -58,8 +58,8 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
         const omitted = omittedKeptAsideCopies(machine);
         const keptAsideUnsupported = machine?.keptAsideReporting === "unsupported";
         return (
-          <article className="skills-machine" key={runner.runnerId} aria-label={machineLabels.get(runner.runnerId) ?? runner.runnerId}>
-            <div className="skills-machine-head">
+          <article className="skill-orphans-machine" key={runner.runnerId} aria-label={machineLabels.get(runner.runnerId) ?? runner.runnerId}>
+            <div className="skill-orphans-machine-head">
               <strong>{machineLabels.get(runner.runnerId) ?? runner.runnerId}</strong>
               <button
                 type="button"

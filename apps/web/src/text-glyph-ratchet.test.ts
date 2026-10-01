@@ -129,8 +129,6 @@ const EXEMPT: readonly (readonly [string, string, string, string])[] = [
   ["shortcuts.ts", "←", "←", "a keycap's display key for ArrowLeft"],
   ["shortcuts.ts", "→", "Hidden in Settings → Appearance", "a settings path written in a sentence"],
   ["shortcuts.ts", "→", "Turned off in Settings → Experimental", "a settings path written in a sentence"],
-  ["components/SkillAssignmentMatrix.tsx", "×", "Machine × Agents", "a multiplication sign naming a matrix's axes"],
-  ["components/SkillAssignmentMatrix.tsx", "×", "Machine × Agents", "a multiplication sign naming a matrix's axes"],
 ];
 
 function sourceFiles(dir: string, out: string[] = []): string[] {

@@ -105,9 +105,10 @@ test.describe("at desktop widths", () => {
     const scroll = (locator: typeof list, top: number) => locator.evaluate((element, value) => { element.scrollTop = value; }, top);
     const top = (locator: typeof list) => locator.evaluate((element) => element.scrollTop);
     await scroll(list, 400);
-    await scroll(detail, 300);
+    // The detail is shorter since Deployment became one table (#1981): 150px is well within it.
+    await scroll(detail, 150);
     expect(await top(list)).toBe(400);
-    expect(await top(detail)).toBe(300);
+    expect(await top(detail)).toBe(150);
     expect(await page.locator(".main-body").evaluate((element) => element.scrollHeight - element.clientHeight), "the page itself never scrolls").toBe(0);
 
     const row = list.getByRole("button", { name: /^team-skill-12/ });

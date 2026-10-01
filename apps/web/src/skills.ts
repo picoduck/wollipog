@@ -1,8 +1,7 @@
 /** Pure logic for the Skills view (no DOM, unit-tested): tolerant response normalization for the
- * skills REST surface, assignment presentation, per-machine deploy-status derivation, folder-upload
- * → SkillFile[] conversion, and client-side draft validation mirroring the protocol validators. */
+ * skills REST surface, assignment presentation, folder-upload → SkillFile[] conversion, and
+ * client-side draft validation mirroring the protocol validators. */
 
-import { statusMeta, type StatusMeta } from "./status-meta.js";
 import {
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_FILES,
@@ -11,8 +10,8 @@ import {
   validSkillName,
   type AgentDefinition,
   type AgentContext,
-  type ResourceScope,
   type DeployedSkillState,
+  type ResourceScope,
   type RunnerView,
   type SkillDriftState,
   type SkillFile,
@@ -21,7 +20,6 @@ import {
   type SkillSyncTarget,
   type UnmanagedSkillInfo,
 } from "@wollipog/protocol";
-import { accountLabelText } from "./personal-identifiers.js";
 // A cycle (the matrix reads invocationLabel and skillEligibleAgents from here) that only function
 // declarations cross, so neither module reads the other while it is still evaluating.
 import { skillAgentMatrixCell } from "./skill-assignment-matrix.js";
@@ -427,7 +425,7 @@ export type SkillAttention = "error" | "edited" | "update_held";
 
 /**
  * The one status a skill shows in the list, and the reason the Library Overview (#1971) lists it:
- * Error when any eligible agent reports a deployment error for it (the Machine × Agents model), then
+ * Error when any eligible agent reports a deployment error for it (each agent's reported link), then
  * Edited when a machine reports an edited copy, then Update Held for a held Git or built-in update.
  * Machines whose report has not loaded say nothing.
  */
@@ -618,7 +616,7 @@ function skillAttentionReason(
     return state && !state.loadError ? [{ runner, state }] : [];
   });
   if (kind === "error") {
-    // The Machine × Agents model: the eligible agents whose cell reports Error, per machine.
+    // Each agent's reported link: the eligible agents whose link reports Error, per machine.
     const failing = loaded.flatMap(({ runner, state }) => {
       const deploys = state.desired.some((entry) => entry.name === skill.name) ||
         Boolean(state.reported?.deployed?.some((entry) => entry.name === skill.name));
@@ -776,120 +774,21 @@ export function skillEligibleAgents(agents: ReadonlyArray<AgentDefinition>, incl
     ((agent.context?.kind ?? "native") === "native" || (includeWsl && agent.context?.kind === "wsl")));
 }
 
-/* --- Deploy status derivation --- */
-
-export type SkillDeployStatus = "deployed" | "pending" | "drift" | "conflict" | "error" | "offline";
-
-/** The chip's words and tone come from the shared skill-deployment vocabulary (§11.2): a deployed
- * copy is Linked, and a hand-edited one is Edited. */
-export interface SkillDeployBadge extends StatusMeta {
-  status: SkillDeployStatus;
-  detail?: string;
-}
-
-function badge(status: SkillDeployStatus, detail?: string): SkillDeployBadge {
-  const meta = statusMeta("skill", status === "deployed" ? "linked" : status === "drift" ? "edited" : status);
-  return { status, ...meta, ...(detail ? { detail } : {}) };
-}
-
-/** One skill × one machine → the chip the detail pane shows.
- *
- * Precedence: an unreachable machine reports nothing trustworthy (offline); a hand-edited deployed
- * copy needs a decision before anything else can converge (drift); a real file in the way must be
- * surfaced over everything else the report says (conflict); an explicit error next; anything not
- * yet reconciled to the desired digest and every target linked is pending. */
-export function skillDeployBadge(input: {
-  loadError?: string;
-  loading?: boolean;
-  runnerOnline: boolean;
-  desired: Pick<RunnerDesiredSkill, "versionDigest" | "targets"> | undefined;
-  reported: ReportedSkillsState | null | undefined;
-  skillName: string;
-  agents?: ReadonlyArray<Pick<AgentDefinition, "id" | "driver" | "context">>;
-  providerAccounts?: ReadonlyArray<{ id: string; label: string; provider?: "claude" | "codex" }>;
-}): SkillDeployBadge {
-  if (!input.runnerOnline) return badge("offline");
-  if (input.loading) return badge("pending", "Skills status has not loaded.");
-  if (input.loadError) return badge("error", input.loadError);
-  const drift = reportedSkillDrift(input.reported, input.skillName);
-  if (drift.length) {
-    return badge("drift", drift.some((entry) => entry.held)
-      ? "A deployed copy of this skill was edited on this machine. Updates and removals are held until you import the edit or restore the library version."
-      : "An edited copy of this skill is retained on this machine until you import the edit or restore the library version.");
-  }
-  if (!input.desired) return badge("pending", "No assignment targets this machine yet.");
-  const deployed = input.reported?.deployed?.filter((entry) => entry.name === input.skillName) ?? [];
-  if (!deployed.length) {
-    return input.reported?.error
-      ? badge("error", input.reported.error)
-      : badge("pending", "This machine has not reported this skill yet.");
-  }
-  const scopedDetail = (row: DeployedSkillState, detail: string | undefined) => {
-    if (!row.providerAccountId) return detail;
-    const label = accountLabelText(input.providerAccounts?.find((account) => account.id === row.providerAccountId)?.label ??
-      "Provider Account");
-    return `${label}: ${detail ?? "deployment did not succeed"}`;
-  };
-  for (const row of deployed) {
-    const conflicted = row.links?.find((link) => link.status === "conflict");
-    if (conflicted) return badge("conflict", scopedDetail(row,
-      conflicted.detail ?? `A conflicting file blocks ${conflicted.agentId}.`));
-  }
-  for (const row of deployed) {
-    const failed = row.links?.find((link) => link.status === "error" || link.status === "unsupported");
-    if (row.error || failed) return badge("error", scopedDetail(row, row.error ?? failed?.detail));
-  }
-  if (deployed.some((row) => row.digest !== input.desired!.versionDigest)) {
-    return badge("pending", "An older version is deployed. Sync to update it.");
-  }
-  const agentsById = new Map(input.agents?.map((agent) => [agent.id, agent]));
-  const accountScoped = deployed.some((row) => Boolean(row.providerAccountId));
-  if (accountScoped && input.agents && input.providerAccounts?.some((account) => account.provider)) {
-    const unscoped = deployed.filter((row) => !row.providerAccountId);
-    for (const target of input.desired.targets) {
-      const agent = agentsById.get(target.agentId);
-      const native = (agent?.context?.kind ?? "native") === "native";
-      const provider = native
-        ? agent?.driver === "claude-code"
-          ? "claude"
-          : agent?.driver === "codex" || agent?.driver === "codex-app-server"
-            ? "codex"
-            : undefined
-        : undefined;
-      const applicableAccounts = provider
-        ? input.providerAccounts.filter((account) => account.provider === provider)
-        : [];
-      if (applicableAccounts.length) {
-        for (const account of applicableAccounts) {
-          const linked = deployed.some((row) => row.providerAccountId === account.id &&
-            row.links?.some((link) => link.agentId === target.agentId && link.status === "linked"));
-          if (!linked) return badge("pending", `${accountLabelText(account.label)}: Awaiting link for ${target.agentId}.`);
-        }
-        continue;
-      }
-      const linked = unscoped.some((row) =>
-        row.links?.some((link) => link.agentId === target.agentId && link.status === "linked"));
-      if (!linked) return badge("pending", `Awaiting links for ${target.agentId}.`);
-    }
-    return badge("deployed");
-  }
-  const links = deployed.flatMap((row) => row.links ?? []);
-  const linked = new Set(links.filter((link) => link.status === "linked").map((link) => link.agentId));
-  const missing = input.desired.targets.filter((target) => !linked.has(target.agentId));
-  if (missing.length) {
-    return badge("pending", `Awaiting links for ${missing.map((target) => target.agentId).join(", ")}.`);
-  }
-  return badge("deployed");
-}
-
 export function reportedUnmanagedSkills(reported: ReportedSkillsState | null | undefined): UnmanagedSkillInfo[] {
   return Array.isArray(reported?.unmanaged) ? reported.unmanaged : [];
 }
 
-export function reportedSkillLinkRemovals(reported: ReportedSkillsState | null | undefined): SkillLinkRemoval[] {
+/** The link removals a machine reported. With a skill name, only that skill's: a removed link's
+ * path ends in the skill's directory name (`~/.claude/skills/<name>`). `null` keeps every removal,
+ * for the machine's own history in Connections. */
+export function reportedSkillLinkRemovals(
+  reported: ReportedSkillsState | null | undefined,
+  skillName: string | null,
+): SkillLinkRemoval[] {
   if (!Array.isArray(reported?.removals)) return [];
   return reported.removals.filter(
-    (entry) => entry && typeof entry.path === "string" && typeof entry.reason === "string",
+    (entry) => entry && typeof entry.path === "string" && typeof entry.reason === "string" &&
+      (skillName === null || entry.path.split(/[\\/]/).filter(Boolean).pop() === skillName),
   );
 }
 

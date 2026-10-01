@@ -113,7 +113,7 @@ test.describe("at 1440×900", () => {
     await expect(notice(page).locator(".notice-body")).toHaveText(
       "Claude Code's copy differs from v3. Updates on that machine wait until you import the edit or restore v3.");
     await expect(actions(page)).toHaveText(["Review Edit…", "Restore Library Version…"]);
-    await expect(page.locator(".skills-machine").getByRole("heading", { name: "Edited Copies" })).toHaveCount(0);
+    await expect(page.locator("table.skill-deployment").getByRole("heading", { name: "Edited Copies" })).toHaveCount(0);
     await notice(page).getByRole("button", { name: "Restore Library Version…" }).click();
     await expect(page.getByRole("alertdialog").or(page.getByRole("dialog"))).toContainText("The edited copy of “lint-rules”");
 

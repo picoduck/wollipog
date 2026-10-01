@@ -54,6 +54,7 @@ import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
 import { AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { InstancesPanel } from "./InstancesPanel.js";
 import { ProviderAccountsSection } from "./ProviderAccountsSection.js";
+import { MachineSkillsSection } from "./MachineSkillsSection.js";
 import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettings.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { formatHarnessLaunchCommand } from "../harness-command.js";
@@ -508,6 +509,7 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
             )}
           </div>
         </details>
+        <MachineSkillsSection runner={runner} />
         <div className="group runner-workspaces">
           <div className="group-head">
             Workspaces <span className="group-count">{runner.workspaces.length}</span>

@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { State } from "./State.js";
-import { StatusBadge } from "./StatusBadge.js";
 import { runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { DetailSkeleton } from "./common.js";
-import { accountLabelText } from "../personal-identifiers.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { PlusIcon, SkillsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
@@ -26,7 +24,7 @@ import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
 import { NewSkillDialog } from "./NewSkillDialog.js";
 import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
 import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
-import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
+import { SkillDeployment } from "./SkillDeployment.js";
 import { SkillNoticeSlot, skillNoticeItem } from "./SkillNoticeSlot.js";
 import { SkillInstructions } from "./SkillInstructions.js";
 import { SkillSource } from "./SkillSource.js";
@@ -45,10 +43,7 @@ import {
   orphanedCopyKey,
   orphanedCopyRef,
   reportedOrphanedCopies,
-  reportedSkillLinkRemovals,
-  reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
-  skillDeployBadge,
   skillFromPayload,
   skillGroupsFromPayload,
   skillOverviewAttention,
@@ -64,10 +59,6 @@ import {
   type SkillGroupView,
   type SkillSummary,
 } from "../skills.js";
-
-function formatTime(value: number | undefined): string {
-  return value === undefined ? "—" : new Date(value).toLocaleString();
-}
 
 /** An Agent Skills route: a skill, a pane (Orphaned Copies, Library Overview), or the bare list. */
 export type SkillsRoute = Extract<View, { name: "skills" }>;
@@ -727,97 +718,21 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 onDismissRecommendation={() => dismissRecommendation(detail.id)}
               />
               {/* §5.1: unboxed sections, in the order Deployment, Assignments, Instructions, Source.
-                  #1981 and #1982 rebuild what the first two hold. */}
-              <SkillDetailSection title="Deployment">
-                <SkillAssignmentMatrix key={`matrix-${detail.id}`} skillId={detail.id} skillName={detail.name} runners={runners} machineLabels={machineLabels} machineSkills={machineSkills} onManageVersion={runnerId => { setVersionRunnerId(runnerId); setDialog("machine-versions"); }} />
-                {runners.length === 0 && <p className="skills-hint">Connect a machine to deploy this skill.</p>}
-                {runners.map((runner) => {
-                  const machine = machineSkills[runner.runnerId];
-                  const desired = machine?.desired.find((entry) => entry.name === detail.name);
-                  const badge = skillDeployBadge({
-                    loadError: machine?.loadError,
-                    loading: !machine,
-                    runnerOnline: runner.status === "online",
-                    desired,
-                    reported: machine?.reported,
-                    skillName: detail.name,
-                    agents: runner.agents,
-                    providerAccounts: runner.providerAccounts,
-                  });
-                  const unmanaged = reportedUnmanagedSkills(machine?.reported);
-                  const removals = reportedSkillLinkRemovals(machine?.reported);
-                  const removalReporting = machine?.removalReporting ?? "unknown";
-                  return (
-                    <article className="skills-machine" key={runner.runnerId}>
-                      <div className="skills-machine-head">
-                        <strong>{machineLabels.get(runner.runnerId) ?? runner.runnerId}</strong>
-                        <StatusBadge meta={badge} title={badge.detail} />
-                        <button
-                          type="button"
-                          className="btn sm"
-                          disabled={runner.status !== "online" || syncingRunnerId !== null}
-                          onClick={() => void syncMachine(runner.runnerId)}
-                        >
-                          {syncingRunnerId === runner.runnerId ? "Syncing…" : "Sync Now"}
-                        </button>
-                      </div>
-                      {badge.detail && <p className="skills-hint">{badge.detail}</p>}
-                      {unmanaged.length > 0 && (
-                        <div className="skills-unmanaged">
-                          <h5>Unmanaged Skills</h5>
-                          <ul>
-                            {unmanaged.map((entry) => (
-                              <li key={`${entry.providerAccountId ?? "legacy"}:${entry.agentId}:${entry.name}`}>
-                                <strong>{entry.name}</strong>
-                                {entry.providerAccountId && <span className="muted"> · {accountLabelText(
-                                  runner.providerAccounts?.find((account) => account.id === entry.providerAccountId)?.label ??
-                                    "Provider Account",
-                                )}</span>}
-                                <span className="muted"> · {entry.agentId}</span>
-                                {entry.description && <span className="muted"> — {entry.description}</span>}
-                              </li>
-                            ))}
-                          </ul>
-                          <p className="skills-hint">
-                            These skills live on the machine but are not managed here. Use Import from Machine to preview or import a snapshot. On a compatible Linux runner, an identical assigned version can then be adopted with an explicit recovery-aware confirmation.
-                          </p>
-                        </div>
-                      )}
-                      {machine && (removals.length > 0 || removalReporting !== "unknown") && (
-                        <div className="skills-removals">
-                          <h5>Recent Link Removals</h5>
-                          {removalReporting === "unsupported" && (
-                            <p className="skills-hint">
-                              This runner version cannot report new managed link removals.
-                            </p>
-                          )}
-                          {removalReporting === "supported" && removals.length === 0 && (
-                            <p className="skills-hint">No managed link removals have been reported.</p>
-                          )}
-                          {removals.length > 0 && (
-                            <>
-                              <p className="skills-hint">
-                                Reported {formatTime(machine.reported?.removalsUpdatedAt ?? machine.reported?.updatedAt)}
-                              </p>
-                              <ul>
-                                {removals.map((entry, index) => (
-                                  <li key={`${entry.path}:${entry.reason}:${index}`}>
-                                    <strong>{entry.path}</strong>
-                                    {entry.providerAccountId && <span className="muted"> · {accountLabelText(
-                                      runner.providerAccounts?.find((account) => account.id === entry.providerAccountId)?.label ??
-                                        "Provider Account",
-                                    )}</span>}
-                                    <span className="muted"> — {entry.reason}</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </article>
-                  );
-                })}
+                  #1982 rebuilds what Assignments holds. */}
+              <SkillDetailSection title="Deployment" note="What each machine reports.">
+                <SkillDeployment
+                  key={`deployment-${detail.id}`}
+                  skill={detail}
+                  runners={runners}
+                  machineLabels={machineLabels}
+                  machineSkills={machineSkills}
+                  rules={detailRules}
+                  rulesComplete={!detailGroupId || groupRulesCurrent}
+                  groupName={(groupId) => groups.find((group) => group.id === groupId)?.name}
+                  syncingRunnerId={syncingRunnerId}
+                  onSync={(runnerId) => void syncMachine(runnerId)}
+                  onManageVersion={(runnerId) => { setVersionRunnerId(runnerId); setDialog("machine-versions"); }}
+                />
               </SkillDetailSection>
               <SkillDetailSection title="Assignments">
                 {detail.groupId && <SkillInheritedAssignments key={detail.id} groupId={detail.groupId} groups={groups} runners={runners} machineLabels={machineLabels} onManage={() => setDialog("groups")} />}

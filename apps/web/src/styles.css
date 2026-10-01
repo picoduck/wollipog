@@ -2358,6 +2358,12 @@ button.status { cursor: pointer; }
   font: var(--type-section);
 }
 .section > .btn { justify-self: start; }
+/* A sentence under a section's title saying where its facts come from. */
+.section-note {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 /* A Surface (§5.1): one bordered group of rows that belong together, divided by hairlines. */
 .surface {
   min-width: 0;
@@ -14425,11 +14431,6 @@ body.shell-dock-dragging * {
 @media (max-width: 760px) {
   .modal-foot > .skill-machine-import-reason { flex-basis: 100%; }
 }
-/* One machine after another in Machine × Agents, divided by hairlines rather than cards. */
-.skill-assignment-matrix > article + article {
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-}
 .skills-machine-import { min-width: 0; overflow-wrap: anywhere; }
 /* The notice slot directly under the skill detail's header (§13.2, #1972): one notice, closer to the
    header than the 32px between sections. On a phone its actions stack at full width, the one
@@ -14507,21 +14508,101 @@ body.shell-dock-dragging * {
 .skill-source > .ui-row-switch:hover:not(.is-disabled) { border-color: transparent; }
 .skill-groups-dialog .skills-section-heading { flex-wrap: wrap; }
 .skill-groups-dialog .btn { white-space: normal; overflow-wrap: anywhere; }
-.skill-assignment-matrix, .skill-assignment-matrix > article { min-width: 0; overflow-wrap: anywhere; }
 /* The assignment tables are `.table`s; each declares its column widths (§14). */
 .skills-table .col-agents { width: 24%; }
 .skills-table .col-invocation { width: 170px; }
 .skills-table .col-enabled { width: 80px; }
 .skills-table .col-actions { width: 90px; }
-.skill-matrix .col-state { width: 32%; }
 .skill-version-list { max-height: 18rem; overflow: auto; display: grid; gap: 8px; }
-.skills-machine { display: grid; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
-.skills-machine:first-of-type { border-top: 0; padding-top: 0; }
-.skills-machine-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.skills-machine-head .btn { margin-left: auto; }
-.skills-unmanaged ul { margin: 4px 0; padding-left: 18px; display: grid; gap: 3px; }
-.skills-removals ul { margin: 4px 0; padding-left: 18px; display: grid; gap: 5px; }
-.skills-removals li { overflow-wrap: anywhere; }
+/* One machine after another in Orphaned Copies, divided by hairlines rather than cards. */
+.skill-orphans-machine {
+  display: grid;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.skill-orphans-machine:first-of-type { padding-top: 0; border-top: 0; }
+.skill-orphans-machine-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.skill-orphans-machine-head .btn { margin-left: auto; }
+/* Deployment (#1981): one §14 table for every machine, so agent rows line up from one machine to
+   the next. Each machine is a row group led by a full-width machine row; an agent's reason wraps
+   under its name (the `.cell-note` rule). Under a 560px container the generic two-line rows apply
+   and the machine's actions take their own line. */
+.skill-deployment .col-invocation,
+.skill-deployment .col-assigned-by { width: 22%; }
+.skill-deployment .col-status { width: 104px; }
+.skill-deployment tbody + tbody > .skill-deployment-machine > td { border-top: 1px solid var(--border-strong); }
+.table.skill-deployment .skill-deployment-machine { background: var(--bg-elev); }
+.skill-deployment .skill-deployment-machine > td {
+  height: auto;
+  padding-block: var(--space-2);
+  white-space: normal;
+}
+@media (hover: hover) {
+  .table.skill-deployment tbody tr.skill-deployment-machine:hover { background: var(--bg-elev); }
+}
+.skill-deployment-machine-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+.skill-deployment-machine-name {
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-body-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-deployment-meta {
+  color: var(--text-dim);
+  font: var(--type-small);
+  white-space: nowrap;
+}
+.skill-deployment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+.skill-deployment .skill-deployment-agent > th { font-weight: inherit; }
+.skill-deployment .skill-deployment-agent:has(.skill-deployment-reason) > * {
+  height: auto;
+  padding-block: var(--space-2);
+  vertical-align: top;
+}
+.skill-deployment-agent-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skill-deployment-reason,
+.skill-deployment-machine .cell-note {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.skill-deployment-machine .cell-note { margin-top: var(--space-1); }
+.skill-deployment .skill-deployment-load-error { color: var(--danger-text); }
+.skill-deployment-ineligible > td { height: auto; padding-block: var(--space-1); }
+@container (max-width: 560px) {
+  /* The row is the padded flex line here, so its cell adds no padding or rule of its own. */
+  .skill-deployment .skill-deployment-machine > td,
+  .skill-deployment tbody + tbody > .skill-deployment-machine > td { flex: 1 1 100%; padding-block: 0; border-top: 0; }
+  .skill-deployment tbody + tbody > .skill-deployment-machine { border-top: 1px solid var(--border-strong); }
+  .skill-deployment-actions { flex-basis: 100%; margin-left: 0; }
+  .skill-deployment .skill-deployment-agent > *,
+  .skill-deployment .skill-deployment-agent:has(.skill-deployment-reason) > * { padding-block: 0; }
+  /* The status stays beside the agent's name when a reason wraps under it. */
+  .skill-deployment .skill-deployment-agent > .cell-status { align-self: flex-start; }
+}
+/* Skills on This Machine, in a machine's details in Connections (#1981). */
+.machine-skills > .runner-agents-body { display: grid; gap: var(--space-3); padding-top: var(--space-2); }
+.machine-skills-group { display: grid; gap: var(--space-1); min-width: 0; }
+.machine-skills-group h5 { margin: 0; }
+.machine-skills-group ul { display: grid; gap: var(--space-1); margin: 0; padding-left: var(--space-4); }
+.machine-skills-group li { overflow-wrap: anywhere; }
 .skills-orphans { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; }
 .skills-orphans li { display: grid; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
 .skills-orphans li + li { border-top: 1px dashed var(--border); padding-top: 12px; }
@@ -14575,7 +14656,6 @@ body.shell-dock-dragging * {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.skills-target-unavailable { border-left: 2px solid var(--warning); padding-left: 8px; overflow-wrap: anywhere; }
 
 
 /* --------------------------- Durable automations -------------------------- */

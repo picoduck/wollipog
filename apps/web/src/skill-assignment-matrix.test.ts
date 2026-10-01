@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentDefinition, RunnerView } from "@wollipog/protocol";
-import { skillDeployBadge, type RunnerSkillsResponse } from "./skills.js";
-import { skillAgentMatrixCell, skillDeploymentErrors, skillManualOnlyErrors, winningSkillRule, type SkillRule } from "./skill-assignment-matrix.js";
+import type { RunnerSkillsResponse } from "./skills.js";
+import {
+  skillAgentDeployment,
+  skillAgentMatrixCell,
+  skillAssignedBy,
+  skillDeploymentErrors,
+  skillMachineDeployment,
+  skillManualOnlyErrors,
+  winningSkillRule,
+  type SkillRule,
+} from "./skill-assignment-matrix.js";
 const runner = { protocolVersion: 111, os: "linux" } as RunnerView;
 const agent = { id: "codex", driver: "codex", name: "Codex" } as AgentDefinition;
 const state = (targeted = true): RunnerSkillsResponse => ({ desired: [{ name: "review", versionDigest: "digest", targets: targeted ? [{ agentId: "codex", invocation: "manual" }] : [] }], reported: { deployed: [{ name: "review", digest: "digest", links: [{ agentId: "codex", status: "linked" }] }] } });
@@ -20,8 +29,8 @@ test("untargeted shared links are not reported as removed", () => {
 test("missing or failed reads remain unknown, never empty assignments", () => {
   assert.equal(skillAgentMatrixCell(runner, agent, "review").desired, "Unknown");
   assert.equal(skillAgentMatrixCell(runner, agent, "review", { ...state(), loadError: "Request failed" }).reported, "Unknown");
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired: undefined, reported: null, skillName: "review", loadError: "Request failed" }).detail, "Request failed");
-  assert.equal(skillDeployBadge({ runnerOnline: true, desired: undefined, reported: null, skillName: "review", loading: true }).detail, "Skills status has not loaded.");
+  assert.equal(skillAgentDeployment(runner, agent, "review").status, null);
+  assert.equal(skillAgentDeployment(runner, agent, "review", { ...state(), loadError: "Request failed" }).status, null);
 });
 test("unavailable platforms, contexts and old runners are explicit", () => {
   assert.equal(skillAgentMatrixCell({ ...runner, os: "windows" }, agent, "review", state()).desired, "Unavailable");
@@ -194,6 +203,98 @@ test("deployment errors are the machines that report an Error for an agent that 
   // An unsupported link (a manual-only skip) is not a machine error; the manual-only notice owns it.
   const skipped = state(); skipped.reported!.deployed![0]!.links[0] = { agentId: "codex", status: "unsupported", detail: "Manual-only invocation is not supported for this agent." };
   assert.deepEqual(skillDeploymentErrors("review", machines, { a: skipped }), []);
+  // Any other unsupported link is an Error row, so the notice names its machine too (#1981).
+  const unsupported = state(); unsupported.desired[0]!.targets[0]!.invocation = "agent";
+  unsupported.reported!.deployed![0]!.links[0] = { agentId: "codex", status: "unsupported", detail: "The WSL distribution name is invalid." };
+  assert.deepEqual(skillDeploymentErrors("review", machines, { a: unsupported }), [{ runnerId: "a", detail: "The WSL distribution name is invalid." }]);
+});
+
+/* --- Deployment rows (#1981) --- */
+
+const linkedTo = (links: Array<[string, "linked" | "error" | "conflict" | "unsupported", string?]>,
+  targets: Array<[string, "agent" | "manual"]>, digest = "digest"): RunnerSkillsResponse => ({
+  desired: [{ name: "review", versionDigest: "digest", targets: targets.map(([agentId, invocation]) => ({ agentId, invocation })) }],
+  reported: { deployed: [{ name: "review", digest, links: links.map(([agentId, status, detail]) => ({ agentId, status, ...(detail ? { detail } : {}) })) }] },
+});
+
+test("Claude Code linked beside a Codex it can't run as Manual Only is 1 of 2 Linked, with Error on Codex only", () => {
+  const machine = { ...laptop, agents: [claude, codex] };
+  const deployment = skillMachineDeployment(machine, "review", linkedTo(
+    [["claude", "linked"], ["codex", "unsupported", "Manual-only invocation is not supported for this agent."]],
+    [["claude", "manual"], ["codex", "manual"]],
+  ));
+  assert.deepEqual(deployment.rows.map((row) => [row.agent.id, row.status, row.reason ?? null]), [
+    ["claude", "linked", null],
+    ["codex", "error", "Can't run manual-only skills."],
+  ]);
+  assert.deepEqual([deployment.linked, deployment.total], [1, 2]);
+  // Before the machine reports, what it was told already makes Codex an Error, as the notice says.
+  const told = skillAgentDeployment(machine, codex, "review", linkedTo([], [["claude", "manual"], ["codex", "manual"]]));
+  assert.deepEqual([told.status, told.manualOnly], ["error", true]);
+});
+
+test("each agent has one status, and anything more specific is its reason", () => {
+  const row = (state: RunnerSkillsResponse, who: AgentDefinition = codex) => {
+    const result = skillAgentDeployment(laptop, who, "review", state);
+    return [result.status, result.reason ?? null];
+  };
+  assert.deepEqual(row(linkedTo([["codex", "linked"]], [["codex", "agent"]])), ["linked", null]);
+  assert.deepEqual(row(linkedTo([["codex", "linked"]], [["codex", "agent"]], "older")),
+    ["pending", "An older version is linked. Sync to update it."]);
+  assert.deepEqual(row(linkedTo([], [["codex", "agent"]])), ["pending", "Not reported yet."]);
+  assert.deepEqual(row({ desired: linkedTo([], [["codex", "agent"]]).desired, reported: null }), ["pending", "Not reported yet."]);
+  assert.deepEqual(row(linkedTo([["codex", "conflict", "A local directory blocks this link"]], [["codex", "agent"]])),
+    ["error", "A local directory blocks this link"]);
+  assert.deepEqual(row(linkedTo([["codex", "unsupported"]], [["codex", "agent"]])), ["error", "This agent can't load this skill."]);
+  assert.deepEqual(row(linkedTo([["codex", "error", "Permission denied"]], [["codex", "agent"]])), ["error", "Permission denied"]);
+  const failed = linkedTo([["codex", "linked"]], [["codex", "agent"]]); failed.reported!.error = "Sync failed";
+  assert.deepEqual(row(failed), ["error", "Sync failed"]);
+  // Linked without a target is Linked, with why it is still there.
+  assert.equal(row(linkedTo([["codex", "linked"]], []))[0], "linked");
+  assert.match(String(row(linkedTo([["codex", "linked"]], []))[1]), /^Not assigned\./);
+  // Not targeted and holding no link: nothing to say, even beside a machine-wide error.
+  assert.deepEqual(row(linkedTo([], [])), [null, null]);
+  const unrelated = linkedTo([], []); unrelated.reported!.error = "Sync failed";
+  assert.deepEqual(row(unrelated), [null, null]);
+  // An edited copy is Edited, and an error outranks it, as in the notice slot.
+  const edited = linkedTo([["codex", "linked"]], [["codex", "agent"]]);
+  edited.reported!.drift = [{ name: "review", digest: "digest", variant: "agent", held: true }];
+  assert.equal(row(edited)[0], "edited");
+  // A held copy's links report as conflicts; the edit is still what the row says.
+  edited.reported!.deployed![0]!.links[0]!.status = "conflict";
+  assert.equal(row(edited)[0], "edited");
+  edited.reported!.deployed![0]!.links[0]!.status = "error";
+  assert.equal(row(edited)[0], "error");
+  // A Manual Only copy's edit is not an Agent Invocable agent's.
+  const manualEdit = linkedTo([["codex", "linked"]], [["codex", "agent"]]);
+  manualEdit.reported!.drift = [{ name: "review", digest: "digest", variant: "manual", held: false }];
+  assert.equal(row(manualEdit)[0], "linked");
+});
+
+test("agents that can't receive managed skills are counted apart, with why", () => {
+  const acp = { id: "gemini", name: "Gemini", driver: "acp" } as AgentDefinition;
+  const wsl = { ...codex, id: "wsl", name: "WSL Codex", context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  const machine = { ...laptop, agents: [claude, acp, wsl] };
+  const deployment = skillMachineDeployment(machine, "review", linkedTo([["claude", "linked"]], [["claude", "agent"]]));
+  assert.deepEqual(deployment.rows.map((row) => row.agent.id), ["claude"]);
+  assert.deepEqual(deployment.ineligible.map((row) => [row.agent.id, row.status, row.reason]), [
+    ["gemini", null, "This agent type can't load managed skills."],
+    ["wsl", null, "Its execution context can't load managed skills."],
+  ]);
+  assert.deepEqual([deployment.linked, deployment.total], [1, 1]);
+  assert.equal(skillMachineDeployment({ ...machine, protocolVersion: 1 }, "review").ineligible[0]!.reason,
+    "Update this machine's runner to deploy skills.");
+});
+
+test("Assigned By names the rule that won: Direct, or its group", () => {
+  const targeted = { agent: codex, invocation: "agent" as const };
+  const groupName = (id: string) => (id === "g" ? "Reviewers" : undefined);
+  assert.equal(skillAssignedBy(targeted, "studio", [rule("direct")], true, groupName), "Direct");
+  assert.equal(skillAssignedBy(targeted, "studio", [rule("group", { groupId: "g" })], true, groupName), "Reviewers");
+  assert.equal(skillAssignedBy({ ...targeted, invocation: null }, "studio", [rule("direct")], true, groupName), null);
+  // The group's rules are unread: the direct rule may not be the one that won.
+  assert.equal(skillAssignedBy(targeted, "studio", [rule("direct")], false, groupName), null);
+  assert.equal(skillAssignedBy(targeted, "studio", [rule("direct", { enabled: false })], true, groupName), null);
 });
 
 test("a group's rule that outranks the skill's own is the one blamed, and an unread group blames none (CR-1.1)", () => {

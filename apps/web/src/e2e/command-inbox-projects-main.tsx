@@ -1182,7 +1182,7 @@ const detailFiles = (name: string) => [
   { path: "references/checklist.md", content: "- Read the change.\n", encoding: "utf8" as const },
   { path: "scripts/check.sh", content: "#!/bin/sh\n", encoding: "utf8" as const },
 ];
-/** A second machine, so Machine × Agents and the Orphaned Copies pane show what divides one machine from the next. */
+/** A second machine, so Deployment and the Orphaned Copies pane show what divides one machine from the next. */
 const secondSkillRunner: RunnerView = {
   ...runner, runnerId: "runner-2", hostname: "build-box", displayName: "Build Box", workspaces: [],
 };
@@ -1196,16 +1196,28 @@ const detailMode = SHELL_SKILLS_MODE === "detail";
  * rule changes apply to the fixture, so each notice clears the way it would.
  */
 const noticesMode = SHELL_SKILLS_MODE === "notices";
-const noticeAgent = (id: string, name: string, driver: "claude-code" | "codex" | "pi") => ({
+/** `&deployment=1` (#1981): the Studio also has six ACP agents that can't receive managed skills,
+ * container and cloud targets, and `deploy-bot`'s error is a long one. */
+const deploymentExtras = noticesMode && FIXTURE_QUERY.has("deployment");
+const noticeAgent = (id: string, name: string, driver: "claude-code" | "codex" | "pi" | "acp") => ({
   id, name, command: id, args: [], env: {}, driver, context: { kind: "native" as const }, available: true,
+});
+const noticeTarget = (id: string, name: string, adapter: "host" | "container" | "cloud") => ({
+  id, runnerId: "runner-studio", name, kind: adapter === "host" ? "local" as const : adapter, workspaceStrategy: "worktree" as const, adapter,
+  boundaries: { filesystem: adapter === "host" ? "worktree" as const : adapter === "cloud" ? "snapshot" as const : "container" as const,
+    network: "deny" as const, secrets: "none" as const, billing: "none" as const },
+  available: true,
 });
 const noticeStudio: RunnerView = {
   ...runner, runnerId: "runner-studio", hostname: "studio", displayName: "Studio Workstation", workspaces: [],
-  agents: [noticeAgent("claude", "Claude Code", "claude-code"), noticeAgent("codex", "Codex", "codex"), noticeAgent("pi", "Pi", "pi")],
+  agents: [noticeAgent("claude", "Claude Code", "claude-code"), noticeAgent("codex", "Codex", "codex"), noticeAgent("pi", "Pi", "pi"),
+    ...(deploymentExtras ? ["Gemini", "Goose", "Amp", "Cursor", "Aider", "Kiro"].map((name) => noticeAgent(name.toLowerCase(), name, "acp")) : [])],
+  ...(deploymentExtras ? { executionTargets: [noticeTarget("studio-host", "Runner Host", "host"),
+    noticeTarget("studio-container", "Offline Container", "container"), noticeTarget("studio-cloud", "Cloud Sandbox", "cloud")] } : {}),
 };
 const noticeLaptop: RunnerView = {
   ...noticeStudio, runnerId: "runner-laptop", hostname: "laptop", displayName: "Travel Laptop", status: "offline",
-  agents: noticeStudio.agents.slice(0, 2),
+  agents: noticeStudio.agents.slice(0, 2), executionTargets: undefined,
 };
 const noticeVersion = (index: number, number: number) => ({
   id: `skillv_n${index}`, digest: `${index.toString(16).padStart(4, "0")}`.padEnd(64, "b"), createdAt: 1_700_000_000_000, versionNumber: number,
@@ -1236,7 +1248,8 @@ const noticeRules: NoticeRule[] = [
 /** What a machine is told to deploy, from the fixture's rules, as the control plane resolves them. */
 const noticeDesired = (machine: RunnerView) => noticeSkills.flatMap((skill) => {
   const rules = noticeRules.filter((rule) => rule.skillId === skill.id && (rule.scopeKind === "instance" || rule.runnerId === machine.runnerId));
-  const targets = machine.agents.flatMap((agent) => {
+  // The control plane targets only agents that can receive managed skills.
+  const targets = machine.agents.filter((agent) => agent.driver !== "acp").flatMap((agent) => {
     const winner = rules.filter((rule) => rule.agentSelector.kind === "all" || rule.agentSelector.driver === agent.driver)
       .sort((a, b) => Number(b.scopeKind === "runner") - Number(a.scopeKind === "runner") ||
         Number(b.agentSelector.kind !== "all") - Number(a.agentSelector.kind !== "all"))[0];
@@ -1254,7 +1267,9 @@ const noticeMachine = (runnerId: string) => {
     reported: {
       deployed: desired.map((entry) => ({ name: entry.name, digest: entry.versionDigest, links: entry.targets.map((target) =>
         studio && entry.name === "deploy-bot"
-          ? { agentId: target.agentId, status: "error" as const, detail: "Permission denied: ~/.codex/skills/deploy-bot is owned by root." }
+          ? { agentId: target.agentId, status: "error" as const, detail: deploymentExtras
+            ? "Permission denied: ~/.codex/skills/deploy-bot is owned by root, so the runner could not replace the link with the library's version. Change the folder's owner or remove it, then sync again."
+            : "Permission denied: ~/.codex/skills/deploy-bot is owned by root." }
           // As the runner reports it: only Claude Code can enforce manual-only invocation.
           : target.invocation === "manual" && target.agentId !== "claude"
             ? { agentId: target.agentId, status: "unsupported" as const, detail: "Manual-only invocation is not supported for this agent." }

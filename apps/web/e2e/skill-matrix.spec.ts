@@ -20,13 +20,22 @@ test("version picker explains when no compatible machines exist", async ({ page 
   await expect(page.getByRole("button", { name: "Preview Version Policy" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Save Version Policy" })).toBeDisabled();
 });
+/** The Deployment table's row group for a machine (#1981). */
+const machineGroup = (page: import("@playwright/test").Page, name: string) =>
+  page.locator("table.skill-deployment").getByRole("rowgroup", { name, exact: true });
+/** An agent's row: name, invocation, assigned by and status, read without the narrow cell labels. */
+const agentCells = (page: import("@playwright/test").Page, machine: string, agent: string) =>
+  machineGroup(page, machine).locator("tr.skill-deployment-agent")
+    .filter({ has: page.locator(".skill-deployment-agent-name", { hasText: new RegExp(`^${agent}$`) }) })
+    .evaluate((row) => [...row.children].map((cell) => [...cell.childNodes]
+      .filter((node) => !(node as Element).classList?.contains("cell-label") && !(node as Element).classList?.contains("cell-note"))
+      .map((node) => node.textContent).join("")));
+
 test("capable Windows machines offer WSL agents for direct assignment", async ({ page }) => {
   await installSkillMatrixFixture(page);
   await page.goto("/skills-removals-e2e.html?matrix=1&wslSkills=1");
   await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-  const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
-  await expect(matrix.getByRole("row", { name: /^WSL Codex / }).first())
-    .toHaveAccessibleName(/^WSL Codex Not Assigned Not Reported/);
+  expect(await agentCells(page, "Build Machine", "WSL Codex")).toEqual(["WSL Codex", "Not Assigned", "—", ""]);
   await page.getByRole("button", { name: "Add Assignment…", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: /^Machine:/ }).click();
@@ -34,47 +43,65 @@ test("capable Windows machines offer WSL agents for direct assignment", async ({
   await dialog.getByRole("button", { name: /^Agents:/ }).click();
   await expect(page.getByRole("option", { name: "WSL Codex Codex (Command Line)", exact: true })).toBeVisible();
 });
-test("unsupported WSL reconciliation detail is visible in the assignment matrix", async ({ page }) => {
+test("an unsupported WSL link is an Error with the machine's reason", async ({ page }) => {
   const detail = "this agent's WSL distribution name is invalid or unsafe";
   await installSkillMatrixFixture(page, { wslUnsupportedDetail: detail });
   await page.goto("/skills-removals-e2e.html?matrix=1&wslSkills=1");
   await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-  const row = page.getByRole("region", { name: "Machine × Agents", exact: true })
-    .getByRole("row", { name: /^WSL Codex / }).first();
-  await expect(row).toHaveAccessibleName(/^WSL Codex Agent Invocable Unsupported/);
-  await expect(row).toContainText(detail);
+  expect(await agentCells(page, "Build Machine", "WSL Codex")).toEqual(["WSL Codex", "Agent Invocable", "—", "Error"]);
+  await expect(machineGroup(page, "Build Machine").locator("tr.skill-deployment-agent", { hasText: "WSL Codex" })).toContainText(detail);
 });
 for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
-  test(`matrix shows targeting, reports and pins at ${width} in ${theme}`, async ({ page }, info) => {
+  test(`Deployment shows each agent's status once, version pins and offline machines at ${width} in ${theme}`, async ({ page }, info) => {
     await installSkillMatrixFixture(page);
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/skills-removals-e2e.html?matrix=1");
     await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
     await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-    const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
-    await expect(matrix).toContainText("Pinned · v0");
-    await expect(matrix).toContainText("Track Latest");
-    await expect(matrix).toContainText("Other Machine · Offline");
-    await expect(matrix.getByRole("row", { name: /^Claude / }).first()).toHaveAccessibleName("Claude Manual Only Linked");
-    await expect(matrix.getByRole("row", { name: /^Codex / }).first()).toHaveAccessibleName(/^Codex Not Assigned Linked \(Not Targeted\)/);
-    await expect(matrix.getByRole("row", { name: /^WSL Codex / }).first()).toHaveAccessibleName(/^WSL Codex Unavailable Not Reported/);
-    await matrix.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: info.outputPath(`matrix-${width}-${theme}.png`), fullPage: true });
+    const deployment = page.getByRole("region", { name: "Deployment", exact: true });
+    await expect(deployment.getByRole("heading", { name: "Machine × Agents" })).toHaveCount(0);
+    await expect(deployment).toContainText("What each machine reports.");
+    const build = machineGroup(page, "Build Machine");
+    const other = machineGroup(page, "Other Machine");
+    await expect(build).toContainText("Pinned to v1");
+    await expect(other).toContainText("Track Latest");
+    await expect(build.locator(".skill-deployment-machine")).toContainText("2 of 2 Linked");
+    // An offline machine updates when it is back, with no Sync Now to press.
+    await expect(other.locator(".skill-deployment-machine .status")).toHaveText("Offline");
+    await expect(other).toContainText("Updates when back online");
+    await expect(other.getByRole("button", { name: "Sync Now" })).toHaveCount(0);
+    await expect(build.getByRole("button", { name: "Sync Now", exact: true })).toBeVisible();
+    expect(await agentCells(page, "Build Machine", "Claude")).toEqual(["Claude", "Manual Only", "—", "Linked"]);
+    expect(await agentCells(page, "Build Machine", "Codex")).toEqual(["Codex", "Not Assigned", "—", "Linked"]);
+    await expect(build.locator("tr.skill-deployment-agent", { hasText: "Codex" }).first()).toContainText(/Not assigned\. A link from before/);
+    // A WSL agent on a Linux machine can't receive managed skills: it folds into one row.
+    await expect(build.getByRole("button", { name: "1 Agent Can't Receive Managed Skills" })).toHaveAttribute("aria-expanded", "false");
+    await build.getByRole("button", { name: "1 Agent Can't Receive Managed Skills" }).click();
+    expect(await agentCells(page, "Build Machine", "WSL Codex")).toEqual(["WSL Codex", "—", "—", ""]);
+    await deployment.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath(`deployment-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     if (width === 320) {
-      // The §14 narrow table: each row is a padded two-line flex row and its cells carry no
-      // padding or rules of their own.
-      await expect(matrix.locator("tbody tr").first()).toHaveCSS("display", "flex");
-      await expect(matrix.locator("td").first()).toHaveCSS("padding", "0px");
-      await expect(matrix.locator("td").first()).toHaveCSS("border-top-width", "0px");
+      // The §14 narrow table: each agent row is a padded two-line flex row and its cells carry no
+      // padding or rules of their own; the machine's actions take their own line.
+      const agentRow = build.locator("tr.skill-deployment-agent").first();
+      await expect(agentRow).toHaveCSS("display", "flex");
+      await expect(agentRow.locator("td").first()).toHaveCSS("padding", "0px");
+      await expect(agentRow.locator("td").first()).toHaveCSS("border-top-width", "0px");
+      const lines = await build.locator(".skill-deployment-machine").evaluate((row) => {
+        const name = row.querySelector(".skill-deployment-machine-name")!.getBoundingClientRect();
+        const actions = row.querySelector(".skill-deployment-actions")!.getBoundingClientRect();
+        return { nameBottom: name.bottom, actionsTop: actions.top };
+      });
+      expect(lines.actionsTop).toBeGreaterThanOrEqual(lines.nameBottom);
       const cdp = await page.context().newCDPSession(page);
       const { nodes } = await cdp.send("Accessibility.getFullAXTree");
-      expect(nodes.some(node => !node.ignored && node.role?.value === "columnheader" && node.name?.value === "Desired Invocation")).toBe(true);
+      expect(nodes.some(node => !node.ignored && node.role?.value === "columnheader" && node.name?.value === "Assigned By")).toBe(true);
       expect(nodes.some(node => !node.ignored && node.role?.value === "rowheader" && node.name?.value === "Claude")).toBe(true);
       expect(nodes.some(node => !node.ignored && node.role?.value === "cell" && node.name?.value === "Manual Only")).toBe(true);
       await cdp.detach();
     }
-    await matrix.getByRole("button", { name: "Manage Machine Version", exact: true }).first().click();
+    await build.getByRole("button", { name: "Manage Version…", exact: true }).click();
     await expect(page.getByRole("button", { name: /^Version Policy: Pin v0/ })).toBeVisible();
     await page.getByRole("button", { name: "Preview Version Policy" }).click();
     await expect(page.getByText("Proposed policy: pin v0.")).toBeVisible();
@@ -85,7 +112,8 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.getByRole("button", { name: "Save Version Policy" }).click();
     await expect(page.getByRole("status").filter({ hasText: "Version policy saved" })).toBeVisible();
     await page.getByRole("button", { name: "Close", exact: true }).last().click();
-    await expect(matrix).not.toContainText("Pinned · v0");
+    await expect(build).not.toContainText("Pinned to v1");
+    await expect(build).toContainText("Track Latest");
   });
 }
 test("failed reads do not show unassigned or tracking defaults", async ({ page }) => {
@@ -94,13 +122,14 @@ test("failed reads do not show unassigned or tracking defaults", async ({ page }
   await page.route("**/api/skills/skill-1/machines/*/version-policy", route => route.fulfill({ status: 503, json: { error: "Unavailable" } }));
   await page.goto("/skills-removals-e2e.html?matrix=1");
   await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-  const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
-  await expect(matrix.getByRole("row", { name: /^Claude / }).first()).toHaveAccessibleName(/^Claude Unknown Unknown/);
-  await expect(matrix).toContainText("Version policy: Unavailable");
-  await expect(matrix).toContainText("Reported: Unknown.");
-  await expect(matrix).not.toContainText("Reported: Never.");
-  await expect(page.getByRole("region", { name: "Deployment", exact: true })).not.toContainText("No assignment targets this machine yet.");
-  await matrix.getByRole("button", { name: "Manage Machine Version", exact: true }).first().click();
+  const build = machineGroup(page, "Build Machine");
+  await expect(build.getByRole("alert")).toContainText("Skills status could not be loaded");
+  await expect(build.locator("tr.skill-deployment-agent")).toHaveCount(0);
+  await expect(build).toContainText("Version Unavailable");
+  await expect(build).not.toContainText("Not Assigned");
+  await expect(build).not.toContainText("Track Latest");
+  await expect(page.getByRole("region", { name: "Deployment", exact: true })).not.toContainText("Not Deployed Anywhere");
+  await build.getByRole("button", { name: "Manage Version…", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("Current version policy could not be loaded");
   await expect(page.getByRole("button", { name: "Preview Version Policy" })).toBeDisabled();
 });
@@ -109,16 +138,16 @@ test("manual sync preserves unknown desired state until authoritative refresh", 
   await page.route("**/api/runners/*/skills", route => route.fulfill({ status: 503, json: { error: "Unavailable" } }));
   await page.goto("/skills-removals-e2e.html?matrix=1");
   await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-  const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
-  await expect(matrix).toContainText("Skills status could not be loaded");
+  const build = machineGroup(page, "Build Machine");
+  await expect(build).toContainText("Skills status could not be loaded");
   let started!: () => void; const refreshing = new Promise<void>(resolve => { started = resolve; });
   let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
   await page.route("**/api/runners/*/skills", async route => { started(); await held; await route.fulfill({ status: 503, json: { error: "Unavailable" } }); });
   try {
-    await page.getByRole("button", { name: "Sync Now", exact: true }).first().click();
+    await build.getByRole("button", { name: "Sync Now", exact: true }).click();
     await refreshing;
-    await expect(matrix.getByRole("row", { name: /^Claude / }).first()).toHaveAccessibleName(/^Claude Unknown Unknown/);
-    await expect(matrix).not.toContainText("Not Assigned");
+    await expect(build.locator("tr.skill-deployment-agent")).toHaveCount(0);
+    await expect(build).not.toContainText("Not Assigned");
   } finally { release(); }
 });
 test("older control planes use the authorized preview to initialize the saved pin", async ({ page }) => {

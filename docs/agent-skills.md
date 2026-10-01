@@ -916,7 +916,7 @@ Git backs the library as an **upstream source**, not as the distribution transpo
   or cloud session on a Machine with skills assigned to its agent shows a dismissible info notice in
   its notice slot naming them, with Open Agent Skills; the Pinned Summary's Environment section keeps
   a Skills: Not Available row after it is dismissed. In the Skills view, each Machine that advertises container or
-  cloud targets carries a note in the Machine × Agents matrix naming those targets. Mounting the skills root into containers is a deliberate later
+  cloud targets says in one sentence on its Deployment row that its skills don't reach them. Mounting the skills root into containers is a deliberate later
   decision.
 - **Provider-home concurrency.** Content is verified and materialized in the runner-local store
   before the reconciler requests the process-lifetime `ProviderHomeLeaseRegistry` lease. Every
@@ -951,11 +951,18 @@ targeting specificity, while machine-wide pins still choose the version. These a
 rules, not a claim that every target has successfully deployed; machine-reported state remains
 authoritative.
 
-The **Machine × Agents** section separates desired invocation from the last reported link for each
-agent and shows each machine's pin or Track Latest policy. Untargeted but still-reported links are
-explicitly labeled: a shared harness directory or a pending reconciliation can leave them visible.
-Unknown/failed reads never become an empty assignment or tracking default. Unsupported execution
-targets are marked unavailable, and offline reports carry their last inventory timestamp. Policy
+The **Deployment** section (#1981) is one table for every machine, so each agent's row lines up
+from one machine to the next. A machine's row shows whether it is online, its version policy
+(Track Latest or Pinned to a numbered version), how many of its agents with a status are Linked,
+Manage Version… and, while it is online, an icon Sync Now; an offline machine says it updates when
+it is back. Each agent row shows its invocation, the rule responsible (Direct, or the group's name)
+and one status from the skill vocabulary: Linked, Pending, Edited or Error. Anything more specific
+is the row's reason: an older version still linked, nothing reported yet, a link that remains
+without a target (a shared harness directory or a pending reconciliation can leave it), a conflict,
+an unsupported link, or a Manual Only target the agent can't run. Agents that can't receive managed
+skills fold into one disclosure row. A machine lists only this skill's reported link removals; its
+unmanaged skills and its whole removal history are under Skills on This Machine in its Connections
+details. Unknown/failed reads never become an empty assignment or tracking default. Policy
 metadata is read through the same skill-and-machine authorization checks as version preview, but
 without loading files. The version picker starts from the selected machine's saved policy; saving
 still requires full preview and acceptance with the existing revision/latest-version fences.

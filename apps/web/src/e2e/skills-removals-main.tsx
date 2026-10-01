@@ -190,7 +190,13 @@ const runnerSkills: RunnerSkillsResponse = {
       ? [{ agentId: "claude", name: "account-notes", description: "Local account skill",
           providerAccountId: "acct-personal" }]
       : [],
+    // One removal is this skill's; the others are other skills', which only Connections lists (#1981).
     removals: [
+      {
+        path: "~/.claude/skills/code-review",
+        reason: "The canonical location it routes through is conflicted.",
+        ...(accountScopes ? { providerAccountId: "acct-work" } : {}),
+      },
       {
         path: "~/.codex/skills/retired-skill-with-a-long-name",
         reason: "No longer in the desired skill list.",

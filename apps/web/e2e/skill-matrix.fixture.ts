@@ -1,8 +1,8 @@
 import { expect, type Page } from "@playwright/test";
 export async function installSkillMatrixFixture(page: Page, options: { wslUnsupportedDetail?: string } = {}) {
   let pin: string | null = "v0";
-  const old = { id: "v0", digest: "old", files: [{ path: "SKILL.md", encoding: "utf8", content: "Pinned review instructions" }] };
-  const latest = { id: "v1", digest: "new", files: [{ path: "SKILL.md", encoding: "utf8", content: "Latest review instructions" }] };
+  const old = { id: "v0", digest: "old", versionNumber: 1, files: [{ path: "SKILL.md", encoding: "utf8", content: "Pinned review instructions" }] };
+  const latest = { id: "v1", digest: "new", versionNumber: 2, files: [{ path: "SKILL.md", encoding: "utf8", content: "Latest review instructions" }] };
   await page.route("**/api/runners/*/skills", route => route.fulfill({ json: {
     desired: [{ name: "code-review", versionDigest: "old", targets: [
       { agentId: "claude", invocation: "manual" },
@@ -16,7 +16,7 @@ export async function installSkillMatrixFixture(page: Page, options: { wslUnsupp
         : []),
     ] }] }, removalReporting: "supported",
   } }));
-  await page.route("**/api/skills/skill-1/versions", route => route.fulfill({ json: { versions: [latest], nextCursor: null } }));
+  await page.route("**/api/skills/skill-1/versions", route => route.fulfill({ json: { versions: [latest, old], nextCursor: null } }));
   await page.route("**/api/skills/skill-1/machines/*/version*", async route => {
     const url = new URL(route.request().url()); const first = url.pathname.includes("runner-1");
     const policy = first && pin ? { versionId: pin, revision: "r1" } : null;

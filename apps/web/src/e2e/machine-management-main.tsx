@@ -184,6 +184,20 @@ const navigation: ViewNavigation = {
 
 const client = {
   ...api,
+  // Skills on This Machine (#1981): the machine's own skills diagnostics, read when opened.
+  runnerSkills: async () => ({
+    removalReporting: "supported",
+    desired: [],
+    reported: {
+      unmanaged: [{ agentId: "custom-acp", name: "local-notes", description: "Scratch notes kept outside Wollipog" }],
+      removals: [
+        { path: "~/.claude/skills/code-review", reason: "No longer in the desired skill list." },
+        { path: "~/.codex/skills/retired-skill-with-a-long-name-that-wraps", reason: "The canonical location it routes through is conflicted." },
+      ],
+      removalsUpdatedAt: 1_699_999_000_000,
+      updatedAt: 1_700_000_000_000,
+    },
+  }),
   sshConfigHosts: async () => ({
     hosts: [
       { host: "golf-sim", hostName: "100.64.0.10", user: "misko", port: 2222 },

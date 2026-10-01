@@ -193,39 +193,27 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.deepEqual(assignmentLabels, ["Agents:", "Invocation", "Enabled"]);
   assert.match(pageText(), /Build Machine/);
   // A deployed copy is Linked in the shared skill-deployment vocabulary (docs/design-system.md §11.2).
-  assert.match(pageText(), /Linked/);
-  assert.match(pageText(), /Unmanaged Skills/);
-  assert.match(pageText(), /local-notes/);
-  assert.match(pageText(), /Work/, "account-scoped inventory names the credential home without exposing its path");
-  assert.match(pageText(), /can then be adopted with an explicit recovery-aware confirmation/);
-  assert.match(pageText(), /Recent Link Removals/);
-  assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/);
-  assert.match(pageText(), /No longer in the desired skill list\./);
-  const removalHistoryText = container.querySelector(".skills-removals")?.textContent ?? "";
-  assert.match(removalHistoryText, new RegExp(new Date(1_699_999_000_000).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.doesNotMatch(
-    removalHistoryText,
-    new RegExp(new Date(1_700_000_000_000).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-    "removal history displays its event timestamp rather than the newer inventory timestamp",
-  );
+  const deployment = container.querySelector("table.skill-deployment");
+  assert.ok(deployment, "Deployment is one table");
+  const claudeRow = [...deployment!.querySelectorAll("tr.skill-deployment-agent")]
+    .find((row) => row.querySelector("th")?.textContent?.startsWith("Claude"));
+  assert.equal(claudeRow?.querySelector(".cell-status")?.textContent, "Linked");
+  assert.match(deployment!.textContent ?? "", /1 of 1 Linked/);
+  // The machine's own diagnostics live in Connections now (#1981), and another skill's removals never
+  // show on this one.
+  assert.doesNotMatch(pageText(), /Unmanaged Skills|local-notes|Recent Link Removals|retired-skill/);
 
-  const sync = [...container.querySelectorAll<HTMLButtonElement>("button")]
-    .find((candidate) => candidate.textContent?.trim() === "Sync Now");
-  assert.ok(sync, "each machine offers Sync Now");
-
+  const sync = deployment!.querySelector<HTMLButtonElement>('button[aria-label="Sync Now"]');
+  assert.ok(sync, "an online machine offers Sync Now as an icon button");
   let resolveMachineRefresh!: (response: RunnerSkillsResponse) => void;
   machineRefresh = new Promise((resolve) => { resolveMachineRefresh = resolve; });
-  runnerSkills.removalReporting = "unsupported";
   await act(async () => {
     sync!.click();
     await Promise.resolve();
     await Promise.resolve();
   });
-  assert.equal(sync!.textContent?.trim(), "Syncing…");
-  assert.doesNotMatch(pageText(), /cannot report new managed link removals/,
-    "manual sync preserves the last known capability while its inventory refresh is pending");
-  assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/,
-    "the last removal event remains visible during the pending refresh");
+  assert.equal(sync!.getAttribute("aria-busy"), "true", "the button shows its sync running and keeps its name");
+  assert.equal(sync!.getAttribute("aria-label"), "Sync Now");
   await act(async () => {
     resolveMachineRefresh(runnerSkills);
     await machineRefresh;
@@ -233,28 +221,8 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   });
   machineRefresh = null;
   await act(settle);
-  assert.match(pageText(), /cannot report new managed link removals/);
-  assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/,
-    "a rollback runner does not hide the last event it reported before rollback");
-
-  runnerSkills.removalReporting = "supported";
-  runnerSkills.reported = { ...runnerSkills.reported!, removals: [] };
-  await act(async () => { sync!.click(); });
-  await act(settle);
-  assert.match(pageText(), /No managed link removals have been reported/);
-
-  runnerSkills.removalReporting = "future-value" as never;
-  await act(async () => { sync!.click(); });
-  await act(settle);
-  assertNoDomNode(container.querySelector(".skills-removals"),
-    "an unknown future capability value degrades to the explicit unknown state");
-
-  delete runnerSkills.removalReporting;
-  await act(async () => { sync!.click(); });
-  await act(settle);
-  assertNoDomNode(container.querySelector(".skills-removals"),
-    "an older control plane that omits capability state never becomes a false empty-history claim");
-  assert.deepEqual(syncedRunnerIds, ["runner-1", "runner-1", "runner-1", "runner-1"]);
+  assert.equal(sync!.getAttribute("aria-busy"), null);
+  assert.deepEqual(syncedRunnerIds, ["runner-1"]);
 
   // New Skill asks for the name and description once: its only editor is the instructions body,
   // with no frontmatter to edit (#1964).
@@ -285,6 +253,9 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
       updatedAt: 1_700_000_000_000,
     },
   };
+  // Importing or restoring releases the hold and re-reads the machine, whose links are then plain.
+  const released: RunnerSkillsResponse = { ...drifted, reported: { ...drifted.reported!, drift: [],
+    deployed: [{ name: "code-review", digest, links: [{ agentId: "claude", status: "linked" }] }] } };
   let current = drifted;
   const calls: string[] = [];
   const confirmations: string[] = [];
@@ -313,12 +284,12 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
     discardSkillDriftPreview: async () => { calls.push("discard"); },
     importSkillDrift: async (previewId: string, acceptUpdate: boolean) => {
       calls.push(`import:${previewId}:${acceptUpdate}`);
-      current = { ...drifted, reported: { ...drifted.reported!, drift: [] } };
-      return { released: false, pinMoved: false, state: current.reported };
+      current = released;
+      return { released: true, pinMoved: false, state: current.reported };
     },
     restoreSkillDrift: async (runnerId: string, copy: { digest: string }, fence: string | null) => {
       calls.push(`restore:${runnerId}:${copy.digest === digest}:${fence === observedDigest}`);
-      current = { ...drifted, reported: { ...drifted.reported!, drift: [] } };
+      current = released;
       return { status: "restored", state: current.reported };
     },
   } as unknown as ApiClient;
@@ -364,10 +335,10 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
   assert.match(item?.textContent ?? "", /Edited/, "the skill list marks a skill with an edited copy");
   await act(async () => { item!.click(); });
   await act(settle);
-  const machine = container.querySelector(".skills-machine");
-  assert.match(machine?.querySelector(".status")?.textContent ?? "", /^Edited$/);
+  const deployment = container.querySelector("table.skill-deployment");
+  assert.equal(deployment?.querySelector(".skill-deployment-agent .cell-status")?.textContent, "Edited");
   // The edited copy is the slot's notice; Deployment no longer lists it.
-  assert.doesNotMatch(machine?.textContent ?? "", /Edited Copies|Import Edit as New Version/);
+  assert.doesNotMatch(deployment?.textContent ?? "", /Edited Copies|Import Edit as New Version/);
   const slot = () => container.querySelector<HTMLElement>(".skill-notice-slot");
   assert.equal(slot()?.dataset.notice, "edited");
   assert.equal(slot()!.querySelector(".notice")?.classList.contains("t-warning"), true);
@@ -395,7 +366,7 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
   assertNoDomNode(slot(), "an imported edit needs nothing more");
 
   current = drifted;
-  await act(async () => { button("Sync Now")?.click(); });
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Sync Now"]')?.click(); });
   await act(settle);
   await act(async () => { button("Restore Library Version…")!.click(); });
   await act(settle);
@@ -509,7 +480,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   assert.match(entry!.textContent ?? "", /Orphaned Copies5/, "copies beyond the runner's bound are counted");
   await act(async () => { entry!.click(); });
   await act(settle);
-  const machine = container.querySelector('[aria-label="Orphaned Copies"] .skills-machine');
+  const machine = container.querySelector('[aria-label="Orphaned Copies"] .skill-orphans-machine');
   assert.match(machine?.textContent ?? "", /Build Machine/);
   const items = [...machine!.querySelectorAll(".skills-orphans li")];
   assert.equal(items.length, 3);
@@ -1729,7 +1700,7 @@ test("a superseded detail request that fails later never replaces the skill a ne
     await act(async () => { rejectFirst(new Error("HTTP 500 from the first request")); });
     await act(settle);
     assert.equal(container.querySelector(".skill-detail-title")?.textContent, "code-review", "the stale failure is ignored");
-    assertNoDomNode(container.querySelector(".master-detail-detail .notice"), "no error for a superseded request");
+    assertNoDomNode(container.querySelector(".master-detail-detail .state-error"), "no error for a superseded request");
   } finally {
     await view.unmount();
   }
@@ -1820,7 +1791,7 @@ test("a skill that failed to load recovers when a later refresh of it succeeds, 
     assert.equal(container.querySelector(".master-detail-detail .notice-title")?.textContent, "Couldn't Load This Skill");
     await createGroupThroughDialog(container);
     assert.ok(detailCalls >= 2, "the group change refreshed the selected skill");
-    assertNoDomNode(container.querySelector(".master-detail-detail .notice"), "the refreshed skill replaces its error");
+    assertNoDomNode(container.querySelector(".master-detail-detail .state-error"), "the refreshed skill replaces its error");
     assert.equal(container.querySelector(".skill-detail-title")?.textContent, "code-review");
   } finally {
     await view.unmount();
