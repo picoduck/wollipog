@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import {
   isTerminal,
   runnerCapabilityRequirement,
@@ -25,6 +25,7 @@ import { absoluteViewUrl, backLabel } from "../navigation.js";
 import { reminderMenuActionLabel } from "../session-reminders.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
 import { DEVELOPMENT_BUILD } from "../config.js";
+import { shortcutDisplay } from "../shortcuts.js";
 import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
 import { backgroundWorkAccessibleName } from "./common.js";
 import {
@@ -35,7 +36,7 @@ import { MenuItem, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { TranscriptShareDialog } from "./TranscriptShareDialog.js";
 import { ChevronLeftIcon, DownloadIcon, LinkIcon, MoreVerticalIcon, RefreshIcon, ShareIcon } from "./Icons.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { deleteSessionMessage, signOutOfAgentMessage, stopSessionMessage } from "../session-confirmation-copy.js";
@@ -105,6 +106,7 @@ export function SessionHeader({
   onDismissReminder,
   forkAvailability,
   onFork,
+  forkShortcutRef,
   projectControl,
   projectName,
   projectLabel = "Project",
@@ -142,6 +144,10 @@ export function SessionHeader({
   onDismissReminder?: () => void;
   forkAvailability?: ConversationForkAvailability;
   onFork?: () => void;
+  /** Holds Fork Conversation…'s action while the item is offered and enabled, and null otherwise,
+   * so the Session Reading F key runs exactly what the item would (#2272). Given only where that key
+   * is live, so the item shows its keycap only there. */
+  forkShortcutRef?: MutableRefObject<(() => void) | null>;
   /** The project menu button, drawn before the title above the compact tier. */
   projectControl?: ReactNode;
   /** The session's Project (or Workspace) name; absent when it has none. */
@@ -174,6 +180,7 @@ export function SessionHeader({
   const instances = useInstances();
   const instanceScope = useInstanceScope();
   const isMobile = useIsMobile();
+  const coarsePointer = useIsCoarsePointer();
   const { confirm, showToast, showUndo } = useFeedback();
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -239,6 +246,12 @@ export function SessionHeader({
       : pendingQueuedPromptCount(session.queued) > 0 ? "Available when queued messages are sent." : null;
   const forkOffered = forkAvailability !== undefined && (forkAvailability.available || forkAvailability.offered);
   const forkReason = busy ? BUSY_REASON : forkAvailability?.available === false ? forkAvailability.reason : null;
+  const forkShortcut = forkOffered && forkReason === null ? onFork ?? null : null;
+  useLayoutEffect(() => {
+    if (!forkShortcutRef) return;
+    forkShortcutRef.current = forkShortcut;
+    return () => { forkShortcutRef.current = null; };
+  }, [forkShortcut, forkShortcutRef]);
   const archiveReason = busy ? BUSY_REASON : archiveRefusal;
   const restartReason = busy ? BUSY_REASON : restartRefusal;
   const stopReason = busy ? BUSY_REASON : stopRefusal;
@@ -432,6 +445,7 @@ export function SessionHeader({
             key="fork"
             disabled={forkReason !== null}
             description={forkReason ?? undefined}
+            trail={forkShortcutRef && !coarsePointer ? <kbd>{shortcutDisplay("session-reading-fork")}</kbd> : undefined}
             onClick={() => {
               if (forkReason !== null) return;
               closeMenuToTrigger();

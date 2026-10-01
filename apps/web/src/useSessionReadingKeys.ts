@@ -20,6 +20,8 @@ export interface SessionReadingKeyActions {
   deny: () => void;
   archive: () => void;
   snooze: () => void;
+  /** More Actions' Fork Conversation…, and only while that item is offered and enabled. */
+  fork: () => void;
   reply: () => void;
   pauseFollow: () => void;
   resumeFollow: () => void;
@@ -46,6 +48,7 @@ const ACTION_BINDINGS: ReadonlyArray<[
   ["session-reading-deny", "deny"],
   ["session-reading-archive", "archive"],
   ["session-reading-snooze", "snooze"],
+  ["session-reading-fork", "fork"],
   ["session-reading-reply", "reply"],
 ];
 

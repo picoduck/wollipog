@@ -126,6 +126,16 @@ test.describe("at 1440×900", () => {
     await expect(reading.locator(".shortcut-row", { hasText: "Previous Session" }).locator("kbd")).toHaveText("Alt+↑");
   });
 
+  test("the reference lists Fork Conversation (F) under the session page's group (#2272)", async ({ page }) => {
+    const reference = await openWithKey(page, SESSION);
+    const reading = reference.locator(".shortcut-group").filter({ has: page.getByRole("heading", { name: /^Session Reading/ }) });
+    const fork = reading.locator(".shortcut-row", { hasText: "Fork Conversation" });
+    await expect(fork.locator("dt")).toHaveText("Fork Conversation");
+    await expect(fork.locator("kbd")).toHaveText("F");
+    const list = reference.locator(".shortcut-group").filter({ has: page.getByRole("heading", { name: /^Sessions List/ }) });
+    await expect(list.locator(".shortcut-row", { hasText: "Fork Conversation" }), "listed once, where it applies").toHaveCount(0);
+  });
+
   test("typing filters to the matching rows and their headings", async ({ page }) => {
     const reference = await openWithKey(page, SKILLS);
     const filter = reference.getByRole("searchbox", { name: "Filter Shortcuts" });

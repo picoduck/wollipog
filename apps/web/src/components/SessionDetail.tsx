@@ -3256,6 +3256,8 @@ function SessionDetailLoaded({
   usePreviewNavigationRegistration(mode, onPreviewNavigationReady, previewNavigationControls);
   // The archive shortcut runs the header's archive action, so it is refused for the same people.
   const archiveRefusal = sessionArchiveActionRefusal(session);
+  // F runs More Actions' Fork Conversation…, which the header registers here only while enabled.
+  const forkShortcutRef = useRef<(() => void) | null>(null);
   const readingActions = useMemo<SessionReadingKeyActions>(() => ({
     nextSession: () => onNextSession?.(),
     previousSession: () => onPreviousSession?.(),
@@ -3272,12 +3274,14 @@ function SessionDetailLoaded({
       else setError(archiveRefusal);
     },
     snooze: () => onSnooze?.(),
+    fork: () => forkShortcutRef.current?.(),
     reply: canAnswerPendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
   }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, responseRefusal]);
+  const sessionReadingKeys = mode === "expanded" && !isMobile;
   useSessionReadingKeys({
-    enabled: mode === "expanded" && !isMobile,
+    enabled: sessionReadingKeys,
     sessionId,
     scrollRef,
     composerAvailable: canPrompt,
@@ -5058,6 +5062,7 @@ function SessionDetailLoaded({
           onFork={() => {
             if (latestForkAvailability.available) void onFork(latestForkAvailability.forkTurn);
           }}
+          forkShortcutRef={sessionReadingKeys ? forkShortcutRef : undefined}
           projectControl={<ProjectMenuButton session={session} />}
           projectName={currentProjectName ?? undefined}
           projectLabel={projectsSupported ? "Project" : "Workspace"}

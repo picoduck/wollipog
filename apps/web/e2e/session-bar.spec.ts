@@ -711,8 +711,17 @@ test("Fork Conversation lives in More Actions: enabled after a finished turn, di
   await moreActions.click();
   const fork = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem", { name: "Fork Conversation…" });
   await expect(fork).toBeEnabled();
-  await expect(fork.locator("kbd")).toHaveCount(0);
+  // The item teaches its key, which forks from the reader the same way (#2272).
+  await expect(fork.locator(".menu-trail kbd")).toHaveText("F");
+  await expect(fork).toHaveAccessibleName("Fork Conversation…");
   await page.keyboard.press("Escape");
+  const transcript = page.locator(".detail-scroll");
+  const createFork = page.getByRole("dialog", { name: "Create Fork" });
+  await transcript.focus();
+  await page.keyboard.press("f");
+  await expect(createFork).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(createFork).toBeHidden();
 
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { status: "running" });
@@ -722,6 +731,9 @@ test("Fork Conversation lives in More Actions: enabled after a finished turn, di
   await expect(fork).toHaveAccessibleDescription("Wait for the current turn or approval before creating a fork.");
   await expect(fork.locator(".menu-desc")).toBeVisible();
   await page.keyboard.press("Escape");
+  await transcript.focus();
+  await page.keyboard.press("f");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
@@ -740,7 +752,8 @@ test.describe("phone action line", () => {
     await openBar(page, 390, { height: 844, scenario: "edit-in-fork" });
     await expect(page.locator('.session-bar [aria-label="Fork Conversation"]')).toHaveCount(0);
     await page.locator(".session-bar").getByRole("button", { name: "More Actions" }).click();
-    await expect(page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem", { name: "Fork Conversation…" }))
-      .toBeVisible();
+    const fork = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem", { name: "Fork Conversation…" });
+    await expect(fork).toBeVisible();
+    await expect(fork.locator("kbd"), "a touch pointer shows no keycap (#2272)").toHaveCount(0);
   });
 });

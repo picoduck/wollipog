@@ -63,6 +63,7 @@ export type ShortcutId =
   | "session-reading-deny"
   | "session-reading-archive"
   | "session-reading-snooze"
+  | "session-reading-fork"
   | "session-reading-reply"
   | "steer-turn"
   | "stop-turn"
@@ -487,6 +488,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Snooze Session",
     scope: "Session Reading",
     binding: { key: "h", bare: true },
+  },
+  {
+    id: "session-reading-fork",
+    group: "Session Reading",
+    label: "Fork Conversation",
+    scope: "Session Reading",
+    binding: { key: "f", bare: true },
   },
   {
     id: "session-reading-reply",

@@ -202,7 +202,7 @@ test("Session Reading shortcuts are registered in their contextual reference gro
     "session-reading-start", "session-reading-latest", "session-reading-latest-end",
     "session-reading-next-session", "session-reading-previous-session",
     "session-reading-approve", "session-reading-deny", "session-reading-archive",
-    "session-reading-snooze", "session-reading-reply",
+    "session-reading-snooze", "session-reading-fork", "session-reading-reply",
   ];
   const reading = SHORTCUTS.filter((item) => item.scope === "Session Reading");
   assert.deepEqual(reading.map((item) => item.id), expected);
@@ -210,6 +210,13 @@ test("Session Reading shortcuts are registered in their contextual reference gro
   assert.deepEqual(shortcut("session-reading-start").binding.sequence, ["g", "g"]);
   assert.equal(shortcut("session-reading-latest").label, "Follow Live Output");
   assert.equal(shortcut("session-reading-latest-end").label, "Follow Live Output (End)");
+  // F forks from the session page as it does from the Sessions list, whose entry stays (#2272).
+  assert.equal(shortcut("session-reading-fork").label, shortcut("inbox-fork").label);
+  assert.equal(shortcutDisplay("session-reading-fork", false), "F");
+  assert.equal(shortcutDisplay("session-reading-fork", true), "F");
+  assert.equal(matchesShortcut(key("f"), "session-reading-fork"), true);
+  assert.equal(matchesShortcut(key("f", { shiftKey: true }), "session-reading-fork"), false);
+  assert.equal(matchesShortcut(key("f", { ctrlKey: true }), "session-reading-fork"), false);
   assert.equal(matchesShortcut(key("ArrowDown", { altKey: true }), "session-reading-next-session"), true);
   assert.equal(matchesShortcut(key("ArrowUp", { altKey: true }), "session-reading-previous-session"), true);
   assert.equal(matchesShortcut(key("ArrowUp"), "session-reading-previous-session"), false);
@@ -379,7 +386,8 @@ test("without a session the Session groups carry one note and no per-row session
 test("shared Session actions are listed once, in the first of the two groups, only when their keys match", () => {
   const labelsOf = (groups: ReturnType<typeof shortcutReferenceGroups>, name: string) =>
     groups.find((group) => group.group === name)!.rows.map((row) => row.label);
-  const shared = ["Approve Request", "Deny Request", "Snooze Session", "Reply to Session", "Page Down", "Page Up", "Follow Live Output"];
+  const shared = ["Approve Request", "Deny Request", "Snooze Session", "Fork Conversation", "Reply to Session", "Page Down", "Page Up",
+    "Follow Live Output"];
 
   const onSessions = shortcutReferenceGroups({ scope: "Sessions List", availability: AVAILABLE, keys: referenceKeys });
   const inSession = shortcutReferenceGroups({ scope: "Session Reading", availability: AVAILABLE, keys: referenceKeys });

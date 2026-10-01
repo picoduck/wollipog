@@ -81,6 +81,7 @@ function setupActions() {
     deny: action("deny"),
     archive: action("archive"),
     snooze: action("snooze"),
+    fork: action("fork"),
     reply: action("reply"),
     pauseFollow: action("pauseFollow"),
     resumeFollow: action("resumeFollow"),
@@ -180,11 +181,16 @@ test("Session Reading dispatches contextual triage and session hopping bindings"
   dispatchKey("a");
   dispatchKey("d");
   dispatchKey("e");
+  dispatchKey("h");
+  const fork = dispatchKey("f");
+  dispatchKey("F", { shiftKey: true });
   dispatchKey("r");
 
   assert.equal(next.defaultPrevented, true);
   assert.equal(previous.defaultPrevented, true);
-  assert.deepEqual(fixture.calls, ["nextSession", "previousSession", "approve", "deny", "archive", "reply"]);
+  assert.equal(fork.defaultPrevented, true);
+  assert.deepEqual(fixture.calls, ["nextSession", "previousSession", "approve", "deny", "archive", "snooze", "fork", "reply"],
+    "Shift+F is not Fork");
 
   await act(async () => { fixture.root.unmount(); });
   fixture.container.remove();
@@ -288,11 +294,12 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
   const composer = fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Composer"]')!;
   composer.focus();
   dispatchKey("a");
+  dispatchKey("f");
   dispatchKey("ArrowDown", { altKey: true });
   assert.deepEqual(fixture.calls, ["nextSession"], "typing blocks bare keys but preserves modifier navigation");
 
   fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=main] button")!.focus();
-  for (const key of ["a", "j", " "]) dispatchKey(key);
+  for (const key of ["a", "f", "j", " "]) dispatchKey(key);
   // An open picker, a filter combobox and a resize grip move their own value with Alt+arrows, and
   // the pipe-mode shell input keeps its own ↑/↓ history like any terminal.
   for (const label of ["Worktree", "Filter Worktrees", "Resize Shell Panel", "Pipe Shell"]) {
@@ -303,6 +310,7 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
   }
   fixture.container.querySelector<HTMLTextAreaElement>('[aria-label="Terminal"]')!.focus();
   dispatchKey("ArrowDown", { altKey: true });
+  dispatchKey("f");
   fixture.container.querySelector<HTMLButtonElement>("[data-focus-zone=rail] button")!.focus();
   dispatchKey("e");
 
@@ -311,7 +319,14 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
   modal.setAttribute("aria-modal", "true");
   domWindow.document.body.append(modal);
   dispatchKey("d");
+  dispatchKey("f");
   modal.remove();
+  // An open menu (More Actions, with the reader still focused) owns its keys too.
+  const menu = domWindow.document.createElement("div");
+  menu.setAttribute("role", "menu");
+  domWindow.document.body.append(menu);
+  dispatchKey("f");
+  menu.remove();
   assert.deepEqual(fixture.calls, ["nextSession"]);
 
   await act(async () => { fixture.root.unmount(); });

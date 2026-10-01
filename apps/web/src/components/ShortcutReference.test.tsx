@@ -75,6 +75,22 @@ test("without a session each Session group says so once and dims its rows", () =
   assert.doesNotMatch(render({ sessionOpen: true }), /Open a session to use these/);
 });
 
+test("Fork Conversation (F) is listed under the page's own group: Session Reading on a session, Sessions List on the list (#2272)", () => {
+  const groupRows = (html: string, id: string) => {
+    const start = html.indexOf(`aria-labelledby="${id}"`);
+    assert.ok(start >= 0, `the reference has a ${id} group`);
+    const section = html.slice(start);
+    return section.slice(0, section.indexOf("</dl>"));
+  };
+  const fork = /<div class="shortcut-row"><dt>Fork Conversation<\/dt><dd class="shortcut-keys"><kbd>F<\/kbd><\/dd><\/div>/;
+  const onSession = render({ scope: "Session Reading" });
+  assert.match(groupRows(onSession, "shortcut-session-reading"), fork);
+  assert.doesNotMatch(groupRows(onSession, "shortcut-sessions-list"), /Fork Conversation/, "listed once, where it applies");
+  const onList = render({ scope: "Sessions List" });
+  assert.match(groupRows(onList, "shortcut-sessions-list"), fork);
+  assert.doesNotMatch(groupRows(onList, "shortcut-session-reading"), /Fork Conversation/);
+});
+
 test("a row-specific reason stays on its row", () => {
   const html = render({ scope: "Session", conversationSteeringSupported: false });
   assert.match(html, /<div class="shortcut-row is-unavailable"><dt>Steer Active Turn<\/dt><dd class="shortcut-reason" title="Not supported by this runner">Not supported by this runner<\/dd><dd class="shortcut-keys"><kbd>Ctrl\+Enter<\/kbd>/);

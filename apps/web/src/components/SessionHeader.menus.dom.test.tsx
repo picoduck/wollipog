@@ -508,3 +508,89 @@ test("without a Clipboard API (a plain-HTTP page) Copy Session Link falls back a
     if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
   }
 });
+
+/** Answers `(pointer: coarse)` as given and every other query as false, like a desktop browser. */
+function stubPointer(coarse: boolean): () => void {
+  const original = Object.getOwnPropertyDescriptor(domWindow, "matchMedia");
+  Object.defineProperty(domWindow, "matchMedia", {
+    configurable: true,
+    value: (query: string) => ({
+      matches: query === "(pointer: coarse)" ? coarse : false,
+      media: query,
+      addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    }),
+  });
+  return () => {
+    if (original) Object.defineProperty(domWindow, "matchMedia", original);
+    else delete (domWindow as unknown as { matchMedia?: unknown }).matchMedia;
+  };
+}
+
+test("Fork Conversation… shows its F keycap on a fine pointer and none on a coarse one (#2272)", async () => {
+  for (const [coarse, wired, expected] of [
+    [false, true, ["F"]],
+    [true, true, []],
+    // Where Session Reading keys are off (a phone-width window) no shortcut is wired, so no keycap.
+    [false, false, []],
+  ] as const) {
+    const restore = stubPointer(coarse);
+    const header = await renderHeader({
+      extra: {
+        forkAvailability: { available: true, forkTurn: 2 },
+        onFork: () => undefined,
+        ...(wired ? { forkShortcutRef: { current: null } } : {}),
+      },
+    });
+    try {
+      const menu = await open("More Actions");
+      const fork = item(menu, "Fork Conversation…");
+      const keycaps = [...fork.querySelectorAll(".menu-trail kbd")].map((key) => key.textContent);
+      assert.deepEqual(keycaps, expected, `${coarse ? "(pointer: coarse)" : "(pointer: fine)"}, wired: ${wired}`);
+      assert.equal(fork.querySelector(".menu-text")?.textContent, "Fork Conversation…");
+      if (expected.length > 0) {
+        assert.equal(fork.querySelector(".menu-trail")?.getAttribute("aria-hidden"), "true",
+          "the keycap stays out of the item's accessible name");
+      }
+    } finally {
+      await header.unmount();
+      restore();
+    }
+  }
+});
+
+test("the F shortcut holds Fork Conversation…'s action only while the item is offered and enabled (#2272)", async () => {
+  const forkShortcutRef: { current: (() => void) | null } = { current: null };
+  const forks: string[] = [];
+  const pendingExport = new Promise<never>(() => {});
+  const cases: Array<[string, Partial<React.ComponentProps<typeof SessionHeader>>, boolean]> = [
+    ["enabled", { forkAvailability: { available: true, forkTurn: 2 } }, true],
+    ["disabled with a reason", {
+      forkAvailability: { available: false, offered: true, reason: "Wait for the current turn or approval before creating a fork." },
+    }, false],
+    ["never offered", {
+      forkAvailability: { available: false, offered: false, reason: "Conversation forks require an isolated worktree session." },
+    }, false],
+  ];
+  for (const [name, extra, enabled] of cases) {
+    const header = await renderHeader({
+      client: { transcriptExport: () => pendingExport },
+      extra: { ...extra, onFork: () => { forks.push(name); }, forkShortcutRef },
+    });
+    try {
+      assert.equal(forkShortcutRef.current !== null, enabled, name);
+      forkShortcutRef.current?.();
+      if (!enabled) continue;
+      assert.deepEqual(forks, [name], "the shortcut runs the item's own action");
+
+      // A header action in flight disables the item with its busy reason, and the shortcut with it.
+      const share = await open("Share");
+      await act(async () => { item(share, "Export as Markdown").click(); await tick(); });
+      assert.equal(page().querySelector<HTMLButtonElement>('button[aria-label="More Actions"]')?.disabled, true);
+      assert.equal(forkShortcutRef.current, null, "busy");
+    } finally {
+      await header.unmount();
+    }
+    assert.equal(forkShortcutRef.current, null, `${name}: an unmounted header leaves nothing to run`);
+  }
+  assert.deepEqual(forks, ["enabled"]);
+});
