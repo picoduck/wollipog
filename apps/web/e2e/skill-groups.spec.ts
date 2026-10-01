@@ -286,13 +286,13 @@ for (const width of [1440, 390]) test(`the dialog's in-place menus at ${width} o
       };
     }, await trigger.getAttribute("aria-controls"));
     expect(boxes.contained, "the menu is under the containing block").toBe(true);
-    expect(boxes.backdrop, "the backdrop covers the whole viewport").toEqual([0, 0, width, height]);
     if (width > 760) {
-      expect(boxes.gap).toBe(4);
-      expect(Math.abs(boxes.right)).toBeLessThanOrEqual(2);
+      expect(boxes.gap, "the menu opens 4px below its trigger").toBe(4);
+      expect(Math.abs(boxes.right), "and end-aligned with it").toBeLessThanOrEqual(2);
     } else {
       expect(boxes.sheet, "the sheet docks to the viewport's edges").toEqual({ left: 0, right: width, bottom: height });
     }
+    expect(boxes.backdrop, "the backdrop covers the whole viewport").toEqual([0, 0, width, height]);
     // A click away from the menu lands on its backdrop and dismisses it. (The dialog's scrolling body
     // still clips anything under a containing block inside it, the backdrop included.)
     const [x, y] = [body.box.x + 8, body.box.y + 8];
