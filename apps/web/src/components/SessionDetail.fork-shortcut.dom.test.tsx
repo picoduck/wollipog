@@ -12,6 +12,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 /**
  * #2272: on the session page, bare F runs More Actions' Fork Conversation… — the latest-turn fork
@@ -187,6 +188,20 @@ async function mountSession(patch: Partial<SessionView>, options: { accept?: boo
         .find((candidate) => candidate.querySelector(".menu-text")?.textContent === label);
       return { menu, item };
     },
+    /** Escape from inside the menu, as a person would, so an open menu cannot mask what F does. */
+    closeMoreActions: async () => {
+      const menu = page().querySelector<HTMLElement>('[role="menu"][aria-label="More Actions"]');
+      assert.ok(menu, "More Actions is open");
+      const target = menu.contains(domWindow.document.activeElement as never)
+        ? domWindow.document.activeElement!
+        : menu.querySelector('[role="menuitem"]') ?? menu;
+      await act(async () => {
+        target.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await settle();
+      assertNoDomNode(page().querySelector('[role="menu"]'), "no menu remains open");
+    },
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -261,6 +276,7 @@ test("F does nothing while Fork Conversation… is disabled: a fork in flight, o
     assert.deepEqual(busy.forks, [1], "accepting starts the fork, which stays in flight");
     const { item } = await busy.openMoreActions();
     assert.equal(item("Fork Conversation…")?.disabled, true, "the item is disabled while the fork runs");
+    await busy.closeMoreActions();
     busy.transcript.focus();
     await busy.press();
     assert.equal(busy.confirmations.length, 1, "F does not ask again");
@@ -275,8 +291,7 @@ test("F does nothing while Fork Conversation… is disabled: a fork in flight, o
     const fork = item("Fork Conversation…");
     assert.equal(fork?.disabled, true);
     assert.match(fork?.textContent ?? "", /Wait for the current turn or approval before creating a fork\./);
-    await act(async () => { domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
-    await settle();
+    await running.closeMoreActions();
     running.transcript.focus();
     await running.press();
     assert.deepEqual(running.confirmations, []);
@@ -291,8 +306,7 @@ test("F does nothing for a session that can never fork, where More Actions offer
     const { item } = await view.openMoreActions();
     assert.equal(item("Fork Conversation…"), undefined);
     assert.ok(item("Rename…"), "the menu is otherwise populated");
-    await act(async () => { domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
-    await settle();
+    await view.closeMoreActions();
     view.transcript.focus();
     await view.press();
     assert.deepEqual(view.confirmations, []);
