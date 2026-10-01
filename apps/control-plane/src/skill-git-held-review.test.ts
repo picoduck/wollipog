@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { ControlPlaneDb } from "./db.js";
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import { SkillGitAutoUpdater } from "./skill-git-auto-update.js";
@@ -38,10 +39,10 @@ test("a held update is reviewed and imported at the held commit after its branch
   await mkdir(join(upstream, "skills/alpha"), { recursive: true });
   await mkdir(shim);
   await writeFile(join(shim, "git"), `#!${process.execPath}
-const { spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const args = process.argv.slice(2).map((arg) => arg === ${JSON.stringify(REMOTE)} ? ${JSON.stringify(`file://${upstream}`)} : arg);
-const result = spawnSync(${JSON.stringify(realGit)}, ["-c", "protocol.file.allow=always", ...args], { stdio: "inherit" });
-process.exit(result.status ?? 1);
+const child = spawn(${JSON.stringify(realGit)}, ["-c", "protocol.file.allow=always", ...args], { stdio: "inherit" });
+child.on("exit", (code) => process.exit(code ?? 1));
 `, { mode: 0o700 });
   const git = async (...args: string[]) => (await exec(realGit, ["-C", upstream, ...args], { encoding: "utf8" })).stdout.trim();
   const commit = async (files: Record<string, string>, message: string) => {
