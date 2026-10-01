@@ -279,6 +279,31 @@ export class DurableCommandStore {
     return next;
   }
 
+  /** Called only when beginSteering threw before the caller could invoke the provider. Recheck
+   * under the command lock: a failed atomic write may already have published its next revision.
+   * Never reset evidence of delivery, an unexpected revision, or another owner's receipt. */
+  recoverUnsubmittedSteering(prior: DurableCommandRecord): DurableCommandRecord | null {
+    return this.withCommandLock(prior.commandId, () => {
+      const current = this.read(prior.commandId);
+      if (!current || prior.kind !== "answer_recovered_question" || prior.state !== "queued" ||
+          prior.userEventSeq !== undefined || current.ownerId !== this.ownerId ||
+          current.ownerId !== prior.ownerId || current.commandId !== prior.commandId ||
+          current.executionId !== prior.executionId ||
+          current.kind !== prior.kind || current.sessionId !== prior.sessionId ||
+          current.payloadHmac !== prior.payloadHmac || current.userEventSeq !== undefined) return null;
+      const unchanged = current.revision === prior.revision && current.state === "queued" &&
+        !current.steeringPending;
+      const publishedFence = current.revision === prior.revision + 1 && current.state === "started" &&
+        current.steeringPending === true;
+      if (!unchanged && !publishedFence) return null;
+      // Publish and flush queued even when the first write left the old revision intact. Only a
+      // successful durable reset permits the caller to put the answer back in its FIFO.
+      const recovered = this.transitionLocked(current, "queued", { steeringPending: false });
+      this.activateHandle(prior.commandId);
+      return recovered;
+    });
+  }
+
   activateHandle(commandId: string): void {
     this.activeHandles.add(commandId);
   }
@@ -494,11 +519,20 @@ export class DurableCommandHandle {
 
   /** Persist before turn/steer writes. Keep this boundary local: the CP receipt remains queued
    * until acceptance, while a crashed runner (including an older version) sees started. */
-  beginSteering(): void {
+  beginSteering(): boolean {
     if (this.record.kind !== "answer_recovered_question" || this.record.state !== "queued") {
       throw new Error("only a queued question answer can begin durable steering");
     }
-    this.nonterminal(() => this.store.transition(this.record, "started", { steeringPending: true }));
+    try {
+      this.nonterminal(() => this.store.transition(this.record, "started", { steeringPending: true }));
+      return true;
+    } catch (error) {
+      let recovered: DurableCommandRecord | null = null;
+      try { recovered = this.store.recoverUnsubmittedSteering(this.record); } catch { /* remain fail-closed */ }
+      if (!recovered) throw error;
+      this.record = recovered;
+      return false;
+    }
   }
 
   /** Called only for a definite provider refusal, before any provider-delivery event exists. */

@@ -471,3 +471,93 @@ test("a truncated final receipt is never overwritten or retried as new", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const changed of ["owner", "revision", "delivery", "identity", "payload", "rollback"] as const) {
+  test(`a failed answer fence does not recover with ${changed} uncertainty`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-answer-fence-guard-"));
+    let now = 1;
+    try {
+      const command: DurableSessionCommand = {
+        type: "answer_recovered_question", sessionId: "s_test", requestId: "question",
+        recoveryId: "occurrence", answers: { "0": "synthetic answer" },
+      };
+      const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => now, ownerStaleMs: 10 });
+      const claim = store.claim(message(command));
+      if (claim.kind !== "new") return assert.fail("answer was not claimed");
+      claim.handle.queued();
+      const originalWrite = (store as any).writeAtomic.bind(store);
+      let diskBeforeRecovery = "";
+      let recordFile = "";
+      t.mock.method(store as any, "writeAtomic", (file: string, record: any) => {
+        if (record.state === "started" && record.steeringPending) {
+          const adjusted = { ...record };
+          if (changed === "owner") adjusted.ownerId = "owner-b";
+          if (changed === "revision") adjusted.revision += 1;
+          if (changed === "delivery") adjusted.userEventSeq = 7;
+          if (changed === "identity") adjusted.commandId = "other_command";
+          if (changed === "payload") adjusted.payloadHmac = "0".repeat(64);
+          originalWrite(file, adjusted);
+          recordFile = file;
+          diskBeforeRecovery = readFileSync(file, "utf8");
+          throw new Error("synthetic fence publication failure");
+        }
+        if (changed === "rollback") throw new Error("synthetic recovery write failure");
+        return originalWrite(file, record);
+      });
+      assert.throws(() => claim.handle.beginSteering(), /synthetic fence publication failure/u);
+      assert.equal(readFileSync(recordFile, "utf8"), diskBeforeRecovery,
+        "recovery must not overwrite uncertain state or another command/owner");
+      if (changed === "rollback") {
+        now = 20;
+        const restarted = new DurableCommandStore(root, { ownerId: "owner-c", now: () => now, ownerStaleMs: 10 });
+        const replay = restarted.claim(message(command));
+        assert.equal(replay.kind, "duplicate");
+        if (replay.kind === "duplicate") assert.equal(replay.receipt.state, "uncertain");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const published of [false, true]) {
+  test(`a recovered ${published ? "published" : "unpublished"} answer fence remains replay-safe across restart`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-answer-fence-restart-"));
+    let now = 1;
+    try {
+      const command: DurableSessionCommand = {
+        type: "answer_recovered_question", sessionId: "s_test", requestId: "question",
+        recoveryId: "occurrence", answers: { "0": "synthetic answer" },
+      };
+      const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => now, ownerStaleMs: 10 });
+      const claim = store.claim(message(command));
+      if (claim.kind !== "new") return assert.fail("answer was not claimed");
+      claim.handle.queued();
+      const originalWrite = (store as any).writeAtomic.bind(store);
+      let injected = false;
+      t.mock.method(store as any, "writeAtomic", (file: string, record: any) => {
+        if (!injected && record.state === "started" && record.steeringPending) {
+          injected = true;
+          if (published) originalWrite(file, record);
+          throw new Error("synthetic fence failure");
+        }
+        return originalWrite(file, record);
+      });
+      assert.equal(claim.handle.beginSteering(), false);
+      assert.equal(store.claim(message(command)).kind, "duplicate", "the queued local handle still owns this answer");
+      assert.equal(store.recentUpdates()[0]?.state, "queued", "reconnect reports recoverable queued state");
+      now = 20;
+      const restarted = new DurableCommandStore(root, { ownerId: "owner-b", now: () => now, ownerStaleMs: 10 });
+      const replay = restarted.claim(message(command));
+      assert.equal(replay.kind, "reclaimed");
+      if (replay.kind !== "reclaimed") return assert.fail("safe queued answer was not recovered");
+      replay.handle.queued();
+      assert.equal(replay.handle.beginSteering(), true);
+      replay.handle.started(7);
+      replay.handle.completed();
+      assert.equal(restarted.claim(message(command)).kind, "duplicate");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}

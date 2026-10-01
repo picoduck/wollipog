@@ -168,6 +168,7 @@ async function startLiveStack(
   codexScenario: "question" | "dogfood-question" | "async-question" = "question",
   restartRecovery = false,
   asyncDelivery?: "accepted" | "rejected",
+  journalFault = false,
 ): Promise<LiveStack> {
   const port = await reservePort();
   const httpBase = `http://127.0.0.1:${port}`;
@@ -239,9 +240,11 @@ async function startLiveStack(
     XDG_STATE_HOME: join(runnerHome, ".local", "state"),
     PATH: `${runnerBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
     XDG_CACHE_HOME: join(runnerHome, ".cache"),
+    ...(journalFault ? { WOLLIPOG_TEST_JOURNAL_FAULT_MARKER: receiptPath + ".journal-fault" } : {}),
   });
   const spawnRunner = () => {
-    const child = spawn(process.execPath, ["--import", "tsx", "apps/runner/src/cli.ts", "--config", configPath], {
+    const imports = journalFault ? ["--import", fileURLToPath(new URL("./fixtures/async-answer-journal-fault.ts", import.meta.url))] : [];
+    const child = spawn(process.execPath, ["--import", "tsx", ...imports, "apps/runner/src/cli.ts", "--config", configPath], {
       cwd: REPO_ROOT,
       env: runnerEnv(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -593,12 +596,12 @@ for (const viewport of [
   { name: "mobile", width: 390, height: 844 },
 ]) {
   test.describe(`Async Answer Delivery on ${viewport.name}`, () => {
-    const evidenceDir = process.env.WOLLIPOG_ISSUE_2306_EVIDENCE_DIR;
+    const evidenceDir = process.env.WOLLIPOG_ISSUE_2340_EVIDENCE_DIR ?? process.env.WOLLIPOG_ISSUE_2306_EVIDENCE_DIR;
     test.use({
       viewport: { width: viewport.width, height: viewport.height },
     });
-    for (const delivery of ["accepted", "rejected"] as const) {
-      test(`running async answers ${delivery === "accepted" ? "steer automatically" : "stay queued"} without reopening`, async ({ page: fixturePage, browser, baseURL }) => {
+    for (const delivery of ["accepted", "rejected", "journal"] as const) {
+      test(`running async answers ${delivery === "accepted" ? "steer automatically" : delivery === "journal" ? "recover from journal failure" : "stay queued"} without reopening`, async ({ page: fixturePage, browser, baseURL }) => {
         test.setTimeout(180_000);
         const recording = evidenceDir ? await browser.newContext({
           baseURL,
@@ -606,7 +609,8 @@ for (const viewport of [
           recordVideo: { dir: evidenceDir, size: { width: viewport.width, height: viewport.height } },
         }) : null;
         const page = recording ? await recording.newPage() : fixturePage;
-        const stack = await startLiveStack("codex", "async-question", false, delivery);
+        const stack = await startLiveStack("codex", "async-question", false,
+          delivery === "journal" ? "accepted" : delivery, delivery === "journal");
         const prefix = `${delivery}-${viewport.name}`;
         const errors: string[] = [];
         page.on("pageerror", (error) => errors.push(error.message));
@@ -639,15 +643,21 @@ for (const viewport of [
           await page.getByRole("button", { name: "Submit Answers" }).click();
           await expect(answer).toHaveCount(0);
           await expect(page.locator(".composer-input")).toBeVisible();
-          await expect.poll(async () => existsSync(stack.receiptPath + ".steer")).toBe(true);
+          if (delivery === "journal") {
+            await expect.poll(async () => existsSync(stack.receiptPath + ".journal-fault")).toBe(true);
+            await expect.poll(async () => stack.logs()).toContain('"event":"async_answer_journal_recovery"');
+            expect(existsSync(stack.receiptPath + ".steer")).toBe(false);
+          } else {
+            await expect.poll(async () => existsSync(stack.receiptPath + ".steer")).toBe(true);
+          }
           await expect.poll(async () => (await fetchSession(stack)).pendingApproval).toBeNull();
           await expect.poll(async () => (await fetchSession(stack)).queued?.length ?? 0)
-            .toBe(delivery === "rejected" ? 1 : 0);
+            .toBe(delivery === "accepted" ? 0 : 1);
           await page.reload();
           await expect(answer).toHaveCount(0);
           await expect(page.getByRole("region", { name: "Agent Questions" })).toHaveCount(0);
           await expect(page.locator(".composer-input")).toBeVisible();
-          if (delivery === "rejected") {
+          if (delivery !== "accepted") {
             await expect(page.locator(".queued-item")).toHaveCount(1);
             await expect(page.locator(".queued-item")).toContainText("Answer: Patch");
             expect(existsSync(stack.receiptPath)).toBe(false);
@@ -657,7 +667,7 @@ for (const viewport of [
           }
           await capture("after");
           await beat(3_000);
-          if (delivery === "rejected") {
+          if (delivery !== "accepted") {
             // Reconnect the live runner to a restarted CP while delivery remains queued.
             // Journal tests separately prove replay after a runner process is lost.
             await stack.restart(false);

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { pendingRequests, type RunnerToControlPlane } from "@wollipog/protocol";
 import { SessionManager, type DurableCommandLifecycle } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { DurableCommandStore, durableCommandPayloadDigest } from "./durable-command-store.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -2034,3 +2035,85 @@ test("logoutAgent fences prompts and duplicate logout until the provider settles
     cleanup();
   }
 });
+
+for (const published of [false, true]) {
+  test(`an async answer survives a journal failure ${published ? "after" : "before"} fence publication`, async (t) => {
+    const { sm, sent, store, cleanup } = makeHarness(true);
+    const journalRoot = mkdtempSync(join(tmpdir(), "wollipog-answer-journal-fault-"));
+    try {
+      const entry = (sm as any).active.get("s_perm");
+      Object.assign(entry, { activeTurnId: "running-turn", activeTurnConfig: {}, providerReady: true,
+        context: { kind: "native" } });
+      entry.client.agentSessionId = () => "codex-thread";
+      entry.client.activeSteeringTurnId = () => "provider-turn";
+      let providerCalls = 0;
+      let promptCalls = 0;
+      entry.client.prompt = async () => { promptCalls += 1; return "end_turn"; };
+      entry.client.steer = async () => {
+        providerCalls += 1;
+        return { outcome: "accepted", providerTurnId: "provider-turn" };
+      };
+      store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex",
+        agentSessionId: "codex-thread", status: "running" });
+      (sm as any).emitEvent("s_perm", {
+        kind: "question_request", async: true, requestId: "codex-async:journal",
+        questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+      });
+      const recoveryId = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+      const command = { type: "answer_recovered_question" as const, sessionId: "s_perm",
+        requestId: "codex-async:journal", recoveryId, answers: { "0": "Patch" } };
+      const journal = new DurableCommandStore(journalRoot, { ownerId: "owner-a", now: () => 1 });
+      const claim = journal.claim({ type: "durable_session_command", requestId: "receipt-request",
+        commandId: "journal_answer", executionId: "execution", expiresAt: 10_000,
+        payloadDigest: durableCommandPayloadDigest(command), command });
+      if (claim.kind !== "new") return assert.fail("answer was not claimed");
+      const handle = claim.handle;
+      const originalWrite = (journal as any).writeAtomic.bind(journal);
+      let injected = false;
+      t.mock.method(journal as any, "writeAtomic", (file: string, record: any) => {
+        if (!injected && record.state === "started" && record.steeringPending) {
+          injected = true;
+          if (published) originalWrite(file, record);
+          throw new Error("synthetic journal write failure");
+        }
+        return originalWrite(file, record);
+      });
+      sm.answerRecoveredQuestion("s_perm", command.requestId, recoveryId, command.answers, {
+        commandId: handle.commandId,
+        queued: () => { handle.queued(); },
+        beginSteering: () => handle.beginSteering(),
+        steeringRejected: () => { handle.steeringRejected(); },
+        started: (seq) => { handle.started(seq); },
+        completed: () => { handle.completed(); },
+        failed: (error, code) => { handle.failed(error, code); },
+        uncertain: (error) => { handle.uncertain(error); },
+      });
+      for (let attempt = 0; attempt < 40 && (sm as any).steeringLaneRunning.has("s_perm"); attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      assert.equal(injected, true);
+      assert.equal(providerCalls, 0);
+      assert.equal(journal.read("journal_answer")?.state, "queued");
+      assert.equal(entry.queue.length, 1, "the submitted answer must remain recoverable");
+      assert.match(entry.queue[0].text, /Question: Which path\?\nAnswer: Patch/u);
+      assert.equal(entry.reservedPromotions.size, 0);
+      assert.equal((sm as any).steerFences(entry).size, 0);
+      assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+      assert.equal(eventsOf(sent, "user_message").length, 0);
+      sm.reconcileStore();
+      assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+      entry.running = false;
+      (sm as any).emitStatus("s_perm", "idle");
+      (sm as any).scheduleDrain("s_perm");
+      for (let attempt = 0; attempt < 40 && handle.state !== "completed"; attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      assert.equal(handle.state, "completed");
+      assert.equal(promptCalls, 1);
+      assert.equal(providerCalls, 0);
+    } finally {
+      rmSync(journalRoot, { recursive: true, force: true });
+      cleanup();
+    }
+  });
+}

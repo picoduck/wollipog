@@ -370,7 +370,7 @@ export interface DurableCommandLifecycle {
   readonly commandId: string;
   queued(error?: string, code?: DurableSessionCommandErrorCode): void;
   started(userEventSeq?: number): void;
-  beginSteering?(): void;
+  beginSteering?(): boolean | void;
   steeringRejected?(): void;
   completed(): void;
   failed(error: string, code?: DurableSessionCommandErrorCode): void;
@@ -9126,7 +9126,20 @@ export class SessionManager {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "session lifecycle discarded the promotion");
     }
 
-    operation.source?.durable?.beginSteering?.();
+    let prepared: boolean | void;
+    try {
+      prepared = operation.source?.durable?.beginSteering?.();
+    } catch (error) {
+      this.log(JSON.stringify({ event: "async_answer_journal_recovery", sessionId: request.sessionId,
+        commandId: operation.source?.durable?.commandId, outcome: "uncertain" }));
+      throw error;
+    }
+    if (prepared === false) {
+      this.log(JSON.stringify({ event: "async_answer_journal_recovery", sessionId: request.sessionId,
+        commandId: operation.source?.durable?.commandId, outcome: "requeued" }));
+      return this.handleDefiniteSteeringFailure(operation, "policy_blocked",
+        "The answer remains queued because its steering journal could not be prepared.");
+    }
     operation.providerStarted = true;
     const [steeringImages, steeringReferenceText] = materialized.value!;
     const providerPromise = entry.client.steer({
