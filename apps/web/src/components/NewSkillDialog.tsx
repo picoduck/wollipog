@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type DragEvent } from "react";
+import { useCallback, useId, useRef, useState, type DragEvent } from "react";
 import { SKILL_MAX_FILES, isSkillScriptFile, skillMarkdownFromFields, type SkillFile } from "@wollipog/protocol";
 import {
   skillFilesFromUploads,
@@ -89,7 +89,11 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const chooseRef = useRef<HTMLButtonElement>(null);
   const fileListRef = useRef<HTMLUListElement>(null);
-  useAutoGrowTextarea(bodyRef, body);
+  const growBody = useAutoGrowTextarea(body);
+  const bodyFieldRef = useCallback((field: HTMLTextAreaElement | null) => {
+    bodyRef.current = field;
+    growBody(field);
+  }, [growBody]);
 
   const trimmedName = name.trim();
 
@@ -218,7 +222,7 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
           </div>
           {source === "write" ? <>
             <textarea
-              ref={bodyRef}
+              ref={bodyFieldRef}
               rows={6}
               value={body}
               placeholder="e.g. Read the whole diff before commenting. Point out bugs before style."

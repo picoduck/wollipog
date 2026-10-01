@@ -1,4 +1,4 @@
-import { useId, useRef } from "react";
+import { useId } from "react";
 import { SKILL_DESCRIPTION_MAX_CHARS } from "@wollipog/protocol";
 import { useAutoGrowTextarea } from "./useAutoGrowTextarea.js";
 
@@ -27,14 +27,13 @@ export function SkillDescriptionField({ value, onChange, disabled = false, label
   const id = useId();
   const helperId = `${id}-helper`;
   const counterId = `${id}-counter`;
-  const ref = useRef<HTMLTextAreaElement>(null);
-  useAutoGrowTextarea(ref, value);
+  const growRef = useAutoGrowTextarea(value);
   const nearLimit = SKILL_DESCRIPTION_MAX_CHARS - value.length <= SKILL_DESCRIPTION_NEAR_LIMIT;
   return (
     <div className="field">
       <div className="field-head"><label htmlFor={id}>{label}</label></div>
       <textarea
-        ref={ref}
+        ref={growRef}
         id={id}
         rows={3}
         value={value}

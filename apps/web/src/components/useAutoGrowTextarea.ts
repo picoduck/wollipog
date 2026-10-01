@@ -1,4 +1,4 @@
-import { useLayoutEffect, type RefObject } from "react";
+import { useLayoutEffect, useState } from "react";
 
 /** The §8.4 textarea maximum: a field grows with its text up to this many rows, then scrolls. */
 export const TEXTAREA_MAX_ROWS = 12;
@@ -24,19 +24,23 @@ function fitTextarea(field: HTMLTextAreaElement, maxRows: number) {
 
 /**
  * Grow a textarea with its text, from its `rows` up to `maxRows`, then let it scroll (§8.4).
+ * Returns the ref to put on the textarea.
  *
  * The height is measured rather than left to `field-sizing: content`, which WebKit (the desktop
  * app's webview on macOS and Linux) does not support. It is measured again when the text changes
  * and when the field's width does (a narrower window or a rotated phone rewraps the same text);
- * the heights this sets are ignored, so measuring never feeds itself.
+ * the heights this sets are ignored, so measuring never feeds itself. The field is held as state,
+ * not a ref object, so a textarea that remounts with the same text (New Skill's Write editor after
+ * Upload Folder) is fitted and observed again.
  */
-export function useAutoGrowTextarea(ref: RefObject<HTMLTextAreaElement | null>, value: string, maxRows = TEXTAREA_MAX_ROWS) {
-  useLayoutEffect(() => {
-    if (ref.current) fitTextarea(ref.current, maxRows);
-  }, [ref, value, maxRows]);
+export function useAutoGrowTextarea(value: string, maxRows = TEXTAREA_MAX_ROWS): (field: HTMLTextAreaElement | null) => void {
+  const [field, setField] = useState<HTMLTextAreaElement | null>(null);
 
   useLayoutEffect(() => {
-    const field = ref.current;
+    if (field) fitTextarea(field, maxRows);
+  }, [field, value, maxRows]);
+
+  useLayoutEffect(() => {
     const Observer = field?.ownerDocument.defaultView?.ResizeObserver;
     if (!field || !Observer) return;
     let width = field.offsetWidth;
@@ -47,5 +51,7 @@ export function useAutoGrowTextarea(ref: RefObject<HTMLTextAreaElement | null>, 
     });
     observer.observe(field);
     return () => observer.disconnect();
-  }, [ref, maxRows]);
+  }, [field, maxRows]);
+
+  return setField;
 }

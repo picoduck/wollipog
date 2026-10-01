@@ -79,6 +79,23 @@ test("the description is measured again when its width changes, so rewrapped tex
   expect(await description.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true);
 });
 
+test("the Write editor grows again after Upload Folder and back, and still refits on resize", async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 1000 });
+  const dialog = await openNewSkill(page);
+  const editor = () => dialog.getByRole("textbox", { name: "Instructions" });
+  await editor().fill(Array.from({ length: 10 }, (_, index) => `Step ${index + 1}`).join("\n"));
+  expect(await visibleRows(editor())).toBe(10);
+  await dialog.getByRole("radio", { name: "Upload Folder", exact: true }).click();
+  await dialog.getByRole("radio", { name: "Write", exact: true }).click();
+  await expect(editor()).toHaveValue(/^Step 1\n[\s\S]*Step 10$/);
+  expect(await visibleRows(editor()), "the remounted editor is fitted to its text").toBe(10);
+
+  await editor().fill("Read the whole diff before commenting, then every caller of what changed. ".repeat(6).trim());
+  const wide = await visibleRows(editor());
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await expect.poll(() => visibleRows(editor()), { message: "the remounted editor is still observed" }).toBeGreaterThan(wide);
+});
+
 test("a 1,100-character paste leaves exactly 1,024 characters, and the counter turns amber at 924", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const dialog = await openNewSkill(page);
