@@ -28,13 +28,14 @@ public static class WollipogProviderHomeLeaseIo {
   [StructLayout(LayoutKind.Sequential)] struct OVERLAPPED { public IntPtr Internal,InternalHigh; public uint Offset,OffsetHigh; public IntPtr Event; }
   [StructLayout(LayoutKind.Sequential)] struct PBI { public IntPtr Exit,Peb,Affinity,Priority,Pid,Parent; }
   [StructLayout(LayoutKind.Sequential)] struct RENAME { public uint Flags; public IntPtr Root; public uint Length; public ushort First; }
+  [StructLayout(LayoutKind.Sequential)] struct IO_STATUS_BLOCK { public IntPtr Status,Information; }
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out INFO info);
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandleEx(SafeFileHandle file,int type,out BASIC info,uint size);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFinalPathNameByHandleW(SafeFileHandle file,StringBuilder path,uint length,uint flags);
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool LockFileEx(SafeFileHandle file,uint flags,uint reserved,uint low,uint high,ref OVERLAPPED overlap);
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool FlushFileBuffers(SafeFileHandle file);
-  [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle file,int kind,IntPtr information,uint size);
+  [DllImport("ntdll.dll")] static extern int NtSetInformationFile(SafeFileHandle file,out IO_STATUS_BLOCK status,IntPtr information,uint size,int kind);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateHardLinkW(string target,string source,IntPtr security);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool DeleteFileW(string path);
   [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
@@ -59,12 +60,13 @@ public static class WollipogProviderHomeLeaseIo {
   static void Move(SafeFileHandle source,string target,string message){
     Pinned();Need(Name(target)&&Info(source).Volume==Info(rootHandle).Volume,"unsafe or cross-volume lease rename");
     int rootOffset=Marshal.OffsetOf(typeof(RENAME),"Root").ToInt32(),lengthOffset=Marshal.OffsetOf(typeof(RENAME),"Length").ToInt32(),nameOffset=Marshal.OffsetOf(typeof(RENAME),"First").ToInt32();
-    Need(rootOffset==IntPtr.Size&&lengthOffset==2*IntPtr.Size&&nameOffset==lengthOffset+4&&Marshal.SizeOf(typeof(RENAME))>=nameOffset+2,"native lease rename layout unavailable");
+    Need(rootOffset==IntPtr.Size&&lengthOffset==2*IntPtr.Size&&nameOffset==lengthOffset+4&&Marshal.SizeOf(typeof(RENAME))>=nameOffset+2&&Marshal.SizeOf(typeof(IO_STATUS_BLOCK))==2*IntPtr.Size,"native lease rename layout unavailable");
     byte[] name=Encoding.Unicode.GetBytes(target);Need(name.Length>=2&&name.Length<=510,"lease rename UTF-16 length exceeded");
-    int size=Math.Max(Marshal.SizeOf(typeof(RENAME)),nameOffset+name.Length+2);IntPtr buffer=Marshal.AllocHGlobal(size);
-    try{Marshal.Copy(new byte[size],0,buffer,size);Marshal.StructureToPtr(new RENAME{Flags=1|2,Root=rootHandle.DangerousGetHandle(),Length=(uint)name.Length},buffer,false);Marshal.Copy(name,0,IntPtr.Add(buffer,nameOffset),name.Length);
-      if(!SetFileInformationByHandle(source,22,buffer,(uint)size))throw new Refusal(1,message+" (Windows code "+Marshal.GetLastWin32Error()+")");
-    }finally{Marshal.FreeHGlobal(buffer);}
+    int size=Marshal.SizeOf(typeof(RENAME))+name.Length+2;IntPtr buffer=Marshal.AllocHGlobal(size);bool added=false;
+    try{rootHandle.DangerousAddRef(ref added);Marshal.Copy(new byte[size],0,buffer,size);Marshal.StructureToPtr(new RENAME{Flags=1|2,Root=rootHandle.DangerousGetHandle(),Length=(uint)name.Length},buffer,false);Marshal.Copy(name,0,IntPtr.Add(buffer,nameOffset),name.Length);
+      IO_STATUS_BLOCK status;int result=NtSetInformationFile(source,out status,buffer,(uint)size,65);
+      if(result!=0||status.Status.ToInt64()!=0)throw new Refusal(1,message+" (NTSTATUS 0x"+result.ToString("x8")+", completion 0x"+status.Status.ToInt64().ToString("x")+")");
+    }finally{if(added)rootHandle.DangerousRelease();Marshal.FreeHGlobal(buffer);}
   }
   static void Alive(){Need(parentHandle!=IntPtr.Zero&&WaitForSingleObject(parentHandle,0)==258,"lease helper parent exited; preserve all evidence");}
   static byte[] Blob(int maximum){uint size=input.ReadUInt32();Need(size<=maximum&&size<=int.MaxValue,"lease I/O field limit exceeded");inputBytes+=(int)size;Need(inputBytes<=MAX_INPUT,"lease I/O input limit exceeded");byte[] value=input.ReadBytes((int)size);Need(value.Length==size,"truncated lease I/O input");return value;}

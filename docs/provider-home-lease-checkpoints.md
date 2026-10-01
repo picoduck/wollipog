@@ -75,11 +75,12 @@ before unlink. Full-chain verification is not repeated for every retired entry.
 Windows retains a fixed `.mutable-home.retired` alias instead of treating DeleteFile or a
 read-only handle as a POSIX directory barrier. Under the fence it pins source and destination
 ancestry and handles, verifies selected-manifest authority, moves the source to this same-volume
-alias with SetFileInformationByHandle(FileRenameInfoEx), flags REPLACE_IF_EXISTS |
+alias with NtSetInformationFile(FileRenameInformationEx), flags REPLACE_IF_EXISTS |
 POSIX_SEMANTICS, and flushes the exact moved inode with GENERIC_WRITE. The source handle
 has DELETE access and denies shared writes; the relative single-component target uses the
 pinned RootDirectory handle. Old target proof handles remain open through replacement.
-Native structure offsets and bounded UTF-16 target lengths are checked before publication.
+Native structure offsets, zeroed conservative buffer size, synchronous completion and bounded
+UTF-16 target lengths are checked before publication.
 No copy, path-based rename fallback or read-only override is used. The last alias, and any surviving hard-linked
 mirror, remain selected-manifest evidence and are committed before the next anchor replaces
 their authorizing checkpoint. Windows byte-range fencing uses a range beyond the record's EOF,
@@ -90,7 +91,7 @@ This relies on the local NTFS rename and FlushFileBuffers metadata semantics. It
 a general Windows directory-fsync guarantee. Handle-relative POSIX replacement preserves
 open target proof handles and refuses unsupported APIs. See the
 [handle-preserving rename flags](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4217551b-d2c0-42cb-9dc1-69a716cf6d0c),
-[relative rename targets](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info),
+[relative native rename targets](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information),
 [write-through NTFS metadata semantics](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
 and [FlushFileBuffers access requirements](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers). Process-kill tests
 validate interruption recovery, not a physical power-loss experiment.
