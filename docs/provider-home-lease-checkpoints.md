@@ -75,17 +75,22 @@ before unlink. Full-chain verification is not repeated for every retired entry.
 Windows retains a fixed `.mutable-home.retired` alias instead of treating DeleteFile or a
 read-only handle as a POSIX directory barrier. Under the fence it pins source and destination
 ancestry and handles, verifies selected-manifest authority, moves the source to this same-volume
-alias with MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH), and flushes the exact moved inode
-with GENERIC_WRITE. COPY_ALLOWED is never used. The last alias, and any surviving hard-linked
+alias with SetFileInformationByHandle(FileRenameInfoEx), flags REPLACE_IF_EXISTS |
+POSIX_SEMANTICS, and flushes the exact moved inode with GENERIC_WRITE. The source handle
+has DELETE access and denies shared writes; the relative single-component target uses the
+pinned RootDirectory handle. Old target proof handles remain open through replacement.
+Native structure offsets and bounded UTF-16 target lengths are checked before publication.
+No copy, path-based rename fallback or read-only override is used. The last alias, and any surviving hard-linked
 mirror, remain selected-manifest evidence and are committed before the next anchor replaces
 their authorizing checkpoint. Windows byte-range fencing uses a range beyond the record's EOF,
 so ordinary reads of the guard do not conflict with its own lock. Microsoft documents
 [locking beyond EOF and conflicts through other handles](https://learn.microsoft.com/en-us/windows/win32/fileio/locking-and-unlocking-byte-ranges-in-files).
 
-This relies on the local NTFS rename and FlushFileBuffers metadata semantics. The documented
-MoveFileEx write-through guarantee explicitly discusses copy/delete moves; the implementation
-does not infer a general Windows directory-fsync guarantee from that wording. See the
-[MoveFileEx flags](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw),
+This relies on the local NTFS rename and FlushFileBuffers metadata semantics. It does not infer
+a general Windows directory-fsync guarantee. Handle-relative POSIX replacement preserves
+open target proof handles and refuses unsupported APIs. See the
+[handle-preserving rename flags](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4217551b-d2c0-42cb-9dc1-69a716cf6d0c),
+[relative rename targets](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info),
 [write-through NTFS metadata semantics](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
 and [FlushFileBuffers access requirements](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers). Process-kill tests
 validate interruption recovery, not a physical power-loss experiment.
@@ -107,11 +112,13 @@ admission and one above, and actual killed-parent publication boundaries. Platfo
 the native regressions and portable publication-boundary tests on Linux, macOS, and both Windows
 images. Windows tests include interrupted retirement move and flush boundaries.
 
-A 64/64/128 native/helper/mixed handoff run measured at most 31/31/27 metadata records and
-19,325/19,697/17,857 bytes respectively. Native whole-handoff read instrumentation also counts
-trusted helper-binary integrity checks: its observed maximum was about 15.7 MiB; helper-only
-journal reads were about 333 KiB. These measurements do not replace the enforced limits.
-Maximum padded legacy migration (4,090 transitions) completed in approximately 53 seconds
-native and 52 seconds helper on the development filesystem, with a roughly 1.54 MiB selected
-checkpoint after subsequent cross-reader handoffs. Large-run and exact platform CI evidence are
-recorded in the implementation report.
+A 512/512/1,024 native/helper/mixed handoff run measured at most 31/31/27 metadata records and
+19,348/19,720/17,880 bytes respectively. Native whole-handoff read instrumentation also counts
+trusted helper-binary integrity checks: its observed maximum was 15,615,263 bytes; helper-only
+journal reads were at most 333,412 bytes. These measurements do not replace the enforced limits.
+Maximum padded legacy migration (4,090 transitions) completed in approximately 50 seconds
+native and 52 seconds helper on the development filesystem. Its complete largest transaction
+used 57,307 record operations / 221,215,834 read-or-hashed bytes native, and 73,669 /
+166,524,777 helper, below both negotiated work ceilings. The selected checkpoint was roughly
+1.54 MiB after subsequent cross-reader handoffs. These are workload measurements, not latency
+guarantees. Large-run and exact platform CI evidence are recorded in the implementation report.

@@ -27,13 +27,14 @@ public static class WollipogProviderHomeLeaseIo {
   [StructLayout(LayoutKind.Sequential)] struct BASIC { public long Created,Accessed,Written,Changed; public uint Attributes; }
   [StructLayout(LayoutKind.Sequential)] struct OVERLAPPED { public IntPtr Internal,InternalHigh; public uint Offset,OffsetHigh; public IntPtr Event; }
   [StructLayout(LayoutKind.Sequential)] struct PBI { public IntPtr Exit,Peb,Affinity,Priority,Pid,Parent; }
+  [StructLayout(LayoutKind.Sequential)] struct RENAME { public uint Flags; public IntPtr Root; public uint Length; public ushort First; }
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out INFO info);
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandleEx(SafeFileHandle file,int type,out BASIC info,uint size);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFinalPathNameByHandleW(SafeFileHandle file,StringBuilder path,uint length,uint flags);
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool LockFileEx(SafeFileHandle file,uint flags,uint reserved,uint low,uint high,ref OVERLAPPED overlap);
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool FlushFileBuffers(SafeFileHandle file);
-  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool MoveFileExW(string source,string target,uint flags);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle file,int kind,IntPtr information,uint size);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateHardLinkW(string target,string source,IntPtr security);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool DeleteFileW(string path);
   [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
@@ -51,10 +52,20 @@ public static class WollipogProviderHomeLeaseIo {
   sealed class Refusal:Exception { public byte Code; public Refusal(byte code,string message):base(message){Code=code;} }
   static BinaryReader input; static BinaryWriter output; static int inputBytes; static uint reads; static uint allowedReads; static ulong allowedBytes; static ulong bytes;
   static string root,lockPath,rootDev,rootIno,lockDev,lockIno,barrierStage,barrierPath,guardStamp,anchorStamp;
-  static SafeFileHandle rootHandle,lockHandle,guardHandle,anchorHandle;
+  static SafeFileHandle rootHandle,lockHandle,guardHandle,anchorHandle,selectingHandle;
+  static string selectingStamp;
   static IntPtr parentHandle; static uint parentId; static List<SafeFileHandle> ancestry;
   static void Need(bool value,string message){if(!value)throw new Refusal(1,message);}
-  static void Move(string source,string target,string message){if(!MoveFileExW(source,target,1|8))throw new Refusal(1,message+" (Windows code "+Marshal.GetLastWin32Error()+")");}
+  static void Move(SafeFileHandle source,string target,string message){
+    Pinned();Need(Name(target)&&Info(source).Volume==Info(rootHandle).Volume,"unsafe or cross-volume lease rename");
+    int rootOffset=Marshal.OffsetOf(typeof(RENAME),"Root").ToInt32(),lengthOffset=Marshal.OffsetOf(typeof(RENAME),"Length").ToInt32(),nameOffset=Marshal.OffsetOf(typeof(RENAME),"First").ToInt32();
+    Need(rootOffset==IntPtr.Size&&lengthOffset==2*IntPtr.Size&&nameOffset==lengthOffset+4&&Marshal.SizeOf(typeof(RENAME))>=nameOffset+2,"native lease rename layout unavailable");
+    byte[] name=Encoding.Unicode.GetBytes(target);Need(name.Length>=2&&name.Length<=510,"lease rename UTF-16 length exceeded");
+    int size=Math.Max(Marshal.SizeOf(typeof(RENAME)),nameOffset+name.Length+2);IntPtr buffer=Marshal.AllocHGlobal(size);
+    try{Marshal.Copy(new byte[size],0,buffer,size);Marshal.StructureToPtr(new RENAME{Flags=1|2,Root=rootHandle.DangerousGetHandle(),Length=(uint)name.Length},buffer,false);Marshal.Copy(name,0,IntPtr.Add(buffer,nameOffset),name.Length);
+      if(!SetFileInformationByHandle(source,22,buffer,(uint)size))throw new Refusal(1,message+" (Windows code "+Marshal.GetLastWin32Error()+")");
+    }finally{Marshal.FreeHGlobal(buffer);}
+  }
   static void Alive(){Need(parentHandle!=IntPtr.Zero&&WaitForSingleObject(parentHandle,0)==258,"lease helper parent exited; preserve all evidence");}
   static byte[] Blob(int maximum){uint size=input.ReadUInt32();Need(size<=maximum&&size<=int.MaxValue,"lease I/O field limit exceeded");inputBytes+=(int)size;Need(inputBytes<=MAX_INPUT,"lease I/O input limit exceeded");byte[] value=input.ReadBytes((int)size);Need(value.Length==size,"truncated lease I/O input");return value;}
   static string Text(int maximum){string value=Utf8.GetString(Blob(maximum));Need(value.IndexOf('\0')<0,"invalid lease I/O text");return value;}
@@ -79,7 +90,7 @@ public static class WollipogProviderHomeLeaseIo {
   static bool Missing(Exception error){var native=error as Win32Exception;return native!=null&&(native.NativeErrorCode==2||native.NativeErrorCode==3);}
   static bool Exists(byte dir,string name){try{using(var handle=Open(PathFor(dir,name),false,false,false,true))return true;}catch(Exception error){if(Missing(error))return false;throw;}}
   static void CheckNamed(string path,SafeFileHandle handle,string dev,string ino,string stamp=null){using(var named=Open(path,(Info(handle).Attributes&DIRECTORY)!=0,false,false,true)){INFO info=Info(named);Need(Dev(info)==dev&&Ino(info)==ino&&(stamp==null||Fingerprint(named)==stamp),"pinned lease identity changed");}}
-  static void Pinned(){Alive();CheckNamed(root,rootHandle,rootDev,rootIno);if(lockHandle!=null)CheckNamed(lockPath,lockHandle,lockDev,lockIno);if(guardHandle!=null){INFO info=Info(guardHandle);CheckNamed(PathFor(1,GUARD),guardHandle,Dev(info),Ino(info),guardStamp);}if(anchorHandle!=null){INFO info=Info(anchorHandle);CheckNamed(PathFor(0,ANCHOR),anchorHandle,Dev(info),Ino(info),anchorStamp);}}
+  static void Pinned(){Alive();CheckNamed(root,rootHandle,rootDev,rootIno);if(lockHandle!=null)CheckNamed(lockPath,lockHandle,lockDev,lockIno);if(guardHandle!=null){INFO info=Info(guardHandle);CheckNamed(PathFor(1,GUARD),guardHandle,Dev(info),Ino(info),guardStamp);}if(selectingHandle!=null){INFO info=Info(selectingHandle);CheckNamed(PathFor(0,ANCHOR),selectingHandle,Dev(info),Ino(info),selectingStamp);}else if(anchorHandle!=null){INFO info=Info(anchorHandle);CheckNamed(PathFor(0,ANCHOR),anchorHandle,Dev(info),Ino(info),anchorStamp);}}
   static void Roots(string configured){
     Need(Path.IsPathRooted(configured)&&configured.Length<=32768,"invalid lease root");string full=Path.GetFullPath(configured);string volume=Path.GetPathRoot(full);
     var label=new StringBuilder(256);var filesystem=new StringBuilder(256);uint serial,length,flags;
@@ -118,15 +129,21 @@ public static class WollipogProviderHomeLeaseIo {
   static void Verify(Entry expected,bool optional){if(!Exists(expected.Dir,expected.Name)){Need(optional,"verified lease evidence disappeared");return;}Need(Equal(expected,Read(expected.Dir,expected.Name)),"verified lease evidence changed");}
   static void Owned(Entry tip,string future,bool copied){Pinned();Need(!Exists(0,future),"acquired lease has a future successor");if(!copied)Verify(tip,false);}
   static void KeepAnchor(){if(anchorHandle!=null)anchorHandle.Dispose();anchorHandle=Open(PathFor(0,ANCHOR),false);anchorStamp=Fingerprint(anchorHandle);}
-  static void Select(string name){Pinned();using(var candidate=Open(PathFor(0,name),false,true,false,false)){Flush(candidate);Barrier("before-selection");Need(Info(candidate).Volume==Info(rootHandle).Volume,"cross-volume checkpoint selection refused");Move(PathFor(0,name),PathFor(0,ANCHOR),"durable checkpoint selection failed");if(anchorHandle!=null){anchorHandle.Dispose();anchorHandle=null;}Barrier("selection-published");Flush(candidate);}KeepAnchor();Barrier("selection-durable");}
+  static void Select(Entry proof){Pinned();using(var candidate=Open(PathFor(0,proof.Name),false,true,true,false)){INFO identity=Info(candidate);Need(Dev(identity)==proof.Dev&&Ino(identity)==proof.Ino&&BytesEqual(ReadBytes(candidate),proof.Raw),"checkpoint candidate changed before selection");Flush(candidate);Barrier("before-selection");Move(candidate,ANCHOR,"durable checkpoint selection failed");
+      // The old anchor handle remains valid through POSIX replacement, but its name now
+      // resolves to the candidate. Parent-death checks still precede this exact inode flush.
+      selectingHandle=candidate;selectingStamp=Fingerprint(candidate);
+      try{Barrier("selection-published");Flush(candidate);using(var named=Open(PathFor(0,ANCHOR),false,false,false,true)){INFO info=Info(named);Need(Dev(info)==proof.Dev&&Ino(info)==proof.Ino&&BytesEqual(ReadBytes(named),proof.Raw),"selected checkpoint proof changed");}}
+      finally{selectingHandle=null;}
+    }KeepAnchor();Barrier("selection-durable");}
 
   static void Retire(Entry expected,List<Entry> manifest){if(expected.Dir==0&&expected.Name==ALIAS)return;
     using(var source=Open(PathFor(expected.Dir,expected.Name),false,true,true,false)){
       INFO info=Info(source);Need(Dev(info)==expected.Dev&&Ino(info)==expected.Ino&&BytesEqual(ReadBytes(source),expected.Raw),"retirement source changed");Need(info.Volume==Info(rootHandle).Volume,"cross-volume retirement refused");
       SafeFileHandle oldAlias=null;try{if(Exists(0,ALIAS)){oldAlias=Open(PathFor(0,ALIAS),false,false,true,true);INFO prior=Info(oldAlias);byte[] raw=ReadBytes(oldAlias);bool valid=false;foreach(var entry in manifest)if(entry.Dev==Dev(prior)&&entry.Ino==Ino(prior)&&BytesEqual(entry.Raw,raw)){valid=true;break;}Need(valid,"retirement alias lacks selected-manifest authority");if(Dev(prior)==expected.Dev&&Ino(prior)==expected.Ino)return;}
-        Pinned();Move(PathFor(expected.Dir,expected.Name),PathFor(0,ALIAS),"durable evidence retirement move failed");if(oldAlias!=null){oldAlias.Dispose();oldAlias=null;}
+        Pinned();Move(source,ALIAS,"durable evidence retirement move failed");
         Barrier("retirement-moved");using(var named=Open(PathFor(0,ALIAS),false,false,false,true)){INFO moved=Info(named);Need(Dev(moved)==expected.Dev&&Ino(moved)==expected.Ino,"retirement alias identity changed");}
-        Flush(source);Barrier("retirement-flushed");
+        Flush(source);using(var named=Open(PathFor(0,ALIAS),false,false,false,true)){INFO moved=Info(named);Need(Dev(moved)==expected.Dev&&Ino(moved)==expected.Ino&&BytesEqual(ReadBytes(named),expected.Raw),"flushed retirement alias proof changed");}Barrier("retirement-flushed");
       }finally{if(oldAlias!=null)oldAlias.Dispose();}
     }
   }
@@ -148,7 +165,7 @@ public static class WollipogProviderHomeLeaseIo {
     KeepAnchor();
     bool copiedOwner=false;Owned(tip,future,copiedOwner);
     if(operation==2){WriteNew(0,guardTemp,jobs[0].Raw,false);Owned(tip,future,false);Pinned();Need(CreateHardLinkW(PathFor(0,jobs[0].Name),PathFor(0,guardTemp),IntPtr.Zero),"canonical successor changed during publication");using(var successor=Open(PathFor(0,jobs[0].Name),false,true,false,true))Flush(successor);Need(DeleteFileW(PathFor(0,guardTemp)),"successor staging cleanup failed");output.Write((byte)'D');output.Write(reads);output.Write(bytes);output.Flush();return;}
-    foreach(var job in jobs){if(job.Name.Length>0){if(Exists(0,job.Name))Need(BytesEqual(Read(0,job.Name).Raw,job.Raw),"completed checkpoint candidate changed");else{Barrier("before-candidate");WriteNew(0,job.Name,job.Raw,false);Barrier("candidate-durable");}Owned(tip,future,copiedOwner);Select(job.Name);if(job.Copies)copiedOwner=true;}
+    foreach(var job in jobs){if(job.Name.Length>0){if(!Exists(0,job.Name)){Barrier("before-candidate");WriteNew(0,job.Name,job.Raw,false);Barrier("candidate-durable");}Entry candidate=Read(0,job.Name);Need(BytesEqual(candidate.Raw,job.Raw),"completed checkpoint candidate changed");Entry previous; if(byName.TryGetValue(Key(candidate),out previous))Need(Equal(previous,candidate),"completed candidate identity changed");Owned(tip,future,copiedOwner);Select(candidate);if(job.Copies)copiedOwner=true;}
       var manifest=new List<Entry>();foreach(uint index in job.Retire)manifest.Add(expected[(int)index]);
       for(int pass=0;pass<2;pass++)foreach(var e in manifest){if((e.Dir==0&&e.Name==ALIAS)||!Exists(e.Dir,e.Name))continue;Need(copiedOwner||e.Dir!=tip.Dir||e.Name!=tip.Name,"cannot retire acquired tip before selecting its checkpoint");Owned(tip,future,copiedOwner);Barrier("before-retire");Owned(tip,future,copiedOwner);Retire(e,manifest);Barrier("after-retire");}Barrier("retirement-durable");
     }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -55,6 +55,12 @@ test("native POSIX and Windows checkpoints recover actual killed-parent publicat
       assert.ok(performance.now() < deadline, `${boundary}: barrier timeout ${output}`);
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    const evidence = () => [root, join(root, "mutable-home.lock")].flatMap((directory) =>
+      readdirSync(directory).filter((name) => name !== "mutable-home.lock").map((name) =>
+        [directory, name, createHash("sha256").update(readFileSync(join(directory, name))).digest("hex")]));
+    const before = evidence();
+    assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /already in use/, `${boundary}: live writer/fence`);
+    assert.deepEqual(evidence(), before, `${boundary}: contender changed live writer evidence`);
     const ended = new Promise<void>((resolve) => child.once("close", () => resolve()));
     child.kill("SIGKILL"); await ended;
     const registry = new ProviderHomeLeaseRegistry(owner, { onCheckpointFailureForTest: (error) => { throw error; } });
@@ -72,5 +78,42 @@ test("native POSIX and Windows checkpoints recover actual killed-parent publicat
     assert.ok(readdirSync(root).length <= 36);
     assert.ok(readdirSync(join(root, "mutable-home.lock")).length <= 36);
     t.diagnostic(`${process.platform}: ${boundary} recovered`);
+  }
+});
+
+test("portable selected checkpoints preserve unsafe evidence and reject foreign or substituted authority", { timeout: 600_000 }, (t) => {
+  const cases = ["owner", "host", "live-pid", "guard", "anchor", "unknown", "ancestry", ...(process.platform === "win32" ? ["alias", "alias-inode"] : [])];
+  for (const scenario of cases) {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-portable-refusal-")));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const root = seed(home), lock = join(root, "mutable-home.lock");
+    const registry = new ProviderHomeLeaseRegistry(owner, { onCheckpointFailureForTest: (error) => { throw error; } });
+    registry.acquireHome(home); assert.equal(registry.releaseHome(home), true);
+    assert.deepEqual(registry.getDiagnostics(), []);
+    const anchor = join(root, "mutable-home.recovery.json");
+    const tipPath = readdirSync(root).filter((name) => name.startsWith("next-")).map((name) => join(root, name))
+      .find((path) => JSON.parse(readFileSync(path, "utf8")).state === "released")!;
+    if (["owner", "host", "live-pid"].includes(scenario)) {
+      const tip = JSON.parse(readFileSync(tipPath, "utf8"));
+      writeFileSync(tipPath, `${JSON.stringify({ ...tip, state: "active", pid: scenario === "live-pid" ? process.pid : 999999,
+        ...(scenario === "owner" ? { ownerHash: "b".repeat(64) } : {}), ...(scenario === "host" ? { hostname: "foreign-host" } : {}) })}\n`);
+    } else if (scenario === "guard") writeFileSync(join(lock, "protocol-v4.json"), `${readFileSync(join(lock, "protocol-v4.json"), "utf8")} `);
+    else if (scenario === "anchor") writeFileSync(anchor, `${readFileSync(anchor, "utf8")} `);
+    else if (scenario === "unknown") writeFileSync(join(root, "unproven.json"), "{}", { mode: 0o600 });
+    else if (scenario === "alias") writeFileSync(join(root, ".mutable-home.retired"), "corrupt selected-manifest alias");
+    else if (scenario === "alias-inode") {
+      const alias = join(root, ".mutable-home.retired"), bytes = readFileSync(alias);
+      renameSync(alias, join(home, "preserved-alias")); writeFileSync(alias, bytes, { mode: 0o600 });
+    } else {
+      const preserved = join(home, "preserved-lock"); renameSync(lock, preserved);
+      symlinkSync(preserved, lock, process.platform === "win32" ? "junction" : "dir");
+    }
+    const evidence = () => [root, scenario === "ancestry" ? join(home, "preserved-lock") : lock].flatMap((directory) =>
+      readdirSync(directory).filter((name) => name !== "mutable-home.lock").map((name) =>
+        [directory, name, createHash("sha256").update(readFileSync(join(directory, name))).digest("hex")]));
+    const before = evidence();
+    assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /quarantine the entire/, scenario);
+    assert.deepEqual(evidence(), before, scenario);
+    t.diagnostic(`${process.platform}: ${scenario} refused without evidence changes`);
   }
 });
