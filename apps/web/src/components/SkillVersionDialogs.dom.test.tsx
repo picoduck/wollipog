@@ -264,3 +264,136 @@ test("Machine Version: an older control plane's policy comes from the preview, a
   assert.equal(dialog().querySelector(".review-consent")?.textContent, "Switch 1 agent to v1");
   await unmount();
 });
+
+/** An IntersectionObserver that reports only when the test says the list's end came into view. */
+function installManualObserver() {
+  const observers = new Set<{ callback: IntersectionObserverCallback; targets: Element[] }>();
+  class ManualObserver {
+    private entry: { callback: IntersectionObserverCallback; targets: Element[] };
+    constructor(callback: IntersectionObserverCallback) { this.entry = { callback, targets: [] }; observers.add(this.entry); }
+    observe(target: Element) { this.entry.targets.push(target); }
+    disconnect() { observers.delete(this.entry); }
+  }
+  Object.defineProperty(globalThis, "IntersectionObserver", { configurable: true, writable: true, value: ManualObserver });
+  return {
+    async scrollToEnd() {
+      await act(async () => {
+        for (const { callback, targets } of [...observers]) {
+          callback(targets.map((target) => ({ isIntersecting: true, target }) as unknown as IntersectionObserverEntry), {} as IntersectionObserver);
+        }
+      });
+      await settle();
+    },
+    remove() { delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver; },
+  };
+}
+
+test("Version History: a reload while an older page is read still lets older pages load (review CR-1.2)", async () => {
+  const observer = installManualObserver();
+  const slow = deferred<{ versions: SkillVersionSummary[]; nextCursor: string | null }>();
+  let olderReads = 0;
+  const first = { versions: [{ id: "skillv_3", versionNumber: 3, digest: "c" }, { id: "skillv_2", versionNumber: 2, digest: "b" }], nextCursor: "skillv_2" };
+  const older = { versions: [{ id: "skillv_1", versionNumber: 1, digest: "a" }], nextCursor: null };
+  let restores = 0;
+  const client = {
+    ...api,
+    listSkillVersions: async (_id: string, before?: string) => {
+      if (!before) return first;
+      olderReads++;
+      return olderReads === 1 ? slow.promise : older;
+    },
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => ({
+      version: { id: versionId, versionNumber: 2, digest: "b", files: [file("Old")] },
+      currentVersion: { id: "skillv_3", versionNumber: 3, digest: "c", files: [file("New")] },
+    }),
+    restoreSkillVersion: async () => { restores++; throw new ApiError("The library changed after preview. Preview the version again.", 409); },
+  } as unknown as ApiClient;
+  try {
+    const unmount = await history(client);
+    await observer.scrollToEnd();
+    assert.equal(olderReads, 1, "the older page is being read");
+    // A refused restore reloads the list while that read is still out.
+    await click(dialog().querySelector<HTMLInputElement>('.review-consent input[type="checkbox"]')!);
+    await click([...dialog().querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Restore v2")!);
+    assert.equal(restores, 1);
+    await act(async () => { slow.resolve(older); });
+    await settle();
+    // The superseded read is dropped, and the list's end reads the older page again.
+    assert.deepEqual(rows().map((row) => row.querySelector(".row-title")!.textContent), ["v3", "v2"]);
+    await observer.scrollToEnd();
+    assert.equal(olderReads, 2);
+    assert.deepEqual(rows().map((row) => row.querySelector(".row-title")!.textContent), ["v3", "v2", "v1"]);
+    await unmount();
+  } finally { observer.remove(); }
+});
+
+test("Version History: an older version stays on screen when a refused restore reloads the first page (review CR-1.4)", async () => {
+  const observer = installManualObserver();
+  const client = {
+    ...api,
+    listSkillVersions: async (_id: string, before?: string) => before
+      ? { versions: [{ id: "skillv_1", versionNumber: 1, digest: "a", note: "First" }], nextCursor: null }
+      : { versions: [{ id: "skillv_3", versionNumber: 3, digest: "c" }, { id: "skillv_2", versionNumber: 2, digest: "b" }], nextCursor: "skillv_2" },
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => ({
+      version: { id: versionId, versionNumber: Number(versionId.slice(7)), digest: versionId, files: [file(versionId)] },
+      currentVersion: { id: "skillv_3", versionNumber: 3, digest: "skillv_3", files: [file("current")] },
+    }),
+    restoreSkillVersion: async () => { throw new ApiError("The library changed after preview. Preview the version again.", 409); },
+  } as unknown as ApiClient;
+  try {
+    const unmount = await history(client);
+    await observer.scrollToEnd();
+    await click(rows()[2]!);
+    assert.equal(heading(), "Changes If You Restore v1");
+    await click(dialog().querySelector<HTMLInputElement>('.review-consent input[type="checkbox"]')!);
+    await click([...dialog().querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Restore v1")!);
+    // The reload dropped v1's page, but its facts and changes stay, read afresh.
+    assert.equal(rows().length, 2);
+    assert.equal(heading(), "Changes If You Restore v1");
+    assert.match(dialog().querySelector(".skill-review-facts")!.textContent!, /Library edit/);
+    assert.ok([...dialog().querySelectorAll("button")].some((button) => button.textContent === "Restore v1"));
+    await unmount();
+  } finally { observer.remove(); }
+});
+
+test("Version History: a preview naming a newer current version lets the listed one be restored (review CR-1.3)", async () => {
+  const client = {
+    ...api,
+    // The list was read before v4 was made.
+    listSkillVersions: async () => ({ versions: [{ id: "skillv_3", versionNumber: 3, digest: "c" }, { id: "skillv_2", versionNumber: 2, digest: "b" }], nextCursor: null }),
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => ({
+      version: { id: versionId, versionNumber: Number(versionId.slice(7)), digest: versionId, files: [file(versionId)] },
+      currentVersion: { id: "skillv_4", versionNumber: 4, digest: "skillv_4", files: [file("v4")] },
+    }),
+  } as unknown as ApiClient;
+  const unmount = await history(client);
+  await click(rows()[0]!);
+  assert.equal(heading(), "Changes If You Restore v3");
+  assert.doesNotMatch(dialog().querySelector(".modal-foot")!.textContent!, /This is the current version/);
+  await click(dialog().querySelector<HTMLInputElement>('.review-consent input[type="checkbox"]')!);
+  assert.equal([...dialog().querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Restore v3")!.disabled, false);
+  await unmount();
+});
+
+test("Machine Version counts the machine's agents again for every preview (review CR-1.1)", async () => {
+  let agents: string[] = [];
+  const client = machineClient({
+    getMachineSkillVersionPolicy: async () => ({ policy: null }),
+    runnerSkills: async () => ({ desired: [{ name: "code-review", versionDigest: "a", targets: agents.map((agentId) => ({ agentId, invocation: "agent" })) }] }),
+    listSkillVersions: async () => ({ versions: [
+      { id: "skillv_3", versionNumber: 3, digest: "3" }, { id: "skillv_2", versionNumber: 2, digest: "2" }, { id: "skillv_1", versionNumber: 1, digest: "1" },
+    ], nextCursor: null }),
+    previewMachineSkillVersion: async (_id: string, _runnerId: string, versionId: string | null) => machinePreview(versionId, null),
+  } as unknown as Partial<ApiClient>);
+  const unmount = await machineVersion(client);
+  await click(radios()[2]!);
+  await wait(MACHINE_VERSION_PREVIEW_DELAY_MS + 50);
+  assert.equal(heading(), "Changes If You Pin to v2");
+  assertNoDomNode(dialog().querySelector(".review-consent"), "no agent runs the skill here yet, so nothing switches");
+  // Two agents are assigned while the dialog is open.
+  agents = ["claude", "codex"];
+  await click(radios()[3]!);
+  await wait(MACHINE_VERSION_PREVIEW_DELAY_MS + 50);
+  assert.equal(dialog().querySelector(".review-consent")?.textContent, "Switch 2 agents to v1");
+  await unmount();
+});

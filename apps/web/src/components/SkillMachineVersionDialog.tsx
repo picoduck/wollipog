@@ -76,19 +76,17 @@ export function SkillMachineVersionDialog({ skillId, runners, machineLabels, ini
     return () => { active = false; };
   }, [api, skillId, runnerId]);
 
-  // The agents this machine deploys the skill to, for the consent's count. A failure leaves the
-  // count unknown, which still asks for consent rather than assuming nothing runs there.
-  useEffect(() => {
-    let active = true;
-    setAgentCount(null);
-    if (!runnerId) return;
-    void Promise.all([api.getSkill(skillId), api.runnerSkills(runnerId)]).then(([skill, machine]) => {
+  // The agents this machine deploys the skill to, for the consent's count, read with every preview
+  // so an assignment added meanwhile is counted. A failure leaves the count unknown, which still asks
+  // for consent rather than assuming nothing runs there.
+  const agentsRunningSkill = async (): Promise<number | null> => {
+    try {
+      const [skill, machine] = await Promise.all([api.getSkill(skillId), api.runnerSkills(runnerId)]);
       const name = skillFromPayload(skill)?.name;
-      if (!active || !name || machine.loadError) return;
-      setAgentCount(new Set(machine.desired.find((entry) => entry.name === name)?.targets.map((target) => target.agentId) ?? []).size);
-    }).catch(() => undefined);
-    return () => { active = false; };
-  }, [api, skillId, runnerId]);
+      if (!name || machine.loadError) return null;
+      return new Set(machine.desired.find((entry) => entry.name === name)?.targets.map((target) => target.agentId) ?? []).size;
+    } catch { return null; }
+  };
 
   // A pin older than the versions read so far is read page by page, so its row can name it.
   const pinMissing = !!currentPin && !byId.has(currentPin);
@@ -104,8 +102,9 @@ export function SkillMachineVersionDialog({ skillId, runners, machineLabels, ini
     if (!loaded || unchanged || !runnerId) return;
     let active = true;
     const timer = window.setTimeout(() => {
-      api.previewMachineSkillVersion(skillId, runnerId, choice || null).then((value) => {
+      Promise.all([api.previewMachineSkillVersion(skillId, runnerId, choice || null), agentsRunningSkill()]).then(([value, agents]) => {
         if (!active) return;
+        setAgentCount(agents);
         setPreview({ key, value });
         // The preview reports the machine's version as it is now, which another person may have changed.
         setCurrentPin(value.policy?.versionId ?? null);

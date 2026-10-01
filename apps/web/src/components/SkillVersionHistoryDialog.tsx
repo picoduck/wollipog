@@ -47,7 +47,9 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
   /** The newest version is the current one; the list is newest first. */
   const currentId = versions[0]?.id ?? null;
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** The chosen version as it was listed; a reload that drops its page keeps it on screen. */
+  const [chosen, setChosen] = useState<SkillVersionSummary | null>(null);
+  const selectedId = chosen?.id ?? null;
   const [step, setStep] = useState<"list" | "detail">("list");
   const [preview, setPreview] = useState<SkillVersionPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -70,12 +72,13 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
       if (readToken.current === token) setPreviewError((cause as Error).message);
     }
   };
-  const select = (versionId: string, keepOutcome = false) => {
-    if (restoring) return;
+  const select = (version: SkillVersionSummary, keepOutcome = false) => {
+    const versionId = version.id;
+    if (restoring || !versionId) return;
     // The version on screen (or being read) is kept; a phone only steps to it.
     if (versionId === selectedId && !previewError) { setStep("detail"); return; }
     if (!keepOutcome) { setOutcome(null); setError(null); }
-    setSelectedId(versionId);
+    setChosen(version);
     setStep("detail");
     void read(versionId);
   };
@@ -86,13 +89,14 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
   useEffect(() => {
     if (opened.current || phone || pages.loading || versions.length === 0) return;
     opened.current = true;
-    const first = versions[1]?.id ?? versions[0]?.id;
+    const first = versions[1] ?? versions[0];
     if (first) select(first);
   }, [phone, pages.loading, versions]);
 
-  const selected = selectedId ? byId.get(selectedId) ?? null : null;
+  const selected = selectedId ? byId.get(selectedId) ?? chosen : null;
   const shown = preview && preview.version.id === selectedId ? preview : null;
-  const isCurrent = !!selectedId && (selectedId === currentId || (!!shown && shown.version.id === shown.currentVersion?.id));
+  // The preview names the current version as the server has it now; the list may be older.
+  const isCurrent = !!selectedId && (shown ? shown.version.id === shown.currentVersion?.id : selectedId === currentId);
   const restorable = !!shown?.version.id && !!shown.currentVersion?.id && !isCurrent;
   // Restoring makes this content the latest version; when it differs from what is deployed now,
   // every machine that tracks the latest version deploys it. Without both digests, assume it differs.
@@ -131,7 +135,7 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
   useEffect(() => {
     if (!outcome || !currentId || restoredTo.current === currentId) return;
     restoredTo.current = currentId;
-    select(currentId, true);
+    if (versions[0]) select(versions[0], true);
   }, [outcome, currentId]);
 
   const reasonId = useId();
@@ -153,7 +157,7 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
           const note = skillVersionNote(version, byId);
           const label = skillVersionLabel(version);
           return <button key={version.id ?? version.digest} type="button" className={`row${note === undefined ? "" : " row-2"}${isSelected ? " is-selected" : ""}`}
-            aria-current={isSelected || undefined} disabled={restoring || !version.id} onClick={() => version.id && select(version.id)}>
+            aria-current={isSelected || undefined} disabled={restoring || !version.id} onClick={() => select(version)}>
             <span className="row-body">
               <span className="row-line">
                 <span className={`row-title${label?.mono ? " mono" : ""}`}>{label?.text ?? "Unnumbered Version"}</span>

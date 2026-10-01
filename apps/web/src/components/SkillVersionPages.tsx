@@ -22,7 +22,9 @@ export function useSkillVersionPages(skillId: string) {
   const reload = useCallback(async () => {
     const current = ++generation.current;
     busy.current = true;
-    setLoading(true); setError(null);
+    // An older page still being read belongs to the generation this one replaces, and its own
+    // settling is fenced off, so its flag is cleared here.
+    setLoading(true); setLoadingMore(false); setError(null);
     try {
       const result = await api.listSkillVersions(skillId);
       if (generation.current !== current) return;
