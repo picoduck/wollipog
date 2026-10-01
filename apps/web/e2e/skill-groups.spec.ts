@@ -237,8 +237,8 @@ for (const width of [1440, 390]) test(`the dialog's in-place menus at ${width} h
 // The guard above keeps containment out of this dialog's own styles, but a containing block can still
 // form between an in-place menu and the viewport: a floor engine's size container, or a dialog's
 // transform while it animates (#2284). Layout containment forced on the dialog's body stands in for
-// one; each menu must still open beside its trigger, dismiss on any click outside it, and on a phone
-// dock to the viewport's bottom edge.
+// one; each menu must still open beside its trigger and dismiss on a click away from it. A phone sheet
+// keeps docking inside that body, which clips it, so every item stays where a finger can reach it.
 for (const width of [1440, 390]) test(`the dialog's in-place menus at ${width} open beside their triggers under a fixed containing block`, async ({ page }) => {
   await installSkillGroupsFixture(page, { library: "full" });
   const height = width > 760 ? 900 : 844;
@@ -280,22 +280,28 @@ for (const width of [1440, 390]) test(`the dialog's in-place menus at ${width} o
       const button = document.querySelector(`[aria-controls="${triggerId}"]`)!.getBoundingClientRect();
       const box = element.getBoundingClientRect();
       const backdrop = element.previousElementSibling!.getBoundingClientRect();
+      const items = [...element.querySelectorAll<HTMLElement>('[role^="menuitem"]')];
       return {
         contained: Boolean(element.closest(".skill-groups-body")),
         gap: Math.round(box.top - button.bottom),
         right: Math.round(button.right - box.right),
-        sheet: { left: Math.round(box.left), right: Math.round(box.right), bottom: Math.round(box.bottom) },
         backdrop: [backdrop.left, backdrop.top, backdrop.right, backdrop.bottom].map(Math.round),
+        items: items.length,
+        // The topmost element at each item's centre is that item: nothing clips or covers it.
+        reachable: items.every((item) => {
+          const rect = item.getBoundingClientRect();
+          return item.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+        }),
       };
     }, await trigger.getAttribute("aria-controls"));
     expect(boxes.contained, "the menu is under the containing block").toBe(true);
+    expect(boxes.items).toBeGreaterThan(0);
+    expect(boxes.reachable, "no item is clipped or covered").toBe(true);
     if (width > 760) {
       expect(boxes.gap, "the menu opens 4px below its trigger").toBe(4);
       expect(Math.abs(boxes.right), "and end-aligned with it").toBeLessThanOrEqual(2);
-    } else {
-      expect(boxes.sheet, "the sheet docks to the viewport's edges").toEqual({ left: 0, right: width, bottom: height });
+      expect(boxes.backdrop, "the backdrop covers the whole viewport").toEqual([0, 0, width, height]);
     }
-    expect(boxes.backdrop, "the backdrop covers the whole viewport").toEqual([0, 0, width, height]);
     // A click away from the menu lands on its backdrop and dismisses it. (The dialog's scrolling body
     // still clips anything under a containing block inside it, the backdrop included.)
     const [x, y] = [body.box.x + 8, body.box.y + 8];

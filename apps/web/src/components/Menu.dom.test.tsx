@@ -460,22 +460,19 @@ test("an inline menu under a fixed containing block opens beside its trigger; a 
   }
 });
 
-test("an inline phone sheet under a fixed containing block still docks to the viewport's edges", async () => {
-  const box = { left: 16, top: 40, bottom: 60 };
-  const layout = stubLayout(box);
+test("an inline phone sheet under a fixed containing block keeps docking to that block", async () => {
+  // A scroller around the block clips the sheet, so docked to the viewport instead it could land
+  // behind a dialog's footer. It keeps the stylesheet's docking and measures nothing.
+  const layout = stubLayout({ left: 16, top: 40, bottom: 60 });
   const restore = stubViewport(true);
   const mounted = await mount(<ContainedHarness inline />);
   try {
     const menu = doc().querySelector<HTMLElement>('[role="menu"]')!;
     assert.equal(menu.style.top, "", "a sheet has no anchored placement");
-    assert.equal(menu.style.left, "-16px");
-    assert.equal(menu.style.width, "100vw");
-    assert.equal(menu.style.bottom, "calc(var(--keyboard-inset, 0px) - 60px)");
-    // The box moves (a dialog sheet sliding in): the sheet docks again once the motion ends.
-    Object.assign(box, { left: 0, top: 20, bottom: 30 });
-    await act(async () => { doc().dispatchEvent(new domWindow.Event("animationend") as never); });
-    assert.equal(menu.style.left, "0px");
-    assert.equal(menu.style.bottom, "calc(var(--keyboard-inset, 0px) - 30px)");
+    assert.equal(menu.style.left, "");
+    assert.equal(menu.style.bottom, "");
+    assert.equal(doc().querySelector(".menu-backdrop")!.getAttribute("style"), null);
+    assert.equal(layout.probes(), 0);
   } finally {
     await unmount(mounted);
     restore();

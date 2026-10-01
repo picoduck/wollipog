@@ -100,6 +100,7 @@ function samePlacement(a: Placement | undefined, b: Placement): boolean {
  * transform or layout containment becomes (a dialog's motion, a size container at the build floor,
  * §2.10). It is measured when the menu opens and whenever its trigger or the viewport has moved,
  * never on a scroll or resize that moved nothing, and the placement is moved into its coordinates.
+ * A phone sheet has no placement and measures nothing.
  */
 function useMenuPlacement(
   surfaceRef: RefObject<HTMLDivElement | null>,
@@ -121,9 +122,9 @@ function useMenuPlacement(
     // What the containing block was last measured for, and what it measured.
     let measuredFor = "";
     let measured = VIEWPORT_BOX;
-    const containingBlock = (anchorRect: Pick<DOMRect, "left" | "top" | "bottom"> | undefined): FixedContainingBlockOffset => {
+    const containingBlock = (rect: DOMRect): FixedContainingBlockOffset => {
       if (!inline) return VIEWPORT_BOX;
-      const key = `${anchorRect?.left},${anchorRect?.top},${anchorRect?.bottom},${window.innerWidth},${window.innerHeight}`;
+      const key = `${rect.left},${rect.top},${rect.bottom},${window.innerWidth},${window.innerHeight}`;
       if (key === measuredFor) return measured;
       measuredFor = key;
       // The surface's parent shares its ancestors, so it resolves against the same box.
@@ -132,22 +133,12 @@ function useMenuPlacement(
       setBox((current) => sameBox(current, measured) ? current : measured);
       return measured;
     };
-    if (!inline) setBox(VIEWPORT_BOX);
+    // A sheet keeps docking to the box it resolves against: a scroller around that box clips it, so
+    // docked to the viewport's edges instead it could land behind a dialog's footer, out of reach.
+    if (!inline || sheet) setBox(VIEWPORT_BOX);
     if (sheet) {
       setPlacement(undefined);
-      if (!inline) return;
-      // A sheet docks to the edges of the box it resolves against, so an inline one measures that
-      // box, again whenever the surface's parent has moved (a dialog sheet sliding in, a scroll).
-      const dock = () => void containingBlock(surfaceRef.current?.parentElement?.getBoundingClientRect());
-      dock();
-      window.addEventListener("resize", dock);
-      window.addEventListener("scroll", dock, true);
-      document.addEventListener("animationend", dock, true);
-      return () => {
-        window.removeEventListener("resize", dock);
-        window.removeEventListener("scroll", dock, true);
-        document.removeEventListener("animationend", dock, true);
-      };
+      return;
     }
     const update = () => {
       const surface = surfaceRef.current;
@@ -259,8 +250,8 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
    * and every dialog's backdrop covers the popover layer, so a portalled menu would be both unheard
    * and under the dialog. In place it is fixed like any menu and stacks inside the dialog's layer,
    * as a Select's list does, and like that list it subtracts the offset of any ancestor that becomes
-   * its fixed containing block, so it still opens beside its trigger and its backdrop and phone sheet
-   * still reach the viewport's edges.
+   * its fixed containing block, so it still opens beside its trigger and its backdrop still reaches
+   * the viewport's edges. A scroller around that ancestor still clips both.
    */
   inline?: boolean;
   children: ReactNode;
@@ -269,8 +260,7 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
 /**
  * The one menu container (docs/design-system.md §9). Portalled to <body> and fixed from its first
  * commit: an ancestor's `container-type` or transform cannot become its containing block (an inline
- * menu measures one instead), and
- * focusing its first item can never scroll the page to where an unplaced element would sit. On a
+ * menu measures one instead), and focusing its first item can never scroll the page to where an unplaced element would sit. On a
  * phone it is a bottom sheet with the dialog sheet's grabber and a title row (§7.5, §9.2).
  */
 export function MenuSurface({
@@ -311,15 +301,10 @@ export function MenuSurface({
     return () => setMenuOpen(-1);
   }, []);
   // An inline menu under an ancestor that became its fixed containing block: the backdrop still
-  // covers the whole viewport, so a click anywhere outside the menu dismisses it, and a phone sheet
-  // still docks to the viewport's bottom edge rather than the ancestor's.
-  const contained = !sameBox(box, VIEWPORT_BOX);
-  const backdropStyle: CSSProperties | undefined = contained
-    ? { top: -box.top, right: "auto", bottom: "auto", left: -box.left, width: "100vw", height: "100vh" }
-    : undefined;
-  const sheetStyle: CSSProperties | undefined = contained && sheet
-    ? { right: "auto", bottom: `calc(var(--keyboard-inset, 0px) - ${box.bottom}px)`, left: -box.left, width: "100vw" }
-    : undefined;
+  // covers the whole viewport, so a click anywhere outside the menu dismisses it.
+  const backdropStyle: CSSProperties | undefined = sameBox(box, VIEWPORT_BOX)
+    ? undefined
+    : { top: -box.top, right: "auto", bottom: "auto", left: -box.left, width: "100vw", height: "100vh" };
   const surface = (
     <>
       <div className="menu-backdrop" aria-hidden="true" style={backdropStyle} onClick={onDismiss} />
@@ -329,7 +314,7 @@ export function MenuSurface({
         ref={surfaceRef}
         role={role}
         className={`${kind === "popover" ? "popover" : "menu"}${className ? ` ${className}` : ""}`}
-        style={{ ...(fixedWidth === undefined ? null : { width: fixedWidth }), ...placement, ...sheetStyle, ...style }}
+        style={{ ...(fixedWidth === undefined ? null : { width: fixedWidth }), ...placement, ...style }}
       >
         <div className="sheet-grabber" aria-hidden="true" />
         {head ?? <div className="menu-head" aria-hidden="true">{label}</div>}
