@@ -100,15 +100,19 @@ const read = <T>(value: T | null, observation: number, over: Partial<{
   ...over,
 });
 
-test("deriveHost: a box-backed runner is Remote with its ssh target", () => {
+test("deriveHost: a box-backed runner is Remote, named as runnerDisplay names it, with its ssh target as detail", () => {
   const boxes: BoxView[] = [{ boxId: "b1", sshTarget: "misko@vps", runnerId: "r1", status: "online", lastError: null, createdAt: 0 }];
-  assert.deepEqual(deriveHost(session({}), undefined, boxes), { kind: "remote", label: "Remote", detail: "misko@vps" });
+  assert.deepEqual(deriveHost(session({}), undefined, boxes), { kind: "remote", label: "Remote", name: "vps", detail: "misko@vps" });
+  const named: BoxView[] = [{ ...boxes[0]!, displayName: "Build Box" }];
+  assert.deepEqual(deriveHost(session({}), undefined, named), { kind: "remote", label: "Remote", name: "Build Box", detail: "misko@vps" });
 });
 
-test("deriveHost: no box → Local with the runner hostname (runnerId fallback)", () => {
-  const runner = { hostname: "T14s" } as RunnerView;
-  assert.deepEqual(deriveHost(session({}), runner, []), { kind: "local", label: "Local", detail: "T14s" });
-  assert.deepEqual(deriveHost(session({}), undefined, []), { kind: "local", label: "Local", detail: "r1" });
+test("deriveHost: no box → Local, named as runnerDisplay names it, with the hostname as detail (runnerId fallback)", () => {
+  const runner = { runnerId: "r1", hostname: "T14s" } as RunnerView;
+  assert.deepEqual(deriveHost(session({}), runner, []), { kind: "local", label: "Local", name: "r1", detail: "T14s" });
+  assert.deepEqual(deriveHost(session({}), { ...runner, displayName: "Studio Mac" }, []),
+    { kind: "local", label: "Local", name: "Studio Mac", detail: "T14s" });
+  assert.deepEqual(deriveHost(session({}), undefined, []), { kind: "local", label: "Local", name: "r1", detail: "r1" });
 });
 
 test("legacy local Git facts stay aligned across response order, mixed versions, and session reset", () => {

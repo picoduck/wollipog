@@ -241,7 +241,7 @@ export function PinnedSummary({
             ? <GlobeIcon className="ps-icon" size={14} aria-hidden="true" />
             : <ComputerIcon className="ps-icon" size={14} aria-hidden="true" />}
           label="Machine"
-          value={host.detail ?? host.label}
+          value={host.name || host.detail || host.label}
           title={`${host.label} machine${host.detail ? `: ${host.detail}` : ""}`}
         />
         {folderPath && (

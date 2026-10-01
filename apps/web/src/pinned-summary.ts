@@ -14,6 +14,7 @@ import type {
   RunView,
   SessionView,
 } from "@wollipog/protocol";
+import { runnerDisplay } from "./runners.js";
 
 export interface VisibleForgeFacts {
   forge: GitSummaryInfo["forge"] | undefined;
@@ -41,7 +42,9 @@ export function visibleForgeFacts(
 export interface HostRow {
   kind: "local" | "remote";
   label: string;
-  /** ssh target for boxes, hostname for local runners. */
+  /** runnerDisplay()'s Machine name, the one the session bar and its dialogs use (#2277). */
+  name: string;
+  /** Technical identity kept for the tooltip: ssh target for boxes, hostname for local runners. */
   detail: string | null;
 }
 
@@ -296,10 +299,13 @@ export function deriveHost(
   runner: RunnerView | undefined,
   boxes: Iterable<BoxView>,
 ): HostRow {
+  let box: BoxView | undefined;
   for (const b of boxes) {
-    if (b.runnerId === session.runnerId) return { kind: "remote", label: "Remote", detail: b.sshTarget };
+    if (b.runnerId === session.runnerId) { box = b; break; }
   }
-  return { kind: "local", label: "Local", detail: runner?.hostname ?? session.runnerId };
+  const name = runnerDisplay(runner, box, session.runnerId).name;
+  if (box) return { kind: "remote", label: "Remote", name, detail: box.sshTarget };
+  return { kind: "local", label: "Local", name, detail: runner?.hostname ?? session.runnerId };
 }
 
 /** Legacy pinned cards use status for every overlapping local repository fact once that faster
