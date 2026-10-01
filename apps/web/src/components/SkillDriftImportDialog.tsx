@@ -46,29 +46,34 @@ export function SkillDriftImportDialog({ skillId, runnerId, machineLabel, copy, 
     let active = true;
     api.previewSkillDrift(runnerId, copy).then((result) => {
       previewId.current = result.previewId;
-      if (active) setPreview(result);
-    }).catch((cause) => { if (active) setError((cause as Error).message); })
+      if (!active) return;
+      setPreview(result);
+      void readVersions(result).then((found) => { if (active) setVersions(found); });
+    }).catch((cause) => { if (active) { setError((cause as Error).message); setVersions(UNKNOWN_VERSIONS); } })
       .finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
   }, [api, runnerId, copy, previews]);
-  // The versions the facts and the pin notice name. Only names depend on them, so a failed read
-  // names the versions in words instead.
-  useEffect(() => {
-    let active = true;
-    api.getMachineSkillVersionPolicy(skillId, runnerId).then((result) => result.policy?.versionId ?? null, () => null)
-      .then(async (pinnedId) => {
-        const found = await findSkillVersions((before) => api.listSkillVersions(skillId, before),
-          { digests: [copy.digest], ids: pinnedId ? [pinnedId] : [] });
-        return {
-          latest: skillVersionNumber(found.latest),
-          copyOf: skillVersionNumber(found.byDigest.get(copy.digest)),
-          pinnedTo: pinnedId ? skillVersionNumber(found.byId.get(pinnedId)) : null,
-        };
-      })
-      .catch(() => UNKNOWN_VERSIONS)
-      .then((result) => { if (active) setVersions(result); });
-    return () => { active = false; };
-  }, [api, skillId, runnerId, copy.digest, previews]);
+  /**
+   * The versions the facts, the pin notice and the primary name, read after the preview so they
+   * describe its library or a newer one, never an older one. A newer one means the library moved
+   * since the preview, which the import's fence refuses anyway; when the preview shows it moved,
+   * the latest is named in words. Only names depend on this, so a failed read names them in words.
+   */
+  const readVersions = async (read: SkillDriftPreview): Promise<DriftVersionNumbers> => {
+    try {
+      const pinnedId = await api.getMachineSkillVersionPolicy(skillId, runnerId).then((result) => result.policy?.versionId ?? null, () => null);
+      const found = await findSkillVersions((before) => api.listSkillVersions(skillId, before),
+        { digests: [copy.digest], ids: pinnedId ? [pinnedId] : [] });
+      const sameLatest = (found.latest?.digest === copy.digest) === read.publishedFromLatest;
+      return {
+        latest: sameLatest ? skillVersionNumber(found.latest) : null,
+        copyOf: skillVersionNumber(found.byDigest.get(copy.digest)),
+        pinnedTo: pinnedId ? skillVersionNumber(found.byId.get(pinnedId)) : null,
+      };
+    } catch {
+      return UNKNOWN_VERSIONS;
+    }
+  };
   const previewAgain = () => {
     setPreview(null); setVersions(null); setAccepted(false); setConflict(false); setError(null); setBusy(true);
     setPreviews((count) => count + 1);

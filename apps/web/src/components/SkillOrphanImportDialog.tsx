@@ -41,17 +41,17 @@ export function SkillOrphanImportDialog({ runnerId, machineLabel, copy, onClose,
     let active = true;
     api.previewOrphanedSkillCopy(runnerId, orphanedCopyRef(copy)).then((result) => {
       previewId.current = result.previewId;
-      if (active) setPreview(result);
+      if (!active) return;
+      setPreview(result);
+      // Read after the preview, so the heading names its library version or a newer one; a newer
+      // one means the library moved since the preview, and the import's fence refuses it.
+      if (copy.skillId && result.disposition !== "new") {
+        api.listSkillVersions(copy.skillId).then((found) => { if (active) setLatest(skillVersionNumber(found.versions[0])); }, () => {});
+      }
     }).catch((cause) => { if (active) setError((cause as Error).message); })
       .finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
   }, [api, runnerId, copy, previews]);
-  useEffect(() => {
-    if (!copy.skillId) return;
-    let active = true;
-    api.listSkillVersions(copy.skillId).then((result) => { if (active) setLatest(skillVersionNumber(result.versions[0])); }, () => {});
-    return () => { active = false; };
-  }, [api, copy.skillId, previews]);
   const previewAgain = () => {
     setPreview(null); setLatest(null); setAccepted(false); setConflict(false); setError(null); setBusy(true);
     setPreviews((count) => count + 1);

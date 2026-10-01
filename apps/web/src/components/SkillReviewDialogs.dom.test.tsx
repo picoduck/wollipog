@@ -330,6 +330,66 @@ test("a built-in version that matches the library needs no consent and accepts a
   await unmount();
 });
 
+test("the reviews read the version list only after the preview, so its names never predate the diff", async () => {
+  // Drift: the version list is not read while the preview is still being read.
+  let resolve!: (preview: SkillDriftPreview) => void;
+  const reads: string[] = [];
+  const base = driftClient(() => new Promise((done) => { resolve = done; }));
+  let unmount = await mount({
+    ...base,
+    listSkillVersions: async (id: string, before?: string) => { reads.push("versions"); return base.listSkillVersions(id, before); },
+  } as ApiClient, <SkillDriftImportDialog skillId="skill-1" runnerId="runner-1" machineLabel="Build Machine"
+    copy={{ name: "code-review", digest, variant: "agent" }} onClose={() => undefined} onImported={async () => undefined} />);
+  assert.deepEqual(reads, [], "no version is named before the preview's library is known");
+  await act(async () => { resolve(driftPreview()); });
+  await settle();
+  assert.deepEqual(reads, ["versions"]);
+  assert.ok(buttonNamed("Import as v4"));
+  await unmount();
+
+  // A library that moved after the preview (the copy was of the latest, v3, but the list now leads
+  // with v4) names the latest in words; the import's fence refuses that preview anyway.
+  unmount = await mount({
+    ...driftClient(async () => driftPreview({ publishedFromLatest: true })),
+    listSkillVersions: async () => ({ versions: [{ id: "v4", digest: "e".repeat(64), versionNumber: 4 },
+      { id: "v3", digest, versionNumber: 3 }], nextCursor: null }),
+  } as unknown as ApiClient, <SkillDriftImportDialog skillId="skill-1" runnerId="runner-1" machineLabel="Build Machine"
+    copy={{ name: "code-review", digest, variant: "agent" }} onClose={() => undefined} onImported={async () => undefined} />);
+  assert.equal(dialog().querySelector(".skill-review-changes-title")?.textContent, "Changes From the Latest Version");
+  assert.equal(facts()["Edited Copy Of"], "v3");
+  assert.equal(facts()["Result"], "New version");
+  assert.ok(buttonNamed("Import as New Version"));
+  await unmount();
+
+  // Orphaned copy: the same order.
+  let resolveOrphan!: () => void;
+  const orphanReads: string[] = [];
+  const orphan = orphanClient({ disposition: "update", previousFiles: [file("Library.\n")] });
+  unmount = await mount({
+    ...orphan,
+    previewOrphanedSkillCopy: async (...args: Parameters<ApiClient["previewOrphanedSkillCopy"]>) => {
+      await new Promise<void>((done) => { resolveOrphan = done; });
+      return orphan.previewOrphanedSkillCopy(...args);
+    },
+    listSkillVersions: async (id: string) => { orphanReads.push("versions"); return orphan.listSkillVersions(id); },
+  } as ApiClient, <SkillOrphanImportDialog runnerId="runner-1" machineLabel="Build Machine"
+    copy={{ kind: "kept_aside", id: "copy-1", name: "code-review", observedDigest, observedFingerprint: "c".repeat(64), skillId: "skill-1" }}
+    onClose={() => undefined} onImported={async () => undefined} />);
+  assert.deepEqual(orphanReads, []);
+  await act(async () => { resolveOrphan(); });
+  await settle();
+  assert.deepEqual(orphanReads, ["versions"]);
+  assert.equal(dialog().querySelector(".skill-review-changes-title")?.textContent, "Changes From v2");
+  await unmount();
+});
+
+test("a built-in review names an unnumbered library version in words, never as None", async () => {
+  const unmount = await mount(builtInClient({ currentVersion: { id: "v3", digest: "m".repeat(64), files: [file("Mine.\n")] } }),
+    <SkillBuiltInReviewDialog skillId="skill-1" skillName="code-review" kind="update" onClose={() => undefined} onAccepted={async () => undefined} />);
+  assert.deepEqual(facts(), { "Release": "1.1.0", "Library Version": "Latest, changed here", "Result": "New version" });
+  await unmount();
+});
+
 test("the built-in review is titled for what the skill offers before the review is read", async () => {
   const unmount = await mount({ ...api, getBuiltInSkillVersion: () => new Promise(() => {}) } as ApiClient,
     <SkillBuiltInReviewDialog skillId="skill-1" skillName="code-review" kind="adopt" onClose={() => undefined} onAccepted={async () => undefined} />);

@@ -72,7 +72,8 @@ export function SkillBuiltInReviewDialog({ skillId, skillName, kind: initialKind
   </>}>
     <SkillReviewFacts facts={[
       { label: "Release", value: failed ? "Unknown" : review && review.release },
-      { label: "Library Version", value: failed ? "Unknown" : review && (!current ? "None" : adopt ? current : `${current}, changed here`) },
+      { label: "Library Version", value: failed ? "Unknown" : review && (!review.currentVersion ? "None"
+        : `${current ?? "Latest"}${adopt ? "" : ", changed here"}`) },
       { label: "Result", value: failed ? "Unknown" : review && (!changed ? "No new version"
         : currentNumber !== null ? `New version v${currentNumber + 1}` : "New version") },
     ]} />
