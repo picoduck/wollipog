@@ -1,3 +1,4 @@
+import { IssueClosureSummary } from "./IssueClosureSummary.js";
 import {
   Fragment,
   useEffect,
@@ -63,6 +64,7 @@ export function requestTypeLabel(request: PendingApproval): string {
     if (category === "ui_evidence_approval") return "UI Evidence";
     if (category === "pr_merge") return "PR Merge";
     if (category === "merged_branch_deletion") return "Branch Deletion";
+    if (category === "issue_closure") return "Issue Closure";
     if (category === "follow_up_issue_publication") return "Issue Publication";
     if (category === "implementation_question") return "Implementation Decision";
     return "Workflow Decision";
@@ -77,6 +79,8 @@ function workflowSummary(snapshot: WorkflowDecisionResourceSnapshot) {
         <p>{snapshot.question}</p>
         <ul>{snapshot.options.map((option) => <li key={option.optionId}>{option.label}</li>)}</ul>
       </>;
+    case "issue_closure":
+      return <IssueClosureSummary snapshot={snapshot} />;
     case "pr_merge":
       return <dl>
         <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>

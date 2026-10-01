@@ -24,7 +24,7 @@ import {
   type OrchestratorDefaults,
   type OrchestratorSettingsView,
   type SessionConfig,
-  type WorkflowDecisionCategory,
+  type DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
 import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
@@ -88,7 +88,7 @@ import {
 } from "./ui/ChoiceControls.js";
 
 const AUTOMATIC_ORCHESTRATOR_VALUE = "__automatic__";
-const ORCHESTRATOR_DECISION_LABELS: Record<WorkflowDecisionCategory, string> = {
+const ORCHESTRATOR_DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
   implementation_question: "Implementation Questions",
   pr_merge: "PR Merge Approval",
   merged_branch_deletion: "Merged Branch Deletion",
@@ -461,7 +461,7 @@ export function NewSessionDialog({
     setOrchestratorDraft((current) => ({ ...current, behavior: { ...current.behavior, [key]: value } }));
     setOrchestratorOverrides((current) => new Set(current).add(`behavior.${key}`));
   };
-  const setOrchestratorDelegation = (category: WorkflowDecisionCategory, authority: "human" | "orchestrator") => {
+  const setOrchestratorDelegation = (category: DelegatableWorkflowDecisionCategory, authority: "human" | "orchestrator") => {
     setOrchestratorDraft((current) => ({
       ...current,
       delegation: {
@@ -489,7 +489,7 @@ export function NewSessionDialog({
       !orchestratorOverrides.has("delegation.parentControl")
     ? "off" as const
     : orchestratorDraft.delegation.parentControl;
-  const effectiveDecision = (category: WorkflowDecisionCategory) => !typedDelegationSupported &&
+  const effectiveDecision = (category: DelegatableWorkflowDecisionCategory) => !typedDelegationSupported &&
       !orchestratorOverrides.has(`delegation.decisions.${category}`)
     ? "human" as const
     : orchestratorDraft.delegation.decisions[category];
@@ -501,7 +501,7 @@ export function NewSessionDialog({
     if (path === "delegation.parentControl" && !parentControlSupported &&
         orchestratorDraft.delegation.parentControl !== "off") return "Compatibility Fallback";
     const category = path.startsWith("delegation.decisions.")
-      ? path.slice("delegation.decisions.".length) as WorkflowDecisionCategory
+      ? path.slice("delegation.decisions.".length) as DelegatableWorkflowDecisionCategory
       : null;
     if (category && !typedDelegationSupported &&
         orchestratorDraft.delegation.decisions[category] === "orchestrator") return "Compatibility Fallback";

@@ -5,7 +5,7 @@ import {
   agentHarnessIdentityKey,
   type OrchestratorDefaults,
   type OrchestratorSettingsView,
-  type WorkflowDecisionCategory,
+  type DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
 import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
@@ -22,7 +22,7 @@ import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-discl
 import { SegmentedRow, SelectRow, StaticRow } from "./ui/SettingsRows.js";
 
 const AUTO = "__automatic__";
-const DECISION_LABELS: Record<WorkflowDecisionCategory, string> = {
+const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
   implementation_question: "Implementation Questions",
   pr_merge: "PR Merge Approval",
   merged_branch_deletion: "Merged Branch Deletion",
@@ -86,7 +86,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     } : current);
   };
   const updateDelegation = (
-    category: WorkflowDecisionCategory,
+    category: DelegatableWorkflowDecisionCategory,
     authority: "human" | "orchestrator",
   ) => {
     draftDirty.current = true;

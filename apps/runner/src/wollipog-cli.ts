@@ -157,6 +157,21 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  if (words[0] === "issue-closure") {
+    if (optionPresent(args, "--session")) return { error: "issue-closure commands act only on the injected session" };
+    const groupIndex = args.indexOf("issue-closure");
+    const verb = args[groupIndex + 1];
+    if (verb === "request") {
+      const proposal = jsonObjectOption(args, "--proposal");
+      return "error" in proposal ? proposal : { tool: "request_github_issue_closure", input: proposal.value };
+    }
+    const occurrenceId = args[groupIndex + 2];
+    const resourceDigest = option(args, "--digest");
+    if (verb === "execute" && occurrenceId && !occurrenceId.startsWith("--") && resourceDigest) {
+      return { tool: "close_github_issue", input: { occurrenceId, resourceDigest } };
+    }
+    return { error: "use issue-closure request --proposal <json> or issue-closure execute <occurrence-id> --digest <digest>" };
+  }
   // Like artifact, this group reads only its fixed leading words. Keeping its JSON value options
   // out of the shared positional-option set ensures an unrelated command cannot become valid just
   // because it happens to include --snapshot or --action.
@@ -550,6 +565,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
     : parsed.tool === "reconcile_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
+    : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
     : workflowDecisionTools.has(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation
     : worktreeTools.has(parsed.tool)

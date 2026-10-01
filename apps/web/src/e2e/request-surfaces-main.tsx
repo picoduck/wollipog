@@ -191,6 +191,22 @@ function evidenceSession(): SessionView {
   } as SessionView;
 }
 
+function issueClosureSession(): SessionView {
+  const base = evidenceSession();
+  const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123,
+    title: "Obsolete Task", url: "https://github.com/team/repo/issues/123", forgeDigest: "a".repeat(64),
+    reason: "not_planned" as const, explanation: "The replacement design makes this task obsolete.",
+    evidence: ["Replacement issue #124 covers the current design."], comment: "Retired in favor of #124.",
+    openPullRequests: [{ number: 77, title: "Earlier Implementation", url: "https://github.com/team/repo/pull/77", headSha: "b".repeat(40) }],
+    activeChildren: [{ sessionId: "child", title: "Implement Issue 123", assignmentDigest: "c".repeat(64) }],
+  };
+  return { ...base, title: "Campaign Issue Closure", pendingApproval: {
+    ...base.pendingApproval!, title: "Issue Closure Approval Required", context: { input: JSON.stringify(snapshot) },
+    workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "issue_closure", resourceSnapshot: snapshot,
+      controllingSessionId: base.id, authority: "human" },
+  } };
+}
+
 function standaloneApprovalSession(): SessionView {
   return {
     ...evidenceSession(),
@@ -425,7 +441,7 @@ function heldCampaignSession(): SessionView {
 }
 
 function Fixture() {
-  const [session, setSession] = useState(() => scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held"
     ? heldCampaignSession()
@@ -519,7 +535,7 @@ function Fixture() {
     },
   } as ApiClient;
   const ownDecision = session.pendingApproval?.workflowDecision;
-  const standaloneTemplate = scenario === "standalone" || scenario === "worker"
+  const standaloneTemplate = scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
     ? standaloneApprovalSession().pendingApproval! : null;
   const standaloneTimelineItems: TimelineItem[] = standaloneTemplate ? [{
     kind: "permission",
@@ -580,14 +596,14 @@ function Fixture() {
           )}
           <div className="detail-columns">
             <div className="detail-chat">
-              {(scenario === "legacy" || scenario === "standalone" || scenario === "worker") && (
+              {(scenario === "legacy" || scenario === "standalone" || scenario === "worker" || scenario === "issue-closure") && (
                 <SessionApprovalRegion
                   session={session}
                   runnerOnline
                   fallbackFocusRef={legacyFocusRef}
                   onSessionUpdate={setSession}
                   showKeyHints={false}
-                  standaloneInReviewSurface={scenario === "standalone"}
+                  standaloneInReviewSurface={scenario === "standalone" || scenario === "issue-closure"}
                 />
               )}
               <div className="detail-main">
@@ -601,7 +617,7 @@ function Fixture() {
                         </div>
                       </div>
                     ))}
-                    {(scenario === "standalone" || scenario === "worker" || scenario === "artifact-timeline") && (
+                    {(scenario === "standalone" || scenario === "worker" || scenario === "artifact-timeline" || scenario === "issue-closure") && (
                       <EventTimeline
                         items={scenario === "artifact-timeline" ? artifactTimelineItems : standaloneTimelineItems}
                         scrollRef={scenario === "artifact-timeline" ? artifactTimelineScrollRef : undefined}

@@ -5301,6 +5301,7 @@ export class ControlPlaneDb {
       "action_runner_history_epoch INTEGER",
       "child_message TEXT",
       "human_fallback TEXT",
+      "issue_closure_result TEXT",
       "resume_state TEXT",
       "resume_command_id TEXT",
       "resume_updated_at INTEGER",
@@ -12666,6 +12667,19 @@ export class ControlPlaneDb {
     return typeof row?.text === "string" && row.text.length <= 65_536 ? row.text : null;
   }
 
+  /** Bound closure approvals to the most recent delivered or durable queued assignment.
+   * Read only bounded text for classification; the exact queued payload already has a digest. */
+  issueClosureAssignmentState(sessionId: string) {
+    const latest = this.stmt(`SELECT seq, substr(json_extract(payload, '$.text'), 1, 65537) AS text
+      FROM session_events WHERE session_id=? AND kind='user_message' ORDER BY seq DESC LIMIT 1`)
+      .get(sessionId) as { seq: number; text: string | null } | undefined;
+    const command = this.stmt(`SELECT command_id AS id, payload_sha256 AS digest,
+      substr(json_extract(payload_json, '$.text'), 1, 65537) AS text
+      FROM session_prompt_commands WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(sessionId) as { id: string; digest: string; text: string | null } | undefined;
+    return { latest: latest ?? null, command: command ?? null };
+  }
+
   /** One-time upgrade path for human-created root campaigns that predate protocol v158. A stored
    * non-empty scope is immutable, and ambiguous provenance or prompts remain unscoped. */
   backfillSessionOrchestratorIssueNumbers(id: string, issueNumbers: readonly number[], now: number): number[] | null {
@@ -16345,6 +16359,12 @@ export class ControlPlaneDb {
       ),
       modelId: controller.model,
     };
+  }
+
+  recordGithubIssueClosureResult(occurrenceId: string, result: NonNullable<WorkflowDecisionView["issueClosureResult"]>): void {
+    this.stmt(`UPDATE workflow_decisions SET issue_closure_result=?
+      WHERE occurrence_id=? AND category='issue_closure' AND status='consumed'`)
+      .run(JSON.stringify(result), occurrenceId);
   }
 
   consumeWorkflowDecision(occurrenceId: string, now: number): WorkflowDecisionView | null {
@@ -25647,6 +25667,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_provider_thread_id?: string | null;
     action_runner_history_epoch?: number | null;
     child_message?: string | null;
+    issue_closure_result?: string | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -25669,6 +25690,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     authority: row.authority,
     ...(humanFallback ? { humanFallback } : {}),
     status: row.status,
+    ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     createdAt: row.created_at!,

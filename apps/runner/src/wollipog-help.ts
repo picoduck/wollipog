@@ -25,6 +25,7 @@ export function rootHelp(): string {
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
     "  decision            Request, read, consume, and reconcile typed workflow decisions for this session",
+    "  issue-closure       Request human approval and execute one campaign issue closure",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -37,6 +38,8 @@ export function rootHelp(): string {
     "  wollipog service status",
     "  wollipog doctor",
     "  wollipog init",
+    "  wollipog issue-closure request --proposal '<json>' --json",
+    "  wollipog issue-closure execute <occurrence-id> --digest <resource-digest> --json",
     "  wollipog update",
     "  wollipog pair create --name laptop --output ./laptop.pairing-url",
     "  wollipog pair list",
@@ -105,6 +108,24 @@ export function artifactHelp(): string {
     "Prints only the artifactId, mediaType, sizeBytes, and sha256 — never the file's bytes. Images may be cited in ui_evidence_approval for Orchestrator review; video evidence is reviewed by a human.",
     "An injected agent session attaches to itself and cannot name another session. A relative --file is resolved against the current directory.",
   ].join("\n");
+}
+
+export function issueClosureHelp(): string {
+  return `Usage: wollipog issue-closure <command>
+
+Commands:
+  request --proposal '<json>'                  Request exact human approval
+  execute <occurrence-id> --digest <sha256>     Execute the approved action once
+
+The proposal requires requestId, issue, reason (completed or not_planned), explanation,
+evidence, and an optional exact comment. Repository and current work conflicts are derived
+by the runner and control plane. Only an injected root Orchestrator with protocol v194+
+may close a campaign-scoped issue. Approval expires after 30 minutes; changed evidence
+requires renewed human review. Read issueClosureResult to verify completion. If the
+result is uncertain, inspect GitHub and never replay the action or substitute a shell command.
+
+Tools: request_github_issue_closure, close_github_issue; recover with decision get.
+`;
 }
 
 export function decisionHelp(): string {
@@ -177,6 +198,8 @@ function helpForTopic(topic: string): string | null {
     case "artifact":
     case "artifacts":
       return artifactHelp();
+    case "issue-closure":
+      return issueClosureHelp();
     case "decision":
     case "decisions":
     case "workflow-decision":

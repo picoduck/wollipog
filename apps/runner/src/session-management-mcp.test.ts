@@ -2215,3 +2215,30 @@ test("a held child reports its hold and recovery action through get_session and 
   assert.equal(Object.hasOwn(plain, "holds"), false);
   assert.equal(plain.worktreeRecovery, null);
 });
+
+test("issue closure tools require an Orchestrator, current protocol, and injected identity", async () => {
+  const proposal = { requestId: "closure-1", issue: 123, reason: "not_planned",
+    explanation: "Obsolete design.", evidence: ["Superseded by #124."], comment: "Exact proposed comment." };
+  const ordinary = makeDeps();
+  assert.equal((await callTool(ordinary.deps, "request_github_issue_closure", proposal)).isError, true);
+  assert.equal((await callTool(ordinary.deps, "close_github_issue", { occurrenceId: "closure-1", resourceDigest: "a".repeat(64) })).isError, true);
+  assert.equal(ordinary.calls.length, 0);
+  const older = makeDeps();
+  older.deps.orchestrator = true;
+  older.deps.controlPlaneProtocolVersion = 193;
+  assert.equal((await callTool(older.deps, "request_github_issue_closure", proposal)).isError, true);
+  assert.equal(older.calls.length, 0);
+  const current = makeDeps();
+  current.deps.orchestrator = true;
+  current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  assert.equal((await callTool(current.deps, "request_github_issue_closure", proposal)).isError, undefined);
+  assert.equal(current.calls[0]?.url, `${CP_URL}/api/sessions/${SELF_ID}/github-issue-closures`);
+  assert.deepEqual(current.calls[0]?.body, proposal);
+  assert.equal((await callTool(current.deps, "close_github_issue", { occurrenceId: "closure-1", resourceDigest: "a".repeat(64) })).isError, undefined);
+  assert.equal(current.calls[1]?.url, `${CP_URL}/api/sessions/${SELF_ID}/github-issue-closures/closure-1/execute`);
+  assert.deepEqual(current.calls[1]?.body, { resourceDigest: "a".repeat(64) });
+  const listed = await dispatch({ jsonrpc: "2.0", id: 99, method: "tools/list" }, current.deps);
+  const names = listed!.result.tools.map((tool: { name: string }) => tool.name);
+  assert.ok(names.includes("request_github_issue_closure"));
+  assert.ok(names.includes("close_github_issue"));
+});

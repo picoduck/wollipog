@@ -10,7 +10,7 @@ import type {
   SessionConfig,
   SessionView,
   WorkflowDecisionAuthority,
-  WorkflowDecisionCategory,
+  DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -257,7 +257,7 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
 
 test("the Composer exposes human-controlled Parent Control only for Orchestrator sessions", async () => {
   const selected: ParentControlMode[] = [];
-  const typed: Array<[WorkflowDecisionCategory, WorkflowDecisionAuthority]> = [];
+  const typed: Array<[DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority]> = [];
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);

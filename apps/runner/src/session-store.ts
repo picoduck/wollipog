@@ -151,6 +151,8 @@ export interface SessionMeta {
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
   config: SessionConfig;
+  /** Durable one-shot fence; never evicted, so old runner commands cannot replay mutations. */
+  githubIssueClosureAttempts?: Record<string, string>;
   /** Effective Orchestrator restriction. Missing legacy metadata remains strict at launch, and a
    * missing `integrationIsolation` matches that: a strict launch never carried user integrations. */
   orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[] };

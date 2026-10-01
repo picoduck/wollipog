@@ -1275,6 +1275,9 @@ app.register(async (instance) => {
           app.log.warn(`runner ${runnerId} sent an unsolicited workflow action admission receipt`);
         }
         break;
+      case "github_issue_closure_result":
+        if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
+        break;
       case "workflow_action_reconciliation_result":
         if (runnerId && !hub.resolveRunnerRequest(msg, runnerId)) {
           app.log.warn(`runner ${runnerId} sent an unsolicited workflow action reconciliation receipt`);
@@ -3736,6 +3739,30 @@ app.post("/api/sessions/:id/orchestrator-campaign/verify-child", async (req, rep
     req.body as VerifyOrchestratorChildRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
+});
+
+app.post("/api/sessions/:id/github-issue-closures", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  return respond(reply, await svc.requestGithubIssueClosure(id,
+    req.body as import("@wollipog/protocol").GithubIssueClosureRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/github-issue-closures/:occurrenceId/execute", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  const digest = (req.body as { resourceDigest?: unknown } | null)?.resourceDigest;
+  if (typeof digest !== "string" || !/^[0-9a-f]{64}$/u.test(digest)) return reply.code(400).send({ error: "invalid resourceDigest" });
+  return respond(reply, await svc.executeGithubIssueClosure(id, occurrenceId, digest,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.post("/api/sessions/:id/workflow-decisions", async (req, reply) => {

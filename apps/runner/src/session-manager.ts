@@ -1,3 +1,6 @@
+import { isTerminal } from "@wollipog/protocol";
+import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
+import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 /**
  * Runner-side session orchestration. For each control-plane `start_session`:
  *  - optionally create an isolated git worktree,
@@ -15443,6 +15446,40 @@ export class SessionManager {
       historyEpoch,
       eventSeq: stored.seq,
     };
+  }
+
+  /** Execute only trusted, human-approved closures, with a durable fence before mutation. */
+  async githubIssueClosure(message: GithubIssueClosureMessage): Promise<GithubIssueClosureResultMessage> {
+    const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    const meta = this.store.readMeta(message.sessionId);
+    if (!meta?.orchestrator || !meta.repoPath ||
+        (meta.executionTarget && meta.executionTarget.kind !== "local")) {
+      return { ...base, ok: false, error: "Issue closure requires a runner-local Orchestrator repository" };
+    }
+    const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
+    if (!meta.orchestrator.issueNumbers?.includes(issue)) {
+      return { ...base, ok: false, error: "Issue is outside the human-authorized campaign scope" };
+    }
+    const run = issueClosureRun(meta.context, meta.repoPath);
+    try {
+      if (message.operation === "inspect") return { ...base, ok: true, inspection: await inspectGithubIssueClosure(issue, run) };
+      const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
+      const result = await executeGithubIssueClosure(message.snapshot, run, () => {
+        const fresh = this.store.readMeta(message.sessionId);
+        const attempts = fresh?.githubIssueClosureAttempts ?? {};
+        if (!fresh || attempts[message.occurrenceId] || Object.keys(attempts).length >= 1000 ||
+            isTerminal(fresh.status) || !fresh.orchestrator?.issueNumbers?.includes(issue)) return false;
+        return this.store.patchMeta(message.sessionId, {
+          githubIssueClosureAttempts: { ...attempts, [message.occurrenceId]: digest },
+        }) !== null;
+      });
+      this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId, outcome: result.outcome }));
+      return { ...base, ok: true, result };
+    } catch (error) {
+      return { ...base, ok: false, error: error instanceof IssueClosureInspectionError ? error.message
+        : "GitHub issue inspection failed; verify gh authentication and complete conflict evidence" };
+    }
   }
 
   /** Prove an already-completed PR merge action without executing it again. Provider history

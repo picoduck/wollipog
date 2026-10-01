@@ -1,3 +1,5 @@
+import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
+import type { GithubIssueClosureRequest, GithubIssueClosureResult } from "@wollipog/protocol";
 /**
  * Session orchestration: the control-plane brain that turns UI commands into
  * runner commands, and ingests runner events back into the DB + UI broadcasts.
@@ -541,7 +543,11 @@ export function normalizeWorkflowDecisionSnapshot(
   }
   const value = input as Record<string, unknown>;
   const category = value.category;
-  if (!WORKFLOW_DECISION_CATEGORIES.includes(category as WorkflowDecisionCategory)) {
+  if (category === "issue_closure") {
+    const normalized = normalizeIssueClosureSnapshot(value);
+    return normalized ? ok(normalized) : fail("issue closure requires exact bounded issue, action, and conflict evidence");
+  }
+  if (!WORKFLOW_DECISION_CATEGORIES.includes(category as typeof WORKFLOW_DECISION_CATEGORIES[number])) {
     return fail("unknown workflow decision category");
   }
   const repository = () => boundedDecisionString(value.repository, 256) &&
@@ -7056,11 +7062,122 @@ export class SessionsService {
     }
   }
 
+  async requestGithubIssueClosure(
+    sessionId: string,
+    request: GithubIssueClosureRequest,
+    canAccess: (id: string) => boolean = () => true,
+  ): Promise<ServiceResult<{ decision?: WorkflowDecisionView; outcome?: "already_closed"; url?: string }>> {
+    const session = this.db.getSession(sessionId);
+    if (!session || !canAccess(sessionId)) return fail("session not found", 404);
+    if (sessionRole(session) !== "orchestrator" || !session.orchestratorPolicy ||
+        this.db.resolvedCampaignSessionId(sessionId) !== sessionId) {
+      return fail("issue closure requires the root campaign Orchestrator", 403);
+    }
+    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "Human-approved issue closure");
+    if (unsupported) return unsupported;
+    if (isTerminal(session.status) || !boundedDecisionString(request?.requestId, 256) ||
+        !session.orchestratorPolicy.issueNumbers?.includes(request?.issue) ||
+        !["completed", "not_planned"].includes(request?.reason) ||
+        !boundedDecisionString(request?.explanation, 4000) ||
+        !Array.isArray(request?.evidence) || request.evidence.length < 1 || request.evidence.length > 32 ||
+        request.evidence.some((item) => !boundedDecisionString(item, 4000)) ||
+        (request.comment !== undefined && !boundedDecisionString(request.comment, 65_536))) {
+      return fail("closure requires a campaign-scoped issue, requestId, reason, explanation, evidence, and optional exact comment", 400);
+    }
+    try {
+      const requestId = `issue_closure_inspect_${randomUUID()}`;
+      const inspected = await this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue,
+      }, 60_000);
+      if (inspected.type !== "github_issue_closure_result" || inspected.sessionId !== sessionId ||
+          !inspected.ok || !inspected.inspection || inspected.inspection.issue !== request.issue) {
+        return fail(inspected.type === "github_issue_closure_result" && inspected.error
+          ? inspected.error : "runner could not inspect the issue and its related open pull requests", 409);
+      }
+      if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
+      if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
+      const { state: _state, ...inspection } = inspected.inspection;
+      const created = this.createWorkflowDecision(sessionId, {
+        requestId: request.requestId,
+        resourceKey: `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`,
+        resourceSnapshot: { ...inspection, category: "issue_closure", reason: request.reason,
+          explanation: request.explanation, evidence: request.evidence,
+          ...(request.comment === undefined ? {} : { comment: request.comment }),
+          activeChildren: issueClosureActiveChildren(this.db, sessionId, request.issue) },
+      }, canAccess, { trustedIssueClosure: true });
+      return created.ok ? ok({ decision: created.data }, created.status) : fail(created.error!, created.status);
+    } catch {
+      return fail("issue inspection failed or the runner did not respond; no closure was attempted", 409);
+    }
+  }
+
+  async executeGithubIssueClosure(
+    sessionId: string,
+    occurrenceId: string,
+    resourceDigest: string,
+    canAccess: (id: string) => boolean = () => true,
+  ): Promise<ServiceResult<WorkflowDecisionView>> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || decision.sessionId !== sessionId || decision.controllingSessionId !== sessionId ||
+        decision.resourceSnapshot.category !== "issue_closure" || !canAccess(sessionId)) {
+      return fail("issue-closure decision not found", 404);
+    }
+    // Consumption is a durable dispatch fence, not proof the forge operation succeeded.
+    // A replay never dispatches again; read get_workflow_decision for its recorded result.
+    if (decision.status !== "approved") return fail(`issue closure cannot execute from ${decision.status} state`, 409);
+    const session = this.db.getSession(sessionId);
+    const snapshot = decision.resourceSnapshot;
+    const now = Date.now();
+    if (!session || sessionRole(session) !== "orchestrator" || isTerminal(session.status) ||
+        !session.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue) ||
+        this.db.resolvedCampaignSessionId(sessionId) !== sessionId ||
+        decision.authority !== "human" || decision.policyRevision !== session.parentControlPolicy?.revision ||
+        decision.resourceDigest !== resourceDigest || !decision.resolvedAt || now - decision.resolvedAt > 30 * 60_000 ||
+        auditDigest(issueClosureActiveChildren(this.db, sessionId, snapshot.issue)) !== auditDigest(snapshot.activeChildren)) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("issue-closure approval expired or its scope, payload, policy, or active child work changed; request renewed human review", 409);
+    }
+    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "Human-approved issue closure");
+    if (unsupported) return unsupported;
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
+    // Guardrails and governance remain authoritative even though execution is provider-neutral.
+    if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).length ||
+        this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, now)) {
+      return fail("resolve the session's pending requests and guardrails before executing issue closure", 409);
+    }
+    const consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+    if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);
+    this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
+    this.db.recordGithubIssueClosureResult(occurrenceId, { outcome: "uncertain", completedAt: now });
+    this.hub.sessionChangedById(sessionId);
+    let result: GithubIssueClosureResult = { outcome: "uncertain", completedAt: now };
+    try {
+      const requestId = `issue_closure_execute_${randomUUID()}`;
+      const response = await this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot,
+      }, 90_000);
+      if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok &&
+          response.result && ["closed", "already_closed", "refused", "uncertain"].includes(response.result.outcome) &&
+          Number.isSafeInteger(response.result.completedAt)) result = response.result;
+      else if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && !response.ok) {
+        result = { outcome: "refused", completedAt: Date.now() };
+      }
+      // A malformed receipt after dispatch cannot prove that no mutation occurred.
+    } catch (error) {
+      if (isRunnerRequestNotSentError(error)) result = { outcome: "refused", completedAt: Date.now() };
+    }
+    this.db.recordGithubIssueClosureResult(occurrenceId, result);
+    this.log.info(JSON.stringify({ event: "github_issue_closure_result", sessionId, occurrenceId,
+      resourceDigest: decision.resourceDigest, outcome: result.outcome }));
+    this.hub.sessionChangedById(sessionId);
+    return ok(this.db.workflowDecisionByOccurrence(occurrenceId)!);
+  }
+
   createWorkflowDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
-    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string },
+    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean },
   ): ServiceResult<WorkflowDecisionView> {
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
@@ -7085,7 +7202,10 @@ export class SessionsService {
       "Typed workflow decisions",
     );
     if (unsupported) return unsupported;
-    const controller = this.workflowDecisionController(child);
+    if (normalized.data.category === "issue_closure" && !internal?.trustedIssueClosure) {
+      return fail("use request_github_issue_closure for server-verified issue evidence", 403);
+    }
+    const controller = this.workflowDecisionController(child, normalized.data.category);
     if (!controller) return fail("this session has no controlling Orchestrator ancestor", 409);
     if (isTerminal(controller.session.status)) {
       return fail("a terminal Orchestrator cannot control a new workflow decision", 409);
@@ -7176,7 +7296,8 @@ export class SessionsService {
   ): ServiceResult<WorkflowDecisionView> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
-        !this.db.isSessionDescendant(parentSessionId, childSessionId) ||
+        !(decision.category === "issue_closure" && parentSessionId === childSessionId ||
+          this.db.isSessionDescendant(parentSessionId, childSessionId)) ||
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
     }
@@ -7205,6 +7326,9 @@ export class SessionsService {
     }
     if (decision.authority !== authority) {
       return fail(`this workflow decision requires a ${decision.authority} response`, 403);
+    }
+    if (decision.category === "issue_closure" && (authority !== "human" || actor.kind !== "human")) {
+      return fail("issue closure always requires an authenticated human response", 403);
     }
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
     if (!checked.ok || !checked.data) return fail(checked.error!, checked.status);
@@ -7291,6 +7415,7 @@ export class SessionsService {
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
+    if (decision.category === "issue_closure") return fail("use close_github_issue to consume and execute the exact approved closure", 403);
     if (decision.status !== "approved") {
       return fail(`workflow decision cannot be consumed from ${decision.status} state`, 409);
     }
@@ -7733,10 +7858,13 @@ export class SessionsService {
     return { decision, commandDigest };
   }
 
-  private workflowDecisionController(child: SessionView): {
+  private workflowDecisionController(child: SessionView, category?: WorkflowDecisionCategory): {
     session: SessionView;
     policy: ParentControlPolicy;
   } | null {
+    if (category === "issue_closure" && sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
+      return { session: child, policy: child.parentControlPolicy };
+    }
     const seen = new Set<string>([child.id]);
     let parentId = child.parentSessionId ?? null;
     let controller: { session: SessionView; policy: ParentControlPolicy } | null = null;
@@ -7763,7 +7891,7 @@ export class SessionsService {
     policy: ParentControlPolicy,
     category: Exclude<WorkflowDecisionCategory, "ui_evidence_approval">,
   ): WorkflowDecisionAuthority {
-    return policy.decisions[category];
+    return category === "issue_closure" ? "human" : policy.decisions[category];
   }
 
   /** Verify the immutable source and every server-created frame that the decision manifest names. */
@@ -7962,6 +8090,7 @@ export class SessionsService {
       pr_merge: "PR Merge Approval Required",
       merged_branch_deletion: "Merged Branch Deletion Approval Required",
       follow_up_issue_publication: "Follow-Up Issue Publication Approval Required",
+      issue_closure: "Issue Closure Approval Required",
       ui_evidence_approval: "UI Evidence Approval Required",
     };
     const options = snapshot.category === "implementation_question"
@@ -8404,10 +8533,10 @@ export class SessionsService {
   private restorePendingWorkflowDecisionCards(sessionId: string): void {
     const child = this.db.getSession(sessionId);
     if (!child || isTerminal(child.status)) return;
-    const controller = this.workflowDecisionController(child);
     let pending = child.pendingApproval;
     let restored = false;
     for (const decision of this.db.pendingWorkflowDecisionsForSession(sessionId)) {
+      const controller = this.workflowDecisionController(child, decision.category);
       if (!controller || decision.controllingSessionId !== controller.session.id ||
           decision.policyRevision !== controller.policy.revision ||
           !this.workflowDecisionAuthorityCurrent(controller.session, controller.policy, decision)) {

@@ -55,6 +55,7 @@ import type {
   RemoveProviderAccountResultMessage,
   WorkflowActionAdmissionRecordedMessage,
   WorkflowActionReconciliationResultMessage,
+  GithubIssueClosureResultMessage,
   SessionEvent,
   SessionEventPayload,
   SessionHistoryResultMessage,
@@ -251,6 +252,7 @@ export type RunnerRequestResult =
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
   | WorkflowActionReconciliationResultMessage
+  | GithubIssueClosureResultMessage
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage;
 

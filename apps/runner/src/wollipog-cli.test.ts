@@ -149,6 +149,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
     ["session", ["session list", "session capabilities", "session create", "session wait", "session guardrails", "--effort"]],
     ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
+    ["issue-closure", ["request --proposal", "execute <occurrence-id>", "protocol v194+", "uncertain"]],
     ["decision", ["decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision", "--snapshot"]],
     ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
   ];
@@ -1097,4 +1098,31 @@ test("CLI reconciliation requires protocol v153 before calling the endpoint", as
     `requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation}`, "u",
   ));
   assert.deepEqual(calls, ["http://cp/api/compatibility"]);
+});
+
+test("CLI issue closure preserves the exact proposal and refuses other sessions or old control planes", async () => {
+  const proposal = { requestId: "close-123", issue: 123, reason: "completed", explanation: "Delivered.",
+    evidence: ["Verified merged PR."], comment: "Exact\nclosing comment." };
+  const calls: Array<{ url: string; body?: string }> = [];
+  let version = PROTOCOL_VERSION;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { status: "consumed", issueClosureResult: { outcome: "closed" } }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token",
+    WOLLIPOG_SESSION_ID: "parent", WOLLIPOG_PERMISSION_PRESET: "orchestrator" };
+  const io = { stdout: () => {}, stderr: () => {} };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args], env, io, fetch);
+  assert.equal(await invoke(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), proposal);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/parent/github-issue-closures");
+  assert.equal(await invoke(["issue-closure", "execute", "gate-123", "--digest", "a".repeat(64), "--json"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/parent/github-issue-closures/gate-123/execute");
+  calls.length = 0;
+  assert.equal(await invoke(["issue-closure", "execute", "gate-123", "--digest", "a".repeat(64), "--session", "other", "--json"]), 2);
+  assert.equal(calls.length, 0);
+  version = 193;
+  assert.equal(await invoke(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
 });

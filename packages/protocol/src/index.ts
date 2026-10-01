@@ -607,7 +607,8 @@
 // 193: a campaign archive can request managed worktree retirement with an additional delivery
 //      proof: the exact head is on the default branch or a forge-verified merged pull request.
 //      Older runners keep archive cleanup pending rather than discarding pushed unmerged work.
-export const PROTOCOL_VERSION = 193;
+// 194: human-owned Orchestrator issue-closure decisions and runner-managed GitHub execution.
+export const PROTOCOL_VERSION = 194;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -822,6 +823,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorExecutionPolicy: 144,
   orchestratorChildHarnessPolicy: 157,
   orchestratorIssueScope: 158,
+  orchestratorIssueClosure: 194,
   orchestratorAdditiveRole: 160,
   orchestratorAdditiveCodex: 162,
   orchestratorAdditivePi: 163,
@@ -2036,10 +2038,12 @@ export const WORKFLOW_DECISION_CATEGORIES = [
   "follow_up_issue_publication",
   "ui_evidence_approval",
 ] as const;
-export type WorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
+export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
+/** Issue closure is permanently human-owned and never appears in delegation settings. */
+export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
-export type ParentControlDecisionPolicy = Record<WorkflowDecisionCategory, WorkflowDecisionAuthority>;
+export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
 
 /** Revision is assigned by the control plane and changes whenever any category assignment does. */
 export interface ParentControlPolicy {
@@ -2128,7 +2132,7 @@ export interface OrchestratorPolicySources {
   behavior: Record<keyof OrchestratorBehaviorDefaults, OrchestratorPolicySource>;
   delegation: {
     parentControl: OrchestratorPolicySource;
-    decisions: Record<WorkflowDecisionCategory, OrchestratorPolicySource>;
+    decisions: Record<DelegatableWorkflowDecisionCategory, OrchestratorPolicySource>;
   };
   execution: Record<keyof OrchestratorExecutionDefaults, OrchestratorPolicySource>;
 }
@@ -3724,7 +3728,42 @@ export interface WorkflowDecisionOption {
   description?: string;
 }
 
+export interface GithubIssueClosureInspection {
+  repository: string;
+  issue: number;
+  title: string;
+  url: string;
+  state: "OPEN" | "CLOSED";
+  /** Digest of issue identity, contents, updatedAt, labels, assignees, and relevant open PRs. */
+  forgeDigest: string;
+  openPullRequests: Array<{ number: number; title: string; url: string; headSha: string }>;
+}
+
+export interface GithubIssueClosureRequest {
+  requestId: string;
+  issue: number;
+  reason: "completed" | "not_planned";
+  explanation: string;
+  evidence: string[];
+  comment?: string;
+}
+
+export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspection, "state"> {
+  category: "issue_closure";
+  reason: GithubIssueClosureRequest["reason"];
+  explanation: string;
+  evidence: string[];
+  comment?: string;
+  activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
+}
+
+export interface GithubIssueClosureResult {
+  outcome: "closed" | "already_closed" | "refused" | "uncertain";
+  completedAt: number;
+}
+
 export type WorkflowDecisionResourceSnapshot =
+  | GithubIssueClosureSnapshot
   | {
       category: "implementation_question";
       question: string;
@@ -3851,6 +3890,7 @@ export interface WorkflowDecisionView {
   resolvedAt?: number;
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
+  issueClosureResult?: GithubIssueClosureResult;
   /** v166: the resolver's message to the child, present only when one was attached. */
   childMessage?: string;
 }
@@ -7455,6 +7495,26 @@ export interface WorkflowActionAdmissionRecordedMessage {
   error?: string;
 }
 
+/** Trusted runner inspection or execution of one human-owned closure occurrence. */
+export type GithubIssueClosureMessage = {
+  type: "github_issue_closure";
+  requestId: string;
+  sessionId: string;
+} & (
+  | { operation: "inspect"; issue: number }
+  | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
+);
+
+export interface GithubIssueClosureResultMessage {
+  type: "github_issue_closure_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  inspection?: GithubIssueClosureInspection;
+  result?: GithubIssueClosureResult;
+  error?: string;
+}
+
 /** Read-only request to prove that an already-armed canonical PR merge command completed and the
  * forge merged the exact approved head. It never invokes or retries the command. */
 export interface ReconcileWorkflowActionMessage {
@@ -7898,6 +7958,7 @@ export type RunnerToControlPlane =
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
   | WorkflowActionReconciliationResultMessage
+  | GithubIssueClosureResultMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
   | SessionWorktreeRetirementRefusedMessage
@@ -9594,6 +9655,7 @@ export type ControlPlaneToRunner =
   | RecordPolicyHookDecisionMessage
   | RecordWorkflowActionAdmissionMessage
   | ReconcileWorkflowActionMessage
+  | GithubIssueClosureMessage
   | AgentControlCredentialRegisteredMessage
   | StartSessionMessage
   | PromptSessionMessage

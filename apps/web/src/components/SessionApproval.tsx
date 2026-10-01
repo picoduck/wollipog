@@ -1,3 +1,4 @@
+import { IssueClosureSummary } from "./IssueClosureSummary.js";
 import React, { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
@@ -409,6 +410,7 @@ export function SessionApprovalBanner({
     (login) => login.sessionId === session.id && login.status !== "succeeded" && login.status !== "cancelled",
   );
   const workflowDecision = approval.kind === "workflow_decision" ? approval.workflowDecision : undefined;
+  const closureSnapshot = workflowDecision?.resourceSnapshot.category === "issue_closure" ? workflowDecision.resourceSnapshot : null;
   const evidenceSnapshot = workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
     ? workflowDecision.resourceSnapshot : null;
   const evidenceDecision = evidenceSnapshot ? workflowDecision! : null;
@@ -632,8 +634,9 @@ export function SessionApprovalBanner({
           {authenticationRecoveryPanelApplies(session, approval) && (
             <AuthenticationRecoveryPanel session={session} approval={approval} runner={runner} runnerOnline={runnerOnline} />
           )}
+          {closureSnapshot && <IssueClosureSummary snapshot={closureSnapshot} />}
           <ApprovalSelectorContext context={approval.context} />
-          {approval.context?.input && (
+          {approval.context?.input && !closureSnapshot && (
             <details className="approval-review-details">
               <summary>Request Details</summary>
               <pre className="approval-context">{approval.context.input}</pre>
@@ -683,7 +686,7 @@ export function SessionApprovalBanner({
           {!runnerOnline && decisionNeedsRunner && <span className="muted"> · Runner Offline</span>}
         </span>
         <div className="approval-actions">
-          {approval.context?.input && (
+          {approval.context?.input && !closureSnapshot && (
             <button
               className="btn ghost sm"
               type="button"
@@ -758,7 +761,8 @@ export function SessionApprovalBanner({
       {approval.kind === "policy_hook" && (
         <ApprovalSelectorContext context={approval.context} />
       )}
-      {showContext && approval.context?.input && (
+      {closureSnapshot && <IssueClosureSummary snapshot={closureSnapshot} />}
+      {showContext && !closureSnapshot && approval.context?.input && (
         <pre className="approval-context" id={contextId}>{approval.context.input}</pre>
       )}
       {error && <div className="form-error" role="alert">Approval failed: {error}</div>}

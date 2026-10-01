@@ -38,7 +38,7 @@ import {
   type DescendantRequestView,
   type ParentControlMode,
   type WorkflowDecisionAuthority,
-  type WorkflowDecisionCategory,
+  type DelegatableWorkflowDecisionCategory,
   type SessionHoldView,
   type SessionReminderView,
   sessionRole,
@@ -6676,7 +6676,7 @@ export function ComposerPlusMenu({
   onTogglePlan: (on?: boolean) => void;
   onApply: (patch: Partial<SessionConfig>) => void;
   onSetParentControl?: (mode: ParentControlMode) => void;
-  onSetParentControlPolicy?: (category: WorkflowDecisionCategory, authority: WorkflowDecisionAuthority) => void;
+  onSetParentControlPolicy?: (category: DelegatableWorkflowDecisionCategory, authority: WorkflowDecisionAuthority) => void;
   disabled: boolean;
   /** Exactly the types the connected runner and selected model accept; empty when images cannot be sent. */
   imageMimeTypes: readonly string[];
@@ -6901,7 +6901,7 @@ export function ComposerPlusMenu({
                   ["merged_branch_deletion", "Merged Branch Deletion"],
                   ["follow_up_issue_publication", "Follow-Up Issue Publication"],
                   ["ui_evidence_approval", "UI Evidence Approval"],
-                ] as Array<[WorkflowDecisionCategory, string]>).map(([category, label]) => (
+                ] as Array<[DelegatableWorkflowDecisionCategory, string]>).map(([category, label]) => (
                   <div className="parent-control-setting" key={category}>
                     <span className="parent-control-setting-label">{label}</span>
                     <Select<WorkflowDecisionAuthority>

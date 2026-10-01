@@ -117,3 +117,27 @@ Verify each finished child with `verify_campaign_child`, using its exact complet
 Retire runner-owned worktrees only through Wollipog discard/reconciliation. Active worktree retention before provider exit is an expected deferral. After children stop, verify reconciliation or use authorized descendant discard; inspect any remaining local branches and remove only verified merged campaign branches through supported cleanup. Preserve dirty or unpushed work and report it. Serialize shared-checkout refreshes and enforce the hosting-stack restriction above; neither the hosted parent nor any child may perform the deployment restart.
 
 Finish with the initial and follow-up issue/PR links, delivered results, rejected/duplicate follow-up reasons, verified archived or retained session counts, and cleanup results. Clearly distinguish convergence from an interrupted or blocked campaign. Do not claim complete cleanup if resources remain unexpectedly retained.
+
+## Closing a GitHub Issue
+
+The root Orchestrator can propose closing an issue in its human-authorized campaign scope with
+`request_github_issue_closure` (`requestId`, `issue`, `reason`: `completed` or `not_planned`,
+`explanation`, `evidence`, and an optional exact `comment`). The runner derives the repository,
+current issue, and related open pull requests; the server includes active child assignments.
+Closure always requires a human-owned typed decision, regardless of Parent Control. Read it with
+`get_workflow_decision`, then use `close_github_issue` with its exact `occurrenceId` and
+`resourceDigest`. The CLI equivalents are:
+
+```text
+wollipog issue-closure request --proposal '<json>' --json
+wollipog decision get <occurrence-id> --json
+wollipog issue-closure execute <occurrence-id> --digest <resource-digest> --json
+```
+
+Approval expires 30 minutes after the human resolves it. Changed issue evidence, policy, or child
+work requires renewed review. Never substitute a shell command or generic approval, and never
+approve the Orchestrator's own request. Read `issueClosureResult`: `closed` and `already_closed`
+are verified outcomes, `refused` requires renewed review, and `uncertain` means GitHub may have
+accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
+Issue closure does not attest implementation or campaign completion. Unsupported peers, nonlocal
+execution targets, or incomplete bounded conflict evidence refuse the operation clearly.

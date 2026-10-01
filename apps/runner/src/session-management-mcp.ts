@@ -215,6 +215,17 @@ async function cancellableSleep(deps: McpDeps, milliseconds: number): Promise<bo
   }
 }
 
+async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!compatibility.ok) return errorResult("Issue closure compatibility could not be verified");
+    actual = compatibility.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
+    ? null : errorResult("Human-approved issue closure requires control plane protocol v194; update Wollipog");
+}
+
 async function explicitEffortCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort;
   if (Number.isInteger(deps.controlPlaneProtocolVersion)) {
@@ -841,19 +852,53 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
 
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
+  "request_github_issue_closure", "close_github_issue",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "reconcile_workflow_decision",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree"]);
-const PARENT_CONTROL_TOOLS = new Set([
+const PARENT_CONTROL_TOOLS = new Set(["request_github_issue_closure", "close_github_issue",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
   "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
 ]);
 
 export const TOOLS: McpTool[] = [
+  {
+    name: "request_github_issue_closure",
+    description: "Propose closing one human-authorized campaign issue. The runner derives the repository, title, issue revision, and related open PRs; the server adds active child assignments. Always asks a human, regardless of Parent Control. An already-closed issue is reported without posting a comment.",
+    inputSchema: { type: "object", properties: {
+      requestId: { type: "string" }, issue: { type: "integer", minimum: 1 },
+      reason: { type: "string", enum: ["completed", "not_planned"] },
+      explanation: { type: "string", minLength: 1, maxLength: 4000 },
+      evidence: { type: "array", minItems: 1, maxItems: 32, items: { type: "string", minLength: 1, maxLength: 4000 } },
+      comment: { type: "string", minLength: 1, maxLength: 65536 },
+    }, required: ["requestId", "issue", "reason", "explanation", "evidence"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const compatibility = await issueClosureCompatibilityError(deps);
+      if (compatibility) return compatibility;
+      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/github-issue-closures`, args);
+      return result.ok ? textResult(result.data) : errorResult(result.message);
+    },
+  },
+  {
+    name: "close_github_issue",
+    description: "Execute one exact human-approved issue closure using its occurrenceId and resourceDigest from get_workflow_decision. Checks current child assignments and GitHub evidence, consumes approval once, and verifies the final state. Read issueClosureResult: uncertain means the mutation may have succeeded and must not be replayed. Changed, denied, expired, revoked, consumed, or superseded approvals fail closed. Never use a shell command as a substitute.",
+    inputSchema: { type: "object", properties: {
+      occurrenceId: { type: "string" }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.occurrenceId !== "string") return errorResult("occurrenceId and a session identity are required");
+      const compatibility = await issueClosureCompatibilityError(deps);
+      if (compatibility) return compatibility;
+      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/github-issue-closures/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest });
+      return result.ok ? textResult({ decision: result.data }) : errorResult(result.message);
+    },
+  },
+
   /* ------------------------------- READS --------------------------------- */
   {
     name: "list_runners",

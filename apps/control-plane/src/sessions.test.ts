@@ -23678,3 +23678,86 @@ test("stopBackgroundJob is refused for a runner older than v190 without contacti
   assert.match(result.error ?? "", /Stopping one background job requires protocol v190/);
   assert.equal(hub.sentOfType("stop_background_job").length, 0);
 });
+
+test("issue closure requires an exact human decision and executes one durable action", async () => {
+  for (const mode of ["success", "deny", "expired", "changed_payload", "changed_policy", "new_child", "changed_assignment", "superseded", "stopped", "uncertain", "invalid_result"] as const) {
+    const { db, hub, svc } = makeHarness();
+    try {
+      const meta = runnerMeta();
+      meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"],
+      };
+      db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+      const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+        agentId: "test-orchestrator", config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issues 123." },
+        undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+      assert.ok(created.ok && created.data, created.error);
+      const id = created.data.id;
+      db.backfillSessionOrchestratorIssueNumbers(id, [123], Date.now());
+      db.updateSessionStatus(id, "running", Date.now());
+      if (mode === "changed_assignment") {
+        const child = db.createSession({ id: "closure-assigned-child", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+          agentId: AGENT_ID, title: "Fix issue 123", parentSessionId: id, driver: "claude-code", config: {}, useWorktree: false, now: Date.now() });
+        db.updateSessionStatus(child.id, "running", Date.now());
+      }
+      let executions = 0;
+      hub.requestHandler = (message) => {
+        if (message.type !== "github_issue_closure") throw new Error("unexpected runner command");
+        if (message.operation === "inspect") return { type: "github_issue_closure_result", requestId: message.requestId,
+          sessionId: id, ok: true, inspection: { repository: "team/repo", issue: 123, title: "Obsolete task",
+            url: "https://github.com/team/repo/issues/123", state: "OPEN", forgeDigest: "a".repeat(64), openPullRequests: [] } };
+        executions++;
+        if (mode === "uncertain") throw new RunnerRequestTimeoutError();
+        if (mode === "invalid_result") return { type: "github_issue_closure_result", requestId: message.requestId,
+          sessionId: id, ok: true };
+        return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: id,
+          ok: true, result: { outcome: "closed", completedAt: Date.now() } };
+      };
+      const proposal = { requestId: "closure-1", issue: 123, reason: "not_planned" as const,
+        explanation: "Retire obsolete work.", evidence: ["Superseded by the new design."], comment: "Retired." };
+      assert.equal((await svc.requestGithubIssueClosure(id, { ...proposal, issue: 124 })).ok, false);
+      const requested = await svc.requestGithubIssueClosure(id, proposal);
+      assert.ok(requested.ok && requested.data?.decision, requested.error);
+      const decision = requested.data.decision;
+      assert.equal(decision.controllingSessionId, id);
+      assert.equal(decision.authority, "human");
+      assert.equal(db.getSession(id)?.pendingApproval?.title, "Issue Closure Approval Required");
+      assert.equal((await svc.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest)).ok, false, "pending approval cannot execute");
+      assert.equal(svc.createWorkflowDecision(id, { requestId: "forged", resourceKey: "forged", resourceSnapshot: decision.resourceSnapshot }).status, 403);
+      assert.equal(svc.resolveWorkflowDecision(id, id, decision.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id }, () => true).ok, false);
+      assert.equal(svc.resolveWorkflowDecision(id, id, decision.occurrenceId, { outcome: "approve" }, "human", { kind: "agent", id }, () => true).ok, false);
+      const resolved = svc.resolveWorkflowDecision(id, id, decision.occurrenceId, { outcome: mode === "deny" ? "deny" : "approve" }, "human", { kind: "human", id: "reviewer" }, () => true);
+      assert.ok(resolved.ok, resolved.error);
+      assert.equal((await svc.consumeWorkflowDecision(id, decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot })).ok, false, "generic consumption never authorizes a shell close");
+      if (mode === "expired") db.db.prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id=?").run(Date.now() - 31 * 60_000, decision.occurrenceId);
+      if (mode === "changed_policy") assert.ok(svc.setParentControlPolicy(id, { ...db.getSession(id)!.parentControlPolicy!.decisions, pr_merge: "orchestrator" }, decision.policyRevision).ok);
+      if (mode === "new_child") {
+        const child = db.createSession({ id: "closure-new-child", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+          agentId: AGENT_ID, title: "Fix issue 123", parentSessionId: id, driver: "claude-code", config: {}, useWorktree: false, now: Date.now() });
+        db.updateSessionStatus(child.id, "running", Date.now());
+      }
+      if (mode === "changed_assignment") db.stageSessionPromptCommand({ commandId: "changed-assignment",
+        sessionId: "closure-assigned-child", runnerId: RUNNER_ID, payloadJson: JSON.stringify({ text: "Keep working on issue 123." }),
+        payloadSha256: "c".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
+      if (mode === "superseded") assert.ok((await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-2", comment: "Changed comment." })).ok);
+      if (mode === "stopped") svc.stop(id);
+      const digest = mode === "changed_payload" ? "b".repeat(64) : decision.resourceDigest;
+      const result = await svc.executeGithubIssueClosure(id, decision.occurrenceId, digest);
+      if (mode === "success" || mode === "uncertain" || mode === "invalid_result") {
+        assert.ok(result.ok && result.data, result.error);
+        assert.equal(result.data.status, "consumed");
+        assert.equal(result.data.issueClosureResult?.outcome, mode === "success" ? "closed" : "uncertain");
+        assert.equal(executions, 1);
+        assert.equal((await svc.executeGithubIssueClosure(id, decision.occurrenceId, digest)).ok, false);
+        assert.equal(executions, 1);
+        const audit = db.listGovernanceAudit(id).filter((entry) => entry.workflowDecision?.occurrenceId === decision.occurrenceId);
+        assert.ok(audit.some((entry) => entry.outcome === "allowed" && entry.actor.kind === "human" && entry.actor.id === "reviewer"));
+        assert.ok(audit.some((entry) => entry.outcome === "consumed" && entry.actor.kind === "agent" && entry.actor.id === id));
+      } else {
+        assert.equal(result.ok, false, `${mode}: no execution`);
+        assert.equal(executions, 0);
+      }
+    } finally { db.close(); }
+  }
+});
