@@ -503,6 +503,55 @@ test("both Playwright installs time out and retry once after clearing the stalle
   }
 });
 
+test("the unit-test job's video decoder install retries once and both attempts fit its budget", () => {
+  // A slow apt mirror once held this install for 9-20 minutes, and the job's 20-minute budget then
+  // cancelled Unit Tests with no test failing, which dropped five merge groups in one day (#2328).
+  // The install and its retry are compared whole, like the Playwright installs above: a dropped
+  // timeout, a retry that no longer follows its attempt, a retry that swallows its own failure or
+  // skips clearing the first attempt's processes, or a lost error naming the install all fail here.
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8").replace(/\r\n/g, "\n");
+  const job = ci.slice(ci.indexOf("\n  checks:\n"), ci.indexOf("\n  browser:\n"));
+  const steps = job.split(/^      - name: /m).slice(1)
+    .map((step) => step.replace(/(?:\n *(?:#[^\n]*)?)+$/, ""));
+  const name = "Install Isolated Video Decoder for Unit Tests";
+  const index = steps.findIndex((step) => step.startsWith(`${name}\n`));
+  assert.notEqual(index, -1, `${name}: step is missing from the unit-test job`);
+
+  const attempts = [steps[index], steps[index + 1]].map((step) => Number(step?.match(/^        timeout-minutes: (\d+)$/m)?.[1]));
+  assert.ok(attempts.every((minutes) => minutes > 0), `${name}: both attempts need their own timeout-minutes`);
+  assert.equal(steps[index], [
+    name,
+    "        id: video-decoder",
+    "        continue-on-error: true",
+    `        timeout-minutes: ${attempts[0]}`,
+    "        run: |",
+    "          sudo apt-get update -qq",
+    "          sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg",
+  ].join("\n"), `${name}: first attempt must be bounded and allow one retry`);
+  assert.equal(steps[index + 1], [
+    `Retry ${name}`,
+    "        if: ${{ !cancelled() && steps.video-decoder.outcome == 'failure' }}",
+    `        timeout-minutes: ${attempts[1]}`,
+    "        run: |",
+    `          trap 'echo "::error::${name} failed on both attempts, so the unit tests did not run"' ERR`,
+    "          sudo pkill -KILL -x 'apt-get|dpkg' || true",
+    "          sudo dpkg --configure -a",
+    "          sudo apt-get update -qq",
+    "          sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg",
+  ].join("\n"), `${name}: retry must immediately follow, clear the stalled attempt, and fail the job naming the install`);
+  assert.ok(index < steps.findIndex((step) => step.startsWith("Unit Tests\n")),
+    `${name}: the install must finish before Unit Tests, which need bubblewrap and FFmpeg`);
+
+  // Everything else in the job took at most 771 seconds over 615 successful jobs (2026-09-28 to
+  // 2026-10-01). Two attempts that both run to their bounds must still leave that much, or a stall
+  // the retry recovers from cancels the unit tests anyway, which is the failure #2328 removed.
+  const SLOWEST_REMAINDER_SECONDS = 771;
+  const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
+  assert.ok((budget - attempts[0] - attempts[1]) * 60 >= SLOWEST_REMAINDER_SECONDS,
+    `checks: timeout-minutes ${budget} must cover both ${attempts.join(" + ")}-minute install attempts ` +
+    `plus the slowest measured remainder of the job (${SLOWEST_REMAINDER_SECONDS} seconds)`);
+});
+
 test("PR workflow expressions satisfy the complete event matrix", () => {
   const { groupTemplate, jobGuard } = workflowContract(WORKFLOWS[0]);
   const expressions = groupExpressions(groupTemplate);
