@@ -593,7 +593,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
               onOpenOrphans={() => openPane("orphans")}
               onAssignRecommended={(skillId, runnerId) => void assignRecommended(skillId, runnerId)}
               onDismissRecommendation={(skillId) => void setRecommendationDismissed(skillId, true)}
-              onNewSkill={() => setDialog("new-skill")}
+              onNewSkill={openNewSkill}
               onImportFromGit={() => setDialog("git-import")}
               onImportFromMachine={() => setDialog("machine-import")}
             />
