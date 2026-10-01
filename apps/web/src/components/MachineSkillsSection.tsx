@@ -17,20 +17,24 @@ import { ChevronRightIcon } from "./Icons.js";
  */
 export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
   const api = useApi();
-  const [state, setState] = useState<RunnerSkillsResponse | "loading" | "error" | null>(null);
-  /** Whether a read is running or has succeeded, so opening again never reads twice. */
-  const read = useRef(false);
+  const [state, setState] = useState<RunnerSkillsResponse | "error" | null>(null);
+  const [loading, setLoading] = useState(false);
+  /** Whether a read is running, so one opening never reads twice. */
+  const reading = useRef(false);
   if (!runnerSupportsProtocol(runner.protocolVersion, "agentSkills")) return null;
 
+  // Read on every opening, so what it shows is the machine's latest report; the last one stays on
+  // screen while the next is read.
   const load = () => {
-    if (read.current) return;
-    read.current = true;
-    setState("loading");
+    if (reading.current) return;
+    reading.current = true;
+    setLoading(true);
     api.runnerSkills(runner.runnerId)
       .then((response) => setState({ ...response, removalReporting: normalizeRemovalReporting(response.removalReporting) }))
-      .catch(() => {
-        read.current = false;
-        setState("error");
+      .catch(() => setState("error"))
+      .finally(() => {
+        reading.current = false;
+        setLoading(false);
       });
   };
   const loaded = state && typeof state === "object" ? state : null;
@@ -53,11 +57,12 @@ export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
         <span className="runner-agents-label">Skills on This Machine</span>
       </summary>
       <div className="runner-agents-body">
-        {state === "loading" && <p className="hint">Loading…</p>}
+        {loading && state === null && <p className="hint">Loading…</p>}
         {state === "error" && (
           <p className="hint" role="alert">Skills status could not be loaded. Close and reopen this section to try again.</p>
         )}
-        {loaded && unmanaged.length === 0 && (
+        {loaded && !loaded.reported && <p className="hint">This machine hasn't reported its skills yet.</p>}
+        {loaded?.reported && unmanaged.length === 0 && (
           <p className="hint">This machine reports no unmanaged skills.</p>
         )}
         {unmanaged.length > 0 && (
@@ -78,7 +83,7 @@ export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
             </p>
           </div>
         )}
-        {loaded && (removals.length > 0 || removalReporting !== "unknown") && (
+        {loaded?.reported && (removals.length > 0 || removalReporting !== "unknown") && (
           <div className="machine-skills-group">
             <h5>Recent Link Removals</h5>
             {removalReporting === "unsupported" && (

@@ -779,9 +779,11 @@ export function reportedUnmanagedSkills(reported: ReportedSkillsState | null | u
 }
 
 /** The skill directory a removed link's display path names: its last segment, without the
- * " (WSL <distro>)" a WSL removal adds after it. */
+ * " (WSL <distro>)" a WSL removal adds after it. A distribution's name may hold parentheses, but a
+ * skill's directory name never holds " (WSL ", so the suffix starts at its first occurrence. */
 function removalSkillName(path: string): string | undefined {
-  return path.replace(/ \(WSL [^()]*\)$/, "").split(/[\\/]/).filter(Boolean).pop();
+  const wsl = path.indexOf(" (WSL ");
+  return (wsl >= 0 && path.endsWith(")") ? path.slice(0, wsl) : path).split(/[\\/]/).filter(Boolean).pop();
 }
 
 /** The link removals a machine reported. With a skill name, only that skill's: a removed link's

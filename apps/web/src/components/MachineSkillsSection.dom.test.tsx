@@ -80,7 +80,7 @@ test("Skills on This Machine reads the machine when opened and lists every remov
       "the removal history's own timestamp, not the newer inventory's");
     await view.toggle(false);
     await view.toggle(true);
-    assert.equal(view.reads(), 1, "reopening keeps what was read");
+    assert.equal(view.reads(), 2, "each opening reads the machine's latest report");
   } finally { await view.unmount(); }
 });
 
@@ -118,4 +118,20 @@ test("a failed read says so and retries on the next open; a runner without skill
   try {
     assertNoDomNode(old.details);
   } finally { await old.unmount(); }
+});
+
+test("a machine that hasn't reported yet says so, and a later opening shows its first report (CR-2.2)", async () => {
+  let report: RunnerSkillsResponse = { removalReporting: "supported", desired: [], reported: null };
+  const view = await open(async () => report);
+  try {
+    await view.toggle(true);
+    const text = view.container.textContent ?? "";
+    assert.match(text, /This machine hasn't reported its skills yet\./);
+    assert.doesNotMatch(text, /reports no unmanaged skills|No managed link removals/);
+    report = reported("supported");
+    await view.toggle(false);
+    await view.toggle(true);
+    assert.match(view.container.textContent ?? "", /local-notes/);
+    assert.doesNotMatch(view.container.textContent ?? "", /hasn't reported/);
+  } finally { await view.unmount(); }
 });
