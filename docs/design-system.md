@@ -1217,8 +1217,23 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 - `noValidate` on every form: no native browser bubbles.
 - Validate a field on blur after it was edited, and every field on submit. Errors clear as the user
   types a valid value.
-- Invalid field: `aria-invalid="true"`, 1px `--red` border, and the helper is replaced by the error:
-  `CircleAlert` 14px + `--type-small` in `--danger-text`, associated with `aria-describedby`.
+- **Invalid field** (`.field-error`, `FieldError`): the error is a `CircleAlert` 14px and
+  `--type-small` text, both in `--danger-text`, in the place of the helper (`.field-helper`), so the
+  field does not shift when one replaces the other. Every control inside a `.field` that carries
+  `aria-invalid="true"` draws its 1px edge in `--red` (one rule, `.field [aria-invalid="true"]`,
+  which holds on hover too); its focus ring keeps the standard `--focus` outline (§16.1). The
+  contract:
+  - the field gets `aria-invalid="true"`;
+  - the error replaces the helper: the two are never shown at once;
+  - `aria-describedby` points at the error while it shows, and at the helper otherwise, so
+    `FieldError` requires an `id`;
+  - the error is not `role="alert"`: on submit, focus moves to the first invalid field, which
+    announces it;
+  - the message is one sentence that says what is wrong and how to fix it.
+
+  Errors under a field use `FieldError`, never `.form-error`, which stays for footer errors until
+  the danger Notice replaces it (§13.2). New Skill uses it (#1964); each other dialog adopts it in
+  its own issue and deletes its local error class when it does.
 - Error copy: what is wrong and how to fix it, one sentence: "Use lowercase letters, digits, dots or
   dashes."
 - Submit errors (server, network): danger Notice directly above the submit row, rewritten for users;
@@ -1228,8 +1243,8 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 - **Field warning** (`.field-warn`, `FieldWarning`): a non-blocking warning about a valid value
   ("This branch already has a worktree."). It sits under the helper, pulled 4px closer: a 14px
   `TriangleAlert` in `--amber` and `--type-small` text in `--text-dim`, never amber text. The field's
-  `aria-describedby` points at it. It is the sibling of the field error, which blocks submission and
-  replaces the helper. No screen uses it yet.
+  `aria-describedby` points at it. It is the sibling of the field error (`FieldError`), which blocks
+  submission and replaces the helper. No screen uses it yet.
 - A failed instant-apply setting (Settings › Network › Tailnet) shows its error in place of the
   row's description in `--danger-text` (`.danger-text`).
 
@@ -2107,7 +2122,8 @@ before any area work starts, by one rule:
   add them to the shared primitives.
 
 In total, 42 proposal entries merge into 20 promotions, 20 are already delivered, and 56 are
-rejected. Cite this section when an area design uses one of these names.
+rejected. `.field-error` (#2150) was promoted later, from the production patterns it replaces rather
+than from an area proposal. Cite this section when an area design uses one of these names.
 
 **Promote.** Each promoted class is written once, in the component-ordered part of `styles.css`
 (§19.3), with tokens only. A promoted class with no production screen using it yet lands with its
@@ -2131,6 +2147,7 @@ green. Area work adopts the component instead of writing the class again.
 | `.toolbar` with `.filter-btn` | `.toolbar`, `.tools-group` | §4.7 | Seven production toolbars; `FilterButton` |
 | `.is-stale` | four area classes | §12.5 | `StaleContent` |
 | `.field-warn` | two area classes | §8.5 | `FieldWarning` |
+| `.field-error` | `.question-field-error`, `.form-error` under a field, the composer answer's invalid border | §8.5 | `FieldError` (#2150), first used by New Skill (#1964) |
 | `.list-foot` | three area classes | §5.6 | `ListFoot` |
 | `.crumbs` | `.crumbs` | §4.8 | The Files panel path |
 | `.save-bar` with `.is-error` | `.save-bar.is-error`, the settings save-bar placement | §8.6 | `SaveBar` |

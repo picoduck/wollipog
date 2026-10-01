@@ -243,6 +243,34 @@ test("the inherited danger and count-warning pairs clear AA in every scheme", ()
   assert.deepEqual(failures, [], "a scheme that inherits these tokens must still read at 4.5:1");
 });
 
+test("a field error reads at 4.5:1 and the invalid edge at 3:1 in every scheme (§8.5)", () => {
+  // `.field-error` paints no fill, so the surface loop never measures it. Its words sit on the
+  // dialog body (`--bg-elev`) and the page (`--bg`); the red edge is a state indicator on the field.
+  assert.match(topLevelRule(css, ".field-error").toString(), /color:\s*var\(--danger-text\)/);
+  assert.match(topLevelRule(css, '.field [aria-invalid="true"],\n.field [aria-invalid="true"]:hover,\n.composer-answer-input[aria-invalid="true"]').toString(),
+    /border-color:\s*var\(--red\)/);
+  const failures: string[] = [];
+  let checks = 0;
+  for (const scheme of SCHEMES) {
+    for (const theme of THEMES) {
+      const tokens = tokensFor(scheme, theme);
+      const require = (name: string) => {
+        const value = literal(tokens, name) ?? literal(tokens, /^var\((--[\w-]+)\)$/.exec(tokens.get(name) ?? "")?.[1] ?? "");
+        assert.ok(value, `${scheme}/${theme}: ${name} must resolve to a literal colour`);
+        return value;
+      };
+      const pairs = [["--danger-text", "--bg-elev", 4.5], ["--danger-text", "--bg", 4.5], ["--red", "--field-bg", 3]] as const;
+      for (const [ink, ground, floor] of pairs) {
+        const measured = contrast(require(ink), require(ground));
+        checks += 1;
+        if (measured < floor) failures.push(`${scheme}/${theme}: ${ink} on ${ground} is ${measured.toFixed(2)}:1`);
+      }
+    }
+  }
+  assert.equal(checks, 30, "five schemes x two themes x three pairs");
+  assert.deepEqual(failures, [], "an invalid field must stay legible in every scheme");
+});
+
 test("the committed schemes are what the generator produces", () => {
   // The CSS says these values are derived rather than chosen. That claim is only worth making if it
   // is checked: a hand-edit to one hex would leave the block looking generated and no longer be.

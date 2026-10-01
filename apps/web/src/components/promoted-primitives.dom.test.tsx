@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import React, { act, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
+import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
 import { FilterButton } from "./FilterButton.js";
 import { ListFoot } from "./ListFoot.js";
@@ -97,6 +98,75 @@ test("FieldWarning is a helper-colored line with a warning icon, addressable by 
     assert.equal(warning.getAttribute("role"), null, "a warning is not an alert");
     assert.match(rule(".field-warn"), /color:\s*var\(--text-dim\);/);
     assert.match(rule(".field-warn-icon"), /color:\s*var\(--amber\);/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+/** The dark theme's value of a token, as the shared `:root` block declares it. */
+function rootToken(name: string): string {
+  const root = /\n:root,\n:root\[data-theme="dark"\]\s*\{([^}]*)\}/.exec(sheet);
+  assert.ok(root, "the shared token block must exist");
+  const value = new RegExp(`\\n\\s*${name}:\\s*([^;]+);`).exec(root[1]!)?.[1];
+  assert.ok(value, `${name} must be a token`);
+  return value.trim();
+}
+
+/** What a screen reader announces as the description: the texts `aria-describedby` names, in order. */
+function accessibleDescription(element: Element): string {
+  return (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
+    .map((id) => element.ownerDocument.getElementById(id)?.textContent?.trim() ?? "")
+    .filter(Boolean).join(" ");
+}
+
+test("FieldError is a danger-colored line with an error icon, addressable by the field and never an alert (§8.5)", async () => {
+  // The real rule and the real token, so the computed color proves the declaration resolves.
+  const style = domWindow.document.createElement("style");
+  style.textContent = `:root { --danger-text: ${rootToken("--danger-text")}; }\n.field-error {${rule(".field-error")}}`;
+  domWindow.document.head.append(style);
+  const view = await render(<FieldError id="name-error">Use lowercase letters, digits, dots or dashes.</FieldError>);
+  try {
+    const error = view.container.querySelector<HTMLElement>(".field-error")!;
+    assert.equal(error.tagName, "P");
+    assert.equal(error.id, "name-error", "a field can point aria-describedby at it");
+    assert.equal(error.getAttribute("role"), null, "focus on the invalid field announces it, so it is not an alert");
+    assert.equal(error.getAttribute("aria-live"), null);
+    const icon = error.querySelector("svg.field-error-icon")!;
+    assert.equal(icon.getAttribute("width"), "14");
+    assert.equal(icon.getAttribute("height"), "14");
+    assert.equal(icon.getAttribute("aria-hidden"), "true", "the words carry the meaning");
+    assert.equal(error.querySelector(":scope > span")?.textContent, "Use lowercase letters, digits, dots or dashes.");
+    assert.equal(error.textContent, "Use lowercase letters, digits, dots or dashes.");
+    assert.equal(domWindow.getComputedStyle(error as never).color, rootToken("--danger-text"));
+    assert.match(rule(".field-error"), /color:\s*var\(--danger-text\);/);
+    assert.doesNotMatch(rule(".field-error-icon"), /(^|[;\s])color:/, "the icon inherits the words' colour");
+  } finally {
+    await view.unmount();
+    style.remove();
+  }
+});
+
+test("an invalid field is described by its error, which replaces its helper (§8.5)", async () => {
+  function NameField({ error }: { error?: string }) {
+    return (
+      <label className="field">
+        <span>Name</span>
+        <input aria-invalid={error ? true : undefined} aria-describedby={error ? "name-error" : "name-helper"} />
+        {error ? <FieldError id="name-error">{error}</FieldError> : <p className="field-helper" id="name-helper">Shown in the session list.</p>}
+      </label>
+    );
+  }
+  const view = await render(<NameField />);
+  try {
+    const input = () => view.container.querySelector("input")!;
+    assert.equal(input().getAttribute("aria-invalid"), null);
+    assert.equal(accessibleDescription(input()), "Shown in the session list.");
+
+    await view.rerender(<NameField error="Enter a name of 64 characters or fewer." />);
+    assert.equal(input().getAttribute("aria-invalid"), "true");
+    assert.equal(accessibleDescription(input()), "Enter a name of 64 characters or fewer.");
+    assertNoDomNode(view.container.querySelector("#name-helper"), "the error replaces the helper");
+    assert.equal(view.container.querySelectorAll(".field-error").length, 1);
   } finally {
     await view.unmount();
   }

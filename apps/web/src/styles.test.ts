@@ -207,6 +207,32 @@ test("no focus ring anywhere is drawn in the accent colour", () => {
  * F6 zones (docs/design-system.md §16.1): no pane is framed on focus, and the zone F6 enters shows a
  * 2px --focus line on its top edge that fades out, without the fade under reduced motion.
  */
+/**
+ * The invalid field (docs/design-system.md §8.5): one `.field-error` recipe, and one rule that turns
+ * the edge of any invalid control in a `.field` red. The rule sets only the edge, so the ring the
+ * focus rule above draws (an outline in --focus) is the same on an invalid field.
+ */
+test("one field error rule, and invalid controls in a field draw a red edge under the standard focus ring", () => {
+  const owners = (pattern: RegExp) => [...new Set(allDeclarations(css)
+    .filter((declaration) => declaration.selectors.some((selector) => pattern.test(selector)))
+    .map((declaration) => declaration.selector))];
+  assert.deepEqual(owners(/\.field-error\b/), [".field-error", ".field-error-icon"],
+    "the recipe is written once, beside .field-warn");
+  assert.match(soleRuleBody(".field-error"), /color: var\(--danger-text\);/);
+  assert.match(soleRuleBody(".field-error"), /font: var\(--type-small\);/);
+  assert.match(soleRuleBody(".field-error"), /margin: 0;/, "it takes the helper's place, with no offset of its own");
+  assert.match(soleRuleBody(".field-error-icon"), /width: var\(--icon-sm\);/);
+  assert.doesNotMatch(soleRuleBody(".field-error-icon"), /(^|\n)color:/,
+    "the icon inherits the words' colour, so forced colors repaints it with them");
+
+  const invalid = '.field [aria-invalid="true"],\n.field [aria-invalid="true"]:hover,\n.composer-answer-input[aria-invalid="true"]';
+  assert.equal(soleRuleBody(invalid), "border-color: var(--red);", "the edge only: the focus ring stays --focus");
+  assert.deepEqual(owners(/\[aria-invalid/), [invalid.replace(/\s+/g, " ")],
+    "every invalid edge is this one rule; a control does not draw its own");
+  assert.ok(css.indexOf(invalid) > css.indexOf(".composer-answer-input:focus {"),
+    "the composer answer keeps its red edge while focused: equal specificity, so the later rule wins");
+});
+
 test("focus never frames a pane, and the F6 zone line is a brief neutral top edge", () => {
   const paneFrames = allDeclarations(css).filter((declaration) =>
     /focus/.test(declaration.selector) && /^(border|box-shadow)/.test(declaration.prop) && /--accent\b/.test(declaration.value)

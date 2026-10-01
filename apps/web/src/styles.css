@@ -5614,7 +5614,6 @@ textarea {
   font-size: var(--text-base);
 }
 .composer-answer-input:focus { border-color: var(--focus); }
-.composer-answer-input[aria-invalid="true"] { border-color: var(--danger-text); }
 .composer-answer-actions { margin-top: 2px; }
 @media (max-width: 600px) {
   .composer-question-waiting,
@@ -9763,13 +9762,25 @@ button.file-head.source-path-link {
   color: var(--danger-text);
   font: var(--type-small);
 }
+/* The icon inherits the words' --danger-text rather than setting it: in forced colors an svg
+   preserves its parent's colour, so it follows the words to CanvasText instead of staying red. */
 .field-error-icon {
   flex: none;
   width: var(--icon-sm);
   height: var(--icon-sm);
   margin-top: 1px;
 }
-.field :is(input, textarea)[aria-invalid="true"] { border-color: var(--red); }
+/* The invalid field (§8.5): its 1px edge turns --red, focused or not. The focus ring is the
+   field's own outline (§16.1), which this leaves at --focus. The composer's answer field is not
+   inside a `.field` but is the same invalid control; it follows its own `:focus` rule above, so
+   this comes later to keep the red edge while it is focused. The `:hover` form outranks the
+   pickers' hover edge (.ui-select-trigger:hover, .ui-searchable-combobox-input:hover), which is
+   later in the file at the same specificity. */
+.field [aria-invalid="true"],
+.field [aria-invalid="true"]:hover,
+.composer-answer-input[aria-invalid="true"] {
+  border-color: var(--red);
+}
 /* Workspace: dropdown + Browse, or the chosen ad-hoc directory */
 .ws-select {
   display: flex;
