@@ -90,6 +90,7 @@ export function SwitchAccountDialog({
     let cancelled = false;
     void api.sessionProviderAccounts(session.id).then((response) => {
       if (cancelled) return;
+      setLoadError(null);
       setOptions(response.accounts);
       // The first account that can take over; the session's own account only when it is the one
       // offered (a failed switch to it being retried).
