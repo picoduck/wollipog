@@ -221,11 +221,17 @@ test("project actions preserve presets, pin state, rename, reveal, and compensat
   await openMenu(container);
   await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
   assert.match(container.textContent ?? "", /Archive and Stop Sessions.*All 2 sessions in/);
-  assert.match(container.textContent ?? "", /their queued work is canceled/);
-  assert.match(container.textContent ?? "", /use Snooze instead/);
+  assert.match(
+    container.textContent ?? "",
+    /All 2 sessions in “Project One” stop, their queued messages are canceled, and they move to Archived Sessions\. You can restore them later\./,
+  );
+  assert.doesNotMatch(container.textContent ?? "", /Snooze/);
   await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archived, [["session-1", true], ["session-2", true]]);
-  assert.match(container.textContent ?? "", /1 session Stop has failed in Project One. Runtime capacity may still be held; use Retry Stop/);
+  assert.match(
+    container.textContent ?? "",
+    /The stop failed for 1 session in Project One, so it may still be running\. Use Retry Stop to try again\./,
+  );
 
   await act(async () => { root.unmount(); });
   mountPoint.remove();
@@ -637,8 +643,8 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
   await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
   assert.match(container.textContent ?? "", /Archive and Stop Sessions.*All 2 sessions in/);
   // The count covers the Project sessions that are not loaded here, which the server also stops.
-  assert.match(container.textContent ?? "", /All 2 sessions in “Project One” stop and move to Archived Sessions/);
-  assert.match(container.textContent ?? "", /use Snooze instead/);
+  assert.match(container.textContent ?? "", /All 2 sessions in “Project One” stop, their queued messages are canceled/);
+  assert.doesNotMatch(container.textContent ?? "", /Snooze/);
   // The loaded session is listed; the one the split has not loaded is still counted (#2051).
   const durableDialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
   assert.deepEqual([...durableDialog.querySelectorAll(".confirmation-rows .row-title")].map((row) => row.textContent), ["session-visible"]);
@@ -657,7 +663,7 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
   await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
   await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archivedProjects, ["project-1", "project-1"]);
-  assert.match(container.textContent ?? "", /Sessions archived from Project One\. Exact undo is unavailable/);
+  assert.match(container.textContent ?? "", /Sessions archived from Project One\. Undo isn't available for this archive\./);
 
   await act(async () => { root.unmount(); });
   mountPoint.remove();

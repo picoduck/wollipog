@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { titleCaseLabel } from "./format.js";
+import { projectArchiveMessage, projectArchiveResultMessage, projectArchiveWithoutUndoMessage } from "./project-actions.js";
 import {
   absoluteViewUrl,
   backLabel,
@@ -166,6 +167,28 @@ test("an entity page is titled by its entity once it has loaded", () => {
 });
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+
+test("a Project's bulk-archive confirmations and results use no retired terms (#2279)", () => {
+  const confirmations = [1, 3].flatMap((count) => [true, false].flatMap((stops) => [true, false].map((onProjectPage) =>
+    ({ stops, text: projectArchiveMessage({ projectName: "Payments Service", count, stops, onProjectPage }) }))));
+  const outcomes: Array<[number, number, number]> = [[0, 0, 0], [1, 0, 0], [3, 0, 0], [1, 1, 0], [1, 3, 0], [1, 0, 1], [0, 0, 3], [1, 2, 2]];
+  const results = outcomes.map(
+    ([archived, pending, failed]) => projectArchiveResultMessage("Payments Service", { archived, pending, failed }));
+  const texts = [...confirmations.map(({ text }) => text), ...results, projectArchiveWithoutUndoMessage("Payments Service")];
+  for (const text of texts) {
+    for (const term of RETIRED_TERMS) assert.ok(!text.toLowerCase().includes(term), `"${text}" uses the retired term "${term}"`);
+    // Snooze is the single-session confirmation's secondary action, never a sentence (#2162).
+    assert.doesNotMatch(text, /snooze/i);
+  }
+  for (const { stops, text } of confirmations) {
+    if (stops) assert.match(text, /queued messages are canceled/);
+    assert.doesNotMatch(text, /queued work/);
+  }
+  // The copy lives in those helpers only: neither surface keeps a copy of its own.
+  for (const path of ["./components/ProjectSplitMenu.tsx", "./components/ProjectsView.tsx", "./project-actions.ts"]) {
+    assert.doesNotMatch(source(path), /runtime capacity|queued work|Snooze instead|Exact undo/i, path);
+  }
+});
 
 test("every surface that names a destination reads the registry's one name", () => {
   // The rail's accessible name and tooltip, its More sheet, the palette, the shortcut reference

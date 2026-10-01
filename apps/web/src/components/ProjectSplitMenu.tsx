@@ -12,7 +12,7 @@ import {
   sessionArchiveRequiresStop,
   setArchivedForSessions,
 } from "../archive-actions.js";
-import { archiveProjectWithFeedback } from "../project-actions.js";
+import { archiveProjectWithFeedback, projectArchiveMessage, projectArchiveResultMessage } from "../project-actions.js";
 import { useApi } from "../api-context.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
@@ -206,13 +206,12 @@ export function ProjectSplitMenu({
     const detail = archiveDetailRows(archiveScope.sessions, sessionCount);
     const accepted = await confirm({
       title: archiveStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions",
-      message: archiveStopsRuntime
-        ? sessionCount === 1
-          ? `The session in “${split.name}” stops and moves to Archived Sessions, and its queued work is canceled. You can restore it, or use Snooze instead to keep it running.`
-          : `All ${sessionCount} sessions in “${split.name}” stop and move to Archived Sessions, and their queued work is canceled. You can restore them, or use Snooze instead to keep them running.`
-        : sessionCount === 1
-          ? `The session in “${split.name}” moves to Archived Sessions. If it is still running, it is stopped first.`
-          : `All ${sessionCount} sessions in “${split.name}” move to Archived Sessions. Any that are still running are stopped first.`,
+      message: projectArchiveMessage({
+        projectName: split.name,
+        count: sessionCount,
+        stops: archiveStopsRuntime,
+        onProjectPage: false,
+      }),
       detailRows: detail.rows,
       detailRowsOverflow: detail.overflow,
       confirmLabel: archiveStopsRuntime ? "Archive and Stop" : "Archive Sessions",
@@ -247,13 +246,11 @@ export function ProjectSplitMenu({
           `Could not archive ${outcome.archiveFailures} session${outcome.archiveFailures === 1 ? "" : "s"}; ${outcome.rollbackFailures > 0 ? `${outcome.rollbackFailures} still need recovery` : "successful changes were rolled back"}.`,
         );
       }
-      const pendingCount = outcome.pendingSessionIds.length;
-      const failedCount = outcome.failedSessionIds.length;
-      showUndo(failedCount > 0
-        ? `${failedCount} session Stop${failedCount === 1 ? " has" : "s have"} failed in ${split.name}. Runtime capacity may still be held; use Retry Stop.`
-        : pendingCount > 0
-          ? `${pendingCount} session${pendingCount === 1 ? " is" : "s are"} waiting for runtime capacity to be released before archiving from ${split.name}.`
-        : `${sessionIds.length} session${sessionIds.length === 1 ? "" : "s"} archived from ${split.name}.`, async () => {
+      showUndo(projectArchiveResultMessage(split.name, {
+        archived: sessionIds.length,
+        pending: outcome.pendingSessionIds.length,
+        failed: outcome.failedSessionIds.length,
+      }), async () => {
         const failures = await setArchivedForSessions(sessionIds, false, api.setArchived);
         if (failures > 0) throw new Error(`${failures} session${failures === 1 ? "" : "s"} could not be restored`);
       });

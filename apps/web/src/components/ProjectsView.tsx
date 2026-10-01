@@ -9,7 +9,7 @@ import {
   type WorktreeSetupConfigStatus,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { archiveProjectWithFeedback } from "../project-actions.js";
+import { archiveProjectWithFeedback, projectArchiveMessage } from "../project-actions.js";
 import { ProjectChildDefaults } from "./ProjectChildDefaults.js";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
@@ -249,13 +249,12 @@ export function ProjectsView({
     if (!selected || selected.unarchivedSessionCount === 0) return;
     const accepted = await confirm({
       title: selectedStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions",
-      message: selectedStopsRuntime
-        ? selected.unarchivedSessionCount === 1
-          ? `The unarchived session in “${selected.name}” stops and moves to Archived Sessions, and its queued work is canceled. The Project and its Locations remain, and you can restore the session.`
-          : `All ${selected.unarchivedSessionCount} unarchived sessions in “${selected.name}” stop and move to Archived Sessions, and their queued work is canceled. The Project and its Locations remain, and you can restore the sessions.`
-        : selected.unarchivedSessionCount === 1
-          ? `The unarchived session in “${selected.name}” moves to Archived Sessions. The Project and its Locations remain.`
-          : `All ${selected.unarchivedSessionCount} unarchived sessions in “${selected.name}” move to Archived Sessions. The Project and its Locations remain.`,
+      message: projectArchiveMessage({
+        projectName: selected.name,
+        count: selected.unarchivedSessionCount,
+        stops: selectedStopsRuntime,
+        onProjectPage: true,
+      }),
       confirmLabel: selectedStopsRuntime ? "Archive and Stop" : "Archive Sessions",
       ...(selectedStopsRuntime ? { tone: "danger" as const } : {}),
     });

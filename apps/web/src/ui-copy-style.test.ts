@@ -6,6 +6,7 @@ import ts from "typescript";
 import type { SessionReminderView } from "@wollipog/protocol";
 import { ApiError } from "./api.js";
 import { archiveAndStopMessage } from "./archive-actions.js";
+import { projectArchiveMessage } from "./project-actions.js";
 import { deleteSessionMessage, signOutOfAgentMessage, stopArchivedSessionMessage, stopSessionMessage } from "./session-confirmation-copy.js";
 import { STOP_JOB_OUTCOME } from "./background-job-stop.js";
 import { closeWarning } from "./components/DesktopCloseGuard.js";
@@ -807,7 +808,7 @@ const MAX_BODY_BRANCHES = 256;
  * Confirmation bodies built by a helper the static reader cannot follow. Each one has its own
  * sentence check below; a new unreadable body fails until it is listed here and tested.
  */
-const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^conflict\.message$/, /^closeWarning\(/, /^heldUpdateMessage\(/,
+const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^projectArchiveMessage\(/, /^conflict\.message$/, /^closeWarning\(/, /^heldUpdateMessage\(/,
   /^stopSessionMessage\(/, /^stopArchivedSessionMessage\(/, /^deleteSessionMessage\(/, /^signOutOfAgentMessage\(/,
   /^STOP_JOB_OUTCOME$/];
 
@@ -1022,8 +1023,10 @@ test("confirmation bodies built by a helper are one or two sentences too", () =>
     ]),
     ...["Studio Mac", null].map((machine) => signOutOfAgentMessage("Gemini CLI", machine)),
     STOP_JOB_OUTCOME,
+    ...[1, 3].flatMap((count) => [true, false].flatMap((stops) => [true, false].map((onProjectPage) =>
+      projectArchiveMessage({ projectName: "Payments Service", count, stops, onProjectPage })))),
   ];
-  assert.equal(bodies.length, 39);
+  assert.equal(bodies.length, 47);
   for (const body of bodies) assert.ok(sentenceCount(body) <= 2, JSON.stringify(body));
 });
 
