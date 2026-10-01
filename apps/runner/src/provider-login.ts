@@ -413,7 +413,7 @@ export class ProviderLoginSupervisor {
       const args = structuredCodex ? appServerArgs(resolved) : loginArgs(resolved);
       child = this.spawn({
         command: resolved.command,
-        args: inheritProviderPlugins({ ...resolved, args }, resolved.provider),
+        args: inheritProviderPlugins({ ...resolved, args, providerCredentialHome: resolved.directory }, resolved.provider),
         cwd: resolved.directory,
         env: resolved.env,
         context: resolved.context,

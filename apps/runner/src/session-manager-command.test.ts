@@ -406,6 +406,7 @@ test("Codex plugin defaults reach the driver without freezing into session metad
 test("Claude plugins reach a managed session before its driver starts", async () => {
   const h = harness({ prepareClaudePlugins: (meta, root) => {
     meta.env = { HOME: root, CLAUDE_CONFIG_DIR: join(root, "account") };
+    meta.providerCredentialHome = join(root, "account");
     inheritProviderPlugins(meta);
   } });
   try {

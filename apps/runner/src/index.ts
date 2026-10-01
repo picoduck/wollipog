@@ -878,7 +878,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       }));
     }
     const pluginProvider = pluginProviderForDriver(meta.driver);
-    if (pluginProvider) {
+    if (pluginProvider && meta.providerCredentialHome) {
       const accountHome = pluginProvider === "claude" ? meta.env.CLAUDE_CONFIG_DIR : meta.env.CODEX_HOME;
       if (meta.context.kind === "native" && accountHome &&
           (!meta.executionTarget || meta.executionTarget.adapter === "host")) {

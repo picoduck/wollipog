@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +28,7 @@ function fixture(t: { after(fn: () => void): void }) {
   json(join(source, "settings.json"), { enabledPlugins: { "review@local": true } });
   mkdirSync(account);
   const launch = { command: "claude", args: [] as string[], driver: "claude-code", context: { kind: "native" as const },
-    env: { HOME: root, CLAUDE_CONFIG_DIR: account } };
+    env: { HOME: root, CLAUDE_CONFIG_DIR: account }, providerCredentialHome: account };
   return { root, source, account, installPath, record, launch };
 }
 
@@ -197,4 +197,14 @@ test("installed Claude CLI lists and disables inherited plugins independently", 
   assert.ok(existsSync(f.installPath));
   run(f.account, ["plugin", "uninstall", "review@local", "--scope", "user"]);
   assert.ok(existsSync(join(f.installPath, ".claude-plugin/plugin.json")));
+});
+
+
+test("unmanaged custom Claude homes do not inherit or mutate default plugins", (t) => {
+  const f = fixture(t);
+  const { providerCredentialHome: _home, ...unmanaged } = f.launch;
+  assert.deepEqual(inheritProviderPlugins(unmanaged), []);
+  assert.equal(existsSync(join(f.account, "plugins")), false);
+  assert.deepEqual(inheritProviderPlugins({ ...f.launch, providerCredentialHome: join(f.root, "another-account") }), []);
+  assert.equal(existsSync(join(f.account, "plugins")), false);
 });

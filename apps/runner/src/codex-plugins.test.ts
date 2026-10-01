@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { once } from "node:events";
 import { createServer } from "node:https";
 import {
@@ -9,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { inheritProviderPlugins } from "./provider-plugins.js";
 import { inheritCodexPlugins } from "./codex-plugins.js";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import type { SessionMeta } from "./session-store.js";
@@ -29,7 +31,7 @@ function fixture(t: { after(fn: () => void): void }) {
   writeFileSync(join(source, cache, "local/.codex-plugin/plugin.json"), '{"name":"review"}');
   writeFileSync(join(source, "config.toml"), '[plugins."review@local"]\nenabled = true\n');
   const launch = { command: "codex", args: [], env: { HOME: root, CODEX_HOME: account },
-    context: { kind: "native" as const } };
+    context: { kind: "native" as const }, providerCredentialHome: account };
   return { root, source, account, plugin, cache, launch };
 }
 
@@ -288,4 +290,27 @@ test("installed Codex reconciles remote catalog installs into an already-running
   await waitFor(false);
   assert.ok(authenticatedSnapshots >= 3, "every reconciliation must use the managed account's identity");
   assert.ok(existsSync(join(f.source, f.cache)), "remote sync must preserve default-home plugins");
+});
+
+
+test("unmanaged custom Codex homes do not inherit default plugins", (t) => {
+  const f = fixture(t);
+  const { providerCredentialHome: _home, ...unmanaged } = f.launch;
+  assert.deepEqual(inheritProviderPlugins({ ...unmanaged, driver: "codex-app-server" }), []);
+  assert.equal(existsSync(join(f.account, "plugins")), false);
+});
+
+
+test("package launchers keep their bootstrap before inherited Codex flags", (t) => {
+  const f = fixture(t);
+  for (const [command, bootstrap] of [
+    ["npx", ["-y", "@openai/codex"]], ["npm", ["exec", "--", "@openai/codex@0.159.2"]],
+    ["pnpm", ["dlx", "@openai/codex"]], ["bun", ["x", "@openai/codex"]],
+  ] as const) {
+    const explicit = ["-c", "plugins.review@local.enabled=false"];
+    const args = inheritCodexPlugins({ ...f.launch, command, args: [...bootstrap, ...explicit] });
+    assert.deepEqual(args.slice(0, bootstrap.length), bootstrap);
+    assert.ok(args.slice(bootstrap.length).includes("plugins.review@local.enabled=true"));
+    assert.deepEqual(args.slice(-2), explicit);
+  }
 });

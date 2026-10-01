@@ -134,6 +134,12 @@ export function inheritCodexPlugins(launch: CodexPluginLaunch): string[] {
   catch { throw new Error("Codex plugin inheritance could not reconcile the account plugin cache."); }
   // Node's bootstrap script must precede provider flags when the CLI is launched via node.
   const flags = inherited.flatMap((value) => ["-c", value]);
-  const bootstrap = launch.args.length && /(?:^|[\\/])node(?:\.exe)?$/iu.test(launch.command) ? 1 : 0;
+  let bootstrap = launch.args.length && /(?:^|[\\/])node(?:\.exe)?$/iu.test(launch.command) ? 1 : 0;
+  // Package-manager flags belong to the launcher. Insert provider flags after the package name,
+  // before the existing provider overrides, so npx does not interpret -c as its own --call flag.
+  if (/(?:^|[\\/])(?:npx|npm|pnpm|bun)(?:\.cmd|\.exe)?$/iu.test(launch.command)) {
+    const packageIndex = launch.args.findIndex((arg) => /^@openai\/codex(?:@[^/]+)?$/u.test(arg));
+    if (packageIndex >= 0) bootstrap = packageIndex + 1;
+  }
   return [...launch.args.slice(0, bootstrap), ...flags, ...launch.args.slice(bootstrap)];
 }
