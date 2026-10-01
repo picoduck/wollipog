@@ -983,6 +983,12 @@ export interface SelectOption<T extends string> {
   label: string;
   description?: string;
   /**
+   * The Title Case section this option belongs to. Consecutive options with the same group are
+   * listed under one section label (§9.1) inside a `role="group"` named by it; options without one
+   * are listed bare.
+   */
+  group?: string;
+  /**
    * A decoration shown before the label, in the trigger as well as in the list.
    *
    * Hiding it from assistive technology is the CALLER's job and every caller owes it: the label
@@ -996,6 +1002,22 @@ export interface SelectOption<T extends string> {
   disabled?: boolean;
   /** Rendered in the option, not a tooltip — §11.3: never hide a setting that could exist. */
   disabledReason?: string;
+}
+
+/** Split a list into runs of consecutive options that share a `group`, keeping each option's index
+ * in the whole list, which the option ids and the active highlight count. */
+export function selectOptionRuns<O extends { group?: string }>(options: readonly O[]): Array<{
+  group: string | undefined;
+  start: number;
+  options: Array<{ option: O; index: number }>;
+}> {
+  const runs: Array<{ group: string | undefined; start: number; options: Array<{ option: O; index: number }> }> = [];
+  options.forEach((option, index) => {
+    const last = runs.at(-1);
+    if (last && last.group === option.group) last.options.push({ option, index });
+    else runs.push({ group: option.group, start: index, options: [{ option, index }] });
+  });
+  return runs;
 }
 
 /**
@@ -1488,41 +1510,54 @@ export function Select<T extends string>({
     if (!searchable) popover.onPanelKeyDown(event as React.KeyboardEvent<HTMLDivElement>);
   };
 
+  const renderOption = (option: SelectOption<T>, index: number) => (
+    <button
+      key={option.value}
+      id={optionId(index)}
+      type="button"
+      role="option"
+      aria-selected={option.value === value}
+      aria-disabled={option.disabled || undefined}
+      tabIndex={-1}
+      className={`ui-select-option${option.value === value ? " is-selected" : ""}`
+        + `${index === activeIndex ? " is-active" : ""}${option.disabled ? " is-disabled" : ""}`}
+      onMouseEnter={() => setActive(index)}
+      onClick={() => commit(option)}
+    >
+      {option.swatch}
+      <span className="ui-select-option-body">
+        <span>{option.label}</span>
+        {option.description && <small className="ui-select-option-desc">{option.description}</small>}
+        {option.disabled && option.disabledReason && (
+          <small className="ui-select-option-reason">{option.disabledReason}</small>
+        )}
+      </span>
+      {option.value === value && <CheckIcon size={14} />}
+    </button>
+  );
+
   const rows = (
     <>
       {noMatch
         ? <NoMatchRow noun={noun} query={query} />
         : visible.length === 0 && <p className="ui-select-empty">{emptyLabel}</p>}
-      {visible.map((option, index) => (
-        <button
-          key={option.value}
-          id={optionId(index)}
-          type="button"
-          role="option"
-          aria-selected={option.value === value}
-          aria-disabled={option.disabled || undefined}
-          tabIndex={-1}
-          className={`ui-select-option${option.value === value ? " is-selected" : ""}`
-            + `${index === activeIndex ? " is-active" : ""}${option.disabled ? " is-disabled" : ""}`}
-          onMouseEnter={() => setActive(index)}
-          onClick={() => commit(option)}
-        >
-          {option.swatch}
-          <span className="ui-select-option-body">
-            <span>{option.label}</span>
-            {option.description && <small className="ui-select-option-desc">{option.description}</small>}
-            {option.disabled && option.disabledReason && (
-              <small className="ui-select-option-reason">{option.disabledReason}</small>
-            )}
-          </span>
-          {option.value === value && <CheckIcon size={14} />}
-        </button>
-      ))}
+      {selectOptionRuns(visible).map((run) => {
+        const options = run.options.map(({ option, index }) => renderOption(option, index));
+        if (run.group === undefined) return options;
+        const labelId = `${popover.panelId}-group-${run.start}`;
+        return (
+          <div key={labelId} role="group" aria-labelledby={labelId}>
+            <div className="menu-label" id={labelId} role="presentation">{run.group}</div>
+            {options}
+          </div>
+        );
+      })}
       {showCreate && createOption && (
         <CreateOptionRow id={createId} label={createOption.label} active onSelect={create} />
       )}
     </>
   );
+
 
   return (
     <div

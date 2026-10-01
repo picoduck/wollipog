@@ -9,6 +9,7 @@ import {
   TOUCH_TARGET_MEDIA,
   filterSearchableComboboxOptions,
   selectMenuDesiredHeight,
+  selectOptionRuns,
 } from "./ChoiceControls.js";
 
 const SEARCH_OPTIONS = [
@@ -181,4 +182,21 @@ test("the touch floor still applies to a multi-line option", () => {
   // A three-line option is already taller than 44px, so the floor must not pull it DOWN.
   const height = selectMenuDesiredHeight({ optionCount: 2, maxOptionLines: 3, coarsePointer: true });
   assert.equal(height, selectMenuDesiredHeight({ optionCount: 2, maxOptionLines: 3, coarsePointer: false }));
+});
+
+test("Select groups only consecutive options under a section, and keeps each option's list index", () => {
+  const runs = selectOptionRuns([
+    { value: "all" },
+    { value: "claude", group: "Agent Types" },
+    { value: "codex", group: "Agent Types" },
+    { value: "mine", group: "On This Machine" },
+    { value: "loose" },
+  ]);
+  assert.deepEqual(runs.map((run) => [run.group, run.start, run.options.map(({ option, index }) => `${option.value}@${index}`)]), [
+    [undefined, 0, ["all@0"]],
+    ["Agent Types", 1, ["claude@1", "codex@2"]],
+    ["On This Machine", 3, ["mine@3"]],
+    [undefined, 4, ["loose@4"]],
+  ]);
+  assert.deepEqual(selectOptionRuns([]), []);
 });

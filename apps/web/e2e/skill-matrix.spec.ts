@@ -30,9 +30,9 @@ test("capable Windows machines offer WSL agents for direct assignment", async ({
   await page.getByRole("button", { name: "Add Assignment…", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: /^Machine:/ }).click();
-  await page.getByRole("option", { name: "Build Machine", exact: true }).click();
+  await page.getByRole("option", { name: /^Build Machine\b/ }).click();
   await dialog.getByRole("button", { name: /^Agents:/ }).click();
-  await expect(page.getByRole("option", { name: "WSL Codex", exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: "WSL Codex Codex (Command Line)", exact: true })).toBeVisible();
 });
 test("unsupported WSL reconciliation detail is visible in the assignment matrix", async ({ page }) => {
   const detail = "this agent's WSL distribution name is invalid or unsafe";

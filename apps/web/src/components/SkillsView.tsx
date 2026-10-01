@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { SKILL_DESCRIPTION_MAX_CHARS, runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { DetailSkeleton, Modal } from "./common.js";
+import { DetailSkeleton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { PlusIcon, SkillsIcon } from "./Icons.js";
@@ -25,6 +25,7 @@ import { SkillDriftImportDialog } from "./SkillDriftImportDialog.js";
 import { SkillOrphanImportDialog } from "./SkillOrphanImportDialog.js";
 import { SkillOrphanedCopies } from "./SkillOrphanedCopies.js";
 import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
+import { NewSkillDialog } from "./NewSkillDialog.js";
 import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
 import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
 import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
@@ -48,14 +49,11 @@ import {
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
   skillDeployBadge,
-  skillFilesFromUploads,
   skillFromPayload,
   skillGroupsFromPayload,
   skillMarkdownBody,
-  skillMarkdownTemplate,
   skillOverviewAttention,
   skillsFromPayload,
-  validateSkillDraft,
   type RunnerSkillsResponse,
   type SkillAgentSelector,
   type SkillAssignmentView,
@@ -70,121 +68,6 @@ import {
 function formatTime(value: number | undefined): string {
   return value === undefined ? "—" : new Date(value).toLocaleString();
 }
-
-function NewSkillDialog({ onClose, onCreate, busy }: {
-  onClose: () => void;
-  onCreate: (input: { name: string; description: string; files: SkillFile[] }) => Promise<void>;
-  busy: boolean;
-}) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [markdown, setMarkdown] = useState(() => skillMarkdownTemplate("", ""));
-  const [markdownTouched, setMarkdownTouched] = useState(false);
-  const [folderFiles, setFolderFiles] = useState<SkillFile[]>([]);
-  const [errors, setErrors] = useState<string[]>([]);
-
-  const buildFiles = (): SkillFile[] => folderFiles.length
-    ? folderFiles
-    : [{ path: "SKILL.md", content: markdown, encoding: "utf8" }];
-
-  const readFolder = async (list: FileList | null) => {
-    if (!list || list.length === 0) {
-      setFolderFiles([]);
-      return;
-    }
-    const uploads = await Promise.all([...list].map(async (file) => ({
-      relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
-      bytes: new Uint8Array(await file.arrayBuffer()),
-    })));
-    const converted = skillFilesFromUploads(uploads);
-    setErrors(converted.errors);
-    setFolderFiles(converted.files);
-  };
-
-  const submit = async () => {
-    const files = buildFiles();
-    const found = validateSkillDraft({ name: name.trim(), files });
-    setErrors(found);
-    if (found.length) return;
-    await onCreate({ name: name.trim(), description: description.trim(), files });
-  };
-
-  return (
-    <Modal title="New Skill" onClose={onClose} size="lg" footer={
-      <>
-        <button type="button" className="btn" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn primary" disabled={busy} onClick={() => void submit()}>
-          {busy ? "Creating…" : "Create Skill"}
-        </button>
-      </>
-    }>
-      <div className="form">
-        <label className="field">
-          <span>Name</span>
-          <input
-            autoFocus
-            value={name}
-            maxLength={64}
-            placeholder="my-skill"
-            onChange={(event) => {
-              const next = event.target.value;
-              setName(next);
-              if (!markdownTouched) setMarkdown(skillMarkdownTemplate(next, description));
-            }}
-          />
-        </label>
-        <label className="field">
-          <span>Description</span>
-          <input
-            value={description}
-            maxLength={SKILL_DESCRIPTION_MAX_CHARS}
-            placeholder="What this skill helps an agent do"
-            onChange={(event) => {
-              const next = event.target.value;
-              setDescription(next);
-              if (!markdownTouched) setMarkdown(skillMarkdownTemplate(name, next));
-            }}
-          />
-        </label>
-        <label className="field">
-          <span>SKILL.md</span>
-          <textarea
-            value={markdown}
-            rows={10}
-            disabled={folderFiles.length > 0}
-            onChange={(event) => {
-              setMarkdownTouched(true);
-              setMarkdown(event.target.value);
-            }}
-          />
-        </label>
-        <label className="field">
-          <span>Folder Upload</span>
-          <input
-            type="file"
-            multiple
-            {...({ webkitdirectory: "" } as Record<string, string>)}
-            onChange={(event) => void readFolder(event.target.files)}
-          />
-          <small className="skills-hint">
-            Optional: pick a skill folder to upload every file in it. The folder replaces the SKILL.md editor above.
-          </small>
-        </label>
-        {folderFiles.length > 0 && (
-          <p className="skills-hint">
-            {folderFiles.length} file{folderFiles.length === 1 ? "" : "s"} ready: {folderFiles.map((file) => file.path).join(", ")}
-          </p>
-        )}
-        {errors.length > 0 && (
-          <div className="form-error" role="alert">
-            {errors.map((message) => <div key={message}>{message}</div>)}
-          </div>
-        )}
-      </div>
-    </Modal>
-  );
-}
-
 
 /** An Agent Skills route: a skill, a pane (Orphaned Copies, Library Overview), or the bare list. */
 export type SkillsRoute = Extract<View, { name: "skills" }>;
@@ -560,6 +443,9 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   // The open skill's actions (#1962): Add Assignment… beside ⋯ on a wide pane; on a phone the
   // detail bar's ⋯ holds Add Assignment… and then the same items.
   const addAssignment = { label: "Add Assignment…", disabled: busy, onClick: () => { setError(null); setDialog("add-assignment"); } };
+  const openNewSkill = () => { setError(null); setDialog("new-skill"); };
+  /** Closing a dialog that shows its own failure takes the failure with it, rather than leaving it on the page. */
+  const closeErrorDialog = () => { setDialog(null); setError(null); };
   const detailMenu = detail ? skillDetailMenu(detail, busy, {
     onVersionHistory: () => setDialog("version-history"),
     onMachineVersion: () => { setVersionRunnerId(undefined); setDialog("machine-versions"); },
@@ -590,10 +476,13 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
           // §4.2, left to right: [Manage Groups…] [Import ▾] [+ New Skill]. Manage Groups… is the first
           // into ⋯ as the header narrows; on a phone ⋯ holds it and both imports, one item each.
           secondary={spanningEmpty ? [manageGroups] : [manageGroups, { label: "Import", items: importItems }]}
-          primary={spanningEmpty ? undefined : { label: "New Skill", onClick: () => setDialog("new-skill") }}
+          primary={spanningEmpty ? undefined : { label: "New Skill", onClick: openNewSkill }}
         />
       )}
-      {error && <Notice tone="danger" role="alert" onDismiss={() => setError(null)}>{error}</Notice>}
+      {/* New Skill and Add Assignment show their own request's failure above their footer (§7.3). */}
+      {error && dialog !== "new-skill" && dialog !== "add-assignment" && (
+        <Notice tone="danger" role="alert" onDismiss={() => setError(null)}>{error}</Notice>
+      )}
 
       {listError ? (
         <div className="master-detail-state">
@@ -614,7 +503,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
             headingLevel={2}
             actions={
               <>
-                <button type="button" className="btn primary lg" onClick={() => setDialog("new-skill")}>
+                <button type="button" className="btn primary lg" onClick={openNewSkill}>
                   <PlusIcon />
                   New Skill
                 </button>
@@ -1008,7 +897,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
         await refreshMachines();
       }} />}
       {dialog === "new-skill" && (
-        <NewSkillDialog busy={busy} onClose={() => setDialog(null)} onCreate={createSkill} />
+        <NewSkillDialog busy={busy} error={error} onClose={closeErrorDialog} onCreate={createSkill} />
       )}
       {dialog === "version-history" && detail && <SkillVersionHistoryDialog key={detail.id} skillId={detail.id} onClose={() => setDialog(null)} onRestored={async () => {
         await refreshList();
@@ -1070,12 +959,12 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       )}
       {dialog === "add-assignment" && detail && (
         <AddAssignmentDialog
-          skill={detail}
+          variant="skill"
           runners={runners}
           machineLabels={machineLabels}
           busy={busy}
           error={error}
-          onClose={() => setDialog(null)}
+          onClose={closeErrorDialog}
           onCreate={createAssignment}
         />
       )}

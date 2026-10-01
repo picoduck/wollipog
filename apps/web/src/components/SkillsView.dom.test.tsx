@@ -256,14 +256,15 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
     "an older control plane that omits capability state never becomes a false empty-history claim");
   assert.deepEqual(syncedRunnerIds, ["runner-1", "runner-1", "runner-1", "runner-1"]);
 
-  // The New Skill dialog opens with a template whose frontmatter is prefilled.
+  // New Skill asks for the name and description once: its only editor is the instructions body,
+  // with no frontmatter to edit (#1964).
   const newSkill = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === "New Skill");
   await act(async () => { newSkill!.click(); });
-  const dialog = container.querySelector('[role="dialog"]');
+  const dialog = domWindow.document.querySelector('[role="dialog"]');
   assert.ok(dialog, "New Skill opens a dialog");
-  assert.match(dialog!.textContent ?? "", /SKILL\.md/);
-  assert.match((dialog!.querySelector("textarea") as HTMLTextAreaElement).value, /^---\nname: /);
+  assert.deepEqual([...dialog!.querySelectorAll("textarea")].map((field) => field.value), ["", ""]);
+  assert.doesNotMatch(dialog!.textContent ?? "", /SKILL\.md editor|Folder Upload/);
 
   await act(async () => root.unmount());
   mountPoint.remove();

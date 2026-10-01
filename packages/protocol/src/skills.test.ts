@@ -8,10 +8,12 @@ import {
   isSkillScriptFile,
   isSkillScriptPath,
   shortenAtWordBoundary,
+  skillMarkdownFromFields,
   validSkillFilePath,
   validSkillName,
   type SkillFile,
 } from "./index.js";
+import { parseDocument } from "yaml";
 import { skillVersionDigest } from "./skills-digest.js";
 import {
   manualInvocationVariantFiles,
@@ -183,4 +185,59 @@ test("shortenAtWordBoundary keeps text that fits and otherwise cuts between word
   assert.equal(shortenAtWordBoundary("😀😀😀 😀😀", 8), "😀😀😀…");
   assert.equal(shortenAtWordBoundary("😀".repeat(10), 6), "😀😀…");
   assert.ok(shortenAtWordBoundary("😀".repeat(600), 1024).length <= 1024);
+});
+
+/** Split a generated SKILL.md into its frontmatter, parsed strictly as YAML 1.2, and its body. */
+function generatedSkillMarkdown(markdown: string): { frontmatter: Record<string, unknown>; body: string } {
+  const match = /^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/.exec(markdown);
+  assert.ok(match, `a closed frontmatter block, a blank line and the body:\n${markdown}`);
+  const document = parseDocument(match[1]!, { strict: true, uniqueKeys: true, prettyErrors: false });
+  assert.deepEqual(document.errors.map((error) => error.message), [], "the frontmatter is valid YAML");
+  assert.deepEqual(document.warnings.map((warning) => warning.message), []);
+  return { frontmatter: document.toJS() as Record<string, unknown>, body: match[2]! };
+}
+
+test("a SKILL.md built from fields parses as YAML to exactly the name and description entered", () => {
+  const descriptions = [
+    "Reviews code.",
+    "Use when: the user asks for a review: diffs, PRs.",
+    "Say \"hi\" and 'bye' # not a comment",
+    "Line one\nLine two\n\n  indented line\twith a tab",
+    "- starts like a list item, ends with a backslash \\",
+    "{ flow: mapping } [flow, sequence] & * ! | > % @ ` ? ,",
+    "Unicode: café 🎉 \u00a0nbsp \u2028line sep \u2029para sep \u0085nel \u007fdel \u009fC1 \ufffe\uffff",
+    "true",
+    "null",
+    "0x1F",
+    "x".repeat(1024),
+  ];
+  for (const description of descriptions) {
+    const { frontmatter, body } = generatedSkillMarkdown(skillMarkdownFromFields({ name: "code-review", description, body: "Do the thing." }));
+    assert.deepEqual(frontmatter, { name: "code-review", description }, JSON.stringify(description));
+    assert.equal(body, "Do the thing.\n");
+  }
+});
+
+test("a SKILL.md built from fields keeps names YAML would retype as strings", () => {
+  for (const name of ["code-review", "skill.v2_beta-1", "a", "1", "1.5", "1e3", "0x1f", "0o7", "true", "yes", "no", "on", "off", "y", "n", "null", "2026-09-30"]) {
+    const markdown = skillMarkdownFromFields({ name, description: "Does things.", body: "" });
+    assert.deepEqual(generatedSkillMarkdown(markdown).frontmatter, { name, description: "Does things." }, name);
+  }
+  assert.match(skillMarkdownFromFields({ name: "code-review", description: "", body: "" }), /^---\nname: code-review\n---\n/,
+    "an ordinary name stays a plain scalar");
+});
+
+test("a SKILL.md built from fields leaves out an empty description and keeps the body as written", () => {
+  const markdown = skillMarkdownFromFields({ name: "notes", description: "", body: "\n\n# Notes\n\nKeep them.\n\n---\n\nnot frontmatter" });
+  assert.deepEqual(generatedSkillMarkdown(markdown), {
+    frontmatter: { name: "notes" },
+    body: "# Notes\n\nKeep them.\n\n---\n\nnot frontmatter\n",
+  });
+  assert.equal(skillMarkdownFromFields({ name: "notes", description: "", body: "" }), "---\nname: notes\n---\n\n");
+});
+
+test("the manual-invocation variant of a SKILL.md built from fields stays valid YAML", () => {
+  const description = "Use when: asked.\nSecond \"line\".";
+  const variant = withManualInvocationFrontmatter(skillMarkdownFromFields({ name: "code-review", description, body: "Body." }));
+  assert.deepEqual(generatedSkillMarkdown(variant).frontmatter, { "disable-model-invocation": true, name: "code-review", description });
 });

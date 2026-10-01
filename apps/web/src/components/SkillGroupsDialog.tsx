@@ -63,7 +63,7 @@ export function SkillGroupsDialog({ runners, machineLabels, onClose, onChanged }
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   };
-  if (adding && selected) return <AddAssignmentDialog skill={{ id: selected.id, name: `all current and future members of ${selected.name}` }} runners={runners} machineLabels={machineLabels} busy={busy}
+  if (adding && selected) return <AddAssignmentDialog variant="group" groupName={selected.name} runners={runners} machineLabels={machineLabels} busy={busy}
     error={error} onClose={() => { if (!busy) { setAdding(false); setError(null); } }} onCreate={input => mutate(() => api.createSkillGroupAssignment(selected.id, input))} />;
   return <Modal title="Manage Skill Groups" size="lg" onClose={() => { if (!busy) onClose(); }} footer={<button className="btn" type="button" disabled={busy} onClick={onClose}>Close</button>}>
     <div className="form skills-machine-import skill-groups-dialog">

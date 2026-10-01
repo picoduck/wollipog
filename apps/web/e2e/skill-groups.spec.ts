@@ -48,7 +48,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.getByRole("button", { name: /^Machine:/ }).click();
     await page.getByRole("option", { name: "Build Machine" }).click();
     await page.getByRole("button", { name: /^Agents:/ }).click();
-    await page.getByRole("option", { name: "Claude", exact: true }).click();
+    await page.getByRole("option", { name: "Claude Claude Code", exact: true }).click();
     await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
     await expect(page.getByRole("button", { name: "Disable Assignment" })).toBeVisible();
     expect(fixture.writes.find(write => write.path.endsWith("/assignments"))?.body).toEqual({ scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "agent", agentId: "claude" }, invocation: "agent" });

@@ -51,6 +51,13 @@ const runner: RunnerView = {
       driver: "claude-code",
       available: true,
     },
+    // `?dialogs=1` (#1964): one agent of each other type, for Add Assignment's lists and its
+    // Manual Only warning.
+    ...(new URLSearchParams(location.search).has("dialogs") ? [
+      { id: "codex-review", name: "Codex Review", command: "codex", args: [], env: {}, driver: "codex" as const, available: true },
+      { id: "codex-app", name: "Codex App", command: "codex", args: [], env: {}, driver: "codex-app-server" as const, available: true },
+      { id: "pi", name: "Pi Agent", command: "pi", args: [], env: {}, driver: "pi" as const, available: true },
+    ] : []),
     ...(new URLSearchParams(location.search).has("matrix") ? [
       { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" as const, available: true },
       { id: "wsl", name: "WSL Codex", command: "codex", args: [], env: {}, driver: "codex" as const, context: { kind: "wsl" as const, distro: "Ubuntu" }, available: true },

@@ -22,7 +22,6 @@ import {
   type UnmanagedSkillInfo,
 } from "@wollipog/protocol";
 import { accountLabelText } from "./personal-identifiers.js";
-import { driverKindLabel } from "./agent-presentation.js";
 // A cycle (the matrix reads invocationLabel and skillEligibleAgents from here) that only function
 // declarations cross, so neither module reads the other while it is still evaluating.
 import { skillAgentMatrixCell } from "./skill-assignment-matrix.js";
@@ -708,9 +707,7 @@ export function describeAgentSelector(
   selector: SkillAgentSelector,
   agents: ReadonlyArray<Pick<AgentDefinition, "id" | "name">> = [],
 ): string {
-  if (selector.kind === "driver") {
-    return driverKindLabel(selector.driver as Parameters<typeof driverKindLabel>[0]);
-  }
+  if (selector.kind === "driver") return agentTypeLabel(selector.driver);
   if (selector.kind === "agent") {
     return agents.find((agent) => agent.id === selector.agentId)?.name ?? selector.agentId;
   }
@@ -721,8 +718,35 @@ export function invocationLabel(invocation: SkillInvocationPolicy): string {
   return invocation === "manual" ? "Manual Only" : "Agent Invocable";
 }
 
-/** Drivers the runner reconciler can deploy to. */
-const DEPLOYABLE_DRIVERS = new Set(["claude-code", "codex", "codex-app-server", "pi"]);
+/** Agent types the runner reconciler can deploy to, in the order the assignment pickers list them. */
+export const SKILL_AGENT_TYPES = ["claude-code", "codex", "codex-app-server", "pi"] as const;
+const DEPLOYABLE_DRIVERS = new Set<string>(SKILL_AGENT_TYPES);
+
+/** An agent type as a person assigning a skill knows it: the tool, not the driver protocol.
+ * `driverKindLabel` keeps the protocol names ("Codex Non-Interactive") for Agents settings. */
+export function agentTypeLabel(driver: string): string {
+  if (driver === "claude-code") return "Claude Code";
+  if (driver === "codex") return "Codex (Command Line)";
+  if (driver === "codex-app-server") return "Codex (App Server)";
+  if (driver === "pi") return "Pi";
+  return driver;
+}
+
+/** Only Claude Code honours `disable-model-invocation`; the runner reports a Manual Only target on
+ * any other agent as unsupported. */
+export function supportsManualOnly(driver: string | undefined): boolean {
+  return driver === "claude-code";
+}
+
+/** The agents among `agents` an assignment's selector reaches. */
+export function agentsReachedBySelector<A extends Pick<AgentDefinition, "id" | "driver">>(
+  agents: ReadonlyArray<A>,
+  selector: SkillAgentSelector,
+): A[] {
+  if (selector.kind === "driver") return agents.filter((agent) => agent.driver === selector.driver);
+  if (selector.kind === "agent") return agents.filter((agent) => agent.id === selector.agentId);
+  return [...agents];
+}
 
 /** Agents on this machine that skill deployment can actually reach. The pickers list these so an
  * assignment cannot be aimed at an ACP or unsupported execution context. */
@@ -931,10 +955,15 @@ export function skillMarkdownBody(markdown: string): string {
 }
 
 export function validateSkillDraft(input: { name: string; files: SkillFile[] }): string[] {
+  const nameError = skillNameError(input.name);
+  return [...(nameError ? [nameError] : []), ...validateSkillFiles(input)];
+}
+
+/** The draft's file errors: count, paths, sizes, and a top-level SKILL.md whose frontmatter name
+ * is `name`. The name itself is checked by `skillNameError`; without a usable name the frontmatter
+ * name is not compared. */
+export function validateSkillFiles(input: { name?: string; files: SkillFile[] }): string[] {
   const errors: string[] = [];
-  if (!validSkillName(input.name)) {
-    errors.push("Skill names are lowercase letters, digits, dots, dashes, or underscores (max 64 characters) and cannot start with a dot.");
-  }
   if (input.files.length === 0) {
     errors.push("A skill needs at least a SKILL.md file.");
     return errors;
@@ -962,14 +991,17 @@ export function validateSkillDraft(input: { name: string; files: SkillFile[] }):
     errors.push("SKILL.md must exist at the top level of the skill.");
   } else if (skillMd.encoding === "utf8") {
     const frontmatterName = skillMarkdownFrontmatterName(skillMd.content);
-    if (frontmatterName !== null && frontmatterName !== input.name) {
+    if (input.name !== undefined && frontmatterName !== null && frontmatterName !== input.name) {
       errors.push(`The SKILL.md frontmatter name "${frontmatterName}" must match the skill name "${input.name}".`);
     }
   }
   return errors;
 }
 
-/** The SKILL.md a fresh New Skill dialog starts from. */
-export function skillMarkdownTemplate(name: string, description: string): string {
-  return `---\nname: ${name || "my-skill"}\ndescription: ${description || "What this skill helps an agent do."}\n---\n\n`;
+/** Why a New Skill name is not usable, in one sentence, or null when it is (§8.5). */
+export function skillNameError(name: string): string | null {
+  if (!name) return "Enter a name for the skill.";
+  if (validSkillName(name)) return null;
+  if (!/^[a-z0-9]/.test(name)) return "Start with a lowercase letter or digit.";
+  return "Use lowercase letters, digits, dots, dashes or underscores.";
 }

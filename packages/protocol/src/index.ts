@@ -1621,6 +1621,32 @@ export function validSkillName(name: string): boolean {
   return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name);
 }
 
+/** Plain scalars YAML would read as something other than a string (YAML 1.1 and 1.2 booleans and
+ * nulls), which a valid skill name can spell. */
+const YAML_PLAIN_NON_STRINGS = new Set(["y", "n", "yes", "no", "on", "off", "true", "false", "null"]);
+
+/** A YAML double-quoted scalar that is also a JSON string, so YAML parsers and the runner's
+ * JSON-based unquoting read the same text back. JSON leaves DEL, the C1 controls, the line and
+ * paragraph separators and the two noncharacters raw; YAML forbids or folds them, so they are
+ * escaped too. */
+function yamlQuoted(value: string): string {
+  return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029\ufffe\uffff]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/** Build a SKILL.md from a skill's name, description and instructions body. The frontmatter is
+ * generated, never hand-edited: the description is always one double-quoted line, so line breaks,
+ * colons and quotes survive both YAML parsers and the line-based readers in this repository, and
+ * the name is quoted only where YAML would read it as a number, boolean or null. An empty
+ * description is left out rather than written as "". */
+export function skillMarkdownFromFields(input: { name: string; description: string; body: string }): string {
+  const plainName = /^[a-z][a-z0-9._-]*$/.test(input.name) && !YAML_PLAIN_NON_STRINGS.has(input.name);
+  const name = plainName ? input.name : yamlQuoted(input.name);
+  const description = input.description ? `description: ${yamlQuoted(input.description)}\n` : "";
+  const body = input.body.replace(/^\n+/, "");
+  return `---\nname: ${name}\n${description}---\n\n${body}${body && !body.endsWith("\n") ? "\n" : ""}`;
+}
+
 /** Validate a relative POSIX path inside a skill directory without ever allowing an absolute,
  * parent-relative, backslashed, or drive-lettered target. Unlike normalizeSourcePath this never
  * rewrites: the exact wire path participates in the version digest and must already be canonical. */

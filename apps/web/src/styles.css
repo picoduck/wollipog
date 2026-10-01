@@ -9718,6 +9718,58 @@ button.file-head.source-path-link {
 .field-row > .field {
   min-width: 0;
 }
+/* Field parts (§8.1, §8.5). `.field-head` is the label row, with room for a control beside the
+   label (Instructions' Write | Upload Folder). The helper sits under the control and the error
+   (FieldError.tsx) replaces it; `.field-foot` puts a counter at the helper's end. */
+.field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.field-head > :is(label, span):first-child {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.field-helper {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.field-foot {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+.field-foot > .field-helper {
+  flex: 1;
+  min-width: 0;
+}
+.field-counter {
+  flex: none;
+  color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.field-counter.is-near-limit { color: var(--amber-on-tint); }
+.field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: 0;
+  color: var(--danger-text);
+  font: var(--type-small);
+}
+.field-error-icon {
+  flex: none;
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  margin-top: 1px;
+}
+.field :is(input, textarea)[aria-invalid="true"] { border-color: var(--red); }
 /* Workspace: dropdown + Browse, or the chosen ad-hoc directory */
 .ws-select {
   display: flex;
@@ -14369,6 +14421,52 @@ body.shell-dock-dragging * {
 .skills-orphans li + li { border-top: 1px dashed var(--border); padding-top: 12px; }
 .skills-orphan-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .skills-hint { color: var(--text-dim); font-size: var(--text-sm); line-height: 1.5; margin: 0; }
+/* New Skill (NewSkillDialog.tsx). The Upload Folder dropzone is the §8.4 file picker: an icon, a
+   sentence and Choose Folder…, never the native "Choose Files" control. */
+.skill-dropzone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 72px;
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--control-outline);
+  border-radius: var(--radius-sm);
+  background: var(--field-bg);
+  color: var(--text-dim);
+  text-align: center;
+}
+.skill-dropzone.is-dragging {
+  border-style: solid;
+  border-color: var(--focus);
+  background: color-mix(in srgb, var(--accent) 7%, var(--field-bg));
+}
+.skill-dropzone-icon { flex: none; }
+.skill-upload-files {
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  list-style: none;
+}
+.skill-upload-file {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--row-h);
+  padding: 0 var(--space-1) 0 var(--space-3);
+}
+.skill-upload-file + .skill-upload-file { border-top: 1px solid var(--border); }
+.skill-upload-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .skills-target-unavailable { border-left: 2px solid var(--warning); padding-left: 8px; overflow-wrap: anywhere; }
 
 

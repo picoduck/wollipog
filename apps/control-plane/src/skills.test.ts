@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   SKILL_MAX_FILES,
+  skillMarkdownFromFields,
   type AgentDefinition,
   type ResourceScope,
   type RunnerMetadata,
@@ -49,6 +50,22 @@ test("readSkillFrontmatter bounds values and tolerates a BOM", () => {
     content: `---\nname: wide\ndescription: ${"😀".repeat(600)}\n---\n` }] });
   assert.ok(wide.ok);
   assert.ok(wide.description!.length <= 1024);
+});
+
+test("readSkillFrontmatter reads back the name and a one-line description of a SKILL.md built from fields", () => {
+  // The New Skill dialog writes this frontmatter. The reader is line-based, not YAML: it keeps a
+  // one-line description with colons exactly; escapes stay escaped, which is why the dialog also
+  // sends the description explicitly and the explicit one is what the library stores.
+  for (const name of ["code-review", "1.5", "true"]) {
+    const description = "Use when: the user asks for a review, or 'checks' a PR.";
+    const content = skillMarkdownFromFields({ name, description, body: "Review the diff." });
+    assert.deepEqual(readSkillFrontmatter(content), { name, description }, name);
+  }
+  const description = "Line one: colons.\nLine two \"quoted\".";
+  const content = skillMarkdownFromFields({ name: "code-review", description, body: "Review the diff." });
+  const created = validateSkillPayload({ name: "code-review", description, files: [{ path: "SKILL.md", content, encoding: "utf8" }] });
+  assert.ok(created.ok, created.ok ? "" : created.error);
+  assert.equal(created.description, description, "the explicit description is stored exactly");
 });
 
 /* ------------------------------- Validation ------------------------------ */

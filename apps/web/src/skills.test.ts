@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SKILL_MAX_FILES, type RunnerView, type SkillFile } from "@wollipog/protocol";
+import { SKILL_MAX_FILES, skillMarkdownFromFields, type RunnerView, type SkillFile } from "@wollipog/protocol";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -30,7 +30,7 @@ import {
   skillListDescription,
   skillMarkdownBody,
   skillMarkdownFrontmatterName,
-  skillMarkdownTemplate,
+  skillNameError,
   skillOfflineMachineSentence,
   skillOverviewAttention,
   skillRecentChanges,
@@ -39,6 +39,10 @@ import {
   skillUncheckedMachineSentence,
   skillVersionChangeDetail,
   validateSkillDraft,
+  validateSkillFiles,
+  agentTypeLabel,
+  agentsReachedBySelector,
+  supportsManualOnly,
   type RunnerSkillsResponse,
   type SkillSummary,
 } from "./skills.js";
@@ -356,11 +360,45 @@ test("assignment presentation names machines, drivers, agents, and invocation po
   assert.equal(describeAssignmentScope({ scopeKind: "runner", runnerId: "r1" }, () => "Build Machine"), "Build Machine");
   assert.equal(describeAssignmentScope({ scopeKind: "runner", runnerId: "r1" }, () => undefined), "r1");
   assert.equal(describeAgentSelector({ kind: "all" }), "All Agents");
-  assert.equal(describeAgentSelector({ kind: "driver", driver: "claude-code" }), "Claude Code Native");
+  assert.equal(describeAgentSelector({ kind: "driver", driver: "claude-code" }), "Claude Code");
+  assert.equal(describeAgentSelector({ kind: "driver", driver: "codex" }), "Codex (Command Line)");
   assert.equal(describeAgentSelector({ kind: "agent", agentId: "claude" }, [{ id: "claude", name: "Claude" }]), "Claude");
   assert.equal(describeAgentSelector({ kind: "agent", agentId: "gone" }, []), "gone");
   assert.equal(invocationLabel("agent"), "Agent Invocable");
   assert.equal(invocationLabel("manual"), "Manual Only");
+});
+
+test("agent types are named as the tool, never the driver protocol", () => {
+  assert.deepEqual(["claude-code", "codex", "codex-app-server", "pi"].map(agentTypeLabel),
+    ["Claude Code", "Codex (Command Line)", "Codex (App Server)", "Pi"]);
+  for (const driver of ["claude-code", "codex", "codex-app-server", "pi"]) {
+    assert.doesNotMatch(agentTypeLabel(driver), /Native|Non-Interactive|RPC/);
+  }
+});
+
+test("Manual Only reaches only Claude Code, and a selector reaches the agents it names", () => {
+  assert.deepEqual(["claude-code", "codex", "codex-app-server", "pi", undefined].map(supportsManualOnly),
+    [true, false, false, false, false]);
+  const agents = [
+    { id: "claude", driver: "claude-code" as const },
+    { id: "codex", driver: "codex" as const },
+    { id: "codex-2", driver: "codex" as const },
+  ];
+  assert.deepEqual(agentsReachedBySelector(agents, { kind: "all" }).map((agent) => agent.id), ["claude", "codex", "codex-2"]);
+  assert.deepEqual(agentsReachedBySelector(agents, { kind: "driver", driver: "codex" }).map((agent) => agent.id), ["codex", "codex-2"]);
+  assert.deepEqual(agentsReachedBySelector(agents, { kind: "agent", agentId: "claude" }).map((agent) => agent.id), ["claude"]);
+  assert.deepEqual(agentsReachedBySelector(agents, { kind: "agent", agentId: "gone" }), []);
+});
+
+test("a New Skill name error says what is wrong and how to fix it", () => {
+  assert.equal(skillNameError("code-review"), null);
+  assert.equal(skillNameError("v2.skill_x"), null);
+  assert.equal(skillNameError(""), "Enter a name for the skill.");
+  assert.equal(skillNameError(".hidden"), "Start with a lowercase letter or digit.");
+  assert.equal(skillNameError("-dash"), "Start with a lowercase letter or digit.");
+  assert.equal(skillNameError("Code Review"), "Start with a lowercase letter or digit.");
+  assert.equal(skillNameError("code review"), "Use lowercase letters, digits, dots, dashes or underscores.");
+  assert.equal(skillNameError("code/review"), "Use lowercase letters, digits, dots, dashes or underscores.");
 });
 
 test("deployable native agents are eligible and WSL agents require runner capability", () => {
@@ -551,7 +589,11 @@ test("draft validation mirrors the protocol validators and limits", () => {
   const md = (name: string): SkillFile => ({ path: "SKILL.md", content: `---\nname: ${name}\n---\nBody\n`, encoding: "utf8" });
   assert.deepEqual(validateSkillDraft({ name: "code-review", files: [md("code-review")] }), []);
 
-  assert.ok(validateSkillDraft({ name: "Bad Name", files: [md("Bad Name")] }).length > 0);
+  assert.deepEqual(validateSkillDraft({ name: "Bad Name", files: [md("Bad Name")] }), ["Start with a lowercase letter or digit."]);
+  // Without a usable name the files are still checked, but not against the name.
+  assert.deepEqual(validateSkillFiles({ files: [md("other-name")] }), []);
+  assert.ok(validateSkillFiles({ name: "code-review", files: [md("other-name")] })
+    .some((error) => error.includes("must match the skill name")));
   assert.ok(validateSkillDraft({ name: "code-review", files: [] })[0]!.includes("SKILL.md"));
   assert.ok(validateSkillDraft({ name: "code-review", files: [{ path: "notes.md", content: "x", encoding: "utf8" }] })
     .some((error) => error.includes("SKILL.md must exist")));
@@ -576,7 +618,12 @@ test("SKILL.md helpers read and strip frontmatter the same line-based way", () =
   assert.equal(skillMarkdownFrontmatterName("# no frontmatter"), null);
   assert.equal(skillMarkdownBody(markdown), "# Usage\n");
   assert.equal(skillMarkdownBody("plain body"), "plain body");
-  assert.equal(skillMarkdownFrontmatterName(skillMarkdownTemplate("my-skill", "Does things")), "my-skill");
+  // New Skill builds SKILL.md from its fields; every reader here agrees on the name it wrote.
+  for (const name of ["my-skill", "1.5", "true"]) {
+    const built = skillMarkdownFromFields({ name, description: "Does: things, \"quoted\".\nTwice.", body: "# Usage\n" });
+    assert.equal(skillMarkdownFrontmatterName(built), name);
+    assert.equal(skillMarkdownBody(built), "# Usage\n");
+  }
 });
 
 test("orphaned copies are read defensively and addressed without paths", () => {
