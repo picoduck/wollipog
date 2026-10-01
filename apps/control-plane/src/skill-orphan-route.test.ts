@@ -147,6 +147,33 @@ test("orphaned copies are kept-aside copies and edited copies of deleted skills,
   ], "a copy of another organization's skill, malformed entries, and drift of an existing skill are not orphaned here");
 });
 
+test("an edited copy of a deleted skill carries when the library deleted it, and a copy orphaned before the record has no date", (t) => {
+  const { db, report } = setup(t);
+  const retired = payload("retired", "Library");
+  const create = () => db.createSkill({ name: "retired", files: retired.files, manifest: retired.manifest, digest: retired.digest });
+  assert.equal(db.deleteSkill(create().id, 1_700_000_000_000), true);
+  const drift = [
+    { name: "retired", digest: "1".repeat(64), variant: "agent" as const, observedDigest: "2".repeat(64), held: false },
+    // Never in this library's deletion record: deleted before it existed, or by an older control plane.
+    { name: "legacy", digest: "3".repeat(64), variant: "manual" as const, observedDigest: "4".repeat(64), held: true },
+  ];
+  report({ drift });
+  assert.deepEqual(listOrphanedSkillCopies(db, owner, "runner-1"), [
+    { kind: "deleted_skill", name: "legacy", digest: "3".repeat(64), variant: "manual", observedDigest: "4".repeat(64), held: true },
+    { kind: "deleted_skill", name: "retired", digest: "1".repeat(64), variant: "agent", observedDigest: "2".repeat(64),
+      held: false, skillDeletedAt: 1_700_000_000_000 },
+  ], "only a deletion the library recorded is dated; nothing is invented for an older one");
+
+  const again = create();
+  assert.equal(db.getSkillDeletedAt("retired"), null, "a skill that takes the name again clears the record");
+  assert.deepEqual(listOrphanedSkillCopies(db, owner, "runner-1").map((copy) => copy.name), ["legacy"]);
+  assert.equal(db.deleteSkill(again.id, 1_800_000_000_000), true);
+  assert.equal(listOrphanedSkillCopies(db, owner, "runner-1")[1]?.skillDeletedAt, 1_800_000_000_000,
+    "a later deletion of the name is the one the copy shows");
+  assert.equal(db.deleteSkill(again.id, 1_900_000_000_000), false);
+  assert.equal(db.getSkillDeletedAt("retired"), 1_800_000_000_000, "deleting a missing skill records nothing");
+});
+
 test("an older runner's kept-aside report is never stored", (t) => {
   const { db, report } = setup(t, { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift });
   report({ keptAside: [{ id: randomUUID(), name: "alpha", observedDigest: "b".repeat(64) }] });

@@ -62,6 +62,9 @@ export interface OrphanedSkillCopy {
   observedFingerprint?: string;
   /** deleted_skill: the runner's links still serve this copy. */
   held?: boolean;
+  /** deleted_skill: when the library deleted the skill with this name; absent when the deletion
+   * predates the record, or from an older control plane. */
+  skillDeletedAt?: number;
   detail?: string;
   /** kept_aside: the accessible library skill with the copy's name, which an import updates. */
   skillId?: string;
@@ -80,6 +83,7 @@ export function listOrphanedSkillCopies(db: ControlPlaneDb, principal: AuthPrinc
   }
   for (const entry of state.drift) {
     if (db.getSkillByName(entry.name)) continue;
+    const skillDeletedAt = db.getSkillDeletedAt(entry.name);
     copies.push({
       kind: "deleted_skill",
       name: entry.name,
@@ -87,6 +91,7 @@ export function listOrphanedSkillCopies(db: ControlPlaneDb, principal: AuthPrinc
       variant: entry.variant,
       ...(entry.observedDigest ? { observedDigest: entry.observedDigest } : {}),
       held: entry.held,
+      ...(skillDeletedAt === null ? {} : { skillDeletedAt }),
       ...(entry.detail ? { detail: entry.detail } : {}),
     });
   }

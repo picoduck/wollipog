@@ -139,7 +139,10 @@ test("owned group rules expand changing membership, respect direct overrides and
   assert.ok(pushed.some(p => p.runnerId === "one"), "membership removal sends authoritative sync");
   await app.inject({ method: "PUT", url: `/api/skills/${skill.id}`, payload: { groupId: group.id } });
   pushed.length = 0;
+  const beforeDelete = Date.now();
   assert.equal((await app.inject({ method: "DELETE", url: `/api/skills/${skill.id}` })).statusCode, 204);
+  const deletedAt = db.getSkillDeletedAt(skill.name);
+  assert.ok(deletedAt !== null && deletedAt >= beforeDelete && deletedAt <= Date.now(), "the library records when it deleted the skill");
   assert.ok(pushed.some(p => p.runnerId === "one"), "deletion notifies group-only deployment");
   assert.deepEqual(resolveDesiredSkills(db, "one"), []);
   assert.equal((await app.inject({ method: "DELETE", url: `${rules}/${rule.id}` })).statusCode, 204);

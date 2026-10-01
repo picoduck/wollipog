@@ -267,6 +267,30 @@ test("the orphaned-copy review of a deleted skill: Import Orphaned Copy, its fac
   await unmount();
 });
 
+test("the orphaned-copy review of a deleted skill says when the library deleted it, only when that was recorded (#2289)", async () => {
+  const skillDeletedAt = Date.UTC(2026, 8, 3, 14, 2);
+  const ref = { kind: "deleted_skill" as const, name: "triage-helper", digest, variant: "agent" as const, observedDigest };
+  let unmount = await mount(orphanClient({ name: "triage-helper", copy: ref }),
+    <SkillOrphanImportDialog runnerId="runner-1" machineLabel="Build Machine" copy={{ ...ref, held: true, skillDeletedAt }}
+      onClose={() => undefined} onImported={async () => undefined} />);
+  assert.deepEqual(facts(), {
+    "Machine": "Build Machine",
+    "Deleted Skill": "triage-helper",
+    "Deleted On": new Date(skillDeletedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }),
+    "Result": "New skill",
+  });
+  await unmount();
+
+  // An older control plane omits the field, and a malformed one is ignored: the facts stay as before.
+  for (const absent of [undefined, Number.NaN, "2026-09-03" as unknown as number]) {
+    unmount = await mount(orphanClient({ name: "triage-helper", copy: ref }),
+      <SkillOrphanImportDialog runnerId="runner-1" machineLabel="Build Machine" copy={{ ...ref, held: true, skillDeletedAt: absent }}
+        onClose={() => undefined} onImported={async () => undefined} />);
+    assert.deepEqual(facts(), { "Machine": "Build Machine", "Deleted Skill": "triage-helper", "Result": "New skill" });
+    await unmount();
+  }
+});
+
 test("the orphaned-copy review of a kept-aside Manual Only copy that updates a skill", async () => {
   const keptAsideAt = Date.UTC(2026, 8, 3, 14, 2);
   const copy: OrphanedSkillCopy = { kind: "kept_aside", id: "copy-1", name: "code-review", digest, variant: "manual", keptAsideAt,

@@ -364,3 +364,63 @@ test("loading the pane with no copies shows All Resolved, and the list has no Or
   await expect(page.locator(".master-detail-list .row-title").first()).toBeVisible();
   await expect(page.locator(".master-detail-list .row", { hasText: "Orphaned Copies" })).toHaveCount(0);
 });
+
+/** #2289: a deleted skill's copy says when the library deleted it, and a copy whose deletion was not
+ * recorded (an older control plane, or a deletion before the record) keeps the undated text. */
+const skillDeletedAt = Date.UTC(2026, 8, 3, 12, 0);
+const deletions = {
+  ...current,
+  orphaned: [
+    { kind: "deleted_skill", name: "triage-helper", digest, variant: "agent", observedDigest: "5d3a".padEnd(64, "0"), held: true, skillDeletedAt },
+    { kind: "deleted_skill", name: "old-triage", digest, variant: "manual", observedDigest: "6e4b".padEnd(64, "0"), held: false },
+  ] as Array<Record<string, unknown>>,
+};
+
+async function previewDeleted(page: Page, name: string) {
+  await page.route("**/api/runners/runner-1/orphaned-skill-copies/preview", (route) => route.fulfill({ json: {
+    previewId: "review-1",
+    copy: { ...(route.request().postDataJSON() as object), observedDigest: "5d3a".padEnd(64, "0") },
+    name,
+    files: [{ path: "SKILL.md", content: `---\nname: ${name}\n---\n\nTriage new issues.\n`, encoding: "utf8" }],
+    previousFiles: [],
+    digest: "5d3a".padEnd(64, "0"), importable: true, disposition: "new", assignmentCount: 0,
+  } }));
+}
+
+for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
+  test(`a deleted skill's copy shows its deletion date in the row and the review, only when recorded, at ${width} in ${theme}`, async ({ page }, info) => {
+    const { entry } = await openOrphans(page, width, theme, { first: deletions });
+    await entry.click();
+    const build = machine(page, "Build Machine");
+    await expect(rows(build).locator(".row-title")).toHaveText(["triage-helper", "old-triage"]);
+    await expect(row(build, "triage-helper").locator(".row-sub"))
+      .toHaveText("Its skill was deleted from the library on Sep 3, 2026; links still serve this copy. Agent Invocable.");
+    // The date's spaces never break, as in "Kept aside by a restore on <date>".
+    expect(await row(build, "triage-helper").locator(".row-sub").evaluate((sub) => sub.textContent))
+      .toContain("on Sep 3, 2026;");
+    await expect(row(build, "old-triage").locator(".row-sub"))
+      .toHaveText("Its skill was deleted from the library; no link serves it. Manual Only.");
+    expect(await noHorizontalOverflow(page)).toBe(true);
+    await page.mouse.move(0, 0);
+    await page.screenshot({ path: info.outputPath(`deleted-dates-list-${width}-${theme}.png`), fullPage: true });
+
+    const dialog = page.getByRole("dialog", { name: "Import Orphaned Copy" });
+    const expected = await page.evaluate((at) => new Date(at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }), skillDeletedAt);
+    for (const [name, dated] of [["triage-helper", true], ["old-triage", false]] as const) {
+      await previewDeleted(page, name);
+      await importButton(row(build, name)).click();
+      await expect(dialog.locator(".skill-diff-file")).toHaveCount(1);
+      await expect(dialog.locator(".skill-review-facts dt"))
+        .toHaveText(dated ? ["Machine", "Deleted Skill", "Deleted On", "Result"] : ["Machine", "Deleted Skill", "Result"]);
+      await expect(dialog.locator(".skill-review-facts dd"))
+        .toHaveText(dated ? ["Build Machine", name, expected, "New skill"] : ["Build Machine", name, "New skill"]);
+      const clipped = await dialog.locator(".skill-review-facts dd").evaluateAll((values) =>
+        values.filter((value) => value.scrollWidth > value.clientWidth).map((value) => value.textContent));
+      expect(clipped, "every fact is whole").toEqual([]);
+      await page.mouse.move(0, 0);
+      await page.screenshot({ path: info.outputPath(`deleted-dates-review-${dated ? "dated" : "undated"}-${width}-${theme}.png`) });
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+      await expect(dialog).toBeHidden();
+    }
+  });
+}

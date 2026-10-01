@@ -659,6 +659,8 @@ test("orphaned copies are read defensively and addressed without paths", () => {
     orphaned: [
       { kind: "kept_aside", id: "0f0e0d0c-0b0a-4908-8706-050403020100", name: "notes" },
       { kind: "deleted_skill", name: "retired", digest: "d".repeat(64), variant: "manual" },
+      { kind: "deleted_skill", name: "dated", digest: "e".repeat(64), variant: "agent", skillDeletedAt: 1_700_000_000_000 },
+      { kind: "deleted_skill", name: "misdated", digest: "f".repeat(64), variant: "agent", skillDeletedAt: "yesterday" },
       { kind: "deleted_skill", name: "broken", digest: "d".repeat(64), variant: "other" },
       { kind: "unknown" },
       null,
@@ -668,9 +670,17 @@ test("orphaned copies are read defensively and addressed without paths", () => {
   assert.deepEqual(copies.map((copy) => orphanedCopyRef(copy)), [
     { kind: "kept_aside", id: "0f0e0d0c-0b0a-4908-8706-050403020100" },
     { kind: "deleted_skill", name: "retired", digest: "d".repeat(64), variant: "manual" },
-  ]);
+    { kind: "deleted_skill", name: "dated", digest: "e".repeat(64), variant: "agent" },
+    { kind: "deleted_skill", name: "misdated", digest: "f".repeat(64), variant: "agent" },
+  ], "a deletion date is optional (#2289): a copy from an older control plane, or with a malformed date, is still listed");
   assert.deepEqual(copies.map(orphanedCopyKey), [
     "kept:0f0e0d0c-0b0a-4908-8706-050403020100", `deleted:retired:manual:${"d".repeat(64)}`,
+    `deleted:dated:agent:${"e".repeat(64)}`, `deleted:misdated:agent:${"f".repeat(64)}`,
+  ]);
+  assert.deepEqual(copies.slice(1).map((copy) => orphanedCopySentence(copy, { locale: "en-US", timeZone: "UTC" })), [
+    "Its skill was deleted from the library; no link serves it. Manual Only.",
+    "Its skill was deleted from the library on Nov\u00a014,\u00a02023; no link serves it. Agent Invocable.",
+    "Its skill was deleted from the library; no link serves it. Agent Invocable.",
   ]);
   assert.deepEqual(reportedOrphanedCopies(undefined), []);
 });
@@ -688,6 +698,12 @@ test("an orphaned copy's row says what it is in one sentence, with a formatted d
     "Its skill was deleted from the library; links still serve this copy. Agent Invocable.");
   assert.equal(orphanedCopySentence({ kind: "deleted_skill", name: "x", digest: "d", variant: "manual", held: false }),
     "Its skill was deleted from the library; no link serves it. Manual Only.");
+  assert.equal(orphanedCopySentence({ kind: "deleted_skill", name: "x", digest: "d", variant: "agent", held: true, skillDeletedAt: at }, options),
+    "Its skill was deleted from the library on Nov\u00a014,\u00a02023; links still serve this copy. Agent Invocable.", "#2289");
+  assert.equal(orphanedCopySentence({ kind: "deleted_skill", name: "x", digest: "d", variant: "manual", held: false, skillDeletedAt: at }, options),
+    "Its skill was deleted from the library on Nov\u00a014,\u00a02023; no link serves it. Manual Only.");
+  assert.equal(orphanedCopySentence({ kind: "deleted_skill", name: "x", digest: "d", variant: "manual", held: false, skillDeletedAt: Number.NaN }, options),
+    "Its skill was deleted from the library; no link serves it. Manual Only.", "a malformed date is no date");
   // A date, never a time of day that could break as "4:13:20 / PM".
   assert.doesNotMatch(orphanedCopySentence({ kind: "kept_aside", id: "a", digest: "d", keptAsideAt: at }, options), /:\d\d|PM|AM/);
 });

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import {
+  orphanedCopyDate,
   orphanedCopyRef,
   skillVersionNumber,
   type OrphanedSkillCopy,
@@ -82,6 +83,8 @@ export function SkillOrphanImportDialog({ runnerId, machineLabel, copy, onClose,
   const importLabel = disposition === "new" ? "Import as New Skill" : disposition === "identical" ? "Import Copy" : "Import as New Version";
   const name = preview?.name ?? copy.name;
   const latestName = latest === null ? null : `v${latest}`;
+  // Absent for a deletion the library did not record (#2289), which keeps the facts as they were.
+  const deletedAt = copy.kind === "deleted_skill" ? orphanedCopyDate(copy.skillDeletedAt) : null;
   const description = disposition === "identical"
     ? `These files already match the latest version of ${name}, so importing only records where they came from.`
     : `Importing adds exactly these files to the library, then ${machineLabel} discards its copy if it still matches.`;
@@ -111,6 +114,7 @@ export function SkillOrphanImportDialog({ runnerId, machineLabel, copy, onClose,
         ? { label: "Kept Aside", value: copy.keptAsideAt
           ? new Date(copy.keptAsideAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "Unknown" }
         : { label: "Deleted Skill", value: copy.name ?? "Unknown" },
+      ...(deletedAt ? [{ label: "Deleted On", value: deletedAt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) }] : []),
       { label: "Result", value: !preview ? (!busy && error ? "Unknown" : null)
         : disposition === "new" ? "New skill"
         : disposition === "update" ? `New version of ${name}`

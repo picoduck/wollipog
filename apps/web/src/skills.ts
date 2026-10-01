@@ -289,6 +289,9 @@ export interface OrphanedSkillCopy {
   observedDigest?: string;
   observedFingerprint?: string;
   held?: boolean;
+  /** deleted_skill: when the library deleted the skill (#2289); absent when the deletion predates the
+   * record, or from an older control plane. */
+  skillDeletedAt?: number;
   detail?: string;
   /** The accessible library skill with this name, which an import adds a version to. */
   skillId?: string;
@@ -357,25 +360,34 @@ export function orphanedCopyDiscardable(copy: OrphanedSkillCopy): boolean {
   return copy.kind === "deleted_skill" || !!copy.observedFingerprint;
 }
 
+/** A timestamp an orphaned copy carries, as a Date, or null when it is absent or malformed. */
+export function orphanedCopyDate(value: unknown): Date | null {
+  const at = typeof value === "number" && Number.isFinite(value) ? new Date(value) : null;
+  return at && !Number.isNaN(at.getTime()) ? at : null;
+}
+
 /**
  * The second line of an orphaned copy's row (#1974): what kind of copy it is, when a restore kept it
- * aside, and its invocation, as sentences. The date is formatted as a date, never a time of day, and
- * its spaces are non-breaking, so a wrapping line never splits it.
+ * aside or the library deleted its skill (#2289), and its invocation, as sentences. The date is
+ * formatted as a date, never a time of day, and its spaces are non-breaking, so a wrapping line never
+ * splits it.
  */
 export function orphanedCopySentence(copy: OrphanedSkillCopy, options: { locale?: string; timeZone?: string } = {}): string {
+  const date = (at: Date) => new Intl.DateTimeFormat(options.locale, {
+    dateStyle: "medium", ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+  }).format(at).replace(/\s/g, "\u00a0");
   let kind: string;
   if (copy.kind === "kept_aside") {
-    const at = typeof copy.keptAsideAt === "number" && Number.isFinite(copy.keptAsideAt) ? new Date(copy.keptAsideAt) : null;
-    kind = at && !Number.isNaN(at.getTime())
-      ? `Kept aside by a restore on ${new Intl.DateTimeFormat(options.locale, {
-        dateStyle: "medium", ...(options.timeZone ? { timeZone: options.timeZone } : {}),
-      }).format(at).replace(/\s/g, "\u00a0")}.`
+    const at = orphanedCopyDate(copy.keptAsideAt);
+    kind = at
+      ? `Kept aside by a restore on ${date(at)}.`
       // Only a copy kept aside before records existed has no record, and so no date or version.
       : copy.digest ? "Kept aside by a restore." : "Kept aside by an earlier runner.";
   } else {
-    kind = copy.held
-      ? "Its skill was deleted from the library; links still serve this copy."
-      : "Its skill was deleted from the library; no link serves it.";
+    // A deletion before the library recorded them, or from an older control plane, has no date.
+    const at = orphanedCopyDate(copy.skillDeletedAt);
+    const deleted = `Its skill was deleted from the library${at ? ` on ${date(at)}` : ""}`;
+    kind = copy.held ? `${deleted}; links still serve this copy.` : `${deleted}; no link serves it.`;
   }
   return copy.variant ? `${kind} ${invocationLabel(copy.variant)}.` : kind;
 }

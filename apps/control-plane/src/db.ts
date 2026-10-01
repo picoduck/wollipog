@@ -2618,6 +2618,14 @@ CREATE TABLE IF NOT EXISTS skill_recommendation_dismissals (
   dismissed_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, skill_id)
 );
+
+-- When the library last deleted a skill with this name, so an edited copy a machine still keeps can
+-- say when its skill was deleted (#2289). Names deleted before this table existed have no row, and a
+-- skill that takes the name again clears it.
+CREATE TABLE IF NOT EXISTS skill_deletions (
+  name       TEXT PRIMARY KEY,
+  deleted_at INTEGER NOT NULL
+);
 `;
 
 /**
@@ -7623,6 +7631,7 @@ export class ControlPlaneDb {
         `INSERT INTO skills (id, name, description, group_id, source, latest_version_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'library', ?, ?, ?)`,
       ).run(skillId, input.name, input.description ?? null, input.groupId ?? null, versionId, now, now);
+      this.stmt("DELETE FROM skill_deletions WHERE name=?").run(input.name);
       this.stmt(
         `INSERT INTO skill_versions (id, skill_id, digest, manifest, files, note, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -7637,6 +7646,13 @@ export class ControlPlaneDb {
       "SELECT id, name, description, group_id, source, latest_version_id, created_at, updated_at FROM skills WHERE id=?",
     ).get(skillId) as unknown as SkillRow | undefined;
     return row ? this.skillView(row) : null;
+  }
+
+  /** When the library last deleted a skill with this name; null when no skill holding it was deleted
+   * since deletions were recorded, or a skill holds it again. */
+  getSkillDeletedAt(name: string): number | null {
+    const row = this.stmt("SELECT deleted_at FROM skill_deletions WHERE name=?").get(name) as { deleted_at: number } | undefined;
+    return row ? row.deleted_at : null;
   }
 
   getSkillByName(name: string): SkillView | null {
@@ -8001,7 +8017,7 @@ export class ControlPlaneDb {
     return row ? this.skillVersionView(row) : null;
   }
 
-  deleteSkill(skillId: string): boolean {
+  deleteSkill(skillId: string, now = Date.now()): boolean {
     return this.atomic(() => {
       this.stmt("DELETE FROM skill_machine_versions WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_machine_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
@@ -8011,7 +8027,9 @@ export class ControlPlaneDb {
       if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
       // Deleting a built-in entry declines it: later releases never re-create it.
       this.stmt("UPDATE skill_built_ins SET skill_id=NULL, deleted_at=?, updated_at=? WHERE skill_id=?")
-        .run(Date.now(), Date.now(), skillId);
+        .run(now, now, skillId);
+      this.stmt(`INSERT INTO skill_deletions (name, deleted_at) SELECT name, ? FROM skills WHERE id=?
+                 ON CONFLICT(name) DO UPDATE SET deleted_at=excluded.deleted_at`).run(now, skillId);
       this.stmt("DELETE FROM skill_recommendation_dismissals WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_assignments WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_versions WHERE skill_id=?").run(skillId);
