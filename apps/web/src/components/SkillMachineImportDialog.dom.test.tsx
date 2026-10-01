@@ -8,6 +8,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 /**
@@ -19,9 +20,11 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
+/** Whether the window is phone-width: max-width queries match while it is set. */
+let phoneWidth = false;
 Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
-  value: (query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }),
+  value: (query: string) => ({ matches: phoneWidth && query.includes("max-width"), media: query, addEventListener() {}, removeEventListener() {} }),
 });
 for (const [name, value] of Object.entries({
   window: domWindow,
@@ -35,6 +38,8 @@ for (const [name, value] of Object.entries({
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -404,4 +409,144 @@ test("closing mid-read and opening again waits for the first read instead of mee
   assert.ok(folderRow(), "the second opening lists the folders");
   assert.ok((calls.discard ?? 0) >= 1, "the first opening's late discovery is discarded");
   await closeSecond();
+});
+
+/** #2283: a phone shows the folders or the review, so a pane change can unmount the focused control. */
+const second = { ...candidate, id: "second", name: "release-notes" };
+function twoFolders(calls: Record<string, number>, overrides: Partial<ApiClient> = {}): ApiClient {
+  const base = fakeApi(calls);
+  return { ...base,
+    discoverMachineSkills: async () => ({ discoveryId: "discovery", candidates: [candidate, second] }),
+    previewMachineSkill: async (id: string, candidateId: string) => {
+      const preview = await base.previewMachineSkill(id, candidateId);
+      return candidateId === second.id ? { ...preview, candidate: second } : preview;
+    },
+    ...overrides,
+  } as ApiClient;
+}
+const importDialog = () => dialogTitled("Import from Machine") as HTMLElement;
+const folderRows = () => [...importDialog().querySelectorAll<HTMLButtonElement>('[aria-label="Skill Folders"] > button')];
+const focused = () => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.textContent ?? null;
+const focusInDialog = () => importDialog().contains(document.activeElement);
+async function resize(phone: boolean) {
+  phoneWidth = phone;
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+  await settle();
+}
+async function choose(row: HTMLButtonElement) {
+  await act(async () => { row.focus(); });
+  await act(async () => { row.click(); });
+  await settle();
+}
+
+test("on a phone, choosing a folder moves focus to Back, and Back returns it to the chosen folder (#2283)", async () => {
+  phoneWidth = true;
+  try {
+    const unmount = await mountDialog(twoFolders({}), async () => undefined);
+    await choose(folderRows()[1]!);
+    assert.equal(folderRows().length, 0, "the review replaces the folders");
+    assert.ok(focusInDialog(), "choosing keeps focus inside the dialog");
+    assert.equal(focused(), "Back to Skill Folders");
+    // Back keeps its header button, which is Close on the list step: focus goes to the chosen folder.
+    await act(async () => { buttonNamed("Back to Skill Folders").click(); });
+    await settle();
+    assert.equal(folderRows().length, 2);
+    assert.ok(folderRows()[1] === document.activeElement, "Back returns focus to the chosen folder");
+    await unmount();
+  } finally { phoneWidth = false; }
+});
+
+test("crossing the phone breakpoint either way keeps focus inside Import from Machine (#2283)", async () => {
+  try {
+    const unmount = await mountDialog(twoFolders({}), async () => undefined);
+    // Wide: both panes show. Choosing leaves focus on the row; narrowing hides the folders.
+    await choose(folderRows()[1]!);
+    assert.ok(folderRows()[1] === document.activeElement);
+    await resize(true);
+    assert.equal(folderRows().length, 0);
+    assert.ok(focusInDialog(), "narrowing keeps focus inside the dialog");
+    assert.equal(focused(), "Back to Skill Folders");
+    // Widening keeps the header button (now Close) and the focus on it.
+    await resize(false);
+    assert.ok(focusInDialog(), "widening keeps focus inside the dialog");
+    assert.equal(focused(), "Close");
+    // Back to the list on a phone, then wider: focus a control in the review, and narrow again,
+    // which hides the review: focus goes to the chosen folder.
+    await resize(true);
+    await act(async () => { buttonNamed("Back to Skill Folders").focus(); });
+    await act(async () => { buttonNamed("Back to Skill Folders").click(); });
+    await settle();
+    await resize(false);
+    assert.ok(folderRows()[1] === document.activeElement, "widening leaves focus on the chosen folder");
+    await act(async () => { buttonNamed("Replace with Link…").focus(); });
+    assert.equal(focused(), "Replace with Link…");
+    await resize(true);
+    assertNoDomNode(importDialog().querySelector(".skill-machine-import-pane.review"), "the review is hidden on the list step");
+    assert.ok(focusInDialog(), "narrowing keeps focus inside the dialog");
+    assert.ok(folderRows()[1] === document.activeElement, "focus goes to the chosen folder");
+    await unmount();
+  } finally { phoneWidth = false; }
+});
+
+test("a pane change while an import runs leaves focus on the dialog when the folders refuse it (#2283)", async () => {
+  const importing = deferred<never>();
+  const client = twoFolders({}, {
+    previewMachineSkill: async () => ({ ...newVersion(), candidate: second }),
+    importMachineSkill: () => importing.promise,
+  });
+  try {
+    const unmount = await mountDialog(client, async () => undefined);
+    phoneWidth = true;
+    await resize(true);
+    await choose(folderRows()[1]!);
+    await act(async () => { buttonNamed("Back to Skill Folders").click(); });
+    await settle();
+    await resize(false);
+    await act(async () => { buttonNamed("Import as New Version").click(); });
+    await settle();
+    // The import is running, so every folder and the Machine field are disabled.
+    assert.ok(folderRows().every((row) => row.disabled));
+    const summary = importDialog().querySelector<HTMLElement>(".skill-machine-import-pane.review summary")!;
+    await act(async () => { summary.focus(); });
+    assert.ok(summary === document.activeElement);
+    await resize(true);
+    assert.ok(focusInDialog(), "focus stays inside the dialog while the folders are disabled");
+    assert.ok(importDialog() === document.activeElement, "the dialog itself takes focus");
+    await act(async () => { importing.reject(new Error("Stopped.")); });
+    await settle();
+    await unmount();
+  } finally { phoneWidth = false; }
+});
+
+test("choosing a machine that needs a runner update keeps focus on the Machine field (#2283)", async () => {
+  const old: RunnerView = { ...runner, runnerId: "runner-old", displayName: "Old Machine", protocolVersion: 1 };
+  const unmount = await mountDialog(twoFolders({}), async () => undefined, [runner, old]);
+  await act(async () => { machineSelect().focus(); });
+  await act(async () => { machineSelect().click(); });
+  await settle();
+  const option = [...importDialog().querySelectorAll<HTMLButtonElement>('[role="option"]')].find((entry) => entry.textContent?.includes("Old Machine"))!;
+  await act(async () => { option.focus(); });
+  await act(async () => { option.click(); });
+  await settle();
+  assert.match(importDialog().textContent ?? "", /Old Machine Needs a Runner Update/u);
+  assert.ok(focusInDialog(), "the swapped pane keeps focus inside the dialog");
+  assert.ok(machineSelect() === document.activeElement, "focus is on the Machine field");
+  await unmount();
+});
+
+test("a pane change never moves focus out of a dialog stacked over Import from Machine (#2283)", async () => {
+  try {
+    const unmount = await mountDialog(twoFolders({}), async () => undefined);
+    await choose(folderRows()[1]!);
+    await act(async () => { buttonNamed("More Actions").click(); });
+    await act(async () => { buttonNamed("Adoption Recovery…").click(); });
+    await settle();
+    const recovery = dialogTitled("Adoption Recovery");
+    const inRecovery = recovery.querySelector<HTMLButtonElement>("button:not(:disabled)")!;
+    await act(async () => { inRecovery.focus(); });
+    // Narrowing hides the folders behind it; focus stays where the person is.
+    await resize(true);
+    assert.ok(recovery.contains(document.activeElement), "focus stays in the stacked dialog");
+    await unmount();
+  } finally { phoneWidth = false; }
 });

@@ -159,6 +159,33 @@ test("at 390px a folder pushes a review step with Back, in one sheet", async ({ 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
 
+test("focus stays inside the dialog when the phone pane changes or the breakpoint is crossed (#2283)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await routeMachine(page, [codeReview, alpha], { opaque: previewOf(codeReview, "update", 2), "alpha-id": previewOf(alpha, "new") });
+  await page.goto("/skills-removals-e2e.html");
+  const dialog = await openImport(page);
+  const row = dialog.getByRole("button", { name: /^alpha/u });
+  const back = dialog.getByRole("button", { name: "Back to Skill Folders", exact: true });
+  // Choosing from the keyboard replaces the folders with the review: focus goes to Back, and Back
+  // returns it to the chosen folder.
+  await row.focus();
+  await page.keyboard.press("Enter");
+  await expect(back).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(row).toBeFocused();
+  // Wider, both panes show and choosing leaves focus on the folder; narrowing hides it, so focus
+  // goes to Back, and widening again keeps it on the same header button, now Close.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(row).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(dialog.locator(".facts")).toContainText("ResultNew Skill");
+  await expect(row).toBeFocused();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(back).toBeFocused();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+});
+
 test("a runner too old to import shows only the runner-update notice", async ({ page }) => {
   let discovered = 0;
   await page.route("**/api/runners/*/skill-snapshots", (route) => { discovered++; return route.abort(); });

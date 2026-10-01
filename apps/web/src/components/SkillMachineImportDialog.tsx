@@ -289,6 +289,54 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
   const listStep = !phone || step === "list";
   const reviewStep = !phone || step === "review";
 
+  // A phone shows one pane at a time, so choosing a folder, or crossing the breakpoint, can unmount
+  // the control that has focus, as can a Retry that starts a read or a machine change that swaps the
+  // pane; focus would fall to the page behind the sheet. After every commit, focus that was in this
+  // dialog and is now lost moves to the shown pane's first control: Back on the review step, else the
+  // chosen folder (or the first), else the Machine field. One that is disabled (all of them are
+  // while the machine is busy) passes it on, and the dialog itself takes it last. Focus that is still
+  // somewhere, such as in a dialog stacked over this one, is never moved. Back takes focus to the
+  // chosen folder too, where the person left off: the header button it stays on is Close on the list
+  // step. The dialog is found through whichever pane is shown.
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const paneRef = (pane: HTMLDivElement | null) => {
+    if (pane) dialogRef.current = pane.closest<HTMLElement>('[role="dialog"]');
+  };
+  const focusInside = useRef(false);
+  useEffect(() => {
+    const inside = (target: EventTarget | null) =>
+      !!dialogRef.current && target instanceof HTMLElement && target.closest('[role="dialog"]') === dialogRef.current;
+    // Modal focuses its card before this effect runs, so the current focus is read once here.
+    focusInside.current = inside(document.activeElement);
+    const track = (event: FocusEvent) => { focusInside.current = inside(event.target); };
+    document.addEventListener("focusin", track);
+    return () => document.removeEventListener("focusin", track);
+  }, []);
+  const backToList = useRef(false);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    // Read when the folders show: a commit that was waiting for its effects may run them first.
+    const back = backToList.current && listStep;
+    if (listStep) backToList.current = false;
+    if (!dialog?.isConnected) return;
+    const active = document.activeElement;
+    const lost = !active || active === document.body || !active.isConnected;
+    if (!(back && dialog.contains(active)) && !(lost && focusInside.current)) return;
+    const rows = [...dialog.querySelectorAll<HTMLElement>('[aria-label="Skill Folders"] > button')];
+    const targets = [
+      reviewStep && !listStep ? dialog.querySelector<HTMLElement>('button[aria-label="Back to Skill Folders"]') : null,
+      rows.find((row) => row.getAttribute("aria-current") === "true"),
+      rows[0],
+      dialog.querySelector<HTMLElement>(".skill-machine-import-pane .ui-select-trigger"),
+    ];
+    for (const target of targets) {
+      if (!target || target.getAttribute("aria-disabled") === "true") continue;
+      target.focus();
+      if (document.activeElement === target) return;
+    }
+    dialog.focus();
+  });
+
   const menu = <DialogMoreMenu label="More Actions" items={[{
     label: "Adoption Recovery…",
     disabled: !recoverySupported || busy || scanning || machineRequests > 0,
@@ -369,7 +417,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
 
   return <>
     <Modal title="Import from Machine" size="lg" className="skill-machine-import" onClose={close} headerActions={menu}
-      back={phone && step === "review" ? { label: "Back to Skill Folders", onBack: () => setStep("list") } : undefined}
+      back={phone && step === "review" ? { label: "Back to Skill Folders", onBack: () => { backToList.current = true; setStep("list"); } } : undefined}
       footer={<>
         {conflict && shown
           ? <ReviewConflict busy={busy || machineBusy} onPreviewAgain={() => void read(shown.candidate.id)} />
@@ -384,14 +432,14 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
         </BusyButton>
       </>}>
       {runner && online && !compatible
-        ? <div className="skill-machine-import-pane only">
+        ? <div ref={paneRef} className="skill-machine-import-pane only">
           {machineField}
           <Notice tone="warning" title={`${machineName} Needs a Runner Update`}>
             Update Wollipog on this machine to import its skill folders.
           </Notice>
         </div>
         : <>
-          {listStep && <div className="skill-machine-import-pane list">
+          {listStep && <div ref={paneRef} className="skill-machine-import-pane list">
             {machineField}
             <div className="skill-machine-import-head">
               <h3 className="skill-machine-import-title">Skill Folders</h3>
@@ -400,7 +448,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
             </div>
             {folderList}
           </div>}
-          {reviewStep && <div className="skill-machine-import-pane review">{review}</div>}
+          {reviewStep && <div ref={paneRef} className="skill-machine-import-pane review">{review}</div>}
         </>}
     </Modal>
     {confirmingAdoption && discovery && shown && runner && <AdoptionConfirmation discovery={discovery} preview={shown}
