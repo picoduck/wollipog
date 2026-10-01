@@ -891,6 +891,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       }
     }
     const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
+    // Refresh the launch capability observation instead of trusting the session's creation-time version.
+    meta.agentVersion = localAgent?.version;
     // A sandboxed native host launch cannot see the protections file, so its guard asks the
     // runner. No socket means no guard for that launch (and so mediation), never a file-mode guard
     // that would refuse every matched tool call.

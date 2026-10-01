@@ -39,7 +39,7 @@ export function ProjectMemorySharingSettings({ project, runners, disabled, onSav
       </form>
       {error && <p className="form-error" role="alert">{error}</p>}
     </>}
-    <p>Claude sharing applies to this Project’s accounts on the same machine. Codex keeps its native account memories; project-only sharing is unavailable in its current memory system. Other providers and container or cloud sessions do not support this choice.</p>
+    <p>Claude sharing applies to this Project’s accounts on the same machine. Codex keeps its native account memories; project-only sharing is unavailable in its current memory system. Other providers and container or cloud sessions do not support this choice. Unsupported installations retain native memory when accounts are kept separate, and refuse explicit sharing with an update instruction.</p>
     {machines.length === 0 && <p>No Locations are linked. Add a Location to use this policy.</p>}
     {machines.map((id) => {
       const runner = runners.get(id);
@@ -50,7 +50,7 @@ export function ProjectMemorySharingSettings({ project, runners, disabled, onSav
         ? "Memory Policy Unavailable — update this runner."
         : !capableClaude ? "Claude Memory Policy Unavailable — install Claude Code 2.1.284 or newer and refresh agents."
         : runner?.status !== "online" ? "Machine Offline — the saved policy will apply when it reconnects."
-        : "Claude uses the saved choice; unsupported installations refuse launch with an update instruction."}</p>;
+        : "Supported Claude installations use the saved choice. Unsupported default cases retain native memory; explicit sharing requires support."}</p>;
     })}
     <p>Changes apply after the current turn and its background work finish, before the next ordinary turn. Existing account memories and previously shared storage remain in their original locations. New managed directories start empty; existing memories are not automatically imported. Turning sharing off retains shared files and returns each account to its own saved memory. Re-enabling sharing reuses the retained shared files.</p>
   </section>;

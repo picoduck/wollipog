@@ -5,7 +5,7 @@ import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { supportsClaudeProjectMemory } from "@wollipog/protocol";
-import { prepareProjectMemory, withClaudeProjectMemory } from "./project-memory.js";
+import { effectiveProjectMemoryKey, NativeProjectMemorySettings, prepareProjectMemory, withClaudeProjectMemory } from "./project-memory.js";
 import type { SessionMeta } from "./session-store.js";
 import { runContextCommand } from "./context-command.js";
 import { resolveExecutionIsolation, buildSeatbeltProfile } from "./execution-isolation.js";
@@ -40,15 +40,20 @@ test("private/shared partitions survive switches and restart without copying cre
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("unverified Claude and non-host targets fail explicitly; Codex neither redirects nor copies global memories", async () => {
+test("unsupported defaults retain native behavior; explicit sharing fails; Codex neither redirects nor copies global memories", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-memory-gating-"));
   try {
     for (const version of [undefined, "2.1.283", "garbage"]) {
-      await assert.rejects(prepareProjectMemory({ ...meta(), agentVersion: version }, root), /requires Claude/);
+      assert.equal(await prepareProjectMemory({ ...meta(), agentVersion: version }, root), undefined);
+      assert.equal(effectiveProjectMemoryKey({ ...meta(), agentVersion: version }), "native");
+      await assert.rejects(prepareProjectMemory({ ...meta("project", "/account/one", "shared"), agentVersion: version }, root), /requires Claude/);
     }
     assert.equal(supportsClaudeProjectMemory("2.1.284"), true);
     assert.equal(supportsClaudeProjectMemory("3.0.0"), true);
-    await assert.rejects(prepareProjectMemory({ ...meta(), executionTarget: { adapter: "container" } as never }, root), /execution target/);
+    for (const adapter of ["container", "cloud"] as const) {
+      assert.equal(await prepareProjectMemory({ ...meta(), executionTarget: { adapter } as never }, root), undefined);
+      await assert.rejects(prepareProjectMemory({ ...meta("project", "/account/one", "shared"), executionTarget: { adapter } as never }, root), /execution target/);
+    }
     for (const driver of ["codex", "codex-app-server"] as const) for (const sharing of ["separate", "shared"] as const) {
       assert.equal(await prepareProjectMemory({ ...meta("project", "/account/one", sharing), driver }, root), undefined);
     }
@@ -128,4 +133,31 @@ test("relative operator settings resolve in the provider cwd; oversized settings
     writeFileSync(join(root, "settings.json"), "x".repeat(100_000));
     assert.throws(() => withClaudeProjectMemory(["--settings", "settings.json"], "/selected", root), /too large/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("native Windows settings use a private file, preserving percent syntax and large settings, and clean up", () => {
+  const settings = new NativeProjectMemorySettings();
+  let file: string | undefined;
+  try {
+    const source = { statusLine: { command: "date +%H" }, env: { NOTES: "x".repeat(10_000) } };
+    const args = settings.args(["--settings", JSON.stringify(source)], "/selected", process.cwd());
+    file = args.at(-1)!;
+    assert.ok(!file.includes("%"));
+    assert.ok(file.length < 8000);
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...source, autoMemoryDirectory: "/selected" });
+    assert.ok(!file.startsWith("/selected"));
+  } finally { settings.dispose(); }
+  assert.throws(() => readFileSync(file!), /ENOENT/);
+});
+
+test("strict Seatbelt canonicalizes the selected memory partition", { skip: process.platform === "win32" }, async () => {
+  const state = { driver: "claude-code" as const, dataDir: "/var/runner", env: { HOME: "/home/me" },
+    sessionId: "session", cwd: "/work", projectMemoryDirectory: "/var/runner/selected", orchestratorScratchOnly: true };
+  const isolation = await resolveExecutionIsolation({ mode: "seatbelt", network: "inherit" }, { kind: "native" }, {
+    platform: "darwin", resolveNative: async () => ({ launch: { command: "/sandbox-exec", args: [] } }) as never,
+    realpathNative: async (path) => path.replace(/^\/var\//, "/private/var/"), mkdirNative: async () => {},
+  }, state);
+  assert.ok(isolation?.backend === "seatbelt");
+  assert.ok(isolation.profile.includes('/private/var/runner/selected'));
 });

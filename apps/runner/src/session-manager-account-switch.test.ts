@@ -910,3 +910,46 @@ test("a running turn retains its memory policy; the queued turn resumes the same
     assert.deepEqual(made.store.readMeta(spec.sessionId)?.projectMemory, { projectId: "project", sharing: "separate" });
   } finally { finishFirst?.(); manager?.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
 });
+
+
+for (const failure of ["not_resumable", "lock_unavailable"] as const) test(`memory replacement ${failure} rejects queued work once and requires restart`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-memory-failure-"));
+  const messages: RunnerToControlPlane[] = [];
+  let prompts = 0; let replacements = 0;
+  const made = makeManager(root, () => ({ pid: 1, initialize: async () => {}, newSession: async () => {},
+    prompt: async () => { prompts++; return "end_turn" as const; }, cancel: () => {}, dispose: () => {},
+    setConfig: async () => {}, resolvePermission: () => false, agentSessionId: () => "conversation" }), messages);
+  try {
+    const spec = { ...launchSpec(root, "claude-code", "claude-work"), agentVersion: "2.1.284",
+      projectMemory: { projectId: "project", sharing: "separate" as const } };
+    assert.equal(await made.manager.start(spec), true);
+    const internals = made.manager as unknown as { replaceProviderProcess: () => Promise<{ status: string }> };
+    internals.replaceProviderProcess = async () => { replacements++; return { status: failure }; };
+    made.manager.setProjectMemory(spec.sessionId, { projectId: "project", sharing: "shared" });
+    assert.equal(made.manager.prompt(spec.sessionId, "queued"), true);
+    await waitFor(() => made.store.readMeta(spec.sessionId)?.status === "failed", "failed policy did not surface");
+    assert.equal(prompts, 0); assert.equal(replacements, 1);
+    assert.equal(made.manager.prompt(spec.sessionId, "later"), true);
+    await waitFor(() => made.store.readMeta(spec.sessionId)?.status === "failed", "later work not rejected");
+    assert.equal(prompts, 0); assert.equal(replacements, 1);
+    assert.equal(messages.filter(m => m.type === "session_event" && m.payload.kind === "error" && m.payload.message === "Could not apply the project memory policy. Restart this session to retry.").length, 1);
+  } finally { made.manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("live launch preparation replaces a stale creation version for the memory gate", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-memory-live-version-"));
+  let selected: string | undefined;
+  const made = makeManager(root, (_driver: unknown, launch: { projectMemoryDirectory?: string }) => {
+    selected = launch.projectMemoryDirectory;
+    return { pid: 1, initialize: async () => {}, newSession: async () => {}, prompt: async () => "end_turn" as const,
+      cancel: () => {}, dispose: () => {}, setConfig: async () => {}, resolvePermission: () => false, agentSessionId: () => "conversation" };
+  }, []);
+  try {
+    const internals = made.manager as unknown as { prepareLaunch: (meta: { agentVersion?: string }) => void };
+    internals.prepareLaunch = meta => { meta.agentVersion = "2.1.284"; };
+    const spec = { ...launchSpec(root, "claude-code", "claude-work"), agentVersion: "2.1.283",
+      projectMemory: { projectId: "project", sharing: "shared" as const } };
+    assert.equal(await made.manager.start(spec), true); assert.ok(selected);
+    assert.equal(made.store.readMeta(spec.sessionId)?.agentVersion, "2.1.284");
+  } finally { made.manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
+});

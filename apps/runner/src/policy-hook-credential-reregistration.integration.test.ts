@@ -28,7 +28,7 @@ const FAKE_CLAUDE = String.raw`#!/usr/bin/env node
 import { renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const args = process.argv.slice(2);
-if (args.includes("--version")) { process.stdout.write("2.1.284 (Claude Code)\n"); process.exit(0); }
+if (args.includes("--version")) { process.stdout.write("2.1.205 (Claude Code)\n"); process.exit(0); }
 if (args.includes("--help")) {
   process.stdout.write([
     "  --input-format <format>  text or stream-json",

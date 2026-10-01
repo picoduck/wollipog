@@ -1,8 +1,8 @@
 import { supportsClaudeProjectMemory } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
 import { lstat, mkdir } from "node:fs/promises";
-import { readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, posix, resolve } from "node:path";
 import type { SessionMeta } from "./session-store.js";
 import { runContextCommand } from "./context-command.js";
@@ -20,11 +20,10 @@ export async function prepareProjectMemory(
   contextCommand: typeof runContextCommand = runContextCommand,
 ): Promise<string | undefined> {
   if (!meta.projectMemory || meta.driver !== "claude-code") return undefined;
-  if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
-    throw new Error("Project memory selection is unavailable for this execution target. Use a host Claude session.");
-  }
-  if (!supportsClaudeProjectMemory(meta.agentVersion)) {
-    throw new Error("Project memory selection requires Claude Code 2.1.284 or newer. Update Claude Code and refresh the runner's agents.");
+  const unavailable = projectMemoryUnavailable(meta);
+  if (unavailable) {
+    if (meta.projectMemory.sharing === "shared") throw new Error(unavailable);
+    return undefined;
   }
   const project = digest(meta.projectMemory.projectId ?? `unassigned:${meta.repoPath}`);
   const account = digest(meta.providerCredentialHome ?? meta.env.CLAUDE_CONFIG_DIR ??
@@ -113,4 +112,42 @@ export async function prepareProjectMemoryArgs(meta: SessionMeta): Promise<strin
   if (Buffer.byteLength(result.stdout) > 96 * 1024) throw new Error("Claude settings are too large for project memory selection. Reduce the launch settings below 96 KiB.");
   args[index] = pair ? result.stdout : `--settings=${result.stdout}`;
   return args;
+}
+
+/** Unsupported default cases retain native memory instead of breaking an existing session. */
+export function projectMemoryUnavailable(meta: SessionMeta): string | undefined {
+  if (!meta.projectMemory || meta.driver !== "claude-code") return undefined;
+  if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
+    return "Project memory policy is unavailable for this execution target. Native memory behavior remains unchanged; use a host Claude session to apply the policy.";
+  }
+  if (!supportsClaudeProjectMemory(meta.agentVersion)) {
+    return "Project memory policy requires Claude Code 2.1.284 or newer. Native memory behavior remains unchanged; update Claude Code and refresh the runner's agents to apply the policy.";
+  }
+  return undefined;
+}
+
+/** Native Windows cmd shims cannot carry arbitrary JSON (% expansion and the 8 KiB limit).
+ * Keep launch settings in a driver-private file outside the shared writable memory partition. */
+export class NativeProjectMemorySettings {
+  private root?: string;
+  args(args: readonly string[], directory: string | undefined, cwd: string): string[] {
+    const merged = withClaudeProjectMemory(args, directory, cwd);
+    if (!directory) return merged;
+    this.root ??= mkdtempSync(join(tmpdir(), "wollipog-memory-settings-"));
+    const file = join(this.root, "settings.json");
+    writeFileSync(file, merged.at(-1)!, { mode: 0o600 });
+    return [...merged.slice(0, -1), file];
+  }
+  dispose(): void {
+    if (this.root) rmSync(this.root, { recursive: true, force: true });
+    this.root = undefined;
+  }
+}
+
+
+/** Compare process configuration, not a saved policy that an unsupported process cannot apply. */
+export function effectiveProjectMemoryKey(meta: SessionMeta): string {
+  if (!meta.projectMemory || meta.driver !== "claude-code" ||
+      meta.projectMemory.sharing === "separate" && projectMemoryUnavailable(meta)) return "native";
+  return projectMemoryKey(meta);
 }

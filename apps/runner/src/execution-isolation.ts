@@ -673,6 +673,7 @@ export async function resolveExecutionIsolation(
     const canonicalState = {
       ...state,
       dataDir: await runtime.realpathNative(state.dataDir),
+      ...(state.projectMemoryDirectory ? { projectMemoryDirectory: await runtime.realpathNative(state.projectMemoryDirectory) } : {}),
       cwd: await runtime.realpathNative(state.cwd),
       env: { ...state.env, ...(state.env.HOME ? { HOME: home } : {}) },
       additionalWritableRoots,

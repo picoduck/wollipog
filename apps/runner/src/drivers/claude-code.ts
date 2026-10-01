@@ -25,7 +25,7 @@ import { approvalScopeContext } from "../approval-scope.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
-import { withClaudeProjectMemory } from "../project-memory.js";
+import { NativeProjectMemorySettings, withClaudeProjectMemory } from "../project-memory.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
 import {
   PLACELESS_CWD,
@@ -525,6 +525,7 @@ export function claudeErrorResultText(
 }
 
 export class ClaudeCodeDriver implements Driver {
+  private readonly projectMemorySettings = new NativeProjectMemorySettings();
   private readonly preparedCommands = new WeakSet<object>();
   private sessionId: string;
   private firstTurn: boolean;
@@ -2445,7 +2446,9 @@ export class ClaudeCodeDriver implements Driver {
       this.hookCircuitOpenedAt = null;
     }
     if (prepared.healed) this.cb.onStderr("Claude manager hook settings were restored before launch.");
-    const memoryArgs = withClaudeProjectMemory(prepared.args, this.opts.projectMemoryDirectory, this.cwd);
+    const memoryArgs = process.platform === "win32" && this.opts.context.kind === "native"
+      ? this.projectMemorySettings.args(prepared.args, this.opts.projectMemoryDirectory, this.cwd)
+      : withClaudeProjectMemory(prepared.args, this.opts.projectMemoryDirectory, this.cwd);
     return this.opts.orchestrator
       ? claudeStructuredOrchestratorArgs(
         memoryArgs,
@@ -2525,6 +2528,8 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   dispose(options?: { forceImmediate?: boolean }): void {
+    try { this.projectMemorySettings.dispose(); }
+    catch { this.cb.onStderr("Temporary project memory settings could not be removed."); }
     const retirements: Promise<void>[] = [];
     if (this.pendingBackgroundTasks.size > 0) this.markOrphaned("shutdown");
     this.disposed = true;

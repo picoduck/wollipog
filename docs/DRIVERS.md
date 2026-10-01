@@ -1332,8 +1332,11 @@ credential home, while shared partitions are keyed by Project. The chosen direct
 own writable bind/allow under Bubblewrap and Seatbelt, including strict Orchestrator sessions.
 WSL uses an attested runner-owner namespace in the distro. Provider mode and Windows Job apply
 provider configuration; this choice is not an OS access-control boundary against arbitrary tools.
-Container/cloud targets and unverified Claude versions refuse the managed selection with an
-update/host-target instruction rather than silently using an old shared directory.
+Container/cloud targets and unverified Claude versions retain native memory under the default
+policy, with a visible unavailable notice. They refuse explicit sharing with an update/host-target
+instruction. Live discovery refreshes the version at each launch; updating and refreshing agents
+allows an old session to apply the policy. Windows native launches use a private settings file
+to preserve arbitrary settings through cmd shims.
 
 Codex exec and App Server retain their native account memories. Current Codex memory combines
 projects in an account-wide database, so project-only sharing is unavailable and the UI says so.

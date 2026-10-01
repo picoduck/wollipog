@@ -19,7 +19,7 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
     const save = section.getByRole("button", { name: "Save Memory Policy" });
     await expect(separate).toBeChecked(); await expect(save).toBeDisabled();
     await expect(section).toContainText("project-only sharing is unavailable");
-    await expect(section).toContainText("Claude uses the saved choice");
+    await expect(section).toContainText("Supported Claude installations use the saved choice");
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setProjectMemoryClaudeVersion("2.1.283"));
     await expect(section).toContainText("install Claude Code 2.1.284 or newer");
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setProjectMemoryClaudeVersion("2.1.284"));

@@ -398,12 +398,12 @@ export class Hub {
   }
 
   private withProjectMemory(runnerId: string, msg: ControlPlaneToRunner): ControlPlaneToRunner {
-    if ((this.db.getRunner?.(runnerId)?.protocolVersion ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return msg;
     const command = msg.type === "durable_session_command" ? msg.command : msg;
     const sessionId = command.type === "start_session" ? command.spec.sessionId
       : "sessionId" in command ? command.sessionId : undefined;
     if (!sessionId || !(command.type === "start_session" || command.type === "prompt_session" ||
         command.type === "answer_recovered_question")) return msg;
+    if ((this.db.getRunner?.(runnerId)?.protocolVersion ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return msg;
     const session = this.db.getSession(sessionId);
     if (!session || session.runnerId !== runnerId) return msg;
     const projectMemory = { projectId: session.projectId ?? null,

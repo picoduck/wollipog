@@ -1,4 +1,4 @@
-import { prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey } from "./project-memory.js";
+import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { isTerminal } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
@@ -504,6 +504,7 @@ interface SteeringOperation {
 
 interface ActiveSession {
   projectMemoryKey?: string;
+  projectMemoryFailureKey?: string;
   sessionId: string;
   /** Exact launch generation that owns this provider process; fences callbacks from retirees. */
   launchGeneration: number;
@@ -7351,6 +7352,7 @@ export class SessionManager {
         args: meta.args,
         config: meta.config,
         capabilities: meta.capabilities,
+        agentVersion: meta.agentVersion,
         sessionSlashCommands: meta.sessionSlashCommands,
         sessionSlashCommandProvenance: meta.sessionSlashCommandProvenance,
       });
@@ -7409,6 +7411,8 @@ export class SessionManager {
         this.store.patchMeta(sessionId, { providerConversationHome: meta.providerConversationHome });
         this.store.flush(sessionId);
       }
+      const unavailableMemory = projectMemoryUnavailable(meta);
+      if (unavailableMemory && meta.projectMemory?.sharing === "separate") this.noticeSessionLaunch(sessionId, unavailableMemory);
       const projectMemoryDirectory = await prepareProjectMemory(meta, this.stateDir, this.runnerOwnerHash);
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration, projectMemoryDirectory);
       preparedProjectMemoryDirectory = projectMemoryDirectory;
@@ -7666,7 +7670,7 @@ export class SessionManager {
     }
     const pendingProviderAccountSwitch = this.pendingProviderAccount(meta);
     const entry: ActiveSession = {
-      projectMemoryKey: projectMemoryKey(meta),
+      projectMemoryKey: effectiveProjectMemoryKey(meta),
       sessionId,
       launchGeneration,
       client,
@@ -7864,7 +7868,7 @@ export class SessionManager {
     }
     if (meta.projectMemory) this.log(JSON.stringify({ event: "project_memory_policy_applied", sessionId,
       provider: meta.driver, sharing: meta.projectMemory.sharing,
-      effective: meta.driver === "claude-code" ? meta.projectMemory.sharing : "account_native" }));
+      effective: preparedProjectMemoryDirectory ? meta.projectMemory.sharing : "account_native" }));
     this.log(`session ${sessionId} ready (cwd=${cwd}${resumeId ? ", resumed" : ""})`);
     return true;
   }
@@ -10617,12 +10621,13 @@ export class SessionManager {
     this.store.flush(sessionId);
     this.log(JSON.stringify({ event: "project_memory_policy_updated", sessionId, sharing: policy.sharing }));
     const entry = this.active.get(sessionId);
+    if (entry) entry.projectMemoryFailureKey = undefined;
     if (entry && !entry.running) setImmediate(() => this.scheduleDrain(sessionId));
   }
 
   private projectMemoryChanged(sessionId: string, entry: ActiveSession): boolean {
     const meta = this.store.readMeta(sessionId);
-    return Boolean(meta && meta.driver === "claude-code" && (entry.projectMemoryKey ?? "null") !== projectMemoryKey(meta));
+    return Boolean(meta && meta.driver === "claude-code" && (entry.projectMemoryKey ?? "native") !== effectiveProjectMemoryKey(meta));
   }
 
   private async rebindProjectMemory(sessionId: string, entry: ActiveSession): Promise<void> {
@@ -10633,7 +10638,12 @@ export class SessionManager {
     if (result.status === "launched") {
       if (!result.queuedWork) this.emitStatus(sessionId, "idle");
     } else if (result.status !== "stopped" && result.status !== "superseded") {
+      entry.projectMemoryFailureKey = projectMemoryKey(this.store.readMeta(sessionId) ?? {});
+      this.log(JSON.stringify({ event: "project_memory_policy_failed", sessionId, reason: result.status }));
+      this.rejectQueued(entry.queue.splice(0), "Could not apply the project memory policy. Restart this session to retry.");
+      this.emitQueue(sessionId);
       this.emitEvent(sessionId, { kind: "error", message: "Could not apply the project memory policy. Restart this session to retry." });
+      this.emitStatus(sessionId, "failed");
     }
   }
 
@@ -10687,6 +10697,12 @@ export class SessionManager {
       }
     }
     if (this.projectMemoryChanged(sessionId, entry)) {
+      if (entry.projectMemoryFailureKey === projectMemoryKey(this.store.readMeta(sessionId) ?? {})) {
+        this.rejectQueued(entry.queue.splice(0), "Could not apply the project memory policy. Restart this session to retry.");
+        this.emitQueue(sessionId);
+        this.emitStatus(sessionId, "failed");
+        return;
+      }
       if (this.providerAccountSwitchCanProceed(sessionId, entry)) {
         await this.rebindProjectMemory(sessionId, entry);
         return;
