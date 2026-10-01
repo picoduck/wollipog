@@ -91,7 +91,9 @@ test("private bootstrap reuse and cleanup retain changed, substituted, hardlinke
 });
 
 test("private ancestry protects permissive descendants and removal of that protection refuses reuse", { skip: process.platform === "win32" }, (t) => {
-  const parent = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-staging-private-ancestor-")));
+  // macOS's per-user tmpdir already has a private ancestor. Use the shared sticky
+  // temp parent so this fixture can remove its only current-user private ancestor.
+  const parent = realpathSync(mkdtempSync(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "wollipog-staging-private-ancestor-")));
   t.after(() => rmSync(parent, { recursive: true, force: true }));
   const nested = join(parent, "permissive-temp"); mkdirSync(nested, { mode: 0o777 }); chmodSync(nested, 0o777);
   assert.equal(leaseHelperParent(nested), nested, "private current-user ancestor prevents foreign access");
