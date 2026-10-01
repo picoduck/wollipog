@@ -46,6 +46,8 @@ export interface SkillListProps {
   onSelect: (skillId: string) => void;
   /** The Orphaned Copies entry at the list's foot, shown only while there is something to review. */
   orphans: { shown: boolean; count: number; selected: boolean; onOpen: () => void };
+  /** The phone's first row, which opens the Library Overview route with its attention count. */
+  overview?: { count: number; onOpen: () => void };
   /** The list's one scroll container, which the page restores on a phone's Back. */
   bodyRef?: Ref<HTMLDivElement>;
   onBodyScroll?: UIEventHandler<HTMLDivElement>;
@@ -56,13 +58,15 @@ export interface SkillListProps {
  * equal two-line rows in groups, each row with at most one status, and the Orphaned Copies entry at
  * its foot. The filter and view choices live only as long as the page.
  */
-export function SkillList({ skills, groups, runners, machineSkills, selectedId, onSelect, orphans, bodyRef, onBodyScroll }: SkillListProps) {
+export function SkillList({ skills, groups, runners, machineSkills, selectedId, onSelect, orphans, overview, bodyRef, onBodyScroll }: SkillListProps) {
   const [query, setQuery] = useState("");
   const [show, setShow] = useState<SkillListShow>("all");
   const [grouping, setGrouping] = useState<SkillListGrouping>("group");
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "skill-view-options");
-  const orphansDescriptionId = `skill-orphans-${useId().replace(/:/g, "")}`;
+  const listId = useId().replace(/:/g, "");
+  const orphansDescriptionId = `skill-orphans-${listId}`;
+  const overviewDescriptionId = `skill-overview-${listId}`;
 
   const attention = useMemo(() => {
     const byId = new Map<string, SkillAttention | null>();
@@ -142,6 +146,24 @@ export function SkillList({ skills, groups, runners, machineSkills, selectedId, 
         )}
       </div>
       <div ref={bodyRef} className="master-detail-list-body clip-focus" onScroll={onBodyScroll}>
+        {skills !== null && overview && (
+          <>
+            <button
+              type="button"
+              className="row skill-list-overview"
+              aria-describedby={overview.count > 0 ? overviewDescriptionId : undefined}
+              onClick={overview.onOpen}
+            >
+              <span className="row-title">Library Overview</span>
+              <CountBadge count={overview.count} />
+            </button>
+            {overview.count > 0 && (
+              <span id={overviewDescriptionId} className="sr-only">
+                {overview.count} {overview.count === 1 ? "item needs" : "items need"} attention
+              </span>
+            )}
+          </>
+        )}
         {skills === null ? (
           <div className="skeleton" role="status" aria-live="polite">
             <span className="sr-only">Loading skills</span>

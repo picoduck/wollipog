@@ -404,6 +404,32 @@ test("POST /api/skills validates, creates skill + first version, and rejects dup
   assert.deepEqual(detail.json().assignments, []);
 });
 
+test("GET /api/skills adds the latest version's note and when a direct assignment last changed (#1971)", async (t) => {
+  const { app, db } = await fixture();
+  t.after(() => app.close());
+  const { skill } = (await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("noted-skill") })).json();
+  const listed = async () => (await app.inject({ method: "GET", url: "/api/skills" })).json().skills[0];
+
+  // Neither field is invented: no note, no direct assignment.
+  const fresh = await listed();
+  assert.equal("note" in fresh.latestVersion, false);
+  assert.equal("lastAssignmentChangedAt" in fresh, false);
+
+  db.addSkillVersion(skill.id, {
+    files: skillPayload("noted-skill").files as never, manifest: "{}", digest: "noted-2", note: "Add migration checks",
+  }, 5_000);
+  const first = db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "all" }, now: 6_000 });
+  db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one", agentSelector: { kind: "all" }, now: 7_000 });
+  const versioned = await listed();
+  assert.equal(versioned.latestVersion.note, "Add migration checks");
+  assert.equal(versioned.latestVersion.createdAt, 5_000);
+  assert.equal(versioned.lastAssignmentChangedAt, 7_000);
+
+  // An edit to an older assignment is the newest change.
+  db.updateSkillAssignment(first.id, { enabled: false }, 9_000);
+  assert.equal((await listed()).lastAssignmentChangedAt, 9_000);
+});
+
 test("assignment mutations push a fire-and-forget skills_sync to affected capable runners only", async (t) => {
   const { app, db, online, pushed } = await fixture();
   t.after(() => app.close());

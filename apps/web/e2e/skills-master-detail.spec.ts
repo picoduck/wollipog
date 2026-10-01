@@ -126,7 +126,7 @@ test.describe("at desktop widths", () => {
     await expect(page.locator(".list-foot .row")).toHaveAttribute("aria-current", "true");
     await page.goBack();
     await expect(page.locator('[aria-label="Orphaned Copies"]')).toHaveCount(0);
-    await expect(page.locator(".master-detail-detail")).toContainText("Select a skill");
+    await expect(page.locator(".master-detail-detail > .skills-overview")).toBeVisible();
   });
 
   test("an empty library is one state across the content, and the header keeps only Manage Groups…", async ({ page }) => {

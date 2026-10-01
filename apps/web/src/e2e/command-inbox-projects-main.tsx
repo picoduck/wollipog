@@ -775,7 +775,8 @@ function snapshot(): UiSnapshotMessage {
       ...(SESSION_REMINDERS ? { sessionReminders: true } : {}),
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
     },
-    runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner] : [runner],
+    runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner]
+      : shellOfflineRunner ? [runner, shellOfflineRunner] : [runner],
     boxes: [],
     ...(LEGACY_WORKSPACES ? {} : { projects: structuredClone(model.projects) }),
     sessions: structuredClone(model.sessions.filter((candidate) => !candidate.archived)),
@@ -1029,7 +1030,71 @@ const SHELL_LIST_MACHINE = {
     { kind: "deleted_skill" as const, name: "old-triage", digest: "d0".padEnd(64, "0"), variant: "manual" as const, observedDigest: "e4".padEnd(64, "0") },
   ],
 };
-const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : SHELL_SKILLS_MODE === "list" ? SHELL_LIST_SKILLS : Array.from(
+/**
+ * `overview` (#1971): the Library Overview's case, one deployment error, one edited copy, one held
+ * Git update and four orphaned copies, with a recommended built-in skill and recent versions and
+ * assignment changes. `healthy` is the same library with nothing to review, all assigned, and an
+ * offline second machine. Both name their machines and keep Assign and Dismiss in memory.
+ */
+const SHELL_OVERVIEW = SHELL_SKILLS_MODE === "overview" || SHELL_SKILLS_MODE === "healthy";
+const SHELL_OVERVIEW_NOW = Date.now();
+const shellAgo = (minutes: number) => SHELL_OVERVIEW_NOW - minutes * 60_000;
+const SHELL_OVERVIEW_SKILLS = [
+  { name: "deploy-bot", description: "Ships signed builds to the release channel.", groupId: "group-platform", assignmentCount: 1,
+    latestVersion: { versionNumber: 4, note: "Sign builds with the release key", createdAt: shellAgo(26 * 60) } },
+  { name: "release-notes", description: "Writes release notes from merged pull requests.", groupId: "group-writing", assignmentCount: 1,
+    latestVersion: { versionNumber: 2, createdAt: shellAgo(3 * 24 * 60) } },
+  { name: "lint-rules", description: "Keeps the team's lint rules current.", groupId: "group-platform", assignmentCount: 1,
+    gitSource: SHELL_LIST_GIT_SOURCE,
+    ...(SHELL_SKILLS_MODE === "overview"
+      ? { gitAutoUpdate: { enabled: true, held: { commit: "9e2a".padEnd(40, "0"), reason: "scripts" as const, scriptPaths: ["scripts/fix.sh"], heldAt: shellAgo(90) } } }
+      : { gitAutoUpdate: { enabled: true, held: null } }),
+    latestVersion: { versionNumber: 7, note: "Automatic update from Git commit 4c1d000", createdAt: shellAgo(5 * 24 * 60) } },
+  { name: "code-review", description: "Reviews a pull request against the team's conventions.", groupId: "group-review", assignmentCount: 2,
+    lastAssignmentChangedAt: shellAgo(2 * 60), latestVersion: { versionNumber: 5, createdAt: shellAgo(6 * 24 * 60) } },
+  { name: "review-checklist", description: "The checklist a reviewer walks before approving.", groupId: "group-review", assignmentCount: 1,
+    latestVersion: { versionNumber: 3, note: "Add migration and test-coverage checks", createdAt: shellAgo(40) } },
+  { name: "triage-helper", description: "Labels and routes new issues.", assignmentCount: 1,
+    latestVersion: { versionNumber: 1, createdAt: shellAgo(9 * 24 * 60) } },
+  { name: "writing-tests", description: "Writes focused tests for a change.", groupId: "group-writing", assignmentCount: 1,
+    latestVersion: { versionNumber: 2, createdAt: shellAgo(12 * 24 * 60) } },
+  { name: "using-wollipog", description: "Operate Wollipog sessions from inside an agent session.",
+    builtIn: { release: "0.29.1", heldUpdate: null }, recommendation: { dismissed: false },
+    assignmentCount: SHELL_SKILLS_MODE === "overview" ? 0 : 1, latestVersion: { versionNumber: 1, createdAt: shellAgo(20 * 24 * 60) } },
+].map((skill, index) => ({
+  id: `skill-${index + 1}`,
+  ...skill,
+  latestVersion: { id: `v${index + 1}`, digest: `${(index + 1).toString(16).padStart(4, "0")}`.padEnd(64, "a"), ...skill.latestVersion },
+}));
+const SHELL_OVERVIEW_GROUPS = [
+  { id: "group-platform", name: "Platform", sortOrder: 1 },
+  { id: "group-review", name: "Review", sortOrder: 2 },
+  { id: "group-writing", name: "Writing", sortOrder: 3 },
+];
+const shellOverviewMachine = () => {
+  const healthy = SHELL_SKILLS_MODE === "healthy";
+  const names = SHELL_OVERVIEW_SKILLS.filter((skill) => skill.assignmentCount > 0).map((skill) => skill.name);
+  return {
+    removalReporting: "supported" as const, driftReporting: "supported" as const, keptAsideReporting: "supported" as const,
+    desired: names.map(shellListTarget),
+    reported: {
+      deployed: names.map((name) => ({ name, digest: "d1", links: [{ agentId: "codex",
+        ...(name === "deploy-bot" && !healthy ? { status: "error" as const, detail: "Permission denied writing ~/.codex/skills/deploy-bot" } : { status: "linked" as const }) }] })),
+      drift: healthy ? [] : [{ name: "release-notes", digest: "d1", variant: "agent" as const, observedDigest: "e1".padEnd(64, "0") }],
+      unmanaged: [],
+      updatedAt: SHELL_OVERVIEW_NOW,
+    },
+    orphaned: healthy ? [] : ["retired-lint", "old-triage", "draft-notes", "legacy-review"].map((name, index) => ({
+      kind: "deleted_skill" as const, name, digest: "d0".padEnd(64, "0"), variant: "agent" as const, observedDigest: `e${index + 3}`.padEnd(64, "0"),
+    })),
+  };
+};
+/** The overview's offline second machine. */
+const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW
+  ? { ...structuredClone(runner), runnerId: "runner-2", hostname: "studio-workstation", displayName: "Studio Workstation", status: "offline" }
+  : null;
+if (SHELL_OVERVIEW) runner.displayName = "Build Machine";
+const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : SHELL_SKILLS_MODE === "list" ? SHELL_LIST_SKILLS : SHELL_OVERVIEW ? SHELL_OVERVIEW_SKILLS : Array.from(
   { length: SHELL_SKILLS_MODE === "many" ? 40 : SHELL_SKILL_NAMES.length },
   (_, index) => ({
     id: `skill-${index + 1}`,
@@ -1105,7 +1170,8 @@ const shellSkillsApi = {
     return { skills: structuredClone(detailMode ? detailSkills : shellSkills) };
   },
   listSkillGroups: async () => ({ groups: detailMode ? [{ id: "group-1", name: "Campaigns", sortOrder: 0 }]
-    : SHELL_SKILLS_MODE === "list" ? [{ id: "group-platform", name: "Platform", sortOrder: 1 }] : [] }),
+    : SHELL_SKILLS_MODE === "list" ? [{ id: "group-platform", name: "Platform", sortOrder: 1 }]
+    : SHELL_OVERVIEW ? SHELL_OVERVIEW_GROUPS : [] }),
   getSkill: async (id: string) => {
     if (detailMode) {
       const skill = detailSkills.find((candidate) => candidate.id === id);
@@ -1130,9 +1196,24 @@ const shellSkillsApi = {
     { id: "assignment-3", skillId, scopeKind: "runner" as const, runnerId: "runner-1",
       agentSelector: { kind: "all" as const }, enabled: false, invocation: "agent" as const },
   ] }),
-  runnerSkills: async () => SHELL_SKILLS_MODE === "list"
+  runnerSkills: async (runnerId?: string) => SHELL_SKILLS_MODE === "list"
     ? structuredClone(SHELL_LIST_MACHINE)
-    : { desired: [], reported: null, removalReporting: "unknown" as const },
+    : SHELL_OVERVIEW && runnerId === "runner-1"
+      ? shellOverviewMachine()
+      : { desired: [], reported: null, removalReporting: "unknown" as const },
+  ...(SHELL_OVERVIEW ? {
+    createSkillAssignment: async (body: { skillId: string }) => {
+      const skill = SHELL_OVERVIEW_SKILLS.find((candidate) => candidate.id === body.skillId)!;
+      skill.assignmentCount += 1;
+      Object.assign(skill, { lastAssignmentChangedAt: Date.now() });
+      return { assignment: { id: `assignment-${skill.id}-${skill.assignmentCount}`, enabled: true, ...body } };
+    },
+    setSkillRecommendationDismissed: async (skillId: string, dismissed: boolean) => {
+      const skill = SHELL_OVERVIEW_SKILLS.find((candidate) => candidate.id === skillId)!;
+      Object.assign(skill, { recommendation: { dismissed } });
+      return { skill: structuredClone(skill) };
+    },
+  } : {}),
 };
 
 const client = {

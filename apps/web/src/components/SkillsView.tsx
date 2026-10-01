@@ -32,6 +32,7 @@ import { SkillBuiltInSection } from "./SkillBuiltInSection.js";
 import { SkillBuiltInReviewDialog } from "./SkillBuiltInReviewDialog.js";
 import { SkillList } from "./SkillList.js";
 import { SkillDetailHeader, SkillDetailSection, skillDetailMenu } from "./SkillDetailHeader.js";
+import { SkillsOverview } from "./SkillsOverview.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -52,6 +53,7 @@ import {
   skillGroupsFromPayload,
   skillMarkdownBody,
   skillMarkdownTemplate,
+  skillOverviewAttention,
   skillsFromPayload,
   validateSkillDraft,
   type RunnerSkillsResponse,
@@ -389,26 +391,27 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     runnerId?: string;
     agentSelector: SkillAgentSelector;
     invocation: SkillInvocationPolicy;
-  }) => {
-    if (!selectedId) return;
+  }, skillId = selectedId) => {
+    if (!skillId) return;
     await mutate(async () => {
-      await api.createSkillAssignment({ skillId: selectedId, ...input });
+      await api.createSkillAssignment({ skillId, ...input });
       setDialog(null);
     }, async () => {
       // The list's assignment counts decide which built-in skills are still recommended.
       await refreshList();
-      await refreshDetail(selectedId);
+      await refreshDetail(skillId);
       await refreshMachines();
     });
   };
 
-  /** One-step assignment of a recommended built-in skill to every supported agent. */
-  const assignRecommended = (runnerId: string | null) => createAssignment({
+  /** One-step assignment of a recommended built-in skill to every supported agent, from its detail
+   * or from the Library Overview. */
+  const assignRecommended = (skillId: string, runnerId: string | null) => createAssignment({
     scopeKind: runnerId ? "runner" : "instance",
     ...(runnerId ? { runnerId } : {}),
     agentSelector: { kind: "all" },
     invocation: "agent",
-  });
+  }, skillId);
 
   const setRecommendationDismissed = async (skillId: string, dismissed: boolean) => {
     await mutate(() => api.setSkillRecommendationDismissed(skillId, dismissed), async () => {
@@ -473,6 +476,16 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   const orphanCount = useMemo(() => runners.reduce((count, runner) =>
     count + reportedOrphanedCopies(machineSkills[runner.runnerId]).length + omittedKeptAsideCopies(machineSkills[runner.runnerId]),
   0), [machineSkills, runners]);
+
+  // One list for the overview's Needs Attention and the phone's Library Overview row, so the two
+  // counts cannot differ.
+  const overviewAttention = useMemo(() => skillOverviewAttention({
+    skills: skills ?? [],
+    runners,
+    machineSkills,
+    orphanCount,
+    machineLabel: (runnerId) => machineLabels.get(runnerId) ?? runnerId,
+  }), [skills, runners, machineSkills, orphanCount, machineLabels]);
 
   const orphanResolved = async (result: OrphanedSkillCopyResolution) => {
     if (result.warning) showToast(result.warning, { tone: "error" });
@@ -640,6 +653,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
           selectedId={selectedId}
           onSelect={select}
           orphans={{ shown: showOrphanEntry, count: orphanCount, selected: showOrphans, onOpen: () => openPane("orphans") }}
+          // On a phone the overview is a route of its own, opened from the list's first row (§6.2).
+          overview={isMobile ? { count: overviewAttention.length, onOpen: () => openPane("overview") } : undefined}
           bodyRef={listBodyRef}
           onBodyScroll={(event) => {
             // A hidden list reports 0; that is not where the person left it.
@@ -674,12 +689,25 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
             <DetailSkeleton announce={skills === null ? undefined : "Loading skill"} />
           ) : !selectedId && skills === null ? (
             <DetailSkeleton />
-          ) : !selectedId ? (
-            /* The default detail (/skills, /skills/overview) until the Library Overview (#1971)
-               replaces it. */
-            <p className="skills-hint">
-              Select a skill to see its content, assignments, and per-machine deployment.
-            </p>
+          ) : !selectedId && skills ? (
+            // The default detail (§6.1): /skills beside the list, and /skills/overview on its own.
+            <SkillsOverview
+              skills={skills}
+              groups={groups}
+              runners={runners}
+              machineSkills={machineSkills}
+              machineLabels={machineLabels}
+              attention={overviewAttention}
+              busy={busy}
+              showTitle={!isMobile}
+              onOpenSkill={select}
+              onOpenOrphans={() => openPane("orphans")}
+              onAssignRecommended={(skillId, runnerId) => void assignRecommended(skillId, runnerId)}
+              onDismissRecommendation={(skillId) => void setRecommendationDismissed(skillId, true)}
+              onNewSkill={() => setDialog("new-skill")}
+              onImportFromGit={() => setDialog("git-import")}
+              onImportFromMachine={() => setDialog("machine-import")}
+            />
           ) : null}
           {/* Exactly one detail state: a failed reload never leaves the cached skill actionable below
               its error. */}
@@ -699,7 +727,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 runners={runners}
                 machineLabels={machineLabels}
                 busy={busy}
-                onAssign={(runnerId) => void assignRecommended(runnerId)}
+                onAssign={(runnerId) => void assignRecommended(detail.id, runnerId)}
                 onDismiss={(dismissed) => void setRecommendationDismissed(detail.id, dismissed)}
                 onReview={() => setDialog("built-in-review")}
               />

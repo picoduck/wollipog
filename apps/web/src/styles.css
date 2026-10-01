@@ -14001,6 +14001,75 @@ body.shell-dock-dragging * {
 .skill-list-orphans > .row-title { font: var(--type-body); }
 /* Skeleton rows are the row itself, holding a title bar over a meta bar (§12.3). */
 .skill-row-skeleton > .row-body { gap: var(--space-2); }
+/* The phone's first row (#1971): it opens the Library Overview, a step apart from the groups. */
+.skill-list-overview { margin-bottom: var(--space-2); }
+/* The Library Overview (#1971, §6.1): the default detail, top-aligned at the pane's leading edge.
+   A title row, then sections 32px apart, each a Surface of two-line rows. */
+.skills-overview {
+  display: grid;
+  align-content: start;
+  gap: var(--space-8);
+  min-width: 0;
+}
+.skills-overview-head {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.skills-overview-title {
+  margin: 0;
+  font: var(--type-title);
+}
+.skills-overview-summary {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+/* The section's plain count (§11.4): no pill, faint and tabular. */
+.skills-overview-count {
+  margin-left: var(--space-2);
+  color: var(--text-faint);
+  font: var(--type-micro);
+  font-variant-numeric: tabular-nums;
+}
+/* Actions trail the row and never shrink; the reason gives way first. */
+.skills-overview-row > .btn,
+.skills-overview-actions { flex: none; }
+.skills-overview-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+/* Nothing to review: one line after a green dot, centred on the first line if it wraps. */
+.skills-overview-ok {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  font: var(--type-body);
+}
+.skills-overview-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--green);
+}
+.skills-get-started {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.skills-get-started > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+}
 /* The empty library (§12.1): the spanning state, then "How Skills Work" as three short steps. */
 .skills-how {
   display: grid;

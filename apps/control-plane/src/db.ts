@@ -3624,8 +3624,12 @@ export interface SkillView {
   builtInOffer?: SkillBuiltInRelease;
   /** Per requesting user; added by the routes for built-in skills. */
   recommendation?: { dismissed: boolean };
-  latestVersion: SkillVersionSummary | null;
+  /** The latest version's `note` is present when it has one, so the Library Overview (#1971) can
+   * say what changed without reading the version. */
+  latestVersion: (SkillVersionSummary & { note?: string }) | null;
   assignmentCount: number;
+  /** The newest `updated_at` of the skill's direct assignments; absent when it has none. */
+  lastAssignmentChangedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -7466,13 +7470,14 @@ export class ControlPlaneDb {
       ORDER BY (v.id=?) DESC, v.created_at DESC, v.id DESC LIMIT 1`)
       .get(row.id, row.latest_version_id) as { source: string } | undefined;
     const latest = row.latest_version_id
-      ? (this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE id=?")
-        .get(row.latest_version_id) as { id: string; digest: string; created_at: number } | undefined)
+      ? (this.stmt("SELECT id, digest, note, created_at FROM skill_versions WHERE id=?")
+        .get(row.latest_version_id) as { id: string; digest: string; note: string | null; created_at: number } | undefined)
       : undefined;
     const assignments = this.stmt(`SELECT
       (SELECT COUNT(*) FROM skill_assignments WHERE skill_id=?) +
-      (SELECT COUNT(*) FROM skill_group_assignments WHERE group_id=?) AS n`)
-      .get(row.id, row.group_id) as { n: number };
+      (SELECT COUNT(*) FROM skill_group_assignments WHERE group_id=?) AS n,
+      (SELECT MAX(updated_at) FROM skill_assignments WHERE skill_id=?) AS changed`)
+      .get(row.id, row.group_id, row.id) as { n: number; changed: number | null };
     // Names are unique, so the one built-in row for this name either manages this entry or offers
     // the running release's version to it.
     const builtIn = this.stmt(`SELECT skill_id, offered_release, offered_digest, handled_digest
@@ -7498,9 +7503,10 @@ export class ControlPlaneDb {
       ...(offered && adoptable ? { builtInOffer: offered } : {}),
       latestVersion: latest
         ? { id: latest.id, digest: latest.digest, createdAt: latest.created_at,
-          versionNumber: this.skillVersionNumber(row.id, latest.id) }
+          versionNumber: this.skillVersionNumber(row.id, latest.id), ...(latest.note ? { note: latest.note } : {}) }
         : null,
       assignmentCount: Number(assignments.n),
+      ...(assignments.changed !== null ? { lastAssignmentChangedAt: Number(assignments.changed) } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

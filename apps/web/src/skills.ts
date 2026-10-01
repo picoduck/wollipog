@@ -121,6 +121,8 @@ export interface SkillSummary {
   builtInOffer?: SkillBuiltInRelease;
   /** The signed-in user's recommendation state for a built-in skill. */
   recommendation?: { dismissed: boolean };
+  /** When a direct assignment last changed; absent with none, or from an older control plane. */
+  lastAssignmentChangedAt?: number | null;
   latestVersion?: SkillVersionSummary | null;
   assignmentCount?: number;
   /** When the skill last changed: a new version, a new description, or a new group. */
@@ -507,6 +509,174 @@ export function groupSkillList(
     push({ key: `group:${group.id}`, id: group.id, name: group.name, skills: rest.filter((skill) => skill.groupId === group.id) });
   }
   return out;
+}
+
+/* --- The Library Overview (#1971) --- */
+
+const counted = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+
+/** "Claude Code", "Claude Code and Codex", "Claude Code, Codex and Pi". */
+function joinNames(names: ReadonlyArray<string>): string {
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+const sentence = (text: string) => /[.!?]$/.test(text) ? text : `${text}.`;
+
+/**
+ * The overview's count line: "10 skills in 4 groups, deployed to agents on 2 machines." A machine
+ * counts once any assignment targets it; the groups are the library's, whether or not they hold a
+ * skill, as Manage Groups lists them.
+ */
+export function skillLibrarySummary({ skills, groups, deployingMachines }: {
+  skills: number;
+  groups: number;
+  deployingMachines: number;
+}): string {
+  const library = counted(skills, "skill", "skills") + (groups > 0 ? ` in ${counted(groups, "group", "groups")}` : "");
+  return deployingMachines > 0
+    ? `${library}, deployed to agents on ${counted(deployingMachines, "machine", "machines")}.`
+    : `${library}, not deployed to any machine yet.`;
+}
+
+/** Machines whose skills report has loaded and assigns them at least one skill. */
+export function skillDeployingMachineCount(
+  runners: ReadonlyArray<RunnerView>,
+  machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
+): number {
+  return runners.filter((runner) => {
+    const state = machineSkills[runner.runnerId];
+    return Boolean(state && !state.loadError && state.desired.length > 0);
+  }).length;
+}
+
+/** One Needs Attention row: a skill with its status, or the machines' orphaned copies. */
+export type SkillOverviewAttentionItem =
+  | { kind: SkillAttention; skill: SkillSummary; reason: string }
+  | { kind: "orphans"; count: number; reason: string };
+
+const ATTENTION_ORDER: Record<SkillAttention, number> = { error: 0, edited: 1, update_held: 2 };
+
+/**
+ * Needs Attention: every skill `skillAttention()` marks, so the overview and the list's badges
+ * always agree, most urgent first and then by name, with a one-line reason each; then the orphaned
+ * copies as one row while any machine reports some. A recommendation is never an item.
+ */
+export function skillOverviewAttention({ skills, runners, machineSkills, orphanCount, machineLabel }: {
+  skills: ReadonlyArray<SkillSummary>;
+  runners: ReadonlyArray<RunnerView>;
+  machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>;
+  orphanCount: number;
+  machineLabel: (runnerId: string) => string;
+}): SkillOverviewAttentionItem[] {
+  const items: SkillOverviewAttentionItem[] = skills
+    .flatMap((skill) => {
+      const kind = skillAttention(skill, runners, machineSkills);
+      return kind ? [{ kind, skill, reason: skillAttentionReason(kind, skill, runners, machineSkills, machineLabel) }] : [];
+    })
+    .sort((a, b) => ATTENTION_ORDER[a.kind] - ATTENTION_ORDER[b.kind] || a.skill.name.localeCompare(b.skill.name));
+  if (orphanCount > 0) {
+    items.push({
+      kind: "orphans",
+      count: orphanCount,
+      reason: orphanCount === 1
+        ? "A machine keeps an edited copy that no library skill shows."
+        : `Machines keep ${orphanCount} edited copies that no library skill shows.`,
+    });
+  }
+  return items;
+}
+
+/** Why a skill is in Needs Attention, read from the same reports `skillAttention()` read. */
+function skillAttentionReason(
+  kind: SkillAttention,
+  skill: SkillSummary,
+  runners: ReadonlyArray<RunnerView>,
+  machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
+  machineLabel: (runnerId: string) => string,
+): string {
+  const loaded = runners.flatMap((runner) => {
+    const state = machineSkills[runner.runnerId];
+    return state && !state.loadError ? [{ runner, state }] : [];
+  });
+  if (kind === "error") {
+    // The Machine × Agents model: the eligible agents whose cell reports Error, per machine.
+    const failing = loaded.flatMap(({ runner, state }) => {
+      const deploys = state.desired.some((entry) => entry.name === skill.name) ||
+        Boolean(state.reported?.deployed?.some((entry) => entry.name === skill.name));
+      if (!deploys) return [];
+      const cells = runner.agents.flatMap((agent) => {
+        const cell = skillAgentMatrixCell(runner, agent, skill.name, state);
+        return cell.desired !== "Unavailable" && cell.reported === "Error" ? [{ agent, detail: cell.detail }] : [];
+      });
+      return cells.length ? [{ runner, cells }] : [];
+    });
+    const first = failing[0];
+    if (!first) return "A machine reported a deployment error.";
+    const who = `${joinNames(first.cells.map(({ agent }) => agent.name))} on ${machineLabel(first.runner.runnerId)}`;
+    const detail = first.cells.find((cell) => cell.detail)?.detail;
+    const more = failing.length > 1 ? ` ${counted(failing.length - 1, "other machine also reports", "other machines also report")} errors.` : "";
+    return (detail ? `${who}: ${sentence(oneLine(detail))}` : `${who} reported a deployment error.`) + more;
+  }
+  if (kind === "edited") {
+    const machines = loaded.filter(({ state }) => reportedSkillDrift(state.reported, skill.name).length > 0)
+      .map(({ runner }) => machineLabel(runner.runnerId));
+    if (machines.length <= 1) return `${machines[0] ?? "A machine"} has an edited copy of this skill.`;
+    return `${machines[0]} and ${counted(machines.length - 1, "other machine", "other machines")} have edited copies of this skill.`;
+  }
+  const held = skill.gitAutoUpdate?.held;
+  if (held) return `An update to Git commit ${held.commit.slice(0, 12)} waits for your review.`;
+  return `The update in Wollipog ${skill.builtIn?.heldUpdate?.release ?? "this release"} waits for your review.`;
+}
+
+/** Machines whose agents get assignment changes only once they reconnect. */
+export function skillOfflineMachineSentence(
+  runners: ReadonlyArray<RunnerView>,
+  machineLabel: (runnerId: string) => string,
+): string | null {
+  const offline = runners.filter((runner) => runner.status !== "online");
+  if (!offline.length) return null;
+  return offline.length === 1
+    ? `${machineLabel(offline[0]!.runnerId)} is offline; its agents update when it reconnects.`
+    : `${offline.length} machines are offline; their agents update when they reconnect.`;
+}
+
+/** One Recently Changed row: the skill's newest change, a version or an assignment edit. */
+export interface SkillRecentChange {
+  skill: SkillSummary;
+  kind: "version" | "assignment";
+  at: number;
+  /** Line 2, sentence case. */
+  detail: string;
+}
+
+/** A restore's note names the restored version by its internal id, which never shows. */
+const RESTORED_NOTE = /^Restored from skillv_\S+$/;
+
+/** Line 2 of a new version: "v3: Add migration checks", the note alone before version numbers
+ * (#1962), or the number alone when the version has no note. */
+export function skillVersionChangeDetail(version: SkillVersionSummary): string {
+  const note = version.note && RESTORED_NOTE.test(version.note) ? "Restored an earlier version" : oneLine(version.note);
+  const number = typeof version.versionNumber === "number" && Number.isInteger(version.versionNumber) &&
+    version.versionNumber > 0 ? `v${version.versionNumber}` : null;
+  if (number && note) return `${number}: ${note}`;
+  return number ? `New version ${number}` : note || "New version";
+}
+
+/**
+ * Recently Changed: up to `limit` skills, newest first, each by its newest change. A control plane
+ * without `lastAssignmentChangedAt` leaves only the version dates, and the rows still render.
+ */
+export function skillRecentChanges(skills: ReadonlyArray<SkillSummary>, limit = 5): SkillRecentChange[] {
+  const changes = skills.flatMap((skill): SkillRecentChange[] => {
+    const version = skill.latestVersion;
+    const versionAt = typeof version?.createdAt === "number" ? version.createdAt : null;
+    const assignedAt = typeof skill.lastAssignmentChangedAt === "number" ? skill.lastAssignmentChangedAt : null;
+    if (assignedAt !== null && (versionAt === null || assignedAt > versionAt)) {
+      return [{ skill, kind: "assignment", at: assignedAt, detail: "Assignments changed" }];
+    }
+    return versionAt !== null && version ? [{ skill, kind: "version", at: versionAt, detail: skillVersionChangeDetail(version) }] : [];
+  });
+  return changes.sort((a, b) => b.at - a.at || a.skill.name.localeCompare(b.skill.name)).slice(0, limit);
 }
 
 /* --- Assignment presentation --- */

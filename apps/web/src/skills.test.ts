@@ -17,6 +17,7 @@ import {
   skillAssignmentsFromPayload,
   skillAttention,
   skillDeployBadge,
+  skillDeployingMachineCount,
   skillEligibleAgents,
   skillFileByteLength,
   skillFilesFromUploads,
@@ -25,12 +26,17 @@ import {
   skillVersionLabel,
   skillFromPayload,
   skillGroupsFromPayload,
+  skillLibrarySummary,
   skillListDescription,
   skillMarkdownBody,
   skillMarkdownFrontmatterName,
   skillMarkdownTemplate,
+  skillOfflineMachineSentence,
+  skillOverviewAttention,
+  skillRecentChanges,
   skillRecommended,
   skillsFromPayload,
+  skillVersionChangeDetail,
   validateSkillDraft,
   type RunnerSkillsResponse,
   type SkillSummary,
@@ -219,6 +225,120 @@ test("a skill's attention is Error, then Edited, then Update Held, and Built-In 
   assert.equal(skillAttention(skill(), [acp], { r1: failed }), null);
   assert.equal(skillAttention(skill(), [runner], {}), null);
   assert.equal(skillAttention(skill(), [runner], { r1: { ...failed, loadError: "Request failed" } }), null);
+});
+
+test("the Library Overview's count line counts skills, the library's groups and the machines deploying them", () => {
+  assert.equal(skillLibrarySummary({ skills: 10, groups: 4, deployingMachines: 2 }),
+    "10 skills in 4 groups, deployed to agents on 2 machines.");
+  assert.equal(skillLibrarySummary({ skills: 1, groups: 1, deployingMachines: 1 }), "1 skill in 1 group, deployed to agents on 1 machine.");
+  assert.equal(skillLibrarySummary({ skills: 2, groups: 0, deployingMachines: 0 }), "2 skills, not deployed to any machine yet.");
+
+  const runner = (runnerId: string) => ({ runnerId, status: "online", agents: [] }) as unknown as RunnerView;
+  const desired = [{ name: "code-review", versionDigest: "d1", targets: [] }];
+  assert.equal(skillDeployingMachineCount([runner("r1"), runner("r2"), runner("r3"), runner("r4")], {
+    r1: { desired, reported: null },
+    r2: { desired: [], reported: null },
+    r3: { desired, reported: null, loadError: "Request failed" },
+  }), 1, "only a loaded machine with an assigned skill counts");
+});
+
+test("Needs Attention lists exactly the skills skillAttention() marks, most urgent first, then the orphaned copies", () => {
+  const claude = { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true };
+  const codex = { ...claude, id: "codex", name: "Codex", driver: "codex" as const };
+  const studio = { runnerId: "r1", os: "linux", status: "online", agents: [claude, codex], protocolVersion: 200 } as unknown as RunnerView;
+  const laptop = { ...studio, runnerId: "r2" } as RunnerView;
+  const target = (name: string) => ({ name, versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" as const }, { agentId: "codex", invocation: "agent" as const }] });
+  const link = (name: string, status: "linked" | "error", detail?: string) => ({
+    name, digest: "d1", links: ["claude", "codex"].map((agentId) => ({ agentId, status, ...(detail ? { detail } : {}) })),
+  });
+  const machineSkills: Record<string, RunnerSkillsResponse> = {
+    r1: {
+      desired: [target("broken"), target("edited"), target("fine"), target("held")],
+      reported: {
+        deployed: [link("broken", "error", "can't run manual-only skills"), link("edited", "linked"), link("fine", "linked"), link("held", "linked")],
+        drift: [{ name: "edited", digest: "d1", variant: "agent", held: false }],
+      },
+    },
+    r2: { desired: [target("broken")], reported: { deployed: [link("broken", "error")] } },
+  };
+  const skills = [
+    skill({ id: "s-fine", name: "fine" }),
+    skill({ id: "s-held", name: "held", gitAutoUpdate: { enabled: true, held: { commit: "0123456789abcdef", reason: "scripts", scriptPaths: [], heldAt: 1 } } }),
+    skill({ id: "s-edited", name: "edited" }),
+    skill({ id: "s-broken", name: "broken" }),
+    skill({ id: "s-offer", name: "using-wollipog", builtIn: { release: "1", heldUpdate: null }, recommendation: { dismissed: false }, assignmentCount: 0 }),
+  ];
+  const labels: Record<string, string> = { r1: "Studio Workstation", r2: "Laptop" };
+  const items = skillOverviewAttention({ skills, runners: [studio, laptop], machineSkills, orphanCount: 4, machineLabel: (id) => labels[id]! });
+
+  assert.deepEqual(items.map((item) => item.kind), ["error", "edited", "update_held", "orphans"]);
+  assert.deepEqual(items.flatMap((item) => item.kind === "orphans" ? [] : [item.skill.id]),
+    skills.filter((entry) => skillAttention(entry, [studio, laptop], machineSkills)).map((entry) => entry.id).sort(
+      (a, b) => ["s-broken", "s-edited", "s-held"].indexOf(a) - ["s-broken", "s-edited", "s-held"].indexOf(b)),
+    "the overview and the list's badges mark the same skills; a recommendation is not an item");
+  assert.deepEqual(items.map((item) => item.reason), [
+    "Claude Code and Codex on Studio Workstation: can't run manual-only skills. 1 other machine also reports errors.",
+    "Studio Workstation has an edited copy of this skill.",
+    "An update to Git commit 0123456789ab waits for your review.",
+    "Machines keep 4 edited copies that no library skill shows.",
+  ]);
+  const orphans = items.at(-1)!;
+  assert.equal(orphans.kind === "orphans" && orphans.count, 4);
+
+  // A held built-in update, an error without a detail, and nothing orphaned.
+  const builtInHeld = skill({ id: "s-b", name: "fine", builtIn: { release: "1", heldUpdate: { release: "0.30.0", digest: "d2" } } });
+  const quiet = skillOverviewAttention({
+    skills: [builtInHeld, skill({ id: "s-broken", name: "broken" })],
+    runners: [laptop], machineSkills, orphanCount: 0, machineLabel: (id) => labels[id]!,
+  });
+  assert.deepEqual(quiet.map((item) => item.reason), [
+    "Claude Code and Codex on Laptop reported a deployment error.",
+    "The update in Wollipog 0.30.0 waits for your review.",
+  ]);
+  assert.deepEqual(skillOverviewAttention({ skills: [skill({ name: "fine" })], runners: [studio], machineSkills, orphanCount: 0, machineLabel: String }), []);
+  assert.equal(skillOverviewAttention({ skills: [], runners: [], machineSkills: {}, orphanCount: 1, machineLabel: String })[0]!.reason,
+    "A machine keeps an edited copy that no library skill shows.");
+});
+
+test("an offline machine's agents update when it reconnects", () => {
+  const runner = (runnerId: string, status: string) => ({ runnerId, status, agents: [] }) as unknown as RunnerView;
+  const label = (id: string) => ({ r1: "Studio Workstation", r2: "Laptop" })[id]!;
+  assert.equal(skillOfflineMachineSentence([runner("r1", "online")], label), null);
+  assert.equal(skillOfflineMachineSentence([runner("r1", "online"), runner("r2", "offline")], label),
+    "Laptop is offline; its agents update when it reconnects.");
+  assert.equal(skillOfflineMachineSentence([runner("r1", "offline"), runner("r2", "offline")], label),
+    "2 machines are offline; their agents update when they reconnect.");
+});
+
+test("Recently Changed shows each skill's newest change, newest first, at most five", () => {
+  const version = (createdAt: number, extra: Partial<NonNullable<SkillSummary["latestVersion"]>> = {}) => ({ id: `v${createdAt}`, digest: "d", createdAt, ...extra });
+  const skills = [
+    skill({ id: "a", name: "alpha", latestVersion: version(100, { versionNumber: 3, note: "Add migration and test-coverage checks" }) }),
+    skill({ id: "b", name: "beta", latestVersion: version(50), lastAssignmentChangedAt: 400 }),
+    skill({ id: "c", name: "gamma", latestVersion: version(300, { note: "Automatic update from Git commit abc" }), lastAssignmentChangedAt: 200 }),
+    skill({ id: "d", name: "delta", latestVersion: version(250, { versionNumber: 2 }) }),
+    skill({ id: "e", name: "epsilon", latestVersion: version(20, { note: "Restored from skillv_0123456789" }) }),
+    skill({ id: "f", name: "zeta", latestVersion: version(10) }),
+    skill({ id: "g", name: "no-version", latestVersion: null }),
+  ];
+  const recent = skillRecentChanges(skills);
+  assert.deepEqual(recent.map((change) => [change.skill.name, change.kind, change.at, change.detail]), [
+    ["beta", "assignment", 400, "Assignments changed"],
+    ["gamma", "version", 300, "Automatic update from Git commit abc"],
+    ["delta", "version", 250, "New version v2"],
+    ["alpha", "version", 100, "v3: Add migration and test-coverage checks"],
+    ["epsilon", "version", 20, "Restored an earlier version"],
+  ]);
+
+  // An older control plane sends neither field: version dates alone order the rows.
+  const legacy = skills.map(({ lastAssignmentChangedAt: _ignored, ...rest }) => ({
+    ...rest, latestVersion: rest.latestVersion ? { id: rest.latestVersion.id, digest: "d", createdAt: rest.latestVersion.createdAt } : null,
+  }));
+  assert.deepEqual(skillRecentChanges(legacy).map((change) => [change.skill.name, change.detail]), [
+    ["gamma", "New version"], ["delta", "New version"], ["alpha", "New version"], ["beta", "New version"], ["epsilon", "New version"],
+  ]);
+  assert.equal(skillVersionChangeDetail({ versionNumber: 0, note: "  Line one\nline two " }), "Line one line two");
+  assert.deepEqual(skillRecentChanges([]), []);
 });
 
 test("assignment presentation names machines, drivers, agents, and invocation policies", () => {

@@ -945,7 +945,7 @@ test("SkillsView follows the route's selected skill, including back to no select
   await act(async () => { route(undefined); });
   await act(settle);
   assertNoDomNode(container.querySelector(".skill-detail-head"), "the bare Skills route clears the selection");
-  assert.match(container.querySelector(".master-detail-detail")?.textContent ?? "", /Select a skill/);
+  assert.ok(container.querySelector(".master-detail-detail > .skills-overview"), "the default detail is the Library Overview");
 
   // A detail load still pending when the route clears never repopulates the pane.
   let release!: () => void;
@@ -1061,7 +1061,8 @@ function stubPhone(): () => void {
 
 /** Mounts the view on a route through a store whose navigation records every push. */
 async function mountRouted(client: ApiClient, key: string, view: View = { name: "skills" }, strict = false,
-  feedback?: { confirm: (options: { title: string; message: string; confirmLabel?: string }) => Promise<boolean> }) {
+  feedback?: { confirm: (options: { title: string; message: string; confirmLabel?: string }) => Promise<boolean> },
+  runners: RunnerView[] = [runner]) {
   const pushed: View[] = [];
   const routed: ViewNavigation = { current: () => view, push: (next) => { pushed.push(next); }, listen: () => () => {} };
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -1085,7 +1086,7 @@ async function mountRouted(client: ApiClient, key: string, view: View = { name: 
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
-      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+      runners, boxes: [], sessions: [], runs: [], pods: [],
     });
   });
   await act(settle);
@@ -1243,7 +1244,7 @@ test("on a phone a skill route is its own screen with Back, and Back returns to 
     assert.ok(domWindow.document.activeElement === container.querySelector("#page-title") as never,
       "the route change moves focus to the new page title");
 
-    const row = container.querySelector<HTMLButtonElement>(".master-detail-list-body .row")!;
+    const row = container.querySelector<HTMLButtonElement>(".master-detail-list-body .skill-row")!;
     await act(async () => row.click());
     await act(settle);
     assert.equal(container.querySelector(".detail-bar h1")?.textContent, "code-review");
@@ -1764,6 +1765,312 @@ test("on a phone a failed library load leaves no skill actions behind its error"
   } finally {
     await view.unmount();
     layout.restore();
+    restore();
+  }
+});
+
+/* --- The Library Overview (#1971) --- */
+
+const daysAgo = (days: number) => Date.now() - days * 86_400_000;
+const versionAt = (createdAt: number, extra: Record<string, unknown> = {}) => ({ id: `v-${createdAt}`, digest: "d1", createdAt, ...extra });
+
+/** One deployment error, one edited copy, one held Git update and four orphaned copies, plus a
+ * healthy skill. */
+function attentionClient(overrides: Record<string, unknown> = {}) {
+  const skills = [
+    { id: "s-broken", name: "broken", description: "Fails to link", latestVersion: versionAt(daysAgo(1)) },
+    { id: "s-edited", name: "edited", description: "Edited on a machine", latestVersion: versionAt(daysAgo(2)) },
+    { id: "s-held", name: "held", description: "Waits for review", latestVersion: versionAt(daysAgo(3)),
+      gitSource: { url: "https://example.test/r.git", ref: "main", subdirectory: "", path: "", commit: "c1" },
+      gitAutoUpdate: { enabled: true, held: { commit: "0123456789abcdef", reason: "scripts", scriptPaths: ["run.sh"], heldAt: 1 } } },
+    { id: "s-fine", name: "fine", description: "Deployed as assigned", latestVersion: versionAt(daysAgo(4)) },
+  ];
+  const target = (name: string) => ({ name, versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" as const }] });
+  const linked = (name: string) => ({ name, digest: "d1", links: [{ agentId: "claude", status: "linked" as const }] });
+  const machine: RunnerSkillsResponse = {
+    keptAsideReporting: "supported",
+    desired: ["broken", "edited", "held", "fine"].map(target),
+    reported: {
+      deployed: [
+        { name: "broken", digest: "d1", links: [{ agentId: "claude", status: "error", detail: "Permission denied" }] },
+        linked("edited"), linked("held"), linked("fine"),
+      ],
+      drift: [{ name: "edited", digest: "d1", variant: "agent", held: false }],
+      updatedAt: 1,
+    },
+    orphaned: [1, 2, 3, 4].map((index) => ({ kind: "deleted_skill" as const, name: `retired-${index}`, digest: `d${index}`, variant: "agent" as const })),
+  };
+  return {
+    ...api,
+    listSkills: async () => ({ skills }),
+    listSkillGroups: async () => ({ groups: [{ id: "g1", name: "Review" }] }),
+    getSkill: async (id: string) => ({ skill: skills.find((entry) => entry.id === id), latestVersion: { id: "v1", digest: "d1", files: [] } }),
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => machine,
+    ...overrides,
+  } as unknown as ApiClient;
+}
+
+const overviewSection = (container: ParentNode, title: string) =>
+  [...container.querySelectorAll<HTMLElement>(".skills-overview > .section")]
+    .find((section) => section.querySelector(".section-title")?.firstChild?.textContent === title);
+
+test("/skills shows the Library Overview, top-aligned in the detail, with no centred sentence", async () => {
+  const view = await mountRouted(attentionClient(), "skills-overview-desktop");
+  try {
+    const { container } = view;
+    const overview = container.querySelector(".master-detail-detail > .skills-overview")!;
+    assert.ok(overview, "the default detail is the overview");
+    assert.equal(overview.querySelector("h2.skills-overview-title")?.textContent, "Library Overview");
+    assert.equal(overview.querySelector(".skills-overview-summary")?.textContent,
+      "4 skills in 1 group, deployed to agents on 1 machine.");
+    assert.doesNotMatch(container.textContent ?? "", /Select a skill/);
+    assertNoDomNode(container.querySelector(".skill-list-overview"), "the list's overview row is for phones only");
+    assert.deepEqual([...overview.querySelectorAll(".section-title")].map((title) => title.firstChild?.textContent),
+      ["Needs Attention", "Recently Changed"], "Recommended and Get Started appear only when they apply");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Needs Attention lists the same skills the list marks, each with its badge and a Review that opens it", async () => {
+  const view = await mountRouted(attentionClient(), "skills-overview-attention");
+  try {
+    const { container } = view;
+    const section = overviewSection(container, "Needs Attention")!;
+    assert.equal(section.querySelector(".skills-overview-count")?.textContent, "4");
+    const rows = [...section.querySelectorAll<HTMLElement>(".surface > .row")];
+    assert.deepEqual(rows.map((row) => [
+      row.querySelector(".row-title")?.textContent,
+      row.querySelector(".status, .count-badge")?.textContent,
+      row.querySelector(".row-sub")?.textContent,
+    ]), [
+      ["broken", "Error", "Claude on Build Machine: Permission denied."],
+      ["edited", "Edited", "Build Machine has an edited copy of this skill."],
+      ["held", "Update Held", "An update to Git commit 0123456789ab waits for your review."],
+      ["Orphaned Copies", "4", "Machines keep 4 edited copies that no library skill shows."],
+    ]);
+    assert.deepEqual(rows.map((row) => row.querySelector("button")?.textContent), ["Review", "Review", "Review", "Review"]);
+
+    // The list's badges (#1961) mark exactly the same skills.
+    const marked = [...container.querySelectorAll(".master-detail-list .skill-row")]
+      .filter((row) => row.querySelector(".skill-row-status"))
+      .map((row) => [row.querySelector(".row-title")?.textContent, row.querySelector(".skill-row-status")?.textContent]);
+    assert.deepEqual(marked, [["broken", "Error"], ["edited", "Edited"], ["held", "Update Held"]]);
+
+    await act(async () => rows[1]!.querySelector("button")!.click());
+    await act(settle);
+    assert.deepEqual(view.pushed.at(-1), { name: "skills", id: "s-edited" });
+  } finally {
+    await view.unmount();
+  }
+  const orphans = await mountRouted(attentionClient(), "skills-overview-orphans");
+  try {
+    const row = [...overviewSection(orphans.container, "Needs Attention")!.querySelectorAll(".surface > .row")].at(-1)!;
+    assert.equal(row.querySelector("button")?.getAttribute("aria-label"), "Review Orphaned Copies");
+    await act(async () => row.querySelector<HTMLButtonElement>("button")!.click());
+    await act(settle);
+    assert.deepEqual(orphans.pushed.at(-1), { name: "skills", pane: "orphans" });
+    assert.ok(orphans.container.querySelector('.master-detail-detail [aria-label="Orphaned Copies"]'));
+  } finally {
+    await orphans.unmount();
+  }
+});
+
+test("with nothing to review, Needs Attention is one line after a green dot, and names an offline machine", async () => {
+  const view = await mountRouted(oneSkillClient(), "skills-overview-healthy");
+  try {
+    const section = overviewSection(view.container, "Needs Attention")!;
+    assert.equal(section.querySelector(".skills-overview-ok")?.textContent, "Every skill is deployed as assigned.");
+    assert.ok(section.querySelector(".skills-overview-ok > .skills-overview-dot"));
+    assertNoDomNode(section.querySelector(".skills-overview-count"), "no count for nothing");
+    assert.equal(buttonNamed(view.container, "Review").length, 0);
+  } finally {
+    await view.unmount();
+  }
+
+  const offline = await mountRouted(oneSkillClient(), "skills-overview-offline", { name: "skills" }, false, undefined,
+    [runner, { ...runner, runnerId: "runner-2", displayName: "Laptop", status: "offline" }]);
+  try {
+    assert.equal(overviewSection(offline.container, "Needs Attention")!.querySelector(".skills-overview-ok")?.textContent,
+      "Every skill is deployed as assigned. Laptop is offline; its agents update when it reconnects.");
+  } finally {
+    await offline.unmount();
+  }
+});
+
+test("Recommended by Wollipog assigns from a menu or dismisses, and never counts as attention", async () => {
+  const skills = [
+    { id: "s-using", name: "using-wollipog", description: "Operate Wollipog sessions.", builtIn: { release: "0.29.0", heldUpdate: null },
+      recommendation: { dismissed: false }, assignmentCount: 0, latestVersion: versionAt(daysAgo(1)) },
+    { id: "s-orchestrate", name: "orchestrate-issues", description: "Coordinate child sessions.", builtIn: { release: "0.29.0", heldUpdate: null },
+      recommendation: { dismissed: false }, assignmentCount: 0, latestVersion: versionAt(daysAgo(2)) },
+  ];
+  const calls: unknown[] = [];
+  const view = await mountRouted(oneSkillClient({
+    listSkills: async () => ({ skills: structuredClone(skills) }),
+    createSkillAssignment: async (body: { skillId: string }) => {
+      calls.push(body);
+      skills.find((entry) => entry.id === body.skillId)!.assignmentCount += 1;
+      return { assignment: { id: "a1", enabled: true, ...body } };
+    },
+    setSkillRecommendationDismissed: async (id: string, dismissed: boolean) => {
+      calls.push({ id, dismissed });
+      skills.find((entry) => entry.id === id)!.recommendation = { dismissed };
+      return { skill: structuredClone(skills.find((entry) => entry.id === id)) };
+    },
+  }), "skills-overview-recommended");
+  try {
+    const { container } = view;
+    const section = () => overviewSection(container, "Recommended by Wollipog");
+    assert.match(section()!.textContent ?? "", /Built-in skills that teach agents to use Wollipog\. They aren't on any machine until you assign them\./);
+    const names = () => [...(section()?.querySelectorAll(".row-title") ?? [])].map((title) => title.textContent);
+    assert.deepEqual(names(), ["orchestrate-issues", "using-wollipog"]);
+    const row = section()!.querySelector(".row")!;
+    assert.deepEqual([...row.querySelectorAll(".status")].map((badge) => badge.textContent), ["Built-In"]);
+    assert.deepEqual([...row.querySelectorAll("button")].map((button) => button.textContent), ["View", "Assign"]);
+    assertNoDomNode(overviewSection(container, "Needs Attention")!.querySelector(".skills-overview-count"),
+      "a recommendation adds nothing to the attention count");
+    const sections = [...container.querySelectorAll(".skills-overview > .section .section-title")].map((title) => title.firstChild?.textContent);
+    assert.deepEqual(sections.slice(0, 3), ["Needs Attention", "Recommended by Wollipog", "Recently Changed"]);
+
+    // Assign › All Machines: an instance-wide, all-agents, Agent Invocable assignment.
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Assign using-wollipog"]')!;
+    await act(async () => trigger.click());
+    const items = [...container.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]')];
+    assert.deepEqual(items.map((item) => [item.querySelector(".menu-text")?.textContent, item.querySelector(".menu-desc")?.textContent ?? null]), [
+      ["All Machines", "Every supported agent on every machine."],
+      ["Build Machine", "Its supported agents get it on the next sync."],
+      ["Dismiss Recommendation", null],
+    ]);
+    assert.ok(container.querySelector('[role="menu"] [role="separator"]'), "a separator before Dismiss Recommendation");
+    await act(async () => items[0]!.click());
+    await act(settle);
+    assert.deepEqual(calls.at(-1), { skillId: "s-using", scopeKind: "instance", agentSelector: { kind: "all" }, invocation: "agent" });
+    assert.deepEqual(names(), ["orchestrate-issues"], "the assigned skill leaves the section after the refresh");
+    assert.notEqual(
+      container.querySelector('.skill-list-group[aria-label="Recommended"]')?.textContent?.includes("using-wollipog"), true,
+      "and leaves the list's Recommended group");
+
+    // Dismiss Recommendation hides it without assigning.
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Assign orchestrate-issues"]')!.click());
+    const dismiss = [...container.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]')]
+      .find((item) => item.textContent === "Dismiss Recommendation")!;
+    await act(async () => dismiss.click());
+    await act(settle);
+    assert.deepEqual(calls.at(-1), { id: "s-orchestrate", dismissed: true });
+    assert.equal(calls.length, 2, "dismissing assigns nothing");
+    assertNoDomNode(section() ?? null, "the section shows only while a skill is recommended");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Recommended by Wollipog's Assign › machine assigns to that machine, and View opens the skill", async () => {
+  const skill = { id: "s-using", name: "using-wollipog", builtIn: { release: "0.29.0", heldUpdate: null },
+    recommendation: { dismissed: false }, assignmentCount: 0, latestVersion: versionAt(daysAgo(1)) };
+  const calls: unknown[] = [];
+  const view = await mountRouted(oneSkillClient({
+    listSkills: async () => ({ skills: [skill] }),
+    createSkillAssignment: async (body: unknown) => {
+      calls.push(body);
+      return { assignment: { id: "a1", enabled: true } };
+    },
+  }), "skills-overview-assign-machine");
+  try {
+    const { container } = view;
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Assign using-wollipog"]')!.click());
+    const machine = [...container.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]')]
+      .find((item) => item.querySelector(".menu-text")?.textContent === "Build Machine")!;
+    await act(async () => machine.click());
+    await act(settle);
+    assert.deepEqual(calls.at(-1), {
+      skillId: "s-using", scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "all" }, invocation: "agent",
+    });
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="View using-wollipog"]')!.click());
+    await act(settle);
+    assert.deepEqual(view.pushed.at(-1), { name: "skills", id: "s-using" });
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Recently Changed shows five skills, newest first, each opening its skill", async () => {
+  const skills = [
+    { id: "a", name: "alpha", latestVersion: versionAt(Date.now() - 2 * 3_600_000, { note: "Add migration and test-coverage checks" }) },
+    { id: "b", name: "beta", latestVersion: versionAt(daysAgo(9)), lastAssignmentChangedAt: Date.now() - 5 * 60_000 },
+    { id: "c", name: "gamma", latestVersion: versionAt(daysAgo(1)) },
+    { id: "d", name: "delta", latestVersion: versionAt(daysAgo(2)) },
+    { id: "e", name: "epsilon", latestVersion: versionAt(daysAgo(3)) },
+    { id: "f", name: "zeta", latestVersion: versionAt(daysAgo(4)) },
+  ];
+  const view = await mountRouted(oneSkillClient({ listSkills: async () => ({ skills }) }), "skills-overview-recent");
+  try {
+    const { container } = view;
+    const rows = [...overviewSection(container, "Recently Changed")!.querySelectorAll<HTMLButtonElement>(".surface > button.row")];
+    assert.deepEqual(rows.map((row) => [
+      row.querySelector(".row-title")?.textContent, row.querySelector(".row-trail")?.textContent, row.querySelector(".row-sub")?.textContent,
+    ]), [
+      ["beta", "5m ago", "Assignments changed"],
+      ["alpha", "2h ago", "Add migration and test-coverage checks"],
+      ["gamma", "1d ago", "New version"],
+      ["delta", "2d ago", "New version"],
+      ["epsilon", "3d ago", "New version"],
+    ]);
+    assertNoDomNode(overviewSection(container, "Get Started") ?? null, "a library of three or more skills needs no Get Started");
+    await act(async () => rows[1]!.click());
+    await act(settle);
+    assert.deepEqual(view.pushed.at(-1), { name: "skills", id: "a" });
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a small library offers Get Started: New Skill, Import from Git… and Import from Machine…", async () => {
+  const view = await mountRouted(oneSkillClient(), "skills-overview-get-started");
+  try {
+    const { container } = view;
+    const section = overviewSection(container, "Get Started")!;
+    assert.deepEqual([...section.querySelectorAll("li")].map((item) => [item.querySelector(".btn")?.textContent, item.querySelector(".skills-hint")?.textContent]), [
+      ["New Skill", "Write a skill here, starting from a SKILL.md template."],
+      ["Import from Git…", "Copy a skill from a Git repository and keep its source."],
+      ["Import from Machine…", "Snapshot a skill that already lives on a connected machine."],
+    ]);
+    assert.ok([...section.querySelectorAll(".btn")].every((button) => !button.classList.contains("primary")), "secondary buttons");
+    await act(async () => buttonNamed(section, "New Skill")[0]!.click());
+    await act(settle);
+    assert.equal(container.querySelector(".modal .modal-title, .modal h2")?.textContent, "New Skill");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("on a phone the list's first row is Library Overview with the attention count, and opens /skills/overview with Back", async () => {
+  const restore = stubPhone();
+  const view = await mountRouted(attentionClient(), "skills-overview-phone");
+  try {
+    const { container } = view;
+    const first = container.querySelector<HTMLButtonElement>(".master-detail-list-body > .row")!;
+    assert.ok(first.classList.contains("skill-list-overview"));
+    assert.equal(first.querySelector(".row-title")?.textContent, "Library Overview");
+    assert.equal(first.querySelector(".count-badge")?.textContent, "4", "the same count as Needs Attention");
+    const description = container.querySelector(`#${first.getAttribute("aria-describedby")}`);
+    assert.equal(description?.textContent, "4 items need attention");
+
+    await act(async () => first.click());
+    await act(settle);
+    assert.deepEqual(view.pushed.at(-1), { name: "skills", pane: "overview" });
+    assert.equal(container.querySelector(".detail-bar h1#page-title")?.textContent, "Library Overview");
+    assert.ok(container.querySelector(".master-detail[data-detail-open] .master-detail-detail > .skills-overview"));
+    assertNoDomNode(container.querySelector(".skills-overview-title"), "the detail bar already names the route");
+    assert.equal(overviewSection(container, "Needs Attention")!.querySelector(".skills-overview-count")?.textContent, "4");
+
+    await act(async () => container.querySelector<HTMLButtonElement>(".detail-bar-back")!.click());
+    await act(settle);
+    assert.deepEqual(view.pushed.at(-1), { name: "skills" });
+    assert.equal(container.querySelector(".master-detail")?.hasAttribute("data-detail-open"), false);
+  } finally {
+    await view.unmount();
     restore();
   }
 });
