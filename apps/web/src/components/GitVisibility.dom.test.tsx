@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { GitStatusInfo, GitSummaryInfo } from "@wollipog/protocol";
 import { deriveGitPresentation } from "../pinned-summary.js";
+import { relativeTime } from "../format.js";
 import { GitPinnedSection } from "./GitVisibility.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -192,12 +193,15 @@ test("the Git section states the branch with its folder kind, attention rows, th
       ["Sync", "231 behind origin/mainIn sync with upstream"],
       ["Working Tree", "1 conflicted, 1 staged, 1 modified"],
       ["Remote", "https://github.com/picoduck/wollipog"],
-      ["Remote Refs", "Updated 2023-11-14 22:13 UTC"],
+      ["Remote Refs", `Updated ${relativeTime(1_700_000_000_000)}`],
       ["Checked", "just now"],
     ]);
     assert.equal(facts.querySelector("dd a")?.getAttribute("href"), "https://github.com/picoduck/wollipog",
       "the Sources section merges in as the remote's link");
     assert.doesNotMatch(facts.textContent ?? "", /Fetched/i);
+    const refs = [...facts.children].find((pair) => pair.querySelector("dt")?.textContent === "Remote Refs");
+    assert.equal(refs?.querySelector("dd")?.getAttribute("title"), "2023-11-14 22:13 UTC",
+      "the exact minute stays in the tooltip");
 
     // Disclosure persists app-wide.
     assert.equal(domWindow.localStorage.getItem("wollipog.pinned.git.open"), "1");

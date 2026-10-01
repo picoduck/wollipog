@@ -282,7 +282,8 @@ test("v76 Git presentation keeps upstream sync distinct from default-base diverg
   assert.equal(model.worktreeKind, "linked");
   assert.equal(model.conflicts, 1);
   assert.equal(model.operation?.label, "Rebase in Progress");
-  assert.equal(model.remoteRefsAt, "2023-11-14 22:13 UTC");
+  assert.equal(model.remoteRefsAt, 1_700_000_000_000);
+  assert.equal(formatRemoteRefsAt(model.remoteRefsAt), "2023-11-14 22:13 UTC");
   assert.doesNotMatch([...model.upstream, ...model.base].map((line) => line.text).join(" "), /Up to Date/i);
 });
 

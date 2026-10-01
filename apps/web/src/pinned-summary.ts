@@ -110,8 +110,8 @@ export interface GitPresentation {
   upstreamBranch: string | null | undefined;
   upstream: GitSyncLine[];
   base: GitSyncLine[];
-  /** When the remote refs were last updated, as "2023-11-14 22:13 UTC"; null when unknown. */
-  remoteRefsAt: string | null;
+  /** When the remote refs were last updated (epoch milliseconds); null when unknown. */
+  remoteRefsAt: number | null;
 }
 
 const hasOwn = (value: object, key: PropertyKey): boolean =>
@@ -153,13 +153,19 @@ export function formatGitOperation(operation: GitRepositoryFacts["operation"]): 
   return null;
 }
 
-/** The remote refs' last update as a UTC minute. It never claims a fetch: refs also move on push. */
-export function formatRemoteRefsAt(remoteRefsAt: number | null | undefined): string | null {
+/** A usable remote-refs timestamp, or null. It never claims a fetch: refs also move on push. */
+export function validRemoteRefsAt(remoteRefsAt: number | null | undefined): number | null {
   if (typeof remoteRefsAt !== "number" || !Number.isFinite(remoteRefsAt) ||
       remoteRefsAt < 0 || remoteRefsAt > 8.64e15) {
     return null;
   }
-  return `${new Date(remoteRefsAt).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return remoteRefsAt;
+}
+
+/** The remote refs' last update as a UTC minute, for its tooltip. */
+export function formatRemoteRefsAt(remoteRefsAt: number | null | undefined): string | null {
+  const at = validRemoteRefsAt(remoteRefsAt);
+  return at === null ? null : `${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
 /** A ref as Git names it, without the `refs/remotes/` or `refs/heads/` prefix. */
@@ -281,7 +287,7 @@ export function deriveGitPresentation(input: {
     upstreamBranch: facts && hasOwn(facts, "upstreamBranch") ? facts.upstreamBranch ?? null : undefined,
     upstream: facts ? deriveUpstreamLines(facts) : [],
     base: facts ? deriveBaseLines(facts, behindBase) : [],
-    remoteRefsAt: formatRemoteRefsAt(facts?.remoteRefsAt),
+    remoteRefsAt: validRemoteRefsAt(facts?.remoteRefsAt),
   };
 }
 

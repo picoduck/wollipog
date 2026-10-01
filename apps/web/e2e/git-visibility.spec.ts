@@ -79,6 +79,7 @@ test("rich Git facts are truthful, accessible, and contained at desktop and narr
   await expect(facts).toContainText("In sync with upstream");
   await expect(facts).toContainText("231 behind origin/main");
   await expect(facts).toContainText("Remote Refs");
+  await expect(facts.locator(":scope > div").filter({ hasText: "Remote Refs" }).locator("dd")).toHaveText(/^Updated \d+m ago$/);
   await expect(git).not.toContainText("Fetched");
 
   const refresh = git.getByRole("button", { name: "Refresh Git Status" });

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { relativeTime } from "../format.js";
-import type { GitPresentation } from "../pinned-summary.js";
+import { formatRemoteRefsAt, type GitPresentation } from "../pinned-summary.js";
 import { BranchIcon, GlobeIcon, RefreshIcon, WarningIcon } from "./Icons.js";
 import { SummaryDisclosure, SummaryRow, SummarySection } from "./PinnedSummaryRows.js";
 
@@ -238,9 +238,12 @@ function GitDetailsFacts({
           </dd>
         </div>
       )}
+      {/* Relative, like Updated and Checked; the exact minute is in the tooltip. */}
       <div>
         <dt>Remote Refs</dt>
-        <dd>{model.remoteRefsAt ? `Updated ${model.remoteRefsAt}` : "Unknown"}</dd>
+        <dd title={formatRemoteRefsAt(model.remoteRefsAt) ?? undefined}>
+          {model.remoteRefsAt === null ? "Unknown" : `Updated ${relativeTime(model.remoteRefsAt)}`}
+        </dd>
       </div>
       {checkedAt != null && (
         <div>
