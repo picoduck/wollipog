@@ -226,6 +226,7 @@ async function mount(
     .find((candidate) => candidate.querySelector(".choice-row-title")?.firstChild?.textContent === title);
   return {
     body,
+    socket,
     calls,
     closed: () => closed,
     dialog,
@@ -309,6 +310,33 @@ test("a linkable project shows the folder notice and Add Folder and Move", async
     await view.press(view.buttonIn(dialog, "Add Folder and Move"));
     assert.deepEqual(view.calls, [["setProject", "session-1", "linkable", { linkLocation: true }]]);
     assert.equal(view.body.querySelectorAll('[role="dialog"]').length, 1, "no separate confirmation opened");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a selected project that can no longer take this folder cannot be moved to", async () => {
+  // Codex review round 1 (#2257): revoking the permission to add folders after the row was chosen
+  // left the primary enabled, and it sent a move without the folder link.
+  const value = session({ adopted: true, importLocationReady: true, projectId: null, projectName: null, projectLocationId: null });
+  const view = await mount((onClose) => <MoveToProjectDialog session={value} onClose={onClose} />, {
+    projects: PROJECTS,
+    sessions: [value],
+  });
+  try {
+    const dialog = view.dialog("Move to Project")!;
+    await view.choose(dialog, "Linkable");
+    assert.equal(view.buttonIn(dialog, "Add Folder and Move")?.disabled, false);
+    await act(async () => {
+      view.socket.push({ type: "project_upsert", project: { ...PROJECTS[1]!, canManage: false } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const primary = view.buttonIn(dialog, "Move Session");
+    assert.equal(primary?.disabled, true, "the selection falls back to the current assignment");
+    assert.match(dialog.querySelector(".modal-foot")?.textContent ?? "", /Choose a different project\./);
+    assertNoDomNode(dialog.querySelector(".notice"), "no folder notice for a project that cannot take it");
+    await view.press(primary);
+    assert.deepEqual(view.calls, []);
   } finally {
     await view.unmount();
   }
@@ -510,6 +538,42 @@ test("New Workspace asks for a Name and a Folder, stacks Choose Folder, and crea
       ["createWorkspace", "runner-1", { name: "Billing Service", path: "/repos/new" }],
       ["setWorkspace", "session-1", "workspace-new"],
     ]);
+    assert.equal(view.closed(), 1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("submitting New Workspace with Enter keeps the Name field focusable while it runs", async () => {
+  // Codex review round 1 (#2257): disabling the focused field drops focus on <body> in a browser.
+  const value = session({ projectId: null, projectName: null, projectLocationId: null });
+  let release!: () => void;
+  const view = await mount((onClose) => <NewWorkspaceDialog session={value} onClose={onClose} />, {
+    projectsSupported: false,
+    sessions: [value],
+  }, {
+    createWorkspace: () => new Promise((resolve) => {
+      release = () => resolve({ workspace: { id: "workspace-new", name: "New", path: "/repos/new" } });
+    }),
+  } as Partial<ApiClient>);
+  try {
+    const dialog = view.dialog("New Workspace")!;
+    const [name] = [...dialog.querySelectorAll<HTMLInputElement>("input")];
+    await view.press(view.buttonIn(dialog, "Browse…"));
+    await view.settle();
+    await view.press(view.buttonIn(view.dialog("Choose Folder")!, "Use This Folder"));
+    await typeInto(name!, "Billing Service");
+    await act(async () => {
+      fireDomEvent.submit(dialog.querySelector("form")!);
+      await Promise.resolve();
+    });
+    assert.equal(view.buttonIn(dialog, "Create and Move")?.getAttribute("aria-busy"), "true");
+    assert.equal(name!.disabled, false);
+    assert.equal(name!.readOnly, true);
+    await act(async () => {
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     assert.equal(view.closed(), 1);
   } finally {
     await view.unmount();

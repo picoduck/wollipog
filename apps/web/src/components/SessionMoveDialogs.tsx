@@ -62,10 +62,12 @@ export function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
   // owning team" rather than hiding the notice.
   const { identity } = useAccessScopeIdentity(choices.some((choice) => choice.audience === "team"));
 
-  // A project that disappears while it is selected leaves nothing to move to: fall back to the
-  // current assignment, which disables the primary.
+  // A project that disappears while it is selected, or that can no longer take this folder (its
+  // management permission was revoked), leaves nothing to move to: fall back to the current
+  // assignment, which disables the primary.
   const choice = choices.find((candidate) => candidate.id === selected);
-  const effective = selected === "" || choice ? selected : current;
+  const selectable = choice !== undefined && (choice.current || projectMoveRowRefusal(session, choice) === null);
+  const effective = selected === "" || selectable ? selected : current;
   const effectiveChoice = effective === "" ? undefined : choices.find((candidate) => candidate.id === effective);
   const target = effective === "" ? undefined : projects.get(effective);
   const plan = projectMovePlan(session, target, effectiveChoice);
@@ -359,7 +361,9 @@ export function NewWorkspaceDialog({ session, onClose, onMoved, returnFocusRef }
               value={name}
               spellCheck={false}
               placeholder="e.g. Billing Service"
-              disabled={busy}
+              // Read-only rather than disabled while busy: Enter submits from here, and disabling
+              // the focused field would drop focus on <body>, outside the dialog's Tab trap.
+              readOnly={busy}
               onChange={(event) => setName(event.target.value)}
             />
           </div>
