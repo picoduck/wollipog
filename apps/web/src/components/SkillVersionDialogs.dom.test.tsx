@@ -515,3 +515,41 @@ test("Version History keeps focus in the dialog when a phone-width crossing hide
     await unmount();
   } finally { phoneWidth = false; }
 });
+
+test("Version History keeps focus in the dialog through every phone pane change (review CR-E2-3.1)", async () => {
+  const client = {
+    ...api,
+    listSkillVersions: async () => ({ versions: [{ id: "skillv_3", versionNumber: 3, digest: "c" }, { id: "skillv_2", versionNumber: 2, digest: "b" }], nextCursor: null }),
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => ({
+      version: { id: versionId, versionNumber: Number(versionId.slice(7)), digest: versionId.padEnd(64, "0"), files: [file(versionId)] },
+      currentVersion: { id: "skillv_3", versionNumber: 3, digest: "skillv_3", files: [file("current")] },
+    }),
+  } as unknown as ApiClient;
+  const resize = async (phone: boolean) => {
+    phoneWidth = phone;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+    await settle();
+  };
+  const buttonLabelled = (label: string) => dialog().querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+  phoneWidth = true;
+  try {
+    const unmount = await history(client);
+    // Choosing a row from the keyboard replaces the list with the version: focus goes to Back.
+    await act(async () => { rows()[1]!.focus(); });
+    await click(rows()[1]!);
+    assert.equal(rows().length, 0);
+    assert.ok(dialog().contains(document.activeElement), "choosing keeps focus inside the dialog");
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "Back to Versions");
+    // Back to the list, then wider: both panes show. Focus Copy in the version, then narrow again,
+    // which hides the version: focus goes to the chosen row.
+    await click(buttonLabelled("Back to Versions"));
+    await resize(false);
+    await act(async () => { buttonLabelled("Copy Fingerprint").focus(); });
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "Copy Fingerprint");
+    await resize(true);
+    assertNoDomNode(dialog().querySelector('button[aria-label="Copy Fingerprint"]'), "the version pane is hidden on the list step");
+    assert.ok(dialog().contains(document.activeElement), "narrowing keeps focus inside the dialog");
+    assert.equal(document.activeElement, rows()[1]);
+    await unmount();
+  } finally { phoneWidth = false; }
+});

@@ -136,24 +136,35 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
     catch { setError("The version was restored, but the Skills page didn't refresh. Reopen it to refresh."); }
   };
 
-  // Crossing to a phone while a version row has focus hides the list and the row with it, which drops
-  // focus on the page behind the sheet. Keep it in the dialog: on Back, or else on the dialog itself.
-  const detailRef = useRef<HTMLDivElement>(null);
-  const shownPhone = useRef(phone);
-  useLayoutEffect(() => {
-    // Only a crossing: opening the dialog places focus itself (Modal, §7.2).
-    if (shownPhone.current === phone) return;
-    shownPhone.current = phone;
-    if (document.activeElement && document.activeElement !== document.body) return;
-    const dialog = detailRef.current?.closest<HTMLElement>('[role="dialog"]');
-    const back = dialog?.querySelector<HTMLElement>('button[aria-label="Back to Versions"]');
-    (back ?? dialog)?.focus();
-  }, [phone]);
-
   const reasonId = useId();
   const reason = isCurrent ? CURRENT_VERSION_REASON : null;
   const listStep = !phone || step === "list";
   const detailStep = !phone || step === "detail";
+
+  // A phone shows one pane at a time, so choosing a row, or crossing the breakpoint, can unmount the
+  // control that has focus, which drops it on the page behind the sheet. Keep it in the dialog: on
+  // Back when the version shows, on the chosen row (or the first) when the list does, else on the
+  // dialog itself. The dialog is found through whichever pane is shown.
+  const listRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    dialogRef.current = (listRef.current ?? detailRef.current)?.closest<HTMLElement>('[role="dialog"]') ?? dialogRef.current;
+  });
+  const panes = `${listStep}:${detailStep}`;
+  const shownPanes = useRef(panes);
+  useLayoutEffect(() => {
+    // Only a change of pane: opening the dialog places focus itself (Modal, §7.2).
+    if (shownPanes.current === panes) return;
+    shownPanes.current = panes;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    const dialog = dialogRef.current;
+    if (!dialog?.isConnected) return;
+    const target = detailStep
+      ? dialog.querySelector<HTMLElement>('button[aria-label="Back to Versions"]')
+      : listRef.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? listRef.current?.querySelector<HTMLElement>("button");
+    (target ?? dialog).focus();
+  }, [panes]);
 
   const list = pages.loading ? <div className="skill-version-loading" role="status">
     <span className="sr-only">Loading versions…</span>
@@ -229,7 +240,7 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
         {selected ? `Restore ${name}` : "Restore Version"}
       </BusyButton>
     </>}>
-    {listStep && <div className="skill-version-pane list">{list}</div>}
+    {listStep && <div className="skill-version-pane list" ref={listRef}>{list}</div>}
     {detailStep && <div className="skill-version-pane detail" ref={detailRef}>{detail}</div>}
   </Modal>;
 }
