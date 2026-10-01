@@ -25,7 +25,7 @@ async function openNewSkill(page: Page): Promise<Locator> {
 
 async function openAddAssignment(page: Page): Promise<Locator> {
   await page.goto("/skills-removals-e2e.html?dialogs=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".skill-row", { hasText: "code-review" }).click();
   const direct = page.getByRole("button", { name: "Add Assignment…", exact: true });
   if (await direct.isVisible()) await direct.click();
   else {
