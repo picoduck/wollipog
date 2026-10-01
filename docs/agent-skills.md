@@ -109,11 +109,14 @@ or runs a version that keeps copies aside without reporting them, the skill list
   entry.
 - **Edited copies of deleted skills.** A drifted copy whose skill no longer exists in the library.
   The runner keeps its links while they serve it. It moves back to a skill's Deployment section
-  when a skill with the same name exists again.
+  when a skill with the same name exists again. The control plane records when the library deletes
+  a skill (by name, cleared when a skill takes the name again) and lists it as the optional
+  `skillDeletedAt`. A deletion before that record existed, or a list from an older control plane,
+  has no date.
 
 Each machine with something to show is a section with its status. Each copy is one row: its skill
 name ("Unidentified Copy" when the copy names none), then one sentence with what kind of copy it is,
-the date a restore kept it aside, and its invocation variant. A copy that cannot be imported keeps
+the date a restore kept it aside or the library deleted its skill, and its invocation variant. A copy that cannot be imported keeps
 **Import…** disabled and says why on that line: its content is not readable skill content (with the
 runner's reason), or the machine's runner is too old to resolve it. On an offline machine, the
 header says copies can be imported or discarded when it is back online. What a runner cannot report
