@@ -109,6 +109,8 @@ test("every referenced custom property is defined in the shared root scope", () 
     "--zone-line-top",
     "--zone-line-left",
     "--zone-line-width",
+    // SessionHeader measures the bar title's readable width; absent means no compact-tier floor.
+    "--session-title-readable",
   ]);
 
   // Component-local by design (docs/design-system.md §19.4 rejects promoting them): each is
@@ -419,17 +421,17 @@ test("mobile Session statuses stay on one measured line before fixed actions", (
   const phoneRule = mediaBlocks(css).find((block) =>
     block.maxWidths.includes(760) &&
     block.containsSelector(
-      ".session-detail > .detail-head > .session-header-statuses .change-status-indicators",
+      ".session-bar > .session-header-statuses .change-status-indicators",
     ));
   assert.ok(phoneRule, "the phone layout must define the compact shared status row");
   assert.deepEqual(
     phoneRule.declarationsForSelector(
-      ".session-detail > .detail-head > .session-header-statuses .change-status-indicators",
+      ".session-bar > .session-header-statuses .change-status-indicators",
     ).get("display"),
     ["contents"],
   );
   const statuses = phoneRule
-    .declarationsForSelector(".session-detail > .detail-head > .session-header-statuses");
+    .declarationsForSelector(".session-bar > .session-header-statuses");
   assert.deepEqual(statuses.get("grid-column"), ["1"],
     "statuses must stop before the dedicated action track");
   assert.deepEqual(statuses.get("flex-wrap"), ["nowrap"]);
@@ -441,20 +443,20 @@ test("mobile Session statuses stay on one measured line before fixed actions", (
     "a hidden-count disclosure replaces the ambiguous clipped-edge fade");
   assert.deepEqual(
     phoneRule.declarationsForSelector(
-      ".session-detail > .detail-head > .session-header-statuses [hidden]",
+      ".session-bar > .session-header-statuses [hidden]",
     ).get("display"),
     ["none"],
     "overflowed badges must not remain partially painted",
   );
   const interactiveStatus = phoneRule.declarationsForSelector(
-    ".session-detail > .detail-head > .session-header-statuses > .active-subagents-badge",
+    ".session-bar > .session-header-statuses > .active-subagents-badge",
   );
   assert.deepEqual(interactiveStatus.get("order"), ["-1"],
     "active subagents must lead the row without reordering every actionable status badge");
   assert.deepEqual(interactiveStatus.get("flex"), ["none"]);
   const lifecycle = phoneRule
     .declarationsForSelector(
-      ".session-detail > .detail-head > .session-header-statuses .session-status-indicators",
+      ".session-bar > .session-header-statuses .session-status-indicators",
     );
   assert.deepEqual(lifecycle.get("flex"), ["none"],
     "the lifecycle group must retain stable intrinsic geometry for overflow measurement");
@@ -467,7 +469,7 @@ test("mobile Session statuses stay on one measured line before fixed actions", (
   // its 11px type rather than dropping to the retired 10px `--text-2xs`; the width headroom for
   // wider system fonts now comes from the inset alone, and the line truncates to "+N" (§21).
   const headerBadge = phoneRule.declarationsForSelector(
-    ".session-detail > .detail-head > .session-header-statuses .status",
+    ".session-bar > .session-header-statuses .status",
   );
   assert.deepEqual(headerBadge.get("padding-inline"), ["var(--space-1)"],
     "header badges need enough width headroom for wider system fonts");
@@ -479,25 +481,25 @@ test("mobile Session statuses stay on one measured line before fixed actions", (
   assert.match(soleRuleBody(".status.sm"), /^font-size: var\(--text-xs\);$/m,
     "the small badge keeps 11px against the older `.sm` utility");
   assert.deepEqual(
-    phoneRule.declarationsForSelector(".session-detail > .detail-head").get("min-height"),
+    phoneRule.declarationsForSelector(".session-bar").get("min-height"),
     ["44px"],
-    "the compact status/action row must override the desktop 52px floor",
+    "the compact status/action row must override the desktop 48px bar",
   );
   assert.deepEqual(
-    phoneRule.declarationsForSelector(".session-detail > .detail-head").get("row-gap"),
+    phoneRule.declarationsForSelector(".session-bar").get("row-gap"),
     ["0"],
     "an absent transient note must not leave an empty second-row gap",
   );
   assert.deepEqual(
     phoneRule.declarationsForSelector(
-      ".session-detail > .detail-head:has(> .session-header-note)",
+      ".session-bar:has(> .session-header-note)",
     ).get("row-gap"),
     ["4px"],
     "a present transient note retains separation from the status/action row",
   );
   assert.deepEqual(
     phoneRule.declarationsForSelector(
-      ".session-detail > .detail-head > .detail-actions",
+      ".session-bar > .detail-actions",
     ).get("align-self"),
     ["center"],
     "status and action centers must remain aligned if the single row grows",
@@ -514,7 +516,8 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
   assert.ok(phoneRule, "the phone layout must define both default and Session chrome geometry");
 
   const sharedTokens = soleRuleProps(":root");
-  assert.deepEqual(sharedTokens.get("--mobile-session-action-gap"), ["7px"]);
+  assert.deepEqual(sharedTokens.get("--mobile-session-action-gap"), ["var(--space-2)"],
+    "8px apart, so each 36px button keeps its whole borrowed 44px hit area");
   assert.deepEqual(sharedTokens.get("--mobile-session-trailing-inset"),
     ["calc(12px + env(safe-area-inset-right, 0px))"]);
 
@@ -522,9 +525,9 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
   const paneActions = phoneRule.declarationsForSelector(
     ".topbar:has(.mobile-session-back) .topbar-mobile-controls",
   );
-  const sessionHeader = phoneRule.declarationsForSelector(".session-detail > .detail-head");
+  const sessionHeader = phoneRule.declarationsForSelector(".session-bar");
   const sessionActions = phoneRule.declarationsForSelector(
-    ".session-detail > .detail-head > .detail-actions",
+    ".session-bar > .detail-actions",
   );
   assert.deepEqual(sessionTopbar.get("padding-right"), ["var(--mobile-session-trailing-inset)"]);
   assert.deepEqual(sessionHeader.get("padding-right"), ["var(--mobile-session-trailing-inset)"]);
@@ -543,11 +546,11 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
   const sessionPanelTop = phoneRule
     .declarationsForSelector(".app:has(.mobile-session-back) .right-panel").get("top");
   assert.deepEqual(sessionTopbarHeight,
-    ["calc(40px + env(safe-area-inset-top, 0px))"]);
+    ["calc(var(--bar-h) + env(safe-area-inset-top, 0px))"]);
   assert.deepEqual(sessionPanelTop, sessionTopbarHeight,
     "the Session right panel must begin at the compact Session topbar's bottom edge");
 
-  const actionIcon = phoneRule.declarationsForSelector(".session-header-action svg");
+  const actionIcon = phoneRule.declarationsForSelector(".session-bar .session-header-action svg");
   assert.deepEqual(actionIcon.get("width"), ["var(--icon)"]);
   assert.deepEqual(actionIcon.get("height"), ["var(--icon)"]);
 });

@@ -25,7 +25,7 @@ async function openSession(page: Page, scenario = "preview-follow", params: Reco
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
-  await expect(page.locator(".detail-head")).toBeVisible();
+  await expect(page.locator(".session-bar")).toBeVisible();
   if (evidenceTheme === "dark" || evidenceTheme === "light") {
     await page.evaluate((theme) => {
       document.documentElement.dataset.theme = theme;
@@ -49,7 +49,7 @@ async function capture(page: Page, viewport: string) {
 async function mobileSessionHeaderGeometry(page: Page) {
   return page.evaluate(() => {
     const topbar = document.querySelector(".topbar") as HTMLElement;
-    const header = document.querySelector(".session-detail > .detail-head") as HTMLElement;
+    const header = document.querySelector(".session-bar") as HTMLElement;
     const paneActions = topbar.querySelector(".topbar-mobile-controls") as HTMLElement;
     const sessionActions = header.querySelector(".detail-actions") as HTMLElement;
     const rect = (selector: string, root: ParentNode) => {
@@ -252,15 +252,15 @@ test("resolving a closed Requests surface leaves the cross-session generic toggl
   await expect(page.getByRole("button", { name: "Hide Side Panel" })).toBeFocused();
 });
 
-test("the unified session bar balances navigation, breadcrumb, status, and actions on one row", async ({ page }) => {
+test("the session bar balances navigation, the project button, status, and actions on one row", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openSession(page);
   await capture(page, "desktop");
 
-  const header = page.locator(".detail-head");
-  const back = header.locator(".back");
+  const header = page.locator(".session-bar");
+  const back = header.locator(".detail-bar-back");
   await expect(back).toHaveAccessibleName("Back to Sessions");
-  await expect(back).toHaveAttribute("title", "Back to sessions");
+  await expect(back).toHaveAttribute("title", "Back to Sessions");
   await expect(header.locator(".status").first()).toBeVisible();
 
   const geometry = await header.evaluate((element) => {
@@ -268,17 +268,12 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
       const value = node.getBoundingClientRect();
       return { x: value.x, y: value.y, width: value.width, height: value.height };
     };
-    const backControl = element.querySelector(".back")!;
-    const crumbs = element.querySelector(".detail-crumbs")!;
+    const backControl = element.querySelector(".detail-bar-back")!;
+    const title = element.querySelector("h1")!;
     const actions = element.querySelector(".detail-actions")!;
-    const project = element.querySelector(".crumb-project")!;
-    const projectButton = project.querySelector(".cctx-chip")!;
-    const projectLabel = project.querySelector(".crumb-project-label")!;
-    const projectActions = project.querySelector(".crumb-project-actions")!;
-    const projectActionsIcon = projectActions.querySelector("svg")!;
-    const projectSeparator = element.querySelector(".detail-crumb-sep")!;
-    const projectText = document.createRange();
-    projectText.selectNodeContents(projectLabel);
+    const projectButton = element.querySelector(".session-project-button")!;
+    const projectLabel = projectButton.querySelector(".session-project-button-label")!;
+    const projectSeparator = element.querySelector(".session-bar-sep")!;
     const moreActions = element.querySelector('[aria-label="More Actions"]')!;
     const headerBox = element.getBoundingClientRect();
     const clippingPane = element.closest(".inbox-preview-pane");
@@ -287,68 +282,39 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
     const style = getComputedStyle(element);
     return {
       back: rect(backControl),
-      crumbs: rect(crumbs),
+      title: rect(title),
       actions: rect(actions),
-      project: rect(project),
       projectButton: rect(projectButton),
-      projectActions: rect(projectActions),
-      projectActionsIcon: rect(projectActionsIcon),
       projectSeparator: rect(projectSeparator),
-      projectActionDots: [...projectActions.querySelectorAll("circle")]
-        .map((dot) => ({
-          x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
-          y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
-        }))
-        .sort((a, b) => a.y - b.y),
-      projectActionsOpacity: getComputedStyle(projectActions).opacity,
-      projectActionsPointerEvents: getComputedStyle(projectActions).pointerEvents,
-      projectTextWidth: projectText.getBoundingClientRect().width,
+      projectLabelWhole: projectLabel.scrollWidth <= projectLabel.clientWidth,
       projectTextOverflow: getComputedStyle(projectLabel).textOverflow,
       headerHeight: headerBox.height,
       headerRight: headerBox.right,
       clippingRight: Math.min(window.innerWidth, clippingBox.right),
       moreActionsRight: moreActions.getBoundingClientRect().right,
-      paddingTop: Number.parseFloat(style.paddingTop),
-      paddingBottom: Number.parseFloat(style.paddingBottom),
       paddingRight: Number.parseFloat(style.paddingRight),
       hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
     };
   });
 
-  expect(geometry.back.width).toBeGreaterThanOrEqual(40);
-  expect(geometry.back.height).toBeGreaterThanOrEqual(40);
-  // The point of the unified bar: Codex-density chrome, not the old three-strata stack.
-  expect(geometry.headerHeight).toBeLessThanOrEqual(64);
-  expect(geometry.paddingTop).toBeGreaterThanOrEqual(6);
-  expect(geometry.paddingTop).toBe(geometry.paddingBottom);
+  expect(geometry.back.width).toBe(32);
+  expect(geometry.back.height).toBe(32);
+  // The shared 48px bar (§4.4), not the old 52px row.
+  expect(geometry.headerHeight).toBe(48);
   expect(geometry.paddingRight).toBeGreaterThanOrEqual(12);
   expect(geometry.hasHorizontalOverflow).toBe(false);
-  expect(geometry.projectButton.width - geometry.projectTextWidth).toBeLessThanOrEqual(1.5);
-  expect(geometry.project.width - geometry.projectButton.width).toBeCloseTo(24, 0);
-  expect(geometry.projectActions.width).toBe(24);
-  expect(geometry.projectActions.height).toBe(24);
-  expect(geometry.projectActionsIcon.x - geometry.projectActions.x).toBeCloseTo(5, 0);
-  expect(
-    geometry.projectActions.x + geometry.projectActions.width
-      - geometry.projectActionsIcon.x - geometry.projectActionsIcon.width,
-  ).toBeCloseTo(5, 0);
-  expect(geometry.projectSeparator.x - (geometry.project.x + geometry.project.width)).toBeCloseTo(0, 0);
-  expect(geometry.projectActions.x).toBeGreaterThanOrEqual(
-    geometry.projectButton.x + geometry.projectButton.width - 1,
-  );
-  expect(geometry.projectActionDots).toEqual([
-    { x: 12, y: 5 },
-    { x: 12, y: 12 },
-    { x: 12, y: 19 },
-  ]);
-  expect(geometry.projectActionsOpacity).toBe("1");
-  expect(geometry.projectActionsPointerEvents).toBe("auto");
+  expect(geometry.projectButton.height).toBe(32);
+  expect(geometry.projectLabelWhole).toBe(true);
   expect(geometry.projectTextOverflow).toBe("ellipsis");
+  // The separator sits between the project button and the title, with no negative margin.
+  expect(geometry.projectSeparator.x).toBeGreaterThanOrEqual(geometry.projectButton.x + geometry.projectButton.width + 7.5);
+  expect(geometry.title.x).toBeGreaterThanOrEqual(geometry.projectSeparator.x + geometry.projectSeparator.width + 7.5);
   expect(geometry.headerRight - (geometry.actions.x + geometry.actions.width)).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
   expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
   const center = (box: { y: number; height: number }) => box.y + box.height / 2;
-  expect(Math.abs(center(geometry.back) - center(geometry.crumbs))).toBeLessThanOrEqual(1);
-  expect(Math.abs(center(geometry.actions) - center(geometry.crumbs))).toBeLessThanOrEqual(1);
+  expect(Math.abs(center(geometry.back) - center(geometry.title))).toBeLessThanOrEqual(1);
+  expect(Math.abs(center(geometry.actions) - center(geometry.title))).toBeLessThanOrEqual(1);
+  expect(Math.abs(center(geometry.projectButton) - center(geometry.title))).toBeLessThanOrEqual(1);
 
   await page.evaluate(() => {
     document.body.tabIndex = -1;
@@ -371,18 +337,14 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   expect(focus.outlineWidth).toBeGreaterThanOrEqual(2);
   expect(focus.clearanceAbove).toBeGreaterThan(focus.outlineWidth);
 
+  // One control for the project: Back, then the project button, then the actions.
+  const projectButton = header.locator(".session-project-button");
+  await page.keyboard.press("Tab");
+  await expect(projectButton).toBeFocused();
   const moreActions = header.getByRole("button", { name: "More Actions" });
   await moreActions.focus();
   await page.keyboard.press("Shift+Tab");
   await expect(header.getByRole("button", { name: "Share" })).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  // The actions trigger overlays the crumb's reserved gutter (no layout footprint) and remains in
-  // the tab order after the Project navigation button.
-  await expect(header.getByRole("button", { name: "Project Actions" })).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(header.locator(".detail-crumbs .cctx-chip")).toBeFocused();
-  await page.keyboard.press("Tab");
-  await page.keyboard.press("Tab");
   await page.keyboard.press("Tab");
   await expect(moreActions).toBeFocused();
   const trailingFocus = await moreActions.evaluate((element) => {
@@ -404,6 +366,8 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   await moreActions.click();
   const menu = page.getByRole("menu", { name: "Session Actions" });
   await expect(menu).toBeVisible();
+  // The project button is visible at this width, so More Actions does not repeat its actions.
+  await expect(menu.getByRole("menuitem", { name: "Move to Another Project…" })).toHaveCount(0);
   // The former standalone header actions live here now; the process-destructive item stays last
   // and visually distinct.
   await expect(menu.getByRole("menuitem", { name: "Rename Session…" })).toBeVisible();
@@ -436,140 +400,9 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   await expect(shareMenu.getByRole("menuitem", { name: "Rename Session…" })).toHaveCount(0);
 });
 
-test("coarse-pointer desktop keeps Project Actions beside short Project text", async ({ browser }) => {
-  const context = await browser.newContext({
-    hasTouch: true,
-    viewport: { width: 900, height: 800 },
-  });
-  const page = await context.newPage();
-  try {
-    await openSession(page);
-    const header = page.locator(".detail-head");
-    const projectButton = header.locator(".crumb-project > .cctx-chip");
-    const projectActions = header.getByRole("button", { name: "Project Actions" });
-    await expect(projectButton).toHaveText("Alpha");
-    await expect(projectActions).toHaveCSS("opacity", "1");
-    const geometry = await header.locator(".crumb-project").evaluate((element) => {
-      const project = element.getBoundingClientRect();
-      const button = element.querySelector(".cctx-chip")!.getBoundingClientRect();
-      const actions = element.querySelector(".crumb-project-actions")!.getBoundingClientRect();
-      return {
-        projectWidth: project.width,
-        buttonRight: button.right,
-        actionsLeft: actions.left,
-      };
-    });
-    expect(geometry.projectWidth).toBeLessThan(100);
-    expect(geometry.actionsLeft).toBeGreaterThanOrEqual(geometry.buttonRight - 1);
-  } finally {
-    await context.close();
-  }
-});
-
-test("Project Actions keeps hover transparent while preserving interaction states", async ({ browser }) => {
-  for (const theme of ["light", "dark"] as const) {
-    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-    const page = await context.newPage();
-    try {
-      await openSession(page);
-      await page.evaluate((value) => {
-        document.documentElement.dataset.theme = value;
-        document.documentElement.style.colorScheme = value;
-      }, theme);
-
-      const header = page.locator(".detail-head");
-      const project = header.locator(".crumb-project > .cctx-chip");
-      const actions = header.getByRole("button", { name: "Project Actions" });
-      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await expect(actions).toHaveAttribute("title", "Project Actions");
-      await expect(actions).toHaveAttribute("aria-haspopup", "menu");
-      await expect(actions).toHaveAttribute("aria-expanded", "false");
-      await expect(actions).toHaveCSS("background-image", "none");
-      await expect(actions).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-      await expect.poll(async () => {
-        const [actionsColor, projectColor] = await Promise.all([
-          actions.evaluate((element) => getComputedStyle(element).color),
-          project.evaluate((element) => getComputedStyle(element).color),
-        ]);
-        return actionsColor === projectColor;
-      }).toBe(true);
-      const idleBox = await actions.boundingBox();
-      expect(idleBox).not.toBeNull();
-      const idleTransform = await actions.evaluate((element) => getComputedStyle(element).transform);
-
-      const tokens = await page.locator("html").evaluate(() => {
-        const probe = document.createElement("div");
-        probe.style.display = "none";
-        probe.style.backgroundColor = "var(--bg-elev-2)";
-        probe.style.color = "var(--accent)";
-        document.body.append(probe);
-        const style = getComputedStyle(probe);
-        const expanded = style.backgroundColor;
-        const accent = style.color;
-        probe.style.backgroundColor = "var(--bg-elev-3)";
-        const active = getComputedStyle(probe).backgroundColor;
-        probe.remove();
-        return { accent, active, expanded };
-      });
-      await actions.hover();
-      await expect.poll(() => actions.evaluate((element) => element.matches(":hover"))).toBe(true);
-      await expect(actions).toHaveCSS("background-image", "none");
-      await expect(actions).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-      await expect(actions).toHaveCSS("border-top-width", "0px");
-      await expect(actions).toHaveCSS("border-right-width", "0px");
-      await expect(actions).toHaveCSS("border-bottom-width", "0px");
-      await expect(actions).toHaveCSS("border-left-width", "0px");
-      await expect(actions).toHaveCSS("box-shadow", "none");
-      await expect(actions).toHaveCSS("filter", "none");
-      await expect(actions).toHaveCSS("outline-style", "none");
-      await expect(actions).toHaveCSS("cursor", "pointer");
-      await expect(actions).toHaveCSS("transform", idleTransform);
-      await expect.poll(async () => {
-        const [actionsColor, projectColor] = await Promise.all([
-          actions.evaluate((element) => getComputedStyle(element).color),
-          project.evaluate((element) => getComputedStyle(element).color),
-        ]);
-        return actionsColor === projectColor;
-      }).toBe(true);
-      const hoveredBox = await actions.boundingBox();
-      expect(hoveredBox).toEqual(idleBox);
-      await capture(page, `${theme}-project-actions-hover`);
-      await expect.poll(() => actions.evaluate((element) => element.matches(":hover"))).toBe(true);
-      const box = await actions.boundingBox();
-      expect(box).not.toBeNull();
-      await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
-      await page.mouse.down();
-      await expect(actions).toHaveCSS("background-color", tokens.active);
-      await page.mouse.up();
-      await expect(actions).toHaveAttribute("aria-expanded", "true");
-      await expect(actions).toHaveCSS("background-color", tokens.expanded);
-      await expect(actions).toHaveCSS("color", tokens.accent);
-      await page.keyboard.press("Escape");
-      await expect(actions).toHaveAttribute("aria-expanded", "false");
-      await expect(actions).toBeFocused();
-      await project.focus();
-      await expect(project).toBeFocused();
-      await page.keyboard.press("Tab");
-      await expect(actions).toBeFocused();
-      await expect(actions).toHaveCSS("color", tokens.accent);
-      const focus = await actions.evaluate((element) => {
-        const style = getComputedStyle(element);
-        return {
-          outlineStyle: style.outlineStyle,
-          outlineWidth: Number.parseFloat(style.outlineWidth),
-        };
-      });
-      expect(focus.outlineStyle).not.toBe("none");
-      expect(focus.outlineWidth).toBeGreaterThanOrEqual(2);
-    } finally {
-      await context.close();
-    }
-  }
-});
-
 test("desktop Session actions stay contained with five concurrent status indicators", async ({ page }) => {
-  await page.setViewportSize({ width: 900, height: 800 });
-  await openSession(page, "git-visibility", { reviewReady: "1" });
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await openSession(page, "git-visibility", { reviewReady: "1", fullShell: "1" });
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       status: "idle",
@@ -578,7 +411,7 @@ test("desktop Session actions stay contained with five concurrent status indicat
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "active-desktop-subagent");
   });
 
-  const header = page.locator(".session-detail > .detail-head");
+  const header = page.locator(".session-bar");
   await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
   await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
   await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
@@ -589,28 +422,37 @@ test("desktop Session actions stay contained with five concurrent status indicat
   await expect(header.getByRole("button", { name: "1 Worker Active" })).toBeVisible();
   await expect(header.locator(".session-status-overflow-trigger")).toHaveCount(0);
   await capture(page, "desktop-concurrent");
-  const longProjectName = "Alpha Project with a deliberately long name for breadcrumb truncation";
+  const longProjectName = "Alpha Project with a deliberately long name for project button truncation";
   await page.evaluate((name) => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { name });
   }, longProjectName);
-  await expect(header.locator(".crumb-project > .cctx-chip")).toHaveText(longProjectName);
+  const projectButton = header.locator(".session-project-button");
+  await expect(projectButton).toHaveText(longProjectName);
+  await page.setViewportSize({ width: 1440, height: 800 });
+  const wide = await projectButton.evaluate((element) => {
+    const label = element.querySelector<HTMLElement>(".session-project-button-label")!;
+    return { width: element.getBoundingClientRect().width, clipped: label.scrollWidth > label.clientWidth };
+  });
+  expect(wide.width).toBe(220);
+  expect(wide.clipped).toBe(true);
   await capture(page, "desktop-long-project");
 
   for (const width of [900, 761]) {
     await page.setViewportSize({ width, height: 800 });
+    // The compact tier (§15.2) folds the project button into More Actions.
+    await expect(projectButton).toBeHidden();
     const geometry = await header.evaluate((element) => {
       const headerBox = element.getBoundingClientRect();
       const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
       const moreActions = element.querySelector('[aria-label="More Actions"]')!.getBoundingClientRect();
-      const project = element.querySelector(".crumb-project")!.getBoundingClientRect();
-      const projectButton = element.querySelector(".crumb-project > .cctx-chip") as HTMLElement;
-      const projectLabel = element.querySelector(".crumb-project-label") as HTMLElement;
-      const projectActions = element.querySelector(".crumb-project-actions")!.getBoundingClientRect();
-      const separator = element.querySelector(".detail-crumb-sep")!.getBoundingClientRect();
+      const title = element.querySelector("h1")!.getBoundingClientRect();
+      const statuses = element.querySelector(".session-header-statuses")!.getBoundingClientRect();
       const clippingPane = element.closest(".inbox-preview-pane");
       return {
         hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+        headerHeight: headerBox.height,
         headerRight: headerBox.right,
+        actionsLeft: actions.left,
         actionsRight: actions.right,
         clippingRight: Math.min(
           window.innerWidth,
@@ -618,30 +460,23 @@ test("desktop Session actions stay contained with five concurrent status indicat
         ),
         moreActionsRight: moreActions.right,
         paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
-        projectRight: project.right,
-        projectWidth: project.width,
-        projectButtonRight: projectButton.getBoundingClientRect().right,
-        projectLabelClientWidth: projectLabel.clientWidth,
-        projectLabelScrollWidth: projectLabel.scrollWidth,
-        projectLabelTextOverflow: getComputedStyle(projectLabel).textOverflow,
-        projectActionsLeft: projectActions.left,
-        separatorLeft: separator.left,
+        titleWidth: title.width,
+        titleNatural: element.querySelector("h1")!.scrollWidth,
+        titleRight: title.right,
+        statusesLeft: statuses.left,
+        statusesRight: statuses.right,
       };
     });
     expect(geometry.hasHorizontalOverflow, `${width}px header overflow`).toBe(false);
+    expect(geometry.headerHeight, `${width}px stays one row`).toBe(48);
     expect(geometry.headerRight - geometry.actionsRight).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
     expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
-    expect(geometry.projectWidth).toBeLessThanOrEqual(220);
-    expect(geometry.projectRight).toBeLessThanOrEqual(geometry.separatorLeft);
-    expect(geometry.projectLabelClientWidth).toBeGreaterThan(0);
-    expect(geometry.projectLabelScrollWidth).toBeGreaterThan(geometry.projectLabelClientWidth);
-    expect(geometry.projectLabelTextOverflow).toBe("ellipsis");
-    expect(geometry.projectActionsLeft).toBeGreaterThanOrEqual(geometry.projectButtonRight - 1);
+    // The title keeps 200px, or all of itself when shorter, before the five statuses clip (§15.2).
+    expect(geometry.titleWidth, `${width}px title stays readable`)
+      .toBeGreaterThanOrEqual(Math.min(200, geometry.titleNatural) - 0.5);
+    expect(geometry.titleRight).toBeLessThanOrEqual(geometry.statusesLeft + 0.5);
+    expect(geometry.statusesRight).toBeLessThanOrEqual(geometry.actionsLeft + 0.5);
   }
-  const projectActions = header.getByRole("button", { name: "Project Actions" });
-  await projectActions.focus();
-  await expect(projectActions).toBeFocused();
-  await expect(projectActions).toBeVisible();
 });
 
 test("managed background indicators open a responsive inspectable inventory and settled work leaves history only", async ({ page }) => {
@@ -658,7 +493,7 @@ test("managed background indicators open a responsive inspectable inventory and 
       backgroundWorkTracking: "untracked",
     });
   });
-  const header = page.locator(".session-detail > .detail-head");
+  const header = page.locator(".session-bar");
   await expect(header.getByRole("button", { name: "Detached Work: Untracked" })).toBeVisible();
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
@@ -804,16 +639,16 @@ for (const viewport of [
       });
       await capture(page, `narrow-${viewport.width}`);
 
-      const header = page.locator(".session-detail > .detail-head");
+      const header = page.locator(".session-bar");
       const topbar = page.locator(".topbar");
-      await expect(page.locator(".topbar, .session-detail > .detail-head")).toHaveCount(2);
+      await expect(page.locator(".topbar, .session-bar")).toHaveCount(2);
       await expect(topbar.getByRole("button", { name: "Back to Sessions" })).toBeVisible();
       await expect(topbar.getByRole("heading", { name: "Alpha Session", exact: true })).toBeVisible();
       await expect(topbar.getByRole("button", { name: /^Open/ })).toHaveCount(0);
       // Settings left the phone topbar for the rail's More sheet (#458). The compact geometry this
       // test pins is now anchored on the trailing pane control instead of the gear.
       await expect(topbar.getByRole("button", { name: "Settings" })).toHaveCount(0);
-      await expect(header.locator(".back, .detail-crumbs, .editor-select")).toHaveCount(0);
+      await expect(header.locator(".detail-bar-back, .session-bar-project, h1, .editor-select")).toHaveCount(0);
       await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toHaveCount(1);
       await expect(header.locator('[aria-label="Changes: Ready for Review"]')).toHaveCount(1);
       await expect(header.locator('[aria-label="Changes: Uncommitted Changes"]')).toHaveCount(1);
@@ -934,8 +769,9 @@ for (const viewport of [
       const subheaderBottom = await header.evaluate((element) => element.getBoundingClientRect().bottom);
 
       expect(metrics.display).toBe("grid");
-      expect(shellMetrics.bottom - shellMetrics.top).toBeLessThanOrEqual(40.5);
-      expect(shellMetrics.titleFontSize).toBeLessThanOrEqual(14);
+      // The shared 48px bar, which holds the toggles' 44px hit areas (§4.4, #2146).
+      expect(shellMetrics.bottom - shellMetrics.top).toBe(48);
+      expect(shellMetrics.titleFontSize).toBe(16);
       expect(shellMetrics.back.width).toBeGreaterThanOrEqual(36);
       expect(shellMetrics.back.height).toBeGreaterThanOrEqual(36);
       expect(shellMetrics.trailingControl.width).toBe(metrics.share.width);
@@ -963,7 +799,7 @@ for (const viewport of [
       expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
       // #784: background work rides the measured status/action line, so a running job no longer buys
       // the header a line of its own. The topbar, that line, and the worktree identity are all of it.
-      expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(105);
+      expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(113);
       expect(metrics.share.width).toBeGreaterThanOrEqual(36);
       expect(metrics.share.height).toBeGreaterThanOrEqual(36);
       expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
@@ -985,9 +821,9 @@ for (const viewport of [
         expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
       }
       expect(metrics.overflow.right).toBeLessThanOrEqual(metrics.fork.x);
-      expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(7, 0);
+      expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(8, 0); // 8px apart, so the borrowed 44px hit areas meet without overlapping (§2.8)
       expect(metrics.fork.right).toBeLessThanOrEqual(metrics.share.x);
-      expect(metrics.share.x - metrics.fork.right).toBeCloseTo(7, 0);
+      expect(metrics.share.x - metrics.fork.right).toBeCloseTo(8, 0);
       expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
       expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
       expect(metrics.totalBadgeCount).toBe(5);
@@ -1062,11 +898,12 @@ for (const viewport of [
       await expect(menu).toBeVisible();
       await expect(menu.locator(".menu-label", { hasText: "Status" })).toHaveCount(0);
       await expect(menu.locator(".session-menu-statuses")).toHaveCount(0);
-      const projectHeader = menu.locator(".session-project-menu-header");
-      await expect(projectHeader).toContainText("Project");
-      expect(await projectHeader.evaluate((element) => getComputedStyle(element).textTransform)).toBe("none");
-      await expect(menu.getByRole("menuitem", { name: "Manage Project" })).toBeVisible();
-      await expect(menu.getByRole("menuitem", { name: "Move Session…" })).toBeVisible();
+      // The project leads the phone sheet (§15.1): Open <Project>, Move to Another Project…, then a
+      // separator before the session's own actions.
+      const rows = menu.locator("[role='menuitem'], [role='separator']");
+      await expect(rows.nth(0)).toHaveText("Open Alpha");
+      await expect(rows.nth(1)).toHaveText("Move to Another Project…");
+      await expect(rows.nth(2)).toHaveAttribute("role", "separator");
       await expect(menu.getByRole("menuitem", { name: "Copy Internal Session Link" })).toHaveCount(0);
       // Read the rows once the sheet has finished sliding up: mid-motion boxes are fractional.
       await dialogMotionSettled(page);
@@ -1075,7 +912,7 @@ for (const viewport of [
         expect(box?.height).toBeGreaterThanOrEqual(44);
       }
       if (viewport.width === 390) {
-        await menu.getByRole("menuitem", { name: "Move Session…" }).click();
+        await menu.getByRole("menuitem", { name: "Move to Another Project…" }).click();
         const moveDialog = page.getByRole("dialog", { name: "Move to Project" });
         await expect(moveDialog).toBeVisible();
         await moveDialog.getByRole("button", { name: "Cancel" }).click();
@@ -1125,7 +962,7 @@ test("status overflow count follows width and live Session status changes", asyn
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "dynamic-status-subagent");
   });
 
-  const header = page.locator(".session-detail > .detail-head");
+  const header = page.locator(".session-bar");
   // Five badges compete for the row since #784 put background work in it.
   const overflowTrigger = header.locator(".session-status-overflow-trigger");
   await expect(overflowTrigger).toBeVisible();
@@ -1168,7 +1005,7 @@ test("status overflow count follows width and live Session status changes", asyn
 test("a fitting phone status row does not render an overflow control", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   await openSession(page, "preview-follow", { sessionShell: "1" });
-  const header = page.locator(".session-detail > .detail-head");
+  const header = page.locator(".session-bar");
   await expect(header.locator('.session-status-overflow-trigger')).toHaveCount(0);
   await expect(header.locator(".session-header-statuses .status")).toBeVisible();
 });
@@ -1182,7 +1019,7 @@ test("measured background work leaves phone actions hittable when no change stat
     });
   });
 
-  const header = page.locator(".session-detail > .detail-head");
+  const header = page.locator(".session-bar");
   await expect(header.locator(".change-status-indicators")).toHaveCount(0);
   await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
   const metrics = await header.evaluate((element) => {
@@ -1206,26 +1043,29 @@ test("measured background work leaves phone actions hittable when no change stat
   expect(metrics.moreActionsIsTopmost).toBe(true);
 });
 
-test("long session titles truncate inside the breadcrumb without hiding actions", async ({ page }) => {
+test("long session titles truncate before the statuses without hiding actions", async ({ page }) => {
   await page.setViewportSize({ width: 780, height: 800 });
   await openSession(page);
-  const header = page.locator(".session-detail > .detail-head");
-  await header.locator(".detail-title").evaluate((element) => {
+  const header = page.locator(".session-bar");
+  await header.locator("h1").evaluate((element) => {
     element.textContent = "A very long session title that must yield to a complete action cluster without hiding navigation";
   });
 
   const metrics = await header.evaluate((element) => {
     const rect = (selector: string) => element.querySelector(selector)!.getBoundingClientRect();
     const headerRect = element.getBoundingClientRect();
-    const crumbs = rect(".detail-crumbs");
+    const title = element.querySelector("h1") as HTMLElement;
+    const titleBox = title.getBoundingClientRect();
+    const statuses = rect(".session-header-statuses");
     const actions = rect(".detail-actions");
-    const title = element.querySelector(".detail-title") as HTMLElement;
     const clippingPane = element.closest(".inbox-preview-pane");
     if (!clippingPane) throw new Error("expanded Session bar is not mounted in the clipping pane");
     const titleStyle = getComputedStyle(title);
     return {
-      crumbsWidth: crumbs.width,
-      crumbsRight: crumbs.right,
+      titleWidth: titleBox.width,
+      titleRight: titleBox.right,
+      statusesLeft: statuses.left,
+      statusesRight: statuses.right,
       actionsLeft: actions.left,
       actionsRight: actions.right,
       titleWhiteSpace: titleStyle.whiteSpace,
@@ -1237,8 +1077,9 @@ test("long session titles truncate inside the breadcrumb without hiding actions"
     };
   });
 
-  expect(metrics.crumbsWidth).toBeGreaterThanOrEqual(120);
-  expect(metrics.crumbsRight).toBeLessThanOrEqual(metrics.actionsLeft + 1);
+  expect(metrics.titleWidth).toBeGreaterThanOrEqual(120);
+  expect(metrics.titleRight).toBeLessThanOrEqual(metrics.statusesLeft + 1);
+  expect(metrics.statusesRight).toBeLessThanOrEqual(metrics.actionsLeft + 1);
   expect(metrics.titleWhiteSpace).toBe("nowrap");
   expect(metrics.titleTextOverflow).toBe("ellipsis");
   expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
@@ -1259,7 +1100,7 @@ test.describe("at 125% device scaling", () => {
   test("session header preserves its trailing inset across clipping-pane scrollbar states", async ({ page }) => {
     await page.setViewportSize({ width: 780, height: 800 });
     await openSession(page);
-    const header = page.locator(".session-detail > .detail-head");
+    const header = page.locator(".session-bar");
     const clippingPane = page.locator(".inbox-preview-pane");
     await expect.poll(() => page.evaluate(() => window.devicePixelRatio)).toBe(1.25);
 
@@ -1290,25 +1131,25 @@ test.describe("at 125% device scaling", () => {
 test("unbroken 120-character session titles truncate without overlapping bar actions", async ({ page }) => {
   await page.setViewportSize({ width: 780, height: 800 });
   await openSession(page);
-  const header = page.locator(".session-detail > .detail-head");
-  await header.locator(".detail-title").evaluate((element) => {
+  const header = page.locator(".session-bar");
+  await header.locator("h1").evaluate((element) => {
     element.textContent = "W".repeat(120);
   });
 
   const metrics = await header.evaluate((element) => {
-    const crumbs = element.querySelector(".detail-crumbs")!.getBoundingClientRect();
+    const title = element.querySelector("h1")!.getBoundingClientRect();
     const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
     const clippingPane = element.closest(".inbox-preview-pane");
     if (!clippingPane) throw new Error("expanded Session bar is not mounted in the clipping pane");
     return {
-      crumbsRight: crumbs.right,
+      titleRight: title.right,
       actionsLeft: actions.left,
       clippingRight: Math.min(window.innerWidth, clippingPane.getBoundingClientRect().right),
       moreActionsRight: element.querySelector('[aria-label="More Actions"]')!.getBoundingClientRect().right,
     };
   });
 
-  expect(metrics.crumbsRight).toBeLessThanOrEqual(metrics.actionsLeft + 1);
+  expect(metrics.titleRight).toBeLessThanOrEqual(metrics.actionsLeft + 1);
   expect(metrics.clippingRight - metrics.moreActionsRight).toBeGreaterThanOrEqual(11.5);
 });
 
@@ -1319,7 +1160,7 @@ test.describe("with a touch pointer", () => {
   test("the two mobile Session bars use compact touch targets and a bounded menu near the breakpoint", async ({ page }) => {
     await page.setViewportSize({ width: 700, height: 800 });
     await openSession(page, "preview-follow", { sessionShell: "1" });
-    const header = page.locator(".session-detail > .detail-head");
+    const header = page.locator(".session-bar");
     const actions = header.locator(".detail-actions");
     const backBox = await page.locator(".topbar").getByRole("button", { name: "Back to Sessions" }).boundingBox();
     const headerBox = await header.boundingBox();
@@ -1353,7 +1194,7 @@ test.describe("with a touch pointer", () => {
   });
 });
 
-test("the mobile Session name uses compact typography to reveal more of a long title", async ({ page }) => {
+test("the mobile Session name is the 16/600 title and truncates a long title on one line", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   await openSession(page, "preview-follow", { sessionShell: "1" });
   const longTitle = "A deliberately long mobile Session name for compact header coverage";
@@ -1363,51 +1204,31 @@ test("the mobile Session name uses compact typography to reveal more of a long t
   const heading = page.locator(".topbar h1");
   await expect(heading).toHaveText(longTitle);
 
+  // §15.1: the phone title is --type-title like every other page title (#2146), not a label.
   const metrics = await heading.evaluate((element) => {
-    const title = element as HTMLElement;
-    const style = getComputedStyle(title);
-    const box = title.getBoundingClientRect();
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d")!;
-    context.font = `600 17px ${style.fontFamily}`;
-    let prominentFit = 0;
-    for (let index = 1; index <= title.textContent!.length; index += 1) {
-      if (context.measureText(title.textContent!.slice(0, index)).width > box.width) break;
-      prominentFit = index;
-    }
-
-    const range = document.createRange();
-    const text = title.firstChild!;
-    let visibleFit = 0;
-    for (let index = 1; index <= text.textContent!.length; index += 1) {
-      range.setStart(text, 0);
-      range.setEnd(text, index);
-      if (range.getBoundingClientRect().right > box.right + 0.5) break;
-      visibleFit = index;
-    }
+    const style = getComputedStyle(element);
     return {
       fontSize: Number.parseFloat(style.fontSize),
       fontWeight: Number.parseFloat(style.fontWeight),
       textOverflow: style.textOverflow,
       whiteSpace: style.whiteSpace,
-      visibleFit,
-      prominentFit,
-      hasHorizontalOverflow: title.scrollWidth > title.clientWidth,
+      hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+      height: element.getBoundingClientRect().height,
     };
   });
 
-  expect(metrics.fontSize).toBeLessThanOrEqual(14);
-  expect(metrics.fontWeight).toBeLessThanOrEqual(500);
+  expect(metrics.fontSize).toBe(16);
+  expect(metrics.fontWeight).toBe(600);
   expect(metrics.whiteSpace).toBe("nowrap");
   expect(metrics.textOverflow).toBe("ellipsis");
   expect(metrics.hasHorizontalOverflow).toBe(true);
-  expect(metrics.visibleFit).toBeGreaterThan(metrics.prominentFit);
+  expect(metrics.height).toBeLessThan(30);
 });
 
 test("the Share menu scrolls inside a short landscape-phone viewport", async ({ page }) => {
   await page.setViewportSize({ width: 568, height: 320 });
   await openSession(page, "git-visibility", { sessionShell: "1" });
-  await page.locator(".session-detail > .detail-head").getByRole("button", { name: "Share" }).click();
+  await page.locator(".session-bar").getByRole("button", { name: "Share" }).click();
   const menu = page.getByRole("menu", { name: "Session Sharing" });
   await expect(menu).toBeVisible();
   await dialogMotionSettled(page);
@@ -1432,12 +1253,14 @@ test("the Share menu scrolls inside a short landscape-phone viewport", async ({ 
 test("legacy control planes keep mobile Workspace re-filing in More Actions", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 800 });
   await openSession(page, "preview-follow", { sessionShell: "1", legacyWorkspaces: "1" });
-  const moreActions = page.locator(".session-detail > .detail-head").getByRole("button", { name: "More Actions" });
+  const moreActions = page.locator(".session-bar").getByRole("button", { name: "More Actions" });
   await moreActions.click();
   const menu = page.getByRole("menu", { name: "Session Actions" });
-  await expect(menu.locator(".session-project-menu-header")).toHaveText("Workspace · alpha-workspace");
-  await expect(menu.getByRole("menuitem", { name: "Manage Project" })).toHaveCount(0);
-  await menu.getByRole("menuitem", { name: "Move Session…" }).click();
+  // A Workspace has no page to open, so the sheet leads with moving the session alone.
+  const rows = menu.locator("[role='menuitem'], [role='separator']");
+  await expect(rows.nth(0)).toHaveText("Move to Another Workspace…");
+  await expect(rows.nth(1)).toHaveAttribute("role", "separator");
+  await menu.getByRole("menuitem", { name: "Move to Another Workspace…" }).click();
   const dialog = page.getByRole("dialog", { name: "Move to Workspace" });
   await expect(dialog.getByRole("radio", { name: /Alpha Secondary/ })).toBeVisible();
   await dialog.getByRole("button", { name: "New Workspace…" }).click();
@@ -1457,9 +1280,9 @@ test("legacy unfiled sessions use the Workspace vocabulary in More Actions", asy
     legacyWorkspaces: "1",
     unfiledWorkspace: "1",
   });
-  await page.locator(".session-detail > .detail-head").getByRole("button", { name: "More Actions" }).click();
-  await expect(page.getByRole("menu", { name: "Session Actions" }).locator(".session-project-menu-header"))
-    .toHaveText("Workspace · No Workspace");
+  await page.locator(".session-bar").getByRole("button", { name: "More Actions" }).click();
+  await expect(page.getByRole("menu", { name: "Session Actions" }).getByRole("menuitem").first())
+    .toHaveText("Move to a Workspace…");
 });
 
 // Run and Pod detail share one 48px detail bar (#1801, docs/design-system.md §4.3): a ChevronLeft
@@ -1471,7 +1294,7 @@ test("shared Pod headers keep their trailing controls out of the back-button tra
   const pod = page.locator(".pod-detail");
   await expect(pod.getByRole("heading", { level: 1, name: "Active Collaboration Pod" })).toBeVisible();
   await expect(page.locator("h1")).toHaveCount(1);
-  await expect(pod.locator(".detail-head")).toHaveCount(0);
+  await expect(pod.locator(".session-bar")).toHaveCount(0);
 
   const bar = pod.locator(".detail-bar");
   const back = bar.getByRole("button", { name: "Back to Pods", exact: true });

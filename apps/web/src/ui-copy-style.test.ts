@@ -9,6 +9,7 @@ import { closeWarning } from "./components/DesktopCloseGuard.js";
 import { heldUpdateMessage } from "./desktop-updates.js";
 import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
 import { lifecycleConflictPresentation } from "./components/RunnersView.js";
+import { backLabel } from "./navigation.js";
 import {
   DEPLOY_TO_TRACKING_MACHINES_CONSENT,
   deployToAssignmentsConsent,
@@ -609,6 +610,33 @@ test("no production screen calls Sessions the Inbox", () => {
   }
   assert.ok(scanned > 50, `scanned ${scanned} production TSX files`);
   assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+test("the session bar's navigation and project labels are Title Case (#2146)", () => {
+  // Back is named by a helper, so read its result; the project items are menu text, which the
+  // label-tag scan above does not hold to Title Case, so read them from the components themselves.
+  assert.equal(backLabel("inbox"), "Back to Sessions");
+  const menuItems = (file: string) => uiCopy(parseSource(path.join(SOURCE_ROOT, file)))
+    .filter((copy) => copy.kind === "<MenuItem>")
+    .map((copy) => copy.value.replace(/\s+/g, " ").trim());
+  const projectMenu = menuItems("components/SessionDetail.tsx");
+  const moreActions = menuItems("components/SessionHeader.tsx");
+  const labels = [
+    ["Back to Sessions", [backLabel("inbox")]],
+    ["Open Project", projectMenu],
+    ["Move to Another Project…", projectMenu],
+    ["Move to a Project…", projectMenu],
+    // More Actions names the Project or the legacy Workspace through a template hole.
+    ["Move to Another Name…", moreActions],
+    ["Move to a Name…", moreActions],
+  ] as const;
+  for (const [label, found] of labels) {
+    assert.ok(found.includes(label), `${label} is rendered (found ${JSON.stringify(found)})`);
+    assert.ok(isTitleCase(label), `${label} is Title Case`);
+  }
+  for (const retired of ["Manage Project", "Move Session…", "Project Actions"]) {
+    assert.ok(![...projectMenu, ...moreActions].includes(retired), `${retired} is gone from the bar's menus`);
+  }
 });
 
 test("the copy rules tell a sentence from a title", () => {

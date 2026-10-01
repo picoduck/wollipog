@@ -145,7 +145,7 @@ test("every core control is one control height, never sized by its padding", () 
  */
 const REMAINING_MIN_HEIGHT_44 = [
   // The phone Session header row; its geometry is asserted in styles.test.ts (#1801 detail bar).
-  "@media (max-width: 760px)|.session-detail > .detail-head",
+  "@media (max-width: 760px)|.session-bar",
   // The Settings rail-order row (#1803 rows).
   "|.rail-order-row",
 ];

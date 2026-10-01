@@ -65,7 +65,7 @@ test("at 1440px the stack is anchored bottom right, clear of the app bar, three 
   expect(viewport.width - region.right).toBeGreaterThanOrEqual(15.5);
   expect(viewport.width - region.right).toBeLessThanOrEqual(16.5);
   expect(viewport.height - region.bottom).toBeGreaterThanOrEqual(15.5);
-  const bar = page.locator(".topbar, .session-detail > .detail-head").first();
+  const bar = page.locator(".topbar, .session-bar").first();
   if (await bar.count()) {
     const barBox = await bar.evaluate((element) => element.getBoundingClientRect().bottom);
     const firstToast = await box(page, ".toast-region > .toast, .toast-region > .toast-more");

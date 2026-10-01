@@ -32,7 +32,7 @@ for (const viewport of [
       }
       await row.click();
       if (viewport.name === "desktop") await page.getByRole("button", { name: "Expand Session" }).click();
-      const identity = page.locator(".detail-head > .session-worktree-identity");
+      const identity = page.locator(".session-bar > .session-worktree-identity");
       await expect(identity).toHaveText("fix/session-worktree-identity ← origin/main · Open PR");
       await expect(identity).toHaveAttribute("href", "https://github.com/picoduck/wollipog/pull/600");
       await expect(identity).toHaveAttribute("title", /Base: origin\/main.*PR: https:\/\/github\.com\/picoduck\/wollipog\/pull\/600/);
@@ -56,7 +56,7 @@ for (const viewport of [
       }
       await row.click();
       if (viewport.name === "desktop") await page.getByRole("button", { name: "Expand Session" }).click();
-      await expect(page.locator(".detail-head > .session-worktree-identity")).toHaveCount(0);
+      await expect(page.locator(".session-bar > .session-worktree-identity")).toHaveCount(0);
       if (capture) {
         await page.screenshot({ path: `${evidenceDir}/before-header-${viewport.name}-${theme}.png`, fullPage: true });
       }
@@ -69,7 +69,7 @@ test("an unsafe worktree PR URL is shown as identity text without a link", async
   await page.goto("/command-inbox-projects-e2e.html?scenario=unsafe-worktree-pr");
   await page.getByRole("row", { name: /Alpha Session/ }).click();
   await page.getByRole("button", { name: "Expand Session" }).click();
-  const identity = page.locator(".detail-head > .session-worktree-identity");
+  const identity = page.locator(".session-bar > .session-worktree-identity");
   await expect(identity).toHaveText("fix/session-worktree-identity ← origin/main · Open PR");
   await expect(identity).not.toHaveAttribute("href", /.+/u);
 });

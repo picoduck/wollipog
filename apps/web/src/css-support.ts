@@ -187,7 +187,7 @@ export const CSS_SURFACE = {
   "grid-template-columns", "grid-template-rows", "height", "image-rendering", "inset",
   "inset-block-start", "inset-inline-end", "inset-inline-start", "justify-content",
   "justify-items", "justify-self", "left", "letter-spacing", "line-height", "list-style",
-  "margin", "margin-bottom", "margin-inline-end", "margin-inline-start", "margin-left",
+  "margin", "margin-bottom", "margin-inline-start", "margin-left",
   "margin-right", "margin-top", "mask-image", "max-height", "max-width", "min-height",
   "min-inline-size", "min-width", "object-fit", "opacity", "order", "outline", "outline-offset",
   "overflow", "overflow-anchor", "overflow-wrap", "overflow-x", "overflow-y",

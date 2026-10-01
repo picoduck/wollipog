@@ -28,7 +28,7 @@ async function openSession(page: Page, scenario = "permission-mode-layout") {
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
-  await expect(page.locator(".detail-head")).toBeVisible();
+  await expect(page.locator(".session-bar")).toBeVisible();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "acceptEdits"], {
     models: [{ id: "fixture-large", displayName: "Fixture Large" }, { id: "fixture-small", displayName: "Fixture Small" }],
   }));

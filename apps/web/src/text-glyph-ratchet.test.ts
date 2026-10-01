@@ -108,7 +108,6 @@ const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/SessionDetail.tsx", "✕", "✕", COMPOSER],
   ["components/SessionDetail.tsx", "◒", "◒ Plan", COMPOSER],
   ["components/SessionDetail.tsx", "✕", "✕", COMPOSER],
-  ["components/SessionDetail.tsx", "▾", "▾", COMPOSER],
   ["components/SessionDetail.tsx", "✕", "✕", COMPOSER],
   ["components/SessionDetail.tsx", "↳", "↳", COMPOSER],
   ["components/SessionDetail.tsx", "↯", "↯", COMPOSER],

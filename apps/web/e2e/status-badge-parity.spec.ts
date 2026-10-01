@@ -70,13 +70,13 @@ async function openSession(page: Page) {
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
-  await expect(page.locator(".session-detail > .detail-head")).toBeVisible();
+  await expect(page.locator(".session-bar")).toBeVisible();
 }
 
 /** Header badge geometry and placement, with the row's displaced badges temporarily restored. */
 async function readHeader(page: Page) {
   return page.evaluate(() => {
-    const header = document.querySelector<HTMLElement>(".session-detail > .detail-head")!;
+    const header = document.querySelector<HTMLElement>(".session-bar")!;
     const statuses = header.querySelector<HTMLElement>(".session-header-statuses")!;
     const measured = [...statuses.querySelectorAll<HTMLElement>(
       ".session-status-indicators > .status, " +
@@ -165,7 +165,7 @@ for (const width of WIDTHS) {
       await expect(narrowLabel).toBeHidden();
     }
     // The accessible name survives whether or not the row had room to paint the badge.
-    await expect(page.locator(`.detail-head .sr-only [aria-label="${BACKGROUND_LABEL}"]`))
+    await expect(page.locator(`.session-bar .sr-only [aria-label="${BACKGROUND_LABEL}"]`))
       .toHaveCount(1);
 
     const header = await readHeader(page);
@@ -205,7 +205,7 @@ for (const width of WIDTHS) {
     // wrapping flex item among several, which is how that row has always behaved.
     await applyStatuses(page, { status: "running", backgroundWorkState: "resumed" });
     await expect(badge).toHaveCount(0);
-    const withoutBackgroundWork = await page.locator(".session-detail > .detail-head")
+    const withoutBackgroundWork = await page.locator(".session-bar")
       .evaluate((element) => element.getBoundingClientRect().height);
     if (phone) expect(running.headerHeight).toBeLessThanOrEqual(withoutBackgroundWork + 0.5);
   });

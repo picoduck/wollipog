@@ -713,6 +713,15 @@ extending the settled one-bar session chrome app-wide.
   deleted. Project detail gets the same back control.
 - Session specifics follow the settled session designs: the one-bar desktop session chrome with a
   docked Pinned Summary, and the phone session header.
+- The session bar (`header.detail-bar.session-bar`, #2146) shares the classes, not `DetailBar`: it
+  holds Back ("Back to Sessions"), one project menu button (`.btn.ghost`: the projects icon, the
+  name, a 14px caret; `flex: none` up to 220px, "No Project" in `--text-faint`), a `/` separator,
+  the title, the statuses, then Share, More Actions, a divider, the Open split button, a divider and
+  the panel toggles. The project menu is headed by the name and holds Open Project and Move to
+  Another Project… (only Move to a Project… without one); the name does not navigate on its own.
+  The title is the only element that absorbs width, and shows `sessionDisplayTitle()`: the stored
+  title's first non-empty line, whitespace collapsed, a trailing period dropped. Control planes
+  without Projects show the same button with the folder icon for the workspace menu.
 
 ### 4.4 Bar Height: 48px
 
@@ -1873,7 +1882,10 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   badge becomes a dot, with the label in the tooltip, when keeping the full badge would leave the
   truncated title under 200px (`DETAIL_TITLE_READABLE_PX`). A `primary` or `secondary` that carries
   an `icon` becomes a square icon button whose label is its tooltip and accessible name. The session
-  bar follows in its own epic.
+  bar (#2146) hides its project button and separator here, and Open <Project> and Move to Another
+  Project… lead More Actions above a separator instead, as they do on phones. Its status row never
+  wraps and clips instead, and the title keeps `DETAIL_TITLE_READABLE_PX` (or its own width, if
+  shorter) before the statuses give way.
 - Right panel docks at 320px or overlays as a sheet from the right with a scrim when the chat column
   would drop below 480px.
 

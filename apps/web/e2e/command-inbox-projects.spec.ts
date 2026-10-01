@@ -1308,113 +1308,54 @@ test("Project-first creation distinguishes same names and explains multi-locatio
     .toMatchObject({ projectId: "alpha-copy", projectLocationId: "location-alpha-copy" });
 });
 
-/** The persistent vertical-ellipsis trigger beside the Project crumb owns the Move Session menu. */
+/** The session bar's project menu button owns Move to Another Project… (#2146). */
 async function openMoveToProjectDialog(page: Page) {
-  await page.getByRole("button", { name: "Project Actions" }).click();
-  await page.getByRole("menuitem", { name: "Move Session…" }).click();
+  await page.locator(".session-bar .session-project-button").click();
+  await page.getByRole("menuitem", { name: /^Move to (Another|a) Project…$/ }).click();
   return page.getByRole("dialog", { name: "Move to Project" });
 }
 
-test("the Project crumb navigates independently beside persistent Project Actions", async ({ page }) => {
-  // A longer name keeps its click region separate from the compact trailing actions gutter.
+test("the project menu button opens the project's actions and returns focus to itself", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { name: "Alpha Project" }));
   await page.getByRole("tab", { name: /^All \d/ }).click();
   await page.getByRole("row", { name: /Alpha Session/ }).click();
   await page.getByRole("button", { name: "Expand Session" }).click();
-  const projectChip = page.locator(".detail-crumbs .cctx-chip").filter({ hasText: "Alpha Project" });
-  await expect(projectChip).toBeVisible();
-  await expect(projectChip).not.toHaveAttribute("aria-haspopup", /.+/);
+  // One control for the project: the name and its caret open a menu; nothing navigates on its own.
+  const projectButton = page.locator(".session-bar .session-project-button");
+  await expect(projectButton).toHaveText("Alpha Project");
+  await expect(projectButton).toHaveAccessibleName("Alpha Project");
+  await expect(projectButton).toHaveAttribute("aria-haspopup", "menu");
+  await expect(projectButton).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("button", { name: "Project Actions" })).toHaveCount(0);
 
-  // The vertical-ellipsis trigger stays visible in the crumb's reserved trailing gutter without
-  // covering the Project navigation button.
-  const actions = page.getByRole("button", { name: "Project Actions" });
-  const projectCrumb = page.locator(".crumb-project");
-  await expect(actions).toHaveCSS("opacity", "1");
-  await expect(actions).toHaveCSS("pointer-events", "auto");
-  const dotGeometry = await actions.locator("circle").evaluateAll((dots) => dots
-    .map((dot) => ({
-      x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
-      y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
-    }))
-    .sort((a, b) => a.y - b.y));
-  expect(dotGeometry).toEqual([
-    { x: 12, y: 5 },
-    { x: 12, y: 12 },
-    { x: 12, y: 19 },
-  ]);
-  const [crumbBox, chipBox, actionsBox] = await Promise.all([
-    projectCrumb.boundingBox(),
-    projectChip.boundingBox(),
-    actions.boundingBox(),
-  ]);
-  expect(crumbBox).not.toBeNull();
-  expect(chipBox).not.toBeNull();
-  expect(actionsBox).not.toBeNull();
-  expect(actionsBox!.x).toBeGreaterThanOrEqual(chipBox!.x + chipBox!.width - 1);
-  expect(actionsBox!.x + actionsBox!.width).toBeLessThanOrEqual(crumbBox!.x + crumbBox!.width + 1);
-
-  const defaultStyle = await actions.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return { backgroundColor: style.backgroundColor, backgroundImage: style.backgroundImage };
-  });
-  await actions.hover();
-  await expect.poll(() => actions.evaluate((element) => getComputedStyle(element).backgroundColor))
-    .toBe(defaultStyle.backgroundColor);
-  await expect(actions).toHaveCSS("background-image", defaultStyle.backgroundImage);
-  const hoverBackground = await actions.evaluate((element) => getComputedStyle(element).backgroundColor);
-
-  const actionsCenter = { x: actionsBox!.x + actionsBox!.width / 2, y: actionsBox!.y + actionsBox!.height / 2 };
-  await page.mouse.move(actionsCenter.x, actionsCenter.y);
-  await page.mouse.down();
-  await expect.poll(() => actions.evaluate((element) => getComputedStyle(element).backgroundColor))
-    .not.toBe(hoverBackground);
-  const activeBackground = await actions.evaluate((element) => getComputedStyle(element).backgroundColor);
-  expect(activeBackground).not.toBe(defaultStyle.backgroundColor);
-  await page.mouse.up();
-
-  // The trigger opens a small menu rather than a dialog directly.
+  await projectButton.click();
   const actionsMenu = page.getByRole("menu", { name: "Project Actions" });
-  await expect(actionsMenu.getByRole("menuitem", { name: "Manage Project" })).toBeVisible();
-  await expect(actionsMenu.getByRole("menuitem", { name: "Move Session…" })).toBeVisible();
-  await expect(actions).toHaveAttribute("aria-expanded", "true");
-  const openStyle = await actions.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return { backgroundColor: style.backgroundColor, backgroundImage: style.backgroundImage };
-  });
-  expect(openStyle.backgroundColor).not.toBe(defaultStyle.backgroundColor);
-  expect(openStyle.backgroundImage).toBe("none");
+  await expect(projectButton).toHaveAttribute("aria-expanded", "true");
+  await expect(actionsMenu.locator(".menu-label")).toHaveText("Alpha Project");
+  await expect(actionsMenu.getByRole("menuitem")).toHaveText(["Open Project", "Move to Another Project…"]);
+  await expect(actionsMenu.getByRole("menuitem", { name: "Open Project" })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(actionsMenu).toBeHidden();
-  await expect(actions).toBeFocused();
+  await expect(projectButton).toBeFocused();
 
-  await projectChip.focus();
-  await page.keyboard.press("Tab");
-  await expect(actions).toBeFocused();
-  const focusStyle = await actions.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return { outlineStyle: style.outlineStyle, outlineWidth: Number.parseFloat(style.outlineWidth) };
-  });
-  expect(focusStyle.outlineStyle).not.toBe("none");
-  expect(focusStyle.outlineWidth).toBeGreaterThanOrEqual(2);
-
-  // Cancelling the Move dialog restores focus to the durable ⋯ trigger, not the removed
+  // Cancelling the Move dialog restores focus to the durable project button, not the removed
   // menu item and not the page heading (regression coverage).
   const moveDialog = await openMoveToProjectDialog(page);
   await page.keyboard.press("Escape");
   await expect(moveDialog).toBeHidden();
-  await expect(actions).toBeFocused();
+  await expect(projectButton).toBeFocused();
 
-  await projectChip.click({ position: { x: 8, y: 8 } });
-  await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: /Alpha/ })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("row", { name: /Alpha Session/ })).toBeVisible();
+  await projectButton.press("Enter");
+  await page.getByRole("menuitem", { name: "Open Project" }).click();
+  await expect(page.locator(".session-bar")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Alpha Project" }).first()).toBeVisible();
 });
 
 test("session Project assignment changes organization without changing execution Location", async ({ page }) => {
   await page.getByRole("tab", { name: /Alpha/ }).click();
   await page.getByRole("row", { name: /Alpha Session/ }).click();
   await page.getByRole("button", { name: "Expand Session" }).click();
-  const projectChip = page.locator(".detail-crumbs .cctx-chip").filter({ hasText: "Alpha" });
+  const projectChip = page.locator(".session-bar .session-project-button").filter({ hasText: "Alpha" });
   await expect(projectChip).toBeVisible();
   let dialog = await openMoveToProjectDialog(page);
   await expect(dialog.getByText(
@@ -1428,16 +1369,16 @@ test("session Project assignment changes organization without changing execution
     return [value?.projectId, value?.projectLocationId, value?.workspaceId];
   })).toEqual([null, null, "alpha-workspace"]);
 
-  await expect(page.locator(".detail-crumbs .cctx-chip").filter({ hasText: "No Project" })).toBeVisible();
+  await expect(page.locator(".session-bar .session-project-button").filter({ hasText: "No Project" })).toBeVisible();
   dialog = await openMoveToProjectDialog(page);
   await dialog.getByRole("radio", { name: /Alpha/ }).click();
   await expect.poll(() => page.evaluate(() => {
     const value = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions.find((session) => session.id === "session-alpha");
     return [value?.projectId, value?.projectLocationId, value?.workspaceId];
   })).toEqual(["alpha", "location-alpha", "alpha-workspace"]);
-  // A successful move closes the dialog and hands focus back to the ⋯ trigger.
+  // A successful move closes the dialog and hands focus back to the project button.
   await expect(dialog).toBeHidden();
-  await expect(page.getByRole("button", { name: "Project Actions" })).toBeFocused();
+  await expect(page.locator(".session-bar .session-project-button")).toBeFocused();
 });
 
 test("an imported session can link its verified Location while moving to a managed Project", async ({ page }) => {
@@ -1456,7 +1397,7 @@ test("an imported session can link its verified Location while moving to a manag
   await expect(confirmation).toContainText("can also change how future imported sessions in this directory are filed");
   await confirmation.getByRole("button", { name: "Link Location and Move" }).click();
 
-  await expect(page.locator(".detail-crumbs .cctx-chip").filter({ hasText: "Gamma" })).toBeVisible();
+  await expect(page.locator(".session-bar .session-project-button").filter({ hasText: "Gamma" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Stop Turn" })).toBeEnabled();
   await expect.poll(() => page.evaluate(() => {
     const model = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model();

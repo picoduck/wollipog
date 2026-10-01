@@ -7,7 +7,7 @@ async function openSession(page: Page) {
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
-  await expect(page.locator(".detail-head")).toBeVisible();
+  await expect(page.locator(".session-bar")).toBeVisible();
 }
 
 test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from Stop Session", async ({ page }) => {

@@ -564,7 +564,7 @@ test("rename-session retry preserves deliberate focus movement and keeps failure
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
   await retry.press("Enter");
-  const moreActions = page.locator(".session-detail > .detail-head")
+  const moreActions = page.locator(".session-bar")
     .getByRole("button", { name: "More Actions" });
   await moreActions.focus();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({

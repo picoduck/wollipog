@@ -143,7 +143,7 @@ function Harness() {
   if (!mobile) {
     return (
       <main className="session-detail">
-        <header className="detail-head">
+        <header className="detail-bar session-bar">
           <div className="detail-actions">
             <div className="topbar-actions"><SessionActions /></div>
           </div>

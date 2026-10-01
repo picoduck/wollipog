@@ -13,7 +13,7 @@ async function openSession(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
-  await expect(page.locator(".detail-head")).toBeVisible();
+  await expect(page.locator(".session-bar")).toBeVisible();
 }
 
 test("the Composer exposes and saves the live-child limit at desktop and mobile widths", async ({ page }) => {

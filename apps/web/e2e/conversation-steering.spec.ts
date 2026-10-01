@@ -9,7 +9,7 @@ async function openSteeringSession(page: Page) {
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
-  await expect(page.locator(".detail-head")).toBeVisible();
+  await expect(page.locator(".session-bar")).toBeVisible();
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(73);
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSupportsSteering("session-alpha", true);
@@ -34,7 +34,7 @@ async function reopenSteeringSession(page: Page) {
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
-  await expect(page.locator(".detail-head")).toBeVisible();
+  await expect(page.locator(".session-bar")).toBeVisible();
   await expect(page.locator(".composer-input")).toBeEnabled();
 }
 

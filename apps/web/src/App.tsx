@@ -81,6 +81,7 @@ import { OfflineBanner } from "./components/OfflineBanner.js";
 import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
+import { sessionDisplayTitle } from "./session-title.js";
 import { useInstanceScope } from "./instance-scope.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
 import { railViewForDigit, visibleRailViews } from "./rail-preferences.js";
@@ -329,7 +330,7 @@ export function Shell() {
   const openExperimentalSettings = () => navigate({ name: "settings", section: "experimental" });
   const activeSession = view.name === "session" ? sessions.get(view.id) : undefined;
   // "<Page> – Wollipog" in the window, the taskbar and a browser tab; a Session by its own title.
-  useWindowTitle(viewTitle(view, view.name === "session" ? activeSession?.title : entityTitle));
+  useWindowTitle(viewTitle(view, view.name === "session" ? sessionDisplayTitle(activeSession?.title ?? "") : entityTitle));
   const activeRunnerProtocol = activeSession ? runners.get(activeSession.runnerId)?.protocolVersion : undefined;
   const terminalSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionShells");
   const filesSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionFiles");
@@ -689,10 +690,15 @@ export function Shell() {
     <>
       {/* Keyed by session: transient state (open menu, in-flight launch, error note)
           must not leak from one session's bar into the next. */}
-      {!isMobile && <EditorSelect key={view.id} sessionId={view.id} />}
+      {!isMobile && (
+        <>
+          <EditorSelect key={view.id} sessionId={view.id} />
+          <span className="detail-actions-divider" aria-hidden="true" />
+        </>
+      )}
       <button
         type="button"
-        className="icon-btn"
+        className={isMobile ? "icon-btn sm" : "icon-btn"}
         ref={pinnedSummary.toggleRef}
         onClick={pinnedSummary.toggle}
         title="Toggle Pinned Summary"
@@ -703,12 +709,12 @@ export function Shell() {
       </button>
       <button
         type="button"
-        className="icon-btn"
+        className={isMobile ? "icon-btn sm" : "icon-btn"}
         onClick={() => {
           if (terminalSupported) setDockVisible((v) => !v);
           else rightPanel.show("launcher");
         }}
-        title={terminalSupported ? `${dockVisible ? "Hide" : "Show"} terminal (${shortcutDisplay("toggle-terminal")})` : terminalHint}
+        title={terminalSupported ? `${dockVisible ? "Hide" : "Show"} Terminal (${shortcutDisplay("toggle-terminal")})` : terminalHint}
         aria-label={
           terminalSupported ? (dockVisible ? "Hide Terminal" : "Show Terminal") : "Terminal Unavailable: Update Runner"
         }
@@ -718,9 +724,9 @@ export function Shell() {
       </button>
       <button
         type="button"
-        className="icon-btn"
+        className={isMobile ? "icon-btn sm" : "icon-btn"}
         onClick={rightPanel.toggle}
-        title={rightPanel.open ? "Hide side panel" : "Show side panel"}
+        title={rightPanel.open ? "Hide Side Panel" : "Show Side Panel"}
         aria-label={rightPanel.open ? "Hide Side Panel" : "Show Side Panel"}
         aria-pressed={rightPanel.open}
       >
@@ -754,7 +760,7 @@ export function Shell() {
           <Header
             view={view}
             sessionActions={sessionPanelControls}
-            sessionTitle={sessions.get(view.id)?.title ?? "Session"}
+            sessionTitle={sessionDisplayTitle(sessions.get(view.id)?.title ?? "") || "Session"}
             onSessionBack={() => navigate(sessionsDestination(instanceScope))}
           />
         )}
@@ -961,9 +967,9 @@ export function Header({
         <>
           <button
             type="button"
-            className="icon-btn mobile-session-back"
+            className="icon-btn sm mobile-session-back"
             onClick={onSessionBack}
-            title="Back to sessions"
+            title={backLabel("inbox")}
             aria-label={backLabel("inbox")}
           >
             <ChevronLeftIcon size={20} />

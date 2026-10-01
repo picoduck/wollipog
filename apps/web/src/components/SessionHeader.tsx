@@ -53,6 +53,8 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
+import { sessionDisplayTitle } from "../session-title.js";
+import { DETAIL_TITLE_READABLE_PX } from "./PageHeader.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 
 /** The badges the measured status row may hide into "+N": the lifecycle and change groups, and the
@@ -90,9 +92,10 @@ export function statusKeepOrder(items: HTMLElement[]): HTMLElement[] {
 }
 
 /**
- * The responsive Session header. Desktop keeps one compact row for identity, status, Share / More
- * Actions, and shell controls. Mobile identity moves into the app topbar, leaving this component
- * as the single status/action line above the transcript.
+ * The responsive Session bar (docs/design-system.md §4.3). Desktop keeps one 48px row: Back, the
+ * project menu button, the title, the statuses, then Share / More Actions and the shell controls.
+ * Mobile identity moves into the app topbar, leaving this component as the single status/action
+ * line above the transcript.
  */
 export function SessionHeader({
   session,
@@ -110,10 +113,10 @@ export function SessionHeader({
   onDismissReminder,
   forkAvailability,
   onFork,
-  projectCrumb,
+  projectControl,
   projectName,
   projectLabel = "Project",
-  onManageProject,
+  onOpenProject,
   renderMoveProjectDialog,
   topbarControls,
   changeStatus,
@@ -141,13 +144,14 @@ export function SessionHeader({
   onDismissReminder?: () => void;
   forkAvailability?: ConversationForkAvailability;
   onFork?: () => void;
-  /** The interactive Project chip, rendered as the breadcrumb's first segment. */
-  projectCrumb?: ReactNode;
-  /** Current Project identity shown in the mobile More Actions menu header. */
+  /** The project menu button, drawn before the title above the compact tier. */
+  projectControl?: ReactNode;
+  /** The session's Project (or Workspace) name; absent when it has none. */
   projectName?: string;
   /** Compatibility control planes group sessions by Workspace instead of Project. */
   projectLabel?: "Project" | "Workspace";
-  onManageProject?: () => void;
+  /** Opens the Project's page. */
+  onOpenProject?: () => void;
   renderMoveProjectDialog?: (options: {
     onClose: () => void;
     returnFocusRef: RefObject<HTMLButtonElement | null>;
@@ -190,6 +194,15 @@ export function SessionHeader({
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [switchAccountDialogOpen, setSwitchAccountDialogOpen] = useState(false);
   const statusesRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const projectSlotRef = useRef<HTMLDivElement>(null);
+  // Where the project button is hidden (the compact tier, §15.2) or absent (phones), its actions
+  // lead More Actions instead. The stylesheet decides the tier, so it is read as the menu opens.
+  const [projectInMenu, setProjectInMenu] = useState(false);
+  const displayTitle = sessionDisplayTitle(session.title) || "Session";
+  // On a phone the action line's icon buttons are the small size: 36px with a borrowed 44px hit
+  // area on touch (§2.8, §15.1).
+  const actionSize = isMobile ? " sm" : "";
   const [note, setNote] = useState<string | null>(null);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-actions-menu");
   const shareMenu = useAccessibleMenu(shareMenuOpen, setShareMenuOpen, "session-share-menu");
@@ -302,6 +315,12 @@ export function SessionHeader({
     menu.close(restoreFocus);
   };
 
+  const projectFolded = () => {
+    if (isMobile) return true;
+    const slot = projectSlotRef.current;
+    return slot !== null && getComputedStyle(slot).display === "none";
+  };
+
   const closeShareMenu = (restoreFocus = false) => {
     shareMenu.close(restoreFocus);
   };
@@ -406,7 +425,7 @@ export function SessionHeader({
     };
     const observer = new ResizeObserver(scheduleMeasure);
     observer.observe(container);
-    const header = container.closest<HTMLElement>(".detail-head");
+    const header = container.closest<HTMLElement>(".session-bar");
     if (header) observer.observe(header);
     void document.fonts?.ready.then(scheduleMeasure);
     return () => {
@@ -415,6 +434,28 @@ export function SessionHeader({
       if (measurementFrame !== null) window.cancelAnimationFrame(measurementFrame);
     };
   }, [isMobile, statusLayoutKey, shareMenu.triggerRef, statusPopover.triggerRef]);
+
+  // In the compact tier the title keeps a readable width before the statuses give way (§15.2), but
+  // never more than its own text: a short title must not reserve empty space. Its natural width is
+  // its scroll width, which does not depend on how far the bar has squeezed it — once the previous
+  // floor is lifted, since a floor wider than a new, shorter title would widen its box and be read
+  // back as its width.
+  useLayoutEffect(() => {
+    const title = titleRef.current;
+    if (!title) return;
+    const measure = () => {
+      title.style.removeProperty("--session-title-readable");
+      title.style.setProperty("--session-title-readable", `${Math.min(DETAIL_TITLE_READABLE_PX, title.scrollWidth)}px`);
+    };
+    measure();
+    let cancelled = false;
+    void document.fonts?.ready.then(() => {
+      if (!cancelled) measure();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [displayTitle, isMobile]);
 
   useEffect(() => {
     if (!focusDisclosureRef.current) return;
@@ -500,23 +541,29 @@ export function SessionHeader({
   };
 
   return (
-    <div className="detail-head" {...windowDragRegion()}>
+    // On a phone this is the second line under the app bar, which already takes the safe area, so
+    // it does not take `.detail-bar`'s phone geometry.
+    <header className={isMobile ? "session-bar" : "detail-bar session-bar"} {...windowDragRegion()}>
       {!isMobile && (
         <>
-          <button className="icon-btn back" onClick={onBack} title="Back to sessions" aria-label={backLabel("inbox")}>
-            <ChevronLeftIcon size={20} />
+          <button type="button" className="icon-btn detail-bar-back" onClick={onBack} title={backLabel("inbox")} aria-label={backLabel("inbox")}>
+            <ChevronLeftIcon />
           </button>
-          <div className="detail-crumbs">
-            {projectCrumb && (
-              <>
-                {projectCrumb}
-                <span className="detail-crumb-sep" aria-hidden="true">/</span>
-              </>
-            )}
-            <h1 className="detail-title" id={titleId} tabIndex={titleId ? -1 : undefined} title={session.title}>
-              {session.title}
-            </h1>
-          </div>
+          {projectControl && (
+            <div ref={projectSlotRef} className="session-bar-project">
+              {projectControl}
+              <span className="session-bar-sep" aria-hidden="true">/</span>
+            </div>
+          )}
+          <h1
+            ref={titleRef}
+            className="detail-bar-title session-bar-title"
+            id={titleId}
+            tabIndex={titleId ? -1 : undefined}
+            title={displayTitle}
+          >
+            {displayTitle}
+          </h1>
         </>
       )}
       <div className="session-header-statuses" ref={statusesRef}>
@@ -564,7 +611,7 @@ export function SessionHeader({
           <div className="overflow-menu">
             <button
               ref={statusPopover.triggerRef}
-              className="icon-btn session-header-action session-status-overflow-trigger"
+              className={`icon-btn${actionSize} session-header-action session-status-overflow-trigger`}
               type="button"
               onClick={() => {
                 if (!statusPopoverOpen) {
@@ -625,7 +672,7 @@ export function SessionHeader({
         {forkAvailability && (
           <button
             type="button"
-            className="icon-btn session-header-action"
+            className={`icon-btn${actionSize} session-header-action`}
             disabled={busy || !forkAvailability.available}
             title={busy
               ? "Another session action is already in progress."
@@ -643,7 +690,7 @@ export function SessionHeader({
         <div className="overflow-menu">
           <button
             ref={shareMenu.triggerRef}
-            className="icon-btn session-header-action"
+            className={`icon-btn${actionSize} session-header-action`}
             onClick={() => {
               if (!shareMenuOpen) {
                 closeMenu(false);
@@ -729,11 +776,12 @@ export function SessionHeader({
         <div className="overflow-menu">
             <button
               ref={menu.triggerRef}
-              className="icon-btn session-header-action"
+              className={`icon-btn${actionSize} session-header-action`}
               onClick={() => {
                 if (!menuOpen) {
                   closeShareMenu(false);
                   closeStatusPopover(false);
+                  setProjectInMenu(projectFolded());
                 }
                 menu.toggle();
               }}
@@ -742,10 +790,11 @@ export function SessionHeader({
                   closeShareMenu(false);
                   closeStatusPopover(false);
                 }
+                if (!menuOpen) setProjectInMenu(projectFolded());
                 menu.onTriggerKeyDown(event);
               }}
               disabled={busy}
-              title="More actions"
+              title="More Actions"
               aria-label="More Actions"
               aria-haspopup="menu"
               aria-expanded={menuOpen}
@@ -759,23 +808,22 @@ export function SessionHeader({
                 anchor={{ trigger: menu.triggerRef }}
                 id={menu.menuId}
                 label="Session Actions"
+                // The phone sheet is titled with the session it acts on.
+                head={isMobile ? <div className="menu-head" aria-hidden="true">{displayTitle}</div> : undefined}
                 align="end"
                 onDismiss={() => closeMenu(true)}
                 onKeyDown={menu.onMenuKeyDown}
               >
-                {isMobile && projectName && (
+                {(isMobile || projectInMenu) && (onOpenProject || renderMoveProjectDialog) && (
                   <>
-                    <MenuLabel className="session-project-menu-header">
-                      {projectLabel} · {projectName}
-                    </MenuLabel>
-                    {onManageProject && (
+                    {projectName && onOpenProject && (
                       <MenuItem
                         onClick={() => {
                           closeMenu(false);
-                          onManageProject();
+                          onOpenProject();
                         }}
                       >
-                        Manage Project
+                        Open {projectName}
                       </MenuItem>
                     )}
                     {renderMoveProjectDialog && (
@@ -785,9 +833,10 @@ export function SessionHeader({
                           setMoveProjectOpen(true);
                         }}
                       >
-                        Move Session…
+                        {projectName ? `Move to Another ${projectLabel}…` : `Move to a ${projectLabel}…`}
                       </MenuItem>
                     )}
+                    <MenuSeparator />
                   </>
                 )}
                 <MenuLabel>Session</MenuLabel>
@@ -1083,7 +1132,7 @@ export function SessionHeader({
           returnFocusRef: menu.triggerRef,
         })}
       </div>
-    </div>
+    </header>
   );
 }
 

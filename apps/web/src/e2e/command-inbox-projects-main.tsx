@@ -51,6 +51,7 @@ import { ShellDock } from "../components/ShellDock.js";
 import { useRightPanelState } from "../components/RightPanel.js";
 import { useIsMobile } from "../components/useIsMobile.js";
 import { Header, Shell } from "../App.js";
+import { sessionDisplayTitle } from "../session-title.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import { browserInstanceManager, InstancesContextProvider } from "../instances-context.js";
@@ -2601,13 +2602,14 @@ function FixtureSurface() {
       view={view}
       sessionActions={(
         <>
-          {/* Production's glyphs, so the phone top bar's icon rule has an icon to size (#2081). */}
-          <button type="button" className="icon-btn" aria-label="Toggle Pinned Summary"><PinnedPanelIcon size={16} /></button>
-          <button type="button" className="icon-btn" aria-label="Show Terminal"><DockBottomIcon size={16} /></button>
-          <button type="button" className="icon-btn" aria-label="Show Side Panel"><PanelRightIcon size={16} /></button>
+          {/* Production's glyphs and small size, so the phone top bar's icon rule has an icon to size
+              (#2081) and each toggle borrows its 44px touch target (#2146). */}
+          <button type="button" className="icon-btn sm" aria-label="Toggle Pinned Summary"><PinnedPanelIcon size={16} /></button>
+          <button type="button" className="icon-btn sm" aria-label="Show Terminal"><DockBottomIcon size={16} /></button>
+          <button type="button" className="icon-btn sm" aria-label="Show Side Panel"><PanelRightIcon size={16} /></button>
         </>
       )}
-      sessionTitle={sessions.get(view.id)?.title ?? "Session"}
+      sessionTitle={sessionDisplayTitle(sessions.get(view.id)?.title ?? "") || "Session"}
       onSessionBack={() => undefined}
     />
   ) : null;

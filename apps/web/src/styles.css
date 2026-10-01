@@ -457,8 +457,9 @@
   --title-bar-h: 40px;
 
   /* The two mobile Session-header rows share these trailing-column metrics. The inset includes the
-     physical right safe area because the interface currently has a left-to-right layout. */
-  --mobile-session-action-gap: 7px;
+     physical right safe area because the interface currently has a left-to-right layout. The gap
+     keeps neighbours 8px apart, so each 36px button's borrowed 44px hit area stays its own (§2.8). */
+  --mobile-session-action-gap: var(--space-2);
   --mobile-session-trailing-inset: calc(12px + env(safe-area-inset-right, 0px));
 
   /* --- Radius by hierarchy (docs/design-system.md §2.5): inline 4, control 6, container 8,
@@ -3358,130 +3359,55 @@ textarea {
   display: flex;
   flex-direction: column;
 }
-.detail-head {
+/* The session bar (§4.3): `.detail-bar`'s recipe in one 48px row of 32px controls — Back, the
+   project menu button and its separator, the title, the statuses, then the actions from the right
+   edge. It replaces the app-level top bar on desktop. The inline padding is the pane's, not the
+   page gutter, so trailing controls, their focus rings and anchored menus clear the clipping pane
+   edge while the hairline stays full width. */
+.session-bar { padding: 0 var(--space-3); }
+.session-bar-project {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--border);
-}
-/* The unified session bar: one compact row (back · project / title · status · actions) that
-   replaces the app-level top bar on desktop. */
-.session-detail > .detail-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 52px;
-  /* Keep trailing controls, their focus rings, and the anchored action menu clear of the
-     clipping pane edge while the divider remains full width. */
-  padding: var(--space-2) var(--space-3);
-}
-.session-detail > .detail-head > .back {
-  width: var(--control-h-lg);
-  min-width: var(--control-h-lg);
-  height: var(--control-h-lg);
-  min-height: var(--control-h-lg);
-  padding: 0;
-  color: var(--text);
-  border-radius: var(--radius-sm);
-}
-.detail-title {
-  font-size: 16px;
-  font-weight: 650;
-  margin-bottom: 6px;
-}
-/* Breadcrumb region of the unified session bar: interactive Project chip / truncating title. */
-.detail-crumbs {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-}
-.detail-crumbs .cctx-item {
   flex: none;
-  max-width: 220px;
-  color: var(--text-dim);
-  font-size: var(--text-base);
-  font-weight: 500;
+  align-items: center;
+  gap: var(--space-2);
 }
-.detail-crumbs .cctx-item:hover { color: var(--text); }
-.detail-crumb-sep {
+/* One button for the session's project: icon, name and caret. Short names render whole; a long
+   name truncates at 220px with the full name in the tooltip. */
+.session-project-button {
+  max-width: 220px;
+  padding: 0 var(--space-2);
+}
+.session-project-button > svg { flex: none; }
+.session-project-button-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-project-button[data-empty] { color: var(--text-faint); }
+.session-bar-sep {
   flex: none;
   color: var(--text-faint);
 }
-/* Project crumb cluster: the name is a breadcrumb back to the Project's Inbox split. Reserve the
-   trailing gutter for the persistent actions trigger so it never covers the Project name. */
-.crumb-project {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  /* Size short Projects to their content, but keep the crumb shrinkable: authoritative statuses
-     and trailing actions win when font metrics or available width put the unified bar under
-     pressure. */
-  flex: 0 1 auto;
-  max-width: 220px;
-  min-width: 50px;
-  padding-inline-end: 24px;
-  /* Keep the shared breadcrumb rhythm after the separator, but pull the separator closer to this
-     compact trailing control so its right side does not read as a second actions gutter. */
-  margin-inline-end: -8px;
-}
-.crumb-project > .cctx-item {
-  min-width: 0;
-  max-width: 100%;
-}
-.crumb-project-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.crumb-project-actions {
-  position: absolute;
-  top: 50%;
-  right: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 5px;
-  border: 0;
-  transform: translateY(-50%);
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-  transition:
-    background-color var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
-}
-.crumb-project-actions:active {
-  background: var(--bg-elev-3);
-}
-.crumb-project-actions:focus-visible {
-  color: var(--accent);
-}
-.crumb-project-actions[aria-expanded="true"] {
-  background: var(--bg-elev-2);
-  color: var(--accent);
-}
-.session-detail > .detail-head .detail-title {
-  margin: 0;
-  min-width: 0;
-  overflow: hidden;
-  font-size: var(--text-md);
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* The title absorbs the width pressure: its shrink factor dwarfs the status row's, so the row gives
+   way only once the title is at its floor, and then clips rather than wrapping or pushing the
+   actions out of the bar. */
+.session-bar-title { flex: 0 1000 auto; }
 .session-header-statuses {
   display: flex;
   align-items: center;
   flex: 0 1 auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   min-width: 0;
   gap: 5px;
+}
+.session-bar > .session-header-statuses { overflow-x: clip; }
+.session-bar > .detail-actions { margin-left: auto; }
+/* The compact tier (§15.2): the project button and its separator give way to the head of More
+   Actions, and the title keeps a readable width (SessionHeader sets the custom property to the
+   smaller of 200px and its text) before the statuses give way. */
+@container app (max-width: 1099px) {
+  .session-bar > .session-bar-project { display: none; }
+  .session-bar > .session-bar-title { min-width: var(--session-title-readable, 0px); }
 }
 .session-worktree-identity {
   flex: 0 1 auto;
@@ -3530,7 +3456,7 @@ textarea {
   max-width: 260px;
   overflow-wrap: anywhere;
 }
-.session-detail > .detail-head > .session-header-note {
+.session-bar > .session-header-note {
   flex: 0 1 260px;
   min-width: 0;
 }
@@ -3538,13 +3464,13 @@ textarea {
 .overflow-menu {
   position: relative;
 }
-/* The phone Session menu opens with the session's Project: one line, truncated. */
-.session-project-menu-header {
+/* The project menu is headed by the project's name: one line, truncated. */
+.session-project-menu-label {
   display: block;
   overflow: hidden;
+  line-height: 28px;
   text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: 28px;
 }
 .session-status-popover-content {
   display: flex;
@@ -5666,32 +5592,6 @@ textarea {
   outline: 2px dashed var(--accent);
   outline-offset: 2px;
 }
-/* cctx chips survive only in the session bar's breadcrumb (durable + legacy Project crumb). */
-.cctx-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-  overflow: hidden;
-}
-.cctx-item:first-child {
-  color: var(--text);
-  font-weight: 500;
-}
-/* The workspace chip is a button (it opens the move-to-project popover) but must look like the
-   plain cctx spans beside it. */
-.cctx-chip {
-  background: transparent;
-  border: none;
-  padding: 0;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-}
-.cctx-caret {
-  font-size: 8px;
-  color: var(--text-faint);
-}
 .project-assignment-menu .project-assignment-note,
 .project-assignment-menu .project-assignment-empty {
   margin: 4px 8px 8px;
@@ -5707,10 +5607,6 @@ textarea {
 .project-move-list .project-assignment-note {
   margin-left: 0;
   margin-right: 0;
-}
-.cctx-icon {
-  color: var(--text-faint);
-  flex: none;
 }
 .cctx-dot {
   width: 7px;
@@ -13549,11 +13445,10 @@ body.shell-dock-dragging * {
       calc(10px + env(safe-area-inset-left, 0px));
   }
   /* A Session has a dense, two-surface header: identity and pane controls above statuses and
-     actions. Keep the route's semantic h1, but present it at label scale and give every icon in
-     this cluster the same compact geometry. Thirty-six CSS pixels remains comfortably above the
-     24px WCAG target minimum while recovering room for the user-authored Session name. */
+     actions (§15.1). The app bar is the shared 48px bar with the title at --type-title, and every
+     icon in this cluster is the small 36px control, whose 44px hit area (§2.8) fits inside it. */
   .topbar:has(.mobile-session-back) {
-    height: calc(40px + env(safe-area-inset-top, 0px));
+    height: calc(var(--bar-h) + env(safe-area-inset-top, 0px));
     padding-right: var(--mobile-session-trailing-inset);
     padding-left: calc(8px + env(safe-area-inset-left, 0px));
   }
@@ -13561,8 +13456,7 @@ body.shell-dock-dragging * {
     gap: var(--mobile-session-action-gap);
   }
   .topbar:has(.mobile-session-back) h1 {
-    font-size: var(--text-base);
-    font-weight: var(--weight-medium);
+    font: var(--type-title);
     letter-spacing: 0;
   }
   .topbar:has(.mobile-session-back) .mobile-session-back,
@@ -13682,10 +13576,7 @@ body.shell-dock-dragging * {
 
   /* The app topbar owns mobile Session identity. This is the only second bar: statuses at the
      leading edge, Share / More Actions trailing, and transient notes on a follow-up line. */
-  .detail-head {
-    flex-wrap: wrap;
-  }
-  .session-detail > .detail-head {
+  .session-bar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-rows: minmax(36px, auto);
@@ -13694,10 +13585,11 @@ body.shell-dock-dragging * {
     row-gap: 0;
     padding: 4px var(--space-3);
     padding-right: var(--mobile-session-trailing-inset);
+    border-bottom: 1px solid var(--border);
   }
-  .session-detail > .detail-head:has(> .session-header-note) { row-gap: 4px; }
-  .session-detail > .detail-head:has(> .session-worktree-identity) { row-gap: 4px; }
-  .session-detail > .detail-head > .session-header-statuses {
+  .session-bar:has(> .session-header-note) { row-gap: 4px; }
+  .session-bar:has(> .session-worktree-identity) { row-gap: 4px; }
+  .session-bar > .session-header-statuses {
     /* Statuses stay in the leading grid track so the action track is always complete. The
        measured badge row hides only its overflowing suffix and hands the exact hidden count to the
        fixed disclosure / Share / More Actions surface without adding a horizontal scroller. */
@@ -13710,45 +13602,45 @@ body.shell-dock-dragging * {
     overflow: clip;
     contain: paint;
   }
-  .session-detail > .detail-head > .session-header-statuses > .active-subagents-badge {
+  .session-bar > .session-header-statuses > .active-subagents-badge {
     order: -1;
     flex: none;
   }
-  .session-detail > .detail-head > .session-header-statuses .session-status-indicators {
+  .session-bar > .session-header-statuses .session-status-indicators {
     flex: none;
     flex-wrap: nowrap;
     min-height: 36px;
   }
-  .session-detail > .detail-head > .session-header-statuses .change-status-indicators {
+  .session-bar > .session-header-statuses .change-status-indicators {
     display: contents;
   }
   /* The badges keep the shared recipe's 11px type (docs/design-system.md §11.1). CI and user
      devices do not share the same system font, so the width headroom comes from the inset instead:
      the status surface, rather than individual badges, owns narrow-width clipping, and the line
      truncates to "+N" before it pushes Share and More Actions (§21). */
-  .session-detail > .detail-head > .session-header-statuses .status {
+  .session-bar > .session-header-statuses .status {
     padding-inline: var(--space-1);
   }
-  .session-detail > .detail-head > .session-header-statuses [hidden] {
+  .session-bar > .session-header-statuses [hidden] {
     display: none;
   }
-  .session-detail > .detail-head > .session-header-statuses
+  .session-bar > .session-header-statuses
     :is(.session-status-indicators, .change-status-indicators):not(:has(> .status:not([hidden]))) {
     display: none;
   }
-  .session-header-action { width: 36px; height: 36px; }
-  .session-header-action svg { width: var(--icon); height: var(--icon); }
+  .session-bar .session-header-action { width: 36px; height: 36px; }
+  .session-bar .session-header-action svg { width: var(--icon); height: var(--icon); }
   .detail-actions {
     flex-wrap: nowrap;
   }
-  .session-detail > .detail-head > .detail-actions {
+  .session-bar > .detail-actions {
     grid-column: 2;
     grid-row: 1;
     min-width: 0;
     align-self: center;
     gap: var(--mobile-session-action-gap);
   }
-  .session-detail > .detail-head > .session-worktree-identity {
+  .session-bar > .session-worktree-identity {
     grid-column: 1 / -1;
     grid-row: 2;
     justify-self: start;
@@ -13758,13 +13650,13 @@ body.shell-dock-dragging * {
      lifecycle badge it belongs beside and made the header taller the moment a job started (#784).
      It now rides the measured status row: the row's priority order keeps it visible and pushes
      passive statuses into the +N disclosure instead. */
-  .session-detail > .detail-head > .session-header-note {
+  .session-bar > .session-header-note {
     grid-column: 1 / -1;
     grid-row: 2;
     width: 100%;
     max-width: none;
   }
-  .session-detail > .detail-head:has(> .session-worktree-identity) > .session-header-note {
+  .session-bar:has(> .session-worktree-identity) > .session-header-note {
     grid-row: 3;
   }
   .detail-scroll {
@@ -13807,7 +13699,7 @@ body.shell-dock-dragging * {
     padding-bottom: 0;
   }
   .app:has(.mobile-session-back) .right-panel {
-    top: calc(40px + env(safe-area-inset-top, 0px));
+    top: calc(var(--bar-h) + env(safe-area-inset-top, 0px));
   }
   .right-panel-resizer {
     display: none;

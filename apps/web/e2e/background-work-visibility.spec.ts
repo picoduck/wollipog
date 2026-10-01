@@ -50,7 +50,7 @@ for (const width of [320, 390, 700, 1280]) {
     await row.click();
     const expand = page.getByRole("button", { name: "Expand Session" });
     if (await expand.isVisible()) await expand.click();
-    const header = page.locator(".session-detail > .detail-head");
+    const header = page.locator(".session-bar");
     // #784: one home at every width — the ordinary status row.
     const badge = header.locator(".session-header-statuses > .status[data-group='background-work']");
     for (const [state, label] of [
@@ -128,7 +128,7 @@ for (const width of [320, 1280]) {
     await page.getByRole("button", { name: /Alpha Session/ }).click();
     const expand = page.getByRole("button", { name: "Expand Session" });
     if (await expand.isVisible()) await expand.click();
-    const header = page.locator(".session-detail > .detail-head");
+    const header = page.locator(".session-bar");
     const cases = [
       ["terminal_without_continuation", "Result Pending", "A background job finished, but its result has not yet been returned to this conversation."],
       ["continuation_blocked", "Result Blocked", "A background job finished, but its result cannot be returned while another job from the same turn is still running."],
@@ -251,7 +251,7 @@ for (const width of [320, 1280]) {
       });
     });
     const openPanel = async () => {
-      const header = page.locator(".session-detail > .detail-head");
+      const header = page.locator(".session-bar");
       const name = /^Background Work: Result Blocked\./;
       let badge = header.locator(":scope > .session-header-statuses").getByRole("button", { name });
       if (!await badge.isVisible()) {

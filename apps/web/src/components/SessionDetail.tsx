@@ -195,7 +195,8 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderIcon, ImageIcon, InfoIcon, MicIcon, MoreVerticalIcon, PlusIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronDownIcon, ChevronLeftIcon, EditIcon, FolderIcon, ImageIcon, InfoIcon, MicIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { windowDragRegion } from "../desktop-window.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -237,7 +238,6 @@ import {
   sessionProjectChoices,
   shouldSubmitProjectAssignment,
 } from "../session-project-assignment.js";
-import { durableInboxProjectKey, INBOX_NO_PROJECT_SPLIT_KEY } from "../inbox.js";
 import { ChoiceRows, Select, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import {
   clearDurableQueuedEditRecoveriesForAccount,
@@ -592,25 +592,24 @@ export function SessionDetail(props: SessionDetailProps) {
     return (
       <div className="session-detail expanded" data-session-surface-id={sessionId}>
         {props.mode !== "preview" && !isMobile && (
-          <div className="detail-head">
+          <header className="detail-bar session-bar" {...windowDragRegion()}>
             <button
-              className="icon-btn back"
+              type="button"
+              className="icon-btn detail-bar-back"
               onClick={props.onBack ?? (() => navigate({ name: "inbox" }))}
-              title="Back to sessions"
+              title={backLabel("inbox")}
               aria-label={backLabel("inbox")}
             >
-              <ChevronLeftIcon size={20} />
+              <ChevronLeftIcon />
             </button>
-            <div className="detail-crumbs">
-              <h1
-                className="detail-title"
-                id={ownsPageTitle ? "page-title" : undefined}
-                tabIndex={ownsPageTitle ? -1 : undefined}
-              >
-                {placeholder.title}
-              </h1>
-            </div>
-          </div>
+            <h1
+              className="detail-bar-title session-bar-title"
+              id={ownsPageTitle ? "page-title" : undefined}
+              tabIndex={ownsPageTitle ? -1 : undefined}
+            >
+              {placeholder.title}
+            </h1>
+          </header>
         )}
         <State variant={placeholder.variant} title={placeholder.title}>{placeholder.hint}</State>
       </div>
@@ -4940,9 +4939,10 @@ function SessionDetailLoaded({
     }
   };
 
+  // Absent when the session has none: More Actions then offers "Move to a Project…" alone.
   const currentProjectName = projectsSupported
-    ? (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName ?? "No Project"
-    : session.workspaceName ?? "No Workspace";
+    ? session.projectId ? projects.get(session.projectId)?.name ?? session.projectName : undefined
+    : session.workspaceName;
   const standaloneRequestCard = ownStandaloneApproval && ownApprovalOccurrenceId &&
     !transcriptRendersRequestRow(transcript.body, ownApprovalHasTimelineRow) ? (
       <section
@@ -5014,11 +5014,11 @@ function SessionDetailLoaded({
           onFork={() => {
             if (latestForkAvailability.available) void onFork(latestForkAvailability.forkTurn);
           }}
-          projectCrumb={<ProjectChip session={session} onOpenInbox={onBack ?? (() => navigate({ name: "inbox" }))} />}
-          projectName={currentProjectName}
+          projectControl={<ProjectMenuButton session={session} />}
+          projectName={currentProjectName ?? undefined}
           projectLabel={projectsSupported ? "Project" : "Workspace"}
-          onManageProject={projectsSupported ? () => {
-            navigate(session.projectId ? { name: "projects", id: session.projectId } : { name: "projects" });
+          onOpenProject={projectsSupported && session.projectId ? () => {
+            navigate({ name: "projects", id: session.projectId! });
           } : undefined}
           renderMoveProjectDialog={({ onClose, returnFocusRef }) => projectsSupported ? (
             <MoveToProjectDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
@@ -6324,53 +6324,43 @@ function MessageActionDialog({
 }
 
 /** Assigns durable Project organization without changing the session's execution Location. */
-function ProjectChip({ session, onOpenInbox }: { session: SessionView; onOpenInbox: () => void }) {
+function ProjectMenuButton({ session }: { session: SessionView }) {
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   return projectsSupported
-    ? <DurableProjectChip session={session} onOpenInbox={onOpenInbox} />
+    ? <DurableProjectMenuButton session={session} />
     : <LegacyWorkspaceChip session={session} />;
 }
 
 /**
- * The breadcrumb's Project segment: the name navigates back to this Project's split in the
- * Inbox, and a persistent vertical-ellipsis trigger opens a small actions menu (Manage Project /
- * Move Session). Reassignment moved out of the name itself so the crumb behaves like a breadcrumb.
+ * The session bar's project menu button (§4.3, §9.1): the projects icon, the project name and a
+ * caret, opening a menu headed by the name with Open Project and Move to Another Project…. A
+ * session with no project offers only Move to a Project…. The name does not navigate on its own.
  */
-function DurableProjectChip({ session, onOpenInbox }: { session: SessionView; onOpenInbox: () => void }) {
+function DurableProjectMenuButton({ session }: { session: SessionView }) {
   const projects = useStoreSelector((state) => state.projects);
-  const { navigate, setInboxSplit } = useStoreActions();
+  const { navigate } = useStoreActions();
   const [menuOpen, setMenuOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
-  const menu = useAccessibleMenu(menuOpen, setMenuOpen, "crumb-project-menu");
-  const current = session.projectId ? projects.get(session.projectId) : undefined;
-  const currentName = current?.name ?? session.projectName ?? "No Project";
+  const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-project-menu");
+  const currentName = (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName;
 
   return (
-    <div className="crumb-project">
-      <button
-        type="button"
-        className="cctx-item cctx-chip"
-        title={`Open ${currentName} in Sessions`}
-        onClick={() => {
-          setInboxSplit(session.projectId ? durableInboxProjectKey(session.projectId) : INBOX_NO_PROJECT_SPLIT_KEY);
-          onOpenInbox();
-        }}
-      >
-        <span className="crumb-project-label">{currentName}</span>
-      </button>
+    <>
       <button
         ref={menu.triggerRef}
         type="button"
-        className="crumb-project-actions"
-        title="Project Actions"
-        aria-label="Project Actions"
+        className="btn ghost session-project-button"
+        data-empty={currentName ? undefined : ""}
+        title={currentName ?? "No Project"}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         aria-controls={menu.menuId}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
       >
-        <MoreVerticalIcon size={14} />
+        <ProjectsIcon size={14} />
+        <span className="session-project-button-label">{currentName ?? "No Project"}</span>
+        <ChevronDownIcon size={14} />
       </button>
       {menuOpen && (
         <MenuSurface
@@ -6381,21 +6371,24 @@ function DurableProjectChip({ session, onOpenInbox }: { session: SessionView; on
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
         >
-          <MenuItem
-            onClick={() => {
-              menu.close(false);
-              navigate(session.projectId ? { name: "projects", id: session.projectId } : { name: "projects" });
-            }}
-          >
-            Manage Project
-          </MenuItem>
+          <MenuLabel className="session-project-menu-label">{currentName ?? "No Project"}</MenuLabel>
+          {session.projectId && currentName && (
+            <MenuItem
+              onClick={() => {
+                menu.close(false);
+                navigate({ name: "projects", id: session.projectId! });
+              }}
+            >
+              Open Project
+            </MenuItem>
+          )}
           <MenuItem
             onClick={() => {
               menu.close(false);
               setMoveOpen(true);
             }}
           >
-            Move Session…
+            {session.projectId && currentName ? "Move to Another Project…" : "Move to a Project…"}
           </MenuItem>
         </MenuSurface>
       )}
@@ -6406,14 +6399,14 @@ function DurableProjectChip({ session, onOpenInbox }: { session: SessionView; on
           returnFocusRef={menu.triggerRef}
         />
       )}
-    </div>
+    </>
   );
 }
 
 function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
   session: SessionView;
   onClose: () => void;
-  /** The crumb's ⋯ trigger — the menu item that opened this dialog unmounts with its menu. */
+  /** The project button or More Actions: the menu item that opened this dialog unmounts with its menu. */
   returnFocusRef?: { current: HTMLElement | null };
 }) {
   const api = useApi();
@@ -6698,8 +6691,8 @@ function LegacyWorkspaceMoveDialog({ session, onClose, returnFocusRef }: {
   );
 }
 
-/** The legacy composer footer workspace chip shows the session's old workspace grouping and opens
- * a small popover to re-file it. The assignment is CP-owned view state (no runner round-trip), so
+/** The session bar's project button on control planes without Projects: the folder icon and the
+ * session's legacy workspace grouping, opening a small menu to re-file it. The assignment is CP-owned view state (no runner round-trip), so
  * it works even while the runner is offline — the store's last-registered workspace list is fine. */
 function LegacyWorkspaceChip({ session }: { session: SessionView }) {
   const api = useApi();
@@ -6777,11 +6770,12 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
   };
 
   return (
-    <div>
+    <>
       <button
         ref={menu.triggerRef}
         type="button"
-        className="cctx-item cctx-chip"
+        className="btn ghost session-project-button"
+        data-empty={session.workspaceName ? undefined : ""}
         title="Workspace — change legacy grouping"
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
@@ -6789,11 +6783,9 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
         aria-expanded={open}
         aria-controls={menu.menuId}
       >
-        <FolderIcon className="cctx-icon" size={14} />
-        {session.workspaceName ?? "No Workspace"}
-        <span className="cctx-caret" aria-hidden="true">
-          ▾
-        </span>
+        <FolderIcon size={14} />
+        <span className="session-project-button-label">{session.workspaceName ?? "No Workspace"}</span>
+        <ChevronDownIcon size={14} />
       </button>
       {open && (
         <MenuSurface
@@ -6907,7 +6899,7 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
           )}
         </MenuSurface>
       )}
-    </div>
+    </>
   );
 }
 

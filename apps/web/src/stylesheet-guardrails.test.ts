@@ -144,6 +144,8 @@ const RUNTIME_PROPERTIES = new Map([
   ["--zone-line-top", { why: "measured by indicateFocusZone while a zone is lit", fallback: "0px" }],
   ["--zone-line-left", { why: "measured by indicateFocusZone while a zone is lit", fallback: "0px" }],
   ["--zone-line-width", { why: "measured by indicateFocusZone while a zone is lit", fallback: "0px" }],
+  // SessionHeader sets this on the session bar's title; absent, the compact tier reserves nothing.
+  ["--session-title-readable", { why: "measured by SessionHeader from the title's natural width", fallback: "0px" }],
 ]);
 
 /** Every declaration value in the stylesheet. */

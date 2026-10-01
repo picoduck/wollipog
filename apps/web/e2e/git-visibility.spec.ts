@@ -14,7 +14,7 @@ async function openSession(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: new RegExp(name) }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
-  await expect(page.locator(".detail-head")).toBeVisible();
+  await expect(page.locator(".session-bar")).toBeVisible();
 }
 
 function gitRegion(page: Page) {
@@ -43,7 +43,7 @@ test("Inbox preview selection does not issue unconsumed Git or forge-summary rea
   await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "running" }));
   await page.getByRole("button", { name: "Expand Session" }).click();
-  await expect(page.locator(".detail-head")).toBeVisible();
+  await expect(page.locator(".session-bar")).toBeVisible();
   await expect.poll(() => page.evaluate(() => {
     const counts = window.__WOLLIPOG_PROJECT_INBOX_E2E__.gitRequestCounts("session-alpha");
     return counts.status > 0 && counts.summary > 0 && counts.status === counts.summary;
@@ -281,7 +281,7 @@ test("turn boundaries and dashboard reconnect refresh both reads while active tu
 
   await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "running" }));
-  await expect(page.locator(".session-detail > .detail-head")
+  await expect(page.locator(".session-bar")
     .getByLabel("Activity: Running")).toHaveText("Running");
   await expect.poll(async () => {
     const before = await page.evaluate(() =>
