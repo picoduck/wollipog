@@ -86,7 +86,8 @@ function fakeApi(options: { groups?: SkillGroupView[]; skills?: SkillSummary[]; 
   ] as SkillGroupAssignmentView[];
   const writes: Array<[string, ...unknown[]]> = [];
   const held: Deferred[] = [];
-  const state = { hold: false, fail: null as string | null, rulesFail: null as string | null };
+  const state = { hold: false, fail: null as string | null, rulesFail: null as string | null, holdRules: false };
+  const heldReads: Array<() => void> = [];
   const write = async <T,>(entry: [string, ...unknown[]], apply: () => T): Promise<T> => {
     writes.push(entry);
     if (state.hold) await new Promise<void>((resolve, reject) => held.push({ resolve, reject }));
@@ -102,6 +103,7 @@ function fakeApi(options: { groups?: SkillGroupView[]; skills?: SkillSummary[]; 
     }),
     listSkillGroupAssignments: async (id: string) => {
       if (state.rulesFail) throw new Error(state.rulesFail);
+      if (state.holdRules) await new Promise<void>((resolve) => heldReads.push(resolve));
       return { assignments: rules.filter((rule) => rule.groupId === id) };
     },
     createSkillGroup: (body: { name: string }) => write(["create", body], () => {
@@ -196,7 +198,7 @@ async function chooseFromMenu(trigger: HTMLButtonElement, item: string) {
   await click(trigger);
   const menu = document.getElementById(trigger.getAttribute("aria-controls")!);
   assert.ok(menu, "the menu opened");
-  const choice = [...menu.querySelectorAll<HTMLButtonElement>(".menu-item")].find((candidate) => candidate.textContent === item);
+  const choice = [...menu.querySelectorAll<HTMLButtonElement>(".menu-item")].find((candidate) => (candidate.querySelector(".menu-text") ?? candidate).textContent === item);
   assert.ok(choice, `a menu item ${item}`);
   await click(choice);
 }
@@ -234,7 +236,7 @@ test("the dialog opens on the group list with the first group selected, ownershi
     assert.match(notice.textContent ?? "", /^This Group Has No Owner/);
     assert.match(notice.textContent ?? "", /Converting makes it shared with your organization\./);
     assert.ok(button(notice, "Convert Group…"));
-    assertNoDomNode(dialog.querySelector(".skill-assignments"), "a legacy group has no assignments");
+    assertNoDomNode(dialog.querySelector(".skill-groups-rules"), "a legacy group has no assignments");
     assert.doesNotMatch(dialog.textContent ?? "", /org_personal|team_7f3a|user_42/, "no id is shown");
 
     await click(button(dialog, "Done"));
@@ -406,6 +408,48 @@ test("removing a rule confirms naming the group's skills; toggling it applies at
     await view.api.release();
     assert.deepEqual([...dialog.querySelectorAll(".skill-assignment-title")].map((node) => node.textContent), ["All Agents on All Machines"]);
     assert.ok(active() === dialog.querySelector('[data-rule-control="more"]'), "focus moves to the next rule's ⋯");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a saved rule shows its new value before its controls unlock, even while the rules reload is slow", async () => {
+  phone = false;
+  const view = await mount();
+  try {
+    const dialog = view.dialog();
+    // The group's rules re-read after every change; hold that read so it never lands in this test.
+    view.api.state.holdRules = true;
+    const enabled = () => dialog.querySelector<HTMLButtonElement>('.skill-assignment [role="switch"]')!;
+    await click(enabled());
+    assert.deepEqual(view.api.writes, [["update-rule", "review", "rule-1", { enabled: false }]]);
+    assert.equal(enabled().disabled, false, "the change finished");
+    assert.equal(enabled().getAttribute("aria-checked"), "false", "the row shows what was saved");
+    await click(enabled());
+    assert.deepEqual(view.api.writes.at(-1), ["update-rule", "review", "rule-1", { enabled: true }], "a second click turns it back on");
+    const invocation = dialog.querySelector<HTMLButtonElement>('.skill-assignment [data-rule-control="invocation"]')!;
+    await chooseFromMenu(invocation, "Manual Only");
+    assert.equal(dialog.querySelector('.skill-assignment [data-rule-control="invocation"]')?.getAttribute("aria-label"), "Invocation: Manual Only");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("adding an assignment clears the notice an earlier refused change left", async () => {
+  phone = false;
+  const api = fakeApi();
+  const view = await mount(api);
+  try {
+    const dialog = view.dialog();
+    api.state.fail = "Removal refused. No changes saved.";
+    await click(buttons(dialog, "Remove…")[0]!);
+    await click(button(view.confirmation(), "Remove Skill"));
+    assert.match(dialog.querySelector(".skill-groups-error")?.textContent ?? "", /Removal refused/);
+    api.state.fail = null;
+    await click(button(dialog, "Add Assignment…"));
+    await click(button(view.dialogs().at(-1), "Add Assignment"));
+    assert.equal(view.dialogs().length, 1);
+    assertNoDomNode(dialog.querySelector(".skill-groups-error"), "the success clears the old refusal");
   } finally {
     await view.unmount();
   }

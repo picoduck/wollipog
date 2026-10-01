@@ -285,8 +285,14 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
   };
 
   const setRule = async (group: SkillGroupView, rule: SkillGroupAssignmentView, patch: { enabled?: boolean; invocation?: SkillInvocationPolicy }) => {
-    const done = await change(`rule:${rule.id}:${patch.invocation ? "invocation" : "enabled"}`, () => api.updateSkillGroupAssignment(group.id, rule.id, patch).then(() => undefined),
-      `${ruleTitle(rule)} saved.`);
+    // The row shows what the server saved before its controls unlock: the reload of the group's
+    // rules lands later, and a second click must act on the new value, not resend the old one.
+    const done = await change(`rule:${rule.id}:${patch.invocation ? "invocation" : "enabled"}`, async () => {
+      const saved = (await api.updateSkillGroupAssignment(group.id, rule.id, patch))?.assignment;
+      setGroupRules((current) => current?.groupId === group.id && current.rules
+        ? { ...current, rules: current.rules.map((candidate) => candidate.id === rule.id ? { ...candidate, ...patch, ...saved } : candidate) }
+        : current);
+    }, `${ruleTitle(rule)} saved.`);
     if (!done) return;
     if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
     setSavedRule(rule.id);
@@ -338,8 +344,9 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
   };
 
   const addRule = async (group: SkillGroupView, input: AddAssignmentInput) => {
-    setAddError(null);
     if (pendingRef.current !== null) return;
+    setAddError(null);
+    setError(null);
     setPending("add-rule");
     try {
       await api.createSkillGroupAssignment(group.id, input);
@@ -561,7 +568,9 @@ function GroupDetail(props: GroupDetailProps) {
           actions={<button type="button" className="btn sm" onClick={props.onRetryRules}>Retry</button>}>{rules.error}</Notice>
         : rules.rules === null
           ? <div className="skill-groups-loading" role="status"><span className="sr-only">Loading the group's assignments…</span><div className="skeleton-row" /></div>
-          : <div className="surface skill-assignments">
+          // Not `.skill-assignments`: that is a size container, and at the build floor a size
+          // container is the containing block of the rule rows' in-place menus (§2.10).
+          : <div className="surface skill-groups-rules">
             <ul className="skill-assignment-list" aria-label="Group Assignments">
               {rules.rules.length === 0
                 ? <li className="skill-assignment is-empty">No assignments. Add one to deploy this group's skills.</li>

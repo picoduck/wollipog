@@ -189,6 +189,47 @@ test("a change shows a spinner on its own control only, and the body keeps its h
   await expect(dialog.locator(".skill-groups-members").getByRole("button", { name: "Remove…" }).first()).toBeFocused();
 });
 
+test("the dialog's in-place menus open beside their triggers, with no containing block between them and the viewport", async ({ page }) => {
+  await installSkillGroupsFixture(page, { library: "full" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/skills-removals-e2e.html?groups=1");
+  await choosePageAction(page, "Manage Groups…");
+  const dialog = manageGroups(page);
+  await expect(dialog.locator(".skill-assignment")).toHaveCount(2);
+  // At the build floor (§2.10) a size container, a transform or layout containment between an
+  // in-place menu and the viewport becomes its fixed containing block and moves it off its trigger.
+  const triggers = [
+    dialog.getByRole("button", { name: "Add Skill", exact: true }),
+    dialog.getByRole("button", { name: "More Actions for Review Team", exact: true }),
+    dialog.locator('[data-rule-control="invocation"]').first(),
+    dialog.locator('[data-rule-control="more"]').first(),
+  ];
+  for (const trigger of triggers) {
+    await trigger.click();
+    const menu = page.locator(`#${await trigger.getAttribute("aria-controls")}`);
+    await expect(menu).toBeVisible();
+    const boxes = await menu.evaluate((element, triggerId) => {
+      const containing: string[] = [];
+      for (let node = element.parentElement; node && node !== document.documentElement; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.containerType !== "normal" || /layout|paint|strict|content/.test(style.contain) || style.transform !== "none" || style.filter !== "none") {
+          containing.push(node.className);
+        }
+      }
+      const button = document.querySelector(`[aria-controls="${triggerId}"]`)!.getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      return { containing, gap: Math.round(box.top - button.bottom), right: Math.round(button.right - box.right) };
+    }, await trigger.getAttribute("aria-controls"));
+    expect(boxes.containing).toEqual([]);
+    expect(boxes.gap).toBeGreaterThanOrEqual(0);
+    expect(boxes.gap).toBeLessThanOrEqual(12);
+    expect(Math.abs(boxes.right)).toBeLessThanOrEqual(2);
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+  }
+  await expect(dialog).toBeVisible();
+});
+
 test("at 390px the list and the group are two steps of one sheet, with Back and one Done", async ({ page }) => {
   await installSkillGroupsFixture(page, { library: "full" });
   await page.setViewportSize({ width: 390, height: 844 });

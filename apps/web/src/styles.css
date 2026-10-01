@@ -14684,6 +14684,10 @@ body.shell-dock-dragging * {
   color: var(--text);
   font: var(--type-body-strong);
 }
+/* The group's rules use the Assignments row, always in its narrow form: the detail pane is under
+   560px wide. The surface is not a size container (§2.10), since the rows' menus render in place. */
+.skill-groups-rules .skill-assignment { flex-wrap: wrap; }
+.skill-groups-rules .skill-assignment-text { flex-basis: 100%; }
 .skill-groups-empty {
   display: flex;
   flex-direction: column;
