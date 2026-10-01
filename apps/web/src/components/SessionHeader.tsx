@@ -605,7 +605,7 @@ export function SessionHeader({
           <BackgroundWorkBadge state={visibleBackgroundWorkState} compact responsiveCompact />
         </span>
       )}
-      {note && <span className="detail-note session-header-note" role="status" aria-live="polite">{note}</span>}
+      {note && <span className="detail-note session-header-note" role="status" aria-live="polite" title={note}>{note}</span>}
       <div className="detail-actions">
         {hiddenStatusCount > 0 && (
           <div className="overflow-menu">

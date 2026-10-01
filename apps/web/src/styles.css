@@ -3466,6 +3466,14 @@ textarea {
   flex: 0 1 260px;
   min-width: 0;
 }
+/* The desktop bar is a fixed 48px row, so a transient note keeps to one line there and truncates,
+   with its full text in the tooltip and announced whole by its live region. The phone's second
+   line gives the note a row of its own and lets it wrap. */
+.detail-bar.session-bar > .session-header-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* "⋯" overflow menu for infrequent actions (e.g. Reprocess) */
 .overflow-menu {
   position: relative;

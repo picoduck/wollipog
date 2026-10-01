@@ -5,6 +5,7 @@ import {
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  type RefObject,
   useCallback,
   useEffect,
   useId,
@@ -6323,6 +6324,52 @@ function MessageActionDialog({
   );
 }
 
+/**
+ * A width change into the compact tier hides the project button (§15.2), and More Actions holds its
+ * items from then on. Like a page header's folded menu button, it takes its open menu with it, and
+ * focus that was on the button or in the menu moves to More Actions, or else to the page title,
+ * rather than being left on a hidden element and dropped on <body> (§16.1).
+ */
+function useProjectButtonFold(
+  open: boolean,
+  close: () => void,
+  triggerRef: RefObject<HTMLButtonElement | null>,
+  surfaceRef: RefObject<HTMLDivElement | null>,
+) {
+  // Whether focus last landed on the button or in its menu. Hiding the focused button lets the
+  // browser's focus fixup drop focus on <body> before the observer below runs, so the active
+  // element alone cannot say where focus was; `focusin` never fires for that drop.
+  const focusHeld = useRef(false);
+  useEffect(() => {
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target as Node | null;
+      focusHeld.current = target !== null &&
+        (target === triggerRef.current || Boolean(surfaceRef.current?.contains(target)));
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, [triggerRef, surfaceRef]);
+  useEffect(() => {
+    const trigger = triggerRef.current;
+    if (!trigger || typeof ResizeObserver === "undefined") return;
+    const bar = trigger.closest<HTMLElement>(".session-bar");
+    const observer = new ResizeObserver(() => {
+      if (trigger.getClientRects().length > 0) return;
+      const active = trigger.ownerDocument.activeElement;
+      const dropped = active === null || active === trigger.ownerDocument.body;
+      const hadFocus = active === trigger || Boolean(active && surfaceRef.current?.contains(active)) ||
+        (dropped && focusHeld.current);
+      if (open) close();
+      if (!hadFocus) return;
+      const more = bar?.querySelector<HTMLElement>('.detail-actions [aria-label="More Actions"]');
+      (more && more.getClientRects().length > 0 ? more : trigger.ownerDocument.getElementById("page-title"))?.focus();
+    });
+    observer.observe(trigger);
+    if (bar) observer.observe(bar);
+    return () => observer.disconnect();
+  }, [open, close, triggerRef, surfaceRef]);
+}
+
 /** Assigns durable Project organization without changing the session's execution Location. */
 function ProjectMenuButton({ session }: { session: SessionView }) {
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
@@ -6342,6 +6389,8 @@ function DurableProjectMenuButton({ session }: { session: SessionView }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-project-menu");
+  const closeFolded = useCallback(() => menu.close(false), [menu.close]);
+  useProjectButtonFold(menuOpen, closeFolded, menu.triggerRef, menu.menuRef);
   const currentName = (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName;
 
   return (
@@ -6727,6 +6776,12 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
     menu.close(true);
     resetCreate();
   };
+  const closeFolded = useCallback(() => {
+    menu.close(false);
+    setCreating(false);
+    setBrowsing(false);
+  }, [menu.close]);
+  useProjectButtonFold(open, closeFolded, menu.triggerRef, menu.menuRef);
   const focusWorkspaceControl = (selector: string) => {
     window.setTimeout(() => menu.menuRef.current?.querySelector<HTMLElement>(selector)?.focus(), 0);
   };

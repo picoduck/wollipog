@@ -132,6 +132,53 @@ test("the project button opens Open Project and Move to Another Project…, and 
   await expect(page.locator('[aria-current="true"]', { hasText: "Alpha" })).toBeVisible();
 });
 
+test("folding into the compact tier closes the project menu and hands its focus to More Actions", async ({ page }) => {
+  await openBar(page, 1440);
+  const bar = page.locator("header.session-bar");
+  const button = bar.locator(".session-project-button");
+  const moreActions = bar.getByRole("button", { name: "More Actions" });
+  await button.focus();
+  await page.keyboard.press("Enter");
+  const menu = page.getByRole("menu", { name: "Project Actions" });
+  await expect(menu.getByRole("menuitem", { name: "Open Project" })).toBeFocused();
+
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await expect(button).toBeHidden();
+  await expect(menu).toHaveCount(0);
+  await expect(moreActions).toBeFocused();
+
+  // The button itself holding focus is handed over the same way.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(button).toBeVisible();
+  await button.focus();
+  await expect(button).toBeFocused();
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await expect(button).toBeHidden();
+  await expect(moreActions).toBeFocused();
+});
+
+test("a long transient note keeps to one line inside the 48px bar", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openBar(page, 940);
+  const bar = page.locator("header.session-bar");
+  await bar.getByRole("button", { name: "Share" }).click();
+  await page.getByRole("menuitem", { name: "Copy Internal Session Link" }).click();
+  const note = bar.locator(".session-header-note");
+  await expect(note).toBeVisible();
+  // Stand in for a long export or reprocessing error, which the same slot shows.
+  const long = "The transcript export failed because the control plane could not read the session's history from disk.";
+  const geometry = await note.evaluate((element, text) => {
+    element.textContent = text;
+    const box = element.getBoundingClientRect();
+    const barBox = element.closest(".session-bar")!.getBoundingClientRect();
+    return { top: box.top, bottom: box.bottom, barTop: barBox.top, barBottom: barBox.bottom, lineHeight: parseFloat(getComputedStyle(element).lineHeight) || 16 };
+  }, long);
+  expect(geometry.top).toBeGreaterThanOrEqual(geometry.barTop);
+  expect(geometry.bottom).toBeLessThanOrEqual(geometry.barBottom);
+  expect(geometry.bottom - geometry.top).toBeLessThan(2 * geometry.lineHeight);
+  await expect(note).toHaveCSS("text-overflow", "ellipsis");
+});
+
 test("a session with no project shows a faint No Project whose menu only moves it", async ({ page }) => {
   await openBar(page, 1440, { session: /No Project Session/ });
   const button = page.locator("header.session-bar .session-project-button");
