@@ -69,6 +69,7 @@ printf '%s' "$root"
 export function withClaudeProjectMemory(args: readonly string[], directory: string | undefined, cwd = process.cwd()): string[] {
   if (!directory) return [...args];
   let settings: Record<string, unknown> = {};
+  let effectiveSettings: string | undefined;
   const result: string[] = [];
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
@@ -77,6 +78,10 @@ export function withClaudeProjectMemory(args: readonly string[], directory: stri
     else if (arg.startsWith("--settings=")) value = arg.slice("--settings=".length);
     else { result.push(arg); continue; }
     if (!value) throw new Error("Missing Claude settings argument.");
+    effectiveSettings = value;
+  }
+  if (effectiveSettings !== undefined) {
+    const value = effectiveSettings;
     const file = resolve(cwd, value);
     if (!value.trimStart().startsWith("{") && statSync(file).size > 96 * 1024) {
       throw new Error("Claude settings are too large for project memory selection. Reduce the launch settings below 96 KiB.");

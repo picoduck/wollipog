@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { supportsClaudeProjectMemory } from "@wollipog/protocol";
@@ -67,7 +67,7 @@ test("a redirected managed store fails without touching the destination", async 
 test("Claude's effective settings retain hooks, env, and permissions while replacing its memory directory", () => {
   const source = { hooks: { PreToolUse: [{ hooks: [{ command: "guard" }] }] }, env: { KEEP: "yes" },
     permissions: { deny: ["Bash(rm:*)"] }, autoMemoryDirectory: "/old" };
-  const args = withClaudeProjectMemory(["--settings", JSON.stringify({ obsolete: true }), "-p",
+  const args = withClaudeProjectMemory(["--settings", "nonexistent-overridden-settings.json", "-p",
     "--settings=" + JSON.stringify(source)], "/project/selected");
   const settings = JSON.parse(args.at(-1)!);
   assert.deepEqual(settings, { ...source, autoMemoryDirectory: "/project/selected" });

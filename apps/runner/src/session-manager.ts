@@ -7467,7 +7467,7 @@ export class SessionManager {
           cwd,
           env: meta.env,
           config: meta.config,
-          projectMemoryDirectory: preparedProjectMemoryDirectory,
+          ...(preparedProjectMemoryDirectory ? { projectMemoryDirectory: preparedProjectMemoryDirectory } : {}),
           orchestrator: meta.orchestrator,
           context: meta.context,
           capabilities: meta.capabilities,
@@ -7905,7 +7905,7 @@ export class SessionManager {
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
-      projectMemoryDirectory,
+      ...(projectMemoryDirectory ? { projectMemoryDirectory } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
@@ -10622,7 +10622,7 @@ export class SessionManager {
 
   private projectMemoryChanged(sessionId: string, entry: ActiveSession): boolean {
     const meta = this.store.readMeta(sessionId);
-    return Boolean(meta && meta.driver === "claude-code" && entry.projectMemoryKey !== projectMemoryKey(meta));
+    return Boolean(meta && meta.driver === "claude-code" && (entry.projectMemoryKey ?? "null") !== projectMemoryKey(meta));
   }
 
   private async rebindProjectMemory(sessionId: string, entry: ActiveSession): Promise<void> {

@@ -1,3 +1,5 @@
+import { ChoiceRows } from "./ui/ChoiceControls.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { useEffect, useState } from "react";
 import { PROJECT_MEMORY_MIN_PROTOCOL, supportsClaudeProjectMemory,
   type ProjectMemorySharing, type ProjectView, type RunnerView } from "@wollipog/protocol";
@@ -19,19 +21,21 @@ export function ProjectMemorySharingSettings({ project, runners, disabled, onSav
     {project.memorySharing === undefined ? <p role="status">Memory policy is unavailable. Update the control plane to configure it.</p> : <>
       <p><strong>Saved Choice: </strong>{project.memorySharing === "shared" ? "Share Project Memory" : "Keep Account Memories Separate"}</p>
       <form onSubmit={(event) => {
-        event.preventDefault(); setSaving(true); setError(null);
+        event.preventDefault();
+        if (saving || disabled || choice === project.memorySharing) return;
+        setSaving(true); setError(null);
         void onSave(choice).catch((err: unknown) => setError(err instanceof Error ? err.message : "Could not save the memory policy."))
           .finally(() => setSaving(false));
       }}>
-        <fieldset className="project-memory-options" disabled={disabled || saving}>
-          <legend className="sr-only">Memory Sharing</legend>
-          <label><input type="radio" name={`memory-${project.id}`} value="separate"
-            checked={choice === "separate"} onChange={() => setChoice("separate")} />Keep Account Memories Separate</label>
-          <label><input type="radio" name={`memory-${project.id}`} value="shared"
-            checked={choice === "shared"} onChange={() => setChoice("shared")} />Share Project Memory</label>
-        </fieldset>
-        <button className="btn" type="submit" disabled={disabled || saving || choice === project.memorySharing}>
-          {saving ? "Saving…" : "Save Memory Policy"}</button>
+        <ChoiceRows<ProjectMemorySharing> label="Memory Sharing" value={choice} onChange={setChoice}
+          options={[
+            { value: "separate", title: "Keep Account Memories Separate", disabled: disabled || saving,
+              description: "Claude auto-memory stays private to the selected account." },
+            { value: "shared", title: "Share Project Memory", disabled: disabled || saving,
+              description: "Claude accounts on this machine use this Project’s shared auto-memory." },
+          ]} />
+        <BusyButton className="btn" type="submit" busy={saving} progress="Saving the memory policy…"
+          disabled={!saving && (disabled || choice === project.memorySharing)}>Save Memory Policy</BusyButton>
       </form>
       {error && <p className="form-error" role="alert">{error}</p>}
     </>}
