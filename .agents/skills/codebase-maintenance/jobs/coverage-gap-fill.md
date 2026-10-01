@@ -38,6 +38,12 @@ branch ran, because `DA` follows function hits. Only a `BRDA` record with a non-
 proves the branch. #592 called `durable-command-store.ts:110` covered on the strength of its `DA`
 counts; the mismatch branch had never been taken.
 
+`BRDA` records identify the line where a branch starts, and one line can contain several
+branches. Map each zero-count record to its exact expression before classifying it. For example,
+an uncovered `?? "unknown"` fallback inside an error arm does not prove that the error arm was
+never taken. Check the source and neighboring branch records, then use a focused probe if the
+mapping is ambiguous.
+
 Run the coverage command with a TAP reporter beside the lcov one
 (`--test-reporter=tap --test-reporter-destination=<scratch>/tap.txt`). One run exited 1 with an
 empty `lcov.info`, nothing on stderr, and every test reported passing, which left nothing to
@@ -72,6 +78,11 @@ less than a single uncovered branch in credential validation. Rank candidates by
   fallthrough after a loop whose body always returns or throws — and a test that drives it is
   impossible or tautological, which is exactly what `useless-test-deletion` deletes. Report those
   as `dead-code-sweep` overlap instead. One run found three such guards; none was a finding.
+- Check for equivalent enforcement in an earlier global check or a later, already-tested layer.
+  If that enforcement masks removal of the candidate guard, a test through that path cannot prove
+  the guard's own behavior. Identify an independently reachable path or a separate contract that
+  requires testing this layer; otherwise drop the candidate. Repeated checks alone are not a
+  reason to dismiss intentional defense in depth.
 - Do not propose tests for code the `dead-code-sweep` job has flagged. Report the overlap instead.
 
 ## Report

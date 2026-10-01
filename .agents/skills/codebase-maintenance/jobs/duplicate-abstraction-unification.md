@@ -9,9 +9,11 @@ callers in ways tests may not catch. Bias hard toward reporting fewer, more cert
 
 Start mechanically, then verify semantically:
 
-- `npx -y jscpd --min-lines 25 --min-tokens 120 --reporters console --silent apps packages scripts`
-  for literal and near-literal duplication (point `--output` at the scratch directory, never the
-  repository's default `./report`);
+- `npx -y jscpd --min-lines 25 --min-tokens 120 --reporters json --output <scratch>/jscpd-report apps packages scripts`
+  for literal and near-literal duplication. Replace `<scratch>` with the run-scoped scratch
+  directory and read `jscpd-report/jscpd-report.json` for the duplicated blocks. The combination
+  `--reporters console --silent` suppresses the block list and prints only a summary; never use
+  the repository's default `./report` output directory;
 - `git grep -n "^export \(async \)\?function \|^export const \|^export class \|^export type \|^export interface " -- 'apps/**' 'packages/**' 'scripts/*.mjs' 'apps/*/scripts/*.mjs'`
   to build a symbol inventory. The `scripts/` trees are part of both passes: plain-`node` scripts
   cannot import `packages/protocol` (its `exports` point at TypeScript source), so constants and
