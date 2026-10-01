@@ -92,6 +92,36 @@ test("account installations and operator-owned cache links are preserved", (t) =
   assert.equal(existsSync(join(other, "local")), false);
 });
 
+test("account marketplace overrides remove inherited payloads and suppress their defaults", (t) => {
+  const f = fixture(t);
+  const sourceConfig = '[marketplaces.local]\nsource_type = "local"\nsource = "/default-market"\n' +
+    '[plugins."review@local"]\nenabled = true\n';
+  writeFileSync(join(f.source, "config.toml"), sourceConfig);
+  inheritCodexPlugins(f.launch);
+  assert.ok(lstatSync(join(f.account, f.cache)).isSymbolicLink());
+  const accountConfig = '[marketplaces.local]\nsource_type = "local"\nsource = "/account-market"\n' +
+    '[plugins."review@local"]\nenabled = true\n';
+  writeFileSync(join(f.account, "config.toml"), accountConfig);
+  const args = inheritCodexPlugins(f.launch);
+  assert.ok(!args.some((arg) => arg.includes("review@local") || arg.includes("marketplaces.local")));
+  assert.throws(() => lstatSync(join(f.account, f.cache)), { code: "ENOENT" });
+  assert.ok(existsSync(join(f.source, f.cache)));
+  assert.equal(readFileSync(join(f.account, "config.toml"), "utf8"), accountConfig);
+  mkdirSync(join(f.account, f.cache), { recursive: true });
+  writeFileSync(join(f.account, f.cache, "own"), "account");
+  inheritCodexPlugins(f.launch);
+  assert.equal(readFileSync(join(f.account, f.cache, "own"), "utf8"), "account");
+});
+
+test("matching account marketplace definitions still inherit missing plugins", (t) => {
+  const f = fixture(t);
+  const market = '[marketplaces.local]\nsource_type = "local"\nsource = "/shared-market"\n';
+  writeFileSync(join(f.source, "config.toml"), market + '[plugins."review@local"]\nenabled = true\n');
+  writeFileSync(join(f.account, "config.toml"), market);
+  assert.ok(inheritCodexPlugins(f.launch).includes("plugins.review@local.enabled=true"));
+  assert.equal(realpathSync(join(f.account, f.cache)), join(f.source, f.cache));
+});
+
 test("default home, WSL, and remote execution do not inherit host plugins", (t) => {
   const f = fixture(t);
   assert.deepEqual(inheritCodexPlugins({ ...f.launch, env: { ...f.launch.env, CODEX_HOME: f.source } }), []);
@@ -195,6 +225,20 @@ test("installed Codex CLI loads inherited plugins from an existing account", {
     child.kill();
     await closed;
   }
+  const accountMarket = join(f.root, "account-marketplace");
+  mkdirSync(join(accountMarket, ".agents/plugins"), { recursive: true });
+  mkdirSync(join(accountMarket, "review/.codex-plugin"), { recursive: true });
+  writeFileSync(join(accountMarket, "review/.codex-plugin/plugin.json"),
+    '{"name":"review","description":"Account-owned payload"}');
+  writeFileSync(join(accountMarket, ".agents/plugins/marketplace.json"), JSON.stringify({
+    name: "local", plugins: [{ name: "review", source: { source: "local", path: "./review" } }],
+  }));
+  run(f.account, ["--disable", "remote_plugin", "plugin", "marketplace", "add", accountMarket]);
+  const overridden = JSON.parse(run(f.account, [...inheritCodexPlugins(f.launch), "--disable", "remote_plugin",
+    "plugin", "list", "--json"]));
+  assert.equal(overridden.installed.length, 0, JSON.stringify(overridden));
+  assert.throws(() => lstatSync(join(f.account, f.cache)), { code: "ENOENT" });
+  assert.ok(existsSync(join(f.source, f.cache)));
 });
 
 test("installed Codex reconciles remote catalog installs into an already-running account", {

@@ -3,6 +3,7 @@ import {
   realpathSync, symlinkSync, unlinkSync,
 } from "node:fs";
 import { homedir } from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse, stringify, type TomlTable, type TomlValue } from "smol-toml";
 import type { AgentContext } from "@wollipog/protocol";
@@ -124,13 +125,22 @@ export function inheritCodexPlugins(launch: CodexPluginLaunch): string[] {
       realpathSync(sourceHome) === realpathSync(accountHome))) return launch.args;
   const defaults = config(sourceHome, "default");
   const account = config(accountHome, "account");
+  const sourceMarkets = table(defaults.marketplaces);
+  const accountMarkets = table(account.marketplaces);
+  // A marketplace alias can name different repositories in the default and account homes.
+  // Keep payload provenance aligned with the account's explicit marketplace definition.
+  const plugins = Object.fromEntries(Object.entries(table(defaults.plugins)).filter(([id]) => {
+    const marketplace = id.slice(id.lastIndexOf("@") + 1);
+    return !Object.hasOwn(accountMarkets, marketplace) ||
+      isDeepStrictEqual(accountMarkets[marketplace], sourceMarkets[marketplace]);
+  }));
   const inherited = [
-    ...overrides(table(defaults.plugins), table(account.plugins), ["plugins"]),
+    ...overrides(plugins, table(account.plugins), ["plugins"]),
     ...overrides(table(defaults.marketplaces), table(account.marketplaces), ["marketplaces"]),
     ...overrides(Object.fromEntries(Object.entries(table(defaults.features))
       .filter(([key]) => key === "plugins" || key === "remote_plugin")), table(account.features), ["features"]),
   ];
-  try { linkPlugins(sourceHome, accountHome, new Set(Object.keys(table(defaults.plugins)))); }
+  try { linkPlugins(sourceHome, accountHome, new Set(Object.keys(plugins))); }
   catch { throw new Error("Codex plugin inheritance could not reconcile the account plugin cache."); }
   // Node's bootstrap script must precede provider flags when the CLI is launched via node.
   const flags = inherited.flatMap((value) => ["-c", value]);
