@@ -268,11 +268,14 @@ for (const width of [1440, 390]) test(`the dialog's in-place menus at ${width} o
     dialog.locator('[data-rule-control="invocation"]').first(),
     dialog.locator('[data-rule-control="more"]').first(),
   ];
-  for (const trigger of triggers) {
+  for (const [index, trigger] of triggers.entries()) {
     await trigger.click();
     const menu = page.locator(`#${await trigger.getAttribute("aria-controls")}`);
     await expect(menu).toBeVisible();
     await page.waitForFunction(() => !document.getAnimations().some((animation) => animation.playState === "running"));
+    if (process.env.EVIDENCE_DIR) {
+      await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/inline-menu-contained-${width}-${index + 1}.png` });
+    }
     const boxes = await menu.evaluate((element, triggerId) => {
       const button = document.querySelector(`[aria-controls="${triggerId}"]`)!.getBoundingClientRect();
       const box = element.getBoundingClientRect();
