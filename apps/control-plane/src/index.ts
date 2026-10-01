@@ -1004,12 +1004,14 @@ function sessionProviderAccountChoices(
 ): Required<SessionProviderAccountOptionsResponse> {
   const runner = db.getRunner(session.runnerId);
   if (!runner) return { accounts: [], unavailable: [] };
+  const now = Date.now();
   const usage = db.subscriptionUsageForPrincipal(
     principal,
-    Date.now(),
+    now,
     SUBSCRIPTION_USAGE_STALE_AFTER_MS,
   );
   return providerAccountSwitchChoices(session, runner.providerAccounts ?? [], usage.sources, {
+    now,
     listUnavailable: db.canAccessRunner(principal, session.runnerId),
   });
 }

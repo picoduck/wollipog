@@ -47,22 +47,27 @@ export function providerAuthenticationAccountOptions(
   });
 }
 
-function bucketExhausted(bucket: SubscriptionUsageBucket): boolean {
+/** A window counts as used up from its latest reading only until its reset time passes, as the
+ * runner's automatic switch counts it (#2304); a window with no reset time stays used up until a
+ * newer reading says otherwise. */
+function bucketExhausted(bucket: SubscriptionUsageBucket, now: number): boolean {
+  if (bucket.resetsAt !== undefined && bucket.resetsAt <= now) return false;
   return bucket.status === "exhausted" || bucket.remainingPercent === 0 ||
     (bucket.usedPercent !== undefined && bucket.usedPercent >= 100);
 }
 
 /** The used-up window that keeps an account unavailable longest: one with no reset time, else the
  * one that resets last. */
-function longestExhaustedWindow(buckets: SubscriptionUsageBucket[]): SubscriptionUsageBucket | undefined {
-  return buckets.filter(bucketExhausted).reduce<SubscriptionUsageBucket | undefined>((longest, bucket) =>
+function longestExhaustedWindow(exhausted: SubscriptionUsageBucket[]): SubscriptionUsageBucket | undefined {
+  return exhausted.reduce<SubscriptionUsageBucket | undefined>((longest, bucket) =>
     !longest || (longest.resetsAt !== undefined &&
       (bucket.resetsAt === undefined || bucket.resetsAt > longest.resetsAt)) ? bucket : longest, undefined);
 }
 
 /** Split the session's same-Machine, same-provider accounts into the ones a switch may choose and
  * the ones it may not, each of those with a typed reason (#2276). Only signed-in accounts whose
- * latest provider windows do not report exhaustion are offered; unknown usage is not headroom. The
+ * latest provider windows do not report exhaustion are offered; unknown usage is not headroom, and a
+ * window whose reset time is at or before `now` no longer reports exhaustion. The
  * session's own account is offered only while a failed switch to it is being retried, and is never
  * listed as unavailable.
  *
@@ -75,7 +80,7 @@ export function providerAccountSwitchChoices(
   >,
   accounts: ProviderAccountDefinition[],
   sources: SubscriptionUsageSourceView[],
-  { listUnavailable = true }: { listUnavailable?: boolean } = {},
+  { now, listUnavailable = true }: { now: number; listUnavailable?: boolean },
 ): Required<SessionProviderAccountOptionsResponse> {
   const offered: SessionProviderAccountOption[] = [];
   const unavailable: SessionProviderAccountUnavailable[] = [];
@@ -96,7 +101,8 @@ export function providerAccountSwitchChoices(
     const source = sources.find((candidate) =>
       candidate.runnerId === session.runnerId && candidate.providerAccountId === account.id);
     if (!source || source.state !== "available") { reject("usage_unknown"); continue; }
-    if (source.buckets.some(bucketExhausted)) { reject("usage_exhausted", longestExhaustedWindow(source.buckets)); continue; }
+    const exhausted = source.buckets.filter((bucket) => bucketExhausted(bucket, now));
+    if (exhausted.length) { reject("usage_exhausted", longestExhaustedWindow(exhausted)); continue; }
     offered.push({
       id: account.id,
       label: account.label,
@@ -110,13 +116,14 @@ export function providerAccountSwitchChoices(
 }
 
 /** The accounts a switch may choose: same-Machine, same-provider, signed-in accounts whose latest
- * provider windows do not report exhaustion. */
+ * provider windows do not report exhaustion at `now`. */
 export function providerAccountSwitchOptions(
   session: Pick<SessionView,
     "driver" | "runnerId" | "providerAccountId" | "providerAccountSwitchFailure"
   >,
   accounts: ProviderAccountDefinition[],
   sources: SubscriptionUsageSourceView[],
+  now: number,
 ): SessionProviderAccountOption[] {
-  return providerAccountSwitchChoices(session, accounts, sources).accounts;
+  return providerAccountSwitchChoices(session, accounts, sources, { now }).accounts;
 }
