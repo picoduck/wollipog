@@ -214,6 +214,12 @@ const VOCABULARY = {
     sign_in_required: warning("Sign-In Required"),
     signed_out: neutral("Signed Out"),
   },
+  /** A transcript share link (Share Transcript, #2148). */
+  share: {
+    active: success("Active"),
+    expired: neutral("Expired"),
+    revoked: neutral("Revoked"),
+  },
   /** A provider's subscription usage. */
   usage: {
     available: success("Available"),

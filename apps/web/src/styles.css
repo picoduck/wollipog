@@ -3605,42 +3605,38 @@ textarea {
   line-height: 1.5;
 }
 .shared-transcript-empty { color: var(--text-dim); }
-.share-create-row {
-  display: grid;
-  grid-template-columns: auto minmax(110px, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-}
-.share-create-row select,
-.share-created-link input {
-  min-width: 0;
-  color: var(--text);
-  background: var(--bg-elev-1);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-}
-
-.share-created-link > label { display: block; margin-bottom: 6px; color: var(--text-dim); }
-.share-link-controls { display: flex; gap: 8px; }
-.share-link-controls input { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-.share-status { color: var(--text-dim); overflow-wrap: anywhere; }
-.share-list { padding: 0; list-style: none; }
-.share-list li {
+/* Share Transcript (#2148, docs/design-system.md §7.2): the expiry, the new link or the
+   reachable-address notice, then the Links section 24px below (the body's 16px gap plus 8px). */
+.share-dialog .share-links { margin-top: var(--space-2); }
+.share-links-count { margin-left: var(--space-1); }
+.share-link-controls {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 9px 0;
-  border-top: 1px solid var(--border);
+  gap: var(--space-2);
+  min-width: 0;
 }
-.share-list li span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.share-list small { color: var(--text-dim); overflow-wrap: anywhere; }
-/* The copy button sits beside the link field, so it takes the field's control height. */
-.share-link-controls .copy-btn { min-height: var(--control-h); }
-@media (max-width: 600px) {
-  .share-create-row { grid-template-columns: 1fr; }
-  .share-link-controls { flex-direction: column; }
+.share-link-input {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font: 400 var(--text-sm)/1 var(--font-mono);
+  text-overflow: ellipsis;
 }
+/* Copy Link takes the link field's control height beside it. */
+.share-link-controls > .btn { flex: none; }
+/* Line two's facts sit 12px apart (§5.2): the creation time now, and room for one more. */
+.share-link-meta > span + span { margin-left: var(--space-3); }
+.share-links-empty {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+.share-address-detail,
+.share-error-detail {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.share-address-detail code,
+.share-error-detail { font-family: var(--font-mono); }
 .right-panel-resizer {
   width: 7px;
   flex-shrink: 0;

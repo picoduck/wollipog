@@ -6,7 +6,6 @@ import {
   runnerSupportsProtocol,
   type SessionReminderView,
   type SessionView,
-  type TranscriptShareView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
@@ -19,7 +18,6 @@ import {
   sessionUnarchiveRestarts,
   unarchiveAndRestartFailureMessage,
 } from "../archive-actions.js";
-import { titleCaseLabel } from "../format.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { discardComposerDraft } from "../composer-drafts.js";
 import { useInstanceScope } from "../instance-scope.js";
@@ -30,8 +28,7 @@ import { safeExternalHref } from "../external-href.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
 import { pullRequestStateLabel } from "../worktree-identity.js";
 import type { SessionChangeStatus } from "../session-status.js";
-import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN, hasSameOriginMarker } from "../config.js";
-import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcript-share-client.js";
+import { DASHBOARD_ORIGIN } from "../config.js";
 import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
 import {
   ActiveSubagentsBadge,
@@ -39,7 +36,6 @@ import {
   BackgroundWorkBadge,
   ChangeStatusBadge,
   CopyButton,
-  Modal,
   SessionStatusIndicators,
   UntrackedBackgroundWorkBadge,
 } from "./common.js";
@@ -48,8 +44,8 @@ import {
   useDismissiblePopover,
 } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
-import { Notice } from "./Notice.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { TranscriptShareDialog } from "./TranscriptShareDialog.js";
 import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
@@ -1133,154 +1129,5 @@ export function SessionHeader({
         })}
       </div>
     </header>
-  );
-}
-
-const SHARE_EXPIRY_OPTIONS = [
-  { seconds: 60 * 60, label: "1 Hour" },
-  { seconds: 24 * 60 * 60, label: "1 Day" },
-  { seconds: 7 * 24 * 60 * 60, label: "7 Days" },
-  { seconds: 30 * 24 * 60 * 60, label: "30 Days" },
-] as const;
-
-function TranscriptShareDialog({ sessionId, onClose, returnFocusRef }: {
-  sessionId: string;
-  onClose: () => void;
-  returnFocusRef?: { current: HTMLElement | null };
-}) {
-  const api = useApi();
-  const instances = useInstances();
-  const { confirm } = useFeedback();
-  const [shares, setShares] = useState<TranscriptShareView[] | null>(null);
-  const [ttl, setTtl] = useState<number>(24 * 60 * 60);
-  const [link, setLink] = useState<{ shareId: string; url: string } | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const linkInputRef = useRef<HTMLInputElement>(null);
-  const shareOrigin = reachableTranscriptShareOrigin(
-    instances.activeProfile.kind === "remote" ? instances.activeProfile.origin : window.location.origin,
-    instances.activeProfile.kind === "remote" ? instances.activeProfile.origin : CONTROL_PLANE_HTTP,
-    instances.activeProfile.kind === "remote" || hasSameOriginMarker(window),
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    void api.transcriptShares(sessionId)
-      .then(({ shares: next }) => { if (!cancelled) setShares(next); })
-      .catch((error) => { if (!cancelled) setStatus((error as Error).message); });
-    return () => { cancelled = true; };
-  }, [api, sessionId]);
-
-  const create = async () => {
-    if (!shareOrigin) {
-      setStatus("Open this dashboard through a reachable LAN, Tailscale, or reverse-proxy URL before creating a share link. No share was created.");
-      return;
-    }
-    setBusy(true);
-    setStatus("Freezing redacted transcript…");
-    try {
-      const result = await api.createTranscriptShare(sessionId, { expiresInSeconds: ttl });
-      setLink({ shareId: result.share.shareId, url: transcriptShareUrl(shareOrigin, result.token) });
-      setShares((current) => [result.share, ...(current ?? [])]);
-      setStatus("Link created. Its secret is shown only here; copy it before closing.");
-    } catch (error) {
-      setStatus((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const revoke = async (share: TranscriptShareView) => {
-    if (!await confirm({
-      title: "Revoke Share",
-      message: `The share expiring ${new Date(share.expiresAt).toLocaleString()} will stop working immediately.`,
-      confirmLabel: "Revoke Share",
-      tone: "danger",
-    })) return;
-    setBusy(true);
-    try {
-      const result = await api.revokeTranscriptShare(sessionId, share.shareId);
-      setShares((current) => current?.map((item) => item.shareId === share.shareId ? result.share : item) ?? []);
-      setLink((current) => current?.shareId === share.shareId ? null : current);
-      setStatus("Share revoked");
-    } catch (error) {
-      setStatus((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Modal
-      title="Share Operational Transcript"
-      onClose={onClose}
-      returnFocusRef={returnFocusRef}
-      footer={<button className="btn" type="button" onClick={onClose}>Done</button>}
-    >
-      <Notice tone="warning" id="share-transcript-disclosure">
-        This freezes the same cached, possibly partial, operationally redacted projection as export.
-        It may still contain secrets, source code, or personal data. Anyone with the link can read it until expiry or revocation.
-      </Notice>
-      <div className="share-create-row">
-        <label htmlFor="share-expiry">Expires After</label>
-        <select id="share-expiry" value={ttl} onChange={(event) => setTtl(Number(event.target.value))} disabled={busy}>
-          {SHARE_EXPIRY_OPTIONS.map((option) => <option key={option.seconds} value={option.seconds}>{option.label}</option>)}
-        </select>
-        <button
-          className="btn primary"
-          type="button"
-          onClick={() => void create()}
-          disabled={busy || !shareOrigin}
-          aria-describedby={shareOrigin ? "share-transcript-disclosure" : "share-transcript-disclosure share-origin-status"}
-        >
-          Create Link
-        </button>
-      </div>
-      {!shareOrigin && (
-        <p id="share-origin-status" className="share-status">
-          Sharing is unavailable from a loopback or desktop-only origin. Open this dashboard through a reachable control-plane URL first.
-        </p>
-      )}
-      {link && (
-        <div className="share-created-link">
-          <label htmlFor="created-share-link">One-Time Share Link</label>
-          <div className="share-link-controls">
-            <input ref={linkInputRef} id="created-share-link" readOnly value={link.url} onFocus={(event) => event.currentTarget.select()} />
-            <CopyButton
-              text={link.url}
-              label="Copy Link"
-              onResult={(copied) => {
-                if (copied) {
-                  setStatus("Link copied");
-                  return;
-                }
-                linkInputRef.current?.focus();
-                linkInputRef.current?.select();
-                setStatus("Clipboard access is unavailable. The link is selected; press Ctrl+C or Command+C to copy it.");
-              }}
-            />
-          </div>
-        </div>
-      )}
-      {status && <p className="share-status" role="status" aria-live="polite">{status}</p>}
-      <h3>Issued Links</h3>
-      {shares === null ? <p>Loading…</p> : shares.length === 0 ? <p>No share links have been issued.</p> : (
-        <ul className="share-list">
-          {shares.map((share) => (
-            <li key={share.shareId}>
-              <span>
-                <strong>{titleCaseLabel(share.status)}</strong>
-                <small>Created {new Date(share.createdAt).toLocaleString()} · expires {new Date(share.expiresAt).toLocaleString()}</small>
-              </span>
-              {share.status === "active" && (
-                <button className="btn ghost danger sm" type="button" disabled={busy} onClick={() => void revoke(share)} aria-label={`Revoke share expiring ${new Date(share.expiresAt).toLocaleString()}`}>
-                  Revoke
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </Modal>
   );
 }

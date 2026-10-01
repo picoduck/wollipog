@@ -1431,6 +1431,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out: neutral |
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
+| Transcript share link | Active: success · Expired, Revoked: neutral. Rendered as the inline badge on Share Transcript's link rows. |
 | Pull request | Open, Draft, Merged and Closed are **facts**: row meta with the Git icon, not status badges. |
 
 "Orphaned" is retired everywhere, including the session header badge, which reads "Background Work

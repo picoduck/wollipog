@@ -15,6 +15,8 @@ import {
   deployToAssignmentsConsent,
   switchAgentsConsent,
 } from "./components/ReviewConsent.js";
+import { copyShortcutHelper, TRANSCRIPT_SHARE_COPY } from "./components/TranscriptShareDialog.js";
+import { shareCreatedLabel, shareExpiryLabel, shareMoment } from "./transcript-share-time.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
 const MINOR_WORDS = new Set([
@@ -637,6 +639,32 @@ test("the session bar's navigation and project labels are Title Case (#2146)", (
   for (const retired of ["Manage Project", "Move Session…", "Project Actions"]) {
     assert.ok(![...projectMenu, ...moreActions].includes(retired), `${retired} is gone from the bar's menus`);
   }
+});
+
+test("Share Transcript's titles, labels and buttons are Title Case, and its sentences are sentence case (#2148)", () => {
+  const titles = ["title", "expiryLabel", "create", "linkLabel", "copy", "unavailableTitle", "linksTitle", "loadErrorTitle",
+    "createErrorTitle", "revoke"] as const;
+  const sentences = ["description", "expiryHelper", "creating", "linkHelper", "copied", "unavailableBody", "loading", "empty",
+    "loadErrorBody", "revoking", "revoked"] as const;
+  assert.deepEqual([...titles, ...sentences].sort(), Object.keys(TRANSCRIPT_SHARE_COPY).sort(), "every string is classified");
+  for (const key of titles) {
+    const value = TRANSCRIPT_SHARE_COPY[key];
+    assert.ok(isTitleCase(value) && !/[.!?]$/.test(value), `${key}: ${JSON.stringify(value)}`);
+  }
+  // Product and service names, and a key's name, keep their capitals inside a sentence.
+  const names = new Set(["Wollipog", "Tailscale", "Ctrl+C"]);
+  const sentence = (value: string) => /[.…]$/.test(value) && value.split(/(?<=[.!?])\s+/).every((part) =>
+    isSentenceCase(part.split(/\s+/).map((word, index) => index > 0 && names.has(word.replace(/\W+$/, "")) ? "name" : word).join(" ")));
+  for (const key of sentences) assert.ok(sentence(TRANSCRIPT_SHARE_COPY[key]), `${key}: ${JSON.stringify(TRANSCRIPT_SHARE_COPY[key])}`);
+  for (const mac of [true, false]) assert.ok(sentence(copyShortcutHelper(mac)), copyShortcutHelper(mac));
+
+  // The rows and the Revoke… name are built from times: line one is a title-like label, line two a
+  // sentence-case fact, and the button's accessible name is Title Case like its visible label.
+  const now = new Date(2026, 8, 30, 0, 26).getTime();
+  const expiresAt = new Date(2026, 9, 2, 0, 26).getTime();
+  assert.ok(isTitleCase(`Revoke Link That Expires ${shareMoment(expiresAt, now)}`));
+  assert.equal(shareExpiryLabel({ status: "active", expiresAt }, now), "Expires in 2 days");
+  assert.ok(isSentenceCase(shareCreatedLabel(now, now).replace(/\d.*$/, "").trim()));
 });
 
 test("the copy rules tell a sentence from a title", () => {

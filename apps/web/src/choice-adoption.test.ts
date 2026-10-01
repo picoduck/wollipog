@@ -104,7 +104,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // Instructions' file chips (#1980): §11.3 meta chips (`button.chip` with `aria-pressed`, as the
   // issue specifies) that choose which file the one view shows. A view switch, not a form choice.
   ["components/SkillInstructions.tsx", "aria-pressed", 1],
-  ["components/SessionHeader.tsx", "native-select", 1],
   /* Raw choice markup, found only once the inventory started counting semantics rather than
      class names. These are bespoke controls phase 6 has not reached yet.
      SettingsView used to be the one exception — a hand-rolled radiogroup wrapping RadioRow
