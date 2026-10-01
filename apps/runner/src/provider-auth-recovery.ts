@@ -511,14 +511,16 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
 
   async startLogin(meta: SessionMeta): Promise<"completed" | "cancelled" | "failed"> {
     const scope = this.describe(meta);
-    if (!scope?.canStartLogin || !this.loginSupervisor) return "failed";
+    if (!scope?.canStartLogin || !this.loginSupervisor || this.loginAccounts.has(scope.id)) return "failed";
     const directory = scope.provider === "claude"
       ? meta.env.CLAUDE_CONFIG_DIR ?? meta.env.HOME ?? homedir()
       : meta.env.CODEX_HOME ?? meta.env.HOME ?? homedir();
     const accountId = meta.providerAccountId ?? `default-${scope.provider}-${scope.id.slice(0, 12)}`;
     let entry: { accountId: string; attempt: symbol } | undefined;
     try {
-      const operation = this.loginSupervisor.startResolved({
+      entry = { accountId, attempt: Symbol("provider-login") };
+      this.loginAccounts.set(scope.id, entry);
+      const operation = await this.loginSupervisor.startResolved({
         accountId,
         label: meta.providerAccountLabel ?? `Default ${scope.provider === "claude" ? "Claude" : "Codex"} Account`,
         provider: scope.provider,
@@ -532,8 +534,6 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
         structuredCodex: scope.provider === "codex" && meta.driver === "codex-app-server" &&
           supportsStructuredCodexDeviceLogin(meta.agentVersion),
       });
-      entry = { accountId, attempt: Symbol("provider-login") };
-      this.loginAccounts.set(scope.id, entry);
       return await operation.completion;
     } catch {
       return "failed";

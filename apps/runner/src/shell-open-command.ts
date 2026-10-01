@@ -27,7 +27,7 @@ export interface ShellOpenCommandDependencies {
   targetError(target: ShellOpenTarget): string | null;
   resolveCleanupBoundary(sessionId: string, worktreePath: string | null): ShellCleanupBoundary;
   launchEpoch(sessionId: string): number;
-  resolveAgentTuiLaunch(meta: SessionMeta): ShellProcessLaunch | null | Promise<ShellProcessLaunch | null>;
+  resolveAgentTuiLaunch(meta: SessionMeta, assertCurrent: () => Promise<void>): ShellProcessLaunch | null | Promise<ShellProcessLaunch | null>;
   open(
     message: ShellOpenMessage,
     target: ShellOpenLaunchTarget,
@@ -100,8 +100,20 @@ export async function handleShellOpenCommand(
       ]);
       const identity = launchIdentity(target);
       const epoch = dependencies.launchEpoch(message.sessionId);
+      const assertCurrent = async () => {
+        if (!dependencies.sessionCanOpen(message.sessionId)) throw new Error("session is being deleted");
+        if (dependencies.consumeCancellation(message.shellId)) throw new Error("shell open was canceled");
+        const current = await dependencies.resolveTarget(message.sessionId);
+        if (!current || current === "pending" || "invalid" in current ||
+            launchIdentity(current) !== identity || dependencies.launchEpoch(message.sessionId) !== epoch) {
+          throw new Error("session launch or workspace changed while preparing Agent TUI; try again");
+        }
+        // Target verification itself awaits; cancellation/deletion may arrive in that window.
+        if (!dependencies.sessionCanOpen(message.sessionId)) throw new Error("session is being deleted");
+        if (dependencies.consumeCancellation(message.shellId)) throw new Error("shell open was canceled");
+      };
       const launch = message.kind === "agent_tui"
-        ? (await dependencies.resolveAgentTuiLaunch(target.meta)) ?? undefined
+        ? (await dependencies.resolveAgentTuiLaunch(target.meta, assertCurrent)) ?? undefined
         : undefined;
       if (message.kind === "agent_tui" && !launch) {
         throw new Error("this session's agent does not expose a standalone TUI");

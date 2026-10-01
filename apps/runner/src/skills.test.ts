@@ -175,6 +175,20 @@ test("skill frontmatter reader is line-based, bounded, and truncating", () => {
   assert.deepEqual(parseSkillFrontmatter("---\nname: dangling\n\nBody"), {});
 });
 
+test("a superseded skill pass cannot mutate canonical or harness links after its lease wait", async () => {
+  const f = makeRoots(); let current = true;
+  try {
+    const desired = entry("superseded", [{ agentId: codexAgent.id, invocation: "agent" }]);
+    const result = await reconcileSkills({ ...f, agents, desired: [desired],
+      acquireProviderHomeLease: async () => { await Promise.resolve(); current = false; },
+      isCurrent: () => current });
+    assert.match(result.error ?? "", /superseded/);
+    assert.equal(existsSync(join(f.home, ".agents/skills/superseded")), false);
+    assert.equal(existsSync(join(f.home, ".codex/skills/superseded")), false);
+    assert.deepEqual(result.removedLinks, []);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("reconcile materializes verified versions and links every harness through the canonical link", async () => {
   const roots = makeRoots();
   try {

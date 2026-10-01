@@ -89,7 +89,8 @@ function fixture(options: {
   kill?: (child: AgentProcess) => Promise<boolean>;
   probe?: ((login: ResolvedProviderLogin) => Promise<boolean>) | null;
   identify?: (login: ResolvedProviderLogin) => Promise<string | undefined>;
-  releaseLease?: (directory: string) => boolean;
+  acquireLease?: (directory: string, provider: "claude" | "codex", cancellation?: import("./provider-home-lease-async.js").LeaseCancellation) => boolean | Promise<boolean>;
+  releaseLease?: (directory: string) => boolean | Promise<boolean>;
   credentialHomeInUse?: () => boolean;
   removalBlocker?: () => string | undefined;
 } = {}) {
@@ -113,7 +114,7 @@ function fixture(options: {
           : agent)
       : agents,
     resolveEnv: () => ({ HOME: root }),
-    acquireLease: () => true,
+    acquireLease: options.acquireLease ?? (() => true),
     releaseLease: (directory) => { releases.push(directory); return options.releaseLease?.(directory) ?? true; },
     onUpdate: (value) => updates.push(value),
     onAccountAdded: (account) => { added.push(account.id); },
@@ -404,10 +405,32 @@ test("structured Codex sign-in fails closed when the provider omits ceremony fie
   }
 });
 
+for (const interruption of ["cancel", "shutdown"] as const) test(`pending lease ${interruption} never launches a sign-in or forgets an accepted reference`, async () => {
+  let grant!: (value: boolean) => void;
+  let cancellation: import("./provider-home-lease-async.js").LeaseCancellation | undefined;
+  const fx = fixture({ acquireLease: (_directory, _provider, current) => {
+    cancellation = current; return new Promise(resolve => { grant = resolve; });
+  } });
+  const resolved: ResolvedProviderLogin = { accountId: "pending", label: "Pending", provider: "claude",
+    directory: fx.root, command: "claude", args: [], context: { kind: "native" }, env: {}, persistAccount: false };
+  try {
+    const operation = fx.supervisor.startResolved(resolved);
+    const rejected = assert.rejects(operation, /cancelled before launch/);
+    assert.equal(fx.spawns.length, 0);
+    await assert.rejects(fx.supervisor.startResolved(resolved), /already running/);
+    if (interruption === "cancel") assert.equal(fx.supervisor.cancelAccount(resolved.accountId), true);
+    else fx.supervisor.shutdown();
+    assert.equal(cancellation?.signal?.aborted, true); assert.equal(cancellation?.isCurrent?.(), false);
+    // Simulate a lease which completed just before cancellation crossed the caller boundary.
+    grant(true); await rejected;
+    assert.equal(fx.spawns.length, 0); assert.equal(fx.releases.length, 1);
+  } finally { fx.cleanup(); }
+});
+
 test("Codex CLI compatibility output strips ANSI and accepts the current 4-5 code shape", async () => {
   const fx = fixture();
   try {
-    fx.supervisor.startResolved({
+    await fx.supervisor.startResolved({
       accountId: "fallback",
       label: "Fallback",
       provider: "codex",
@@ -512,7 +535,7 @@ test("Codex CLI compatibility parser rejects oversized URLs and whole device cod
 test("Codex CLI compatibility fails promptly when the ceremony is incomplete", async () => {
   const fx = fixture({ ceremonyTimeoutMs: 5 });
   try {
-    const operation = fx.supervisor.startResolved({
+    const operation = await fx.supervisor.startResolved({
       accountId: "incomplete",
       label: "Incomplete",
       provider: "codex",
@@ -725,11 +748,31 @@ test("shutdown registers provider sign-in reaping with the runner-wide kill drai
   }
 });
 
+test("a settled sign-in reserves its account throughout asynchronous lease release", async () => {
+  let finishRelease!: (released: boolean) => void;
+  let releaseStarted = false;
+  const fx = fixture({ releaseLease: () => {
+    releaseStarted = true; return new Promise(resolve => { finishRelease = resolve; });
+  } });
+  try {
+    const account = { id: "existing", label: "Existing", provider: "claude" as const, directory: join(fx.root, "existing") };
+    fx.accounts.push(account);
+    await fx.supervisor.startAccount({ accountId: account.id });
+    fx.children[0]!.close(1);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(releaseStarted, true);
+    await assert.rejects(fx.supervisor.startAccount({ accountId: account.id }), /already running/i);
+    await assert.rejects(fx.supervisor.removeAccount(account.id), /sign-in is running/i);
+    finishRelease(true); await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal((fx.supervisor as unknown as { active: Map<string, unknown> }).active.size, 0);
+  } finally { finishRelease?.(false); fx.cleanup(); }
+});
+
 test("completed provider sign-ins retain only the latest bounded history", async () => {
   const fx = fixture();
   try {
     for (let index = 0; index < 33; index += 1) {
-      const operation = fx.supervisor.startResolved({
+      const operation = await fx.supervisor.startResolved({
         accountId: `history-${index}`,
         label: `History ${index}`,
         provider: "codex",
@@ -760,7 +803,7 @@ test("Claude accepts structured positive auth status even when the status comman
       "  process.exitCode = 1;",
       "}",
     ].join("\n"));
-    const started = fx.supervisor.startResolved({
+    const started = await fx.supervisor.startResolved({
       accountId: "structured-status",
       label: "Structured Status",
       provider: "claude",

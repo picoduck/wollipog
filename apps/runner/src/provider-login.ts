@@ -15,6 +15,7 @@ import {
   providerAccountEnvironment,
 } from "./provider-accounts.js";
 import { killTreeAndWait, spawnAgent, trackPendingKill, type AgentProcess } from "./spawn.js";
+import type { LeaseCancellation } from "./provider-home-lease-async.js";
 
 const LOGIN_OUTPUT_LIMIT = 64 * 1024;
 const LOGIN_CODE_LIMIT = 4_096;
@@ -130,8 +131,8 @@ export interface ProviderLoginSupervisorOptions {
   accounts: RunnerProviderAccount[];
   agents: () => AgentDefinition[];
   resolveEnv: (agent: AgentDefinition) => Record<string, string>;
-  acquireLease: (directory: string, provider: "claude" | "codex") => boolean;
-  releaseLease: (directory: string) => boolean;
+  acquireLease: (directory: string, provider: "claude" | "codex", cancellation?: LeaseCancellation) => boolean | Promise<boolean>;
+  releaseLease: (directory: string) => boolean | Promise<boolean>;
   onUpdate: (logins: ProviderLoginView[]) => void;
   onAccountAdded: (account: RunnerProviderAccount) => void | Promise<void>;
   onAccountRemoved?: (account: RunnerProviderAccount) => void | Promise<void>;
@@ -292,6 +293,8 @@ export function codexCredentialIdentity(authJson: string): string | undefined {
 
 export class ProviderLoginSupervisor {
   private readonly active = new Map<string, ActiveLogin>();
+  private readonly pending = new Map<string, { resolved: ResolvedProviderLogin; controller: AbortController }>();
+  private stopped = false;
   private readonly recent = new Map<string, ProviderLoginView>();
   private readonly spawn: typeof spawnAgent;
   private readonly kill: typeof killTreeAndWait;
@@ -336,7 +339,7 @@ export class ProviderLoginSupervisor {
           "Use Sign In on that account to refresh its login.");
       }
       // Settled operations stay active until the account is recorded, which includes the identity check.
-      if ([...this.active.values()].some((operation) => operation.resolved.persistAccount &&
+      if ([...this.active.values(), ...this.pending.values()].some((operation) => operation.resolved.persistAccount &&
         operation.resolved.provider === input.provider && comparableLabel(operation.resolved.label) === comparable)) {
         throw new Error("A sign-in for an account with this label is already running.");
       }
@@ -367,7 +370,7 @@ export class ProviderLoginSupervisor {
     for (const name of PROVIDER_LOGIN_DESCRIPTORS[account.provider].scrubEnv) {
       delete env[name];
     }
-    return this.startResolved({
+    return (await this.startResolved({
       accountId: account.id,
       label: account.label,
       provider: account.provider,
@@ -379,18 +382,31 @@ export class ProviderLoginSupervisor {
       persistAccount,
       structuredCodex: account.provider === "codex" && agent.codexAppServer?.status === "supported" &&
         supportsStructuredCodexDeviceLogin(agent.codexAppServer.installedVersion),
-    }).view;
+    })).view;
   }
 
-  startResolved(resolved: ResolvedProviderLogin): { view: ProviderLoginView; completion: Promise<"completed" | "cancelled" | "failed"> } {
+  async startResolved(resolved: ResolvedProviderLogin): Promise<{ view: ProviderLoginView; completion: Promise<"completed" | "cancelled" | "failed"> }> {
+    if (this.stopped) throw new Error("The provider sign-in supervisor has stopped.");
     const duplicate = [...this.active.values()].find((operation) =>
       operation.resolved.accountId === resolved.accountId);
-    if (duplicate) throw new Error("A sign-in is already running for this account.");
+    if (duplicate || this.pending.has(resolved.accountId)) throw new Error("A sign-in is already running for this account.");
 
+    const pending = { resolved, controller: new AbortController() };
+    this.pending.set(resolved.accountId, pending);
     try {
-      this.options.acquireLease(resolved.directory, resolved.provider);
+      await this.options.acquireLease(resolved.directory, resolved.provider, {
+        signal: pending.controller.signal,
+        isCurrent: () => !this.stopped && this.pending.get(resolved.accountId) === pending && !pending.controller.signal.aborted,
+      });
     } catch {
+      if (this.pending.get(resolved.accountId) === pending) this.pending.delete(resolved.accountId);
       throw new Error("The provider credential home is unavailable or already in use.");
+    }
+    if (this.stopped || pending.controller.signal.aborted) {
+      // Covers cancellation in the caller's continuation after an already accepted lease.
+      await this.release(resolved.directory);
+      this.pending.delete(resolved.accountId);
+      throw new Error("The provider sign-in was cancelled before launch.");
     }
     const operationId = `login_${randomUUID()}`;
     const view: ProviderLoginView = {
@@ -421,8 +437,9 @@ export class ProviderLoginSupervisor {
         windowsShell: false,
       });
     } catch (error) {
-      const released = this.options.releaseLease(resolved.directory);
+      const released = await this.release(resolved.directory);
       if (released && resolved.persistAccount) this.cleanupUnusedDirectory(resolved);
+      this.pending.delete(resolved.accountId);
       if (error instanceof Error && /^(?:Claude|Codex) plugin inheritance could not /u.test(error.message)) throw error;
       throw new Error("The provider sign-in command could not be started.");
     }
@@ -462,6 +479,7 @@ export class ProviderLoginSupervisor {
       completion,
     };
     this.active.set(operationId, active);
+    this.pending.delete(resolved.accountId);
     this.recent.set(operationId, view);
     this.publish();
     if (structuredCodex) {
@@ -541,7 +559,7 @@ export class ProviderLoginSupervisor {
   async removeAccount(accountId: string): Promise<{ credentialsRetained: boolean }> {
     const account = this.options.accounts.find((candidate) => candidate.id === accountId);
     if (!account) throw new Error("Provider account is not configured on this Machine.");
-    if ([...this.active.values()].some((operation) => operation.resolved.accountId === accountId)) {
+    if (this.pending.has(accountId) || [...this.active.values()].some((operation) => operation.resolved.accountId === accountId)) {
       throw new Error("A sign-in is running for this account. Cancel it before removing the account.");
     }
     const blocker = this.options.removalBlocker?.(account);
@@ -552,12 +570,14 @@ export class ProviderLoginSupervisor {
       throw new Error("The runner configuration could not be updated.");
     }
     this.options.accounts.splice(this.options.accounts.indexOf(account), 1);
-    const credentialsRetained = !this.deleteRemovedCredentialHome(account);
+    const credentialsRetained = !await this.deleteRemovedCredentialHome(account);
     await this.options.onAccountRemoved?.(account);
     return { credentialsRetained };
   }
 
   cancelAccount(accountId: string): boolean {
+    const pending = this.pending.get(accountId);
+    if (pending) { pending.controller.abort(); return true; }
     const operation = [...this.active.values()].find((candidate) =>
       candidate.resolved.accountId === accountId && !candidate.settled);
     if (!operation) return false;
@@ -566,6 +586,8 @@ export class ProviderLoginSupervisor {
   }
 
   shutdown(): void {
+    this.stopped = true;
+    for (const pending of this.pending.values()) pending.controller.abort();
     for (const operation of this.active.values()) {
       if (operation.settled) continue;
       operation.cancelled = true;
@@ -819,14 +841,16 @@ export class ProviderLoginSupervisor {
         });
       }
     }
-    this.active.delete(operation.view.operationId);
-    this.pruneRecent();
-    const released = reaped && this.options.releaseLease(operation.resolved.directory);
+    const released = reaped && await this.release(operation.resolved.directory);
     if (released && result !== "completed" && operation.resolved.persistAccount) {
       // A duplicate's fresh credentials belong to no configured account, so nothing may keep them.
       if (duplicate) this.removeDirectory(operation.resolved.directory);
       else this.cleanupUnusedDirectory(operation.resolved);
     }
+    // The async release is part of settlement. Keep the account reserved until cleanup finishes,
+    // otherwise a replacement login can write into the same HOME while this one removes it.
+    this.active.delete(operation.view.operationId);
+    this.pruneRecent();
     operation.resolve(result);
   }
 
@@ -936,7 +960,7 @@ export class ProviderLoginSupervisor {
 
   /** Delete a removed account's credential home only when Wollipog created it and nothing on this
    * Machine still depends on it. Returns whether the home is gone. */
-  private deleteRemovedCredentialHome(account: RunnerProviderAccount): boolean {
+  private async deleteRemovedCredentialHome(account: RunnerProviderAccount): Promise<boolean> {
     const managedRoot = resolve(this.options.dataDir, "provider-accounts");
     if (dirname(resolve(account.directory)) !== managedRoot) return false;
     if (!existsSync(account.directory)) return true;
@@ -945,12 +969,17 @@ export class ProviderLoginSupervisor {
     try {
       // The lease is reference-counted per runner and exclusive across runners. Releasing the
       // reference taken here reports true only when no session or probe was holding the home.
-      this.options.acquireLease(account.directory, account.provider);
-      exclusive = this.options.releaseLease(account.directory);
+      await this.options.acquireLease(account.directory, account.provider);
+      exclusive = await this.options.releaseLease(account.directory);
     } catch {
       return false;
     }
-    return exclusive && this.removeDirectory(account.directory);
+    return exclusive && !this.options.credentialHomeInUse?.(account) && this.removeDirectory(account.directory);
+  }
+
+  private async release(directory: string): Promise<boolean> {
+    try { return await this.options.releaseLease(directory); }
+    catch { return false; }
   }
 
   private removeDirectory(directory: string): boolean {

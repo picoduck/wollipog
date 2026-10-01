@@ -49,6 +49,54 @@ const unguarded = (spec: SessionMeta) => ({ protections: [], args: spec.args, gu
  * `agent-tui-agent-control.test.ts` covers a delete landing inside that window (#1379). */
 const stillPresent = () => {};
 
+test("TUI ownership waits before guard and MCP probe preparation", async () => {
+  for (const orchestrator of [false, true]) {
+    let grant!: () => void;
+    let requested!: () => void;
+    const waiting = new Promise<void>((resolve) => { requested = resolve; });
+    const ownership = new Promise<void>((resolve) => { grant = resolve; });
+    const effects: string[] = [];
+    const launch = prepareAgentTuiLaunch(meta({
+      driver: "codex", command: "codex", args: [],
+      ...(orchestrator ? { config: { permissionMode: "orchestrator" }, orchestrator: { strictProjectIsolation: false } } : {}),
+    }), {
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      assertSessionNotDeleted: stillPresent,
+      prepareScratch: async () => "/scratch",
+      provision: () => {},
+      acquireProviderHome: async () => { requested(); await ownership; },
+      provisionManagedWorktreeGuard: (spec) => { effects.push("guard"); return unguarded(spec); },
+      probe: async () => { effects.push("probe"); return []; },
+      permissionProfile: async () => ({ active: false, reason: "isolated ownership fixture" }),
+    });
+    await waiting;
+    assert.deepEqual(effects, []);
+    grant();
+    assert.ok(await launch);
+    assert.deepEqual(effects, orchestrator ? ["probe", "guard"] : ["guard"]);
+  }
+});
+
+test("TUI ownership refusal and deletion during the wait write no guard", async () => {
+  for (const failure of ["refused", "deleted"]) {
+    let deleted = false;
+    let guards = 0;
+    await assert.rejects(prepareAgentTuiLaunch(meta(), {
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      prepareScratch: async () => "/scratch",
+      provision: () => {},
+      assertSessionNotDeleted: () => { if (deleted) throw new Error("session is being deleted"); },
+      acquireProviderHome: async () => {
+        await Promise.resolve();
+        if (failure === "refused") throw new Error("lease refused");
+        deleted = true;
+      },
+      provisionManagedWorktreeGuard: (spec) => { guards++; return unguarded(spec); },
+    }), failure === "refused" ? /lease refused/ : /being deleted/);
+    assert.equal(guards, 0);
+  }
+});
+
 const CLAUDE_RUNNER_ENV = [
   "ANTHROPIC_API_KEY",
   "WOLLIPOG_CLAUDE_PERSISTENT",

@@ -27,7 +27,9 @@ export async function prepareAgentTuiLaunch(
     controlPlaneProtocolVersion: number | null;
     provision(meta: SessionMeta): Promise<void> | void;
     /** Plugin reconciliation mutates the native account home before any guard or provider probe runs. */
-    acquireProviderHome?(meta: SessionMeta): void;
+    acquireProviderHome?(meta: SessionMeta): Promise<void> | void;
+    /** Recheck cancellation, launch epoch and target identity after ownership awaits. */
+    assertLaunchCurrent?(): Promise<void> | void;
     /**
      * Refuse a session deleted while this launch was awaiting its preparation, BEFORE `provision`
      * writes a runner-owned credential file or registers a credential (#1379).
@@ -58,8 +60,10 @@ export async function prepareAgentTuiLaunch(
   },
 ): Promise<ShellProcessLaunch | null> {
   if (!isOrchestratorLaunch(meta)) {
+    await dependencies.acquireProviderHome?.(meta);
+    dependencies.assertSessionNotDeleted(meta.sessionId);
+    await dependencies.assertLaunchCurrent?.();
     if (pluginProviderForDriver(meta.driver)) {
-      dependencies.acquireProviderHome?.(meta);
       meta = { ...meta, args: inheritProviderPlugins(meta) };
     }
     const guarded = await withManagedWorktreeGuard(meta, dependencies);
@@ -94,8 +98,10 @@ export async function prepareAgentTuiLaunch(
   dependencies.assertSessionNotDeleted(meta.sessionId);
   const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
   await dependencies.provision(prepared);
+  await dependencies.acquireProviderHome?.(prepared);
+  dependencies.assertSessionNotDeleted(meta.sessionId);
+  await dependencies.assertLaunchCurrent?.();
   if (pluginProviderForDriver(prepared.driver)) {
-    dependencies.acquireProviderHome?.(prepared);
     prepared.args = inheritProviderPlugins(prepared);
   }
   if (strictProjectIsolation) {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentDefinition } from "@wollipog/protocol";
 import { adoptMachineSkill, type SkillAdoptionOptions } from "./skill-adoption.js";
-import { listSkillAdoptionRecovery, restoreSkillAdoptionRecovery } from "./skill-adoption-recovery.js";
+import { listSkillAdoptionRecovery, restoreSkillAdoptionRecovery, restoreSkillAdoptionRecoveryWithWsl } from "./skill-adoption-recovery.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { cacheSkillSyncEntry, reconcileSkills } from "./skills.js";
 
@@ -50,6 +50,20 @@ async function adoptAndReroute(f: ReturnType<typeof fixture>) {
   assert.equal(fs.readlinkSync(f.source), canonical, "reconciliation routes the harness link through the canonical link");
   return { adopted, canonical, canonicalTarget: fs.readlinkSync(canonical) };
 }
+
+test("the asynchronous restore waits for ownership and reinspects a replaced source afterward", linux, async t => {
+  const f = fixture(t); const { adopted } = await adoptAndReroute(f);
+  let releaseWait!: () => void;
+  const waiting = new Promise<void>(resolve => { releaseWait = resolve; });
+  const restore = restoreSkillAdoptionRecoveryWithWsl({ home: f.home, dataDir: f.dataDir, agents,
+    operationId: adopted.operationId, acquireProviderHomeLease: () => waiting }, undefined);
+  const originalLink = fs.readlinkSync(f.source);
+  assert.equal(fs.readlinkSync(f.source), originalLink, "the source remains untouched during acquisition");
+  fs.unlinkSync(f.source); fs.mkdirSync(f.source); fs.writeFileSync(join(f.source, "occupant"), "keep");
+  releaseWait(); const result = await restore;
+  assert.equal(result.status, "blocked");
+  assert.equal(fs.readFileSync(join(f.source, "occupant"), "utf8"), "keep");
+});
 
 test("restores an adopted harness skill after reconciliation routes it through the canonical link", linux,
   async (t) => {

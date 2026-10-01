@@ -42,6 +42,15 @@ test("runner command revalidates desired state and adopts an exact live candidat
   assert.ok(fs.lstatSync(join(f.home, ".codex/skills/alpha")).isSymbolicLink());
 });
 
+test("adoption repeats authorization after the lease wait and leaves a revoked source intact", linux, async t => {
+  const f = fixture(t); let desired: ReconcileSkillEntry[] = [f.desired];
+  const result = await handleSkillAdoption({ ...f, runnerId: "runner", agents, desired,
+    currentDesired: () => desired, acquireProviderHomeLease: async () => { await Promise.resolve(); desired = []; } });
+  assert.equal(result.status, "rejected");
+  assert.equal(fs.lstatSync(join(f.home, ".codex/skills/alpha")).isDirectory(), true);
+  assert.equal(fs.readFileSync(join(f.home, ".codex/skills/alpha/SKILL.md"), "utf8"), "---\nname: alpha\n---\nOriginal");
+});
+
 test("runner command rejects stale, retargeted, manual and unconfirmed commands before mutation", linux, async (t) => {
   for (const problem of ["expired", "digest", "unassigned", "manual", "runner", "confirmation"] as const) {
     const f = fixture(t);

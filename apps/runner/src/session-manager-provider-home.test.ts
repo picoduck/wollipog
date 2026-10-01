@@ -31,7 +31,10 @@ test("a refused home lease reaches failed status and the visible conversation er
     undefined, undefined, async () => {}, undefined, [], undefined, undefined, undefined, undefined,
     undefined, "a".repeat(64),
   );
-  t.after(() => manager.shutdownAll());
+  t.after(async () => {
+    manager.shutdownAll();
+    await manager.releaseProviderHomeLeasesAfterShutdown(true);
+  });
   const internals = manager as unknown as {
     acquireAdmission: (sessionId: string) => Promise<boolean>;
     launch: (meta: SessionMeta) => Promise<boolean>;
@@ -42,7 +45,9 @@ test("a refused home lease reaches failed status and the visible conversation er
   assert.equal(store.readMeta(meta.sessionId)?.status, "failed");
   const failed = messages.find((message) => message.type === "session_status" && message.status === "failed");
   assert.ok(failed?.type === "session_status");
-  assert.ok(failed.detail?.includes(lock));
+  // The bounded worker returns a fixed refusal instead of forwarding native paths/exception data.
+  assert.ok(!failed.detail?.includes(lock));
+  assert.match(failed.detail!, /preserve all evidence/);
   assert.match(failed.detail!, /quarantine the entire.*do not remove individual records/);
   const error = store.readEvents(meta.sessionId).find((event) => event.payload.kind === "error");
   assert.ok(error?.payload.kind === "error");

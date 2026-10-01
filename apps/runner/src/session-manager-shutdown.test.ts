@@ -6,9 +6,9 @@ import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
-import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
 
-test("provider sign-in fails closed when attested provider-home ownership is unavailable", (t) => {
+test("provider sign-in fails closed when attested provider-home ownership is unavailable", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-login-provider-home-unavailable-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const manager = new SessionManager(
@@ -20,14 +20,14 @@ test("provider sign-in fails closed when attested provider-home ownership is una
     undefined,
     root,
   );
-  assert.throws(
+  await assert.rejects(
     () => manager.acquireProviderLoginHome(join(root, "provider-home"), "claude"),
     /provider-home ownership is unavailable/,
   );
   manager.shutdownAll();
 });
 
-test("provider-home ownership is released only after shutdown process trees are reaped", (t) => {
+test("provider-home ownership is released only after shutdown process trees are reaped", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-shutdown-provider-home-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const manager = new SessionManager(
@@ -42,41 +42,38 @@ test("provider-home ownership is released only after shutdown process trees are 
   const providerHome = join(root, "provider-home");
   mkdirSync(providerHome);
   const ownerHash = "a".repeat(64);
-  const registry = new ProviderHomeLeaseRegistry(ownerHash, {
-    pid: 101,
-    hostname: "host-a",
-    isProcessAlive: (pid) => pid === 101,
-  });
-  registry.acquire({
+  const registry = new AsyncProviderHomeLeaseRegistry(ownerHash, { helperDataDir: root });
+  t.after(() => registry.close());
+  await registry.acquire({
     driver: "claude-code",
     command: "claude",
     context: { kind: "native" },
     env: { HOME: providerHome },
   });
   let releases = 0;
-  (manager as unknown as { providerHomeLeases: { releaseAll(): void } }).providerHomeLeases = {
-    releaseAll: () => { releases++; registry.releaseAll(); },
+  (manager as unknown as { providerHomeLeases: { close(): Promise<boolean>; stopAcquisitions(): void } }).providerHomeLeases = {
+    close: () => { releases++; return registry.close(); },
+    stopAcquisitions: () => registry.stopAcquisitions(),
   };
 
-  assert.throws(() => manager.releaseProviderHomeLeasesAfterShutdown(true), /only be released after shutdown begins/);
+  await assert.rejects(() => manager.releaseProviderHomeLeasesAfterShutdown(true), /only be released after shutdown begins/);
   manager.shutdownAll();
   assert.equal(releases, 0, "shutdown initiation must retain ownership while process kills drain");
-  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(false), false);
+  assert.equal(await manager.releaseProviderHomeLeasesAfterShutdown(false), false);
   assert.equal(releases, 0, "a reap deadline retains the durable lease for fail-closed recovery");
-  const restarted = new ProviderHomeLeaseRegistry(ownerHash, {
-    pid: 202,
-    hostname: "host-a",
-    isProcessAlive: () => false,
-  });
-  restarted.acquire({
-    driver: "claude-code",
+  const restarted = new AsyncProviderHomeLeaseRegistry("b".repeat(64), { helperDataDir: root });
+  t.after(() => restarted.close());
+  const request = {
+    driver: "claude-code" as const,
     command: "claude",
-    context: { kind: "native" },
+    context: { kind: "native" as const },
     env: { HOME: providerHome },
-  });
-  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(true), true);
+  };
+  await assert.rejects(() => restarted.acquire(request), /already in use/);
+  assert.equal(await manager.releaseProviderHomeLeasesAfterShutdown(true), true);
   assert.equal(releases, 1);
-  restarted.releaseAll();
+  await restarted.acquire(request);
+  assert.equal(await restarted.close(), true);
 });
 
 test("WSL metadata helpers reject bwrap before target resolution or provider-HOME ownership", async (t) => {
@@ -100,8 +97,9 @@ test("WSL metadata helpers reject bwrap before target resolution or provider-HOM
     async () => { resolutions++; throw new Error("must not resolve"); };
   (manager as unknown as { removeIsolationState: (...args: unknown[]) => Promise<void> }).removeIsolationState =
     async () => { removals++; };
-  (manager as unknown as { providerHomeLeases: { acquire(request: unknown): void } }).providerHomeLeases = {
+  (manager as unknown as { providerHomeLeases: { acquire(request: unknown): void; stopAcquisitions(): void } }).providerHomeLeases = {
     acquire: () => { leaseRequests++; },
+    stopAcquisitions: () => {},
   };
   const agent: AgentDefinition = {
     id: "codex", name: "Codex", command: "codex", args: [], env: {},
@@ -173,8 +171,9 @@ test("session naming resolves runner isolation, leases provider HOME, and cleans
     };
   (manager as unknown as { removeIsolationState: (...args: unknown[]) => Promise<void> }).removeIsolationState =
     async (...args: unknown[]) => { removedSessionId = args[4] as string; };
-  (manager as unknown as { providerHomeLeases: { acquire(request: unknown): void } }).providerHomeLeases = {
+  (manager as unknown as { providerHomeLeases: { acquire(request: unknown): void; stopAcquisitions(): void } }).providerHomeLeases = {
     acquire: (request) => { leaseRequest = request; },
+    stopAcquisitions: () => {},
   };
   const agent: AgentDefinition = {
     id: "codex", name: "Codex", command: "codex", args: [], env: {},

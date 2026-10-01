@@ -4,6 +4,7 @@ import type { ShellOpenMessage, ShellOpenResultMessage } from "@wollipog/protoco
 import type { SessionMeta } from "./session-store.js";
 import { handleShellOpenCommand, type ShellOpenCommandDependencies } from "./shell-open-command.js";
 import { PendingShellOpenCancellations } from "./pending-shell-open-cancellations.js";
+import { prepareAgentTuiLaunch } from "./agent-tui.js";
 
 const meta = {
   sessionId: "session-1",
@@ -57,6 +58,51 @@ function harness(overrides: Partial<ShellOpenCommandDependencies> = {}) {
     get waits() { return waits; },
   };
 }
+
+test("ownership wait fences stale TUI guard writes and spawn", async () => {
+  for (const change of ["none", "refused", "deleted", "cancelled", "epoch", "target"]) {
+    let grant!: () => void;
+    let requested!: () => void;
+    const waiting = new Promise<void>((resolve) => { requested = resolve; });
+    const ownership = new Promise<void>((resolve) => { grant = resolve; });
+    let canOpen = true;
+    let cancelled = false;
+    let epoch = 0;
+    let root = "/repo";
+    let guards = 0;
+    const source = { ...meta, driver: "claude-code", command: "claude", args: [], config: {}, env: {}, status: "idle" } as SessionMeta;
+    const state = harness({
+      sessionCanOpen: () => canOpen,
+      consumeCancellation: () => { const value = cancelled; cancelled = false; return value; },
+      launchEpoch: () => epoch,
+      resolveTarget: () => ({ root, context: { kind: "native" }, meta: source }),
+      resolveAgentTuiLaunch: (target, assertCurrent) => prepareAgentTuiLaunch(target, {
+        controlPlaneProtocolVersion: null,
+        prepareScratch: async () => "/scratch",
+        provision: () => {},
+        assertSessionNotDeleted: () => { if (!canOpen) throw new Error("session is being deleted"); },
+        assertLaunchCurrent: assertCurrent,
+        acquireProviderHome: async () => {
+          requested(); await ownership;
+          if (change === "refused") throw new Error("lease refused");
+        },
+        provisionManagedWorktreeGuard: (spec) => { guards++; return { protections: [], args: spec.args, guardActive: false }; },
+      }),
+    });
+    const opening = handleShellOpenCommand(command("agent_tui"), state.dependencies);
+    await waiting;
+    assert.equal(guards, 0);
+    assert.equal(state.opens, 0);
+    if (change === "deleted") canOpen = false;
+    if (change === "cancelled") cancelled = true;
+    if (change === "epoch") epoch++;
+    if (change === "target") root = "/replacement";
+    grant(); await opening;
+    assert.equal(guards, change === "none" ? 1 : 0, change);
+    assert.equal(state.opens, change === "none" ? 1 : 0, change);
+    assert.equal(state.replies[0]?.ok, change === "none", change);
+  }
+});
 
 test("ordinary shells bypass the initial-session fence", async () => {
   const state = harness({

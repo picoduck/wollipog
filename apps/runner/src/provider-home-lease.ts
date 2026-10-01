@@ -179,6 +179,20 @@ export function providerLaunchNeedsSharedHomeLease(isolation?: SpawnIsolation): 
     isolation?.backend !== "cloud";
 }
 
+/** Pure launch selection. The asynchronous facade sends only this bounded target to its worker. */
+export function providerHomeLeaseTarget(request: ProviderHomeLeaseRequest): { home: string; provider: string } | null {
+  if (request.context.kind === "wsl" && request.isolation?.backend === "bwrap") throw new Error(WSL_BWRAP_UNAVAILABLE_ERROR);
+  if (!providerLaunchNeedsSharedHomeLease(request.isolation)) return null;
+  const provider = providerKey(request.driver, request.command);
+  if (request.context.kind === "wsl") {
+    throw new Error(`shared ${provider} provider home in WSL cannot be safely owner-leased; use a supported native, container, or cloud execution target`);
+  }
+  const home = provider === "claude" ? request.env.CLAUDE_CONFIG_DIR || request.env.HOME || homedir()
+    : provider === "codex" ? request.env.CODEX_HOME || request.env.HOME || homedir()
+      : request.env.HOME || homedir();
+  return { home, provider };
+}
+
 function isBaseRecord(value: Record<string, unknown>): boolean {
   return typeof value.ownerHash === "string" && OWNER_HASH.test(value.ownerHash) &&
     typeof value.leaseId === "string" && LEASE_ID.test(value.leaseId) &&
@@ -642,6 +656,7 @@ export class ProviderHomeLeaseRegistry {
   private readonly disableCompactionForTest: boolean;
   private readonly diagnostics: string[] = [];
   private readonly onDiagnostic?: ProviderHomeLeaseOptions["onDiagnostic"];
+  private lastAcquisitionHome?: string;
 
   constructor(private readonly ownerHash: string, options: ProviderHomeLeaseOptions = {}) {
     if (!OWNER_HASH.test(ownerHash)) throw new Error("provider-home lease requires an attested owner hash");
@@ -663,22 +678,8 @@ export class ProviderHomeLeaseRegistry {
   getDiagnostics(): readonly string[] { return this.diagnostics; }
 
   acquire(request: ProviderHomeLeaseRequest): void {
-    if (request.context.kind === "wsl" && request.isolation?.backend === "bwrap") {
-      throw new Error(WSL_BWRAP_UNAVAILABLE_ERROR);
-    }
-    if (!providerLaunchNeedsSharedHomeLease(request.isolation)) return;
-    const provider = providerKey(request.driver, request.command);
-    if (request.context.kind === "wsl") {
-      throw new Error(
-        `shared ${provider} provider home in WSL cannot be safely owner-leased; use a supported native, container, or cloud execution target`,
-      );
-    }
-    const requestedHome = provider === "claude"
-      ? request.env.CLAUDE_CONFIG_DIR || request.env.HOME || homedir()
-      : provider === "codex"
-        ? request.env.CODEX_HOME || request.env.HOME || homedir()
-        : request.env.HOME || homedir();
-    this.acquireHome(requestedHome, provider);
+    const target = providerHomeLeaseTarget(request);
+    if (target) this.acquireHome(target.home, target.provider);
   }
 
   /** Acquire the whole mutable HOME for a non-launch mutation such as managed skill links. */
@@ -689,6 +690,23 @@ export class ProviderHomeLeaseRegistry {
       ensureLeaseIoAvailable();
       return this.acquireHomeAvailable(requestedHome, provider);
     });
+  }
+
+  /** A worker-private reference receipt. Cancellation never re-resolves a mutable HOME alias. */
+  acquireHomeWithReceipt(requestedHome: string, provider = "skills"): { first: boolean; cancel: () => boolean } {
+    const first = this.acquireHome(requestedHome, provider);
+    const home = this.lastAcquisitionHome!;
+    const held = this.held.get(home);
+    if (!held) throw new Error("acquisition has no private reference proof");
+    let cancelled = false;
+    return { first, cancel: () => {
+      if (cancelled || this.held.get(home) !== held) return false;
+      if (held.references > 1) { held.references--; cancelled = true; return true; }
+      const released = withLeaseIoOptions({ helperDataDir: this.helperDataDir, fenceWaitMs: 10000, providerHome: home }, () => this.releaseHeld(held));
+      if (!released) return false;
+      this.held.delete(home); this.pendingMigrations.delete(home); this.pendingCompletions.delete(home);
+      cancelled = true; return true;
+    } };
   }
 
   private acquireHomeAvailable(requestedHome: string, provider: string): boolean {
@@ -704,6 +722,7 @@ export class ProviderHomeLeaseRegistry {
     } catch {
       throw new Error("provider credential home is unavailable");
     }
+    this.lastAcquisitionHome = home;
     const root = join(home, ".agent-manager", "provider-home-leases-v1");
     // ACP adapters are not provider-specific and known CLIs co-locate auth/config/cache below
     // HOME. Lease the whole effective home rather than pretending those mutations are disjoint.
@@ -1132,12 +1151,13 @@ export class ProviderHomeLeaseRegistry {
     }
   }
 
-  releaseAll(): void {
-    withLeaseIoOptions({ helperDataDir: this.helperDataDir, fenceWaitMs: 10000 }, () => {
+  releaseAll(): boolean {
+    return withLeaseIoOptions({ helperDataDir: this.helperDataDir, fenceWaitMs: 10000 }, () => {
       for (const [home, held] of this.held) {
         if (!withLeaseIoOptions({ providerHome: home }, () => this.releaseHeld(held))) continue;
         this.held.delete(home); this.pendingMigrations.delete(home); this.pendingCompletions.delete(home);
       }
+      return this.held.size === 0 && this.failedInitializations.size === 0 && this.pendingCompletions.size === 0;
     });
   }
 

@@ -24,7 +24,7 @@ export interface SkillAdoptionCommandOptions {
   desired: ReconcileSkillEntry[] | null;
   /** Live desired state, read again after any asynchronous boundary. */
   currentDesired?: () => ReconcileSkillEntry[] | null;
-  acquireProviderHomeLease: (home: string) => void;
+  acquireProviderHomeLease: (home: string) => void | Promise<void>;
   /** Present on a Windows runner whose control plane can receive WSL adoption results. */
   wsl?: WslAdoptionEnvironment;
 }
@@ -120,6 +120,9 @@ export async function handleSkillAdoption(options: SkillAdoptionCommandOptions):
       assertAuthorized: stillAuthorized });
     return { type: "skill_adoption_result", runnerId, requestId: message.requestId, ...result };
   }
+  try { await options.acquireProviderHomeLease(account?.directory ?? options.home); }
+  catch { return rejected(message, runnerId, "The provider home is currently in use."); }
+  // The synchronous transaction repeats authorization after the awaited ownership boundary.
   const result = adoptMachineSkill({
     home: account?.directory ?? options.home,
     dataDir: options.dataDir,
@@ -127,10 +130,7 @@ export async function handleSkillAdoption(options: SkillAdoptionCommandOptions):
     candidate,
     ...(account ? { localSourceDirectory: "skills" } : {}),
     digest: message.digest,
-    acquireProviderHomeLease: () => {
-      options.acquireProviderHomeLease(account?.directory ?? options.home);
-      return undefined;
-    },
+    acquireProviderHomeLease: () => undefined,
     assertAuthorized: stillAuthorized,
   });
   return { type: "skill_adoption_result", runnerId, requestId: message.requestId, ...result };

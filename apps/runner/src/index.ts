@@ -778,8 +778,8 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
     agent.driver ?? "acp",
     agent.context ?? { kind: "native" },
   ),
-  acquireLease: (directory, provider): boolean => sessions.acquireProviderLoginHome(directory, provider),
-  releaseLease: (directory): boolean => sessions.releaseProviderHomeAfterLogin(directory),
+  acquireLease: (directory, provider, cancellation) => sessions.acquireProviderLoginHome(directory, provider, cancellation),
+  releaseLease: (directory) => sessions.releaseProviderHomeAfterLogin(directory),
   onUpdate: (logins) => {
     metadata.providerLogins = logins;
     if (runnerSupportsProtocol(controlPlaneProtocolVersion, "providerLogin")) {
@@ -1477,6 +1477,15 @@ function queueSkillsReconcile(requestId?: string): void {
     // Read at run time, not queue time: a pass queued behind another always applies the freshest
     // authoritative list, and replaying it under an older requestId still reports converged truth.
     const desired = lastDesiredSkills;
+    const reconciliationAgents = metadata.agents;
+    const reconciliationAccounts = config.providerAccounts.map(account => ({
+      id: account.id, provider: account.provider, directory: account.directory,
+    }));
+    const stillCurrent = () => desired === lastDesiredSkills && reconciliationAgents === metadata.agents &&
+      config.providerAccounts.length === reconciliationAccounts.length && reconciliationAccounts.every((account, i) => {
+        const current = config.providerAccounts[i];
+        return current?.id === account.id && current.provider === account.provider && current.directory === account.directory;
+      });
     try {
       const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
       const accountScopesEnabled = runnerSupportsProtocol(
@@ -1526,6 +1535,7 @@ function queueSkillsReconcile(requestId?: string): void {
         log,
         acquireProviderHomeLease: () =>
           sessions.acquireSkillReconciliationProviderHome(homedir()),
+        isCurrent: stillCurrent,
         removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
         previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
       });
@@ -1551,6 +1561,7 @@ function queueSkillsReconcile(requestId?: string): void {
           log,
           acquireProviderHomeLease: () =>
             sessions.acquireSkillReconciliationProviderHome(account.directory),
+          isCurrent: stillCurrent,
           removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
           previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
         });
@@ -3051,7 +3062,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         resolveCleanupBoundary: (sessionId, worktreePath) =>
           sessions.worktreeShellCleanupBoundary(sessionId, worktreePath),
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
-        resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
+        resolveAgentTuiLaunch: (meta, assertCurrent) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
           acquireProviderHome: (prepared) => sessions.acquireAgentTuiProviderHome(prepared),
           executionIsolationMode: config.executionIsolation.mode,
@@ -3059,6 +3070,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           // Deletion arriving during that awaited scratch preparation must refuse the open before
           // `provision` writes an agent-control credential file or registers a credential (#1379).
           assertSessionNotDeleted: (sessionId) => void agentTuiSessionMeta(sessionId),
+          assertLaunchCurrent: assertCurrent,
+          acquireProviderHome: (prepared) => sessions.acquireAgentTuiProviderHome(prepared),
           provision: async (prepared) => {
             prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
             if (prepared.providerCredentialHome && prepared.providerAccountProvider) {
@@ -3074,8 +3087,6 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               providerRelayEndpoint: await providerAgentControlRelayEndpoint(prepared),
               orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
             }, log, agentControlHost);
-            // Even the no-turn MCP configuration probe may initialize provider HOME.
-            sessions.acquireAgentTuiProviderHome(prepared);
           },
           // A Codex TUI denies the runner's hook state directory through its own sandbox (#1336).
           hookStateDir: claudeHookHost.configDir,
@@ -3108,7 +3119,6 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           ),
         }),
         open: (message, target, launch, cleanupBoundary) => {
-          if (launch) sessions.acquireAgentTuiProviderHome({ ...target.meta, env: launch.env ?? {} });
           const opened = shells.open(
             message.shellId,
             message.sessionId,
@@ -3788,13 +3798,13 @@ function shutdown(exitCode = 0): void {
   void waitForPendingKills(
     CLAUDE_GRACEFUL_STOP_BUDGET_MS + DESCENDANT_BOUNDARY_TERMINATION_BUDGET_MS + 500,
   )
-    .then((processTreesReaped) => {
+    .then(async (processTreesReaped) => {
       // Never let a throw here skip the exit. Only release the lease when session cleanup completed
       // cleanly AND every tracked process tree was reaped; otherwise retain it (fail closed) so a
       // possibly-still-alive provider cannot share its HOME with a replacement runner.
       try {
         if (sessionsCleanlyShutDown) {
-          if (!sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped)) {
+          if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped)) {
             log("process-tree cleanup was incomplete — retaining provider-home lease; inspect the preceding survivor diagnostic before restarting this runner");
           }
         } else {

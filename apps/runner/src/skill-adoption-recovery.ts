@@ -547,24 +547,27 @@ function currentView(scope: RecoveryScope, dataDir: string, operationId: string,
 }
 
 /** Native journals with the ID, or the first native scope that could not be inspected. */
-function nativeRecoveryMatches(options: RestoreSkillAdoptionRecoveryOptions):
-  { count: number; uninspected?: RecoveryScope } {
+function nativeRecoveryMatches(options: Omit<RestoreSkillAdoptionRecoveryOptions, "acquireProviderHomeLease">):
+  { count: number; home?: string; uninspected?: RecoveryScope } {
   const platform = options.platform ?? process.platform;
   const helper = platform === "linux" ? null : options.helper ?? platformSkillAdoptionHelper(platform);
   if (platform !== "linux" && !helper) return { count: 0 };
   const canonicalDir = canonicalSkillsDir(options.home);
   let count = 0;
+  let home: string | undefined;
   for (const scope of recoveryScopes(options.home, options.agents, options.providerAccounts)) {
     if (helper) {
       const found = helperViews(helper, scope, options.dataDir, options.home, options.operationId);
       if (found.failed) return { count, uninspected: scope };
-      count += found.views.filter(({ view }) => view.operationId === options.operationId).length;
+      const matching = found.views.filter(({ view }) => view.operationId === options.operationId).length;
+      if (matching) home = scope.home;
+      count += matching;
       continue;
     }
-    try { if (operationView(scope, options.dataDir, options.operationId, canonicalDir)) count += 1; }
+    try { if (operationView(scope, options.dataDir, options.operationId, canonicalDir)) { count += 1; home = scope.home; } }
     catch { return { count, uninspected: scope }; }
   }
-  return { count };
+  return { count, ...(count === 1 ? { home } : {}) };
 }
 
 function wslScopes(agents: AgentDefinition[]): RecoveryScope[] {
@@ -605,9 +608,28 @@ export async function listSkillAdoptionRecoveryWithWsl(home: string, dataDir: st
   return { operations: markDuplicates(operations), truncated };
 }
 
-export async function restoreSkillAdoptionRecoveryWithWsl(options: RestoreSkillAdoptionRecoveryOptions,
+type AsyncRestoreOptions = Omit<RestoreSkillAdoptionRecoveryOptions, "acquireProviderHomeLease"> & {
+  acquireProviderHomeLease: (home: string) => void | Promise<void>;
+};
+
+async function restoreNativeAfterLease(options: AsyncRestoreOptions): Promise<RestoreResult> {
+  if (!UUID.test(options.operationId)) return { status: "blocked", error: "Invalid or unsupported recovery operation." };
+  const matches = nativeRecoveryMatches(options);
+  if (matches.uninspected) return uninspectableResult(matches.uninspected);
+  if (matches.count !== 1 || !matches.home) return { status: "blocked", error: "The recovery operation was not found uniquely." };
+  const home = matches.home;
+  try { await options.acquireProviderHomeLease(home); }
+  catch { return { status: "blocked", error: "The provider home is currently in use." }; }
+  // The transaction re-inspects every journal and its identities after waiting. A journal moved
+  // to a different account must not borrow the ownership acquired for the original scope.
+  return restoreSkillAdoptionRecovery({ ...options, acquireProviderHomeLease: selected => {
+    if (selected !== home) throw new Error("recovery scope changed while waiting for ownership");
+  } });
+}
+
+export async function restoreSkillAdoptionRecoveryWithWsl(options: AsyncRestoreOptions,
   wsl: WslAdoptionEnvironment | undefined): Promise<RestoreResult> {
-  if (!wsl || !UUID.test(options.operationId)) return restoreSkillAdoptionRecovery(options);
+  if (!wsl || !UUID.test(options.operationId)) return restoreNativeAfterLease(options);
   const matches: Array<HelperView & { scope: RecoveryScope }> = [];
   for (const scope of wslScopes(options.agents)) {
     const inspected = await wslViews(wsl, scope, options.operationId);
@@ -620,7 +642,7 @@ export async function restoreSkillAdoptionRecoveryWithWsl(options: RestoreSkillA
       if (found.view.operationId === options.operationId) matches.push({ scope, ...found });
     }
   }
-  if (matches.length === 0) return restoreSkillAdoptionRecovery(options);
+  if (matches.length === 0) return restoreNativeAfterLease(options);
   const native = nativeRecoveryMatches(options);
   if (native.uninspected) return uninspectableResult(native.uninspected);
   if (matches.length !== 1 || native.count !== 0) {

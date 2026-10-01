@@ -161,7 +161,7 @@ import {
   usageWindowRejection,
   type UsageWindowRejection,
 } from "./automatic-provider-account-switch.js";
-import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation } from "./provider-home-lease-async.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
   ProviderStateCleanupJournal,
@@ -1385,7 +1385,7 @@ export class SessionManager {
   /** Async seam covers WSL markerless recovery without blocking runner startup. */
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
-  private readonly providerHomeLeases?: ProviderHomeLeaseRegistry;
+  private readonly providerHomeLeases?: AsyncProviderHomeLeaseRegistry;
   private readonly providerAuthOperations = new Set<string>();
   private readonly providerAuthInspections = new Map<string, Promise<ProviderAuthenticationInspectionResult>>();
   /** In-flight selected-account handoffs; tests and shutdown can await their settlement. */
@@ -1489,7 +1489,7 @@ export class SessionManager {
         if (other.sessionId !== meta.sessionId && isOrchestratorLaunch(other)) this.refreshGuardFor(other);
       }
     });
-    this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash, {
+    this.providerHomeLeases = runnerOwnerHash ? new AsyncProviderHomeLeaseRegistry(runnerOwnerHash, {
       onDiagnostic: (diagnostic) => this.log(JSON.stringify(diagnostic)),
       helperDataDir: dataDir ?? join(store.rootPath(), ".runner-data"),
     }) : undefined;
@@ -4189,28 +4189,35 @@ export class SessionManager {
   }
 
   /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. */
-  acquireAgentTuiProviderHome(meta: SessionMeta): void {
-    this.providerHomeLeases?.acquire({
+  async acquireAgentTuiProviderHome(meta: SessionMeta): Promise<void> {
+    const epoch = this.agentTuiLaunchEpoch(meta.sessionId);
+    await this.providerHomeLeases?.acquire({
       driver: meta.driver,
       command: meta.command,
       context: meta.context,
       env: meta.env,
-    });
+    }, { isCurrent: () => !this.shuttingDown && this.sessionCanOpen(meta.sessionId) &&
+      this.agentTuiLaunchEpoch(meta.sessionId) === epoch });
+    if (this.shuttingDown || !this.sessionCanOpen(meta.sessionId) || this.agentTuiLaunchEpoch(meta.sessionId) !== epoch) {
+      throw new Error("Agent TUI launch changed while waiting for provider-home ownership");
+    }
   }
 
   /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire the
    * registry's process-lifetime lease before reconciliation touches those shared directories. */
-  acquireSkillReconciliationProviderHome(home: string): void {
-    this.providerHomeLeases?.acquireHome(home);
+  async acquireSkillReconciliationProviderHome(home: string): Promise<void> {
+    await this.providerHomeLeases?.acquireHome(home, "skills", { isCurrent: () => !this.shuttingDown });
+    if (this.shuttingDown) throw new Error("provider-home acquisition was cancelled by shutdown");
   }
 
   /** Provider sign-in is a short-lived supervised mutation of one exact credential home. */
-  acquireProviderLoginHome(home: string, provider: "claude" | "codex"): boolean {
+  async acquireProviderLoginHome(home: string, provider: "claude" | "codex", cancellation: LeaseCancellation = {}): Promise<boolean> {
     if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
-    return this.providerHomeLeases.acquireHome(home, provider);
+    return this.providerHomeLeases.acquireHome(home, provider, { ...cancellation,
+      isCurrent: () => !this.shuttingDown && (cancellation.isCurrent?.() ?? true) });
   }
 
-  releaseProviderHomeAfterLogin(home: string): boolean {
+  async releaseProviderHomeAfterLogin(home: string): Promise<boolean> {
     return this.providerHomeLeases?.releaseHome(home) ?? false;
   }
 
@@ -4251,7 +4258,9 @@ export class SessionManager {
     } satisfies SessionMeta;
     const scope = controller.describe(meta);
     if (!scope) return "unknown";
-    this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env: meta.env });
+    await this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env: meta.env },
+      { isCurrent: () => !this.shuttingDown });
+    if (this.shuttingDown) return "unknown";
     return (await controller.revalidate(meta)).status;
   }
 
@@ -4278,13 +4287,14 @@ export class SessionManager {
       cwd,
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     });
-    this.providerHomeLeases?.acquire({
+    await this.providerHomeLeases?.acquire({
       driver: agent.driver ?? "acp",
       command: agent.command,
       context,
       env,
       isolation,
-    });
+    }, { isCurrent: () => !this.shuttingDown });
+    if (this.shuttingDown) throw new Error("subscription probe was cancelled by shutdown");
     return { cwd, ...(isolation ? { isolation } : {}) };
   }
 
@@ -4350,7 +4360,9 @@ export class SessionManager {
         cwd,
         ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
       });
-      this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env, isolation });
+      await this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env, isolation },
+        { isCurrent: () => !this.shuttingDown });
+      if (this.shuttingDown) throw new Error("session naming was cancelled by shutdown");
       return { ...(isolation ? { isolation } : {}), cleanup };
     } catch (error) {
       await cleanup().catch(() => {});
@@ -7444,13 +7456,14 @@ export class SessionManager {
 
     let client: Driver;
     try {
-      this.providerHomeLeases?.acquire({
+      await this.providerHomeLeases?.acquire({
         driver: meta.driver,
         command: meta.command,
         context: meta.context,
         env: meta.env,
         isolation,
-      });
+      }, { isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration) });
+      if (!this.launchIsCurrent(sessionId, launchGeneration)) throw new Error("session launch changed during provider-home acquisition");
       client = this.createDriver(
         meta.driver,
         {
@@ -7640,6 +7653,10 @@ export class SessionManager {
       );
     } catch (error) {
       if (worktreeLeaseOwner) this.store.releaseWorktreeLease(sessionId, worktreeLeaseOwner);
+      if (!this.launchIsCurrent(sessionId, launchGeneration)) {
+        await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during provider-home acquisition", launchGeneration);
+        return false;
+      }
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver construction failed", launchGeneration);
       this.emitEvent(sessionId, { kind: "error", message: `agent process could not be created: ${errText(error)}` });
       this.emitStatus(sessionId, "failed", errText(error));
@@ -11152,12 +11169,16 @@ export class SessionManager {
         targetScopeId = targetScope.id;
         this.providerAuthOperations.add(targetScopeId);
       }
-      this.providerHomeLeases?.acquire({
+      await this.providerHomeLeases?.acquire({
         driver: probe.driver,
         command: probe.command,
         context: probe.context,
         env: probe.env,
-      });
+      }, { isCurrent: () => !this.shuttingDown &&
+        this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId === block.recoveryId });
+      if (this.shuttingDown || this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId !== block.recoveryId) {
+        return refuse("recovery_changed", "This Authentication Required card changed while ownership was checked. Review the latest card.");
+      }
       const observation = await controller.revalidate(probe);
       if (observation.status === "unauthenticated") {
         return refuse("sign_in_required", "The provider reports that this account is signed out. Sign in to it, then choose it again.");
@@ -13015,13 +13036,18 @@ export class SessionManager {
         const isolation = await this.resolveLaunchIsolation(source, source.worktreePath);
         // The temporary provider is a provider like any other: its guard is proven first too.
         await this.proveGuardInsideSandbox(source, isolation, source.worktreePath);
-        this.providerHomeLeases?.acquire({
+        await this.providerHomeLeases?.acquire({
           driver: source.driver,
           command: source.command,
           context: source.context,
           env: source.env,
           isolation,
-        });
+        }, { isCurrent: () => !this.shuttingDown &&
+          this.store.readMeta(sourceSessionId)?.agentSessionId === source.agentSessionId &&
+          !this.deleting.has(sourceSessionId) });
+        if (this.shuttingDown || this.store.readMeta(sourceSessionId)?.agentSessionId !== source.agentSessionId || this.deleting.has(sourceSessionId)) {
+          throw new Error("source session changed during provider-home acquisition");
+        }
         temporary = this.createDriver(
           source.driver,
           {
@@ -13126,13 +13152,18 @@ export class SessionManager {
           }],
         };
         forkIsolation = await this.resolveLaunchIsolation(forkMeta, worktree.path);
-        this.providerHomeLeases?.acquire({
+        await this.providerHomeLeases?.acquire({
           driver: source.driver,
           command: source.command,
           context: source.context,
           env: source.env,
           isolation: forkIsolation,
-        });
+        }, { isCurrent: () => !this.shuttingDown &&
+          this.store.readMeta(sourceSessionId)?.agentSessionId === source.agentSessionId &&
+          !this.deleting.has(sourceSessionId) });
+        if (this.shuttingDown || this.store.readMeta(sourceSessionId)?.agentSessionId !== source.agentSessionId || this.deleting.has(sourceSessionId)) {
+          throw new Error("source session changed during provider-home acquisition");
+        }
         temporary = this.createDriver(
           source.driver,
           {
@@ -15048,6 +15079,7 @@ export class SessionManager {
    * lease (fail closed) — releasing it could let a replacement runner share the same HOME. */
   shutdownAll(): boolean {
     this.shuttingDown = true;
+    this.providerHomeLeases?.stopAcquisitions();
     for (const sessionId of this.worktreeSetupRuns.keys()) void this.abortWorktreeSetup(sessionId);
     for (const [key, resolveApproval] of this.worktreeSetupApprovals) {
       this.worktreeSetupApprovals.delete(key);
@@ -15175,13 +15207,12 @@ export class SessionManager {
 
   /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree
    * has been reaped. shutdownAll() merely initiates that asynchronous drain. */
-  releaseProviderHomeLeasesAfterShutdown(processTreesReaped: boolean): boolean {
+  async releaseProviderHomeLeasesAfterShutdown(processTreesReaped: boolean): Promise<boolean> {
     if (!this.shuttingDown) {
       throw new Error("provider-home leases may only be released after shutdown begins");
     }
     if (!processTreesReaped) return false;
-    this.providerHomeLeases?.releaseAll();
-    return true;
+    return this.providerHomeLeases ? this.providerHomeLeases.close() : true;
   }
 
   private emitStatus(

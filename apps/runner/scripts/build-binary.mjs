@@ -48,6 +48,16 @@ await build({
 });
 console.log("bundled runner ->", bundle);
 
+// One fixed, private worker owns the complete synchronous lease engine. SEA workers cannot
+// resolve sibling modules from disk, so embed the exact self-contained worker as an asset.
+const leaseWorker = join(buildDir, "provider-home-lease-worker.cjs");
+await build({
+  entryPoints: [join(runner, "src", "provider-home-lease-worker.ts")],
+  bundle: true, platform: "node", format: "cjs", target: "node24",
+  define: { "import.meta.url": "undefined" },
+  outfile: leaseWorker, legalComments: "none", logLevel: "info",
+});
+
 // Linux adoption moves files with a fixed renameat2(RENAME_NOREPLACE) helper. It is linked
 // statically so the SEA runs on any Linux libc, and it is compiled before the bundle-only exit so
 // CI's bundle check proves the exact release build.
@@ -76,7 +86,7 @@ if (process.argv.includes("--bundle-only")) {
 // 2) Node SEA blob.
 const seaConfig = join(buildDir, "sea-config.json");
 const blob = join(buildDir, "runner.blob");
-const assets = {};
+const assets = { "wollipog/provider-home-lease-worker": leaseWorker };
 if (process.platform === "linux" || process.platform === "darwin") assets["wollipog/provider-home-lease-io"] = leaseIoHelper;
 if (process.platform === "darwin") {
   const helper = join(buildDir, "macos-skill-snapshots");
