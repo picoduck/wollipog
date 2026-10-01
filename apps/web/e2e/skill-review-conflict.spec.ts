@@ -51,7 +51,7 @@ interface Review {
 
 const reviews: Review[] = [{
   title: "Import from Git",
-  first: 0, fresh: 2, consent: null, freshConsent: "Deploy to 2 existing assignments", primary: "Import Selected",
+  first: 0, fresh: 2, consent: null, freshConsent: "Deploy to 2 existing assignments", primary: "Import 1 Skill",
   async open(page, server) {
     await page.route("**/api/skill-git/preview", (route) => route.fulfill({ json: { previewId: "preview-1", candidates: [{
       name: "code-review", path: "skills/code-review", commit: "a".repeat(40), digest: observedDigest,
@@ -62,9 +62,9 @@ const reviews: Review[] = [{
     await page.route("**/api/skill-git/import", (route) => server.accept(route, { skill: { id: "skill-1", name: "code-review" } }));
     await page.goto("/skills-removals-e2e.html");
     await choosePageAction(page, "Import from Git…", "Import");
-    const dialog = page.getByRole("dialog", { name: "Import Skills from Git" });
-    await dialog.getByLabel("Git Repository", { exact: true }).fill("example/skills");
-    await dialog.getByRole("button", { name: "Preview Skills" }).click();
+    const dialog = page.getByRole("dialog", { name: "Import from Git" });
+    await dialog.getByLabel("Repository", { exact: true }).fill("example/skills");
+    await dialog.getByRole("button", { name: "Find Skills" }).click();
     await dialog.getByRole("checkbox", { name: "code-review", exact: true }).check();
     return dialog;
   },

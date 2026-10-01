@@ -1522,7 +1522,7 @@ test("the Skills header is one row: Manage Groups…, an Import menu, then New S
     await act(async () => items[0]!.click());
     await act(settle);
     assertNoDomNode(container.querySelector('[role="menu"]'), "choosing an import closes the menu");
-    assert.match(container.querySelector('[role="dialog"]')?.textContent ?? "", /Import Skills from Git/);
+    assert.match(container.querySelector('[role="dialog"]')?.textContent ?? "", /Import from Git/);
   } finally {
     await view.unmount();
   }
@@ -1966,7 +1966,7 @@ test("each ⋯ item opens its dialog, and Add Assignment… opens the existing o
     };
     assert.equal(await open("Version History…"), "Version History");
     assert.equal(await open("Machine Version…"), "Machine Version");
-    assert.equal(await open("Check for Updates…"), "Check for Skill Updates");
+    assert.equal(await open("Check for Updates…"), "Check for Updates");
     await act(async () => buttonNamed(head, "Add Assignment…")[0]!.click());
     const dialog = container.querySelector('[role="dialog"]');
     assert.equal(dialog?.getAttribute("aria-label") ?? dialog?.querySelector("h2")?.textContent, "Add Assignment");

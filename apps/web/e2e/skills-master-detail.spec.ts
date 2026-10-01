@@ -73,7 +73,7 @@ test.describe("at desktop widths", () => {
     await page.keyboard.press("Escape");
     await importButton.click();
     await menu.getByRole("menuitem", { name: "Import from Git…" }).click();
-    await expect(page.getByRole("dialog", { name: "Import Skills from Git" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Import from Git" })).toBeVisible();
   });
 
   test("at 900px Manage Groups… is in ⋯ and Import and New Skill stay buttons", async ({ page }) => {

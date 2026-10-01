@@ -121,7 +121,7 @@ test.describe("at 1440×900", () => {
     await expect(notice(page).locator(".notice-body")).toHaveText(
       "Commit c3d4e5f6a7b8 adds or changes scripts/collect.sh and tool.py. Review it before it deploys.");
     await notice(page).getByRole("button", { name: "Review Update…" }).click();
-    await expect(page.getByRole("dialog", { name: "Check for Skill Updates" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Check for Updates", exact: true })).toBeVisible();
 
     await open(page, "skill-n4");
     await expect(notice(page).locator(".notice-body")).toHaveText(

@@ -14462,6 +14462,102 @@ body.shell-dock-dragging * {
   flex-direction: column;
   min-width: 0;
 }
+/* Import from Git (#1983): step one is the source form; step two a strip naming the source over the
+   skills found and the shown skill's files. On desktop the review is a full-height `.modal.lg`
+   whose list and files sit side by side, each scrolling on its own; on a phone sheet they stack in
+   the body's one scroll, list first. */
+.skill-git-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.skill-git-body :is(h3, p, dl) { margin: 0; }
+/* Branch or Tag and Folder share a row, and one column under 480px of form (§8.1). */
+.skill-git-source { container-type: inline-size; }
+@container (max-width: 479px) {
+  .skill-git-source .field-row { grid-template-columns: minmax(0, 1fr); }
+}
+.skill-git-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.skill-git-strip > .skill-review-facts { flex: 1 1 auto; border-top: 0; }
+.skill-git-strip > .btn { flex: none; }
+.skill-git-panes,
+.skill-git-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.skill-git-title {
+  color: var(--text);
+  font: var(--type-section);
+}
+.skill-git-note {
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+.skill-git-loading { gap: var(--space-2); }
+/* Why the primary is unavailable (§7.3): the footer's left slot, small and dim. */
+.modal-foot > .skill-git-reason {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: auto;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+@media (min-width: 761px) {
+  .modal.lg:has(> .modal-panel-host > .skill-git-import.is-review) { height: calc(100dvh - 48px); }
+  .skill-git-import.is-review > .modal-body {
+    padding: 0;
+    overflow: hidden;
+  }
+  .skill-git-import.is-review .skill-git-body {
+    flex: 1 1 auto;
+    gap: 0;
+    min-height: 0;
+  }
+  .skill-git-import.is-review .skill-git-strip {
+    flex: none;
+    padding: 0 var(--space-5);
+    border-bottom: 1px solid var(--border);
+  }
+  /* The address is the long fact, so it has the widest column. */
+  .skill-git-import.is-review .skill-git-strip > .skill-review-facts {
+    grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 1fr));
+    border-bottom: 0;
+  }
+  .skill-git-import.is-review .skill-git-panes {
+    flex: 1 1 auto;
+    flex-direction: row;
+    gap: 0;
+    min-height: 0;
+  }
+  .skill-git-import.is-review .skill-git-pane {
+    min-height: 0;
+    padding: var(--space-5);
+    overflow-y: auto;
+  }
+  .skill-git-import.is-review .skill-git-pane.list {
+    flex: 0 0 300px;
+    border-right: 1px solid var(--border);
+  }
+  .skill-git-import.is-review .skill-git-pane.review { flex: 1 1 auto; }
+  .skill-git-import.is-review .skill-git-message { padding: var(--space-5); }
+}
+@media (max-width: 760px) {
+  .modal-foot > .skill-git-reason { flex-basis: 100%; }
+  /* The strip's facts are rows on a phone (§5.4); Change Source follows them. */
+  .skill-git-strip {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .skill-git-strip > .btn { align-self: flex-start; }
+}
 /* The notice slot directly under the skill detail's header (§13.2, #1972): one notice, closer to the
    header than the 32px between sections. On a phone its actions stack at full width, the one
    exception to "buttons never stretch" (§3.1, §3.3). */
@@ -15707,6 +15803,54 @@ body.shell-dock-dragging * {
   min-height: 20px;
   color: var(--text-dim);
   font: var(--type-small);
+}
+/* The list-beside-a-detail form (`show`, #1983): the marker is a target of its own, the rest of the
+   row a button that shows the row. The fill follows the row shown (`aria-current`), not the input,
+   which draws its own checked state; it comes after the hover rule, at its specificity, so the
+   row shown stays filled under the pointer. */
+.choice-row.has-show {
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  cursor: default;
+}
+.choice-row.has-show.is-current { background: var(--surface-selected); }
+.choice-row-mark-target {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+.choice-row-mark-target > :is(.radio-mark, .checkbox-mark) { height: 20px; }
+/* The meta shares the title's line, so the description has the row's whole width beneath both: a
+   list beside a detail is narrow, and the description is what says what checking the row does. */
+.choice-row-show {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: start;
+  column-gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3) var(--space-2) 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.choice-row-show > .choice-row-body { display: contents; }
+.choice-row-show :is(.choice-row-desc, .choice-row-reason) { grid-column: 1 / -1; }
+.choice-row-show > .choice-row-meta { grid-row: 1; grid-column: 2; }
+@media (pointer: coarse) {
+  /* A 44px-wide target for the box, as tall as the row. */
+  .choice-row-mark-target {
+    justify-content: center;
+    min-width: 44px;
+  }
 }
 @media (max-width: 760px) {
   /* Phones wrap the description to two lines rather than cutting it at a phone's width. */

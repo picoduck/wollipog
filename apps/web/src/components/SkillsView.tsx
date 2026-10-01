@@ -887,7 +887,10 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
         await refreshMachines();
       }} />}
       {(dialog === "git-import" || dialog === "git-update") && <SkillGitImportDialog
-        source={dialog === "git-update" && gitSource ? { ...gitSource, subdirectory: gitSource.path } : undefined}
+        check={dialog === "git-update" && gitSource && detail
+          ? { skillName: detail.name, source: { ...gitSource, subdirectory: gitSource.path }, autoUpdate: detail.gitAutoUpdate }
+          : undefined}
+        libraryVersions={new Map((skills ?? []).map((skill) => [skill.name, skill.latestVersion]))}
         onClose={() => setDialog(null)} onImported={async () => {
           await refreshList();
           if (selectedId) await refreshDetail(selectedId);

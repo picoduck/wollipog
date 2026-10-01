@@ -139,10 +139,9 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     expect(await stretched(page)).toEqual([]);
     await page.screenshot({ path: info.outputPath(`git-auto-update-held-${width}-${theme}.png`), fullPage: true });
     await held.getByRole("button", { name: "Review Update…" }).click();
-    await expect(page.getByRole("heading", { name: "Check for Skill Updates" })).toBeVisible();
-    await expect(page.getByLabel("Repository Subdirectory")).toHaveValue("skills/code-review");
-    await page.getByRole("button", { name: "Preview Skills" }).click();
-    await expect(page.getByText("No remaining skill candidates in this preview.")).toBeVisible();
+    // It opens on the review of the recorded source (#1983), which the route above checks.
+    await expect(page.getByRole("dialog", { name: "Check for Updates", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "No Skills Found", exact: true })).toBeVisible();
   });
 }
 
@@ -167,7 +166,7 @@ test("a held update behind a more urgent notice is a notice inside Source with R
   await source(page).scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath("git-auto-update-held-in-source-1280.png"), fullPage: true });
   await held.getByRole("button", { name: "Review Update…" }).click();
-  await expect(page.getByRole("heading", { name: "Check for Skill Updates" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Check for Updates", exact: true })).toBeVisible();
 });
 
 test("a failed check is a danger notice in Source with Check for Updates… and Show Details", async ({ page }, info) => {
@@ -184,7 +183,7 @@ test("a failed check is a danger notice in Source with Check for Updates… and 
   await source(page).scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath("git-auto-update-error-390.png"), fullPage: true });
   await failed.getByRole("button", { name: "Check for Updates…" }).click();
-  await expect(page.getByRole("heading", { name: "Check for Skill Updates" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Check for Updates", exact: true })).toBeVisible();
 });
 
 test("an update over an import without recorded modes explains its one-time review", async ({ page }, info) => {

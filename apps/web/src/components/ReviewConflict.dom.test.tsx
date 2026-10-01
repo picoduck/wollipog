@@ -83,6 +83,11 @@ function buttonNamed(name: string): HTMLButtonElement {
   return found;
 }
 
+/** A primary that stays focusable to explain itself is `aria-disabled` rather than `disabled`. */
+function isDisabled(button: HTMLButtonElement): boolean {
+  return button.disabled || button.getAttribute("aria-disabled") === "true";
+}
+
 async function mount(client: ApiClient, element: ReactElement) {
   const container = document.createElement("div");
   document.body.append(container);
@@ -118,14 +123,14 @@ async function assertConflictRoundTrip(primary: string, options: { consent: stri
   assert.equal(notice.getAttribute("role"), "alert");
   assert.match(notice.textContent ?? "", /changed after the preview, so it wasn't deployed/);
   assertNoDomNode(consent(), "the stale consent is gone");
-  assert.equal(buttonNamed(primary).disabled, true, "the stale preview cannot be accepted");
+  assert.equal(isDisabled(buttonNamed(primary)), true, "the stale preview cannot be accepted");
   assertNoDomNode(document.querySelector(".form-error"), "the conflict is not shown as a failure as well");
 
   await click(buttonNamed("Preview Again"));
   assertNoDomNode(footer().querySelector(".review-conflict"), "the fresh preview clears the conflict");
   assert.equal(consent()?.textContent, options.freshConsent, "the fresh preview's consent names the current count");
   assert.equal(consent()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked, false);
-  assert.equal(buttonNamed(primary).disabled, true, "the fresh consent must be given again");
+  assert.equal(isDisabled(buttonNamed(primary)), true, "the fresh consent must be given again");
   await click(consent()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!);
   await click(buttonNamed(primary));
 }
@@ -256,12 +261,13 @@ test("Import from Git: a conflict names the skill and previews the source again,
       return {} as never;
     },
   } as ApiClient;
-  const unmount = await mount(client, <SkillGitImportDialog onClose={() => undefined} onImported={async () => undefined}
-    source={{ url: "https://github.com/team/repo.git", ref: "HEAD", subdirectory: "" }} />);
-  await click(buttonNamed("Preview Skills"));
-  await click(document.querySelector<HTMLInputElement>('.skills-section input[type="checkbox"]')!);
-  await assertConflictRoundTrip("Import Selected", { consent: null, freshConsent: "Deploy to 2 existing assignments" });
-  assert.match(document.body.textContent ?? "", /Imported: code-review/);
+  let closed = 0;
+  // Opened from the skill (#1983): it previews the recorded source at once and checks the update.
+  const unmount = await mount(client, <SkillGitImportDialog onClose={() => { closed++; }} onImported={async () => undefined}
+    check={{ skillName: "code-review", source: { url: "https://github.com/team/repo.git", ref: "HEAD", subdirectory: "" } }} />);
+  assert.equal(document.querySelector<HTMLInputElement>('.choice-rows input[type="checkbox"]')?.checked, true);
+  await assertConflictRoundTrip("Import Update", { consent: null, freshConsent: "Deploy to 2 existing assignments" });
+  assert.equal(closed, 1, "a complete import closes the dialog");
   assert.deepEqual(server.sent, ["impact-1", "impact-2"]);
   await unmount();
 });

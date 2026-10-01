@@ -402,6 +402,11 @@ export interface ChoiceRowOption<T extends string> {
  * An unavailable row cannot be checked by click, Space or arrows, but stays reachable; it keeps its
  * size, reads in faint text and shows its reason in place of the description. The description stays
  * in its accessible description, beside the reason.
+ *
+ * `show` is the list-beside-a-detail form (Import from Git's skills beside their files, #1983): the
+ * marker becomes a target of its own, and the rest of the row is a button that shows the row
+ * without changing its checkbox. There the fill follows the row shown (`aria-current`) rather than
+ * the checked input, which the marker draws on its own, so each look still has one source.
  */
 export function ChoiceRow({
   type,
@@ -416,6 +421,7 @@ export function ChoiceRow({
   disabled,
   disabledReason,
   compact,
+  show,
 }: Omit<ChoiceRowOption<string>, "value"> & {
   type: "radio" | "checkbox";
   /** The radio group's shared name, which is what makes arrows move between its rows. */
@@ -425,6 +431,9 @@ export function ChoiceRow({
   onSelect: () => void;
   /** The ChoiceList form: one line, no description. */
   compact?: boolean;
+  /** The row's body shows it in a detail beside the list; `current` marks the row shown, and
+   * `controls` names the detail's id. */
+  show?: { current: boolean; onShow: () => void; controls?: string };
 }) {
   const ids = useId();
   const titleId = `${ids}-title`;
@@ -436,49 +445,67 @@ export function ChoiceRow({
     showReason ? reasonId : null,
   ].filter(Boolean).join(" ") || undefined;
   const select = () => { if (!disabled) onSelect(); };
-  return (
-    <label
-      className={`choice-row${compact ? " compact" : ""}${disabled ? " is-disabled" : ""}`}
-    >
-      <ChoiceMark
-        type={type}
-        name={name}
-        checked={checked}
-        // `aria-disabled`, not `disabled`: a natively disabled radio drops out of the arrow order,
-        // so the row and its reason would be reachable by mouse and by nothing else. The change is
-        // refused instead — `onSelect` is never called, and React restores the checked input the
-        // controlled value names — so arrows reach it, a screen reader announces it with its
-        // reason, and nothing is selected.
-        aria-disabled={disabled || undefined}
-        aria-labelledby={titleId}
-        aria-describedby={describedBy}
-        onChange={select}
-        // A checked radio fires no `change` when it is clicked (or Space is pressed on it) again,
-        // but the cards this replaced reported that re-selection, and callers rely on it: New
-        // Session records an explicit role override, Move to Project re-applies the choice. `checked`
-        // is the value before this click, so a first selection is reported once, by `change`.
-        onClick={type === "radio" && checked ? select : undefined}
-      />
-      {icon && <span className="choice-row-icon" aria-hidden="true">{icon}</span>}
-      <span className="choice-row-body">
-        <span className="choice-row-title" id={titleId}>
-          {title}
-          {status && <span className="choice-row-status">{status}</span>}
-        </span>
-        {description && (
-          <span
-            className={showReason ? "sr-only" : "choice-row-desc"}
-            id={descriptionId}
-            title={typeof description === "string" ? description : undefined}
-          >
-            {description}
-          </span>
-        )}
-        {showReason && <small className="choice-row-reason" id={reasonId}>{disabledReason}</small>}
-      </span>
-      {meta && <span className="choice-row-meta">{meta}</span>}
-    </label>
+  const mark = (
+    <ChoiceMark
+      type={type}
+      name={name}
+      checked={checked}
+      // `aria-disabled`, not `disabled`: a natively disabled radio drops out of the arrow order,
+      // so the row and its reason would be reachable by mouse and by nothing else. The change is
+      // refused instead — `onSelect` is never called, and React restores the checked input the
+      // controlled value names — so arrows reach it, a screen reader announces it with its
+      // reason, and nothing is selected.
+      aria-disabled={disabled || undefined}
+      aria-labelledby={titleId}
+      aria-describedby={describedBy}
+      onChange={select}
+      // A checked radio fires no `change` when it is clicked (or Space is pressed on it) again,
+      // but the cards this replaced reported that re-selection, and callers rely on it: New
+      // Session records an explicit role override, Move to Project re-applies the choice. `checked`
+      // is the value before this click, so a first selection is reported once, by `change`.
+      onClick={type === "radio" && checked ? select : undefined}
+    />
   );
+  const content = <>
+    {icon && <span className="choice-row-icon" aria-hidden="true">{icon}</span>}
+    <span className="choice-row-body">
+      <span className="choice-row-title" id={titleId}>
+        {title}
+        {status && <span className="choice-row-status">{status}</span>}
+      </span>
+      {description && (
+        <span
+          className={showReason ? "sr-only" : "choice-row-desc"}
+          id={descriptionId}
+          title={typeof description === "string" ? description : undefined}
+        >
+          {description}
+        </span>
+      )}
+      {showReason && <small className="choice-row-reason" id={reasonId}>{disabledReason}</small>}
+    </span>
+    {meta && <span className="choice-row-meta">{meta}</span>}
+  </>;
+  const modifiers = `${compact ? " compact" : ""}${disabled ? " is-disabled" : ""}`;
+  if (show) {
+    return (
+      <div className={`choice-row has-show${modifiers}${show.current ? " is-current" : ""}`}>
+        <label className="choice-row-mark-target">{mark}</label>
+        <button
+          type="button"
+          className="choice-row-show"
+          aria-labelledby={titleId}
+          aria-describedby={describedBy}
+          aria-current={show.current || undefined}
+          aria-controls={show.controls}
+          onClick={show.onShow}
+        >
+          {content}
+        </button>
+      </div>
+    );
+  }
+  return <label className={`choice-row${modifiers}`}>{mark}{content}</label>;
 }
 
 /**
@@ -501,6 +528,7 @@ export function ChoiceRows<T extends string>({
   multiple,
   className,
   id,
+  show,
 }: {
   options: readonly ChoiceRowOption<T>[];
   onChange: (value: T) => void;
@@ -508,6 +536,9 @@ export function ChoiceRows<T extends string>({
   label: string;
   className?: string;
   id?: string;
+  /** Each row's body shows that row in a detail beside the list (ChoiceRow's `show`): `value` is
+   * the row shown, and `controls` the detail's id. */
+  show?: { value: NoInfer<T> | null; onShow: (value: T) => void; controls?: string };
 } & ({ multiple: true; value: readonly NoInfer<T>[] } | { multiple?: false; value: NoInfer<T> | null })) {
   // The mode decides the shape, so the types cannot disagree with it: a single mode given an array
   // silently selected nothing, and a multiple mode given a scalar selected one row and then could
@@ -536,6 +567,7 @@ export function ChoiceRows<T extends string>({
           meta={option.meta}
           disabled={option.disabled}
           disabledReason={option.disabledReason}
+          show={show && { current: show.value === option.value, onShow: () => show.onShow(option.value), controls: show.controls }}
         />
       ))}
     </div>
