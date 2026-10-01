@@ -164,7 +164,7 @@ export function SkillMachineVersionDialog({ skillId, runners, machineLabels, ini
       }];
     }),
     // A pin the list never reached (the history ended, or a read failed) still shows, unnamed.
-    ...(currentPin && pinMissing && !pages.cursor && !pages.loading && !pages.loadingMore ? [{
+    ...(currentPin && pinMissing && (!pages.cursor || pages.moreError) && !pages.loading && !pages.loadingMore ? [{
       value: currentPin, title: "Pin to an Earlier Version", description: "The version this machine is pinned to.",
       status: <span className="status t-neutral no-dot">Current</span>,
     }] : []),

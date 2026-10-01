@@ -435,3 +435,27 @@ test("Version History: a list that can't be read again after a restore names not
   assert.equal(rows()[0]!.querySelector(".status")?.textContent, "Current");
   await unmount();
 });
+
+test("Machine Version keeps a pin it can't reach selectable when an older page fails, and names it after Retry (review CR-3.1)", async () => {
+  let olderReads = 0;
+  const page = (from: number, to: number) => Array.from({ length: from - to + 1 }, (_, index) => ({ id: `skillv_${from - index}`, versionNumber: from - index, digest: `${from - index}`, note: null }));
+  const client = machineClient({
+    getMachineSkillVersionPolicy: async () => ({ policy: { versionId: "skillv_1", revision: "r1" } }),
+    listSkillVersions: async (_id: string, before?: string) => {
+      if (!before) return { versions: page(60, 11), nextCursor: "skillv_11" };
+      olderReads++;
+      if (olderReads === 1) throw new Error("The control plane is restarting.");
+      return { versions: page(10, 1), nextCursor: null };
+    },
+  });
+  const unmount = await machineVersion(client);
+  const checked = () => titles()[radios().findIndex((radio) => radio.checked)];
+  assert.equal(olderReads, 1);
+  assert.equal(checked(), "Pin to an Earlier VersionCurrent");
+  assert.match(dialog().querySelector(".skill-version-list-error")!.textContent!, /Older versions couldn't be loaded/);
+  await click([...dialog().querySelectorAll<HTMLButtonElement>(".skill-version-list-error button")].find((button) => button.textContent === "Retry")!);
+  assert.equal(olderReads, 2);
+  assert.equal(checked(), "Pin to v1Current");
+  assert.ok(!titles().some((title) => title?.includes("Earlier Version")));
+  await unmount();
+});
