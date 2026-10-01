@@ -778,6 +778,12 @@ export function reportedUnmanagedSkills(reported: ReportedSkillsState | null | u
   return Array.isArray(reported?.unmanaged) ? reported.unmanaged : [];
 }
 
+/** The skill directory a removed link's display path names: its last segment, without the
+ * " (WSL <distro>)" a WSL removal adds after it. */
+function removalSkillName(path: string): string | undefined {
+  return path.replace(/ \(WSL [^()]*\)$/, "").split(/[\\/]/).filter(Boolean).pop();
+}
+
 /** The link removals a machine reported. With a skill name, only that skill's: a removed link's
  * path ends in the skill's directory name (`~/.claude/skills/<name>`). `null` keeps every removal,
  * for the machine's own history in Connections. */
@@ -788,7 +794,7 @@ export function reportedSkillLinkRemovals(
   if (!Array.isArray(reported?.removals)) return [];
   return reported.removals.filter(
     (entry) => entry && typeof entry.path === "string" && typeof entry.reason === "string" &&
-      (skillName === null || entry.path.split(/[\\/]/).filter(Boolean).pop() === skillName),
+      (skillName === null || removalSkillName(entry.path) === skillName),
   );
 }
 

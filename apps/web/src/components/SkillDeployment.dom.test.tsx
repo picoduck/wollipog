@@ -221,3 +221,22 @@ test("a machine lists only this skill's link removals", async () => {
     assert.doesNotMatch(view.container.textContent ?? "", /release-notes/);
   } finally { await view.unmount(); }
 });
+
+test("a pin older than the first page of versions is still named by its number (CR-1.4)", async () => {
+  const runners = [machine("a", "Build Machine", [claude])];
+  const cursors: Array<string | undefined> = [];
+  const view = await render({ runners, machineSkills: { a: told([["claude", "agent"]]) } }, {
+    getMachineSkillVersionPolicy: async () => ({ policy: { versionId: "skillv_first", revision: "r" } }),
+    listSkillVersions: async (_skillId: string, before?: string) => {
+      cursors.push(before);
+      return before
+        ? { versions: [{ id: "skillv_first", versionNumber: 1 }], nextCursor: null }
+        : { versions: Array.from({ length: 50 }, (_, index) => ({ id: `skillv_${index + 2}`, versionNumber: index + 2 })), nextCursor: "page-2" };
+    },
+  } as Partial<ApiClient>);
+  try {
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.match(view.group("Build Machine")!.textContent ?? "", /Pinned to v1/);
+    assert.deepEqual(cursors, [undefined, "page-2"], "it stops once the pin is found");
+  } finally { await view.unmount(); }
+});

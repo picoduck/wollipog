@@ -25,6 +25,9 @@ import { StatusBadge } from "./StatusBadge.js";
 import { targetsWithoutManagedSkills } from "./SkillsUnavailableNotice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
+/** How many pages of versions (50 each) are read to name a pin before it is left as "Pinned". */
+const MAX_VERSION_PAGES = 20;
+
 /** "A", "A or B", "A, B or C": the targets a machine's skills don't reach. */
 const orList = (items: ReadonlyArray<string>) =>
   items.length <= 1 ? items[0] ?? "" : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
@@ -74,17 +77,29 @@ export function SkillDeployment<T extends SkillRule>(props: SkillDeploymentProps
     return () => { active = false; };
   }, [api, skill.id, runners, machineSkills]);
 
-  // A pin names its version by number ("Pinned to v2"), which only the version list knows.
-  const pinned = Object.values(policies).some((policy) => policy !== "error" && policy.policy?.versionId &&
-    policy.policy.versionId !== skill.latestVersion?.id);
+  // A pin names its version by number ("Pinned to v2"), which only the version list knows. It is
+  // read page by page until every pinned version is found.
+  const pinnedIds = [...new Set(Object.values(policies).flatMap((policy) =>
+    policy !== "error" && policy.policy?.versionId && policy.policy.versionId !== skill.latestVersion?.id
+      ? [policy.policy.versionId] : []))].sort().join(" ");
   useEffect(() => {
-    if (!pinned) return;
+    if (!pinnedIds) return;
     let active = true;
-    api.listSkillVersions(skill.id)
-      .then((result) => { if (active) setVersions(result.versions); })
-      .catch(() => { /* The pin stays unnamed: "Pinned". */ });
+    const wanted = new Set(pinnedIds.split(" "));
+    void (async () => {
+      const found: SkillVersionSummary[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < MAX_VERSION_PAGES && active; page += 1) {
+        const result = await api.listSkillVersions(skill.id, cursor);
+        found.push(...result.versions);
+        if (!active) return;
+        setVersions([...found]);
+        if ([...wanted].every((id) => found.some((version) => version.id === id)) || !result.nextCursor) return;
+        cursor = result.nextCursor;
+      }
+    })().catch(() => { /* A pin left unread stays unnamed: "Pinned". */ });
     return () => { active = false; };
-  }, [api, skill.id, pinned]);
+  }, [api, skill.id, pinnedIds]);
 
   const policyText = (runnerId: string) => {
     const policy = policies[runnerId];

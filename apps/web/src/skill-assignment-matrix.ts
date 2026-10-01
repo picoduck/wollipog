@@ -175,9 +175,11 @@ export function skillAgentDeployment(runner: RunnerView, agent: AgentDefinition,
   if (target?.invocation === "manual" && !supportsManualOnly(agent.driver)) {
     return { ...base, status: "error", reason: "Can't run manual-only skills.", manualOnly: true };
   }
-  // An edited copy the runner holds its links on reports them as conflicts: the edit is the news.
-  const edited = reportedSkillDrift(state.reported, skillName)
-    .find((entry) => entry.variant === (target?.invocation ?? "agent"));
+  // An edited copy the runner holds its links on reports them as conflicts: the edit is the news. A
+  // held edit holds every link of the skill's name, whichever variant this agent uses.
+  const drift = reportedSkillDrift(state.reported, skillName);
+  const edited = drift.find((entry) => entry.variant === (target?.invocation ?? "agent")) ??
+    drift.find((entry) => entry.held);
   if (edited) {
     return { ...base, status: "edited", reason: edited.held
       ? "Edited on this machine. Updates wait until you import or restore it."
@@ -193,7 +195,23 @@ export function skillAgentDeployment(runner: RunnerView, agent: AgentDefinition,
   if (reported === "Linked (Not Targeted)") {
     return { ...base, status: "linked", reason: "Not assigned. A link from before, or a shared skills folder, still exposes it." };
   }
+  const unreported = target ? unreportedAccount(runner, agent, skillName, state) : undefined;
+  if (unreported) return { ...base, status: "pending", reason: `${unreported}: Not reported yet.` };
   return { ...base, status: "linked" };
+}
+
+/** The label of a provider account this agent deploys into that the report has no link from, when
+ * the machine reports per account: each of a native agent's accounts gets its own copy. */
+function unreportedAccount(runner: RunnerView, agent: AgentDefinition, skillName: string,
+  state: RunnerSkillsResponse): string | undefined {
+  const deployed = state.reported?.deployed?.filter((row) => row.name === skillName) ?? [];
+  if ((agent.context?.kind ?? "native") !== "native" || !deployed.some((row) => row.providerAccountId)) return undefined;
+  const provider = agent.driver === "claude-code" ? "claude"
+    : agent.driver === "codex" || agent.driver === "codex-app-server" ? "codex" : undefined;
+  const missing = (runner.providerAccounts ?? []).find((account) => provider && account.provider === provider &&
+    !deployed.some((row) => row.providerAccountId === account.id &&
+      row.links.some((link) => link.agentId === agent.id && link.status === "linked")));
+  return missing ? accountLabelText(missing.label) : undefined;
 }
 
 /** The rule responsible for a targeted agent: "Direct" for the skill's own assignment, the group's

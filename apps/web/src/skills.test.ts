@@ -441,17 +441,21 @@ test("a skill's link removals are only those whose path is that skill's director
     { path: "~/.codex/skills/code-review-extra", reason: "A longer name that starts the same." },
     { path: "~\\.codex\\skills\\code-review", reason: "A Windows path." },
     { path: "~/.agents/skills/code-review/", reason: "A trailing separator." },
+    // A WSL removal names its distribution after the path (wsl-skills-helper.ts).
+    { path: "~/.codex/skills/code-review (WSL Ubuntu-22.04)", reason: "A WSL path." },
+    { path: "~/.codex/skills/code-review-extra (WSL Ubuntu)", reason: "Another skill in WSL." },
   ] };
   assert.deepEqual(reportedSkillLinkRemovals(reported, "code-review").map((entry) => entry.reason), [
     "No longer in the desired skill list.",
     "A Windows path.",
     "A trailing separator.",
+    "A WSL path.",
   ]);
   assert.deepEqual(reportedSkillLinkRemovals(reported, "release-notes").map((entry) => entry.path),
     ["~/.codex/skills/release-notes"]);
   assert.deepEqual(reportedSkillLinkRemovals(reported, "deleted-skill"), []);
   // Null is the machine's whole history, for Connections.
-  assert.equal(reportedSkillLinkRemovals(reported, null).length, 5);
+  assert.equal(reportedSkillLinkRemovals(reported, null).length, 7);
 });
 test("folder uploads strip the picked root, sort by path, and split text from binary", () => {
   const text = new TextEncoder().encode("---\nname: code-review\n---\nBody\n");

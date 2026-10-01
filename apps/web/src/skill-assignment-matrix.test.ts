@@ -308,3 +308,36 @@ test("a group's rule that outranks the skill's own is the one blamed, and an unr
   assert.deepEqual(skillManualOnlyErrors("review", [studio], machines, [direct], false)[0]!.agents.map((agent) => agent.id), ["codex"],
     "the error itself still shows");
 });
+
+test("a held edit of one variant holds every agent's link, so each is Edited and no machine error is claimed (CR-1.1)", () => {
+  const machine = { ...laptop, agents: [claude, codex] };
+  const held = "This skill's deployed copy was edited on this machine. Its links stay on the edited copy until the edit is imported as a new version, the library version is restored, or the edit is undone.";
+  const state = linkedTo([["claude", "conflict", held], ["codex", "conflict", held]], [["claude", "manual"], ["codex", "agent"]]);
+  state.reported!.drift = [{ name: "review", digest: "digest", variant: "manual", held: true }];
+  assert.deepEqual(skillMachineDeployment(machine, "review", state).rows.map((row) => row.status), ["edited", "edited"]);
+  assert.deepEqual(skillDeploymentErrors("review", [machine], { [machine.runnerId]: state }), []);
+  // An edit that holds nothing leaves the other variant's real conflict an Error.
+  state.reported!.drift = [{ name: "review", digest: "digest", variant: "manual", held: false }];
+  assert.equal(skillAgentDeployment(machine, codex, "review", state).status, "error");
+});
+
+test("an agent with several provider accounts is Linked only once every account reports its link (CR-1.2)", () => {
+  const machine = {
+    ...laptop,
+    agents: [claude],
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+      { id: "other", label: "Codex Account", provider: "codex", authStatus: "authenticated" },
+    ],
+  } as RunnerView;
+  const state: RunnerSkillsResponse = {
+    desired: [{ name: "review", versionDigest: "digest", targets: [{ agentId: "claude", invocation: "agent" }] }],
+    reported: { deployed: [{ name: "review", digest: "digest", providerAccountId: "work", links: [{ agentId: "claude", status: "linked" }] }] },
+  };
+  const row = skillAgentDeployment(machine, claude, "review", state);
+  assert.deepEqual([row.status, row.reason], ["pending", "Personal: Not reported yet."]);
+  assert.deepEqual([skillMachineDeployment(machine, "review", state).linked, skillMachineDeployment(machine, "review", state).total], [0, 1]);
+  state.reported!.deployed!.push({ name: "review", digest: "digest", providerAccountId: "personal", links: [{ agentId: "claude", status: "linked" }] });
+  assert.equal(skillAgentDeployment(machine, claude, "review", state).status, "linked", "another provider's account is not required");
+});
