@@ -118,16 +118,22 @@ export function listPlaceholder(list: "runs" | "pods", conn: ConnState): ListPla
 }
 
 /** Scope lookup completion to the route that produced it. This is defensive against stale async
- * completion if a future caller preserves lookup state while navigating between session routes. */
+ * completion if a future caller preserves lookup state while navigating between session routes.
+ *
+ * Once a snapshot has loaded, a connection that is only "connecting" is the shell retrying a lost
+ * one, so the page says Waiting to Reconnect rather than flipping back to Loading on every retry
+ * (the same rule as `useSnapshotState()`). */
 export function routedSessionPlaceholder(
   sessionId: string,
   lookup: RoutedSessionLookup,
   conn: ConnState,
+  snapshotLoaded = false,
 ): DetailPlaceholder {
   const appliesToRoute = lookup.sessionId === sessionId;
+  const current = conn === "connecting" && snapshotLoaded ? "offline" : conn;
   return detailPlaceholder("Session", {
-    authoritative: conn === "online" && appliesToRoute && lookup.complete && lookup.error === null,
-    conn,
+    authoritative: current === "online" && appliesToRoute && lookup.complete && lookup.error === null,
+    conn: current,
     error: appliesToRoute ? lookup.error : null,
   });
 }

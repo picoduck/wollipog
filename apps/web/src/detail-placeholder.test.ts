@@ -94,6 +94,17 @@ test("current pairing and offline state outrank a stale lookup error", () => {
   assert.equal(routedSessionPlaceholder("session-a", failed, "online").title, "Couldn't Load Session");
 });
 
+test("after the first snapshot, a reconnect attempt is Waiting to Reconnect, not Loading", () => {
+  const pending = { sessionId: "session-a", complete: false, error: null };
+  assert.equal(routedSessionPlaceholder("session-a", pending, "connecting").title, "Loading Session…",
+    "before any snapshot the page is loading");
+  assert.equal(routedSessionPlaceholder("session-a", pending, "connecting", true).title, "Waiting to Reconnect");
+  const missed = { sessionId: "session-a", complete: true, error: null };
+  assert.equal(routedSessionPlaceholder("session-a", missed, "connecting", true).title, "Waiting to Reconnect",
+    "a retry never vouches for Not Found");
+  assert.equal(routedSessionPlaceholder("session-a", missed, "online", true).title, "Session Not Found");
+});
+
 test("archived lookup retries as connection state recovers", () => {
   assert.equal(shouldLookupRoutedSession(false, "unauthorized"), false);
   assert.equal(shouldLookupRoutedSession(false, "offline"), false);

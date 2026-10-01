@@ -2065,6 +2065,9 @@ button.status { cursor: pointer; }
 .agent-defaults-list > .toolbar > .notice { flex: 1 1 auto; }
 /* Session-level notices sit in the session column under its bar. */
 .session-detail > .notice { margin: var(--space-2) var(--space-3); }
+/* A missing session's state sits on the page gutter, under the bar's Back (#2202). */
+.session-detail > .state { padding-right: var(--page-gutter); padding-left: var(--page-gutter); }
+.session-detail > .notice.state-error { margin-right: var(--page-gutter); margin-left: var(--page-gutter); }
 .notice-actions {
   display: flex;
   flex-wrap: wrap;

@@ -538,6 +538,7 @@ export function SessionDetail(props: SessionDetailProps) {
   const session = useStoreSelector((s) => s.sessions.get(sessionId));
   const conn = useStoreSelector((s) => s.conn);
   const snapshotRevision = useStoreSelector((s) => s.snapshotRevision);
+  const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const isMobile = useIsMobile();
   const lastLookupKeyRef = useRef<string | null>(null);
   // The phone top bar titles the page from the same lookup (#2202).
@@ -578,7 +579,7 @@ export function SessionDetail(props: SessionDetailProps) {
     return (
       <SessionPlaceholder
         sessionId={sessionId}
-        placeholder={routedSessionPlaceholder(sessionId, sessionLookup, conn)}
+        placeholder={routedSessionPlaceholder(sessionId, sessionLookup, conn, snapshotLoaded)}
         preview={props.mode === "preview"}
         isMobile={isMobile}
         onBack={props.onBack ?? (() => navigate({ name: "inbox" }))}

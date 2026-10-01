@@ -2423,6 +2423,8 @@ declare global {
       ): void;
       setSupportsSteering(id: string, supported: boolean | undefined): void;
       replaceSessionSnapshot(id: string, patch: Partial<SessionView>): void;
+      /** Deleted from another client: gone from the snapshot, and a lookup answers 404 (#2202). */
+      deleteSession(id: string): void;
       replaceSnapshot(): void;
       settleInterrupted(id: string): void;
       upsertProject(project: ProjectView): void;
@@ -2750,6 +2752,11 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   },
   replaceSnapshot() {
     socket?.push(snapshot());
+  },
+  deleteSession(id) {
+    model.sessions = model.sessions.filter((candidate) => candidate.id !== id);
+    saveModel();
+    socket?.push({ type: "session_removed", sessionId: id });
   },
   settleInterrupted(id) {
     const value = model.sessions.find((candidate) => candidate.id === id);

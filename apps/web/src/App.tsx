@@ -303,6 +303,7 @@ export function Shell() {
   const settingsReturnViewRef = useRef(settingsReturnView);
   settingsReturnViewRef.current = settingsReturnView;
   const conn = useStoreSelector((s) => s.conn);
+  const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const authRequired = useStoreSelector((s) => s.authRequired);
   const offlineHeld = useConnectionLostFor(conn, 2000);
   // The rail tile and the Instances card agree with the banners below: neither is Online while one
@@ -489,6 +490,16 @@ export function Shell() {
     previousPath.current = path;
     rescueFocusTo(document.getElementById("page-title"));
   }, [path]);
+
+  // And when the routed session loads or goes (deleted or hidden from another client): a missing
+  // session has no panel toggles (#2202), so one that held focus unmounts with it.
+  const sessionLoaded = view.name === "session" && activeSession !== undefined;
+  const previousSessionLoaded = useRef(sessionLoaded);
+  useEffect(() => {
+    if (previousSessionLoaded.current === sessionLoaded) return;
+    previousSessionLoaded.current = sessionLoaded;
+    rescueFocusTo(document.getElementById("page-title"));
+  }, [sessionLoaded]);
   const inboxNewSessionPresetRef = useRef<NewSessionPreset | undefined>(undefined);
   const openContextualNewSession = useCallback(() => {
     setDialog({ kind: "session", preset: inboxNewSessionPresetRef.current });
@@ -746,7 +757,7 @@ export function Shell() {
             sessionActions={sessionPanelControls}
             sessionTitle={activeSession
               ? sessionDisplayTitle(activeSession.title) || "Session"
-              : routedSessionPlaceholder(view.id, routedSessionLookup, conn).title}
+              : routedSessionPlaceholder(view.id, routedSessionLookup, conn, snapshotLoaded).title}
             onSessionBack={() => navigate(sessionsDestination(instanceScope))}
           />
         )}

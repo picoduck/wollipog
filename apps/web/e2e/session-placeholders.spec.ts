@@ -54,6 +54,17 @@ test("at 390px a missing session's top bar shows the state's title and no panel 
   await expect(page.getByRole("button", { name: "Search Sessions" })).toBeVisible();
 });
 
+test("at 390px a session deleted elsewhere hands focus from its panel toggle to the page title", async ({ page }) => {
+  await open(page, 390, ALPHA);
+  const toggle = page.locator("header.topbar .topbar-mobile-controls button").last();
+  await toggle.focus();
+  await expect(toggle).toBeFocused();
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deleteSession("session-alpha"));
+  await expect(page.locator("header.topbar #page-title")).toHaveText("Session Not Found");
+  await expect(page.locator("header.topbar .topbar-mobile-controls")).toHaveCount(0);
+  await expect(page.locator("header.topbar #page-title")).toBeFocused();
+});
+
 test("a load error says Couldn't Load Session, hides the raw error behind Show Details, and Retry looks again", async ({ page }) => {
   await open(page, 1440, ALPHA, "&lookup=error");
   // The fixture's sessions are in the snapshot; take this one out so the page looks it up by id.
