@@ -233,6 +233,21 @@ test("Loading is skeleton rows after 300ms, with a hidden page title and no sent
   }
 });
 
+test("leaving Back during Loading is the person's choice, so the skeleton does not pull focus to the title", async () => {
+  const fixture = await mount(() => new Promise<never>(() => {}));
+  try {
+    const back = fixture.container.querySelector(".session-bar .detail-bar-back") as HTMLButtonElement;
+    await act(async () => back.focus());
+    await act(async () => back.blur());
+    assert.ok(domWindow.document.activeElement === (domWindow.document.body as never));
+    await flush(SESSION_PLACEHOLDER_SKELETON_DELAY_MS + 50);
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"), "the skeleton has appeared");
+    assert.ok(domWindow.document.activeElement === (domWindow.document.body as never), "focus stays where the person left it");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 async function renderPlaceholder(element: React.ReactElement) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

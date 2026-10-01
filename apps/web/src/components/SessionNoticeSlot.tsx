@@ -1,7 +1,8 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import React, { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { ToneIcon } from "./Notice.js";
+import { useRemovedFocus } from "./useRemovedFocus.js";
 
 /**
  * The one notice slot between the transcript and the composer (docs/design-system.md §13.2,
@@ -153,35 +154,9 @@ export function SessionNoticeSlot({ sessionId, entries, onFocusLost }: {
   // the shown notice's "+N More" with it (#2202). Only a focused control the commit removed counts,
   // so a person who clicked away keeps their choice. Focus stays in the slot, or with the slot gone
   // goes to `onFocusLost`.
-  const lastFocusedRef = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    const doc = slotRef.current?.ownerDocument ?? window.document;
-    const onFocusIn = (event: FocusEvent) => {
-      const target = event.target;
-      lastFocusedRef.current = target instanceof HTMLElement && slotRef.current?.contains(target) ? target : null;
-    };
-    // Leaving a control that is still in the document is the person's own move (a click away
-    // leaves focus on <body>). A removal may also report focusout, so look once it has settled.
-    const onFocusOut = (event: FocusEvent) => {
-      const target = event.target;
-      if (target !== lastFocusedRef.current) return;
-      queueMicrotask(() => {
-        if (lastFocusedRef.current === target && (target as HTMLElement).isConnected) lastFocusedRef.current = null;
-      });
-    };
-    doc.addEventListener("focusin", onFocusIn);
-    doc.addEventListener("focusout", onFocusOut);
-    return () => {
-      doc.removeEventListener("focusin", onFocusIn);
-      doc.removeEventListener("focusout", onFocusOut);
-    };
-  }, []);
+  const removedFocus = useRemovedFocus(slotRef);
   useLayoutEffect(() => {
-    const last = lastFocusedRef.current;
-    if (!last || last.isConnected || menuOpen) return;
-    lastFocusedRef.current = null;
-    const doc = last.ownerDocument;
-    if (doc.activeElement && doc.activeElement !== doc.body && doc.activeElement.isConnected) return;
+    if (menuOpen || !removedFocus()) return;
     const target = slotRef.current?.querySelector<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled)") ??
       slotRef.current;
     if (target) target.focus();

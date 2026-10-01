@@ -6,6 +6,7 @@ import { ChevronLeftIcon } from "./Icons.js";
 import { useOpenSearchPalette } from "./search-palette-context.js";
 import { State } from "./State.js";
 import { TranscriptSkeleton } from "./TranscriptSkeleton.js";
+import { useRemovedFocus } from "./useRemovedFocus.js";
 
 /** Loading shows nothing new for this long, so a quick lookup never flashes a skeleton (§12.3). */
 export const SESSION_PLACEHOLDER_SKELETON_DELAY_MS = 300;
@@ -48,26 +49,12 @@ export function SessionPlaceholder({
   }, [loading]);
 
   // Retry swaps the error for Loading, and the state change can take the focused button with it.
-  // Focus that was in this view and is now nowhere goes to the page title rather than <body>.
+  // A control removed under focus hands it to the page title rather than <body>; one the person
+  // left (a click on blank space) keeps their choice.
   const rootRef = useRef<HTMLDivElement>(null);
-  const focusInside = useRef(false);
-  useEffect(() => {
-    const doc = rootRef.current?.ownerDocument;
-    if (!doc) return;
-    const onFocusIn = (event: FocusEvent) => {
-      focusInside.current = event.target instanceof Node && rootRef.current?.contains(event.target) === true;
-    };
-    doc.addEventListener("focusin", onFocusIn);
-    return () => doc.removeEventListener("focusin", onFocusIn);
-  }, []);
+  const removedFocus = useRemovedFocus(rootRef);
   useLayoutEffect(() => {
-    const root = rootRef.current;
-    if (!root || !focusInside.current) return;
-    const doc = root.ownerDocument;
-    const active = doc.activeElement;
-    if (active && active !== doc.body && active.isConnected) return;
-    focusInside.current = false;
-    doc.getElementById("page-title")?.focus();
+    if (removedFocus()) rootRef.current?.ownerDocument.getElementById("page-title")?.focus();
   });
 
   const actions = placeholder.actions.flatMap((action) => {
