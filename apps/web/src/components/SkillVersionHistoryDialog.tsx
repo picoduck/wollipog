@@ -44,8 +44,9 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
   const pages = useSkillVersionPages(skillId);
   const { versions } = pages;
   const byId = useMemo(() => new Map(versions.flatMap((version) => version.id ? [[version.id, version] as const] : [])), [versions]);
-  /** The newest version is the current one; the list is newest first. */
-  const currentId = versions[0]?.id ?? null;
+  /** The newest version is the current one; the list is newest first. A list the dialog couldn't
+   * read again may be out of date, so it names no version current. */
+  const currentId = pages.error ? null : versions[0]?.id ?? null;
 
   /** The chosen version as it was listed; a reload that drops its page keeps it on screen. */
   const [chosen, setChosen] = useState<SkillVersionSummary | null>(null);
@@ -123,20 +124,16 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
       return;
     }
     setAccepted(false); setPreview(null);
-    await pages.reload();
+    const fresh = await pages.reload();
     setRestoring(false);
     setOutcome(`Restored ${restoredName}. Machines that track the latest version deploy it; pinned machines keep their version.`);
+    // The new current version is selected, which says there is nothing left to restore. Only a
+    // fresh list can name it: when the read failed, the list says so and nothing is selected.
+    if (fresh?.[0]) select(fresh[0], true);
+    else setChosen(null);
     try { await onRestored(); }
     catch { setError("The version was restored, but the Skills page didn't refresh. Reopen it to refresh."); }
   };
-
-  // After a restore the new current version is selected, which says there is nothing left to restore.
-  const restoredTo = useRef<string | null>(null);
-  useEffect(() => {
-    if (!outcome || !currentId || restoredTo.current === currentId) return;
-    restoredTo.current = currentId;
-    if (versions[0]) select(versions[0], true);
-  }, [outcome, currentId]);
 
   const reasonId = useId();
   const reason = isCurrent ? CURRENT_VERSION_REASON : null;
@@ -147,11 +144,13 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
     <span className="sr-only">Loading versions…</span>
     <div className="skeleton-row" /><div className="skeleton-row" /><div className="skeleton-row" />
   </div>
-    : pages.error && versions.length === 0 ? <Notice tone="danger" title="Couldn't Load Versions"
-      actions={<button className="btn sm" type="button" onClick={() => void pages.reload()}>Retry</button>}>{pages.error}</Notice>
-    : versions.length === 0 ? <p className="skill-version-note">No versions are available.</p>
+    : versions.length === 0 && !pages.error ? <p className="skill-version-note">No versions are available.</p>
     : <>
-      <div className="surface" role="group" aria-label="Versions">
+      {pages.error && <Notice tone="danger" title="Couldn't Load Versions" role="alert"
+        actions={<button className="btn sm" type="button" onClick={() => void pages.reload()}>Retry</button>}>
+        {versions.length ? `${pages.error} The list below may be out of date.` : pages.error}
+      </Notice>}
+      {versions.length > 0 && <div className="surface" role="group" aria-label="Versions">
         {versions.map((version) => {
           const isSelected = !!version.id && version.id === selectedId;
           const note = skillVersionNote(version, byId);
@@ -170,7 +169,7 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
             </span>}
           </button>;
         })}
-      </div>
+      </div>}
       <SkillVersionListEnd pages={pages} />
     </>;
 

@@ -14,23 +14,29 @@ export function useSkillVersionPages(skillId: string) {
   /** The first page is still being read. */
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  /** The newest versions couldn't be read: the list, if any, is from an earlier read. */
   const [error, setError] = useState<string | null>(null);
+  /** An older page couldn't be read; the list's end offers Retry. */
+  const [moreError, setMoreError] = useState<string | null>(null);
   // Bumped by every reload, so a page that answers after a reload is dropped.
   const generation = useRef(0);
   const busy = useRef(false);
 
-  const reload = useCallback(async () => {
+  /** Reads the newest page again. Resolves to the fresh list, or null when it failed or was superseded. */
+  const reload = useCallback(async (): Promise<SkillVersionSummary[] | null> => {
     const current = ++generation.current;
     busy.current = true;
     // An older page still being read belongs to the generation this one replaces, and its own
     // settling is fenced off, so its flag is cleared here.
-    setLoading(true); setLoadingMore(false); setError(null);
+    setLoading(true); setLoadingMore(false); setError(null); setMoreError(null);
     try {
       const result = await api.listSkillVersions(skillId);
-      if (generation.current !== current) return;
+      if (generation.current !== current) return null;
       setVersions(result.versions); setCursor(result.nextCursor);
+      return result.versions;
     } catch (cause) {
       if (generation.current === current) setError((cause as Error).message);
+      return null;
     } finally {
       if (generation.current === current) { busy.current = false; setLoading(false); }
     }
@@ -45,19 +51,19 @@ export function useSkillVersionPages(skillId: string) {
     if (!cursor || busy.current) return;
     const current = generation.current;
     busy.current = true;
-    setLoadingMore(true); setError(null);
+    setLoadingMore(true); setMoreError(null);
     try {
       const result = await api.listSkillVersions(skillId, cursor);
       if (generation.current !== current) return;
       setVersions((prior) => [...prior, ...result.versions]); setCursor(result.nextCursor);
     } catch (cause) {
-      if (generation.current === current) setError((cause as Error).message);
+      if (generation.current === current) setMoreError((cause as Error).message);
     } finally {
       if (generation.current === current) { busy.current = false; setLoadingMore(false); }
     }
   }, [api, skillId, cursor]);
 
-  return { versions, cursor, loading, loadingMore, error, reload, loadMore };
+  return { versions, cursor, loading, loadingMore, error, moreError, reload, loadMore };
 }
 
 /**
@@ -67,9 +73,9 @@ export function useSkillVersionPages(skillId: string) {
  * dialog needs no scroll box of its own for the list.
  */
 export function SkillVersionListEnd({ pages }: { pages: ReturnType<typeof useSkillVersionPages> }) {
-  const { cursor, loading, loadingMore, error, loadMore, versions } = pages;
+  const { cursor, loading, loadingMore, error, moreError, loadMore, versions } = pages;
   const ref = useRef<HTMLDivElement>(null);
-  const waiting = !!cursor && !loading && !loadingMore && !error;
+  const waiting = !!cursor && !loading && !loadingMore && !error && !moreError;
   useEffect(() => {
     const element = ref.current;
     if (!element || !waiting) return;
@@ -85,7 +91,7 @@ export function SkillVersionListEnd({ pages }: { pages: ReturnType<typeof useSki
   }, [waiting, loadMore, versions.length]);
   if (!cursor && !loadingMore) return null;
   return <div ref={ref} className="skill-version-list-end">
-    {error && versions.length > 0
+    {moreError
       ? <p className="skill-version-list-error" role="alert">
         Older versions couldn't be loaded. <button type="button" className="btn sm" onClick={() => void loadMore()}>Retry</button>
       </p>

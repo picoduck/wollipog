@@ -397,3 +397,41 @@ test("Machine Version counts the machine's agents again for every preview (revie
   assert.equal(dialog().querySelector(".review-consent")?.textContent, "Switch 2 agents to v1");
   await unmount();
 });
+
+test("Version History: a list that can't be read again after a restore names nothing current (review CR-2.1)", async () => {
+  let lists = 0;
+  const before = { versions: [{ id: "skillv_3", versionNumber: 3, digest: "c" }, { id: "skillv_2", versionNumber: 2, digest: "b" }], nextCursor: null };
+  const after = { versions: [{ id: "skillv_4", versionNumber: 4, digest: "b", note: "Restored from v2" }, ...before.versions], nextCursor: null };
+  const client = {
+    ...api,
+    listSkillVersions: async () => {
+      lists++;
+      if (lists === 2) throw new Error("The control plane is restarting.");
+      return lists === 1 ? before : after;
+    },
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => ({
+      version: { id: versionId, versionNumber: Number(versionId.slice(7)), digest: versionId, files: [file(versionId)] },
+      currentVersion: { id: "skillv_3", versionNumber: 3, digest: "skillv_3", files: [file("current")] },
+    }),
+    restoreSkillVersion: async () => undefined,
+  } as unknown as ApiClient;
+  const unmount = await history(client);
+  await click(dialog().querySelector<HTMLInputElement>('.review-consent input[type="checkbox"]')!);
+  await click([...dialog().querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Restore v2")!);
+  assert.match(dialog().textContent!, /Restored v2\./);
+  // The old list stays, said to be out of date, with no version called current and none selected.
+  const notice = dialog().querySelector<HTMLElement>(".skill-version-pane.list .notice")!;
+  assert.match(notice.textContent!, /Couldn't Load Versions.*may be out of date/);
+  assert.deepEqual(rows().map((row) => row.querySelector(".row-title")!.textContent), ["v3", "v2"]);
+  assert.equal(dialog().querySelectorAll(".row .status").length, 0);
+  assert.equal(rows().filter((row) => row.getAttribute("aria-current") === "true").length, 0);
+  const primary = dialog().querySelector<HTMLButtonElement>(".modal-foot .btn.primary")!;
+  assert.equal(primary.textContent, "Restore Version");
+  assert.equal(primary.disabled, true);
+  // Retry reads the list that has the restored version as current.
+  await click([...notice.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Retry")!);
+  assertNoDomNode(dialog().querySelector(".skill-version-pane.list .notice"), "the fresh list replaces the notice");
+  assert.deepEqual(rows().map((row) => row.querySelector(".row-title")!.textContent), ["v4", "v3", "v2"]);
+  assert.equal(rows()[0]!.querySelector(".status")?.textContent, "Current");
+  await unmount();
+});

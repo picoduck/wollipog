@@ -91,8 +91,8 @@ export function SkillMachineVersionDialog({ skillId, runners, machineLabels, ini
   // A pin older than the versions read so far is read page by page, so its row can name it.
   const pinMissing = !!currentPin && !byId.has(currentPin);
   useEffect(() => {
-    if (pinMissing && pages.cursor && !pages.loading && !pages.loadingMore && !pages.error) void pages.loadMore();
-  }, [pinMissing, pages.cursor, pages.loading, pages.loadingMore, pages.error, pages.loadMore]);
+    if (pinMissing && pages.cursor && !pages.loading && !pages.loadingMore && !pages.error && !pages.moreError) void pages.loadMore();
+  }, [pinMissing, pages.cursor, pages.loading, pages.loadingMore, pages.error, pages.moreError, pages.loadMore]);
 
   const loaded = currentPin !== undefined;
   const unchanged = loaded && choice === (currentPin ?? TRACK_LATEST);
@@ -201,7 +201,7 @@ export function SkillMachineVersionDialog({ skillId, runners, machineLabels, ini
           </div>
           : <>
             <ChoiceRows<string> label="Version" value={choice} options={options.map((option) => saving ? { ...option, disabled: true } : option)} onChange={choose} />
-            {pages.error && versions.length === 0
+            {pages.error
               ? <Notice tone="danger" title="Couldn't Load Versions"
                 actions={<button className="btn sm" type="button" onClick={() => void pages.reload()}>Retry</button>}>{pages.error}</Notice>
               : <SkillVersionListEnd pages={pages} />}
