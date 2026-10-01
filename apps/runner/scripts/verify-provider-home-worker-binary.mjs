@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -58,6 +59,38 @@ async function until(predicate, description, ms = 30_000) {
     await pause(10);
   }
 }
+
+function launchDaemon(file, args, options) {
+  if (process.platform !== "win32") return spawn(file, args, options);
+  // A private pseudoconsole can deliver actual Ctrl+C/SIGINT. child.kill(SIGTERM) on Windows
+  // force-terminates a process and cannot prove the daemon's orderly shutdown/release path.
+  const terminal = createRequire(import.meta.url)("node-pty").spawn(file, args, {
+    cwd: options.cwd, env: options.env, cols: 120, rows: 40, useConpty: true,
+  });
+  const child = Object.assign(new EventEmitter(), {
+    pid: terminal.pid, exitCode: null, signalCode: null,
+    stdout: new EventEmitter(), stderr: new EventEmitter(),
+    kill(signal) {
+      if (signal === "SIGTERM") terminal.write("\x03");
+      else {
+        // Force only this ConPTY's exact launched daemon PID; closing a console is not a
+        // substitute for the deliberately abrupt owner-death scenario. Await native onExit.
+        try { process.kill(terminal.pid, "SIGKILL"); }
+        catch (error) { if (error.code !== "ESRCH") throw error; }
+      }
+    },
+  });
+  terminal.onData(data => child.stdout.emit("data", data));
+  terminal.on("error", error => child.emit("error", error));
+  terminal.onExit(({ exitCode }) => {
+    // node-pty's Windows native wait callback supplies this code; bare pipe/PTY closure with no
+    // process exit receipt must never enable recovery, fixture-root deletion or graceful proof.
+    if (!Number.isSafeInteger(exitCode)) { child.emit("error", new Error("unproved ConPTY daemon exit")); return; }
+    child.exitCode = exitCode;
+    child.emit("close", exitCode, null);
+  });
+  return child;
+}
 async function start(dataDir) {
   mkdirSync(dataDir, { mode: 0o700 });
   const config = `${dataDir}.config.json`;
@@ -65,10 +98,12 @@ async function start(dataDir) {
     token: "isolated-smoke-token", dataDir, agents: [], workspaces: [], features: { acpRegistry: false } }));
   // Windows needs its system tools for the fixed PowerShell helper; PATH provider entries are
   // removed, and each conventional user install root points into this fixture.
-  const systemPath = process.platform === "win32" ? `${process.env.SystemRoot}\\System32;${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0` : "/usr/bin:/bin";
-  const child = spawn(binary, [...(source ? ["--import", loader, join(repo, "apps/runner/src/cli.ts")] : []), "--config", config], {
+  const inherited = process.platform === "win32"
+    ? Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key.toUpperCase(), value])) : process.env;
+  const systemPath = process.platform === "win32" ? `${inherited.SYSTEMROOT}\\System32;${inherited.SYSTEMROOT}\\System32\\WindowsPowerShell\\v1.0` : "/usr/bin:/bin";
+  const child = launchDaemon(binary, [...(source ? ["--import", loader, join(repo, "apps/runner/src/cli.ts")] : []), "--config", config], {
     cwd: dataDir, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
-    env: { ...process.env, HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, "local"), APPDATA: join(home, "roaming"),
+    env: { ...inherited, HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, "local"), APPDATA: join(home, "roaming"),
       TMPDIR: temp, TMP: temp, TEMP: temp, PATH: source ? systemPath : process.platform === "win32" ? systemPath : emptyBin,
       RUNNER_ID: runnerId, RUNNER_DATA_DIR: dataDir, RUNNER_TOKEN: "isolated-smoke-token",
       CONTROL_PLANE_URL: `ws://127.0.0.1:${server.address().port}/runner` },
@@ -121,7 +156,10 @@ function seed(ownerHash) {
 }
 async function stop(child, signal) {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  const exit = new Promise(resolveExit => child.once("close", (code, signaled) => resolveExit({ code, signaled })));
+  const exit = new Promise((resolveExit, rejectExit) => {
+    child.once("close", (code, signaled) => resolveExit({ code, signaled }));
+    child.once("error", rejectExit);
+  });
   child.kill(signal);
   const controller = new AbortController();
   try {
