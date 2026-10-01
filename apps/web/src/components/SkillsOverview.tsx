@@ -78,8 +78,13 @@ export function SkillsOverview({
     if (!pending || busy) return;
     focusAfter.current = null;
     const root = rootRef.current;
+    const trigger = [...root?.querySelectorAll<HTMLElement>("[data-skill-assign]") ?? []]
+      .find((candidate) => candidate.dataset.skillAssign === pending);
+    // Focus the person moved elsewhere while the request ran is theirs (as in restoreTriggerFocus).
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== trigger) return;
     const next = recommended.some((skill) => skill.id === pending)
-      ? [...root?.querySelectorAll<HTMLElement>("[data-skill-assign]") ?? []].find((trigger) => trigger.dataset.skillAssign === pending)
+      ? trigger
       : root?.querySelector<HTMLElement>("[data-skill-view]") ??
         root?.querySelector<HTMLElement>(`#${id}-attention`);
     next?.focus();

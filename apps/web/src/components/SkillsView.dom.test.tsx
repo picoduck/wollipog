@@ -2049,6 +2049,39 @@ test("after a recommendation leaves, focus moves to the next View, then to Needs
   }
 });
 
+test("focus the person moves elsewhere while a recommendation request runs stays where they put it", async () => {
+  const skill = { id: "s-using", name: "using-wollipog", builtIn: { release: "0.29.0", heldUpdate: null },
+    recommendation: { dismissed: false }, assignmentCount: 0, latestVersion: versionAt(daysAgo(1)) };
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const view = await mountRouted(oneSkillClient({
+    listSkills: async () => ({ skills: [structuredClone(skill)] }),
+    setSkillRecommendationDismissed: async (_id: string, dismissed: boolean) => {
+      await held;
+      skill.recommendation = { dismissed };
+      return { skill };
+    },
+  }), "skills-overview-focus-claimed");
+  const { container } = view;
+  try {
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Assign using-wollipog"]')!;
+    trigger.focus();
+    await act(async () => trigger.click());
+    const item = [...container.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]')]
+      .find((entry) => entry.textContent === "Dismiss Recommendation")!;
+    await act(async () => item.click());
+    await act(settle);
+    const filter = container.querySelector<HTMLInputElement>('input[aria-label="Filter Skills"]')!;
+    filter.focus();
+    await act(async () => { release(); await held; });
+    await act(settle);
+    assertNoDomNode(overviewSection(container, "Recommended by Wollipog") ?? null, "the dismissal finished");
+    assert.ok(domWindow.document.activeElement === (filter as never), "completion does not take focus from the filter");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("Recommended by Wollipog's Assign › machine assigns to that machine, and View opens the skill", async () => {
   const skill = { id: "s-using", name: "using-wollipog", builtIn: { release: "0.29.0", heldUpdate: null },
     recommendation: { dismissed: false }, assignmentCount: 0, latestVersion: versionAt(daysAgo(1)) };
