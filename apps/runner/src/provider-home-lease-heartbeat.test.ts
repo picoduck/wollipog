@@ -23,7 +23,7 @@ function heartbeat(interval: number) {
   const start = index.indexOf("function startHeartbeat("), end = index.indexOf("\nfunction ", start + 1);
   assert.ok(start > 0 && end > start);
   const source = index.slice(start, end);
-  let last = performance.now(); const delays: number[] = [];
+  let last = performance.now(); const dispatches: { at: number; delayMs: number }[] = [];
   const context = vm.createContext({ setInterval, clearInterval, Date,
     WebSocket: { OPEN: 1 }, MAX_MISSED_HEARTBEAT_PONGS: 2, MAX_INITIAL_MISSED_HEARTBEAT_PONGS: 4,
     metadata: { agents: [] }, staleNativeInstallationKey: () => "[]", reportedStaleInstallationKey: "[]",
@@ -33,13 +33,17 @@ function heartbeat(interval: number) {
   });
   const socket = { readyState: 1, send(frame: string) {
     assert.equal(JSON.parse(frame).type, "heartbeat");
-    const now = performance.now(); delays.push(Math.max(0, now - last - interval)); last = now;
+    const now = performance.now(); dispatches.push({ at: now, delayMs: Math.max(0, now - last - interval) }); last = now;
   }, ping() { context.missedHeartbeatPongs = 0; context.heartbeatPongObserved = true; },
   terminate() { assert.fail("lease work made the healthy socket terminate"); } };
   vm.runInContext(transformSync(source, { loader: "ts", format: "cjs" }).code, context);
+  const firstDueAt = performance.now() + interval;
   context.startHeartbeat(socket, interval);
-  return { stop() { clearInterval(context.heartbeatTimer); }, report() {
-    return { intervalMs: interval, dispatches: delays.length, maxDispatchDelayMs: Math.max(0, ...delays),
+  return { firstDueAt, stop() { clearInterval(context.heartbeatTimer); }, report(begin: number, end: number) {
+    const duringWork = dispatches.filter(dispatch => dispatch.at > begin && dispatch.at < end);
+    return { intervalMs: interval, dispatches: dispatches.length, duringWorkDispatches: duringWork.length,
+      maxDispatchDelayMs: Math.max(0, ...dispatches.map(dispatch => dispatch.delayMs)),
+      maxDuringWorkDispatchDelayMs: Math.max(0, ...duringWork.map(dispatch => dispatch.delayMs)),
       heartbeatSourceSha256: createHash("sha256").update(source).digest("hex") };
   } };
 }
@@ -47,18 +51,31 @@ function heartbeat(interval: number) {
 async function measure(t: { diagnostic(message: string): void }, scenario: string, action: () => Promise<void>, normal = false) {
   const timers = [heartbeat(100), ...(normal ? [heartbeat(10_000)] : [])];
   try {
-    await pause(220);
-    const begin = performance.now(); await action(); const operationDurationMs = performance.now() - begin;
+    // Align the real production interval before work, without extending the operation or resetting
+    // its dispatch baseline. A fast migration still has to overlap an actual heartbeat dispatch.
+    await pause(normal ? 9900 : 220);
+    const begin = performance.now();
+    if (normal) assert.ok(begin < timers[1]!.firstDueAt, "heartbeat sampling setup overshot the first production due time");
+    await action(); const end = performance.now(), operationDurationMs = end - begin;
     await pause(120);
-    const reports = timers.map(timer => timer.report());
+    const reports = timers.map(timer => timer.report(begin, end));
     t.diagnostic(JSON.stringify({ scenario, operationDurationMs, heartbeat: reports }));
     for (const report of reports) {
-      assert.ok(report.dispatches > 0, "the production heartbeat dispatched while lease work was pending");
+      assert.ok(report.dispatches > 0, "the production heartbeat probe dispatched");
+      if (report.intervalMs === 10_000) assert.ok(report.duringWorkDispatches > 0,
+        "heartbeat sampling failed: no production 10-second dispatch strictly during lease work");
       assert.ok(report.maxDispatchDelayMs <= LEASE_WORKER_LIMITS.heartbeatDelayMs,
         `${scenario}: heartbeat ${report.maxDispatchDelayMs} ms late; operation ${operationDurationMs} ms`);
     }
+    return { operationDurationMs, heartbeat: reports };
   } finally { for (const timer of timers) timer.stop(); }
 }
+
+test("the real production timer samples pending work shorter than its 10-second interval", { timeout: 15_000 }, async t => {
+  const result = await measure(t, "sub-interval-pending-work", () => pause(400), true);
+  assert.ok(result.operationDurationMs < 10_000);
+  assert.ok(result.heartbeat.find(report => report.intervalMs === 10_000)!.duringWorkDispatches > 0);
+});
 
 function legacy(home: string, transitions: number) {
   const root = join(home, ".agent-manager/provider-home-leases-v1"), lock = join(root, "mutable-home.lock");

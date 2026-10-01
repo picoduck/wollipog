@@ -64,7 +64,12 @@ failure cannot change ownership.
 The regression fixture executes the actual production `startHeartbeat` function with an isolated
 socket sink and immediate pong. It measures dispatch inter-gap minus interval with
 `performance.now()`, separately from the lease operation's elapsed duration. Fixture preparation
-precedes measurement. The heartbeat callback SHA-256 is
+precedes measurement. The maximal migration starts after 9,900 ms of asynchronous timer setup,
+placing the first unchanged 10-second heartbeat due time inside the pending operation even on
+machines that finish migration in less than 10 seconds. Setup overshoot or no dispatch strictly
+between operation start and completion fails sampling explicitly. Setup and post-work dispatches
+cannot satisfy that proof; the original dispatch timestamps remain intact for the 500 ms bound.
+The heartbeat callback SHA-256 is
 `fe29eb1bc6a221ecd6c271b510fe6035baf8e89f6299a356e3b48ce55f8d88c6`.
 
 Linux / Node 24.18.1 measurements on a local development filesystem:
