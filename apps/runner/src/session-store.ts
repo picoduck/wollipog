@@ -90,6 +90,8 @@ export interface SessionMeta {
   /** Runner-private binding captured once so config edits cannot redirect a durable session. */
   providerAccountProvider?: "claude" | "codex";
   providerCredentialHome?: string;
+  /** Runner-private source of Claude history until a credential-home transfer completes. */
+  providerConversationHome?: string;
   /** Durable runner-private handoff target. The current binding remains authoritative until the
    * replacement provider has resumed successfully. */
   pendingProviderAccountId?: string;

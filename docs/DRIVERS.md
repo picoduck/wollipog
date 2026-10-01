@@ -363,6 +363,13 @@ text and `cmd.exe` metacharacters out of the Windows command line.
   whole group inside the distro, since `taskkill` only sees the `wsl.exe` relay, not the Linux agent).
 - `cwd` = worktree path when isolated, else workspace path. Session-id resume is scoped to cwd + its
   git worktrees, so always spawn from the same `cwd`.
+- Configured-account switching preserves the same conversation id and working directory. Outside
+  Bubblewrap, the runner copies that conversation's `projects/<project>/<id>.jsonl` and its exact
+  subagent-history directory to the chosen account's `CLAUDE_CONFIG_DIR` after retiring the previous
+  provider and before accepting another prompt. A durable runner-private source-home marker keeps
+  interrupted transfers recoverable. Credentials, account configuration, and unrelated histories
+  are not copied. Switching back refreshes the original transcript with intervening turns.
+  Bubblewrap already mounts the same session-owned projects store across credential homes.
 - **stdio control protocol** (interactive modes): when claude needs permission for a tool it writes a
   `control_request` JSONL frame on stdout —
   `{"type":"control_request","request_id":"<id>","request":{"subtype":"can_use_tool","tool_name":"Bash","description":"…","input":{…}}}`.

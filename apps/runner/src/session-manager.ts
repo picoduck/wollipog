@@ -14,6 +14,7 @@
  */
 
 import { buildConversationHandoff, handoffDestinationError, type ConversationHandoffDraft } from "@wollipog/protocol";
+import { transferClaudeAccountTranscript } from "./claude-account-transcript.js";
 import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
 import { UnclassifiedRejectionJournal } from "./drivers/unclassified-rejection-journal.js";
 import type {
@@ -1188,6 +1189,7 @@ export class SessionManager {
      * durable metadata again, but cleanup must keep fencing the cwd already handed to launch(). */
     launchingWorktreePath?: string;
   }>();
+  private readonly transferAccountTranscript = transferClaudeAccountTranscript;
   /** Turn-boundary provider-account handoffs share the worktree handoff's replacement guarantees
    * but keep a distinct lane so neither operation can accidentally consume the other's target. */
   private readonly providerAccountSwitches = new Map<string, {
@@ -5532,6 +5534,7 @@ export class SessionManager {
       providerAccountLabel: providerAccount?.label,
       providerAccountProvider: providerAccount?.provider,
       providerCredentialHome: providerAccount?.credentialHome,
+      providerConversationHome: priorResumeId ? prior?.providerConversationHome : undefined,
       pendingProviderAccountId: prior?.pendingProviderAccountId,
       pendingProviderAccountLabel: prior?.pendingProviderAccountLabel,
       pendingProviderAccountProvider: prior?.pendingProviderAccountProvider,
@@ -7318,6 +7321,31 @@ export class SessionManager {
           this.executionIsolation.mode === "bwrap" &&
           meta.providerStateVersion !== (meta.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(meta, launchGeneration);
+      }
+      // Credential homes also own Claude's projects store. A same-id resume cannot find its
+      // conversation after an account switch until its exact history is in the new home. Bwrap
+      // already mounts the same session-owned store across credential contexts.
+      if (meta.driver === "claude-code" && resumeId && meta.providerConversationHome &&
+          meta.providerCredentialHome && meta.providerConversationHome !== meta.providerCredentialHome) {
+        if (this.executionIsolation.mode !== "bwrap") {
+          try {
+            await this.transferAccountTranscript(
+              meta.context, resumeId, meta.providerConversationHome, meta.providerCredentialHome,
+            );
+          } catch {
+            if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+            this.emitEvent(sessionId, {
+              kind: "error",
+              message: "could not transfer the saved Claude conversation to the selected account",
+            });
+            this.emitStatus(sessionId, "failed", "The saved Claude conversation could not be transferred to the selected account.");
+            return false;
+          }
+        }
+        if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+        meta.providerConversationHome = meta.providerCredentialHome;
+        this.store.patchMeta(sessionId, { providerConversationHome: meta.providerConversationHome });
+        this.store.flush(sessionId);
       }
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
       await this.proveGuardInsideSandbox(meta, isolation, cwd);
@@ -10763,6 +10791,7 @@ export class SessionManager {
       providerAccountLabel: target.label,
       providerAccountProvider: target.provider,
       providerCredentialHome: target.credentialHome,
+      providerConversationHome: meta.providerConversationHome ?? meta.providerCredentialHome,
       pendingProviderAccountId: followUp?.id,
       pendingProviderAccountLabel: followUp?.label,
       pendingProviderAccountProvider: followUp?.provider,
@@ -11089,6 +11118,7 @@ export class SessionManager {
         providerAccountLabel: target.label,
         providerAccountProvider: target.provider,
         providerCredentialHome: target.credentialHome,
+        providerConversationHome: current.providerConversationHome ?? current.providerCredentialHome,
         pendingProviderAccountId: undefined,
         pendingProviderAccountLabel: undefined,
         pendingProviderAccountProvider: undefined,

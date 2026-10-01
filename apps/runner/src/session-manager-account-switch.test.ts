@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -37,6 +37,7 @@ function makeManager(
   root: string,
   driverFactory: (...args: never[]) => unknown,
   messages: RunnerToControlPlane[],
+  useRealTranscripts = false,
 ): { manager: SessionManager; store: SessionStore } {
   const store = new SessionStore(join(root, "data", "sessions"));
   const manager = new SessionManager(
@@ -51,10 +52,14 @@ function makeManager(
   );
   const internals = manager as unknown as {
     resolveProviderAccount: ProviderAccountResolver;
+    transferAccountTranscript: () => Promise<void>;
     prepareLaunch: (meta: { providerAccountProvider?: string; providerCredentialHome?: string;
       env: Record<string, string> }) => void | Promise<void>;
   };
   internals.resolveProviderAccount = accountResolver;
+  // Fake providers in the lifecycle tests do not write provider history. The filesystem-backed
+  // regression below keeps the real transfer so it catches missing history at the resume seam.
+  if (!useRealTranscripts) internals.transferAccountTranscript = async () => {};
   internals.prepareLaunch = (meta) => {
     if (!meta.providerCredentialHome) return;
     meta.env = meta.providerAccountProvider === "claude"
@@ -674,3 +679,77 @@ test("an exhausted structured window schedules an automatic switch only after th
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const scenario of ["idle", "dormant", "interrupted transfer"] as const) {
+  test(`Claude account switching preserves the transcript for resume and switching back (${scenario})`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-transcript-"));
+    const messages: RunnerToControlPlane[] = [];
+    const sessionId = "11111111-2222-4333-8444-555555555555";
+    const homes = { work: join(root, "work"), personal: join(root, "personal") };
+    for (const home of Object.values(homes)) mkdirSync(home, { recursive: true });
+    const project = root.replace(/[^a-zA-Z0-9]/g, "-");
+    const transcript = (home: string) => join(home, "projects", project, `${sessionId}.jsonl`);
+    const failures: string[] = [];
+    let completed = 0;
+    let manager: SessionManager | undefined;
+    try {
+      const factory = (_driver: unknown, launch: { env: Record<string, string>; resumeId?: string }) => {
+        const home = launch.env.CLAUDE_CONFIG_DIR!;
+        return {
+          initialize: async () => {},
+          newSession: async () => sessionId,
+          prompt: async (text: string) => {
+            if (launch.resumeId && !existsSync(transcript(home))) {
+              failures.push("No conversation found with session ID");
+              return "refusal" as const;
+            }
+            mkdirSync(join(home, "projects", project), { recursive: true });
+            const prior = existsSync(transcript(home)) ? readFileSync(transcript(home), "utf8") : "";
+            writeFileSync(transcript(home), prior + JSON.stringify({ type: "user", message: text, sessionId }) + "\n");
+            completed++;
+            return "end_turn" as const;
+          },
+          cancel: () => {}, dispose: () => {}, setConfig: async () => {}, resolvePermission: () => false,
+          agentSessionId: () => sessionId,
+        };
+      };
+      let made = makeManager(root, factory, messages, true);
+      manager = made.manager;
+      const resolveAccount: ProviderAccountResolver = (spec) => ({
+        id: spec.providerAccountId!, label: spec.providerAccountId!, provider: "claude", credentialHome: homes[spec.providerAccountId as keyof typeof homes],
+      });
+      (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
+      const spec = launchSpec(root, "claude-code", "work");
+      assert.equal(await manager.start(spec), true);
+      manager.prompt(spec.sessionId, "first turn");
+      await waitFor(() => made.store.readMeta(spec.sessionId)?.status === "idle" && completed === 1, "first turn did not settle");
+      if (scenario === "dormant") {
+        manager.shutdownAll();
+        made = makeManager(root, factory, messages, true);
+        manager = made.manager;
+        (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
+      }
+      if (scenario === "interrupted transfer") renameSync(transcript(homes.work), `${transcript(homes.work)}.retained`);
+      await manager.switchProviderAccount(spec.sessionId, "personal");
+      if (scenario === "interrupted transfer") {
+        assert.ok(made.store.readMeta(spec.sessionId)?.providerAccountSwitchFailure);
+        assert.equal(made.store.readMeta(spec.sessionId)?.providerConversationHome, homes.work);
+        manager.shutdownAll();
+        renameSync(`${transcript(homes.work)}.retained`, transcript(homes.work));
+        made = makeManager(root, factory, messages, true);
+        manager = made.manager;
+        (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
+      }
+      manager.prompt(spec.sessionId, "Continue, please.");
+      await waitFor(() => failures.length > 0 || (completed === 2 && made.store.readMeta(spec.sessionId)?.status === "idle"), "continued turn did not settle");
+      assert.deepEqual(failures, [], "the selected account must find the same conversation on resume");
+      await manager.switchProviderAccount(spec.sessionId, "work");
+      manager.prompt(spec.sessionId, "continue back on work");
+      await waitFor(() => completed === 3 && made.store.readMeta(spec.sessionId)?.status === "idle", "switch-back turn did not settle");
+      assert.match(readFileSync(transcript(homes.work), "utf8"), /Continue, please/);
+    } finally {
+      manager?.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}

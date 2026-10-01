@@ -157,6 +157,8 @@ function harness(
   );
   (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount =
     (spec: SessionLaunchSpec) => accounts[spec.providerAccountId as keyof typeof accounts];
+  // These fake providers model identity checks and lifecycle; they do not create CLI transcripts.
+  (manager as unknown as { transferAccountTranscript: () => Promise<void> }).transferAccountTranscript = async () => {};
   return {
     root,
     store,
