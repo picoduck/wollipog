@@ -1242,6 +1242,14 @@ kbd {
 .agent-other {
   color: var(--text-faint);
 }
+/* In forced colors a provider's mark follows its words too: an svg keeps an author colour it sets
+   itself, and a brand colour is not a system colour. */
+@media (forced-colors: active) {
+  .agent-openai,
+  .agent-anthropic,
+  .agent-google,
+  .agent-other { color: inherit; }
+}
 /* People & devices access panel */
 .access-heading {
   margin-top: 14px;

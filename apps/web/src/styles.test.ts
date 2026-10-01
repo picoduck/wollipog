@@ -252,6 +252,10 @@ test("one field error rule, and invalid controls in a field draw a red edge unde
  */
 const SELF_COLOURED_ICONS: ReadonlyArray<readonly [rule: string, forced: string]> = [
   [".voice-btn.voice-recording > svg", ".voice-btn.voice-recording > svg"],
+  [".agent-openai", ".agent-openai"],
+  [".agent-anthropic", ".agent-anthropic"],
+  [".agent-google", ".agent-google"],
+  [".agent-other", ".agent-other"],
   [".menu-check", ".menu-check"],
   [".field-warn-icon", ".field-warn-icon"],
   [".save-bar-icon", ".save-bar-icon"],

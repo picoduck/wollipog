@@ -75,6 +75,21 @@ for (const palette of ["dark", "light"] as const) {
       expect(saveBar.words).toBe(canvasText);
     });
 
+    test("a provider's mark follows the session list's sender line", async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(PINNED);
+      await expect(page.locator(".inbox-row-sender").first()).toBeVisible();
+      // Outside forced colors the mark keeps its brand colour; in them it follows the words beside it.
+      const senders = await page.locator(".inbox-row-sender").evaluateAll((lines) => lines.map((line) => ({
+        mark: line.querySelector(":scope > .agent-icon")!.getAttribute("class")!,
+        icon: getComputedStyle(line.querySelector(":scope > .agent-icon")!).color,
+        words: getComputedStyle(line.querySelector(":scope > span")!).color,
+      })));
+      expect(senders.length).toBeGreaterThan(0);
+      expect(senders.some((sender) => /\bagent-(openai|anthropic|google)\b/.test(sender.mark))).toBe(true);
+      for (const sender of senders) expect(sender.icon, sender.mark).toBe(sender.words);
+    });
+
     test("the Pinned Summary's warning rows and plan steps follow their words", async ({ page }) => {
       const aside = await openPinnedSummary(page, palette);
       const canvasText = await computed(page, "CanvasText");
@@ -111,6 +126,7 @@ for (const palette of ["dark", "light"] as const) {
       })));
       expect(chevrons.length).toBeGreaterThan(0);
       for (const chevron of chevrons) expect(chevron.icon).toBe(chevron.words);
+
     });
   });
 }
