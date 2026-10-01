@@ -204,8 +204,48 @@ test("real checkpoint and genesis mirror failures remain retryable only by the o
   }
 });
 
+test("whole-root quarantine requires restarting the originating failed-initialization registry", (t) => {
+  for (const phase of ["directory", "mirror"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-provider-quarantine-${phase}-`));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const { root, lock } = leasePaths(home);
+    const fail = () => { throw new Error("initialization failed before grant"); };
+    const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+      afterInitializationPublishForTest: phase === "directory" ? fail : undefined,
+      beforeInitializationMirrorForTest: phase === "mirror" ? fail : undefined,
+    });
+    const refusals: string[] = [];
+    const refused = () => {
+      assert.throws(() => registry.acquireHome(home), (error: unknown) => {
+        refusals.push(String(error));
+        return true;
+      });
+      assert.equal(registry.releaseHome(home), false, "initialization never granted the HOME");
+    };
+    refused();
+    assert.equal(existsSync(lock), phase === "mirror");
+    const quarantine = join(home, "quarantined-provider-home-leases-v1");
+    const snapshot = () => readdirSync(quarantine, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => ({ path: join(entry.parentPath, entry.name), bytes: readFileSync(join(entry.parentPath, entry.name)) }));
+    renameSync(root, quarantine);
+    const evidence = snapshot();
+    refused();
+    refused();
+    assert.equal(existsSync(lock), false, "the stale registry never creates a replacement lock");
+    const restarted = new ProviderHomeLeaseRegistry(OWNER_A);
+    assert.equal(restarted.acquireHome(home), true, "a fresh registry can acquire after safe quarantine");
+    refused();
+    assert.equal(restarted.releaseHome(home), true);
+    assert.deepEqual(snapshot(), evidence, "all quarantined evidence remains intact");
+    for (const message of refusals) {
+      assert.match(message, /quarantine the entire.*restart the runner.*do not remove individual records/s);
+    }
+  }
+});
+
 test("failed initialization retry refuses changed evidence, successors, and rollback directories", (t) => {
-  for (const change of ["proof", "corrupt", "retained", "directory", "successor", "during-retry"] as const) {
+  for (const change of ["proof", "owner", "host", "pid", "missing", "corrupt", "retained", "directory", "successor", "during-retry"] as const) {
     const home = mkdtempSync(join(tmpdir(), `wollipog-provider-retry-refuse-${change}-`));
     const { root, lock } = leasePaths(home);
     t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -221,6 +261,10 @@ test("failed initialization retry refuses changed evidence, successors, and roll
     assert.throws(() => registry.acquireHome(home), /quarantine the entire/);
     const proof = JSON.parse(readFileSync(proofPath, "utf8"));
     if (change === "proof") mutate();
+    if (change === "owner") writeFileSync(proofPath, JSON.stringify({ ...proof, ownerHash: OWNER_B }));
+    if (change === "host") writeFileSync(proofPath, JSON.stringify({ ...proof, hostname: "foreign-host" }));
+    if (change === "pid") writeFileSync(proofPath, JSON.stringify({ ...proof, pid: process.pid }));
+    if (change === "missing") renameSync(proofPath, join(home, "retained-proof.json"));
     if (change === "corrupt") writeFileSync(proofPath, "{");
     if (change === "retained") writeFileSync(proofPath, JSON.stringify({ ...proof, recoveredEntriesHash: "c".repeat(64) }));
     if (change === "directory") mkdirSync(lock);
@@ -230,9 +274,10 @@ test("failed initialization retry refuses changed evidence, successors, and roll
         ...proof, leaseId: LEGACY_ID, previousLeaseId: proof.leaseId, previousRecordHash: hash,
       }));
     }
-    const before = readFileSync(proofPath);
-    assert.throws(() => registry.acquireHome(home), /quarantine the entire.*do not remove individual records/s);
-    if (change !== "during-retry") assert.deepEqual(readFileSync(proofPath), before);
+    const evidencePath = change === "missing" ? join(home, "retained-proof.json") : proofPath;
+    const before = readFileSync(evidencePath);
+    assert.throws(() => registry.acquireHome(home), /quarantine the entire.*restart the runner.*do not remove individual records/s);
+    if (change !== "during-retry") assert.deepEqual(readFileSync(evidencePath), before);
     assert.equal(registry.releaseHome(home), false);
     assert.equal(existsSync(lock), change === "directory", "refusal does not create a directory");
   }

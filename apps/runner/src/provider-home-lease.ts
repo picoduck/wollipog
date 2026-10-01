@@ -267,16 +267,19 @@ class ProviderHomeLeaseRefusal extends Error {
   constructor(readonly reason: string, message: string) { super(message); }
 }
 
-function refusal(lockDir: string, reason: string): Error {
-  return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and retry; do not remove individual records`);
+function refusal(lockDir: string, reason: string, restartAfterQuarantine = false): Error {
+  const recovery = restartAfterQuarantine
+    ? "restart the runner before retrying; this registry retains its failed initialization reservation after quarantine"
+    : "retry";
+  return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and ${recovery}; do not remove individual records`);
 }
 
-function verificationRefusal(lockDir: string, error: unknown): Error {
+function verificationRefusal(lockDir: string, error: unknown, restartAfterQuarantine = false): Error {
   // Preserve the complete remedy once, and never put malformed record contents from a parser's
   // exception into operator-visible output.
   if (error instanceof LeaseIoError && error.kind === "busy") return new LeaseIoError("busy", `provider home lease directory ${lockDir} is already in use: checkpoint publication is in progress; preserve evidence and retry`);
   if (error instanceof LeaseIoError && error.kind === "unavailable") return error;
-  return refusal(lockDir, error instanceof ProviderHomeLeaseRefusal ? error.reason : "cannot be verified: metadata is unsafe or unreadable");
+  return refusal(lockDir, error instanceof ProviderHomeLeaseRefusal ? error.reason : "cannot be verified: metadata is unsafe or unreadable", restartAfterQuarantine);
 }
 
 function recordsHash(records: Array<{ name: string; hash: string }>): string {
@@ -735,7 +738,7 @@ export class ProviderHomeLeaseRegistry {
         this.beforeTransitionPublishForTest?.();
         if (this.verifyInitialization(lockDir, failed).snapshotHash !== failed.snapshotHash) throw unexpectedEntries(lockDir);
       } catch (error) {
-        throw verificationRefusal(lockDir, error);
+        throw verificationRefusal(lockDir, error, true);
       }
       this.finishInitialization(key, root, lockDir, failed);
       this.held.set(key, { leaseId: failed.proof.record.leaseId, acquiredHash: failed.proof.hash, lockDir, root, references: 1 });
@@ -858,7 +861,7 @@ export class ProviderHomeLeaseRegistry {
         reservation.snapshotHash = this.verifyInitialization(lockDir, reservation).snapshotHash;
         this.failedInitializations.set(home, reservation);
       } catch { /* Uncertain ownership requires the complete operator remedy. */ }
-      throw verificationRefusal(lockDir, error);
+      throw verificationRefusal(lockDir, error, true);
     }
   }
 
