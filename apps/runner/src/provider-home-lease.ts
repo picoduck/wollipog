@@ -391,9 +391,13 @@ export class ProviderHomeLeaseRegistry {
         this.afterInitializationPublishForTest?.();
         // Exclusive mkdir detects a competing legacy initializer instead of attributing its
         // directory to our proof. Keep the proof and refuse; no ownership evidence is removed.
-        mkdirSync(lockDir, { mode: 0o700 });
-        linkSync(join(root, RECOVERY_MARKER), join(lockDir, "checkpoint.json"));
-        linkSync(join(root, RECOVERY_MARKER), join(lockDir, `lease-${record.leaseId}.json`));
+        try {
+          mkdirSync(lockDir, { mode: 0o700 });
+          linkSync(join(root, RECOVERY_MARKER), join(lockDir, "checkpoint.json"));
+          linkSync(join(root, RECOVERY_MARKER), join(lockDir, `lease-${record.leaseId}.json`));
+        } catch (error) {
+          throw verificationRefusal(lockDir, error);
+        }
       } else {
         // The winning initializer may have died before mkdir. Only its verified proof may
         // authorize recreating that directory; never mkdir on a foreign or live reservation.

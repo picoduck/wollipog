@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -32,15 +33,172 @@ function instrumentHelper(before: string, after: string): string {
   return WSL_SKILLS_HELPER.replace(before, after);
 }
 
+function leaseProgram(code: string, helper = WSL_SKILLS_HELPER): string {
+  const boundary = helper.lastIndexOf("\ntry:\n    main(bounded_json())");
+  assert.ok(boundary > 0);
+  return `${helper.slice(0, boundary)}\n${code}\n`;
+}
+
+function invokeLease(home: string, code: string): ReturnType<typeof spawnSync> {
+  return spawnSync("python3", ["-c", leaseProgram(code)], {
+    env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 5_000,
+  });
+}
+
+const acquireAndRelease = `home_fd, _ = open_root(os.environ["HOME"])
+lease = acquire_lease(home_fd, "${owner}")
+release_lease(lease)
+os.close(home_fd)
+print("released")`;
+
+test("native and helper first initializers elect one proof across deterministic interleavings", (t) => {
+  for (const phase of ["before-proof", "after-proof"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-wsl-initializer-${phase}-`));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const root = join(home, ".agent-manager/provider-home-leases-v1");
+    let helper: ReturnType<typeof spawnSync> | undefined;
+    const race = () => {
+      helper = invokeLease(home, acquireAndRelease);
+      if (phase === "before-proof") assert.equal(helper.status, 0, String(helper.stderr));
+      else {
+        assert.notEqual(helper.status, 0);
+        assert.match(String(helper.stderr), /already in use.*quarantine the entire/s);
+        assert.equal(existsSync(join(root, "mutable-home.lock")), false, "loser does not create mirrors");
+      }
+    };
+    const native = new ProviderHomeLeaseRegistry(owner, {
+      ...(phase === "before-proof" ? { beforeMarkerWriteForTest: race } : { afterInitializationPublishForTest: race }),
+    });
+    assert.equal(native.acquireHome(home), true);
+    assert.ok(helper);
+    const competing = invokeLease(home, acquireAndRelease);
+    assert.notEqual(competing.status, 0, "the native winner excludes the helper");
+    const proof = readFileSync(join(root, "mutable-home.recovery.json"));
+    native.releaseAll();
+    assert.equal(invokeLease(home, acquireAndRelease).status, 0, "orderly handoff remains usable");
+    assert.deepEqual(readFileSync(join(root, "mutable-home.recovery.json")), proof);
+  }
+});
+
+test("killed helper initialization is reclaimable by a new helper and native runner", async (t) => {
+  for (const phase of ["before-directory", "empty-directory", "active"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-wsl-killed-${phase}-`));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const ready = join(home, "ready");
+    const before = phase === "before-directory" ? '            except FileExistsError: return acquire_external_lease(root, owner)\n'
+      : phase === "empty-directory" ? '            lock = child_dir(root, "mutable-home.lock")\n            try:\n                mirror_external_lease(root, lock, "mutable-home.recovery.json", "checkpoint.json", True)\n'
+        : '                return root, lock, value["leaseId"]\n';
+    const indent = phase === "active" ? "                " : "            ";
+    const helper = instrumentHelper(before, phase === "before-directory" ? `${before}${indent}hold()\n` : `${indent}hold()\n${before}`);
+    const child = spawn("python3", ["-c", leaseProgram(`
+def hold():
+    with open(${JSON.stringify(ready)}, "w") as stream: stream.write(str(os.getpid()))
+    while True: time.sleep(1)
+home_fd, _ = open_root(os.environ["HOME"])
+lease = acquire_lease(home_fd, "${owner}")
+release_lease(lease)
+`, helper)], { env: { ...process.env, HOME: home }, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    t.after(() => { child.kill("SIGKILL"); });
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(ready) && child.exitCode === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const reported = existsSync(ready);
+    const live = new ProviderHomeLeaseRegistry(owner);
+    if (reported) assert.throws(() => live.acquireHome(home), /already in use.*quarantine the entire/s);
+    child.kill("SIGKILL");
+    await exited;
+    assert.ok(reported, stderr);
+    const foreign = invokeLease(home, acquireAndRelease.replace(owner, "b".repeat(64)));
+    assert.notEqual(foreign.status, 0);
+    assert.match(String(foreign.stderr), /another runner owner.*quarantine the entire/s);
+    const replacement = invokeLease(home, acquireAndRelease);
+    assert.equal(replacement.status, 0, String(replacement.stderr));
+    assert.equal(live.acquireHome(home), true);
+    live.releaseAll();
+  }
+});
+
+test("a helper paused before proof publication loses cleanly to a live native initializer", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-wsl-proof-election-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const ready = join(home, "ready");
+  const resume = join(home, "resume");
+  const helper = instrumentHelper(
+    '            try: publish_lease(root, root, "mutable-home.recovery.json", value)\n',
+    '            hold()\n            try: publish_lease(root, root, "mutable-home.recovery.json", value)\n',
+  );
+  const child = spawn("python3", ["-c", leaseProgram(`
+def hold():
+    with open(${JSON.stringify(ready)}, "w") as stream: stream.write("ready")
+    while not os.path.exists(${JSON.stringify(resume)}): time.sleep(0.01)
+${acquireAndRelease}
+`, helper)], { env: { ...process.env, HOME: home }, stdio: ["ignore", "ignore", "pipe"] });
+  t.after(() => { child.kill("SIGKILL"); });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+  const exited = new Promise<number | null>((resolve) => child.once("close", resolve));
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(ready) && child.exitCode === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(existsSync(ready), stderr);
+  const native = new ProviderHomeLeaseRegistry(owner);
+  assert.equal(native.acquireHome(home), true);
+  const root = join(home, ".agent-manager/provider-home-leases-v1");
+  const proof = readFileSync(join(root, "mutable-home.recovery.json"));
+  writeFileSync(resume, "resume");
+  assert.notEqual(await exited, 0);
+  assert.match(stderr, /already in use.*quarantine the entire/s);
+  assert.deepEqual(readFileSync(join(root, "mutable-home.recovery.json")), proof);
+  native.releaseAll();
+  assert.equal(invokeLease(home, acquireAndRelease).status, 0);
+});
+
+test("legacy helper readers refuse a freshly initialized canonical helper journal", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-wsl-rollback-reader-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  assert.equal(invokeLease(home, acquireAndRelease).status, 0);
+  const rollback = invokeLease(home, `home_fd, _ = open_root(os.environ["HOME"])
+lock = walk_dir(home_fd, ".agent-manager/provider-home-leases-v1/mutable-home.lock")
+read_lease_chain(lock)`);
+  assert.notEqual(rollback.status, 0);
+  assert.match(String(rollback.stderr), /provider home lease is (unsafe|incomplete or foreign)/);
+  const native = new ProviderHomeLeaseRegistry(owner);
+  assert.equal(native.acquireHome(home), true);
+  native.releaseAll();
+});
+
 function compactionSiblings(home: string): string[] {
   const root = join(home, ".agent-manager", "provider-home-leases-v1");
   return readdirSync(root).filter((name) => name.startsWith(".mutable-home.compact-"));
 }
 
+function initializeLegacyLease(home: string): void {
+  const lock = join(home, ".agent-manager/provider-home-leases-v1/mutable-home.lock");
+  mkdirSync(lock, { recursive: true, mode: 0o700 });
+  // Existing journals keep using directory-only compaction. New homes use canonical proof.
+  const active = {
+    version: 2, state: "active", ownerHash: owner, leaseId: "11111111-1111-4111-8111-111111111111",
+    previousLeaseId: null, previousRecordHash: null,
+    pid: 2_147_483_647, hostname: hostname(), provider: "skills", createdAt: "2026-08-19T00:00:00.000Z",
+  };
+  const bytes = `${JSON.stringify(active)}\n`;
+  writeFileSync(join(lock, `lease-${active.leaseId}.json`), bytes, { mode: 0o600 });
+  writeFileSync(join(lock, `next-${active.leaseId}.json`), JSON.stringify({
+    ...active, state: "released", leaseId: "22222222-2222-4222-8222-222222222222",
+    previousLeaseId: active.leaseId, previousRecordHash: createHash("sha256").update(bytes).digest("hex"),
+  }), { mode: 0o600 });
+}
+
 async function fillLeaseJournal(home: string, store: string): Promise<Record<string, unknown>> {
+  initializeLegacyLease(home);
   const specification = { ownerHash: owner, distro: "Ubuntu", storeRoot: resolve(store), bindings: [],
     skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true };
-  for (let pass = 0; pass < 8; pass += 1) {
+  for (let pass = 0; pass < 7; pass += 1) {
     const result = await invoke(home, specification);
     assert.equal(result.status, 0, result.stderr || result.stdout);
   }
@@ -62,6 +220,7 @@ function createOrphanCleanupProof(leaseRoot: string, index: number): { aliasName
 }
 
 async function initializeLeaseRoot(home: string, store: string): Promise<Record<string, unknown>> {
+  initializeLegacyLease(home);
   const specification = { ownerHash: owner, distro: "Ubuntu", storeRoot: resolve(store), bindings: [],
     skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true };
   const initialized = await invoke(home, specification);
@@ -238,6 +397,8 @@ test("the WSL helper releases its lease for a distinct native distro runner", as
   const lock = join(home, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock");
   assert.equal(existsSync(lock), false, "an idle read-only pass does not claim the shared HOME");
 
+  initializeLegacyLease(home);
+
   const result = await invoke(home, { ...base,
     skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -328,7 +489,7 @@ test("the helper refuses foreign, malformed, symlinked, or changed external leas
     const lock = join(leaseRoot, "mutable-home.lock");
     mkdirSync(store);
     if (scenario === "retained") {
-      mkdirSync(lock, { recursive: true });
+      mkdirSync(lock, { recursive: true, mode: 0o700 });
       writeFileSync(join(lock, "next-11111111-1111-4111-8111-111111111111.json"), JSON.stringify({
         version: 2, state: "active", ownerHash: owner, leaseId: "22222222-2222-4222-8222-222222222222",
         previousLeaseId: "11111111-1111-4111-8111-111111111111", previousRecordHash: "c".repeat(64),
@@ -346,6 +507,11 @@ test("the helper refuses foreign, malformed, symlinked, or changed external leas
     }
     if (scenario === "retained") {
       registry.releaseAll();
+      const retained = join(lock, "next-11111111-1111-4111-8111-111111111111.json");
+      const original = readFileSync(retained);
+      const handoff = invokeLease(home, acquireAndRelease);
+      assert.equal(handoff.status, 0, String(handoff.stderr));
+      assert.deepEqual(readFileSync(retained), original, "helper accepts and retains non-empty recovery digest");
       const path = join(lock, "next-11111111-1111-4111-8111-111111111111.json");
       writeFileSync(path, `${readFileSync(path, "utf8")} `);
     }
@@ -354,6 +520,7 @@ test("the helper refuses foreign, malformed, symlinked, or changed external leas
       distro: "Ubuntu", storeRoot: resolve(store), bindings: [],
       skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true });
     assert.notEqual(result.status, 0, scenario);
+    assert.match(result.stdout, /quarantine the entire.*do not remove individual records/s);
     assert.deepEqual(readdirSync(leaseRoot).sort(), before, "refusal retains every ownership record");
   }
 });
@@ -597,8 +764,9 @@ test("a later pass recovers a crash during cleanup-proof publication", async (t)
   );
   const specification = { ownerHash: owner, distro: "Ubuntu", storeRoot: resolve(store), bindings: [],
     skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true };
+  initializeLegacyLease(home);
   for (let cycle = 0; cycle < 3; cycle += 1) {
-    for (let pass = 0; pass < (cycle === 0 ? 8 : 7); pass += 1) {
+    for (let pass = 0; pass < 7; pass += 1) {
       const result = await invoke(home, specification);
       assert.equal(result.status, 0, result.stderr || result.stdout);
     }

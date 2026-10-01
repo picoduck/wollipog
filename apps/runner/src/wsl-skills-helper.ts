@@ -418,54 +418,62 @@ def cleanup_compactions(root, lock):
         finally:
             if proof_fd is not None: os.close(proof_fd)
 
+def acquire_external_lease(root, owner):
+    lock = None
+    try:
+        try: lock = child_dir(root, "mutable-home.lock")
+        except FileNotFoundError: pass
+        existing, existing_hash = read_owned_lease_chain(root, lock)
+        if existing.get("state") != "released":
+            if existing["hostname"] != os.uname().nodename: fail("provider home is leased by another host")
+            if process_alive(existing["pid"]): fail("provider home is already in use")
+            if existing["ownerHash"] != owner: fail("provider home is leased by another runner owner")
+        if lock is None:
+            try: os.mkdir("mutable-home.lock", 0o700, dir_fd=root)
+            except FileExistsError: pass
+            lock = child_dir(root, "mutable-home.lock")
+        confirmed, confirmed_hash = read_owned_lease_chain(root, lock)
+        if confirmed["leaseId"] != existing["leaseId"] or confirmed_hash != existing_hash:
+            fail("provider home lease changed during recovery")
+        value = lease_value(owner, "active", (confirmed["leaseId"], confirmed_hash))
+        name = "next-%s.json" % confirmed["leaseId"]
+        try: publish_lease(root, root, name, value)
+        except FileExistsError: fail("provider home lease changed during recovery")
+        mirror_external_lease(root, lock, name)
+        mirror_external_lease(root, lock, "mutable-home.recovery.json", "checkpoint.json", True)
+        published, _ = read_owned_lease_chain(root, lock)
+        if published.get("state") != "active" or published["leaseId"] != value["leaseId"]:
+            fail("provider home lease changed during recovery")
+        return root, lock, value["leaseId"]
+    except:
+        if lock is not None: os.close(lock)
+        raise
+
 def acquire_lease(home_fd, owner):
     root = walk_dir(home_fd, ".agent-manager/provider-home-leases-v1", True)
     try:
-        if external_lease(root):
-            lock = None
-            try:
-                try: lock = child_dir(root, "mutable-home.lock")
-                except FileNotFoundError: pass
-                existing, existing_hash = read_owned_lease_chain(root, lock)
-                if existing.get("state") != "released":
-                    if existing["hostname"] != os.uname().nodename: fail("provider home is leased by another host")
-                    if process_alive(existing["pid"]): fail("provider home is already in use")
-                    if existing["ownerHash"] != owner: fail("provider home is leased by another runner owner")
-                if lock is None:
-                    try: os.mkdir("mutable-home.lock", 0o700, dir_fd=root)
-                    except FileExistsError: pass
-                    lock = child_dir(root, "mutable-home.lock")
-                confirmed, confirmed_hash = read_owned_lease_chain(root, lock)
-                if confirmed["leaseId"] != existing["leaseId"] or confirmed_hash != existing_hash:
-                    fail("provider home lease changed during recovery")
-                value = lease_value(owner, "active", (confirmed["leaseId"], confirmed_hash))
-                name = "next-%s.json" % confirmed["leaseId"]
-                try: publish_lease(root, root, name, value)
-                except FileExistsError: fail("provider home lease changed during recovery")
-                mirror_external_lease(root, lock, name)
-                mirror_external_lease(root, lock, "mutable-home.recovery.json", "checkpoint.json", True)
-                published, _ = read_owned_lease_chain(root, lock)
-                if published.get("state") != "active" or published["leaseId"] != value["leaseId"]:
-                    fail("provider home lease changed during recovery")
-                return root, lock, value["leaseId"]
-            except:
-                if lock is not None: os.close(lock)
-                raise
-        try:
+        if external_lease(root): return acquire_external_lease(root, owner)
+        try: os.stat("mutable-home.lock", dir_fd=root, follow_symlinks=False)
+        except FileNotFoundError:
+            # Both current writers elect the same exclusive durable proof before mkdir. A
+            # killed helper therefore leaves verifiable ownership even with no/empty mirrors.
+            value = lease_value(owner, "active")
+            value["recoveredEntriesHash"] = hashlib.sha256(b"[]").hexdigest()
+            try: publish_lease(root, root, "mutable-home.recovery.json", value)
+            except FileExistsError: return acquire_external_lease(root, owner)
             os.mkdir("mutable-home.lock", 0o700, dir_fd=root)
             lock = child_dir(root, "mutable-home.lock")
             try:
-                value = lease_value(owner, "active")
-                publish_lease(root, lock, "lease-%s.json" % value["leaseId"], value)
-                os.fsync(root)
-                cleanup_compactions(root, lock)
+                mirror_external_lease(root, lock, "mutable-home.recovery.json", "checkpoint.json", True)
+                mirror_external_lease(root, lock, "mutable-home.recovery.json", "lease-%s.json" % value["leaseId"], True)
+                published, _ = read_owned_lease_chain(root, lock)
+                if published["leaseId"] != value["leaseId"]: fail("provider home lease changed during initialization")
                 return root, lock, value["leaseId"]
             except:
-                os.close(lock)
-                try: os.rmdir("mutable-home.lock", dir_fd=root)
-                except: pass
-                raise
-        except FileExistsError:
+                os.close(lock); raise
+        # A current initializer may have published between the first proof and directory checks.
+        if external_lease(root): return acquire_external_lease(root, owner)
+        else:
             lock = child_dir(root, "mutable-home.lock")
             try:
                 existing, existing_hash = read_lease_chain(lock)
@@ -486,8 +494,11 @@ def acquire_lease(home_fd, owner):
                 return root, lock, value["leaseId"]
             except:
                 os.close(lock); raise
-    except:
-        os.close(root); raise
+    except Exception as error:
+        path = fd_path(root)
+        os.close(root)
+        reason = str(error) if isinstance(error, RuntimeError) else "metadata is unsafe or unreadable"
+        fail("provider home lease at %s/mutable-home.lock %s; after proving no provider process or runner uses this HOME, manually quarantine the entire %s directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and retry; do not remove individual records" % (path, reason, path))
 
 def exchange_directories(root, left, right):
     try:

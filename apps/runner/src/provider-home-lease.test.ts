@@ -149,6 +149,19 @@ test("durable initialization recovers crashes before mkdir and with an empty loc
   }
 });
 
+test("a rollback initializer colliding with the proof gets the complete remedy on the first refusal", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-rollback-initializer-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 202, hostname: "host-a",
+    afterInitializationPublishForTest: () => writePartialJournal(home, "lease"),
+  });
+  assert.throws(() => registry.acquire(request(home)), /quarantine the entire.*do not remove individual records/s);
+  assert.equal(journalRecords(home).length, 1, "the conflicting initializer's ownership record is retained");
+  const retry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 303, hostname: "host-a", isProcessAlive: () => false });
+  assert.throws(() => retry.acquire(request(home)), /unexpected entries.*quarantine the entire/s);
+});
+
 test("a new process reclaims a killed initializer or active holder without filesystem cleanup", async (t) => {
   for (const phase of ["before-directory", "empty-directory", "active"] as const) {
     const home = mkdtempSync(join(tmpdir(), `wollipog-provider-killed-${phase}-`));
