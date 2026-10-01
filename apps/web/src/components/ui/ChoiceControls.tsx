@@ -1542,31 +1542,42 @@ export function Select<T extends string>({
     if (!searchable) popover.onPanelKeyDown(event as React.KeyboardEvent<HTMLDivElement>);
   };
 
-  const renderOption = (option: SelectOption<T>, index: number) => (
-    <button
-      key={option.value}
-      id={optionId(index)}
-      type="button"
-      role="option"
-      aria-selected={option.value === value}
-      aria-disabled={option.disabled || undefined}
-      tabIndex={-1}
-      className={`ui-select-option${option.value === value ? " is-selected" : ""}`
-        + `${index === activeIndex ? " is-active" : ""}${option.disabled ? " is-disabled" : ""}`}
-      onMouseEnter={() => setActive(index)}
-      onClick={() => commit(option)}
-    >
-      {option.swatch}
-      <span className="ui-select-option-body">
-        <span>{option.label}</span>
-        {option.description && <small className="ui-select-option-desc">{option.description}</small>}
-        {option.disabled && option.disabledReason && (
-          <small className="ui-select-option-reason">{option.disabledReason}</small>
-        )}
-      </span>
-      {option.value === value && <CheckIcon size={14} />}
-    </button>
-  );
+  /**
+   * The label alone names an option and its second lines describe it, as a menu item's do (§9.1):
+   * read together as one name, options were long, hard to tell apart and slow to reach with a
+   * screen reader's first-letter navigation, which matches the name.
+   */
+  const renderOption = (option: SelectOption<T>, index: number) => {
+    const id = optionId(index);
+    const reason = option.disabled ? option.disabledReason : undefined;
+    const describedBy = [option.description ? `${id}-desc` : null, reason ? `${id}-reason` : null]
+      .filter(Boolean).join(" ");
+    return (
+      <button
+        key={option.value}
+        id={id}
+        type="button"
+        role="option"
+        aria-selected={option.value === value}
+        aria-disabled={option.disabled || undefined}
+        aria-labelledby={`${id}-label`}
+        aria-describedby={describedBy || undefined}
+        tabIndex={-1}
+        className={`ui-select-option${option.value === value ? " is-selected" : ""}`
+          + `${index === activeIndex ? " is-active" : ""}${option.disabled ? " is-disabled" : ""}`}
+        onMouseEnter={() => setActive(index)}
+        onClick={() => commit(option)}
+      >
+        {option.swatch}
+        <span className="ui-select-option-body">
+          <span id={`${id}-label`}>{option.label}</span>
+          {option.description && <small className="ui-select-option-desc" id={`${id}-desc`}>{option.description}</small>}
+          {reason && <small className="ui-select-option-reason" id={`${id}-reason`}>{reason}</small>}
+        </span>
+        {option.value === value && <CheckIcon size={14} />}
+      </button>
+    );
+  };
 
   const rows = (
     <>

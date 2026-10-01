@@ -516,3 +516,58 @@ test("a Select's leading icon renders inside its trigger, before the value", () 
     unmount();
   }
 });
+
+/* ------------------------------------------------------------------------------------------------
+ * A Select option's name and description (#2285)
+ * ---------------------------------------------------------------------------------------------- */
+
+/** The text of the elements an `aria-labelledby` or `aria-describedby` names, as the spec joins it. */
+function referencedText(element: Element, attribute: "aria-labelledby" | "aria-describedby"): string | null {
+  const ids = element.getAttribute(attribute);
+  if (!ids) return null;
+  return ids.split(/\s+/u).map((id) => document.getElementById(id)?.textContent ?? "").join(" ");
+}
+
+for (const searchable of [false, true]) {
+  test(`a${searchable ? " searchable" : ""} Select option is named by its label and described by its second lines`, () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host as unknown as Element);
+    act(() => root.render(
+      <Select
+        label="Agent"
+        options={OPTIONS}
+        value="alpha"
+        onChange={() => undefined}
+        searchable={searchable}
+      />,
+    ));
+    try {
+      act(() => fireDomEvent.click(host.querySelector(".ui-select-trigger")!));
+      const options = [...host.querySelectorAll<HTMLElement>('[role="option"]')];
+      // The name is exactly the label: a screen reader's first-letter navigation, which matches the
+      // name, reaches "Review Agent" with R rather than through its description.
+      assert.deepEqual(options.map((option) => referencedText(option, "aria-labelledby")),
+        ["Dashboard", "Review Agent", "Dashboard", "Legacy Agent"]);
+      assert.deepEqual(options.map((option) => option.getAttribute("aria-label")), [null, null, null, null]);
+      // The description, then any disabled reason, is the option's accessible description.
+      assert.deepEqual(options.map((option) => referencedText(option, "aria-describedby")), [
+        "Local · ~/dev/alpha",
+        "Advanced Agent Setup Required",
+        "Remote · /srv/beta",
+        "Runner Too Old",
+      ]);
+      // Both still render inside the option, where a sighted user reads them.
+      assert.ok(options[1]!.contains(document.getElementById(options[1]!.getAttribute("aria-describedby")!.split(" ")[1]!)));
+      // Ids are unique per option, so two options with the same label keep their own descriptions.
+      const ids = options.flatMap((option) => [
+        option.getAttribute("aria-labelledby"),
+        ...(option.getAttribute("aria-describedby")?.split(" ") ?? []),
+      ]);
+      assert.equal(new Set(ids).size, ids.length);
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+}
