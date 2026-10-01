@@ -14959,6 +14959,19 @@ export class ControlPlaneDb {
     return Number(result.changes) === 1;
   }
 
+  /** One retained campaign can publish hundreds of fresh child-ready events. Bound each commit
+   * rather than fsyncing each event; duplicate-only replay remains read-only. */
+  recordCampaignContinuationEvents(inputs: readonly Parameters<ControlPlaneDb["recordCampaignContinuationEvent"]>[0][]): void {
+    for (let offset = 0; offset < inputs.length; offset += 32) {
+      const fresh = inputs.slice(offset, offset + 32).filter((input) =>
+        !this.stmt("SELECT 1 FROM orchestrator_campaign_events WHERE event_id=?").get(input.eventId));
+      if (fresh.length === 0) continue;
+      this.atomic(() => {
+        for (const input of fresh) this.recordCampaignContinuationEvent(input);
+      });
+    }
+  }
+
   campaignContinuationEvents(
     campaignSessionId: string,
     throughCreatedAt = Number.MAX_SAFE_INTEGER,

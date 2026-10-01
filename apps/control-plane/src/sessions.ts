@@ -1448,7 +1448,8 @@ export class SessionsService {
    * are not lost when some snapshots committed before the old socket disappeared. */
   private readonly registrationAttention = new Map<string, Map<string, SessionView>>();
   /** Notification progress is separate from durable request-token before-views. */
-  private readonly registrationNotificationViews = new Map<string, SessionView>();
+  private readonly registrationNotificationViews = new Map<string,
+    Pick<SessionView, "status" | "pendingApproval" | "backgroundDeliveries">>();
   private readonly promptOutbox: SessionPromptOutbox;
   /** Process-local epochs fence late initial/manual results. Durable title/source checks provide
    * the cross-restart fence, so an abandoned request can never overwrite newer state. */
@@ -1511,7 +1512,9 @@ export class SessionsService {
       // still compare against the original token set when that batch eventually publishes.
       for (const campaigns of this.registrationAttention.values()) {
         if (campaigns.has(sessionId)) {
-          this.registrationNotificationViews.set(sessionId, view);
+          this.registrationNotificationViews.set(sessionId, {
+            status: view.status, pendingApproval: view.pendingApproval, backgroundDeliveries: view.backgroundDeliveries,
+          });
           break;
         }
       }
@@ -6763,10 +6766,11 @@ export class SessionsService {
         });
       }
     }
+    const continuationEvents: Parameters<ControlPlaneDb["recordCampaignContinuationEvent"]>[0][] = [];
     const orchestratorRequests = this.descendantRequests(before.id, () => true, "orchestrator", false);
     if (orchestratorRequests.ok && orchestratorRequests.data) {
       for (const item of orchestratorRequests.data.requests) {
-        this.db.recordCampaignContinuationEvent({
+        continuationEvents.push({
           eventId: `request-actionable:${before.id}:${item.sessionId}:${item.occurrenceId}`,
           campaignSessionId: before.id,
           kind: "request_actionable",
@@ -6780,7 +6784,7 @@ export class SessionsService {
     // campaign once, keyed by its stable id (#1650).
     for (const child of this.blockedDescendants(before.id, () => true)) {
       for (const hold of child.holds) {
-        this.db.recordCampaignContinuationEvent({
+        continuationEvents.push({
           eventId: `child-blocked:${before.id}:${child.sessionId}:${hold.holdId}`,
           campaignSessionId: before.id,
           kind: "child_blocked",
@@ -6800,7 +6804,7 @@ export class SessionsService {
     );
     for (const token of previousOrchestratorTokens) {
       if (currentOrchestratorTokens.has(token)) continue;
-      this.db.recordCampaignContinuationEvent({
+      continuationEvents.push({
         eventId: `request-resolved:${before.id}:${token}`,
         campaignSessionId: before.id,
         kind: "request_resolved",
@@ -6809,16 +6813,31 @@ export class SessionsService {
       });
     }
     const previousHuman = before.orchestratorCampaign?.pendingRequests;
-    if ((previousHuman?.human ?? 0) > 0 && (after?.pendingRequests?.human ?? 0) === 0) {
+    const humanBlockersCleared = (previousHuman?.human ?? 0) > 0 && (after?.pendingRequests?.human ?? 0) === 0;
+    if (humanBlockersCleared) {
       const clearedIdentity = createHash("sha256").update(JSON.stringify(
         previousHuman?.humanRequestTokens ?? [before.updatedAt, previousHuman?.human],
       )).digest("hex");
-      this.db.recordCampaignContinuationEvent({
+      continuationEvents.push({
         eventId: `human-blockers-cleared:${before.id}:${clearedIdentity}`,
         campaignSessionId: before.id,
         kind: "human_blockers_cleared",
         now,
       });
+    }
+    for (const child of this.db.campaignContinuationChildCandidates(before.id)) {
+      continuationEvents.push({
+        eventId: `child-ready:${before.id}:${child.sessionId}:${child.status}:${child.eventSeq}`,
+        campaignSessionId: before.id,
+        kind: "child_ready",
+        subjectSessionId: child.sessionId,
+        subjectStatus: child.status,
+        occurrenceId: `event-seq:${child.eventSeq}`,
+        now,
+      });
+    }
+    this.db.recordCampaignContinuationEvents(continuationEvents);
+    if (humanBlockersCleared) {
       // An immediate HTTP/direct publication can clear the last blocker while a runtime or
       // registration batch still holds an older token set. Consume only its human transition;
       // retain the original orchestrator tokens so per-request resolved events are not lost.
@@ -6831,18 +6850,9 @@ export class SessionsService {
         } });
       }
     }
-    for (const child of this.db.campaignContinuationChildCandidates(before.id)) {
-      this.db.recordCampaignContinuationEvent({
-        eventId: `child-ready:${before.id}:${child.sessionId}:${child.status}:${child.eventSeq}`,
-        campaignSessionId: before.id,
-        kind: "child_ready",
-        subjectSessionId: child.sessionId,
-        subjectStatus: child.status,
-        occurrenceId: `event-seq:${child.eventSeq}`,
-        now,
-      });
-    }
-    this.notifyTransition(this.registrationNotificationViews.get(before.id) ?? before, before.id);
+    // Only own-session status/approval/delivery progress was already reported. Child request
+    // tokens must still come from the deferred before-view, or their urgent push can be lost.
+    this.notifyTransition({ ...before, ...this.registrationNotificationViews.get(before.id) }, before.id);
     this.hub.sessionChangedById(before.id);
   }
 

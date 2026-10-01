@@ -52,12 +52,12 @@ test("a campaign's own runtime transition does not repeat its notification at ba
   } finally { db.close(); }
 });
 
-test("own campaign notifications consume attention projections without losing later fresh requests", async () => {
+test("own campaign status notifications never suppress deferred urgent child attention", async () => {
   const { db, hub, snapshots } = fixture(10);
   const messages: string[] = [];
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, (before, after) => {
     const message = pushDecision(before, after);
-    if (message?.sessionId === "campaign-0") messages.push(message.title);
+    if (message?.sessionId === "campaign-0") messages.push(`${message.urgency}:${message.title}`);
   });
   const ask = (requestId: string) => ({ requestId, kind: "question" as const, title: "Synthetic question", options: [],
     questions: [{ id: "choice", question: "Synthetic question", header: "Choice", options: [{ label: "Yes" }] }] });
@@ -66,13 +66,87 @@ test("own campaign notifications consume attention projections without losing la
     const batch = svc.beginRunnerAttentionBatch("runner");
     svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: ask("first") }, batch);
     svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, id: "campaign-0", status: "idle" }, batch);
-    assert.equal(messages.length, 1, "own frame already reported the new child request");
+    assert.match(messages[0]!, /^normal:.*awaiting a prompt$/, "the own frame reports only its status, not the already-present request");
     await svc.flushRunnerAttention("runner", () => true);
-    assert.equal(messages.length, 1, "status-only consumption would repeat the human attention projection");
+    assert.equal(messages.length, 2, "the unreported child request still needs a distinct urgent notification");
+    assert.match(messages[1]!, /^high:.*needs your input$/);
     const next = svc.beginRunnerAttentionBatch("runner");
     svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: ask("second") }, next);
     await svc.flushRunnerAttention("runner", () => true);
-    assert.equal(messages.length, 2, "consumption ends with the batch; a later distinct request still notifies");
+    assert.equal(messages.length, 3, "consumption ends with the batch; a later distinct request still notifies");
+  } finally { db.close(); }
+});
+
+test("fresh continuation publications use durable batched commits, not one fsync per child", () => {
+  const { db, svc, snapshots } = fixture(1500);
+  try {
+    let records = 0;
+    const original = db.recordCampaignContinuationEvent.bind(db);
+    db.recordCampaignContinuationEvent = (input) => {
+      records++;
+      assert.equal((db.raw() as ReturnType<ControlPlaneDb["raw"]> & { isTransaction: boolean }).isTransaction, true,
+        "a fresh campaign's event burst must be inside a bounded transaction");
+      return original(input);
+    };
+    svc.hydrateRunnerSessions("runner", snapshots);
+    assert.equal(records, 1500);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events").get()?.n, 1500);
+  } finally { db.close(); }
+});
+
+test("continuation batches roll back a failed chunk and replay without duplicate writes", () => {
+  const { db } = fixture(0);
+  try {
+    const inputs = Array.from({ length: 70 }, (_, i) => ({
+      eventId: `batched-${i}`, campaignSessionId: "campaign-0", kind: "child_ready" as const, now: 3,
+    }));
+    const raw = db.raw();
+    const originalExec = raw.exec.bind(raw);
+    const transactions: string[] = [];
+    raw.exec = (sql: string) => { transactions.push(sql); return originalExec(sql); };
+    const record = db.recordCampaignContinuationEvent.bind(db);
+    db.recordCampaignContinuationEvent = (input) => {
+      if (input.eventId === "batched-34") throw new Error("Synthetic write failure");
+      return record(input);
+    };
+    assert.throws(() => db.recordCampaignContinuationEvents(inputs), /Synthetic write failure/);
+    assert.deepEqual(transactions, ["BEGIN IMMEDIATE", "COMMIT", "BEGIN IMMEDIATE", "ROLLBACK"]);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events").get()?.n, 32,
+      "the earlier committed chunk survives; no partial failed chunk remains");
+    db.recordCampaignContinuationEvent = record;
+    db.recordCampaignContinuationEvents(inputs);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events").get()?.n, 70);
+    assert.equal(raw.prepare("SELECT seq FROM sqlite_sequence WHERE name='orchestrator_campaign_events'").get()?.seq, 70);
+    transactions.length = 0;
+    db.recordCampaignContinuationEvents(inputs);
+    assert.deepEqual(transactions, [], "duplicate-only replay must not begin a write transaction");
+    assert.equal(raw.prepare("SELECT seq FROM sqlite_sequence WHERE name='orchestrator_campaign_events'").get()?.seq, 70);
+  } finally { db.close(); }
+});
+
+test("an interleaved immediate publication never consumes an unreported deferred child question", async () => {
+  const { db, hub, snapshots } = fixture(20);
+  const messages: string[] = [];
+  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, (before, after) => {
+    const message = pushDecision(before, after);
+    if (message?.sessionId === "campaign-0") messages.push(`${message.urgency}:${message.title}`);
+  });
+  try {
+    db.updateSessionStatus("campaign-0", "running", 3);
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: {
+      requestId: "deferred", kind: "question", title: "Synthetic question", options: [],
+      questions: [{ id: "choice", question: "Synthetic question", header: "Choice", options: [{ label: "Yes" }] }],
+    } }, batch);
+    // A direct caller starts from a view already containing the deferred question. It must not
+    // consume that question's notification merely by publishing unrelated current state.
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[10]!, preview: "Immediate" });
+    assert.equal(messages.length, 0);
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(messages.length, 1);
+    assert.match(messages[0]!, /^high:.*needs your input$/);
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(messages.length, 1, "the reported question does not notify twice");
   } finally { db.close(); }
 });
 
