@@ -2651,7 +2651,9 @@ export class ClaudeCodeDriver implements Driver {
                   // `auto`, and its frame carries no cwd either — it is marked by
                   // `request.agent_id`, never by `parent_tool_use_id`. Real frames of both kinds
                   // are replayed against this line in claude-code-managed-worktree.test.ts.
-                  this.managedWorktreeGuardActive ? PLACELESS_CWD : this.cwd,
+                  // Later hook preparation may describe a different transport; only the
+                  // running child's launch determines whether its hook placed relative targets.
+                  this.launchedManagedWorktreeGuardActive ? PLACELESS_CWD : this.cwd,
                   protections,
                   // The environment this process gave Claude is the one its Bash tool starts
                   // from, so a worktree path held in a variable resolves here too (#1324).

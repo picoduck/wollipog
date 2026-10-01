@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import type { SessionLaunchSpec } from "@wollipog/protocol";
+import type { SessionEventPayload, SessionLaunchSpec } from "@wollipog/protocol";
 import {
   claudeHookGuardPath,
   claudeHookSettingsPath,
@@ -29,8 +29,8 @@ import {
   MANAGED_WORKTREE_EDIT_UNRESOLVED_REFUSAL,
   MANAGED_WORKTREE_REFUSAL,
 } from "../managed-worktree-protection.js";
-import { ClaudeCodeDriver, protectedClaudePermissionMode } from "./claude-code.js";
-import type { DriverCallbacks, DriverOptions } from "./driver.js";
+import { CLAUDE_PERSISTENT_FLAG, ClaudeCodeDriver, protectedClaudePermissionMode } from "./claude-code.js";
+import type { DriverCallbacks, DriverOptions, StopReason } from "./driver.js";
 
 const REPO = "/repo";
 const WORKTREE = "/repo-worktrees/s1";
@@ -112,7 +112,7 @@ function fakeProcess() {
 }
 
 interface Launch { argv: string[]; stderr: string[]; writes: string[]; child: ReturnType<typeof fakeProcess>;
-  driver: ClaudeCodeDriver }
+  driver: ClaudeCodeDriver; firstTurn: Promise<StopReason>; events: SessionEventPayload[] }
 
 /** Run one turn with the given launch args and capture the argv the driver spawned. */
 function launch(
@@ -127,8 +127,9 @@ function launch(
   child.stdin.on("data", (chunk: string) => writes.push(chunk));
   const stderr: string[] = [];
   const argv: string[] = [];
+  const events: SessionEventPayload[] = [];
   const cb: DriverCallbacks = {
-    onEvent: () => {},
+    onEvent: (event) => events.push(event),
     onStderr: (text) => stderr.push(text),
     onExit: () => {},
   };
@@ -136,7 +137,7 @@ function launch(
     command: "claude",
     args,
     cwd: WORKTREE,
-    env: {},
+    env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
     config: { permissionMode: mode },
     context: { kind: "native" },
     managedWorktreeProtections: () => [...protections],
@@ -146,8 +147,8 @@ function launch(
     spawn: (options: { args: string[] }) => { argv.push(...options.args); return child; },
     kill: () => {},
   } as never);
-  void driver.prompt("do the work");
-  return { argv, stderr, writes, child, driver };
+  const firstTurn = driver.prompt("do the work");
+  return { argv, stderr, writes, child, driver, firstTurn, events };
 }
 
 function permissionArgv(argv: string[]): string[] {
@@ -617,6 +618,56 @@ test("a mediated launch has no hook, so it keeps the session-directory check ent
   assert.deepEqual(await deniedRequests(run),
     ["relative-cd", "relative-rm", "sub-relative-cd", "sub-relative-rm"]);
 });
+
+for (const launchedWithGuard of [false, true]) {
+  test(`a persistent ${launchedWithGuard ? "guarded" : "mediated"} child's Bash veto survives opposite next-launch hook preparation (#1917)`, async (t) => {
+    const dir = tempDir(t);
+    const guardedArgs = provision(dir, `bash-transition-${launchedWithGuard}`, "default", {
+      protections: PROTECTIONS,
+    });
+    const args = launchedWithGuard ? [...guardedArgs] : [];
+    const run = launch(args, "default", PROTECTIONS);
+    t.after(() => run.driver.dispose({ forceImmediate: true }));
+    const launchedArgc = run.argv.length;
+    assert.equal(run.argv.includes("--settings"), launchedWithGuard);
+
+    // Only fake provider frames are sent; none of the command strings below is executed.
+    // Background work keeps the original child alive when the next launch's args change.
+    run.child.stdout.write(JSON.stringify({
+      type: "system", subtype: "task_started", task_id: "keep-transport",
+    }) + "\n");
+    args.splice(0, args.length, ...(launchedWithGuard ? [] : guardedArgs));
+    run.child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+    assert.equal(await run.firstTurn, "end_turn");
+
+    const secondTurn = run.driver.prompt("continue with the running transport");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(run.argv.length, launchedArgc, "no replacement process was launched");
+    assert.equal(run.child.stdin.writableEnded, false, "the original child remains live");
+    assert.ok(run.stderr.some((line) => line.includes("configuration change deferred")));
+
+    for (const subagent of [false, true]) {
+      const prefix = subagent ? "sub" : "top";
+      requestBash(run, `${prefix}-relative-cd`, "cd ..", subagent);
+      requestBash(run, `${prefix}-relative-rm`, "rm -rf .", subagent);
+      requestBash(run, `${prefix}-absolute-rm`, `rm -rf ${WORKTREE}`, subagent);
+      requestBash(run, `${prefix}-ordinary`, "cd apps && pnpm typecheck", subagent);
+    }
+    const denied = await deniedRequests(run);
+    assert.deepEqual(denied, launchedWithGuard
+      ? ["top-absolute-rm", "sub-absolute-rm"]
+      : ["top-relative-cd", "top-relative-rm", "top-absolute-rm",
+        "sub-relative-cd", "sub-relative-rm", "sub-absolute-rm"]);
+    assert.equal(run.events.filter((event) => event.kind === "permission_request").length,
+      launchedWithGuard ? 6 : 2, "ordinary work still reaches the normal approval path");
+
+    run.child.stdout.write(JSON.stringify({
+      type: "system", subtype: "task_notification", task_id: "keep-transport", status: "completed",
+    }) + "\n");
+    run.child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+    assert.equal(await secondTurn, "end_turn");
+  });
+}
 
 /*
  * Issue #1397: real captured `can_use_tool` frames.
