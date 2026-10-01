@@ -157,6 +157,26 @@ test("folding into the compact tier closes the project menu and hands its focus 
   await expect(moreActions).toBeFocused();
 });
 
+test("folding while More Actions is disabled by a running export hands focus to the page title", async ({ page }) => {
+  // Hold the export open: More Actions is disabled until it settles.
+  await page.route("**/api/sessions/*/export*", () => undefined);
+  await openBar(page, 1440);
+  const bar = page.locator("header.session-bar");
+  const moreActions = bar.getByRole("button", { name: "More Actions" });
+  await bar.getByRole("button", { name: "Share" }).click();
+  await page.getByRole("menuitem", { name: "Export Markdown" }).click();
+  await expect(moreActions).toBeDisabled();
+
+  const button = bar.locator(".session-project-button");
+  await button.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("menuitem", { name: "Open Project" })).toBeFocused();
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await expect(button).toBeHidden();
+  await expect(page.getByRole("menu", { name: "Project Actions" })).toHaveCount(0);
+  await expect(bar.locator("h1#page-title")).toBeFocused();
+});
+
 test("a long transient note keeps to one line inside the 48px bar", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await openBar(page, 940);

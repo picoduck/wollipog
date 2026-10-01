@@ -6361,8 +6361,14 @@ function useProjectButtonFold(
         (dropped && focusHeld.current);
       if (open) close();
       if (!hadFocus) return;
-      const more = bar?.querySelector<HTMLElement>('.detail-actions [aria-label="More Actions"]');
-      (more && more.getClientRects().length > 0 ? more : trigger.ownerDocument.getElementById("page-title"))?.focus();
+      // More Actions is disabled while a session action runs, and a disabled button cannot take
+      // focus; the page title always can.
+      const more = bar?.querySelector<HTMLButtonElement>('.detail-actions [aria-label="More Actions"]');
+      if (more && !more.disabled && more.getClientRects().length > 0) {
+        more.focus();
+        if (trigger.ownerDocument.activeElement === more) return;
+      }
+      trigger.ownerDocument.getElementById("page-title")?.focus();
     });
     observer.observe(trigger);
     if (bar) observer.observe(bar);
