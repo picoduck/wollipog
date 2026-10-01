@@ -64,6 +64,9 @@ import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SCENARIO = FIXTURE_QUERY.get("scenario");
+/** Scenarios that show the Pinned Summary open without the app shell's toggle. */
+const STATIC_SUMMARY_OPEN = SCENARIO === "git-visibility" || SCENARIO === "worktree-identity" ||
+  SCENARIO === "unsafe-worktree-pr";
 const REVIEW_READY = FIXTURE_QUERY.get("reviewReady") === "1";
 const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
@@ -430,6 +433,25 @@ function initialModel(): FixtureModel {
       worktreePath: "/repos/alpha/.agent-worktrees/session-alpha",
     });
   }
+  if (SCENARIO === "pinned-summary") {
+    // Every fact the session bar used to carry, now stated once in the Pinned Summary (#2160).
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      useWorktree: true,
+      worktreePath: "/repos/alpha/.agent-worktrees/session-alpha",
+      worktrees: [{
+        id: "wt-session-alpha",
+        path: "/repos/alpha/.agent-worktrees/session-alpha",
+        branch: "feature/session-alpha-with-a-deliberately-long-branch-name-for-narrow-layout-validation",
+        baseRef: "origin/main",
+        source: "created",
+        pullRequest: { url: "https://github.com/example/wollipog/pull/318", state: "open" },
+      }],
+      providerAccountId: "account-alpha",
+      providerAccountLabel: "pat.example@example.com",
+      providerAccountAutomaticallySelected: true,
+      backgroundWorkTracking: "untracked",
+    });
+  }
   if (SCENARIO === "worktree-identity" || SCENARIO === "unsafe-worktree-pr") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       useWorktree: true,
@@ -503,10 +525,18 @@ for (const value of model.sessions) {
       behind: value.id === "session-alpha" ? 231 : value.id === "session-no-project" ? 7 : 0,
       addedLines: fixtureStatus.addedLines ?? 0,
       deletedLines: fixtureStatus.deletedLines ?? 0,
-      pr: SCENARIO === "git-visibility" && value.id === "session-alpha"
+      pr: (SCENARIO === "git-visibility" || SCENARIO === "pinned-summary") && value.id === "session-alpha"
         ? { number: 318, title: "Alpha Visibility PR", url: "https://github.com/example/wollipog/pull/318", state: "OPEN" }
         : null,
-      checks: null,
+      checks: SCENARIO === "pinned-summary" && value.id === "session-alpha"
+        ? {
+            failing: 2,
+            pending: 0,
+            passing: 9,
+            failingNames: ["Typecheck, Test & Sidecar Bundle", "Browser End-to-End Tests"],
+            url: "https://github.com/example/wollipog/pull/318/checks",
+          }
+        : null,
     },
   });
 }
@@ -630,6 +660,17 @@ if (SCENARIO === "pinned-summary") {
     { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Show me the frame status and the docking check.", final: true } },
     { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: `Here is the status of each area.\n\n${table}\n\nThe docking check:\n\n${code("docks")}\n\nAnd the drawer check:\n\n${code("drawerOpens")}`, final: true } },
     { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
+    ...(FIXTURE_QUERY.get("psActivity") === "1" ? ([
+      { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "plan", entries: [
+        { content: "Read the summary's facts", status: "completed" },
+        { content: "Rebuild the rows", status: "in_progress" },
+        { content: "Capture the evidence", status: "pending" },
+      ] } },
+      { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "tool_call", toolCallId: "ps-read", title: "Read PinnedSummary.tsx", toolKind: "read", status: "completed" } },
+      { id: 6, sessionId: "session-alpha", seq: 6, ts: 6, payload: { kind: "tool_call", toolCallId: "ps-test", title: "Run the summary tests", toolKind: "execute", status: "failed" } },
+      { id: 7, sessionId: "session-alpha", seq: 7, ts: 7, payload: { kind: "file_edit", path: "apps/web/src/components/PinnedSummary.tsx" } },
+      { id: 8, sessionId: "session-alpha", seq: 8, ts: 8, payload: { kind: "file_edit", path: "apps/web/src/styles.css" } },
+    ] satisfies SessionEvent[]) : []),
   ]);
 }
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
@@ -2653,7 +2694,7 @@ function FixtureSurface() {
           mode="expanded"
           rightPanel={rightPanel}
           onOpenTerminal={openTerminal}
-          pinnedSummary={staticPinnedSummary(SCENARIO === "git-visibility")}
+          pinnedSummary={staticPinnedSummary(STATIC_SUMMARY_OPEN)}
           providerCommandAttachmentPolicy={providerCommandAttachmentPolicy}
         />
         {terminalSessionId === view.id && (
@@ -2676,7 +2717,7 @@ function FixtureSurface() {
         expandedSessionId={view.name === "session" ? view.id : null}
         rightPanel={rightPanel}
         onOpenTerminal={openTerminal}
-        pinnedSummary={staticPinnedSummary(SCENARIO === "git-visibility")}
+        pinnedSummary={staticPinnedSummary(STATIC_SUMMARY_OPEN)}
         onNewSession={openNewSession}
         onShortcutNewSessionPresetChange={setShortcutPreset}
       />

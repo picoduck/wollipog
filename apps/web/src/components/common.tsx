@@ -15,7 +15,6 @@ import {
 } from "@wollipog/protocol";
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
-import type { SessionChangeStatus } from "../session-status.js";
 import { reminderBadgeDescription, reminderBadgeLabel, type SnoozedAttentionReason } from "../session-reminders.js";
 import { useOptionalStoreSelector } from "../store.js";
 import { CheckIcon, CopyIcon, ErrorIcon, PinIcon } from "./Icons.js";
@@ -433,22 +432,6 @@ export function SessionStatusIndicators({
         <StatusBadge tone="danger" label="Disconnected" title="The session runner is disconnected."
           ariaLabel="Health: Disconnected" />
       )}
-    </span>
-  );
-}
-
-export function ChangeStatusBadge({ change }: { change: SessionChangeStatus | null }) {
-  if (!change) return null;
-  const indicators = change.kind === "ready_for_review" && change.supplement
-    ? [change, change.supplement]
-    : [change];
-  return (
-    <span className="change-status-indicators" role="group" aria-label="Change Status">
-      {indicators.map((indicator) => (
-        // Ready for Review is a completed state; the others are facts about the worktree (§11.2).
-        <StatusBadge key={indicator.kind} tone={indicator.kind === "ready_for_review" ? "success" : "neutral"}
-          label={indicator.label} title={indicator.description} ariaLabel={`Changes: ${indicator.label}`} />
-      ))}
     </span>
   );
 }

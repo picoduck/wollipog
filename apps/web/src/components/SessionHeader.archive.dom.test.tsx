@@ -99,7 +99,6 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
             onSnooze={() => undefined}
             forkAvailability={{ available: true, forkTurn: 3 }}
             onFork={() => { forks += 1; }}
-            changeStatus={{ kind: "changes_present", label: "Changes Present", description: "Git confirms changes." }}
             activeSubagents={{ count: 1, onOpen: () => { activeSubagentOpens += 1; } }}
           />
         </FeedbackContext.Provider>
@@ -108,7 +107,6 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
   });
 
   assert.match(page().textContent ?? "", /Disconnected/);
-  assert.match(page().textContent ?? "", /Changes Present/);
   const shareIcon = button(page(), "Share").querySelector("svg");
   assert.ok(shareIcon, "the Share action uses the shared icon");
   assert.equal(shareIcon.getAttribute("width"), "16",

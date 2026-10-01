@@ -91,7 +91,7 @@ for (const width of [320, 390, 700, 1280]) {
           lifecycle.getBoundingClientRect().y - element.getBoundingClientRect().y) <= 0.5;
       })).toBe(true);
       await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toHaveCount(1);
-      await expect(header.locator('[aria-label="Changes: No Changes"]')).toHaveCount(1);
+      await expect(header.locator('[aria-label^="Changes:"]')).toHaveCount(0);
       await expect(header.getByRole("button", { name: "Share", exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
       const overflow = header.locator(".session-status-overflow-trigger");
@@ -99,7 +99,6 @@ for (const width of [320, 390, 700, 1280]) {
         await overflow.click();
         const dialog = page.getByRole("dialog", { name: "Session Statuses" });
         await expect(dialog.getByLabel("Attention: Approval Required")).toBeVisible();
-        await expect(dialog.getByLabel("Changes: No Changes")).toBeVisible();
         await page.keyboard.press("Escape");
         await expect(overflow).toBeFocused();
         await overflow.click();

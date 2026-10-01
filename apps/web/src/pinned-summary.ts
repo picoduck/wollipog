@@ -1,6 +1,6 @@
 /**
- * Pure derivation for the pinned summary (the Codex-style floating environment card in the
- * session view's top-right). Presentation lives in components/PinnedSummary.tsx; everything
+ * Pure derivation for the Pinned Summary, the session's fact sheet beside the transcript (#2160).
+ * Presentation lives in components/PinnedSummary.tsx and components/GitVisibility.tsx; everything
  * that can be unit-tested without a DOM lives here.
  */
 
@@ -74,13 +74,15 @@ export interface GitPresentationRow {
 
 export interface GitDirtyPresentation {
   label: "Clean" | "Dirty";
+  /** The changed files by kind, in sentence case ("1 conflicted, 2 untracked"). */
   detail: string | null;
   tone: "normal" | "warning";
 }
 
-export interface GitRemoteFreshness {
-  label: "Remote Status May Be Stale";
-  detail: string;
+/** One sentence-case line of the Git Details "Sync" fact ("231 behind origin/main"). */
+export interface GitSyncLine {
+  text: string;
+  tone: "normal" | "warning";
 }
 
 export function isGitNoRepositoryError(
@@ -98,93 +100,22 @@ export interface GitPresentation {
   behindBase: number | null;
   branchLabel: string | null;
   headSha: string | null;
-  worktree: GitPresentationRow;
+  /** Whether the session's folder is a linked worktree or the repository's primary checkout. */
+  worktreeKind: "linked" | "primary" | null;
   dirty: GitDirtyPresentation | null;
-  upstream: GitPresentationRow[];
-  base: GitPresentationRow[];
+  /** Conflicted files: an attention row of its own. */
+  conflicts: number;
   operation: GitPresentationRow | null;
-  remoteFreshness: GitRemoteFreshness;
+  /** The upstream branch; null when there is none, undefined when the runner does not say. */
+  upstreamBranch: string | null | undefined;
+  upstream: GitSyncLine[];
+  base: GitSyncLine[];
+  /** When the remote refs were last updated, as "2023-11-14 22:13 UTC"; null when unknown. */
+  remoteRefsAt: string | null;
 }
 
 const hasOwn = (value: object, key: PropertyKey): boolean =>
   Object.prototype.hasOwnProperty.call(value, key);
-
-export interface GitHeadlineSegment {
-  text: string;
-  tone: "normal" | "warning";
-  /** Full phrasing when the visible text is compacted (tooltip + screen readers). */
-  expandedLabel?: string;
-}
-
-/**
- * The collapsed Git section's scannable headline (IDEA-009 2026-08-10): branch or detached
- * state, worktree identity, dirty/conflict state, any active operation, and the single most
- * actionable divergence compacted to `Main +7 / -18` arithmetic. Everything else stays behind
- * Show Git Details.
- */
-export function deriveGitHeadline(model: GitPresentation): GitHeadlineSegment[] {
-  const hideFacts = model.state === "offline" ||
-    model.state === "loading" ||
-    model.state === "unavailable" ||
-    model.state === "not_repository";
-  if (hideFacts || !model.facts) return [];
-  const facts = model.facts;
-  const segments: GitHeadlineSegment[] = [];
-  if (model.branchLabel) segments.push({ text: model.branchLabel, tone: "normal" });
-  if (model.worktree.label !== "Worktree Type Unavailable") {
-    segments.push({ text: model.worktree.label, tone: "normal" });
-  }
-  if (model.dirty) segments.push({ text: model.dirty.label, tone: model.dirty.tone });
-  if (hasOwn(facts, "conflictedCount") && typeof facts.conflictedCount === "number" && facts.conflictedCount > 0) {
-    segments.push({
-      text: "Conflicts",
-      tone: "warning",
-      expandedLabel: `${facts.conflictedCount} Conflicted`,
-    });
-  }
-  if (model.operation) segments.push({ text: model.operation.label, tone: "warning" });
-  const baseName = hasOwn(facts, "baseRef") && facts.baseRef != null ? displayBaseRef(facts.baseRef) : null;
-  const behindBase = model.behindBase ?? 0;
-  if (baseName && (facts.ahead > 0 || behindBase > 0)) {
-    segments.push({
-      text: `${baseName} ${[
-        facts.ahead > 0 ? `+${facts.ahead}` : null,
-        behindBase > 0 ? `-${behindBase}` : null,
-      ].filter(Boolean).join(" / ")}`,
-      tone: behindBase > 0 ? "warning" : "normal",
-      expandedLabel: [
-        facts.ahead > 0 ? `Ahead of ${baseName} ${facts.ahead}` : null,
-        behindBase > 0 ? `Behind ${baseName} ${behindBase}` : null,
-      ].filter(Boolean).join(" · "),
-    });
-  } else {
-    // No base comparison: upstream divergence is the one actionable summary, and it must not
-    // hide unpushed commits (regression coverage) — show both directions compacted. When a producer
-    // EXPLICITLY reported no default-base ref, the legacy non-null `ahead` carries the
-    // upstream comparison (legacy contract); when `baseRef` is omitted entirely (pre-v76
-    // shape), `ahead` is base-relative and must not be labelled as upstream divergence.
-    const aheadUpstream = hasOwn(facts, "aheadUpstream") && typeof facts.aheadUpstream === "number"
-      ? facts.aheadUpstream
-      : hasOwn(facts, "baseRef") ? facts.ahead : 0;
-    const behindUpstream = hasOwn(facts, "behindUpstream") && typeof facts.behindUpstream === "number"
-      ? facts.behindUpstream
-      : 0;
-    if (aheadUpstream > 0 || behindUpstream > 0) {
-      segments.push({
-        text: `Upstream ${[
-          aheadUpstream > 0 ? `+${aheadUpstream}` : null,
-          behindUpstream > 0 ? `-${behindUpstream}` : null,
-        ].filter(Boolean).join(" / ")}`,
-        tone: behindUpstream > 0 ? "warning" : "normal",
-        expandedLabel: [
-          aheadUpstream > 0 ? `Ahead of Upstream ${aheadUpstream}` : null,
-          behindUpstream > 0 ? `Behind Upstream ${behindUpstream}` : null,
-        ].filter(Boolean).join(" · "),
-      });
-    }
-  }
-  return segments;
-}
 
 export function displayBaseRef(baseRef: string): string {
   const normalized = baseRef
@@ -201,15 +132,15 @@ export function deriveDirtySummary(
 ): GitDirtyPresentation {
   if (!facts.hasChanges) return { label: "Clean", detail: null, tone: "normal" };
   const categories = [
-    ["Conflicted", facts.conflictedCount],
-    ["Staged", facts.stagedCount],
-    ["Modified", facts.modifiedCount],
-    ["Untracked", facts.untrackedCount],
+    ["conflicted", facts.conflictedCount],
+    ["staged", facts.stagedCount],
+    ["modified", facts.modifiedCount],
+    ["untracked", facts.untrackedCount],
   ] as const;
   const detail = categories
     .filter(([, count]) => typeof count === "number" && count > 0)
     .map(([label, count]) => `${count} ${label}`)
-    .join(" \u00b7 ");
+    .join(", ");
   return { label: "Dirty", detail: detail || null, tone: "warning" };
 }
 
@@ -222,90 +153,60 @@ export function formatGitOperation(operation: GitRepositoryFacts["operation"]): 
   return null;
 }
 
-export function deriveRemoteFreshness(
-  remoteRefsAt: number | null | undefined,
-): GitRemoteFreshness {
-  let detail = "Remote Ref Freshness Unavailable";
-  if (typeof remoteRefsAt === "number" && Number.isFinite(remoteRefsAt) &&
-      remoteRefsAt >= 0 && remoteRefsAt <= 8.64e15) {
-    detail = `Remote Refs Updated ${new Date(remoteRefsAt).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+/** The remote refs' last update as a UTC minute. It never claims a fetch: refs also move on push. */
+export function formatRemoteRefsAt(remoteRefsAt: number | null | undefined): string | null {
+  if (typeof remoteRefsAt !== "number" || !Number.isFinite(remoteRefsAt) ||
+      remoteRefsAt < 0 || remoteRefsAt > 8.64e15) {
+    return null;
   }
-  return { label: "Remote Status May Be Stale", detail };
+  return `${new Date(remoteRefsAt).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
-function deriveUpstreamRows(facts: GitStatusInfo | GitSummaryInfo): GitPresentationRow[] {
+/** A ref as Git names it, without the `refs/remotes/` or `refs/heads/` prefix. */
+function shortRef(ref: string): string {
+  return ref.replace(/^refs\/remotes\//, "").replace(/^refs\/heads\//, "");
+}
+
+function deriveUpstreamLines(facts: GitStatusInfo | GitSummaryInfo): GitSyncLine[] {
   if (!hasOwn(facts, "upstreamBranch")) {
-    return [{ label: "Upstream Details Unavailable", detail: null }];
+    // A rolling-skew producer reports `baseRef: null` and omits the upstream fields; its legacy
+    // `ahead` is then the upstream comparison, and unpushed commits must still show. A pre-v76
+    // producer omits `baseRef` too, and its `ahead` is base-relative, so it says nothing here.
+    return hasOwn(facts, "baseRef") && facts.baseRef == null && facts.ahead > 0
+      ? [{ text: `${facts.ahead} ahead of upstream`, tone: "normal" }]
+      : [];
   }
-  const upstreamBranch = facts.upstreamBranch ?? null;
-  if (upstreamBranch === null) return [{ label: "No Upstream", detail: null }];
+  if (facts.upstreamBranch == null) return [];
   if (facts.aheadUpstream == null || facts.behindUpstream == null) {
-    return [{
-      label: "Upstream Comparison Unavailable",
-      detail: upstreamBranch,
-      title: upstreamBranch,
-    }];
+    return [{ text: "Comparison with upstream unavailable", tone: "normal" }];
   }
-  const rows: GitPresentationRow[] = [];
-  if (facts.behindUpstream > 0) {
-    rows.push({
-      label: "Behind Upstream",
-      detail: String(facts.behindUpstream),
-      title: upstreamBranch,
-      tone: "warning",
-    });
-  }
-  if (facts.aheadUpstream > 0) {
-    rows.push({
-      label: "Ahead of Upstream",
-      detail: String(facts.aheadUpstream),
-      title: upstreamBranch,
-    });
-  }
-  if (rows.length === 0) {
-    rows.push({
-      label: "Upstream Synced",
-      detail: upstreamBranch,
-      title: upstreamBranch,
-    });
-  }
-  return rows;
+  const lines: GitSyncLine[] = [];
+  if (facts.behindUpstream > 0) lines.push({ text: `${facts.behindUpstream} behind upstream`, tone: "warning" });
+  if (facts.aheadUpstream > 0) lines.push({ text: `${facts.aheadUpstream} ahead of upstream`, tone: "normal" });
+  if (lines.length === 0) lines.push({ text: "In sync with upstream", tone: "normal" });
+  return lines;
 }
 
-function deriveBaseRows(
+function deriveBaseLines(
   facts: GitStatusInfo | GitSummaryInfo,
   behindBase: number | null,
-): GitPresentationRow[] {
+): GitSyncLine[] {
   if (!hasOwn(facts, "baseRef") || facts.baseRef == null) {
-    return [{ label: "Base Comparison Unavailable", detail: null }];
+    return [{ text: "Base comparison unavailable", tone: "normal" }];
   }
-  const name = displayBaseRef(facts.baseRef);
-  const rows: GitPresentationRow[] = [];
-  if (behindBase != null && behindBase > 0) {
-    rows.push({
-      label: `Behind ${name}`,
-      detail: String(behindBase),
-      title: facts.baseRef,
-      tone: "warning",
-    });
-  }
-  if (facts.ahead > 0) {
-    rows.push({
-      label: `Ahead of ${name}`,
-      detail: String(facts.ahead),
-      title: facts.baseRef,
-    });
-  }
-  if (rows.length === 0 && behindBase === 0) {
-    rows.push({ label: `Synced With ${name}`, detail: null, title: facts.baseRef });
+  const name = shortRef(facts.baseRef);
+  const lines: GitSyncLine[] = [];
+  if (behindBase != null && behindBase > 0) lines.push({ text: `${behindBase} behind ${name}`, tone: "warning" });
+  if (facts.ahead > 0) lines.push({ text: `${facts.ahead} ahead of ${name}`, tone: "normal" });
+  if (lines.length === 0 && behindBase === 0) {
+    lines.push({ text: `In sync with ${name}`, tone: "normal" });
   } else if (behindBase === null) {
-    rows.push({
-      label: rows.length > 0 ? `Behind ${name} Unavailable` : `${name} Comparison Unavailable`,
-      detail: null,
-      title: facts.baseRef,
+    lines.push({
+      text: lines.length > 0 ? `Commits behind ${name} unavailable` : `Comparison with ${name} unavailable`,
+      tone: "normal",
     });
   }
-  return rows;
+  return lines;
 }
 
 /**
@@ -356,17 +257,13 @@ export function deriveGitPresentation(input: {
     ? facts.detached === true ? "Detached" : facts.branch || null
     : null;
   const headSha = facts && hasOwn(facts, "headSha") ? facts.headSha ?? null : null;
-  const worktreeKind = facts?.worktreeKind;
-  const worktree: GitPresentationRow = worktreeKind === "linked"
-    ? {
-        label: "Linked Worktree",
-        detail: input.worktreePath,
-        title: input.worktreePath ?? undefined,
-      }
-    : worktreeKind === "primary"
-      ? { label: "Primary Checkout", detail: null }
-      : { label: "Worktree Type Unavailable", detail: null };
+  const worktreeKind = facts?.worktreeKind === "linked" || facts?.worktreeKind === "primary"
+    ? facts.worktreeKind
+    : null;
   const operationLabel = facts ? formatGitOperation(facts.operation) : null;
+  const conflicts = facts && hasOwn(facts, "conflictedCount") && typeof facts.conflictedCount === "number"
+    ? Math.max(0, facts.conflictedCount)
+    : 0;
 
   return {
     state,
@@ -375,14 +272,16 @@ export function deriveGitPresentation(input: {
     behindBase,
     branchLabel,
     headSha,
-    worktree,
+    worktreeKind,
     dirty: facts ? deriveDirtySummary(facts) : null,
-    upstream: facts ? deriveUpstreamRows(facts) : [],
-    base: facts ? deriveBaseRows(facts, behindBase) : [],
+    conflicts,
     operation: operationLabel
       ? { label: operationLabel, detail: null, tone: "warning" }
       : null,
-    remoteFreshness: deriveRemoteFreshness(facts?.remoteRefsAt),
+    upstreamBranch: facts && hasOwn(facts, "upstreamBranch") ? facts.upstreamBranch ?? null : undefined,
+    upstream: facts ? deriveUpstreamLines(facts) : [],
+    base: facts ? deriveBaseLines(facts, behindBase) : [],
+    remoteRefsAt: formatRemoteRefsAt(facts?.remoteRefsAt),
   };
 }
 
@@ -477,8 +376,8 @@ export function deriveSubagents(
     .filter((s): s is SessionView => !!s);
 }
 
-/** Which forge icon the Sources section shows. Null hides the section. GitHub means the
- * remote HOST is exactly github.com — `notgithub.com` / `mygithub.com` must not match. */
+/** Which forge the remote is: Git Details names it, and Review offers GitLab's own flow. GitHub
+ * means the remote HOST is exactly github.com — `notgithub.com` / `mygithub.com` must not match. */
 export function sourceKind(remoteUrl: string | null | undefined): "github" | "gitlab" | "git" | null {
   if (!remoteUrl) return null;
   const http = remoteHttpUrl(remoteUrl);

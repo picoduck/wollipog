@@ -400,7 +400,7 @@ test("the session bar balances navigation, the project button, status, and actio
   await expect(shareMenu.getByRole("menuitem", { name: "Rename Session…" })).toHaveCount(0);
 });
 
-test("desktop Session actions stay contained with five concurrent status indicators", async ({ page }) => {
+test("desktop Session actions stay contained with concurrent status indicators", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 800 });
   await openSession(page, "git-visibility", { reviewReady: "1", fullShell: "1" });
   await page.evaluate(() => {
@@ -413,8 +413,8 @@ test("desktop Session actions stay contained with five concurrent status indicat
 
   const header = page.locator(".session-bar");
   await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
-  await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
-  await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
+  // Changes are a Git fact in the Pinned Summary (#2160), never a status in the bar.
+  await expect(header.getByText(/Ready for Review|Uncommitted Changes|Changes Present/)).toHaveCount(0);
   await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
   await expect(header.locator(
     '.session-header-statuses > [aria-label="Background Work: Waiting on External Job"]',
@@ -494,7 +494,8 @@ test("managed background indicators open a responsive inspectable inventory and 
     });
   });
   const header = page.locator(".session-bar");
-  await expect(header.getByRole("button", { name: "Detached Work: Untracked" })).toBeVisible();
+  // Untracked detached work is a fact about the provider, stated in the Pinned Summary (#2160).
+  await expect(header.getByText("Detached Work")).toHaveCount(0);
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       backgroundWorkState: "running",
@@ -592,6 +593,9 @@ test("mobile Session pane and action controls share trailing columns", async ({ 
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       backgroundWorkState: "running",
+      // Two campaign request badges take the place the change badges held before #2160, so the row
+      // still overflows into its disclosure.
+      orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 1 } } as never,
     });
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "aligned-mobile-subagent");
   });
@@ -616,7 +620,7 @@ test("mobile Session pane and action controls share trailing columns", async ({ 
   expect(withoutOptionalAction.sidePanel.center).toBeCloseTo(withoutOptionalAction.moreActions.center, 1);
 });
 
-// #784 put background work into this measured row, so five badges now compete for it and the row
+// #784 put background work into this measured row, so five badges compete for it and the row
 // prefers background work over everything else. The compact phone label now keeps background work
 // inline at the 320px floor, and the disclosure carries lower-priority statuses, workers included.
 for (const viewport of [
@@ -634,6 +638,8 @@ for (const viewport of [
       await page.evaluate(() => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
           backgroundWorkState: "running",
+          // Two campaign request badges take the place the change badges held before #2160.
+          orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 1 } } as never,
         });
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "active-mobile-subagent");
       });
@@ -650,8 +656,7 @@ for (const viewport of [
       await expect(topbar.getByRole("button", { name: "Settings" })).toHaveCount(0);
       await expect(header.locator(".detail-bar-back, .session-bar-project, h1, .editor-select")).toHaveCount(0);
       await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toHaveCount(1);
-      await expect(header.locator('[aria-label="Changes: Ready for Review"]')).toHaveCount(1);
-      await expect(header.locator('[aria-label="Changes: Uncommitted Changes"]')).toHaveCount(1);
+      await expect(header.locator('[aria-label^="Changes:"]')).toHaveCount(0);
       const inlineBackgroundWork = header.locator(
         '.session-header-statuses > [aria-label="Background Work: Waiting on External Job"]',
       );
@@ -845,8 +850,6 @@ for (const viewport of [
       const statusPopover = page.getByRole("dialog", { name: "Session Statuses" });
       await expect(statusPopover).toBeVisible();
       await expect(statusPopover.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
-      await expect(statusPopover.getByText("Ready for Review", { exact: true })).toBeVisible();
-      await expect(statusPopover.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
       await expect(statusPopover.getByText("Waiting on External Job", { exact: true })).toBeVisible();
       await expect(statusPopover.getByRole("button", { name: "1 Worker Active" })).toBeEnabled();
       await expect(statusPopover.getByLabel("All Session Statuses")).toBeFocused();
@@ -958,6 +961,8 @@ test("status overflow count follows width and live Session status changes", asyn
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       backgroundWorkState: "running",
+      // Two campaign request badges take the place the change badges held before #2160.
+      orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 1 } } as never,
     });
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "dynamic-status-subagent");
   });

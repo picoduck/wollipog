@@ -37,7 +37,6 @@
     "src/session-preset-defaults.test.ts",
     "src/session-project-assignment.test.ts",
     "src/session-reminders.test.ts",
-    "src/session-status.test.ts",
     "src/settings-navigation.test.ts",
     "src/shells-panel.test.ts",
     "src/shortcuts.test.ts",

@@ -84,7 +84,6 @@ import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
-import { sessionChangeStatus, sessionMayShowChangeStatus } from "../session-status.js";
 import { ImageStrip, usePastedImages } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
 import {
@@ -1701,13 +1700,6 @@ function SessionDetailLoaded({
       errorCode: gitSummary.errorCode,
     },
   }), [git, gitSummary, runnerOnline, session.worktreePath]);
-  const changeStatus = sessionChangeStatus({
-    status: git.status,
-    summary: gitSummary.summary,
-    settled: git.settled || gitSummary.settled,
-    available: sessionMayShowChangeStatus(session.status) &&
-      (gitPresentation.state === "ready" || gitPresentation.state === "updating"),
-  });
 
   useEffect(() => {
     const generation = ++viewGenerationRef.current;
@@ -4975,7 +4967,27 @@ function SessionDetailLoaded({
       </section>
     ) : null;
 
-  // The summary's contents (#2160 rebuilds them); the container depends on the presentation.
+  // On a phone a summary row that opens the right panel closes the sheet, since only one overlay is
+  // open at a time (#2147). The row that had focus is gone with the sheet, so focus follows it into
+  // the panel; the sheet's Close and Escape still return it to the toggle.
+  const focusPanelAfterSheetRef = useRef(false);
+  const summaryToggleRef = pinnedSummary?.toggleRef;
+  const sheetReturnFocusRef = useMemo(() => ({
+    get current(): HTMLElement | null {
+      if (focusPanelAfterSheetRef.current) {
+        focusPanelAfterSheetRef.current = false;
+        const panelControl = document.querySelector<HTMLElement>("#right-panel .rp-head button");
+        if (panelControl) return panelControl;
+      }
+      return summaryToggleRef?.current ?? null;
+    },
+  }), [summaryToggleRef]);
+  const fromSummary = <A extends unknown[]>(open: (...args: A) => void) => (...args: A) => {
+    if (pinnedSummary?.presentation === "sheet") focusPanelAfterSheetRef.current = true;
+    open(...args);
+  };
+
+  // The summary's contents (#2160); the container depends on the presentation.
   const pinnedSummaryContent = pinnedSummary?.open ? (
     <PinnedSummary
       session={session}
@@ -4984,9 +4996,9 @@ function SessionDetailLoaded({
       gitPresentation={gitPresentation}
       richGitSupported={richGitSupported}
       items={items}
-      onOpenReview={() => rightPanel.show("review")}
-      onOpenBackgroundWork={() => rightPanel.show("background")}
-      onOpenSourceLocation={openSourceLocation}
+      onOpenReview={fromSummary(() => rightPanel.show("review"))}
+      onOpenBackgroundWork={fromSummary(() => rightPanel.show("background"))}
+      onOpenSourceLocation={fromSummary(openSourceLocation)}
       skillsUnavailableReason={skillsUnavailable
         ? skillsUnavailableSentence(runnerDisp.name, skillsUnavailable.adapter, null)
         : null}
@@ -5027,7 +5039,6 @@ function SessionDetailLoaded({
             <LegacyWorkspaceMoveDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
           )}
           topbarControls={topbarControls}
-          changeStatus={changeStatus}
           activeSubagents={activeWorkerCount ? {
             count: activeWorkerCount,
             workers: true,
@@ -6128,7 +6139,7 @@ function SessionDetailLoaded({
         <Modal
           title="Pinned Summary"
           onClose={pinnedSummary.closeOverlay}
-          returnFocusRef={pinnedSummary.toggleRef}
+          returnFocusRef={sheetReturnFocusRef}
           className="ps-sheet"
         >
           {pinnedSummaryContent}

@@ -12,29 +12,62 @@ import {
   fixChecksPrompt,
   legacyLocalGitFacts,
   remoteHttpUrl,
-  sourceKind,
   visibleForgeFacts,
   type GitPresentation,
 } from "../pinned-summary.js";
+import { statusMeta } from "../status-meta.js";
+import { pullRequestStateLabel } from "../worktree-identity.js";
 import type { GitStatus, GitSummary } from "./useGitStatus.js";
-import { GitPinnedSection } from "./GitVisibility.js";
+import { GitPinnedSection, type GitBranchFallback } from "./GitVisibility.js";
+import { SummaryDisclosure, SummaryRow, SummarySection } from "./PinnedSummaryRows.js";
 import { AgentIcon } from "./AgentIcon.js";
-import { BranchIcon, ComputerIcon, DialIcon, FolderIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, SkillsIcon, TuningIcon } from "./Icons.js";
+import {
+  AccountIcon,
+  ArrowUpIcon,
+  ComputerIcon,
+  DialIcon,
+  DiffIcon,
+  FolderIcon,
+  GlobeIcon,
+  JobsIcon,
+  PlanInProgressIcon,
+  PlanPendingIcon,
+  PullRequestIcon,
+  SkillsIcon,
+  SuccessIcon,
+  UpdatedIcon,
+  WarningIcon,
+} from "./Icons.js";
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, Spinner } from "./common.js";
-import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
+import { PersonalIdentifier } from "./PersonalIdentifier.js";
+import { StatusBadge } from "./StatusBadge.js";
+import { effortLabel, relativeTime, resolvedModelLabel, shortenPath } from "../format.js";
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 
 const BUSY = ["queued", "starting", "running", "input_required"];
 
-/**
- * Codex-style pinned summary: a floating card over the session view's top-right with the
- * environment at a glance — changes, host, branch, commit/push entry into Review, run
- * subagents, and the agent's Plan/Files/Tools rollups (collapsed by default). Toggled from
- * the topbar; open state persists app-wide (wollipog.pinned.open, default open).
- */
+/** gh and glab report OPEN, OPENED, MERGED and CLOSED; a pull request's state is a fact (§11.2). */
+function forgeStateLabel(state: string): string {
+  const normalized = state.toUpperCase();
+  if (normalized === "OPEN" || normalized === "OPENED") return "Open";
+  if (normalized === "MERGED") return "Merged";
+  if (normalized === "CLOSED") return "Closed";
+  if (normalized === "DRAFT") return "Draft";
+  return state.charAt(0).toUpperCase() + state.slice(1).toLowerCase();
+}
 
+function requestNoun(kind: string | undefined): string {
+  return kind === "merge_request" ? "Merge Request" : "Pull Request";
+}
+
+/**
+ * The Pinned Summary's contents (#2160): the session's fact sheet, in four sections of one-line
+ * rows that state each fact once — Session, Environment, Git and Activity. The session bar carries
+ * the session's status; every other fact about it lives here. The container (docked column, drawer
+ * or phone sheet) is PinnedSummaryDock or the sheet dialog (#2147).
+ */
 export function PinnedSummary({
   session,
   git,
@@ -77,7 +110,7 @@ export function PinnedSummary({
   // SessionDetail owns both reads so compact and pinned presentations share one
   // session-tagged snapshot while status and summary keep independent refresh cycles.
   const summary = gitSummary.summary;
-  const host = deriveHost(session, runners.get(session.runnerId), boxes.values());
+  const host = deriveHost(session, runner, boxes.values());
   const richFactsVisible = gitPresentation.state !== "offline" &&
     gitPresentation.state !== "loading" &&
     gitPresentation.state !== "unavailable" &&
@@ -88,9 +121,9 @@ export function PinnedSummary({
     : legacyFacts;
   // Review mutations remain linked-worktree-only even though v76 allows read-only facts for a
   // primary checkout. Never render a button that can only open Review's unavailable state.
-  const reviewFacts = session.worktreePath ? displayedFacts : null;
-  const changes = deriveChanges(reviewFacts, git.status?.files.length);
-  const commitAction = deriveCommitAction(reviewFacts);
+  const reviewable = !!session.worktreePath;
+  const changes = deriveChanges(displayedFacts, git.status?.files.length);
+  const commitAction = deriveCommitAction(reviewable ? displayedFacts : null);
   const subagents = deriveSubagents(session, runs, sessions);
   const forgeFactsVisible = !richGitSupported || gitPresentation.state !== "not_repository";
   const { forge, remoteUrl, pr, checks } = visibleForgeFacts(
@@ -98,232 +131,282 @@ export function PinnedSummary({
     displayedFacts?.remoteUrl,
     forgeFactsVisible,
   );
-  const source = forge?.provider ?? sourceKind(remoteUrl);
-  const sourceUrl = remoteHttpUrl(remoteUrl);
   const pane = useMemo(() => deriveSidePaneContent(items), [items]);
-  const branch = legacyFacts?.branch ?? (session.worktreePath ? `agent/${session.id}` : null);
-  const prHref = safeExternalHref(pr?.url);
+  const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
+  const folderPath = session.worktreePath ??
+    runner?.workspaces?.find((workspace) => workspace.id === session.workspaceId)?.path ??
+    null;
+  // The branch when no current Git read can say: a legacy runner's read, then the session record,
+  // and only then the name Wollipog gives a worktree branch.
+  const legacyBranch = legacyFacts?.branch ?? activeWorktree?.branch ??
+    (session.worktreePath ? `agent/${session.id}` : null);
+  const branchFallback: GitBranchFallback | null = !richGitSupported
+    ? legacyBranch
+      ? { name: legacyBranch, kind: session.worktreePath ? "Worktree" : null, title: session.worktreePath ?? undefined }
+      : null
+    : activeWorktree
+      ? { name: activeWorktree.branch, kind: "Worktree", title: activeWorktree.path }
+      : null;
+  // The forge's own pull request first; the session record's link when the forge has not said.
+  const pullRequest = pr
+    ? {
+        title: pr.title || `${pr.kind === "merge_request" ? "MR" : "PR"} #${pr.number}`,
+        state: forgeStateLabel(pr.state),
+        href: safeExternalHref(pr.url),
+        tooltip: `${requestNoun(pr.kind)} #${pr.number}${pr.title ? `: ${pr.title}` : ""}`,
+      }
+    : activeWorktree?.pullRequest
+      ? {
+          title: requestNoun(activeWorktree.pullRequest.kind),
+          state: pullRequestStateLabel(activeWorktree.pullRequest.state),
+          href: safeExternalHref(activeWorktree.pullRequest.url),
+          tooltip: activeWorktree.pullRequest.url,
+        }
+      : null;
   const canPrompt = runnerOnline && !isTerminal(session.status) && !isPolicyApproval(session.pendingApproval);
   const refreshGit = async () => {
     await Promise.all([git.refreshStatusOnly(), gitSummary.refresh()]);
   };
+  const modelLabel = [
+    session.resolvedModel ? resolvedModelLabel(session.resolvedModel) : (effectiveModel?.displayName ?? effectiveModel?.id),
+    effectiveEffort ? effortLabel(effectiveEffort) : undefined,
+  ].filter(Boolean).join(" · ");
+  // Background work in the status vocabulary; untracked detached work is a fact about the provider.
+  const backgroundWorkState = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
+  const backgroundWorkMeta = backgroundWorkState === "running"
+    ? statusMeta("job", "running")
+    : backgroundWorkState === "orphaned"
+      ? statusMeta("job", "lost")
+      : backgroundWorkState === "continuation_pending"
+        ? statusMeta("background_work", "continuation_pending")
+        : null;
+  const backgroundWorkUntracked = !backgroundWorkMeta && session.backgroundWorkTracking === "untracked";
+  const watchdogState = session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState;
 
   return (
-    // The container (docked column, drawer or phone sheet) is PinnedSummaryDock or the sheet dialog.
     <div className="ps-body">
-      {/* Keep session identity and freshness together at the top of the pinned summary. */}
-      <div className="ps-section">
-        <div className="ps-section-head">
-          <span>Session</span>
-        </div>
-        <div className="ps-row is-static">
-          <span className="ps-sub-title" title={session.title}>{session.title}</span>
-          <span className="ps-right ps-detail">Updated {relativeTime(session.updatedAt)}</span>
-        </div>
-        <div className="ps-row is-static">
-          <AgentIcon driver={session.driver} agentName={session.agentName} size={13} />
-          <span>{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
-          {(session.resolvedModel || effectiveModel || effectiveEffort) && (
-            <span className="ps-right ps-detail" title={session.resolvedModel ?? undefined}>
-              {[
-                session.resolvedModel ? resolvedModelLabel(session.resolvedModel) : (effectiveModel?.displayName ?? effectiveModel?.id),
-                effectiveEffort ? effortLabel(effectiveEffort) : undefined,
-              ].filter(Boolean).join(" · ")}
-            </span>
-          )}
-        </div>
-        {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
-          <div className="ps-row is-static">
-            <BackgroundDeliveryBadge
-              state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
-              onOpen={onOpenBackgroundWork}
-            />
+      <SummarySection title="Session">
+        <SummaryRow
+          icon={<AgentIcon driver={session.driver} agentName={session.agentName} size={14} />}
+          label="Agent"
+          value={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
+        />
+        {modelLabel && (
+          <SummaryRow
+            icon={<DialIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Model"
+            value={modelLabel}
+            title={session.resolvedModel ?? modelLabel}
+          />
+        )}
+        {session.providerAccountLabel && (
+          <SummaryRow
+            icon={<AccountIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Account"
+            value={<PersonalIdentifier value={session.providerAccountLabel} label="Account Email" />}
+            note={session.providerAccountAutomaticallySelected ? "Chosen Automatically" : undefined}
+          />
+        )}
+        <SummaryRow
+          icon={<UpdatedIcon className="ps-icon" size={14} aria-hidden="true" />}
+          label="Updated"
+          value={relativeTime(session.updatedAt)}
+        />
+        {(backgroundWorkMeta || backgroundWorkUntracked) && (
+          <SummaryRow
+            icon={<JobsIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Background Work"
+            value={backgroundWorkMeta ? <StatusBadge meta={backgroundWorkMeta} inline /> : "Not Tracked"}
+            title={backgroundWorkUntracked
+              ? "This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."
+              : "Open Background Work"}
+            onClick={onOpenBackgroundWork}
+          />
+        )}
+        {watchdogState && (
+          <div className="ps-row ps-receipt">
+            <BackgroundDeliveryBadge state={watchdogState} onOpen={onOpenBackgroundWork} />
           </div>
         )}
         {session.backgroundDeliveries?.flatMap((delivery) => delivery.notifications ?? []).slice(-2).map((receipt) => (
-          <div className="ps-row is-static" key={receipt.deliveryId}>
+          <div className="ps-row ps-receipt" key={receipt.deliveryId}>
             <BackgroundNotificationBadge state={receipt.state} />
           </div>
         ))}
-      </div>
-      <div className="ps-section">
-        <div className="ps-section-head">
-          <span>Environment</span>
-          {/* Reserved: environment configuration (Codex's +). Enabled in a later phase. */}
-          <button type="button" className="icon-btn ps-plus" disabled title="Environment setup — coming soon">
-            +
-          </button>
-        </div>
+      </SummarySection>
 
-        {changes && (
-          <button type="button" className="ps-row" onClick={onOpenReview} title="Open Review">
-            <NotesIcon className="ps-icon" size={14} />
-            <span>Changes</span>
-            <span className="ps-right">
-              {changes.kind === "lines" ? (
-                <>
-                  <span className="ps-add">+{changes.added.toLocaleString()}</span>{" "}
-                  <span className="ps-del">-{changes.deleted.toLocaleString()}</span>
-                </>
-              ) : (
-                // Untracked-only / binary / pre-v20 dirty trees: numstat can't count lines.
-                <span className="ps-detail">
-                  {changes.count != null ? `${changes.count} file${changes.count === 1 ? "" : "s"}` : "changed"}
-                </span>
-              )}
-            </span>
-          </button>
+      <SummarySection title="Environment">
+        <SummaryRow
+          icon={host.kind === "remote"
+            ? <GlobeIcon className="ps-icon" size={14} aria-hidden="true" />
+            : <ComputerIcon className="ps-icon" size={14} aria-hidden="true" />}
+          label="Machine"
+          value={host.detail ?? host.label}
+          title={`${host.label} machine${host.detail ? `: ${host.detail}` : ""}`}
+        />
+        {folderPath && (
+          <SummaryRow
+            icon={<FolderIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Folder"
+            value={shortenPath(folderPath)}
+            title={folderPath}
+          />
         )}
-
-        <div className="ps-row is-static" title={host.detail ?? undefined}>
-          {host.kind === "remote"
-            ? <GlobeIcon className="ps-icon" size={14} />
-            : <ComputerIcon className="ps-icon" size={14} />}
-          <span>{host.label}</span>
-          {host.detail && <span className="ps-right ps-detail">{host.detail}</span>}
-        </div>
-
-        {/* The Workspace is the directory-on-machine fact — environment, not identity. */}
-        {session.workspaceName && (
-          <div className="ps-row is-static">
-            <FolderIcon className="ps-icon" size={14} />
-            <span>Workspace</span>
-            <span className="ps-right ps-detail">{session.workspaceName}</span>
-          </div>
-        )}
-
         {skillsUnavailableReason && (
-          <div className="ps-row is-static has-note">
-            <SkillsIcon className="ps-icon" size={14} />
-            <span>Skills</span>
-            <span className="ps-right ps-detail">Not Available</span>
-            <span className="ps-note">{skillsUnavailableReason}</span>
-          </div>
+          <SummaryRow
+            icon={<SkillsIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Skills"
+            value="Not Available"
+            note={skillsUnavailableReason}
+          />
         )}
+      </SummarySection>
 
-        {!richGitSupported && branch && (
-          <div className="ps-row is-static" title={session.worktreePath ?? undefined}>
-            <BranchIcon className="ps-icon" size={14} />
-            <span className="ps-branch">{branch}</span>
-          </div>
+      <GitPinnedSection
+        model={gitPresentation}
+        rich={richGitSupported}
+        onRefresh={refreshGit}
+        folderPath={folderPath}
+        remote={remoteUrl ? { url: remoteUrl, href: remoteHttpUrl(remoteUrl) } : null}
+        branchFallback={branchFallback}
+        checkedAt={Math.max(git.observedAt ?? 0, gitSummary.observedAt ?? 0) || null}
+      >
+        {changes && (
+          <SummaryRow
+            icon={<DiffIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Changes"
+            value={changes.kind === "lines" ? (
+              <>
+                <span className="ps-add">+{changes.added.toLocaleString()}</span>{" "}
+                <span className="ps-del">{"−"}{changes.deleted.toLocaleString()}</span>
+              </>
+            ) : (
+              // Untracked-only / binary / pre-v20 dirty trees: numstat can't count lines.
+              changes.count != null ? `${changes.count} file${changes.count === 1 ? "" : "s"}` : "Changed"
+            )}
+            title={reviewable ? "Open Review" : undefined}
+            onClick={reviewable ? onOpenReview : undefined}
+          />
         )}
-
         {commitAction && commitAction !== "up_to_date" && (
-          <button type="button" className="ps-row" onClick={onOpenReview} title="Open Review">
-            <DialIcon className="ps-icon" size={14} />
-            <span>{COMMIT_ACTION_LABELS[commitAction]}</span>
-          </button>
+          <SummaryRow
+            icon={<ArrowUpIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label={COMMIT_ACTION_LABELS[commitAction]}
+            title="Open Review"
+            onClick={onOpenReview}
+          />
         )}
-
-        {pr && prHref && (
-          <a className="ps-row ps-source" href={prHref} target="_blank" rel="noreferrer" title={`#${pr.number} · ${pr.state}`}>
-            <PullRequestIcon className="ps-icon" size={14} />
-            <span className="ps-sub-title">{pr.title || `${pr.kind === "merge_request" ? "MR" : "PR"} #${pr.number}`}</span>
-          </a>
+        {pullRequest && (
+          <SummaryRow
+            icon={<PullRequestIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label={pullRequest.title}
+            value={pullRequest.state}
+            longLabel
+            href={pullRequest.href}
+            title={pullRequest.tooltip}
+          />
         )}
-
         {checks && <ChecksRow checks={checks} session={session} canPrompt={canPrompt} kind={pr?.kind} />}
         {forge?.authenticationError && (
-          <div className="ps-row is-static" title={forge.authenticationError}>
-            <span className="ps-check-dot is-fail" aria-hidden="true" />
-            <span>Forge Authentication Needed</span>
-          </div>
+          <SummaryRow
+            icon={<WarningIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Forge Authentication Needed"
+            title={forge.authenticationError}
+            warning
+          />
         )}
         {forge?.statusError && (
-          <div className="ps-row is-static" title={forge.statusError}>
-            <span className="ps-check-dot is-fail" aria-hidden="true" />
-            <span>Forge Status Unavailable</span>
-          </div>
+          <SummaryRow
+            icon={<WarningIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Forge Status Unavailable"
+            title={forge.statusError}
+            warning
+          />
         )}
-      </div>
+      </GitPinnedSection>
 
-      {richGitSupported && (
-        <GitPinnedSection model={gitPresentation} onRefresh={refreshGit} />
-      )}
-
-      {subagents.length > 0 && (
-        <div className="ps-section">
-          <div className="ps-section-head">Subagents</div>
-          {subagents.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              className="ps-row"
-              onClick={() => navigate({ name: "session", id: s.id })}
-              title={s.preview ?? s.title}
-            >
-              <AgentIcon driver={s.driver} agentName={s.agentName} size={13} />
-              <span className="ps-sub-title">{s.title}</span>
-              {BUSY.includes(s.status) && <span className={`sdot sdot-${s.status} ps-right`} />}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {(pane.plan.length > 0 || pane.artifacts.length > 0 || pane.tools.length > 0) && (
-        <div className="ps-section">
+      {(pane.plan.length > 0 || pane.artifacts.length > 0 || pane.tools.length > 0 || subagents.length > 0) && (
+        <SummarySection title="Activity">
           {pane.plan.length > 0 && (
-            <PsAccordion title="Plan" count={pane.plan.length}>
-              {pane.plan.map((e, i) => (
-                <div key={i} className={`plan-row plan-${e.status}`}>
-                  <span className="plan-icon">{PLAN_ICON[e.status] ?? "○"}</span>
-                  <span className="plan-text">{e.content}</span>
-                </div>
-              ))}
-            </PsAccordion>
+            <SummaryDisclosure label="Plan" count={pane.plan.length}>
+              <ul className="ps-items">
+                {pane.plan.map((entry, i) => (
+                  <li key={i} className={`ps-item plan-${entry.status}`}>
+                    <PlanStepIcon status={entry.status} />
+                    <span className="ps-item-text">{entry.content}</span>
+                  </li>
+                ))}
+              </ul>
+            </SummaryDisclosure>
           )}
           {pane.artifacts.length > 0 && (
-            <PsAccordion title="Files" count={pane.artifacts.length}>
-              {pane.artifacts.map((a, i) => {
-                const path = normalizeSourcePath(a.path);
-                const name = a.path.split(/[/\\]/).pop() || a.path;
-                return path ? (
-                  <button key={i} type="button" className="artifact-row source-path-link" title={`Open ${path}`} onClick={() => onOpenSourceLocation({ path })}>
-                    <span className="artifact-name">{name}</span>
-                  </button>
-                ) : (
-                  <div key={i} className="artifact-row" title={a.path}><span className="artifact-name">{name}</span></div>
-                );
-              })}
-            </PsAccordion>
+            <SummaryDisclosure label="Files" count={pane.artifacts.length}>
+              <ul className="ps-items">
+                {pane.artifacts.map((artifact, i) => {
+                  const path = normalizeSourcePath(artifact.path);
+                  const name = artifact.path.split(/[/\\]/).pop() || artifact.path;
+                  return (
+                    <li key={i}>
+                      {path ? (
+                        <button type="button" className="ps-item is-link" title={`Open ${path}`} onClick={() => onOpenSourceLocation({ path })}>
+                          <span className="ps-item-name">{name}</span>
+                        </button>
+                      ) : (
+                        <span className="ps-item" title={artifact.path}><span className="ps-item-name">{name}</span></span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </SummaryDisclosure>
           )}
           {pane.tools.length > 0 && (
-            <PsAccordion title="Tools" count={pane.tools.length}>
-              {pane.tools.map((t, i) => (
-                <div key={i} className={`tool-row tool-${t.status}`} title={`${t.title} · ${t.status}`}>
-                  <span className="tool-title">{t.title}</span>
-                </div>
-              ))}
-            </PsAccordion>
+            <SummaryDisclosure label="Tools" count={pane.tools.length}>
+              <ul className="ps-items">
+                {pane.tools.map((tool, i) => (
+                  <li key={i} className={tool.status === "failed" ? "ps-item is-failed" : "ps-item"} title={`${tool.title} · ${tool.status}`}>
+                    <span className="ps-item-name">{tool.title}</span>
+                  </li>
+                ))}
+              </ul>
+            </SummaryDisclosure>
           )}
-        </div>
-      )}
-
-      {source && (
-        <div className="ps-section">
-          <div className="ps-section-head">Sources</div>
-          {sourceUrl ? (
-            <a className="ps-row ps-source" href={sourceUrl} target="_blank" rel="noreferrer" title={sourceUrl}>
-              <SourceIcon kind={source} />
-              <span>{source === "github" ? "GitHub" : source === "gitlab" ? "GitLab" : "Git Remote"}</span>
-            </a>
-          ) : (
-            <div className="ps-row is-static">
-              <SourceIcon kind={source} />
-              <span>{source === "github" ? "GitHub" : source === "gitlab" ? "GitLab" : "Git Remote"}</span>
-            </div>
+          {subagents.length > 0 && (
+            <SummaryDisclosure label="Subagents" count={subagents.length}>
+              <ul className="ps-items">
+                {subagents.map((subagent) => (
+                  <li key={subagent.id}>
+                    <button
+                      type="button"
+                      className="ps-item is-link"
+                      onClick={() => navigate({ name: "session", id: subagent.id })}
+                      title={subagent.preview ?? subagent.title}
+                    >
+                      <AgentIcon driver={subagent.driver} agentName={subagent.agentName} size={14} />
+                      <span className="ps-item-name">{subagent.title}</span>
+                      {BUSY.includes(subagent.status) && <span className={`sdot sdot-${subagent.status}`} />}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </SummaryDisclosure>
           )}
-        </div>
+        </SummarySection>
       )}
     </div>
   );
 }
 
-const PLAN_ICON: Record<PlanEntry["status"], string> = { pending: "○", in_progress: "◐", completed: "●" };
+/** A plan step's state as a Lucide icon (§18), never a text glyph. */
+function PlanStepIcon({ status }: { status: PlanEntry["status"] }): ReactNode {
+  if (status === "completed") return <SuccessIcon className="ps-item-icon" size={14} aria-hidden="true" />;
+  if (status === "in_progress") return <PlanInProgressIcon className="ps-item-icon" size={14} aria-hidden="true" />;
+  return <PlanPendingIcon className="ps-item-icon" size={14} aria-hidden="true" />;
+}
 
 /**
- * PR check rollup row. Failing checks get the Codex "Fix" affordance: one click sends the
- * agent a prompt naming the failing checks. The row itself links to the PR's checks tab.
+ * The pull request's check rollup. Failing checks get the Codex "Fix" affordance: one click sends
+ * the agent a prompt naming the failing checks. The row links to the pull request's checks tab.
  */
 function ChecksRow({
   checks,
@@ -350,61 +433,32 @@ function ChecksRow({
       setBusy(false);
     }
   };
-  const label =
+  const value =
     checks.failing > 0
-      ? `${checks.failing} failing check${checks.failing === 1 ? "" : "s"}`
+      ? `${checks.failing} failing`
       : checks.pending > 0
-        ? `${checks.pending} running check${checks.pending === 1 ? "" : "s"}`
-        : "Checks passing";
-  const dotClass = checks.failing > 0 ? "is-fail" : checks.pending > 0 ? "is-pending" : "is-pass";
+        ? `${checks.pending} running`
+        : "Passing";
   const checksHref = safeExternalHref(checks.url);
-  const body = (
-    <>
-      <span className={`ps-check-dot ${dotClass}`} aria-hidden="true" />
-      <span>{label}</span>
-    </>
-  );
   return (
-    <div className="ps-row is-static ps-checks">
-      {checksHref ? (
-        <a className="ps-checks-link" href={checksHref} target="_blank" rel="noreferrer" title="Open the checks tab">
-          {body}
-        </a>
-      ) : (
-        body
-      )}
+    <div className="ps-checks">
+      <SummaryRow
+        icon={(
+          <span
+            className={checks.failing > 0 ? "ps-check-dot is-fail" : checks.pending > 0 ? "ps-check-dot is-pending" : "ps-check-dot is-pass"}
+            aria-hidden="true"
+          />
+        )}
+        label="Checks"
+        value={value}
+        href={checksHref}
+        title={checksHref ? "Open the checks tab" : undefined}
+      />
       {checks.failing > 0 && canPrompt && (
-        <button type="button" className="btn ghost sm ps-right ps-fix" onClick={fix} disabled={busy || sent} title="Ask the agent to investigate and fix the failing checks">
+        <button type="button" className="btn ghost sm ps-fix" onClick={fix} disabled={busy || sent} title="Ask the agent to investigate and fix the failing checks">
           {sent ? "Sent" : busy ? <Spinner /> : "Fix"}
         </button>
       )}
-    </div>
-  );
-}
-
-
-function SourceIcon({ kind }: { kind: "github" | "gitlab" | "git" }) {
-  if (kind === "github") {
-    return (
-      <GitHubIcon className="ps-icon" size={14} />
-    );
-  }
-  return (
-    <TuningIcon className="ps-icon" size={14} />
-  );
-}
-
-/** Collapsed-by-default rollup rows (Plan / Files / Tools) — the old SidePane cards, folded in. */
-function PsAccordion({ title, count, children }: { title: string; count: number; children: ReactNode }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="ps-accordion">
-      <button type="button" className="ps-row ps-accordion-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <span className="chev">{open ? "▾" : "▸"}</span>
-        <span>{title}</span>
-        <span className="ps-right ps-count">{count}</span>
-      </button>
-      {open && <div className="ps-accordion-body">{children}</div>}
     </div>
   );
 }

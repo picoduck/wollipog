@@ -21,12 +21,12 @@ function gitRegion(page: Page) {
   return page.getByRole("region", { name: "Git" });
 }
 
-/** The Git section is collapsed by default (IDEA-009 2026-08-10); details and Refresh Git
- * Status live behind the disclosure, which persists for the rest of the test. */
+/** Git Details is a disclosure, closed by default, whose state persists for the rest of the test
+ * (#2160). Refresh Git Status is always in the section head. */
 async function showGitDetails(page: Page) {
-  const toggle = gitRegion(page).getByRole("button", { name: "Show Git Details" });
-  if (await toggle.isVisible()) await toggle.click();
-  await expect(gitRegion(page).getByRole("button", { name: "Hide Git Details" })).toBeVisible();
+  const toggle = gitRegion(page).getByRole("button", { name: "Git Details" });
+  if (await toggle.getAttribute("aria-expanded") !== "true") await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
 }
 
 test("Inbox preview selection does not issue unconsumed Git or forge-summary reads", async ({ page }) => {
@@ -60,31 +60,29 @@ test("rich Git facts are truthful, accessible, and contained at desktop and narr
   // The composer no longer carries a Git footer; the pinned summary is the only Git surface.
   await expect(page.locator(".composer-context")).toHaveCount(0);
 
-  // Collapsed headline: scannable identity and warnings without the full block.
+  // One row per fact: the branch with its folder's kind, then each state that needs attention.
   const git = gitRegion(page);
-  const headline = git.locator(".ps-git-headline");
-  await expect(headline).toContainText(LONG_BRANCH);
-  await expect(headline).toContainText("Linked Worktree");
-  await expect(headline).toContainText("Dirty");
-  await expect(headline).toContainText("231");
+  const branchRow = git.locator(".ps-row").first();
+  await expect(branchRow.locator(".k")).toHaveText(LONG_BRANCH);
+  await expect(branchRow.locator(".v")).toHaveText("Worktree");
+  await expect(git.locator(".ps-row", { hasText: "Rebase in Progress" })).toBeVisible();
+  await expect(git.locator(".ps-row", { hasText: "Conflicts" }).locator(".v")).toHaveText("1");
+  await expect(git.locator(".ps-git-headline")).toHaveCount(0);
   await expect(git).not.toContainText("Remote Status May Be Stale");
 
   await showGitDetails(page);
-  await expect(git).toContainText("Linked Worktree");
-  await expect(git).toContainText("/repos/alpha/.agent-worktrees/session-alpha");
-  await expect(git).toContainText("aaaaaaaaaaaa");
-  await expect(git).toContainText("1 Conflicted");
-  await expect(git).toContainText("Rebase in Progress");
-  await expect(git).toContainText("Upstream Synced");
-  await expect(git).toContainText("Behind Main");
-  await expect(git).toContainText("231");
-  await expect(git).toContainText("Remote Status May Be Stale");
+  const facts = git.locator("dl.facts");
+  await expect(facts).toContainText("Linked Worktree");
+  await expect(facts).toContainText("/repos/alpha/.agent-worktrees/session-alpha");
+  await expect(facts).toContainText("aaaaaaaaaaaa");
+  await expect(facts).toContainText("1 conflicted");
+  await expect(facts).toContainText("In sync with upstream");
+  await expect(facts).toContainText("231 behind origin/main");
+  await expect(facts).toContainText("Remote Refs");
   await expect(git).not.toContainText("Fetched");
-  const freshness = git.locator(".ps-git-freshness-detail");
-  await expect(freshness).toBeVisible();
 
   const refresh = git.getByRole("button", { name: "Refresh Git Status" });
-  await expect(refresh).toHaveText("Refresh Git Status");
+  await expect(refresh).toHaveAttribute("title", "Refresh Git Status");
   await refresh.focus();
   await expect(refresh).toBeFocused();
 
@@ -95,11 +93,10 @@ test("rich Git facts are truthful, accessible, and contained at desktop and narr
       viewportWidth: document.documentElement.clientWidth,
     }));
     expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.viewportWidth);
-    const freshnessGeometry = await freshness.evaluate((element) => ({
-      clientWidth: element.clientWidth,
-      scrollWidth: element.scrollWidth,
-    }));
-    expect(freshnessGeometry.scrollWidth).toBeLessThanOrEqual(freshnessGeometry.clientWidth);
+    // Git Details values wrap in full rather than overflow.
+    const overflowing = await facts.locator("dd").evaluateAll((values) =>
+      values.filter((value) => value.scrollWidth > value.clientWidth + 1).map((value) => value.textContent));
+    expect(overflowing).toEqual([]);
   }
 });
 
@@ -121,7 +118,9 @@ test("retained forge rows hide outside a repository and restore current provider
   });
   await openSession(page, "Alpha Session");
   const summary = page.getByRole("complementary", { name: "Pinned Summary" });
-  await expect(summary.getByText("GitLab", { exact: true })).toBeVisible();
+  await showGitDetails(page);
+  const remote = summary.locator("dl.facts dd a", { hasText: "gitlab.example.test" });
+  await expect(remote).toBeVisible();
   await expect(summary.getByText("Forge Authentication Needed", { exact: true })).toBeVisible();
   await expect(summary.getByText("Forge Status Unavailable", { exact: true })).toBeVisible();
 
@@ -129,10 +128,9 @@ test("retained forge rows hide outside a repository and restore current provider
     const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
     fixture.failNextGit("session-alpha", "status", "not a git repository");
   });
-  await showGitDetails(page);
   await gitRegion(page).getByRole("button", { name: "Refresh Git Status" }).click();
   await expect(gitRegion(page)).toContainText("Not a Git Repository");
-  await expect(summary.getByText("GitLab", { exact: true })).toHaveCount(0);
+  await expect(remote).toHaveCount(0);
   await expect(summary.getByText("Forge Authentication Needed", { exact: true })).toHaveCount(0);
   await expect(summary.getByText("Forge Status Unavailable", { exact: true })).toHaveCount(0);
 
@@ -148,7 +146,7 @@ test("retained forge rows hide outside a repository and restore current provider
     });
   });
   await gitRegion(page).getByRole("button", { name: "Refresh Git Status" }).click();
-  await expect(summary.getByText("GitLab", { exact: true })).toBeVisible();
+  await expect(remote).toBeVisible();
   await expect(summary.getByText("Forge Authentication Needed", { exact: true })).toHaveCount(0);
   await expect(summary.getByText("Forge Status Unavailable", { exact: true })).toHaveCount(0);
 });
@@ -177,7 +175,6 @@ test("background cadence preserves focused enabled controls and confirmed facts"
     });
   await expect(refresh).toBeEnabled();
   await expect(refresh).toBeFocused();
-  await expect(refresh).toHaveText("Refresh Git Status");
   await expect(git).not.toContainText("Updating Git Status");
   await expect(git).toContainText(LONG_BRANCH);
 
@@ -189,15 +186,17 @@ test("background cadence preserves focused enabled controls and confirmed facts"
 test("linked and primary sessions never exchange facts when an old response settles late", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await resetFixture(page, "&deferGit=alpha");
+  // Git Details only exists once facts do; the persisted preference opens it when they arrive.
+  await page.evaluate(() => localStorage.setItem("wollipog.pinned.git.open", "1"));
   await openSession(page, "Alpha Session");
-  await showGitDetails(page);
   await expect(gitRegion(page)).toContainText("Loading Git Status");
+  await expect(gitRegion(page).getByRole("button", { name: "Git Details" })).toHaveCount(0);
 
   await openSession(page, "No Project Session");
   await expect(gitRegion(page)).toContainText("Detached");
   await expect(gitRegion(page)).toContainText("Primary Checkout");
   await expect(gitRegion(page)).toContainText("bbbbbbbbbbbb");
-  await expect(gitRegion(page)).toContainText("No Upstream");
+  await expect(gitRegion(page).locator("dl.facts > div", { hasText: "Upstream" }).locator("dd")).toHaveText("None");
   await expect(gitRegion(page)).not.toContainText(LONG_BRANCH);
   await expect(page.getByTitle("Open Review")).toHaveCount(0);
 
@@ -213,6 +212,7 @@ test("linked and primary sessions never exchange facts when an old response sett
   await expect(gitRegion(page)).toContainText(LONG_BRANCH);
   await expect(gitRegion(page)).toContainText("Linked Worktree");
   await expect(gitRegion(page)).not.toContainText("bbbbbbbbbbbb");
+  await expect(page.getByTitle("Open Review").first()).toBeVisible();
 });
 
 test("legacy runners keep legacy branch rendering and suppress enhanced labels", async ({ page }) => {
@@ -221,12 +221,13 @@ test("legacy runners keep legacy branch rendering and suppress enhanced labels",
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(75));
   await openSession(page, "Alpha Session");
 
-  await expect(page.locator(".ps-branch")).toHaveText(LONG_BRANCH);
-  // Legacy runners have no composer Git footer either; the pinned branch row is the surface.
+  // Legacy runners have no composer Git footer either; the Git section's branch row is the surface,
+  // without the repository facts a legacy runner cannot report.
+  await expect(gitRegion(page).locator(".ps-row").first().locator(".k")).toHaveText(LONG_BRANCH);
   await expect(page.locator(".composer-context")).toHaveCount(0);
-  await expect(gitRegion(page)).toHaveCount(0);
-  await expect(page.getByText("Upstream Synced")).toHaveCount(0);
-  await expect(page.getByText("Behind Main")).toHaveCount(0);
+  await expect(gitRegion(page).getByRole("button", { name: "Git Details" })).toHaveCount(0);
+  await expect(page.getByText("In sync with upstream")).toHaveCount(0);
+  await expect(page.getByText("Rebase in Progress")).toHaveCount(0);
 });
 
 test("explicit refresh preserves facts while updating, reports failure, and never implies fetch", async ({ page }) => {

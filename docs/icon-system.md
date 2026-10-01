@@ -74,9 +74,12 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `CheckIcon` | Lucide | `Check` | Generic success state. |
 | `WarningIcon` | Lucide | `TriangleAlert` | Generic warning state. |
 | `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices. |
-| `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices. |
+| `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step. |
+| `PlanPendingIcon` | Lucide | `Circle` | A plan step not started yet. |
+| `PlanInProgressIcon` | Lucide | `CircleDot` | The plan step in progress. |
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts. |
+| `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |
 | `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
 | `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |

@@ -10,7 +10,6 @@ import {
 import { useApi } from "../api-context.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
-import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import {
   archiveAndStopMessage,
   sessionArchiveActionLabel,
@@ -24,20 +23,15 @@ import { useInstanceScope } from "../instance-scope.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { absoluteViewUrl, backLabel } from "../navigation.js";
 import { reminderMenuActionLabel } from "../session-reminders.js";
-import { safeExternalHref } from "../external-href.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
-import { pullRequestStateLabel } from "../worktree-identity.js";
-import type { SessionChangeStatus } from "../session-status.js";
 import { DASHBOARD_ORIGIN } from "../config.js";
 import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
 import {
   ActiveSubagentsBadge,
   BackgroundDeliveryBadge,
   BackgroundWorkBadge,
-  ChangeStatusBadge,
   CopyButton,
   SessionStatusIndicators,
-  UntrackedBackgroundWorkBadge,
 } from "./common.js";
 import {
   useAccessibleMenu,
@@ -115,7 +109,6 @@ export function SessionHeader({
   onOpenProject,
   renderMoveProjectDialog,
   topbarControls,
-  changeStatus,
   activeSubagents,
   descendantRequests,
   onOpenBackgroundWork,
@@ -155,7 +148,6 @@ export function SessionHeader({
   /** App-shell control cluster (editor, pinned summary, terminal, side panel) when this bar
    * replaces the top-level app bar on desktop. */
   topbarControls?: ReactNode;
-  changeStatus?: SessionChangeStatus | null;
   /** Live structured subagents remain visible even while the parent awaits its next prompt. */
   activeSubagents?: { count: number; onOpen: () => void; workers?: boolean };
   /** Consolidated unresolved descendant requests owned by the dedicated request panel. */
@@ -167,11 +159,6 @@ export function SessionHeader({
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
-  const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
-  const activeWorktreeLabel = activeWorktree
-    ? `${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${pullRequestStateLabel(activeWorktree.pullRequest.state)} ${activeWorktree.pullRequest.kind === "merge_request" ? "MR" : "PR"}` : ""}`
-    : "";
-  const activeWorktreePullRequestHref = safeExternalHref(activeWorktree?.pullRequest?.url);
   const api = useApi();
   const instances = useInstances();
   const instanceScope = useInstanceScope();
@@ -217,7 +204,6 @@ export function SessionHeader({
     session.backgroundWorkState,
     session.backgroundWorkTracking,
     session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState,
-    changeStatus,
     runnerOnline,
     activeSubagents?.count,
     descendantRequests?.count,
@@ -294,13 +280,6 @@ export function SessionHeader({
       {renderBackgroundWork()}
       {backgroundDeliveryState && (
         <BackgroundDeliveryBadge state={backgroundDeliveryState} onOpen={onOpenBackgroundWork ? () => {
-          closeStatusPopover(statusPopoverOpen);
-          onOpenBackgroundWork();
-        } : undefined} />
-      )}
-      <ChangeStatusBadge change={changeStatus ?? null} />
-      {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-        <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
           closeStatusPopover(statusPopoverOpen);
           onOpenBackgroundWork();
         } : undefined} />
@@ -563,39 +542,11 @@ export function SessionHeader({
         </>
       )}
       <div className="session-header-statuses" ref={statusesRef}>
-        {session.providerAccountLabel && (
-          <span className="tag" title={session.providerAccountAutomaticallySelected
-            ? "Automatically selected provider account"
-            : "Provider account"}>
-            {session.providerAccountAutomaticallySelected ? "Auto: " : ""}
-            <PersonalIdentifier value={session.providerAccountLabel} label="Account Email" />
-          </span>
-        )}
         {renderNoninteractiveStatuses()}
         {activeSubagents && (
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} workers={activeSubagents.workers} />
         )}
       </div>
-      {activeWorktree?.pullRequest && activeWorktreePullRequestHref ? (
-        <a
-          className="tag tag-wt session-worktree-identity"
-          title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · PR: ${activeWorktree.pullRequest.url}` : ""}`}
-          href={activeWorktreePullRequestHref}
-          target="_blank"
-          rel="noreferrer"
-        >
-          {activeWorktreeLabel}
-        </a>
-      ) : activeWorktree ? (
-        <span
-          className="tag tag-wt session-worktree-identity"
-          title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}`}
-        >
-          {activeWorktreeLabel}
-        </span>
-      ) : (
-        null
-      )}
       {visibleBackgroundWorkState && (
         <span className="sr-only">
           <BackgroundWorkBadge state={visibleBackgroundWorkState} compact responsiveCompact />

@@ -5,10 +5,9 @@ import {
   deriveChanges,
   deriveCommitAction,
   deriveDirtySummary,
-  deriveGitHeadline,
   deriveGitPresentation,
   deriveHost,
-  deriveRemoteFreshness,
+  formatRemoteRefsAt,
   deriveSubagents,
   displayBaseRef,
   fixChecksPrompt,
@@ -277,15 +276,14 @@ test("v76 Git presentation keeps upstream sync distinct from default-base diverg
 
   assert.equal(model.branchLabel, "feature/very-long-worktree-name");
   assert.equal(model.headSha, "abcdef123456");
-  assert.deepEqual(model.upstream.map((row) => row.label), ["Upstream Synced"]);
-  assert.deepEqual(model.base.map((row) => [row.label, row.detail]), [["Behind Main", "231"]]);
-  assert.equal(model.worktree.label, "Linked Worktree");
+  assert.equal(model.upstreamBranch, "origin/feature/very-long-worktree-name");
+  assert.deepEqual(model.upstream, [{ text: "In sync with upstream", tone: "normal" }]);
+  assert.deepEqual(model.base, [{ text: "231 behind origin/main", tone: "warning" }]);
+  assert.equal(model.worktreeKind, "linked");
+  assert.equal(model.conflicts, 1);
   assert.equal(model.operation?.label, "Rebase in Progress");
-  assert.equal(model.remoteFreshness.detail, "Remote Refs Updated 2023-11-14 22:13 UTC");
-  const rowText = [...model.upstream, ...model.base]
-    .map((row) => (row.detail ? `${row.label} ${row.detail}` : row.label))
-    .join(" ");
-  assert.doesNotMatch(rowText, /Up to Date/i);
+  assert.equal(model.remoteRefsAt, "2023-11-14 22:13 UTC");
+  assert.doesNotMatch([...model.upstream, ...model.base].map((line) => line.text).join(" "), /Up to Date/i);
 });
 
 test("status owns overlapping local facts and mismatched summary base is not paired", () => {
@@ -309,8 +307,8 @@ test("status owns overlapping local facts and mismatched summary base is not pai
   assert.equal(model.branchLabel, "new-status");
   assert.equal(model.headSha, "222222222222");
   assert.equal(model.behindBase, null);
-  assert.deepEqual(model.base.map((row) => row.label), ["Trunk Comparison Unavailable"]);
-  assert.equal(model.worktree.label, "Primary Checkout");
+  assert.deepEqual(model.base.map((line) => line.text), ["Comparison with origin/trunk unavailable"]);
+  assert.equal(model.worktreeKind, "primary");
 });
 
 test("known ahead facts remain distinct when only the behind-base comparison is unavailable", () => {
@@ -320,9 +318,9 @@ test("known ahead facts remain distinct when only the behind-base comparison is 
     status: read(status({ baseRef: "origin/main", ahead: 3, worktreeKind: "primary" }), 1),
     summary: read(null, 0, { settled: false }),
   });
-  assert.deepEqual(model.base.map((row) => [row.label, row.detail]), [
-    ["Ahead of Main", "3"],
-    ["Behind Main Unavailable", null],
+  assert.deepEqual(model.base.map((line) => line.text), [
+    "3 ahead of origin/main",
+    "Commits behind origin/main unavailable",
   ]);
 });
 
@@ -335,7 +333,7 @@ test("detached, rolling-skew, dirty overlaps, operation, and custom base copy re
     conflictedCount: 1,
   }), {
     label: "Dirty",
-    detail: "1 Conflicted \u00b7 2 Staged \u00b7 2 Modified \u00b7 1 Untracked",
+    detail: "1 conflicted, 2 staged, 2 modified, 1 untracked",
     tone: "warning",
   });
   assert.equal(displayBaseRef("refs/remotes/upstream/release/2026"), "upstream/release/2026");
@@ -348,8 +346,9 @@ test("detached, rolling-skew, dirty overlaps, operation, and custom base copy re
     summary: read(null, 0, { settled: false }),
   });
   assert.equal(detached.branchLabel, "Detached");
-  assert.deepEqual(detached.upstream.map((row) => row.label), ["Upstream Details Unavailable"]);
-  assert.deepEqual(detached.base.map((row) => row.label), ["Base Comparison Unavailable"]);
+  assert.equal(detached.upstreamBranch, undefined, "an unreported upstream is unknown, not absent");
+  assert.deepEqual(detached.upstream, []);
+  assert.deepEqual(detached.base.map((line) => line.text), ["Base comparison unavailable"]);
 });
 
 test("Git availability states are explicit and preserve confirmed facts while updating or failed", () => {
@@ -378,7 +377,6 @@ test("Git availability states are explicit and preserve confirmed facts while up
   });
   assert.equal(codedDisappearance.state, "not_repository");
   assert.equal(codedDisappearance.stateDetail, "Not a Git Repository");
-  assert.deepEqual(deriveGitHeadline(codedDisappearance), [], "a disappeared repository leaks no confirmed facts");
   const linkedDisappearance = deriveGitPresentation({
     runnerOnline: true,
     worktreePath: "/repo/wt",
@@ -389,7 +387,6 @@ test("Git availability states are explicit and preserve confirmed facts while up
   });
   assert.equal(linkedDisappearance.state, "not_repository");
   assert.equal(linkedDisappearance.stateDetail, "Not a Git Repository");
-  assert.deepEqual(deriveGitHeadline(linkedDisappearance), [], "a gone worktree leaks no confirmed facts");
   assert.equal(deriveGitPresentation({
     runnerOnline: true,
     worktreePath: null,
@@ -403,7 +400,6 @@ test("Git availability states are explicit and preserve confirmed facts while up
     summary: noSummary,
   });
   assert.equal(disappeared.stateDetail, "Not a Git Repository");
-  assert.deepEqual(deriveGitHeadline(disappeared), []);
   assert.equal(deriveGitPresentation({
     runnerOnline: true,
     worktreePath: null,
@@ -419,174 +415,45 @@ test("Git availability states are explicit and preserve confirmed facts while up
 });
 
 test("remote-ref freshness never claims a fetch and has truthful null semantics", () => {
-  assert.deepEqual(deriveRemoteFreshness(null), {
-    label: "Remote Status May Be Stale",
-    detail: "Remote Ref Freshness Unavailable",
-  });
-  assert.equal(deriveRemoteFreshness(50).detail, "Remote Refs Updated 1970-01-01 00:00 UTC");
-  assert.equal(deriveRemoteFreshness(9e15).detail, "Remote Ref Freshness Unavailable");
-  assert.doesNotMatch(deriveRemoteFreshness(50).detail, /Fetched|Just Now|Ago/i);
+  assert.equal(formatRemoteRefsAt(null), null);
+  assert.equal(formatRemoteRefsAt(50), "1970-01-01 00:00 UTC");
+  assert.equal(formatRemoteRefsAt(9e15), null);
+  assert.doesNotMatch(formatRemoteRefsAt(50)!, /Fetched|Just Now|Ago/i);
 });
 
-test("deriveGitHeadline: collapsed facts compact to branch, identity, dirty, and one divergence", () => {
-  const model = deriveGitPresentation({
-    runnerOnline: true,
-    worktreePath: "C:/repo/.agent-worktrees/session-a",
-    status: read(status({
-      branch: "feature/deep-work",
-      headSha: "abcdef123456",
-      detached: false,
-      upstreamBranch: "origin/feature/deep-work",
-      aheadUpstream: 0,
-      behindUpstream: 0,
-      baseRef: "origin/main",
-      worktreeKind: "linked",
-      stagedCount: 0,
-      modifiedCount: 2,
-      untrackedCount: 0,
-      conflictedCount: 0,
-      hasChanges: true,
-      ahead: 7,
-      operation: null,
-      remoteRefsAt: 1_700_000_000_000,
-    }), 2),
-    summary: read(summary({
-      branch: "feature/deep-work",
-      baseRef: "origin/main",
-      ahead: 7,
-      behind: 18,
-      hasChanges: true,
-    }), 1),
-  });
-  const segments = deriveGitHeadline(model);
-  assert.deepEqual(segments.map((segment) => segment.text), [
-    "feature/deep-work",
-    "Linked Worktree",
-    "Dirty",
-    "Main +7 / -18",
-  ]);
-  const divergence = segments.at(-1)!;
-  assert.equal(divergence.tone, "warning");
-  assert.equal(divergence.expandedLabel, "Ahead of Main 7 · Behind Main 18");
-  assert.equal(segments.find((segment) => segment.text === "Dirty")?.tone, "warning");
-});
-
-test("deriveGitHeadline: conflicts and operations stay visible collapsed; synced repos stay quiet", () => {
-  const conflicted = deriveGitPresentation({
+test("Git Details sync lines: upstream divergence both ways, and an explicit no-upstream", () => {
+  const upstream = (aheadUpstream: number, behindUpstream: number) => deriveGitPresentation({
     runnerOnline: true,
     worktreePath: null,
     status: read(status({
-      branch: "main",
-      headSha: "abcdef123456",
-      detached: false,
-      upstreamBranch: "origin/main",
-      aheadUpstream: 0,
-      behindUpstream: 3,
-      baseRef: "origin/main",
-      worktreeKind: "primary",
-      stagedCount: 0,
-      modifiedCount: 0,
-      untrackedCount: 0,
-      conflictedCount: 2,
-      hasChanges: true,
-      ahead: 0,
-      operation: "merge",
-      remoteRefsAt: null,
-    }), 2),
-    summary: read(null, 1),
-  });
-  const conflictTexts = deriveGitHeadline(conflicted).map((segment) => segment.text);
-  assert.ok(conflictTexts.includes("Conflicts"));
-  assert.ok(conflictTexts.includes("Merge in Progress"));
-  assert.ok(conflictTexts.includes("Upstream -3"), "no base divergence → behind-upstream is the actionable warning");
-  assert.equal(
-    deriveGitHeadline(conflicted).find((segment) => segment.text === "Upstream -3")?.expandedLabel,
-    "Behind Upstream 3",
-  );
-
-  const synced = deriveGitPresentation({
-    runnerOnline: true,
-    worktreePath: null,
-    status: read(status({
-      branch: "main",
-      headSha: "abcdef123456",
-      detached: false,
-      upstreamBranch: "origin/main",
-      aheadUpstream: 0,
-      behindUpstream: 0,
-      baseRef: "origin/main",
-      worktreeKind: "primary",
-      stagedCount: 0,
-      modifiedCount: 0,
-      untrackedCount: 0,
-      conflictedCount: 0,
-      hasChanges: false,
-      ahead: 0,
-      operation: null,
-      remoteRefsAt: null,
-    }), 2),
-    summary: read(summary({ branch: "main", baseRef: "origin/main", ahead: 0, behind: 0 }), 1),
-  });
-  assert.deepEqual(deriveGitHeadline(synced).map((segment) => segment.text), [
-    "main",
-    "Primary Checkout",
-    "Clean",
-  ], "a synced clean checkout carries no divergence or warning segments");
-
-  const offline = deriveGitPresentation({
-    runnerOnline: false,
-    worktreePath: null,
-    status: read(status({ branch: "main" }), 1),
-    summary: read(null, 0),
-  });
-  assert.deepEqual(deriveGitHeadline(offline), [], "hidden-fact states surface no headline");
-});
-
-test("deriveGitHeadline: without a base comparison, upstream divergence shows both directions", () => {
-  const upstreamOnly = (aheadUpstream: number, behindUpstream: number) => deriveGitPresentation({
-    runnerOnline: true,
-    worktreePath: null,
-    status: read(status({
-      branch: "feature/no-base",
-      headSha: "abcdef123456",
-      detached: false,
-      upstreamBranch: "origin/feature/no-base",
+      branch: "feature/upstream",
+      upstreamBranch: "origin/feature/upstream",
       aheadUpstream,
       behindUpstream,
-      baseRef: null,
+      baseRef: "origin/main",
       worktreeKind: "primary",
-      stagedCount: 0,
-      modifiedCount: 0,
-      untrackedCount: 0,
-      conflictedCount: 0,
-      hasChanges: false,
-      ahead: aheadUpstream,
-      operation: null,
-      remoteRefsAt: null,
     }), 1),
+    summary: read(summary({ branch: "feature/upstream", baseRef: "origin/main", behind: 0 }), 2),
+  });
+  assert.deepEqual(upstream(2, 3).upstream, [
+    { text: "3 behind upstream", tone: "warning" },
+    { text: "2 ahead of upstream", tone: "normal" },
+  ]);
+  assert.deepEqual(upstream(0, 0).base, [{ text: "In sync with origin/main", tone: "normal" }]);
+  const none = deriveGitPresentation({
+    runnerOnline: true,
+    worktreePath: null,
+    status: read(status({ upstreamBranch: null, baseRef: "origin/main", worktreeKind: "primary" }), 1),
     summary: read(null, 0, { settled: false }),
   });
-
-  // Unpushed commits must not vanish from the collapsed summary (regression coverage).
-  const aheadOnly = deriveGitHeadline(upstreamOnly(2, 0)).at(-1)!;
-  assert.equal(aheadOnly.text, "Upstream +2");
-  assert.equal(aheadOnly.tone, "normal");
-  assert.equal(aheadOnly.expandedLabel, "Ahead of Upstream 2");
-
-  const bidirectional = deriveGitHeadline(upstreamOnly(2, 3)).at(-1)!;
-  assert.equal(bidirectional.text, "Upstream +2 / -3");
-  assert.equal(bidirectional.tone, "warning");
-  assert.equal(bidirectional.expandedLabel, "Ahead of Upstream 2 · Behind Upstream 3");
-
-  const synced = deriveGitHeadline(upstreamOnly(0, 0));
-  assert.ok(!synced.some((segment) => segment.text.startsWith("Upstream")),
-    "a synced upstream adds no divergence segment");
+  assert.equal(none.upstreamBranch, null);
+  assert.deepEqual(none.upstream, []);
 });
 
-test("deriveGitHeadline: rolling-skew facts without aheadUpstream fall back to the legacy ahead", () => {
-  // A rolling-skew producer can report baseRef: null while omitting the upstream counts;
-  // the legacy non-null `ahead` then carries the upstream comparison (legacy contract) and
-  // unpushed commits must still surface in the collapsed headline (regression coverage).
+test("rolling-skew facts without aheadUpstream still show unpushed commits", () => {
+  // A rolling-skew producer can report baseRef: null while omitting the upstream counts; the
+  // legacy non-null `ahead` then carries the upstream comparison (legacy contract), and unpushed
+  // commits must still surface (regression coverage).
   const model = deriveGitPresentation({
     runnerOnline: true,
     worktreePath: null,
@@ -601,26 +468,19 @@ test("deriveGitHeadline: rolling-skew facts without aheadUpstream fall back to t
     }), 1),
     summary: read(null, 0, { settled: false }),
   });
-  const divergence = deriveGitHeadline(model).at(-1)!;
-  assert.equal(divergence.text, "Upstream +2");
-  assert.equal(divergence.tone, "normal");
-  assert.equal(divergence.expandedLabel, "Ahead of Upstream 2");
+  assert.deepEqual(model.upstream, [{ text: "2 ahead of upstream", tone: "normal" }]);
 });
 
-test("deriveGitHeadline: pre-v76 omission of baseRef never mislabels base divergence as upstream", () => {
-  // A pre-v76 producer omits both baseRef and the upstream counts while its legacy `ahead`
-  // is relative to the resolved default base. That must not surface as "Upstream +2" —
-  // the comparison target is unknown, so no divergence segment renders (regression coverage).
+test("pre-v76 omission of baseRef never mislabels base divergence as upstream", () => {
+  // A pre-v76 producer omits both baseRef and the upstream counts while its legacy `ahead` is
+  // relative to the resolved default base. The comparison target is unknown, so no upstream line
+  // renders (regression coverage).
   const model = deriveGitPresentation({
     runnerOnline: true,
     worktreePath: null,
-    status: read(status({
-      branch: "feature/legacy",
-      hasChanges: false,
-      ahead: 2,
-    }), 1),
+    status: read(status({ branch: "feature/legacy", hasChanges: false, ahead: 2 }), 1),
     summary: read(null, 0, { settled: false }),
   });
-  assert.ok(!deriveGitHeadline(model).some((segment) => segment.text.startsWith("Upstream")),
-    "omitted baseRef (pre-v76) must not produce an upstream divergence segment");
+  assert.deepEqual(model.upstream, []);
+  assert.deepEqual(model.base.map((line) => line.text), ["Base comparison unavailable"]);
 });

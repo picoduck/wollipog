@@ -27,11 +27,6 @@ Every label below comes from one vocabulary in the web client, `statusMeta(domai
 | Attention | Parent campaign `orchestratorCampaign.pendingRequests.human > 0` | **Needs Your Input** | One or more unresolved descendant requests are explicitly assigned to the human. This is independent of the parent lifecycle. |
 | Agent Work | Parent campaign `orchestratorCampaign.pendingRequests.orchestrator > 0` | **Orchestrator Action** | One or more unresolved descendant requests are assigned to the Orchestrator. This is not human attention and does not enter human notification counts. |
 | Attention | Explicit review-request evidence (reserved; no current producer) | **Review Requested** | Reserved for an authoritative review request. Workflow-column placement is not evidence. |
-| Changes | Completed Git read with a known base and no working-tree or base-relative changes | **No Changes** | Git confirmed an empty change set. |
-| Changes | Completed Git read with working-tree changes or commits ahead, without a confirmed base-plus-open-pull-request pairing | **Changes Present** | Git confirmed a real change set at the latest eligible quiescent boundary. |
-| Changes | Confirmed commits ahead of base with an open pull request and a clean working tree | **Ready for Review** | The committed base-relative change set is reviewable. |
-| Changes | Confirmed commits ahead of base with an open pull request and working-tree changes | **Ready for Review** + **Uncommitted Changes** | The committed change set is reviewable, while additional local work remains outside the pull request. Neither indicator replaces the other. |
-| Changes | No completed Git read, unavailable repository, or stale/missing evidence | No badge | Never infer **Changes Present** or **Ready for Review** from lifecycle or Board column. |
 | Workflow | `column` | Board column title only | Filing and organization; it does not alter any status dimension. |
 | Health | Activity watchdog exceeds ten minutes | **Stalled** | A derived exceptional condition shown alongside lifecycle and attention. |
 | Health | Session runner is offline | **Disconnected** | The authoritative runner connection is unavailable. |
@@ -43,12 +38,14 @@ Every label below comes from one vocabulary in the web client, `statusMeta(domai
 | Background Work | Listed job with `stalledSince` (no terminal status for over an hour) | **Stalled** job row | A report that the job may never end, not proof that it ended. When a queued handoff waits on the job past its bound (`queueHold.endsAt`), the runner ends it and it becomes a killed job row. |
 | Background Work | Settled delivery or legacy `backgroundWorkState=resumed` | No current-status badge | Completion remains in the timestamped Background Work inventory instead of resembling live work. |
 
+Changes are facts, not a status dimension (docs/design-system.md §11.2): the Pinned Summary's Git
+section states the change counts, the commit action, the pull request with its state, and its
+checks (#2160). No session surface shows a Changes badge.
+
 ## Projection Rules
 
 - Show **Running** only for `status=running`. Counts labeled **Running** use that same predicate; **Queued** and **Starting** have separate counts.
 - Show lifecycle and attention together when both apply, except that an attention label replaces **Awaiting Input** rather than repeating it. Do not replace **Running**, **Awaiting Prompt**, or another lifecycle fact with a workflow-column interpretation.
-- Show change state only after a successful Git observation, and suppress retained observations while a turn is queued, starting, running, or awaiting input. A Review-column session with no observation has no change badge.
-- Review readiness and uncommitted work coexist. Keep **Ready for Review** for the confirmed committed change set and add **Uncommitted Changes** for working-tree changes; never imply that those local changes are included in the pull request.
 - Keep compact visible labels and accessible names on the same Title Case terminology. Descriptions and notifications use sentence case.
 - Unknown lifecycle values use **Status Unavailable**. An undifferentiated legacy input state uses **Input Required**. Missing Git or background fields produce no affirmative claim.
 - Refreshes, reconnects, and session transitions replace the relevant dimension independently; they must not synthesize a change in another dimension.
@@ -56,7 +53,7 @@ Every label below comes from one vocabulary in the web client, `statusMeta(domai
 - Current clients group the parent request panel by **Needs Your Input** and **Orchestrator Action** with exact request counts. Older projections that omit `pendingRequests` retain the neutral descendant summary; missing ownership data must not invent human attention.
 - Managed background indicators open the **Background Work** inventory. Job lifecycle, continuation delivery, and notification delivery are separate fields; offline or stale non-terminal evidence reads **Unverified**, with a hollow dot. A subagent that is no longer reachable reads **Lost**.
 - A session with several pending requests shows one attention term per kind, each with its count when more than one ("**Answer Required** 2 · **Approval Required**"), in priority order: Recovery, Authentication, guardrail pauses, Answer, Approval. Session headers may still roll these up into an "N Actions Required" count. A parent session's Inbox row and Board card also carry a family rollup of its child sessions ("4 Children · 2 Awaiting Input"), which is a count of children, not an attention term of the parent's own.
-- Authoritative running, continuation-pending, and orphaned background work stays visible in Inbox rows and expanded Session headers alongside lifecycle. Mobile headers reserve a full-width line for it before the measured lifecycle/change/action line; passive change badges may overflow, but background work never requires opening the status popover. Settled work adds no current-status line.
+- Authoritative running, continuation-pending, and orphaned background work stays visible in Inbox rows and expanded Session headers alongside lifecycle. Mobile headers reserve a full-width line for it before the measured lifecycle/action line; passive badges may overflow, but background work never requires opening the status popover. Settled work adds no current-status line.
 
 ## Surface Contract
 

@@ -12,7 +12,6 @@ import {
   AttentionBadge,
   COPY_RESULT_MS,
   CopyButton,
-  ChangeStatusBadge,
   SessionStatusIndicators,
   UntrackedBackgroundWorkBadge,
 } from "./common.js";
@@ -457,7 +456,7 @@ test("Untracked capability and push receipt badges expose honest Title Case boun
 });
 
 
-test("session indicators preserve simultaneous lifecycle, attention, and change dimensions", async () => {
+test("session indicators preserve simultaneous lifecycle and attention dimensions", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -503,22 +502,10 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
             requiredUnits: 1,
           },
         }} />
-        <ChangeStatusBadge change={{
-          kind: "ready_for_review",
-          label: "Ready for Review",
-          description: "Git confirms reviewable commits.",
-          supplement: {
-            kind: "uncommitted_changes",
-            label: "Uncommitted Changes",
-            description: "Git confirms additional local work outside the pull request.",
-          },
-        }} />
       </>);
     });
     assert.match(container.textContent ?? "", /Running/);
     assert.match(container.textContent ?? "", /Answer Required/);
-    assert.match(container.textContent ?? "", /Ready for Review/);
-    assert.match(container.textContent ?? "", /Uncommitted Changes/);
     assert.match(container.textContent ?? "", /Disconnected/);
     assert.ok(container.querySelector('[role="group"][aria-label="Session Status"]'));
     assert.equal(container.querySelector('[aria-label="Activity: Running"]')?.textContent?.trim(), "Running");
@@ -536,16 +523,6 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
         ?.textContent?.trim(),
       "Capacity Sync",
     );
-    assert.ok(container.querySelector('[role="group"][aria-label="Change Status"]'));
-    assert.equal(container.querySelector('[aria-label="Changes: Ready for Review"]')?.textContent?.trim(), "Ready for Review");
-    assert.equal(container.querySelector('[aria-label="Changes: Uncommitted Changes"]')?.textContent?.trim(), "Uncommitted Changes");
-    assert.equal(container.querySelectorAll(".change-status-indicators > .status").length, 2,
-      "compact surfaces preserve both facts as separate badges");
-    const changeBadges = [...container.querySelectorAll(".change-status-indicators > .status")];
-    assert.equal(changeBadges[0]?.classList.contains("t-success"), true,
-      "review readiness keeps its successful status tone and primary position");
-    assert.equal(changeBadges[1]?.classList.contains("t-neutral"), true,
-      "uncommitted work is a neutral fact in the supplemental position");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

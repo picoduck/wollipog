@@ -1929,13 +1929,6 @@ kbd {
    per-surface recipes, each with its own size, border and uppercase transform, so one condition no
    longer looks different from one screen to the next. The label is never transformed here. */
 .session-status-indicators { display: inline-flex; min-width: 0; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
-.change-status-indicators {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: var(--space-1);
-  flex-wrap: wrap;
-}
 /* Tones (§2.2) are not tokens: a tone class sets two local properties from the palette, and every
    tinted component reads those rather than naming a hue. */
 .t-neutral { --tone: var(--text-faint); --tone-text: var(--text-dim-on-tint); }
@@ -3407,9 +3400,9 @@ textarea {
   gap: 5px;
 }
 .session-bar > .session-header-statuses { overflow-x: clip; }
-/* Nor do the groups inside it wrap: a change group that wraps elsewhere would otherwise stack its
+/* Nor does the status group inside it wrap: a group that wraps elsewhere would otherwise stack its
    badges into a second line the moment the row is a fraction of a pixel short. */
-.session-bar > .session-header-statuses > :is(.session-status-indicators, .change-status-indicators) {
+.session-bar > .session-header-statuses > .session-status-indicators {
   flex: none;
   flex-wrap: nowrap;
 }
@@ -3420,14 +3413,6 @@ textarea {
 @container app (max-width: 1099px) {
   .session-bar > .session-bar-project { display: none; }
   .session-bar > .session-bar-title { min-width: var(--session-title-readable, 0px); }
-}
-.session-worktree-identity {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 360px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .session-header-action { padding: 0; }
 .session-status-overflow-trigger {
@@ -3506,8 +3491,7 @@ textarea {
   box-shadow: 0 0 0 2px var(--accent);
   outline: 2px solid transparent;
 }
-.session-status-popover-content .session-status-indicators,
-.session-status-popover-content .change-status-indicators {
+.session-status-popover-content .session-status-indicators {
   flex-wrap: wrap;
 }
 @media (max-width: 600px) {
@@ -4680,183 +4664,134 @@ textarea {
   gap: var(--space-3);
   padding: var(--space-3) var(--space-3) var(--space-6);
 }
-/* In the phone sheet the dialog body already pads its content. */
-.ps-sheet .ps-body { padding: 0; }
-.ps-section {
+/* In the phone sheet the dialog body already pads its content by 20px; 4px more keeps the 24px
+   below the last row. */
+.ps-sheet .ps-body { padding: 0 0 var(--space-1); }
+/* The contents (#2160; docs/design-system.md §5.2, §5.4, §5.5): four sections of one-line rows
+   that state each fact once, a hairline between sections, and a head in --text above the values'
+   --text-dim. A row is a 14px icon, a label `.k` that keeps its width and a value `.v` that
+   truncates; `.long-k` swaps them where the label is the long part (a branch, a pull request). */
+.ps-sec {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  min-width: 0;
 }
-.ps-section + .ps-section {
+.ps-sec + .ps-sec {
+  padding-top: var(--space-3);
   border-top: 1px solid var(--border);
-  padding-top: 8px;
 }
-.ps-section-head {
+.ps-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
-  text-transform: none;
-  color: var(--text-faint);
-  padding: 2px 4px 4px;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-1);
 }
-.ps-plus {
-  padding: 0 6px;
-  font-size: 14px;
+.ps-head > h3 {
+  margin: 0;
+  color: var(--text);
+  font: var(--type-label);
 }
-.ps-git-refresh {
-  flex: none;
-  align-self: flex-start;
-  margin: 4px 6px 2px;
-  padding: 3px 7px;
-  font-size: var(--text-xs);
-}
-.ps-git-toggle {
-  flex: none;
-  padding: 3px 7px;
-  font-size: var(--text-xs);
-}
-/* Collapsed Git headline: the scannable one-liner (branch · worktree · dirty · divergence).
-   Long branch names truncate; the cluster wraps rather than forcing the card wider. */
-.ps-git-headline {
+.ps-row {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 2px 6px;
-  margin: 2px 6px 4px;
+  gap: var(--space-2);
+  width: 100%;
   min-width: 0;
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-  line-height: 1.35;
+  min-height: var(--control-h);
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: var(--type-small);
+  text-align: left;
+  text-decoration: none;
 }
-.ps-git-headline-seg {
+.ps-row.is-nav { cursor: pointer; }
+@media (hover: hover) {
+  .ps-row.is-nav:hover { background: var(--bg-elev-2); }
+}
+.ps-row > svg,
+.ps-icon {
+  flex: none;
+  color: var(--text-dim);
+}
+.ps-row > .k {
+  flex: none;
+  white-space: nowrap;
+}
+.ps-row > .v {
+  flex: 1 1 auto;
   min-width: 0;
-  max-width: 100%;
   overflow: hidden;
+  color: var(--text-dim);
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ps-git-headline-seg + .ps-git-headline-seg::before {
-  content: "· ";
+.ps-row.long-k > .k {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ps-row.long-k > .v {
+  flex: none;
+  margin-left: auto;
+}
+/* The trailing chevron (opens in Wollipog) or external-link icon (opens a forge page). */
+.ps-row > .ps-go {
+  margin-left: auto;
   color: var(--text-faint);
 }
-.ps-git-headline-seg.is-warning {
-  color: var(--amber);
+.ps-row > .v + .ps-go { margin-left: 0; }
+.ps-row.is-warning,
+.ps-row.is-warning > :is(.ps-icon, .v) { color: var(--warning); }
+/* The Account row's value holds the reveal control: it may not clip the control's 44px touch
+   target, and the identifier truncates rather than the row. */
+.ps-row > .v:has(> .pid) {
+  display: flex;
+  justify-content: flex-end;
+  overflow: visible;
 }
-.ps-git-section {
-  min-width: 0;
-}
-.ps-git-row {
-  min-width: 0;
-}
-.ps-git-label {
-  min-width: 0;
+.ps-row > .v .pid-value {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ps-git-row.is-warning {
-  color: var(--amber);
+/* A fact with a one-line reason under it, aligned with the label rather than the icon. */
+.ps-row.has-note {
+  flex-wrap: wrap;
+  padding-block: var(--space-1);
 }
-.ps-git-freshness {
-  display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
-  align-items: start;
-}
-.ps-git-freshness .ps-git-freshness-detail {
-  grid-column: 2;
-  max-width: none;
-  margin-left: 0;
-  overflow: visible;
-  white-space: normal;
-  text-overflow: clip;
-}
-.ps-git-state {
-  margin: 2px 6px 4px;
+.ps-note {
+  flex-basis: 100%;
+  padding-left: calc(var(--icon-sm) + var(--space-2));
   color: var(--text-dim);
-  font-size: var(--text-xs);
-  line-height: 1.35;
+  font: var(--type-small);
+}
+.ps-receipt { min-height: var(--control-h-sm); }
+.ps-add { color: var(--green); }
+.ps-del { color: var(--red); }
+.ps-git-state {
+  padding: 0 var(--space-1) var(--space-1);
+  color: var(--text-dim);
+  font: var(--type-small);
 }
 .ps-git-state[data-git-state="error"],
 .ps-git-state[data-git-state="not_repository"] {
   color: var(--red);
 }
-.ps-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 6px 6px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text);
-  font-size: 12.5px;
-  text-align: left;
-  cursor: pointer;
-  text-decoration: none;
-}
-.ps-row:hover:not(.is-static) {
-  background: var(--bg-elev-3);
-}
-.ps-row.is-static {
-  cursor: default;
-}
-.ps-icon {
-  color: var(--text-dim);
-  flex: none;
-}
-.ps-right {
-  margin-left: auto;
-  flex: none;
-}
-/* A fact with a one-line reason under it, aligned with the label rather than the icon. */
-.ps-row.has-note { flex-wrap: wrap; row-gap: var(--space-1); }
-.ps-note {
-  flex-basis: 100%;
-  padding-left: var(--space-6);
-  color: var(--text-dim);
-  font: var(--type-small);
-}
-.ps-add {
-  color: var(--green);
-}
-.ps-del {
-  color: var(--red);
-}
-.ps-detail,
-.ps-count {
-  color: var(--text-faint);
-  font-size: 11.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 150px;
-}
-.ps-branch,
-.ps-sub-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ps-accordion-head .chev {
-  color: var(--text-faint);
-  width: 12px;
-}
 .ps-checks {
-  gap: 0;
-}
-.ps-checks-link {
   display: flex;
   align-items: center;
-  gap: 9px;
-  color: var(--text);
-  text-decoration: none;
+  gap: var(--space-2);
   min-width: 0;
 }
-.ps-checks-link:hover {
-  color: var(--accent);
-}
+.ps-checks > .ps-row { flex: 1 1 auto; }
+.ps-fix { flex: none; }
 .ps-check-dot {
   width: 9px;
   height: 9px;
@@ -4872,28 +4807,86 @@ textarea {
 .ps-check-dot.is-pass {
   background: var(--green);
 }
-.ps-fix {
-  padding: 2px 10px;
+/* Plan, Files, Tools, Subagents and Git Details: the shared disclosure (§5.5) as a full-width row
+   with a plain count (§11.4). */
+.ps-disclosure > .disclosure-trigger {
+  display: flex;
+  width: 100%;
+  min-height: var(--control-h);
+  color: var(--text);
+  font: var(--type-small);
 }
-.ps-source:hover {
-  background: var(--bg-elev-3);
+.ps-disclosure > .disclosure-trigger > .disclosure-chevron { color: var(--text-dim); }
+.ps-count {
+  margin-left: auto;
+  color: var(--text-faint);
+  font: var(--type-micro);
+  font-variant-numeric: tabular-nums;
 }
-.ps-accordion-body {
-  padding: 2px 6px 6px 27px;
+.ps-disclosure > .disclosure-body {
+  gap: 0;
+  padding: 0 0 var(--space-2) calc(var(--icon-sm) + var(--space-2));
+}
+/* Plan steps, files, tools and subagents share one 12px item. */
+.ps-items {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.plan-row,
-.artifact-row,
-.tool-row {
+.ps-item {
   display: flex;
-  align-items: baseline;
-  gap: 7px;
-  font-size: 12px;
+  align-items: flex-start;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-1) 0;
+  border: 0;
+  background: transparent;
   color: var(--text-dim);
-  line-height: 1.35;
+  font: var(--type-small);
+  text-align: left;
 }
+.ps-item.is-link {
+  align-items: center;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .ps-item.is-link:hover {
+    color: var(--text);
+    text-decoration: underline;
+  }
+}
+.ps-item > svg { flex: none; }
+.ps-item-icon {
+  color: var(--text-faint);
+  margin-top: var(--space-0-5);
+}
+.ps-item.plan-in_progress .ps-item-icon { color: var(--blue); }
+.ps-item.plan-completed { color: var(--text-faint); }
+.ps-item.plan-completed .ps-item-text { text-decoration: line-through; }
+.ps-item-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ps-item-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ps-item.is-failed .ps-item-name { color: var(--red); }
+/* Git Details: every remaining fact as a `.facts` list (§5.4), its values wrapped in full. */
+.ps-facts {
+  padding-right: var(--space-1);
+  font: var(--type-small);
+}
+.ps-facts .ps-line { display: block; }
+.ps-facts .is-warning { color: var(--warning); }
+.ps-mono { font-family: var(--font-mono); }
 .source-path-link {
   border: 0;
   background: transparent;
@@ -4901,38 +4894,14 @@ textarea {
   text-align: left;
   cursor: pointer;
 }
-.artifact-row.source-path-link {
-  width: 100%;
-  padding: 2px 0;
-}
 .source-path-link:hover {
   color: var(--accent);
   text-decoration: underline;
 }
-.plan-icon {
-  color: var(--text-faint);
-  font-size: 10px;
-}
-.plan-completed {
-  color: var(--text-faint);
-}
-.plan-completed .plan-text {
-  text-decoration: line-through;
-}
-.plan-in_progress .plan-icon {
-  color: var(--blue);
-}
-.plan-text {
-  flex: 1;
-}
-.artifact-name,
 .tool-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.tool-failed .tool-title {
-  color: var(--red);
 }
 
 .approval-bar {
@@ -13604,7 +13573,6 @@ body.shell-dock-dragging * {
     border-bottom: 1px solid var(--border);
   }
   .session-bar:has(> .session-header-note) { row-gap: 4px; }
-  .session-bar:has(> .session-worktree-identity) { row-gap: 4px; }
   .session-bar > .session-header-statuses {
     /* Statuses stay in the leading grid track so the action track is always complete. The
        measured badge row hides only its overflowing suffix and hands the exact hidden count to the
@@ -13627,9 +13595,6 @@ body.shell-dock-dragging * {
     flex-wrap: nowrap;
     min-height: 36px;
   }
-  .session-bar > .session-header-statuses .change-status-indicators {
-    display: contents;
-  }
   /* The badges keep the shared recipe's 11px type (docs/design-system.md §11.1). CI and user
      devices do not share the same system font, so the width headroom comes from the inset instead:
      the status surface, rather than individual badges, owns narrow-width clipping, and the line
@@ -13641,7 +13606,7 @@ body.shell-dock-dragging * {
     display: none;
   }
   .session-bar > .session-header-statuses
-    :is(.session-status-indicators, .change-status-indicators):not(:has(> .status:not([hidden]))) {
+    .session-status-indicators:not(:has(> .status:not([hidden]))) {
     display: none;
   }
   .session-bar .session-header-action { width: 36px; height: 36px; }
@@ -13656,12 +13621,6 @@ body.shell-dock-dragging * {
     align-self: center;
     gap: var(--mobile-session-action-gap);
   }
-  .session-bar > .session-worktree-identity {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    justify-self: start;
-    max-width: 100%;
-  }
   /* Background work used to take a full-width line of its own here, which separated it from the
      lifecycle badge it belongs beside and made the header taller the moment a job started (#784).
      It now rides the measured status row: the row's priority order keeps it visible and pushes
@@ -13671,9 +13630,6 @@ body.shell-dock-dragging * {
     grid-row: 2;
     width: 100%;
     max-width: none;
-  }
-  .session-bar:has(> .session-worktree-identity) > .session-header-note {
-    grid-row: 3;
   }
   .detail-scroll {
     padding: 12px 0;

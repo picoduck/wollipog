@@ -10,6 +10,9 @@ import {
   ChevronDown as LucideChevronDown,
   ChevronLeft as LucideChevronLeft,
   ChevronRight as LucideChevronRight,
+  Circle as LucideCircle,
+  CircleUserRound as LucideCircleUserRound,
+  CircleDot as LucideCircleDot,
   CircleGauge as LucideCircleGauge,
   Clock3 as LucideClock3,
   Code as LucideCode,
@@ -302,6 +305,16 @@ export function SuccessIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCircleCheck} {...props} />;
 }
 
+/** A plan step not started yet (docs/design-system.md §18); a completed step is `SuccessIcon`. */
+export function PlanPendingIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCircle} {...props} />;
+}
+
+/** The plan step in progress. */
+export function PlanInProgressIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCircleDot} {...props} />;
+}
+
 /** The danger tone's icon on toasts and notices (docs/design-system.md §13). */
 export function ErrorIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCircleAlert} {...props} />;
@@ -309,6 +322,11 @@ export function ErrorIcon(props: IconProps) {
 
 export function KeyboardIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideKeyboard} {...props} />;
+}
+
+/** The provider account a session runs under. */
+export function AccountIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCircleUserRound} {...props} />;
 }
 
 export function LockIcon(props: IconProps) {

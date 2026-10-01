@@ -214,7 +214,7 @@ test("a dismissed skills notice stays dismissed for the session on reload, and t
     assert.ok(summary, "the Pinned Summary is open");
     const row = [...summary.querySelectorAll(".ps-row")].find((candidate) => candidate.textContent?.startsWith("Skills"));
     assert.ok(row, "the Environment section has a Skills row");
-    assert.equal(row.querySelector(".ps-detail")?.textContent, "Not Available");
+    assert.equal(row.querySelector(".v")?.textContent, "Not Available");
     assert.equal(row.querySelector(".ps-note")?.textContent, "Skills from Build Box aren’t available in container sessions.");
   });
   domWindow.localStorage.clear();

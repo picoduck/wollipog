@@ -41,13 +41,6 @@ interface BadgeMetrics {
 async function loadInbox(page: Page, width: number) {
   await page.setViewportSize({ width, height: 900 });
   await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
-  await page.evaluate(() => {
-    // A settled, clean tree is what gives the session its "No Changes" status.
-    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setGitStatus("session-alpha", {
-      hasChanges: false, ahead: 0, stagedCount: 0, modifiedCount: 0,
-      untrackedCount: 0, conflictedCount: 0, operation: null,
-    });
-  });
   await applyStatuses(page, { status: "idle", backgroundWorkState: "running" });
 }
 
@@ -56,6 +49,9 @@ async function applyStatuses(page: Page, patch: { status: string; backgroundWork
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       status,
       backgroundWorkState,
+      // An Orchestrator Action badge takes the place the "No Changes" badge held before changes
+      // became a Pinned Summary fact (#2160), so the row still fills at the widths below.
+      orchestratorCampaign: { pendingRequests: { human: 0, orchestrator: 1 } },
       pendingApproval: {
         kind: "permission",
         requestId: "background-approval",

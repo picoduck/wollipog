@@ -15,6 +15,13 @@ async function openBar(page: Page, width: number, options: { session?: RegExp; h
   await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&reviewReady=1&fullShell=1");
   await page.evaluate(() => localStorage.clear());
   await page.reload();
+  // Changes are a Pinned Summary fact (#2160), so two campaign request badges keep the row under
+  // the pressure of three statuses that the review and change badges used to supply.
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 1 } },
+    } as never);
+  });
   await page.getByRole("button", { name: options.session ?? /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
@@ -27,12 +34,14 @@ async function setTitle(page: Page, title: string) {
   }, title);
 }
 
-/** The three statuses the scenario reports: lifecycle, review and changes. */
+/** The three statuses the scenario reports: lifecycle and the two campaign request kinds. */
 async function expectThreeStatuses(page: Page) {
   const statuses = page.locator("header.session-bar .session-header-statuses");
   await expect(statuses.getByText("Awaiting Prompt", { exact: true })).toBeAttached();
-  await expect(statuses.getByText("Ready for Review", { exact: true })).toBeAttached();
-  await expect(statuses.getByText("Uncommitted Changes", { exact: true })).toBeAttached();
+  await expect(statuses.locator('[aria-label^="Needs Your Input"]')).toBeAttached();
+  await expect(statuses.locator('[aria-label^="Orchestrator Action"]')).toBeAttached();
+  // The facts the bar used to carry are in the Pinned Summary.
+  await expect(statuses.getByText(/Ready for Review|Uncommitted Changes|Changes Present/)).toHaveCount(0);
 }
 
 /** Every status badge the row paints sits on one line: the row clips, it never wraps (§15.2). */

@@ -413,23 +413,12 @@ test("unavailable message actions keep their slash in forced colors", () => {
 });
 
 test("mobile Session statuses stay on one measured line before fixed actions", () => {
-  const group = soleRuleBody(".change-status-indicators");
-  assert.match(group, /display: inline-flex;/);
-  assert.match(group, /min-width: 0;/);
-  assert.match(group, /flex-wrap: wrap;/,
-    "desktop change statuses must retain their existing wrapping behavior");
+  // Changes are a Git fact in the Pinned Summary now (#2160), not a status group in the bar.
+  assert.doesNotMatch(css, /\.change-status-indicators\b/);
   const phoneRule = mediaBlocks(css).find((block) =>
     block.maxWidths.includes(760) &&
-    block.containsSelector(
-      ".session-bar > .session-header-statuses .change-status-indicators",
-    ));
+    block.containsSelector(".session-bar > .session-header-statuses"));
   assert.ok(phoneRule, "the phone layout must define the compact shared status row");
-  assert.deepEqual(
-    phoneRule.declarationsForSelector(
-      ".session-bar > .session-header-statuses .change-status-indicators",
-    ).get("display"),
-    ["contents"],
-  );
   const statuses = phoneRule
     .declarationsForSelector(".session-bar > .session-header-statuses");
   assert.deepEqual(statuses.get("grid-column"), ["1"],
