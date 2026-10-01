@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion";
 
 /**
  * Orphaned Copies (#1974; docs/design-system.md §5.1–§5.2, §3.1, §12): a section per machine, each
@@ -414,10 +415,11 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
         .toHaveText(dated ? ["Machine", "Deleted Skill", "Deleted On", "Result"] : ["Machine", "Deleted Skill", "Result"]);
       await expect(dialog.locator(".skill-review-facts dd"))
         .toHaveText(dated ? ["Build Machine", name, expected, "New skill"] : ["Build Machine", name, "New skill"]);
+      await page.mouse.move(0, 0);
+      await dialogMotionSettled(page);
       const clipped = await dialog.locator(".skill-review-facts dd").evaluateAll((values) =>
         values.filter((value) => value.scrollWidth > value.clientWidth).map((value) => value.textContent));
       expect(clipped, "every fact is whole").toEqual([]);
-      await page.mouse.move(0, 0);
       await page.screenshot({ path: info.outputPath(`deleted-dates-review-${dated ? "dated" : "undated"}-${width}-${theme}.png`) });
       await dialog.getByRole("button", { name: "Cancel" }).click();
       await expect(dialog).toBeHidden();
