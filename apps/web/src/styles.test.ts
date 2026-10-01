@@ -243,6 +243,63 @@ test("one field error rule, and invalid controls in a field draw a red edge unde
     "the composer answer keeps its red edge while focused: equal specificity, so the later rule wins");
 });
 
+/**
+ * Every rule that colours an icon's svg itself (#2269), each with the rule that undoes it in forced
+ * colors. Chromium gives an svg `forced-color-adjust: preserve-parent-color`, so an icon that sets
+ * its own colour keeps it there while its words turn a system colour; inheriting lets the system's
+ * colour reach it. The forced rule matches the weight of the one it undoes. e2e
+ * tone-icons-forced-colors.spec.ts measures the field warning, Save bar and Pinned Summary icons.
+ */
+const SELF_COLOURED_ICONS: ReadonlyArray<readonly [rule: string, forced: string]> = [
+  [".voice-btn.voice-recording > svg", ".voice-btn.voice-recording > svg"],
+  [".menu-check", ".menu-check"],
+  [".field-warn-icon", ".field-warn-icon"],
+  [".save-bar-icon", ".save-bar-icon"],
+  [":is(.pid-mask, .pid-shown) > .app-icon", ":is(.pid-mask, .pid-shown) > .app-icon"],
+  [".ps-row > svg", ".ps-row > svg"],
+  [".ps-icon", ".ps-icon"],
+  [".ps-row > .ps-go", ".ps-row > .ps-go"],
+  [".ps-row.is-warning > :is(.ps-icon, .v)", ".ps-row.is-warning > .ps-icon"],
+  [".ps-disclosure > .disclosure-trigger > .disclosure-chevron", ".ps-disclosure > .disclosure-trigger > .disclosure-chevron"],
+  [".ps-item-icon", ".ps-item-icon"],
+  [".ps-item.plan-in_progress .ps-item-icon", ".ps-item.plan-in_progress .ps-item-icon"],
+  [".access-section-title > .app-icon", ".access-section-title > .app-icon"],
+  [".copy-status-icon-copied", ".copy-status-icon-copied"],
+  [".copy-status-icon-failed", ".copy-status-icon-failed"],
+  [".palette-bar-icon", ".palette-bar-icon"],
+  [".ui-row-saved > svg", ".ui-row-saved > svg"],
+  [".checkbox-check", ".checkbox-check"],
+  [".ui-select-caret", ".ui-select-caret"],
+  [".ui-select-filter-icon", ".ui-select-filter-icon"],
+];
+
+test("every icon that sets its own colour follows its words in forced colors", () => {
+  type Colours = Map<string, Array<{ value: string; line: number }>>;
+  const unconditional: Colours = new Map();
+  const forced: Colours = new Map();
+  postcss.parse(css).walkRules((rule) => {
+    const parent = rule.parent;
+    const scope = parent?.type === "root" ? unconditional
+      : parent?.type === "atrule" && (parent as postcss.AtRule).name === "media"
+        && (parent as postcss.AtRule).params === "(forced-colors: active)" ? forced : null;
+    if (!scope) return;
+    const values = rule.nodes.flatMap((node) => node.type === "decl" && node.prop === "color" ? [node.value.trim()] : []);
+    const line = rule.source?.start?.line ?? 0;
+    for (const selector of rule.selectors.map((member) => member.replace(/\s+/g, " ").trim())) {
+      for (const value of values) scope.set(selector, [...(scope.get(selector) ?? []), { value, line }]);
+    }
+  });
+  for (const [rule, undo] of SELF_COLOURED_ICONS) {
+    const own = unconditional.get(rule) ?? [];
+    assert.ok(own.some(({ value }) => value !== "inherit"), `${rule} no longer colours its icon; drop it from SELF_COLOURED_ICONS`);
+    const inForced = forced.get(undo) ?? [];
+    assert.deepEqual(inForced.map(({ value }) => value), ["inherit"],
+      `${undo}: in forced colors the icon must inherit its words' system colour`);
+    assert.ok(inForced[0]!.line > Math.max(...own.map(({ line }) => line)),
+      `${undo}: at the same weight, the forced-colors rule must come after the rule it undoes`);
+  }
+});
+
 test("focus never frames a pane, and the F6 zone line is a brief neutral top edge", () => {
   const paneFrames = allDeclarations(css).filter((declaration) =>
     /focus/.test(declaration.selector) && /^(border|box-shadow)/.test(declaration.prop) && /--accent\b/.test(declaration.value)

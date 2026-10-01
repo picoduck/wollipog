@@ -1,6 +1,8 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { FieldError } from "../components/FieldError.js";
+import { FieldWarning } from "../components/FieldWarning.js";
+import { SaveBar } from "../components/SaveBar.js";
 import "../styles.css";
 
 /**
@@ -9,6 +11,8 @@ import "../styles.css";
  * The field error (#2150, docs/design-system.md §8.5): the same field with its helper, invalid with
  * its error, and invalid with focus, so a spec can compare where the error sits with where the helper
  * sat (`.field-helper`).
+ * A field warning (§8.5) and a failed save's bar (§8.6), whose tone icons follow their words in
+ * forced colors (#2269).
  * `?theme=light` switches theme.
  */
 
@@ -46,6 +50,12 @@ function Harness() {
         <NameField state="helper" />
         <NameField state="invalid" />
         <NameField state="focused" />
+        <label className="field" data-state="warning">
+          <span>Branch Name</span>
+          <input className="input" defaultValue="main" aria-describedby="branch-warning" />
+          <FieldWarning id="branch-warning">Sessions on main commit straight to the default branch.</FieldWarning>
+        </label>
+        <SaveBar dirty error="Couldn't save the instructions." onDiscard={() => {}} onSave={() => {}} />
       </form>
     </div>
   );
