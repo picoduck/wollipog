@@ -13,6 +13,7 @@ import { SkillImportConflictError } from "./db.js";
 import { validateSkillPayload, type ValidatedSkillPayload } from "./skills.js";
 import type { SkillsRouteDeps } from "./skills-route.js";
 import { skillAdoptionPreflight } from "./skill-adoption-preflight.js";
+import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 
 export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps): void {
   type Preview = { id: string; candidate: MachineSkillCandidate; payload: ValidatedSkillPayload; expectedVersionId: string | null; executablePaths: string[] };
@@ -247,7 +248,8 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       discovery.preview = { id: randomUUID(), candidate, payload, expectedVersionId: existing?.latestVersion?.id ?? null, executablePaths: executable };
       const prior = existing?.latestVersion ? deps.db.getSkillVersion(existing.latestVersion.id) : null;
       return { previewId: discovery.preview.id, candidate, files: payload.files, digest: payload.digest, executablePaths: executable, previousFiles: prior?.files ?? [],
-        disposition: prior?.digest === payload.digest ? "identical" : prior ? "update" : "new", assignmentCount: existing?.assignmentCount ?? 0 };
+        disposition: prior?.digest === payload.digest ? "identical" : prior ? "update" : "new", assignmentCount: existing?.assignmentCount ?? 0,
+        deploymentImpact: deps.db.skillDeploymentImpact(existing?.id ?? null) };
     } catch { return reply.code(502).send({ error: "Snapshot failed validation or the source changed. Discover it again. Symlinks, hard links, special files, and oversized trees are not supported." }); }
     finally { pending = false; }
   });
@@ -477,9 +479,12 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     const existing = deps.db.getSkillByName(preview.payload.name);
     if (existing && !deps.db.canAccessSkill(principal, existing.id)) return reply.code(404).send({ error: "Skill not found." });
     const updating = existing && existing.latestVersion?.digest !== preview.payload.digest;
-    if (updating && (req.body as { acceptUpdate?: unknown } | null)?.acceptUpdate !== true) {
+    const body = req.body as { acceptUpdate?: unknown; expectedDeploymentImpact?: unknown } | null;
+    if (updating && body?.acceptUpdate !== true) {
       return reply.code(409).send({ error: "Accept the version diff before updating existing assignments." });
     }
+    const refusal = updating ? deploymentImpactRefusal(deps.db, existing.id, body?.expectedDeploymentImpact) : null;
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     try {
       const skill = deps.db.importMachineSkill({ ...preview.payload, expectedVersionId: preview.expectedVersionId,
         source: { runnerId: discovery.runnerId, sourceDirectory: preview.candidate.sourceDirectory,

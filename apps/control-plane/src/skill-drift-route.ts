@@ -19,6 +19,7 @@ import {
 } from "@wollipog/protocol";
 import { SkillImportConflictError } from "./db.js";
 import type { SkillsRouteDeps } from "./skills-route.js";
+import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 import { resolveDesiredSkillSnapshot, validateSkillPayload, type ValidatedSkillPayload } from "./skills.js";
 import {
   DIGEST,
@@ -167,6 +168,7 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
         publishedFromLatest: latest?.digest === target.digest,
         pinned: !!pin?.versionId,
         assignmentCount: skill.assignmentCount,
+        deploymentImpact: db.skillDeploymentImpact(skill.id),
       };
     } catch {
       return reply.code(502).send({ error: "The edited copy could not be read or failed validation. Sync the machine and try again." });
@@ -185,7 +187,8 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
     if (!preview.payload) return reply.code(409).send({ error: preview.importBlocker ?? "This edited copy cannot be imported." });
     const payload = preview.payload;
     const updating = skill.latestVersion?.digest !== payload.digest;
-    if (updating && (req.body as { acceptUpdate?: unknown } | null)?.acceptUpdate !== true) {
+    const body = req.body as { acceptUpdate?: unknown; expectedDeploymentImpact?: unknown } | null;
+    if (updating && body?.acceptUpdate !== true) {
       return reply.code(409).send({ error: "Accept the version diff before updating existing assignments." });
     }
     // Commit only what the machine still holds: an edit made after the review would otherwise stay
@@ -205,6 +208,9 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
       previews.delete(preview.id);
       return reply.code(409).send({ error: "The edited copy changed after you reviewed it. Review it again before importing." });
     }
+    // Checked after the machine read, the last await before the import.
+    const refusal = updating ? deploymentImpactRefusal(db, skill.id, body?.expectedDeploymentImpact) : null;
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     let imported;
     try {
       imported = db.importSkillDriftEdit({

@@ -15,6 +15,7 @@ import { registerSkillBuiltInRoutes, withSkillRecommendation } from "./skill-bui
 import type { BuiltInSkill } from "./built-in-skills.js";
 import { listOrphanedSkillCopies } from "./skill-orphan-route.js";
 import { skillStateResponse } from "./skill-edited-copy.js";
+import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   SKILL_MAX_TOTAL_BYTES,
@@ -497,7 +498,8 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const skill = db.getSkill(id)!;
     const version = db.getSkillVersion(versionId);
     if (!version || version.skillId !== id) return reply.code(404).send({ error: "version not found" });
-    return { version, currentVersion: skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null };
+    return { version, currentVersion: skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null,
+      deploymentImpact: db.skillDeploymentImpact(id) };
   });
 
   app.post("/api/skills/:id/restore", async (req, reply) => {
@@ -505,11 +507,17 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
     const { id } = req.params as { id: string };
     if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
-    const body = (req.body ?? {}) as { versionId?: unknown; expectedLatestVersionId?: unknown };
+    const body = (req.body ?? {}) as { versionId?: unknown; expectedLatestVersionId?: unknown; expectedDeploymentImpact?: unknown };
     if (typeof body.versionId !== "string" || !body.versionId || body.versionId.length > 100 ||
         typeof body.expectedLatestVersionId !== "string" || !body.expectedLatestVersionId || body.expectedLatestVersionId.length > 100) {
       return reply.code(400).send({ error: "versionId and expectedLatestVersionId are required" });
     }
+    // Restoring content that differs from the latest version deploys it to every unpinned machine.
+    const target = db.getSkillVersion(body.versionId);
+    const latest = db.getSkill(id)?.latestVersion;
+    const refusal = target?.skillId === id && latest?.id === body.expectedLatestVersionId && target.digest !== latest.digest
+      ? deploymentImpactRefusal(db, id, body.expectedDeploymentImpact) : null;
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     try {
       const version = db.restoreSkillVersion(id, body.versionId, body.expectedLatestVersionId);
       if (!version) return reply.code(404).send({ error: "version not found" });

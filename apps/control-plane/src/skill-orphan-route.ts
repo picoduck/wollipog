@@ -24,6 +24,7 @@ import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { SkillImportConflictError, type ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal } from "./identity.js";
 import type { SkillsRouteDeps } from "./skills-route.js";
+import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 import { resolveDesiredSkillSnapshot, validateSkillPayload, type ValidatedSkillPayload } from "./skills.js";
 import {
   DIGEST,
@@ -267,6 +268,7 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
         ...(importBlocker ? { importBlocker } : {}),
         disposition,
         assignmentCount: skill?.assignmentCount ?? 0,
+        deploymentImpact: db.skillDeploymentImpact(skill?.id ?? null),
       };
     } catch {
       return reply.code(502).send({ error: "The copy could not be read or failed validation. Sync the machine and try again." });
@@ -283,7 +285,8 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
     if (preview.skillId && !db.canAccessSkill(principal, preview.skillId)) return reply.code(404).send({ error: "Skill not found." });
     if (!preview.payload) return reply.code(409).send({ error: preview.importBlocker ?? "This copy cannot be imported." });
     const payload = preview.payload;
-    if (preview.disposition === "update" && (req.body as { acceptUpdate?: unknown } | null)?.acceptUpdate !== true) {
+    const body = req.body as { acceptUpdate?: unknown; expectedDeploymentImpact?: unknown } | null;
+    if (preview.disposition === "update" && body?.acceptUpdate !== true) {
       return reply.code(409).send({ error: "Accept the version diff before updating existing assignments." });
     }
     // Commit only what the machine still holds, exactly as reviewed.
@@ -302,6 +305,10 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
       previews.delete(preview.id);
       return reply.code(409).send({ error: "The copy changed after you reviewed it. Review it again before importing." });
     }
+    // Checked after the machine read, the last await before the import.
+    const refusal = preview.disposition === "update"
+      ? deploymentImpactRefusal(db, preview.skillId, body?.expectedDeploymentImpact) : null;
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const { ref } = preview;
     let skill;
     try {

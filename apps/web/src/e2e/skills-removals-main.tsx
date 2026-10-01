@@ -25,6 +25,10 @@ const targets = new URLSearchParams(location.search).has("targets");
 // `?assignment=1` gives the skill one direct assignment, so its assignments table has a row with an
 // Invocation picker.
 const assignment = new URLSearchParams(location.search).has("assignment");
+// `?builtIn=1` makes the skill a built-in one whose next release waits for review (#2129).
+const builtIn = new URLSearchParams(location.search).has("builtIn")
+  ? { builtIn: { release: "1.0.0", heldUpdate: { release: "1.1.0", digest: "e".repeat(64) } } }
+  : {};
 const hostTarget = (runnerId: string): ExecutionTargetDefinition => ({
   id: `${runnerId}-host`, runnerId, name: "Runner Host · worktree", kind: "local", workspaceStrategy: "worktree", adapter: "host",
   boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" }, available: true,
@@ -210,6 +214,7 @@ const client = {
     name: "code-review",
     description: "Reviews code",
     latestVersion: { id: "v1", digest: "d1", createdAt: reportedAt },
+    ...builtIn,
   }] }),
   listSkillGroups: async () => ({ groups: [] }),
   getSkill: async () => ({
@@ -219,6 +224,7 @@ const client = {
       description: "Reviews code",
       gitSource: { url: "https://github.com/example/skills.git", ref: "stable", subdirectory: "skills", path: "skills/code-review", commit: "a".repeat(64) },
       latestVersion: { id: "v1", digest: "d1", createdAt: reportedAt },
+      ...builtIn,
     },
     latestVersion: {
       id: "v1",

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useApi } from "../api-context.js";
 import type { SkillGitPreview, SkillGitSource } from "../skills.js";
 import { Modal } from "./common.js";
-import { deployToAssignmentsConsent, ReviewConsent } from "./ReviewConsent.js";
+import { deployToAssignmentsConsent, isDeploymentImpactConflict, ReviewConflict, ReviewConsent } from "./ReviewConsent.js";
 import { SkillFileDiff } from "./SkillFileDiff.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 
@@ -19,33 +19,46 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [imported, setImported] = useState<string[]>([]);
+  /** The skill whose import was refused because its assignments changed after the preview (#2129). */
+  const [conflict, setConflict] = useState<string | null>(null);
   const close = () => {
     if (busy) return;
     if (preview) void api.discardGitSkillPreview(preview.previewId).catch(() => {});
     onClose();
   };
-  const discover = async () => {
-    setBusy(true); setError(null);
+  /** Preview the source. Previewing it again keeps the selection and what this dialog imported. */
+  const discover = async (again = false) => {
+    const keep = again ? selected : [];
+    setBusy(true); setError(null); setConflict(null);
     try {
       if (preview) await api.discardGitSkillPreview(preview.previewId);
-      setPreview(null); setSelected([]); setAccepted(false); setImported([]);
-      setPreview(await api.previewGitSkills({ url, ref, subdirectory }));
+      setPreview(null); setSelected([]); setAccepted(false);
+      if (!again) setImported([]);
+      const next = await api.previewGitSkills({ url, ref, subdirectory });
+      setPreview(next);
+      setSelected(keep.filter((path) => next.candidates.some((entry) => entry.path === path)));
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   };
   const submit = async () => {
     if (!preview) return;
     setBusy(true); setError(null);
+    let name: string | undefined;
     try {
       for (const path of selected) {
         const candidate = preview.candidates.find((entry) => entry.path === path)!;
+        name = candidate.name;
         // Updates with no assignments deploy nothing, so reviewing them is the acceptance.
-        await api.importGitSkill({ previewId: preview.previewId, path, acceptUpdate: needsConsent ? accepted : true });
+        await api.importGitSkill({ previewId: preview.previewId, path, acceptUpdate: needsConsent ? accepted : true,
+          ...(candidate.deploymentImpact ? { expectedDeploymentImpact: candidate.deploymentImpact } : {}) });
         setImported((current) => [...current, candidate.name]);
         setSelected((current) => current.filter((entry) => entry !== path));
         setPreview((current) => current && { ...current, candidates: current.candidates.filter((entry) => entry.path !== path) });
       }
-    } catch (cause) { setError((cause as Error).message); }
+    } catch (cause) {
+      if (isDeploymentImpactConflict(cause)) { setConflict(name ?? null); setAccepted(false); }
+      else setError((cause as Error).message);
+    }
     finally {
       try { await onImported(); } catch (cause) { setError((cause as Error).message); }
       setBusy(false);
@@ -55,9 +68,10 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
   const deployedAssignments = updates.reduce((sum, entry) => sum + entry.assignmentCount, 0);
   const needsConsent = deployedAssignments > 0;
   return <Modal title={source ? "Check for Skill Updates" : "Import Skills from Git"} size="lg" onClose={close} footer={<>
-    {needsConsent && <ReviewConsent label={deployToAssignmentsConsent(deployedAssignments)} checked={accepted} disabled={busy} onChange={setAccepted} />}
+    {conflict !== null ? <ReviewConflict name={conflict} busy={busy} onPreviewAgain={() => void discover(true)} />
+      : needsConsent && <ReviewConsent label={deployToAssignmentsConsent(deployedAssignments)} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button className="btn ghost" type="button" disabled={busy} onClick={close}>Close</button>
-    {preview && <button className="btn primary" type="button" disabled={busy || !selected.length || (needsConsent && !accepted)}
+    {preview && <button className="btn primary" type="button" disabled={busy || conflict !== null || !selected.length || (needsConsent && !accepted)}
       onClick={() => void submit()}>{busy ? "Working…" : "Import Selected"}</button>}
   </>}>
     <div className="form">

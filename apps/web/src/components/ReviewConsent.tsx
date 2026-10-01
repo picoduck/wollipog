@@ -1,3 +1,5 @@
+import { ApiError } from "../api.js";
+import { Notice } from "./Notice.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 
 /** "Deploy to 2 existing assignments": importing or accepting a new latest version (#1948). */
@@ -31,4 +33,28 @@ export function ReviewConsent({ label, checked, disabled, onChange }: {
   onChange: (checked: boolean) => void;
 }) {
   return <Checkbox consent className="review-consent" label={label} checked={checked} disabled={disabled} onChange={onChange} />;
+}
+
+/** Whether the server refused an accept because the skill's assignments changed after the preview
+ * whose deployment impact it carried (#2129). */
+export function isDeploymentImpactConflict(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.code === "deployment_impact_changed";
+}
+
+/**
+ * Takes the consent's footer slot when the server refused an accept because the skill's
+ * assignments changed after the preview (#2129): the consent named an impact that no longer
+ * holds, and nothing was deployed. Preview Again reads a fresh preview, whose consent names the
+ * current assignments. The dialog keeps its primary disabled meanwhile.
+ */
+export function ReviewConflict({ name, busy, onPreviewAgain }: {
+  /** The skill, where the dialog reviews more than one. */
+  name?: string;
+  busy?: boolean;
+  onPreviewAgain: () => void;
+}) {
+  return <Notice tone="warning" compact role="alert" className="review-conflict"
+    actions={<button type="button" className="btn sm" disabled={busy} onClick={onPreviewAgain}>Preview Again</button>}>
+    Assignments for {name ?? "this skill"} changed after the preview, so it wasn't deployed.
+  </Notice>;
 }

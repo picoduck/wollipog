@@ -14297,9 +14297,13 @@ body.shell-dock-dragging * {
 }
 /* The review's consent (#1948) takes the footer's left slot, beside the primary it unlocks. */
 .modal-foot > .review-consent { flex: 0 1 auto; min-width: 0; margin-right: auto; }
+/* An accept refused because the assignments changed (#2129) takes the same slot, and only the
+   width Cancel and the primary leave it, so they stay on its row. */
+.modal-foot > .review-conflict { flex: 1 1 0; min-width: 0; margin-right: auto; }
 @media (max-width: 760px) {
   /* On a phone sheet it is a full-width row above Cancel and the primary. */
-  .modal-foot > .review-consent { flex-basis: 100%; }
+  .modal-foot > .review-consent,
+  .modal-foot > .review-conflict { flex-basis: 100%; }
 }
 /* Import from Machine (#1963): a `.modal.lg` at full height whose body is two panes, the machine's
    skill folders beside the selected folder's review, each scrolling on its own. On a phone sheet

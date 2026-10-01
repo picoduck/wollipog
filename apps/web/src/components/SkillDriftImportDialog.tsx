@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import { driftVariantLabel, type SkillDriftCopy, type SkillDriftPreview, type SkillDriftResolution } from "../skills.js";
 import { Modal } from "./common.js";
-import { deployToAssignmentsConsent, ReviewConsent } from "./ReviewConsent.js";
+import { deployToAssignmentsConsent, isDeploymentImpactConflict, ReviewConflict, ReviewConsent } from "./ReviewConsent.js";
 import { SkillFileDiff } from "./SkillFileDiff.js";
 
 /** Review one drifted deployed copy as a library update, then commit exactly the reviewed bytes. */
@@ -18,6 +18,9 @@ export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, 
   const [busy, setBusy] = useState(true);
   const [accepted, setAccepted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  /** Counts the previews read, so Preview Again reads a fresh one. */
+  const [previews, setPreviews] = useState(0);
   const previewId = useRef<string | null>(null);
   useEffect(() => {
     let active = true;
@@ -27,7 +30,11 @@ export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, 
     }).catch((cause) => { if (active) setError((cause as Error).message); })
       .finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
-  }, [api, runnerId, copy]);
+  }, [api, runnerId, copy, previews]);
+  const previewAgain = () => {
+    setPreview(null); setAccepted(false); setConflict(false); setError(null); setBusy(true);
+    setPreviews((count) => count + 1);
+  };
   const close = () => {
     if (busy) return;
     if (previewId.current) void api.discardSkillDriftPreview(previewId.current).catch(() => {});
@@ -38,19 +45,22 @@ export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, 
     setBusy(true); setError(null);
     try {
       // An update with no assignments deploys nothing, so reviewing it is the acceptance.
-      const result = await api.importSkillDrift(preview.previewId, needsConsent ? accepted : preview.disposition === "update");
+      const result = await api.importSkillDrift(preview.previewId, needsConsent ? accepted : preview.disposition === "update",
+        preview.deploymentImpact);
       previewId.current = null;
       await onImported(result);
     } catch (cause) {
-      setError((cause as Error).message);
+      if (isDeploymentImpactConflict(cause)) { setConflict(true); setAccepted(false); }
+      else setError((cause as Error).message);
       setBusy(false);
     }
   };
   const needsConsent = !!preview?.importable && preview.disposition === "update" && preview.assignmentCount > 0;
   return <Modal title="Import Edit as New Version" size="lg" onClose={close} footer={<>
-    {needsConsent && preview && <ReviewConsent label={deployToAssignmentsConsent(preview.assignmentCount)} checked={accepted} disabled={busy} onChange={setAccepted} />}
+    {conflict ? <ReviewConflict busy={busy} onPreviewAgain={previewAgain} />
+      : needsConsent && preview && <ReviewConsent label={deployToAssignmentsConsent(preview.assignmentCount)} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button>
-    <button type="button" className="btn primary" disabled={busy || !preview?.importable || (needsConsent && !accepted)}
+    <button type="button" className="btn primary" disabled={busy || conflict || !preview?.importable || (needsConsent && !accepted)}
       onClick={() => void importEdit()}>Import Edit as New Version</button>
   </>}>
     <div className="form skills-machine-import">

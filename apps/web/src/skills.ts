@@ -55,7 +55,13 @@ export interface SkillGitAutoUpdate {
   error?: { message: string; at: number } | null;
   held?: { commit: string; reason: "scripts" | "local_changes" | "untracked_modes"; scriptPaths: string[]; heldAt: number } | null;
 }
-export interface SkillVersionPreview { version: SkillVersionSummary; currentVersion: SkillVersionSummary | null }
+export interface SkillVersionPreview {
+  version: SkillVersionSummary;
+  currentVersion: SkillVersionSummary | null;
+  /** Where accepting deploys, as the server computed it for this preview; the accept carries it back so a
+   * change in between is refused (#2129). Absent from a control plane that predates the fence. */
+  deploymentImpact?: string;
+}
 export interface MachineSkillVersionPreview {
   policy: { versionId: string | null; revision: string } | null;
   currentVersion: SkillVersionSummary | null;
@@ -69,6 +75,9 @@ export interface MachineSkillPreview {
   files: SkillFile[]; previousFiles: SkillFile[]; digest: string;
   executablePaths?: string[];
   disposition: "new" | "identical" | "update"; assignmentCount: number;
+  /** Where accepting deploys, as the server computed it for this preview; the accept carries it back so a
+   * change in between is refused (#2129). Absent from a control plane that predates the fence. */
+  deploymentImpact?: string;
 }
 export interface MachineSkillAdoptionPreflight {
   status: "blocked" | "prerequisites_met";
@@ -103,6 +112,8 @@ export interface SkillGitPreview {
     previousFiles: SkillFile[]; source: SkillGitSource;
     disposition: "new" | "update" | "identical"; assignmentCount: number;
     executablePaths: string[];
+    /** Where accepting this candidate deploys; see `MachineSkillPreview`. */
+    deploymentImpact?: string;
   }>;
 }
 
@@ -139,6 +150,9 @@ export interface SkillBuiltInReview {
   currentVersion: SkillVersionSummary | null;
   expectedLatestVersionId: string | null;
   assignmentCount: number;
+  /** Where accepting deploys, as the server computed it for this preview; the accept carries it back so a
+   * change in between is refused (#2129). Absent from a control plane that predates the fence. */
+  deploymentImpact?: string;
   gitAutoUpdate: boolean;
 }
 
@@ -230,6 +244,9 @@ export interface SkillDriftPreview {
   publishedFromLatest: boolean;
   pinned: boolean;
   assignmentCount: number;
+  /** Where accepting deploys, as the server computed it for this preview; the accept carries it back so a
+   * change in between is refused (#2129). Absent from a control plane that predates the fence. */
+  deploymentImpact?: string;
 }
 
 export interface SkillDriftResolution {
@@ -287,6 +304,9 @@ export interface OrphanedSkillCopyPreview {
   importBlocker?: string;
   disposition: "new" | "update" | "identical";
   assignmentCount: number;
+  /** Where accepting deploys, as the server computed it for this preview; the accept carries it back so a
+   * change in between is refused (#2129). Absent from a control plane that predates the fence. */
+  deploymentImpact?: string;
 }
 
 export interface OrphanedSkillCopyResolution {

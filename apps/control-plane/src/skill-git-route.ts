@@ -4,6 +4,7 @@ import type { SkillsRouteDeps } from "./skills-route.js";
 import { LOCAL_OWNER_USER_ID } from "./identity.js";
 import { SkillImportConflictError } from "./db.js";
 import { discoverGitSkills, parseSkillGitSource, type SkillGitCandidate } from "./skill-git.js";
+import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 
 export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDeps,
   discover = discoverGitSkills): void {
@@ -36,6 +37,7 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
         const prior = existing?.latestVersion ? deps.db.getSkillVersion(existing.latestVersion.id) : null;
         return { ...candidate, existingSkillId: existing?.id ?? null,
           assignmentCount: existing?.assignmentCount ?? 0,
+          deploymentImpact: deps.db.skillDeploymentImpact(existing?.id ?? null),
           disposition: prior?.digest === candidate.digest ? "identical" : prior ? "update" : "new",
           previousFiles: prior?.files ?? [] };
       });
@@ -79,7 +81,7 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
       return reply.code(403).send({ error: "Only the instance owner can import from Git using the control plane's credentials." });
     }
     purge();
-    const body = (req.body ?? {}) as { previewId?: string; path?: string; acceptUpdate?: boolean };
+    const body = (req.body ?? {}) as { previewId?: string; path?: string; acceptUpdate?: boolean; expectedDeploymentImpact?: unknown };
     const snapshot = typeof body.previewId === "string" ? snapshots.get(body.previewId) : undefined;
     if (!snapshot || snapshot.owner !== `${principal.organizationId}:${principal.userId}`) {
       return reply.code(404).send({ error: "Import preview expired or not found. Preview the source again." });
@@ -93,6 +95,10 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
     }
     if (existing && existing.latestVersion?.digest !== candidate.digest && body.acceptUpdate !== true) {
       return reply.code(409).send({ error: "Accept the version diff explicitly before updating an existing skill." });
+    }
+    if (existing && existing.latestVersion?.digest !== candidate.digest) {
+      const refusal = deploymentImpactRefusal(deps.db, existing.id, body.expectedDeploymentImpact);
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
     }
     try {
       const skill = deps.db.importGitSkill({ ...candidate,

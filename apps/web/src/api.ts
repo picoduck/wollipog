@@ -575,16 +575,16 @@ export function createApiClient(transport: ApiTransport) {
       `/api/runners/${encodeURIComponent(runnerId)}/skill-adoption-recovery/${encodeURIComponent(operationId)}/restore`,
       { method: "POST", body: JSON.stringify({ confirmation: "explicit" }) },
     ),
-  importMachineSkill: (id: string, previewId: string, acceptUpdate: boolean) => req<SkillDetailPayload>(`/api/skill-machine/${encodeURIComponent(id)}/import`, { method: "POST", body: JSON.stringify({ previewId, acceptUpdate }) }),
+  importMachineSkill: (id: string, previewId: string, acceptUpdate: boolean, expectedDeploymentImpact?: string) => req<SkillDetailPayload>(`/api/skill-machine/${encodeURIComponent(id)}/import`, { method: "POST", body: JSON.stringify({ previewId, acceptUpdate, expectedDeploymentImpact }) }),
   discardMachineSkillDiscovery: (id: string) => req<void>(`/api/skill-machine/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   previewSkillDrift: (runnerId: string, copy: import("./skills.js").SkillDriftCopy) =>
     req<import("./skills.js").SkillDriftPreview>(`/api/runners/${encodeURIComponent(runnerId)}/skill-drift/preview`, {
       method: "POST", body: JSON.stringify(copy),
     }),
-  importSkillDrift: (previewId: string, acceptUpdate: boolean) =>
+  importSkillDrift: (previewId: string, acceptUpdate: boolean, expectedDeploymentImpact?: string) =>
     req<import("./skills.js").SkillDriftResolution>(`/api/skill-drift/${encodeURIComponent(previewId)}/import`, {
-      method: "POST", body: JSON.stringify({ acceptUpdate }),
+      method: "POST", body: JSON.stringify({ acceptUpdate, expectedDeploymentImpact }),
     }),
   discardSkillDriftPreview: (previewId: string) => req<void>(`/api/skill-drift/${encodeURIComponent(previewId)}`, { method: "DELETE" }),
   restoreSkillDrift: (runnerId: string, copy: import("./skills.js").SkillDriftCopy, observedDigest: string | null) =>
@@ -595,9 +595,9 @@ export function createApiClient(transport: ApiTransport) {
     req<import("./skills.js").OrphanedSkillCopyPreview>(`/api/runners/${encodeURIComponent(runnerId)}/orphaned-skill-copies/preview`, {
       method: "POST", body: JSON.stringify(copy),
     }),
-  importOrphanedSkillCopy: (previewId: string, acceptUpdate: boolean) =>
+  importOrphanedSkillCopy: (previewId: string, acceptUpdate: boolean, expectedDeploymentImpact?: string) =>
     req<import("./skills.js").OrphanedSkillCopyResolution>(`/api/orphaned-skill-copies/${encodeURIComponent(previewId)}/import`, {
-      method: "POST", body: JSON.stringify({ acceptUpdate }),
+      method: "POST", body: JSON.stringify({ acceptUpdate, expectedDeploymentImpact }),
     }),
   discardOrphanedSkillCopyPreview: (previewId: string) =>
     req<void>(`/api/orphaned-skill-copies/${encodeURIComponent(previewId)}`, { method: "DELETE" }),
@@ -611,7 +611,7 @@ export function createApiClient(transport: ApiTransport) {
   previewGitSkills: (source: import("./skills.js").SkillGitSource) =>
     req<import("./skills.js").SkillGitPreview>("/api/skill-git/preview", { method: "POST", body: JSON.stringify(source) }),
   discardGitSkillPreview: (id: string) => req<void>(`/api/skill-git/preview/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  importGitSkill: (body: { previewId: string; path: string; acceptUpdate: boolean }) =>
+  importGitSkill: (body: { previewId: string; path: string; acceptUpdate: boolean; expectedDeploymentImpact?: string }) =>
     req<SkillDetailPayload>("/api/skill-git/import", { method: "POST", body: JSON.stringify(body) }),
   setSkillGitAutoUpdate: (id: string, enabled: boolean) =>
     req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}/git-auto-update`, { method: "PUT", body: JSON.stringify({ enabled }) }),
@@ -619,7 +619,7 @@ export function createApiClient(transport: ApiTransport) {
     req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}/recommendation`, { method: "PUT", body: JSON.stringify({ dismissed }) }),
   getBuiltInSkillVersion: (id: string) =>
     req<import("./skills.js").SkillBuiltInReview>(`/api/skills/${encodeURIComponent(id)}/built-in-version`),
-  acceptBuiltInSkillVersion: (id: string, body: { digest: string; expectedLatestVersionId: string | null }) =>
+  acceptBuiltInSkillVersion: (id: string, body: { digest: string; expectedLatestVersionId: string | null; expectedDeploymentImpact?: string }) =>
     req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}/built-in-version`, {
       method: "POST", body: JSON.stringify({ ...body, accepted: true }),
     }),
@@ -634,7 +634,7 @@ export function createApiClient(transport: ApiTransport) {
 
   listSkillVersions: (id: string, before?: string) => req<{ versions: import("./skills.js").SkillVersionSummary[]; nextCursor: string | null }>(`/api/skills/${encodeURIComponent(id)}/versions${before ? `?before=${encodeURIComponent(before)}` : ""}`),
   previewSkillVersion: (id: string, versionId: string) => req<import("./skills.js").SkillVersionPreview>(`/api/skills/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}`),
-  restoreSkillVersion: (id: string, versionId: string, expectedLatestVersionId: string) => req<unknown>(`/api/skills/${encodeURIComponent(id)}/restore`, { method: "POST", body: JSON.stringify({ versionId, expectedLatestVersionId }) }),
+  restoreSkillVersion: (id: string, versionId: string, expectedLatestVersionId: string, expectedDeploymentImpact?: string) => req<unknown>(`/api/skills/${encodeURIComponent(id)}/restore`, { method: "POST", body: JSON.stringify({ versionId, expectedLatestVersionId, expectedDeploymentImpact }) }),
 
   updateSkill: (id: string, body: { description?: string; groupId?: string | null }) =>
     req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`, {

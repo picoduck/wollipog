@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useApi } from "../api-context.js";
 import type { SkillVersionPreview, SkillVersionSummary } from "../skills.js";
 import { Modal } from "./common.js";
-import { DEPLOY_TO_TRACKING_MACHINES_CONSENT, ReviewConsent } from "./ReviewConsent.js";
+import { DEPLOY_TO_TRACKING_MACHINES_CONSENT, isDeploymentImpactConflict, ReviewConflict, ReviewConsent } from "./ReviewConsent.js";
 import { SkillFileDiff } from "./SkillFileDiff.js";
 
 export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
@@ -16,6 +16,7 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
   const [accepted, setAccepted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [restored, setRestored] = useState(false);
+  const [conflict, setConflict] = useState(false);
   useEffect(() => {
     let active = true;
     api.listSkillVersions(skillId).then((result) => {
@@ -34,7 +35,7 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
     finally { setBusy(false); }
   };
   const read = async (versionId: string) => {
-    setBusy(true); setPreview(null); setAccepted(false); setError(null); setRestored(false);
+    setBusy(true); setPreview(null); setAccepted(false); setError(null); setRestored(false); setConflict(false);
     try { setPreview(await api.previewSkillVersion(skillId, versionId)); }
     catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
@@ -48,18 +49,24 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
     if ((needsConsent && !accepted) || !preview?.version.id || !preview.currentVersion?.id) return;
     setBusy(true); setError(null);
     try {
-      await api.restoreSkillVersion(skillId, preview.version.id, preview.currentVersion.id);
+      await api.restoreSkillVersion(skillId, preview.version.id, preview.currentVersion.id, preview.deploymentImpact);
       setPreview(null); setAccepted(false); setRestored(true);
       const result = await api.listSkillVersions(skillId);
       setVersions(result.versions); setCursor(result.nextCursor);
       await onRestored();
-    } catch (cause) { setPreview(null); setAccepted(false); setError((cause as Error).message); }
+    } catch (cause) {
+      setAccepted(false);
+      // The preview stays on screen, so Preview Again can read the same version afresh.
+      if (isDeploymentImpactConflict(cause)) setConflict(true);
+      else { setPreview(null); setError((cause as Error).message); }
+    }
     finally { setBusy(false); }
   };
   return <Modal title="Version History" size="lg" onClose={() => { if (!busy) onClose(); }} footer={<>
-    {needsConsent && <ReviewConsent label={DEPLOY_TO_TRACKING_MACHINES_CONSENT} checked={accepted} disabled={busy} onChange={setAccepted} />}
+    {conflict && preview?.version.id ? <ReviewConflict busy={busy} onPreviewAgain={() => void read(preview.version.id!)} />
+      : needsConsent && <ReviewConsent label={DEPLOY_TO_TRACKING_MACHINES_CONSENT} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>Close</button>
-    <button type="button" className="btn primary" disabled={busy || !restorable || (needsConsent && !accepted)} onClick={() => void restore()}>Restore Version</button>
+    <button type="button" className="btn primary" disabled={busy || conflict || !restorable || (needsConsent && !accepted)} onClick={() => void restore()}>Restore Version</button>
   </>}>
     <div className="form skills-machine-import">
       <p>Restore historical content as a new library revision. Unpinned machines track the restored content; pinned machines keep their selected revision. Newer history is kept.</p>

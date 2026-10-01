@@ -31,7 +31,7 @@ import { MoreHorizontalIcon, RefreshIcon } from "./Icons.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
-import { deployToAssignmentsConsent, ReviewConsent } from "./ReviewConsent.js";
+import { deployToAssignmentsConsent, isDeploymentImpactConflict, ReviewConflict, ReviewConsent } from "./ReviewConsent.js";
 import { SkillAdoptionRecoveryDialog } from "./SkillAdoptionRecoveryDialog.js";
 import { SkillFileDiff } from "./SkillFileDiff.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -86,6 +86,8 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
   const [reading, setReading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [accepted, setAccepted] = useState(false);
+  /** The import was refused because the skill's assignments changed after this review (#2129). */
+  const [conflict, setConflict] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
@@ -137,7 +139,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
   const scan = async (targetRunnerId: string, keepMessages = false) => {
     const previous = discoveryRef.current;
     setScanning(true); setScanError(null); setSelectedId(null); setPreview(null); setPreviewError(null);
-    setResults({}); setAccepted(false); setStep("list");
+    setResults({}); setAccepted(false); setConflict(false); setStep("list");
     // A rescan after an adoption keeps what the adoption and the page refresh reported.
     if (!keepMessages) { setOutcome(null); setError(null); }
     setDiscovery(null);
@@ -169,7 +171,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
     if (discoveryRef.current) discard(discoveryRef.current.discoveryId);
     discoveryRef.current = null;
     setDiscovery(null); setScanError(null); setSelectedId(null); setPreview(null); setPreviewError(null);
-    setResults({}); setAccepted(false); setError(null); setOutcome(null); setStep("list");
+    setResults({}); setAccepted(false); setConflict(false); setError(null); setOutcome(null); setStep("list");
     scannedFor.current = null;
     setRunnerId(id);
   };
@@ -190,7 +192,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
         const id: string = wanted.current;
         const current = discoveryRef.current;
         if (!current || closed.current) break;
-        setPreview(null); setPreviewError(null); setAccepted(false);
+        setPreview(null); setPreviewError(null); setAccepted(false); setConflict(false);
         if (!keep) setError(null);
         keep = false;
         try {
@@ -229,9 +231,11 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
     setImporting(true); setError(null);
     try {
       // An update with no assignments deploys nothing, so reviewing it is the acceptance.
-      await track(() => api.importMachineSkill(discovery.discoveryId, shown.previewId, needsConsent ? accepted : shown.disposition === "update"));
+      await track(() => api.importMachineSkill(discovery.discoveryId, shown.previewId, needsConsent ? accepted : shown.disposition === "update",
+        shown.deploymentImpact));
     } catch (cause) {
-      setError(userFacingMachineError(cause, machineName));
+      if (isDeploymentImpactConflict(cause)) { setConflict(true); setAccepted(false); }
+      else setError(userFacingMachineError(cause, machineName));
       setImporting(false);
       return;
     }
@@ -367,11 +371,13 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
     <Modal title="Import from Machine" size="lg" className="skill-machine-import" onClose={close} headerActions={menu}
       back={phone && step === "review" ? { label: "Back to Skill Folders", onBack: () => setStep("list") } : undefined}
       footer={<>
-        {needsConsent && shown && <ReviewConsent label={deployToAssignmentsConsent(shown.assignmentCount)} checked={accepted} disabled={importing} onChange={setAccepted} />}
+        {conflict && shown
+          ? <ReviewConflict busy={busy || machineBusy} onPreviewAgain={() => void read(shown.candidate.id)} />
+          : needsConsent && shown && <ReviewConsent label={deployToAssignmentsConsent(shown.assignmentCount)} checked={accepted} disabled={importing} onChange={setAccepted} />}
         {primaryReason && <p className="skill-machine-import-reason" id={reasonId}>{primaryReason}</p>}
         <button className="btn" type="button" disabled={importing} onClick={close}>Cancel</button>
         <BusyButton className="btn primary" busy={importing} progress={`Importing ${shown?.candidate.name ?? "the skill"}…`}
-          disabled={!importable || reading || confirmingAdoption || settling || (machineRequests > 0 && !importing) ||
+          disabled={!importable || conflict || reading || confirmingAdoption || settling || (machineRequests > 0 && !importing) ||
             (needsConsent && !accepted)}
           aria-describedby={primaryReason ? reasonId : undefined} onClick={() => void submit()}>
           {machineSkillImportLabel(shown?.disposition)}

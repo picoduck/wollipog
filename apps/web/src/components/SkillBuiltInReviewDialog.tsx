@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useApi } from "../api-context.js";
 import type { SkillBuiltInReview } from "../skills.js";
 import { Modal } from "./common.js";
-import { deployToAssignmentsConsent, ReviewConsent } from "./ReviewConsent.js";
+import { deployToAssignmentsConsent, isDeploymentImpactConflict, ReviewConflict, ReviewConsent } from "./ReviewConsent.js";
 import { SkillFileDiff } from "./SkillFileDiff.js";
 
 /** Review the running release's version of a skill file by file, then commit exactly that
@@ -18,21 +18,30 @@ export function SkillBuiltInReviewDialog({ skillId, skillName, onClose, onAccept
   const [busy, setBusy] = useState(true);
   const [accepted, setAccepted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  /** Counts the reviews read, so Preview Again reads a fresh one. */
+  const [reviews, setReviews] = useState(0);
   useEffect(() => {
     let active = true;
     api.getBuiltInSkillVersion(skillId).then((result) => { if (active) setReview(result); })
       .catch((cause) => { if (active) setError((cause as Error).message); })
       .finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
-  }, [api, skillId]);
+  }, [api, skillId, reviews]);
+  const previewAgain = () => {
+    setReview(null); setAccepted(false); setConflict(false); setError(null); setBusy(true);
+    setReviews((count) => count + 1);
+  };
   const accept = async () => {
     if (!review) return;
     setBusy(true); setError(null);
     try {
-      await api.acceptBuiltInSkillVersion(skillId, { digest: review.digest, expectedLatestVersionId: review.expectedLatestVersionId });
+      await api.acceptBuiltInSkillVersion(skillId, { digest: review.digest, expectedLatestVersionId: review.expectedLatestVersionId,
+        ...(review.deploymentImpact ? { expectedDeploymentImpact: review.deploymentImpact } : {}) });
       await onAccepted();
     } catch (cause) {
-      setError((cause as Error).message);
+      if (isDeploymentImpactConflict(cause)) { setConflict(true); setAccepted(false); }
+      else setError((cause as Error).message);
       setBusy(false);
     }
   };
@@ -41,9 +50,10 @@ export function SkillBuiltInReviewDialog({ skillId, skillName, onClose, onAccept
   // Accepting makes the release's version the latest, which assigned machines tracking it deploy.
   const needsConsent = changed && !!review && review.assignmentCount > 0;
   return <Modal title={adopt ? "Review Built-In Version" : "Review Built-In Update"} size="lg" onClose={() => { if (!busy) onClose(); }} footer={<>
-    {needsConsent && review && <ReviewConsent label={deployToAssignmentsConsent(review.assignmentCount)} checked={accepted} disabled={busy} onChange={setAccepted} />}
+    {conflict ? <ReviewConflict busy={busy} onPreviewAgain={previewAgain} />
+      : needsConsent && review && <ReviewConsent label={deployToAssignmentsConsent(review.assignmentCount)} checked={accepted} disabled={busy} onChange={setAccepted} />}
     <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
-    <button type="button" className="btn primary" disabled={busy || !review || (needsConsent && !accepted)} onClick={() => void accept()}>
+    <button type="button" className="btn primary" disabled={busy || conflict || !review || (needsConsent && !accepted)} onClick={() => void accept()}>
       Accept Built-In Version
     </button>
   </>}>

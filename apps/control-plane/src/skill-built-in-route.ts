@@ -8,6 +8,7 @@ import { SkillImportConflictError, type ControlPlaneDb, type SkillView } from ".
 import { LOCAL_OWNER_USER_ID, type AuthPrincipal } from "./identity.js";
 import type { BuiltInSkill } from "./built-in-skills.js";
 import type { SkillsRouteDeps } from "./skills-route.js";
+import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 
 /** Add the requesting user's recommendation state to a built-in skill. */
 export function withSkillRecommendation(
@@ -69,6 +70,7 @@ export function registerSkillBuiltInRoutes(
       currentVersion: skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null,
       expectedLatestVersionId: skill.latestVersion?.id ?? null,
       assignmentCount: skill.assignmentCount,
+      deploymentImpact: db.skillDeploymentImpact(skill.id),
       gitAutoUpdate: skill.gitAutoUpdate?.enabled ?? false,
     };
   });
@@ -78,7 +80,9 @@ export function registerSkillBuiltInRoutes(
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
     const { id } = req.params as { id: string };
     if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
-    const body = (req.body ?? {}) as { digest?: unknown; expectedLatestVersionId?: unknown; accepted?: unknown };
+    const body = (req.body ?? {}) as {
+      digest?: unknown; expectedLatestVersionId?: unknown; accepted?: unknown; expectedDeploymentImpact?: unknown;
+    };
     if (body.accepted !== true) {
       return reply.code(400).send({ error: "Accept the version diff explicitly before applying the built-in version." });
     }
@@ -97,6 +101,10 @@ export function registerSkillBuiltInRoutes(
         (principal.userId !== LOCAL_OWNER_USER_ID || !["owner", "admin"].includes(principal.role))) {
       return reply.code(403).send({ error: "Only the instance owner can turn off this skill's automatic Git updates." });
     }
+    // Only content that differs from the latest version deploys anywhere.
+    const refusal = skill.latestVersion?.digest !== content.digest
+      ? deploymentImpactRefusal(db, id, body.expectedDeploymentImpact) : null;
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     let result;
     try {
       result = db.acceptBuiltInSkillVersion({

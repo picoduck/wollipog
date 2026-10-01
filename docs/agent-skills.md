@@ -204,6 +204,23 @@ the source revision. A concurrent library update rejects the restore; preview ag
 
 This is library-wide rollback; pinned machines keep their selected revision. Offline machines
 reconcile when they reconnect; unsupported platforms retain their existing no-write behavior.
+
+## Assignment Changes After a Preview
+
+A review's consent names what accepting deploys, such as "Deploy to 2 existing assignments", and a
+preview with no assignments asks for no consent at all. So the accept is fenced on what the preview
+showed. Every preview that can add a new latest version (Import from Git, Import from Machine,
+Import Edit as New Version, Review Orphaned Copy, the built-in review and Version History) reports
+`deploymentImpact`, a digest of the skill's direct and group assignments by identity and target.
+The dashboard sends it back as `expectedDeploymentImpact`. When an assignment was added, removed,
+retargeted, enabled or disabled in between, and the accept would deploy new content, the control
+plane refuses it with `409` and `code: "deployment_impact_changed"`, and nothing is committed or
+deployed. The review dialog then replaces its consent with the conflict and offers **Preview
+Again**, whose consent names the current assignments.
+
+An accept without `expectedDeploymentImpact`, from a dashboard that predates the fence, keeps its
+earlier behavior, so mixed-version deployments keep working. The fence covers assignments, not
+machine version pins or machines that register later under an existing assignment.
 Group assignments retain the selected machine-wide version policy when they expand dynamically.
 
 ## Implemented machine snapshot import
@@ -619,7 +636,8 @@ The REST surface adds:
 - `GET /api/skills/:id/built-in-version`, which returns the release's files, the current version,
   and the fences for review;
 - `POST /api/skills/:id/built-in-version` with `{ "digest", "expectedLatestVersionId", "accepted":
-  true }`. A changed library or offer is refused with `409`.
+  true }` and the optional `expectedDeploymentImpact` the review reported. A changed library, offer
+  or set of assignments is refused with `409`.
 
 Built-in skills belong to the personal organization, so members of other organizations on the same
 control plane do not see them. Older runners receive them as ordinary library skills. You can
