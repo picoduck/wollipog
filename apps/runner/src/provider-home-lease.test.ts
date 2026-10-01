@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -133,7 +135,7 @@ test("durable initialization recovers crashes before mkdir and with an empty loc
         throw new Error("simulated runner termination");
       },
     });
-    assert.throws(() => crashed.acquire(request(home)), /simulated runner termination/);
+    assert.throws(() => crashed.acquire(request(home)), /quarantine the entire.*do not remove individual records/s);
     const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
       pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
     });
@@ -147,6 +149,131 @@ test("durable initialization recovers crashes before mkdir and with an empty loc
     competitor.acquire(request(home));
     competitor.releaseAll();
   }
+});
+
+test("the originating registry retries a real post-proof directory failure without replacing evidence", (t) => {
+  if (process.platform === "win32" || process.getuid?.() === 0) return t.skip("requires POSIX directory permissions");
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-retry-directory-"));
+  const { root, lock } = leasePaths(home);
+  t.after(() => { chmodSync(root, 0o700); rmSync(home, { recursive: true, force: true }); });
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+    afterInitializationPublishForTest: () => chmodSync(root, 0o500),
+  });
+  assert.throws(() => registry.acquireHome(home), /quarantine the entire.*do not remove individual records/s);
+  assert.equal(existsSync(lock), false);
+  const proof = readFileSync(join(root, "mutable-home.recovery.json"));
+  chmodSync(root, 0o700);
+  const otherRegistry = new ProviderHomeLeaseRegistry(OWNER_A);
+  assert.throws(() => otherRegistry.acquireHome(home), /already in use by process/);
+  assert.equal(registry.acquireHome(home), true);
+  assert.deepEqual(readFileSync(join(root, "mutable-home.recovery.json")), proof);
+  assert.equal(registry.acquireHome(home), false);
+  assert.equal(registry.releaseHome(home), false);
+  assert.equal(registry.releaseHome(home), true);
+  assert.equal(otherRegistry.acquireHome(home), true);
+  otherRegistry.releaseAll();
+});
+
+test("real checkpoint and genesis mirror failures remain retryable only by the originating registry", (t) => {
+  if (process.platform === "win32" || process.getuid?.() === 0) return t.skip("requires POSIX directory permissions");
+  for (const phase of ["checkpoint", "genesis"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-provider-retry-${phase}-`));
+    const { root, lock } = leasePaths(home);
+    t.after(() => { chmodSync(lock, 0o700); rmSync(home, { recursive: true, force: true }); });
+    let fail = true;
+    const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+      beforeInitializationMirrorForTest: (name) => {
+        if (fail && (phase === "checkpoint" || name.startsWith("lease-"))) chmodSync(lock, 0o500);
+      },
+    });
+    assert.throws(() => registry.acquireHome(home), /quarantine the entire.*do not remove individual records/s);
+    const proof = readFileSync(join(root, "mutable-home.recovery.json"));
+    const mirrors = readdirSync(lock).map((name) => ({ name, bytes: readFileSync(join(lock, name)) }));
+    assert.equal(mirrors.length, phase === "checkpoint" ? 0 : 1);
+    assert.equal(registry.releaseHome(home), false, "failed initialization was never granted");
+    assert.throws(() => new ProviderHomeLeaseRegistry(OWNER_A).acquireHome(home), /already in use by process/);
+    fail = false;
+    chmodSync(lock, 0o700);
+    assert.equal(registry.acquireHome(home), true);
+    assert.deepEqual(readFileSync(join(root, "mutable-home.recovery.json")), proof);
+    for (const mirror of mirrors) assert.deepEqual(readFileSync(join(lock, mirror.name)), mirror.bytes);
+    assert.equal(readdirSync(lock).length, 2);
+    assert.equal(registry.releaseHome(home), true);
+  }
+});
+
+test("failed initialization retry refuses changed evidence, successors, and rollback directories", (t) => {
+  for (const change of ["proof", "corrupt", "retained", "directory", "successor", "during-retry"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-provider-retry-refuse-${change}-`));
+    const { root, lock } = leasePaths(home);
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const proofPath = join(root, "mutable-home.recovery.json");
+    const mutate = () => {
+      const proof = JSON.parse(readFileSync(proofPath, "utf8"));
+      writeFileSync(proofPath, JSON.stringify({ ...proof, createdAt: "changed" }));
+    };
+    const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+      afterInitializationPublishForTest: () => { throw new Error("failed before mkdir"); },
+      beforeTransitionPublishForTest: change === "during-retry" ? mutate : undefined,
+    });
+    assert.throws(() => registry.acquireHome(home), /quarantine the entire/);
+    const proof = JSON.parse(readFileSync(proofPath, "utf8"));
+    if (change === "proof") mutate();
+    if (change === "corrupt") writeFileSync(proofPath, "{");
+    if (change === "retained") writeFileSync(proofPath, JSON.stringify({ ...proof, recoveredEntriesHash: "c".repeat(64) }));
+    if (change === "directory") mkdirSync(lock);
+    if (change === "successor") {
+      const hash = createHash("sha256").update(readFileSync(proofPath)).digest("hex");
+      writeFileSync(join(root, `next-${proof.leaseId}.json`), JSON.stringify({
+        ...proof, leaseId: LEGACY_ID, previousLeaseId: proof.leaseId, previousRecordHash: hash,
+      }));
+    }
+    const before = readFileSync(proofPath);
+    assert.throws(() => registry.acquireHome(home), /quarantine the entire.*do not remove individual records/s);
+    if (change !== "during-retry") assert.deepEqual(readFileSync(proofPath), before);
+    assert.equal(registry.releaseHome(home), false);
+    assert.equal(existsSync(lock), change === "directory", "refusal does not create a directory");
+  }
+});
+
+test("retry does not adopt a substituted mirror directory even with identical record bytes", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-retry-substituted-"));
+  const { root, lock } = leasePaths(home);
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+    beforeInitializationMirrorForTest: () => { throw new Error("mirror failed"); },
+  });
+  assert.throws(() => registry.acquireHome(home), /quarantine the entire/);
+  renameSync(lock, join(root, "original.lock"));
+  mkdirSync(lock);
+  const proofPath = join(root, "mutable-home.recovery.json");
+  const proof = JSON.parse(readFileSync(proofPath, "utf8"));
+  linkSync(proofPath, join(lock, "checkpoint.json"));
+  linkSync(proofPath, join(lock, `lease-${proof.leaseId}.json`));
+  assert.throws(() => registry.acquireHome(home), /quarantine the entire/);
+  assert.equal(readdirSync(lock).length, 2);
+});
+
+test("a separate live process cannot claim a failed reservation before its origin retries", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-retry-process-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+    afterInitializationPublishForTest: () => { throw new Error("failed before mkdir"); },
+  });
+  assert.throws(() => registry.acquireHome(home), /quarantine the entire/);
+  const helper = join(home, "contender.ts");
+  writeFileSync(helper, `
+    import assert from "node:assert/strict";
+    import { ProviderHomeLeaseRegistry } from ${JSON.stringify(new URL("./provider-home-lease.ts", import.meta.url).href)};
+    assert.throws(() => new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}).acquireHome(${JSON.stringify(home)}), /already in use by process/);
+  `);
+  const child = spawn(process.execPath, ["--import", "tsx", helper], { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+  const code = await new Promise<number | null>((resolve) => child.once("exit", resolve));
+  assert.equal(code, 0, stderr);
+  assert.equal(registry.acquireHome(home), true);
+  registry.releaseAll();
 });
 
 test("a rollback initializer colliding with the proof gets the complete remedy on the first refusal", (t) => {

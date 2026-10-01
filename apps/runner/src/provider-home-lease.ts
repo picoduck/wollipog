@@ -67,6 +67,12 @@ interface LeaseChain {
   external: boolean;
 }
 
+interface FailedInitialization {
+  proof: ReadLeaseRecord;
+  directory?: { dev: number; ino: number };
+  snapshotHash: string;
+}
+
 export interface ProviderHomeLeaseOptions {
   pid?: number;
   hostname?: string;
@@ -74,6 +80,7 @@ export interface ProviderHomeLeaseOptions {
   beforeMarkerWriteForTest?: () => void;
   beforeTransitionPublishForTest?: () => void;
   afterInitializationPublishForTest?: () => void;
+  beforeInitializationMirrorForTest?: (mirror: string) => void;
 }
 
 export interface ProviderHomeLeaseRequest {
@@ -302,6 +309,9 @@ function publishRecord(root: string, target: string, record: ProviderHomeLeaseRe
  * so allowing a second control plane between turns would still permit cross-owner mutation.
  */
 export class ProviderHomeLeaseRegistry {
+  // Only this registry knows these reservations were never granted to a caller. A matching PID
+  // in another registry (or a record read from disk) is not authority to resume initialization.
+  private readonly failedInitializations = new Map<string, FailedInitialization>();
   private readonly held = new Map<string, {
     leaseId: string;
     lockDir: string;
@@ -314,6 +324,7 @@ export class ProviderHomeLeaseRegistry {
   private readonly beforeMarkerWriteForTest?: () => void;
   private readonly beforeTransitionPublishForTest?: () => void;
   private readonly afterInitializationPublishForTest?: () => void;
+  private readonly beforeInitializationMirrorForTest?: (mirror: string) => void;
 
   constructor(private readonly ownerHash: string, options: ProviderHomeLeaseOptions = {}) {
     if (!OWNER_HASH.test(ownerHash)) throw new Error("provider-home lease requires an attested owner hash");
@@ -323,6 +334,7 @@ export class ProviderHomeLeaseRegistry {
     this.beforeMarkerWriteForTest = options.beforeMarkerWriteForTest;
     this.beforeTransitionPublishForTest = options.beforeTransitionPublishForTest;
     this.afterInitializationPublishForTest = options.afterInitializationPublishForTest;
+    this.beforeInitializationMirrorForTest = options.beforeInitializationMirrorForTest;
   }
 
   acquire(request: ProviderHomeLeaseRequest): void {
@@ -369,6 +381,21 @@ export class ProviderHomeLeaseRegistry {
       return false;
     }
     mkdirSync(root, { recursive: true, mode: 0o700 });
+    const failed = this.failedInitializations.get(key);
+    if (failed) {
+      try {
+        const chain = this.verifyInitialization(lockDir, failed);
+        if (chain.snapshotHash !== failed.snapshotHash) throw unexpectedEntries(lockDir);
+        this.beforeTransitionPublishForTest?.();
+        if (this.verifyInitialization(lockDir, failed).snapshotHash !== failed.snapshotHash) throw unexpectedEntries(lockDir);
+      } catch (error) {
+        throw verificationRefusal(lockDir, error);
+      }
+      this.finishInitialization(key, root, lockDir, failed);
+      this.held.set(key, { leaseId: failed.proof.record.leaseId, lockDir, root, references: 1 });
+      this.failedInitializations.delete(key);
+      return true;
+    }
     const record = this.activeRecord(provider, null, null);
     let exists = true;
     try { lstatSync(lockDir); } catch (error) {
@@ -388,16 +415,11 @@ export class ProviderHomeLeaseRegistry {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
       if (initialized) {
-        this.afterInitializationPublishForTest?.();
-        // Exclusive mkdir detects a competing legacy initializer instead of attributing its
-        // directory to our proof. Keep the proof and refuse; no ownership evidence is removed.
-        try {
-          mkdirSync(lockDir, { mode: 0o700 });
-          linkSync(join(root, RECOVERY_MARKER), join(lockDir, "checkpoint.json"));
-          linkSync(join(root, RECOVERY_MARKER), join(lockDir, `lease-${record.leaseId}.json`));
-        } catch (error) {
-          throw verificationRefusal(lockDir, error);
-        }
+        const reservation: FailedInitialization = {
+          proof: { record, hash: createHash("sha256").update(`${JSON.stringify(record)}\n`).digest("hex") },
+          snapshotHash: "",
+        };
+        this.finishInitialization(key, root, lockDir, reservation, true);
       } else {
         // The winning initializer may have died before mkdir. Only its verified proof may
         // authorize recreating that directory; never mkdir on a foreign or live reservation.
@@ -423,6 +445,50 @@ export class ProviderHomeLeaseRegistry {
     }
     this.held.set(key, { leaseId: record.leaseId, lockDir, root, references: 1 });
     return true;
+  }
+
+  private verifyInitialization(lockDir: string, reservation: FailedInitialization): LeaseChain {
+    let directory: ReturnType<typeof lstatSync> | undefined;
+    try { directory = lstatSync(lockDir); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (reservation.directory
+      ? !directory?.isDirectory() || directory.isSymbolicLink() ||
+        directory.dev !== reservation.directory.dev || directory.ino !== reservation.directory.ino
+      : directory !== undefined) throw unexpectedEntries(lockDir);
+    const chain = readChain(lockDir);
+    if (!chain.external || !sameTip(chain.tip, reservation.proof)) throw unexpectedEntries(lockDir);
+    return chain;
+  }
+
+  private finishInitialization(
+    home: string, root: string, lockDir: string, reservation: FailedInitialization, first = false,
+  ): void {
+    try {
+      if (first) this.afterInitializationPublishForTest?.();
+      this.verifyInitialization(lockDir, reservation);
+      if (!reservation.directory) {
+        // A competing rollback mkdir is never attributed to our reservation, even if empty.
+        mkdirSync(lockDir, { mode: 0o700 });
+        const stat = lstatSync(lockDir);
+        reservation.directory = { dev: stat.dev, ino: stat.ino };
+      }
+      for (const mirror of ["checkpoint.json", `lease-${reservation.proof.record.leaseId}.json`]) {
+        this.beforeInitializationMirrorForTest?.(mirror);
+        this.verifyInitialization(lockDir, reservation);
+        this.mirrorRecord(root, lockDir, RECOVERY_MARKER, mirror, true);
+      }
+      this.verifyInitialization(lockDir, reservation);
+    } catch (error) {
+      // Retain retry authority only for our unchanged proof and our own directory. Corruption,
+      // successors, and rollback collisions keep their evidence but never acquire this token.
+      this.failedInitializations.delete(home);
+      try {
+        reservation.snapshotHash = this.verifyInitialization(lockDir, reservation).snapshotHash;
+        this.failedInitializations.set(home, reservation);
+      } catch { /* Uncertain ownership requires the complete operator remedy. */ }
+      throw verificationRefusal(lockDir, error);
+    }
   }
 
   private activeRecord(
