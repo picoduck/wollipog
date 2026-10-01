@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, hostname as systemHostname } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import type { AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import type { SpawnIsolation } from "./spawn.js";
@@ -124,6 +124,7 @@ export interface ProviderHomeLeaseOptions {
   afterInitializationPublishForTest?: () => void;
   beforeInitializationMirrorForTest?: (mirror: string) => void;
   nativeCheckpointBarrierForTest?: { boundary: string; marker: string };
+  onCheckpointFailureForTest?: (error: unknown) => void;
   disableCompactionForTest?: boolean;
   onDiagnostic?: (diagnostic: { event: "provider_home_checkpoint_unavailable"; leaseId: string; message: string }) => void;
 }
@@ -521,12 +522,16 @@ function sameTip(left: ReadLeaseRecord, right: ReadLeaseRecord): boolean {
   return left.hash === right.hash && left.record.leaseId === right.record.leaseId;
 }
 
+function sameAcquiredTip(tip: ReadLeaseRecord, acquiredHash: string): boolean {
+  return tip.hash === acquiredHash || tip.record.version === 4 && tip.record.checkpoint.previousTipHash === acquiredHash;
+}
+
 /**
  * Publish a complete immutable record with an exclusive hard link. The temporary file is outside
  * the lock directory, so a crash can leave harmless litter but never a transient in-lock entry.
  */
 function publishRecord(root: string, target: string, record: ProviderHomeLeaseRecordV2 | (Omit<ProviderHomeLeaseRecordV2, "version"> & { version: 4; protocol: string }), boundary?: (stage: string) => void): void {
-  if (target.startsWith(`${root}/next-`) && lstatExists(join(root, "mutable-home.lock", FORMAT_GUARD))) {
+  if (dirname(target) === root && basename(target).startsWith("next-") && lstatExists(join(root, "mutable-home.lock", FORMAT_GUARD))) {
     withVerificationBudget(() => {
       const snapshot = capture(root);
       const chain = withSnapshot(snapshot, () => readChainAt(join(root, "mutable-home.lock"), root));
@@ -547,7 +552,7 @@ function publishRecord(root: string, target: string, record: ProviderHomeLeaseRe
     linkSync(temp, target);
     boundary?.("guard-published");
     syncDirectory(root);
-    if (target.startsWith(`${root}/mutable-home.lock/`)) syncDirectory(join(root, "mutable-home.lock"));
+    if (dirname(target) === join(root, "mutable-home.lock")) syncDirectory(join(root, "mutable-home.lock"));
   } finally {
     try {
       rmSync(temp, { force: true });
@@ -568,7 +573,7 @@ function ioPlan(snapshot: LeaseIoSnapshot, tip: ReadLeaseRecord, jobs: LeaseIoJo
     future: `next-${tip.record.leaseId}.json`, jobs, barrier };
 }
 function syncFile(path: string): void {
-  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const fd = openSync(path, (process.platform === "win32" ? constants.O_RDWR : constants.O_RDONLY) | (constants.O_NOFOLLOW ?? 0));
   try { fsyncSync(fd); } finally { closeSync(fd); }
 }
 
@@ -593,6 +598,7 @@ export class ProviderHomeLeaseRegistry {
     leaseId: string;
     lockDir: string;
     root: string;
+    acquiredHash: string;
     references: number;
   }>();
   private readonly pid: number;
@@ -603,6 +609,7 @@ export class ProviderHomeLeaseRegistry {
   private readonly afterInitializationPublishForTest?: () => void;
   private readonly beforeInitializationMirrorForTest?: (mirror: string) => void;
   private readonly nativeCheckpointBarrierForTest?: ProviderHomeLeaseOptions["nativeCheckpointBarrierForTest"];
+  private readonly onCheckpointFailureForTest?: ProviderHomeLeaseOptions["onCheckpointFailureForTest"];
   private readonly pendingMigrations = new Set<string>();
   private readonly disableCompactionForTest: boolean;
   private readonly diagnostics: string[] = [];
@@ -618,6 +625,7 @@ export class ProviderHomeLeaseRegistry {
     this.afterInitializationPublishForTest = options.afterInitializationPublishForTest;
     this.beforeInitializationMirrorForTest = options.beforeInitializationMirrorForTest;
     this.nativeCheckpointBarrierForTest = options.nativeCheckpointBarrierForTest;
+    this.onCheckpointFailureForTest = options.onCheckpointFailureForTest;
     this.disableCompactionForTest = options.disableCompactionForTest ?? false;
     this.onDiagnostic = options.onDiagnostic;
   }
@@ -669,6 +677,7 @@ export class ProviderHomeLeaseRegistry {
         this.pendingMigrations.delete(key);
         return true;
       }
+      if (!sameAcquiredTip(readChain(borrowed.lockDir).tip, borrowed.acquiredHash)) throw unexpectedEntries(borrowed.lockDir);
       borrowed.references++;
       return false;
     }
@@ -691,7 +700,7 @@ export class ProviderHomeLeaseRegistry {
         throw verificationRefusal(lockDir, error);
       }
       this.finishInitialization(key, root, lockDir, failed);
-      this.held.set(key, { leaseId: failed.proof.record.leaseId, lockDir, root, references: 1 });
+      this.held.set(key, { leaseId: failed.proof.record.leaseId, acquiredHash: failed.proof.hash, lockDir, root, references: 1 });
       this.failedInitializations.delete(key);
       return true;
     }
@@ -742,7 +751,7 @@ export class ProviderHomeLeaseRegistry {
       this.mirrorRecord(root, lockDir, RECOVERY_MARKER, "checkpoint.json", true);
       readChain(lockDir);
     }
-    this.held.set(key, { leaseId: record.leaseId, lockDir, root, references: 1 });
+    this.held.set(key, { leaseId: record.leaseId, acquiredHash: createHash("sha256").update(`${JSON.stringify(record)}\n`).digest("hex"), lockDir, root, references: 1 });
     const migrationRequired = (() => { const chain = readChain(lockDir); return chain.external && chain.transitions >= LIMITS.hardTransitions - 1; })();
     if (migrationRequired) this.pendingMigrations.add(key);
     const compacted = this.compactHeld(root, lockDir, record.leaseId);
@@ -964,10 +973,13 @@ export class ProviderHomeLeaseRegistry {
       if (this.disableCompactionForTest) throw new Error("checkpoint disabled for unavailable-storage validation");
       return withVerificationBudget(() => {
         let snapshot = capture(root);
+        const token = [...this.held.values()].find((held) => held.root === root && held.leaseId === leaseId);
+        if (!token) throw new Error("checkpoint has no private acquisition proof");
         const owned = (): LeaseChain => withSnapshot(snapshot, () => {
           const chain = readChainAt(lockDir, root);
           if (chain.tip.record.version === 1 || chain.tip.record.state !== "active" || chain.tip.record.leaseId !== leaseId ||
-              chain.tip.record.ownerHash !== this.ownerHash || chain.tip.record.hostname !== this.hostname || chain.tip.record.pid !== this.pid) throw new Error("checkpoint acquired owner changed");
+              chain.tip.record.ownerHash !== this.ownerHash || chain.tip.record.hostname !== this.hostname || chain.tip.record.pid !== this.pid ||
+              !sameAcquiredTip(chain.tip, token.acquiredHash)) throw new Error("checkpoint acquired owner changed");
           return chain;
         });
         const apply = (chain: LeaseChain, jobs: LeaseIoJob[], guard?: Buffer) => {
@@ -998,8 +1010,13 @@ export class ProviderHomeLeaseRegistry {
               pending.record.ownerHash !== this.ownerHash || pending.record.hostname !== this.hostname ||
               !chain.evidence.some((item) => item.directory === "root" && item.hash === (pending.record as ProviderHomeLeaseRecordV4).checkpoint.previousTipHash)) throw new Error("unproven completed checkpoint candidate");
           withSnapshot(snapshot, () => verifyRetired(root, lockDir, retired));
+          const oldAnchor = snapshot.entries.find((item) => item.directory === "root" && item.name === RECOVERY_MARKER)!;
           const hypothetical = { ...snapshot, entries: snapshot.entries.filter((file) => file.name !== RECOVERY_MARKER || file.directory !== "root")
-            .filter((file) => file !== entry).concat({ ...entry, name: RECOVERY_MARKER }) };
+            .filter((file) => file !== entry)
+            // Selection removes the old anchor's canonical hard link; its two remaining
+            // verified mirrors must reflect that physical post-selection count.
+            .map((file) => file.device === oldAnchor.device && file.inode === oldAnchor.inode ? { ...file, links: file.links - 1 } : file)
+            .concat({ ...entry, name: RECOVERY_MARKER }) };
           const after = withSnapshot(hypothetical, () => readChainAt(lockDir, root));
           if (!sameTip(chain.tip, after.tip)) throw new Error("completed candidate does not preserve the acquired successor");
           apply(chain, [{ name: entry.name, raw: entry.raw, copiesOwner: false, retire: indexes(retired) }]);
@@ -1058,7 +1075,8 @@ export class ProviderHomeLeaseRegistry {
         apply(chain, [{ name: pendingName, raw, copiesOwner: true, retire: indexes([...retired.values()]) }]);
         owned(); return true;
       });
-    } catch {
+    } catch (error) {
+      this.onCheckpointFailureForTest?.(error);
       const diagnostic = `Provider-home lease checkpoint unavailable; preserving the last valid chain. Acquisitions stop at ${LIMITS.hardTransitions - 1} transitions, reserving one release slot. Check the packaged lease helper, permanent reader/writer fence, durable publication, staging evidence, and the ${LIMITS.verificationBytes}-byte verification budget; quarantine the entire lease directory only after proving this HOME unused.`;
       if (!this.diagnostics.includes(diagnostic) && this.diagnostics.length < 16) {
         this.diagnostics.push(diagnostic); this.onDiagnostic?.({ event: "provider_home_checkpoint_unavailable", leaseId, message: diagnostic });
@@ -1092,13 +1110,13 @@ export class ProviderHomeLeaseRegistry {
     return true;
   }
 
-  private releaseHeld({ leaseId, lockDir, root }: { leaseId: string; lockDir: string; root: string }): boolean {
+  private releaseHeld({ leaseId, acquiredHash, lockDir, root }: { leaseId: string; acquiredHash: string; lockDir: string; root: string }): boolean {
     try {
       this.compactHeld(root, lockDir, leaseId);
       const chain = readChain(lockDir);
       const current = chain.tip;
       if (current.record.version === 1 || current.record.state !== "active" ||
-          current.record.leaseId !== leaseId) return false;
+          current.record.leaseId !== leaseId || !sameAcquiredTip(current, acquiredHash)) return false;
       const released: ProviderHomeLeaseRecordV2 = {
         ...current.record,
         version: 2,

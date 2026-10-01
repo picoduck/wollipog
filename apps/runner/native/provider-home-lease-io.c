@@ -1,6 +1,9 @@
 /* Fixed lease-only I/O transaction. JSON and ownership transitions are verified by the runner;
  * this helper pins no-follow ancestry, fences publishers, and compares the exact verified bytes
  * before publishing or retiring anything. Binary input/output is bounded independently here. */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include <dirent.h>
 #include <errno.h>

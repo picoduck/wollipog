@@ -147,6 +147,49 @@ print(json.dumps(maximum))`)], { env: { ...process.env, HOME: home }, encoding: 
   }
 });
 
+test("same UUID and PID cannot replace a private acquired immutable proof", { skip: process.platform !== "linux" }, (t) => {
+  for (const change of [{ ownerHash: "b".repeat(64) }, { padding: "changed-after-acquisition" }]) {
+    const home = fixture(t);
+    nativePass(home);
+    const registry = new ProviderHomeLeaseRegistry(owner);
+    registry.acquireHome(home);
+    const { root } = paths(home);
+    const tipPath = fs.readdirSync(root).filter((name) => name.startsWith("next-")).map((name) => join(root, name))
+      .find((path) => JSON.parse(fs.readFileSync(path, "utf8")).state === "active")!;
+    const tip = JSON.parse(fs.readFileSync(tipPath, "utf8"));
+    fs.writeFileSync(tipPath, `${JSON.stringify({ ...tip, ...change })}\n`);
+    const changed = evidence(home);
+    assert.throws(() => registry.acquireHome(home), /quarantine the entire/);
+    assert.equal(registry.releaseHome(home), false);
+    assert.deepEqual(evidence(home), changed);
+    const helperHome = fixture(t);
+    nativePass(helperHome);
+    const result = spawnSync("python3", ["-c", program(`
+home_fd, _ = open_root(os.environ["HOME"])
+lease = acquire_lease(home_fd, "${owner}")
+root, lock, lease_id = lease
+current, _ = read_owned_lease_chain(root, lock)
+name = "next-%s.json" % current["previousLeaseId"]
+current.update(${JSON.stringify(change)})
+with open(name, "wb", opener=lambda path, flags: os.open(path, flags, dir_fd=root)) as stream: stream.write(lease_bytes(current))
+directories = [fd_path(root), fd_path(lock)]
+before = {os.path.join(directory, name): open(os.path.join(directory, name), "rb").read() for directory in directories for name in os.listdir(directory) if name != "mutable-home.lock"}
+try: release_lease(lease)
+except RuntimeError as error:
+    assert "changed before release" in str(error), str(error)
+    print("immutable acquired proof refused")
+else: raise AssertionError("rewritten acquired proof was released")
+after = {os.path.join(directory, name): open(os.path.join(directory, name), "rb").read() for directory in directories for name in os.listdir(directory) if name != "mutable-home.lock"}
+assert after == before, "refusal changed evidence"
+os.close(home_fd)`)], { env: { ...process.env, HOME: helperHome }, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.status, 0, String(result.stderr));
+    assert.match(String(result.stdout), /immutable acquired proof refused/);
+    // A helper refusal leaves its rewritten active tip and no released successor.
+    assert.ok(fs.readdirSync(paths(helperHome).root).filter((name) => name.startsWith("next-")).map((name) =>
+      JSON.parse(fs.readFileSync(join(paths(helperHome).root, name), "utf8"))).some((record) => record.state === "active" && Object.entries(change).every(([key, value]) => value === record[key])));
+  }
+});
+
 test("SIGKILL at every native/helper checkpoint boundary recovers across readers", { timeout: 180_000, skip: process.platform !== "linux" }, async (t) => {
   for (const writer of ["native", "helper"] as const) for (const boundary of boundaries) {
     const home = fixture(t);

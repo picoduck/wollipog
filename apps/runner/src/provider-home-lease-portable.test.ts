@@ -6,6 +6,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { readLeaseIoSnapshot } from "./provider-home-lease-io.js";
 
 const owner = "a".repeat(64);
 const modulePath = new URL("./provider-home-lease.ts", import.meta.url).href;
@@ -41,6 +42,9 @@ test("native POSIX and Windows checkpoints recover actual killed-parent publicat
     const home = mkdtempSync(join(tmpdir(), "wollipog-portable-lease-"));
     t.after(() => rmSync(home, { recursive: true, force: true }));
     const root = seed(home); const marker = join(home, "ready"); const script = join(home, "writer.mts");
+    // Keep fixed-source compiler errors visible in test evidence before public lease refusals
+    // intentionally replace internal exceptions with the stable operator remedy.
+    readLeaseIoSnapshot(root);
     writeFileSync(script, `import {ProviderHomeLeaseRegistry} from ${JSON.stringify(modulePath)};const registry=new ProviderHomeLeaseRegistry(${JSON.stringify(owner)},{nativeCheckpointBarrierForTest:{boundary:${JSON.stringify(boundary)},marker:${JSON.stringify(marker)}}});registry.acquireHome(${JSON.stringify(home)});registry.releaseAll();`);
     const child = spawn(process.execPath, ["--import", "tsx", script], { stdio: ["ignore", "pipe", "pipe"] });
     let output = ""; child.stdout.on("data", (value) => { output += value; }); child.stderr.on("data", (value) => { output += value; });
@@ -53,7 +57,7 @@ test("native POSIX and Windows checkpoints recover actual killed-parent publicat
     }
     const ended = new Promise<void>((resolve) => child.once("close", () => resolve()));
     child.kill("SIGKILL"); await ended;
-    const registry = new ProviderHomeLeaseRegistry(owner);
+    const registry = new ProviderHomeLeaseRegistry(owner, { onCheckpointFailureForTest: (error) => { throw error; } });
     const recoveryDeadline = performance.now() + 5_000;
     for (;;) {
       try { registry.acquireHome(home); break; }

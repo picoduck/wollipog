@@ -156,7 +156,7 @@ public static class WollipogProviderHomeLeaseIo {
   public static void Run(){
     input=new BinaryReader(Console.OpenStandardInput(),Utf8);output=new BinaryWriter(Console.OpenStandardOutput(),Utf8);ancestry=new List<SafeFileHandle>();
     try{Need(Encoding.ASCII.GetString(input.ReadBytes(5))=="WPLL4","invalid lease I/O protocol");byte operation=input.ReadByte();uint parent=input.ReadUInt32();allowedReads=input.ReadUInt32();allowedBytes=input.ReadUInt64();Need(allowedReads<=131072&&allowedBytes<=268435456,"invalid remaining lease work budget");parentId=parent;PBI info;int returned;Need(NtQueryInformationProcess(Process.GetCurrentProcess().Handle,0,out info,Marshal.SizeOf(typeof(PBI)),out returned)==0&&(ulong)info.Parent.ToInt64()==parent,"lease helper parent identity changed");parentHandle=OpenProcess(0x1000|0x100000,false,parent);Alive();FT parentCreated,selfCreated,exited,kernel,user;Need(GetProcessTimes(parentHandle,out parentCreated,out exited,out kernel,out user)&&GetProcessTimes(Process.GetCurrentProcess().Handle,out selfCreated,out exited,out kernel,out user)&&(((ulong)parentCreated.High<<32)|parentCreated.Low)<=(((ulong)selfCreated.High<<32)|selfCreated.Low),"lease helper parent PID was reused");Roots(Text(32768));if(operation==0){if(lockHandle!=null)Fence(false);OutputSnapshot(Snapshot());}else Apply(operation);
-    }catch(Exception error){try{var refusal=error as Refusal;output.Write((byte)'E');output.Write(refusal==null?(byte)1:refusal.Code);Put(refusal==null?"provider-HOME native lease I/O failed; preserve all evidence":refusal.Message);output.Flush();}catch{}}
+    }catch(Exception error){try{var refusal=error as Refusal;var native=error as Win32Exception;output.Write((byte)'E');output.Write(refusal==null?(byte)1:refusal.Code);Put(refusal==null?"provider-HOME native lease I/O failed"+(native==null?"":" (Windows code "+native.NativeErrorCode+")")+"; preserve all evidence":refusal.Message);output.Flush();}catch{}}
     finally{if(anchorHandle!=null)anchorHandle.Dispose();if(guardHandle!=null)guardHandle.Dispose();for(int i=ancestry.Count-1;i>=0;i--)ancestry[i].Dispose();if(parentHandle!=IntPtr.Zero)CloseHandle(parentHandle);}
   }
 }
@@ -178,7 +178,9 @@ export function windowsLeaseIoCommand(): { command: string; args: string[] } {
       { input: WINDOWS_LEASE_IO_TYPES, encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true });
     if (compiled.error || compiled.status !== 0) {
       rmSync(directory, { recursive: true, force: true });
-      throw new Error("the fixed Windows provider-HOME lease helper could not be compiled");
+      throw new Error("the fixed Windows provider-HOME lease helper could not be compiled", {
+        cause: new Error((compiled.stderr ?? "").slice(0, 2_048)),
+      });
     }
     assembly = { path, sha256: sha256(readFileSync(path)) };
   }

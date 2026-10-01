@@ -74,7 +74,9 @@ function nativeExecutable(): string {
     const compiled = spawnSync(compiler, args, { encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 });
     if (compiled.error || compiled.status !== 0) {
       rmSync(root, { recursive: true, force: true });
-      throw new Error("the fixed provider-HOME lease helper could not be compiled");
+      throw new Error("the fixed provider-HOME lease helper could not be compiled", {
+        cause: new Error((compiled.stderr ?? "").slice(0, 2_048)),
+      });
     }
     chmodSync(path, 0o700);
   }

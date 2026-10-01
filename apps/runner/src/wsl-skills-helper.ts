@@ -81,6 +81,11 @@ def lease_bytes(value):
     return json.dumps(value, separators=(",", ":")).encode() + b"\n"
 
 lease_record_cache = {}
+helper_acquired_proofs = {}
+
+def same_acquired_tip(root, value, digest):
+    acquired = helper_acquired_proofs.get(root)
+    return acquired is not None and (digest == acquired or value.get("version") == 4 and value["checkpoint"]["previousTipHash"] == acquired)
 
 def read_lease_record(lock, name, max_links=2):
     spend_verification_work(1, 0)
@@ -537,6 +542,7 @@ def acquire_external_lease(root, owner):
         published, _ = read_owned_lease_chain(root, lock)
         if published.get("state") != "active" or published["leaseId"] != value["leaseId"]:
             fail("provider home lease changed during recovery")
+        helper_acquired_proofs[root] = hashlib.sha256(lease_bytes(value)).hexdigest()
         compacted = compact_canonical(root, lock, value["leaseId"], owner)
         if details[7] >= CHECKPOINT_LIMITS["hardTransitions"] - 2 and not compacted: fail("bounded catch-up must succeed before this HOME can be granted; preserve the acquired reservation")
         confirmed, _ = read_owned_lease_chain(root, lock)
@@ -565,6 +571,7 @@ def acquire_lease(home_fd, owner):
                 mirror_external_lease(root, lock, "mutable-home.recovery.json", "lease-%s.json" % value["leaseId"], True)
                 published, _ = read_owned_lease_chain(root, lock)
                 if published["leaseId"] != value["leaseId"]: fail("provider home lease changed during initialization")
+                helper_acquired_proofs[root] = hashlib.sha256(lease_bytes(value)).hexdigest()
                 return root, lock, value["leaseId"]
             except:
                 os.close(lock); raise
@@ -588,10 +595,12 @@ def acquire_lease(home_fd, owner):
                 if published.get("state") != "active" or published["leaseId"] != value["leaseId"]:
                     fail("provider home lease changed during recovery")
                 cleanup_compactions(root, lock)
+                helper_acquired_proofs[root] = hashlib.sha256(lease_bytes(value)).hexdigest()
                 return root, lock, value["leaseId"]
             except:
                 os.close(lock); raise
     except Exception as error:
+        helper_acquired_proofs.pop(root, None)
         path = fd_path(root)
         release_lease_ancestry(root)
         os.close(root)
@@ -648,13 +657,19 @@ def release_lease(lease):
     root, lock, lease_id = lease
     try:
         current, current_hash = read_owned_lease_chain(root, lock)
-        if current.get("version") not in (2, 4) or current.get("state") != "active" or current["leaseId"] != lease_id:
+        if current.get("version") not in (2, 4) or current.get("state") != "active" or current["leaseId"] != lease_id or not same_acquired_tip(root, current, current_hash):
             fail("provider home lease changed before release")
         canonical = external_lease(root)
         # Directory exchange cannot compact a journal whose authoritative chain lives outside it.
-        if not canonical: lock = compact_lease(root, lock, current, current_hash)
+        if not canonical:
+            previous_lock = lock
+            lock = compact_lease(root, lock, current, current_hash)
+            if lock != previous_lock:
+                genesis = dict(current, previousLeaseId=None, previousRecordHash=None)
+                helper_acquired_proofs[root] = hashlib.sha256(lease_bytes(genesis)).hexdigest()
         else: compact_canonical(root, lock, lease_id, current["ownerHash"])
         current, current_hash = read_owned_lease_chain(root, lock)
+        if current.get("state") != "active" or current["leaseId"] != lease_id or not same_acquired_tip(root, current, current_hash): fail("provider home acquired proof changed before release")
         released = dict(current, version=2)
         released.pop("checkpoint", None); released.pop("recoveredEntriesHash", None)
         released.update({"state": "released", "leaseId": str(uuid.uuid4()), "previousLeaseId": current["leaseId"],
@@ -664,6 +679,7 @@ def release_lease(lease):
         except FileExistsError: fail("provider home lease changed before release")
         if canonical: mirror_external_lease(root, lock, name)
     finally:
+        helper_acquired_proofs.pop(root, None)
         release_lease_ancestry(root)
         os.close(lock); os.close(root)
 

@@ -225,7 +225,7 @@ def compact_canonical_bounded(root, lock, lease_id, owner):
     details = read_owned_lease_chain(root, lock, True, True)
     tip = details[0]
     if (tip.get("state") != "active" or tip["leaseId"] != lease_id or tip["ownerHash"] != owner or
-        tip["hostname"] != os.uname().nodename or tip["pid"] != os.getpid()): fail("checkpoint acquired token changed")
+        tip["hostname"] != os.uname().nodename or tip["pid"] != os.getpid() or not same_acquired_tip(root, tip, details[1])): fail("checkpoint acquired token changed")
     if details[7] < CHECKPOINT_LIMITS["compactAfter"] and not details[6] and not any(name in bounded_lease_entries(root) for name in CHECKPOINT_SLOTS): return True
     if FORMAT_GUARD not in bounded_lease_entries(lock):
         checkpoint_boundary("before-guard")
@@ -240,7 +240,7 @@ def compact_fenced(root, lock, lease_id, owner):
         details = read_owned_lease_chain(root, lock, True, True)
         tip = details[0]
         if (tip.get("state") != "active" or tip["leaseId"] != lease_id or tip["ownerHash"] != owner or
-            tip["hostname"] != os.uname().nodename or tip["pid"] != os.getpid()): fail("checkpoint acquired owner changed")
+            tip["hostname"] != os.uname().nodename or tip["pid"] != os.getpid() or not same_acquired_tip(root, tip, details[1])): fail("checkpoint acquired owner changed")
         return details
     def pin_authority(details):
         info = os.stat("mutable-home.recovery.json", dir_fd=root, follow_symlinks=False)
