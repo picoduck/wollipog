@@ -156,7 +156,7 @@ test("at 834px the toggle opens a drawer under the session bar that Escape close
   await expect(aside).toHaveAttribute("data-presentation", "drawer");
   await expect(toggle(page)).toHaveAttribute("aria-pressed", "true");
   await expect(aside).toBeFocused();
-  const bar = await box(page.locator(".session-detail > .detail-head"));
+  const bar = await box(page.locator(".session-bar"));
   const drawer = await box(aside);
   expect(drawer.y, "the drawer starts under the session bar").toBeGreaterThanOrEqual(bar.bottom - 0.5);
   expect(Math.abs(drawer.width - 280)).toBeLessThanOrEqual(0.5);

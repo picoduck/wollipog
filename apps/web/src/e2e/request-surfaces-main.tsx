@@ -553,8 +553,8 @@ function Fixture() {
     <ApiProvider client={client}>
       <main className="app" style={{ display: "block", height: "100dvh" }}>
         <section className="session-detail expanded" style={{ height: "100%" }}>
-          <header className="detail-head" style={{ justifyContent: "space-between" }}>
-            <h1 className="detail-title">{session.title}</h1>
+          <header className="detail-bar session-bar" style={{ justifyContent: "space-between" }}>
+            <h1 className="detail-bar-title session-bar-title">{session.title}</h1>
             {scenario === "descendants" || scenario === "polling" || scenario === "held" ? (
               <SessionStatusIndicators
                 session={session}
