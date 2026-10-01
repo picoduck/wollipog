@@ -12,8 +12,19 @@ const inside = (root: string, path: string) => {
 
 function safeDirectory(identity: BigIntStats): void {
   if (!identity.isDirectory() || identity.isSymbolicLink()) throw new Error("unsafe helper staging ancestry");
-  if (process.getuid && ((identity.uid !== 0n && identity.uid !== BigInt(process.getuid())) ||
-      ((identity.mode & 0o022n) && !(identity.mode & 0o1000n)))) throw new Error("helper parent permits unprotected foreign renames");
+}
+
+function protectedAncestry(chain: Array<{ identity: BigIntStats }>): void {
+  if (!process.getuid) return;
+  const uid = BigInt(process.getuid());
+  let exposed = true;
+  for (const { identity } of [...chain].reverse()) {
+    if ((identity.uid !== 0n && identity.uid !== uid) ||
+        (exposed && (identity.mode & 0o022n) && !(identity.mode & 0o1000n))) throw new Error("helper parent permits unprotected foreign renames");
+    // A current-user private ancestor prevents other users reaching descendants even when
+    // their directory modes are permissive. Its exposed ancestors must still be protected.
+    if (identity.uid === uid && !(identity.mode & 0o077n)) exposed = false;
+  }
 }
 
 function ancestors(path: string): Array<{ path: string; identity: BigIntStats }> {
@@ -23,7 +34,7 @@ function ancestors(path: string): Array<{ path: string; identity: BigIntStats }>
     safeDirectory(identity);
     result.push({ path: current, identity });
     if (result.length > 256) throw new Error("helper staging ancestry limit exceeded");
-    if (dirname(current) === current) return result;
+    if (dirname(current) === current) { protectedAncestry(result); return result; }
   }
 }
 
@@ -66,11 +77,14 @@ export class LeaseHelperArtifact {
   }
 
   private checkRoot(): void {
+    const currentChain = [];
     for (const entry of this.parentChain) {
       const current = lstatSync(entry.path, { bigint: true });
       safeDirectory(current);
       if (!current.isDirectory() || current.isSymbolicLink() || !same(current, entry.identity)) throw new Error("helper parent ancestry changed");
+      currentChain.push({ identity: current });
     }
+    protectedAncestry(currentChain);
     const current = lstatSync(this.root, { bigint: true });
     if (!current.isDirectory() || current.isSymbolicLink() || !same(current, this.rootIdentity) ||
         (process.getuid && (current.uid !== BigInt(process.getuid()) || (current.mode & 0o077n)))) throw new Error("private helper root changed");

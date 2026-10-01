@@ -320,7 +320,9 @@ test("a new process reclaims a killed initializer or active holder without files
     let stderr = "";
     child.stderr.on("data", (chunk) => { stderr += String(chunk); });
     const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    const deadline = Date.now() + 5_000;
+    // The first real Windows bootstrap includes compiling and execution-probing the fixed
+    // helper. Wait for the actual publication marker before killing; protocol limits stay fixed.
+    const deadline = Date.now() + 30_000;
     while (!existsSync(ready) && child.exitCode === null && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }

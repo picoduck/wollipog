@@ -143,7 +143,7 @@ publication without republishing or adding a borrowed reference. Failed release 
 held and pending tokens and emits a bounded, deduplicated diagnostic so exact release can be
 retried; transient contention carries retry advice without a quarantine remedy.
 
-Lease I/O is synchronous today. A maximal admitted migration measured roughly 50–77 seconds,
+Lease I/O is synchronous today. A maximal admitted migration measured roughly 50–90 seconds,
 so runner event-loop timers and heartbeat work can be delayed during the transaction. The
 physical record/byte budgets bound work; they are not a low-latency or heartbeat guarantee.
 Truncated or unproven checkpoint candidates remain untouched, even if another slot is free;
@@ -174,7 +174,7 @@ A 512/512/1,024 native/helper/mixed handoff run measured at most 31/31/27 metada
 trusted helper-binary integrity checks: its latest observed maximum was 16,421,141 bytes;
 helper-only journal reads were at most 332,998 bytes. These measurements do not replace the
 enforced limits. Maximum padded legacy migration (4,090 transitions) completed in approximately
-77 seconds native and 49 seconds helper on the development filesystem. Its complete largest transaction
+90 seconds native and 79 seconds helper in the latest isolated run on the development filesystem. Its complete largest transaction
 used 57,307 record operations / 221,215,834 read-or-hashed bytes native, and 73,669 /
 166,524,777 helper, below both negotiated work ceilings. The selected checkpoint was roughly
 1.54 MiB after subsequent cross-reader handoffs. These are workload measurements, not latency

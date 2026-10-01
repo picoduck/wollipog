@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -56,14 +56,14 @@ test("bootstrap excludes canonical evidence, descendants and physical path alias
   const alias = join(home, "metadata-alias"); symlinkSync(data, alias, process.platform === "win32" ? "junction" : "dir");
   assert.throws(() => leaseHelperParent(join(alias, "provider-home-leases-v1", "nested"), home), /lease evidence/);
   if (process.platform === "win32") {
-    const result = spawnSync("cmd.exe", ["/d", "/c", `for %I in ("${evidence}") do @echo %~sI`], { encoding: "utf8", timeout: 10_000 });
+    const result = spawnSync("cmd.exe", ["/d", "/c", `for %I in ("${evidence}") do @echo %~sI`], { encoding: "utf8", timeout: 10_000, windowsVerbatimArguments: true });
     assert.equal(result.status, 0, result.stderr);
     const short = result.stdout.trim();
     assert.throws(() => leaseHelperParent(join(short, "nested"), home), /lease evidence/);
-    const shortHomeResult = spawnSync("cmd.exe", ["/d", "/c", `for %I in ("${home}") do @echo %~sI`], { encoding: "utf8", timeout: 10_000 });
+    const shortHomeResult = spawnSync("cmd.exe", ["/d", "/c", `for %I in ("${home}") do @echo %~sI`], { encoding: "utf8", timeout: 10_000, windowsVerbatimArguments: true });
     assert.equal(shortHomeResult.status, 0, shortHomeResult.stderr);
     const shortHome = shortHomeResult.stdout.trim();
-    assert.throws(() => leaseHelperParent(nested, shortHome), shortHome !== home ? /physical lease evidence alias/ : /lease evidence/);
+    assert.throws(() => leaseHelperParent(nested, shortHome), shortHome.toLowerCase() !== home.toLowerCase() ? /physical lease evidence alias/ : /lease evidence/);
     t.diagnostic(`Windows short-name evidence alias refused: ${short !== evidence}`);
   }
   assert.deepEqual(readdirSync(evidence).sort(), ["foreign-evidence", "nested"]);
@@ -88,6 +88,19 @@ test("private bootstrap reuse and cleanup retain changed, substituted, hardlinke
   const valid = new LeaseHelperArtifact(parent, "lease-io");
   writeFileSync(valid.path, "fixed trusted fixture bytes", { flag: "wx", mode: 0o700 }); valid.capture();
   valid.cleanup(); assert.equal(existsSync(valid.root), false);
+});
+
+test("private ancestry protects permissive descendants and removal of that protection refuses reuse", { skip: process.platform === "win32" }, (t) => {
+  const parent = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-staging-private-ancestor-")));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const nested = join(parent, "permissive-temp"); mkdirSync(nested, { mode: 0o777 }); chmodSync(nested, 0o777);
+  assert.equal(leaseHelperParent(nested), nested, "private current-user ancestor prevents foreign access");
+  const artifact = new LeaseHelperArtifact(nested, "lease-io");
+  writeFileSync(artifact.path, "fixed trusted fixture bytes", { flag: "wx", mode: 0o700 }); artifact.capture();
+  chmodSync(parent, 0o777);
+  assert.throws(() => leaseHelperParent(nested), /unprotected foreign renames/);
+  assert.throws(() => artifact.verify(), /unprotected foreign renames/);
+  artifact.cleanup(); assert.equal(existsSync(artifact.path), true, "uncertain ancestry preserves exact artifact");
 });
 
 test("normal runner exits remove only their exact fixed helper copies on every native platform", { timeout: 120_000 }, (t) => {
