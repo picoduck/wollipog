@@ -4,7 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { PROTOCOL_VERSION, type RunnerView } from "@wollipog/protocol";
-import type { RunnerSkillsResponse, SkillSummary } from "../skills.js";
+import { skillOverviewAttention, type RunnerSkillsResponse, type SkillSummary } from "../skills.js";
 import type { SkillRule } from "../skill-assignment-matrix.js";
 import { SkillNoticeSlot, listText, skillNoticeItem, type SkillNoticeSlotProps } from "./SkillNoticeSlot.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -200,17 +200,17 @@ test("a group's Manual Only rule sends the person to Groups, and an unread rule 
   await unknown.unmount();
 });
 
-test("a machine's own deployment error keeps its words behind Show Details and offers Sync Now", async () => {
+test("a machine's own deployment error names its agents, keeps its words behind Show Details and offers Sync Now", async () => {
   const failing: RunnerSkillsResponse = {
     desired: [{ name: "collect", versionDigest: digest, targets: [{ agentId: "claude", invocation: "agent" }] }],
     reported: { deployed: [{ name: "collect", digest, links: [{ agentId: "claude", status: "error", detail: "Permission denied on ~/.claude/skills." }] }] },
   };
   const view = await mount({ machineSkills: { studio: failing } });
   assert.equal(view.notice().querySelector(".notice-title")?.textContent, "Couldn't Deploy to Studio Workstation");
-  assert.equal(view.body(), "Studio Workstation reported an error for this skill. It may not reach every agent there.");
+  assert.equal(view.body(), "Claude Code on Studio Workstation reported an error for this skill.");
   assert.doesNotMatch(view.notice().textContent ?? "", /Permission denied/, "the machine's words wait behind Show Details");
   await view.click(view.action("Show Details"));
-  assert.match(view.notice().textContent ?? "", /Permission denied on ~\/\.claude\/skills\./);
+  assert.equal(view.notice().querySelector(".notice-details-body")?.textContent, "Permission denied on ~/.claude/skills.");
   await view.click(view.action("Sync Now"));
   assert.deepEqual(view.calls, ["sync:studio"]);
   await view.unmount();
@@ -221,6 +221,75 @@ test("a machine's own deployment error keeps its words behind Show Details and o
   const reason = document.getElementById(sync.getAttribute("aria-describedby")!);
   assert.equal(reason?.textContent, "Studio Workstation is offline.", "a visible reason the button names");
   await offline.unmount();
+});
+
+test("the notice and the Library Overview tell a deployment error the same way, on one machine or several (#2293)", async () => {
+  const laptop: RunnerView = { ...studio, runnerId: "laptop", hostname: "laptop", displayName: "Travel Laptop" };
+  const buildBox: RunnerView = { ...studio, runnerId: "build", hostname: "build", displayName: "Build Box" };
+  const labels = new Map([["studio", "Studio Workstation"], ["laptop", "Travel Laptop"], ["build", "Build Box"]]);
+  type Link = [string, "linked" | "error" | "conflict" | "unsupported", string?];
+  const reporting = (links: Link[]): RunnerSkillsResponse => ({
+    desired: [{ name: "collect", versionDigest: digest, targets: links.map(([agentId]) => ({ agentId, invocation: "agent" as const })) }],
+    reported: { deployed: [{ name: "collect", digest, links: links.map(([agentId, status, detail]) => ({ agentId, status, ...(detail ? { detail } : {}) })) }] },
+  });
+  const conflict = "an unmanaged file or directory already exists at ~/.claude/skills/collect";
+  const cases: Array<{ label: string; runners: RunnerView[]; machineSkills: Record<string, RunnerSkillsResponse>; who: string; detail: string; more: string }> = [
+    { label: "one machine, two agents with one reason", runners: [studio],
+      machineSkills: { studio: reporting([["claude", "error", "Permission denied"], ["codex", "error", "Permission denied"]]) },
+      who: "Claude Code and Codex on Studio Workstation", detail: "Permission denied.", more: "" },
+    { label: "another reason there and another machine", runners: [studio, laptop],
+      machineSkills: {
+        studio: reporting([["claude", "conflict", conflict], ["codex", "error", "Permission denied"]]),
+        laptop: reporting([["claude", "error", "Disk full"], ["codex", "linked"]]),
+      },
+      who: "Claude Code on Studio Workstation", detail: `${conflict}.`, more: "1 other agent there and 1 more machine also report errors." },
+    { label: "several machines", runners: [laptop, studio, buildBox],
+      machineSkills: {
+        laptop: reporting([["claude", "linked"], ["codex", "unsupported", "this agent's driver does not support managed skills"]]),
+        studio: reporting([["claude", "error", "Disk full"]]),
+        build: reporting([["codex", "error", "Disk full"]]),
+      },
+      who: "Codex on Travel Laptop", detail: "this agent's driver does not support managed skills.", more: "2 more machines also report errors." },
+  ];
+  for (const { label, runners, machineSkills, who, detail, more } of cases) {
+    const [row] = skillOverviewAttention({ skills: [skill()], runners, machineSkills, orphanCount: 0, machineLabel: (id) => labels.get(id)! });
+    assert.equal(row?.reason, `${who}: ${detail}${more ? ` ${more}` : ""}`, `${label}: the Overview's one line`);
+
+    const view = await mount({ runners, machineSkills, machineLabels: labels, rules: [] });
+    const machine = who.slice(who.lastIndexOf(" on ") + 4);
+    assert.equal(view.notice().querySelector(".notice-title")?.textContent, `Couldn't Deploy to ${machine}`, `${label}: the same machine`);
+    assert.equal(view.body(), `${who} reported an error for this skill.${more ? ` ${more}` : ""}`, `${label}: the same agents and counts`);
+    await view.click(view.action("Show Details"));
+    assert.equal(view.notice().querySelector(".notice-details-body")?.textContent, detail, `${label}: the same detail`);
+    await view.unmount();
+  }
+
+  // A Manual Only skip is the notice's own notice, so the Overview tells it first too, on its machine.
+  const skipping = { ...reporting([["claude", "linked"]]), desired: [{ name: "collect", versionDigest: digest,
+    targets: [{ agentId: "claude", invocation: "manual" as const }, { agentId: "codex", invocation: "manual" as const }] }] };
+  const machineSkills = { laptop: reporting([["claude", "error", "Disk full"]]), studio: skipping };
+  assert.equal(skillNoticeItem(skill(), [laptop, studio], machineSkills, [manualRule])?.kind, "manual-only");
+  assert.equal(skillOverviewAttention({ skills: [skill()], runners: [laptop, studio], machineSkills, orphanCount: 0,
+    machineLabel: (id) => labels.get(id)! })[0]?.reason, "Codex on Studio Workstation: Can't run manual-only skills.");
+
+  // A machine that also reports an error still skips the agent, as the notice counts it (CR-1.1):
+  // a machine-wide sync error shows first in Deployment, but it must not hide the skip.
+  const skipOnly = { ...skipping, desired: [{ name: "collect", versionDigest: digest, targets: [{ agentId: "codex", invocation: "manual" as const }] }] };
+  const syncFailed: RunnerSkillsResponse = { desired: skipOnly.desired, reported: { deployed: [], error: "Sync failed" } };
+  const skipCases: Array<[string, RunnerView[], Record<string, RunnerSkillsResponse>, string, string]> = [
+    ["a skip on one machine and a skip behind a sync error on another", [studio, laptop], { studio: skipOnly, laptop: syncFailed },
+      "Codex on Studio Workstation: Can't run manual-only skills. 1 more machine also reports errors.", "Studio Workstation and Travel Laptop"],
+    ["a skip behind a sync error alone", [studio], { studio: syncFailed },
+      "Codex on Studio Workstation: Can't run manual-only skills.", "Studio Workstation"],
+  ];
+  for (const [label, runners, states, reason, machines] of skipCases) {
+    assert.equal(skillOverviewAttention({ skills: [skill()], runners, machineSkills: states, orphanCount: 0,
+      machineLabel: (id) => labels.get(id)! })[0]?.reason, reason, `${label}: the Overview`);
+    const view = await mount({ runners, machineSkills: states, machineLabels: labels, rules: [manualRule] });
+    assert.equal(view.notice().querySelector(".notice-title")?.textContent, "Codex Can't Run Manual-Only Skills", `${label}: the notice`);
+    assert.ok((view.body() ?? "").startsWith(`It's skipped on ${machines}.`), `${label}: the same machines`);
+    await view.unmount();
+  }
 });
 
 test("an edited copy names whose copy differs and offers Review Edit… and Restore Library Version…", async () => {

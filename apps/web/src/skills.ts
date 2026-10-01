@@ -22,7 +22,7 @@ import {
 } from "@wollipog/protocol";
 // A cycle (the matrix reads invocationLabel and skillEligibleAgents from here) that only function
 // declarations cross, so neither module reads the other while it is still evaluating.
-import { skillMachineErrors } from "./skill-assignment-matrix.js";
+import { skillDeploymentErrorSummary, skillMachineErrors, type SkillDeploymentErrorSummary } from "./skill-assignment-matrix.js";
 
 /* --- Response DTOs. Every field beyond identity is optional on purpose: the control-plane routes
  * are versioned separately from this dashboard, so a shape difference must degrade to a blank
@@ -711,6 +711,30 @@ export function skillOverviewAttention({ skills, runners, machineSkills, orphanC
   return items;
 }
 
+/**
+ * The words for a skill's deployment error that the Overview's row and the notice share (#2293), so
+ * both name the same machine, agents and detail: `who` ("Codex and Pi on Studio"), `detail` (a
+ * sentence on one line) and `more`, which counts what else shows Error ("1 other agent there and
+ * 2 more machines also report errors."), or "".
+ */
+export function skillDeploymentErrorWords(
+  summary: SkillDeploymentErrorSummary,
+  machineLabel: (runnerId: string) => string,
+): { who: string; detail: string; more: string } {
+  const { agents, otherAgents, moreMachines } = summary;
+  const elsewhere = [
+    ...(otherAgents ? [counted(otherAgents, "other agent there", "other agents there")] : []),
+    ...(moreMachines ? [counted(moreMachines, "more machine", "more machines")] : []),
+  ];
+  return {
+    who: `${joinNames(agents)} on ${machineLabel(summary.runnerId)}`,
+    detail: sentence(oneLine(summary.detail)),
+    more: elsewhere.length
+      ? `${elsewhere.join(" and ")} also ${otherAgents + moreMachines === 1 ? "reports" : "report"} errors.`
+      : "",
+  };
+}
+
 /** Why a skill is in Needs Attention, read from the same reports `skillAttention()` read. */
 function skillAttentionReason(
   kind: SkillAttention,
@@ -724,23 +748,10 @@ function skillAttentionReason(
     return state && !state.loadError ? [{ runner, state }] : [];
   });
   if (kind === "error") {
-    // Deployment's own rows and reasons: the first failing machine's first reason, with every agent
-    // there that gives it, then a count of what else shows Error.
-    const [first, ...others] = skillMachineErrors(skill.name, runners, machineSkills);
-    if (!first) return "A machine reported a deployment error.";
-    const reasonOf = (row: (typeof first.rows)[number]) => row.reason ?? "Deployment didn't succeed.";
-    const reason = reasonOf(first.rows[0]!);
-    const named = first.rows.filter((row) => reasonOf(row) === reason);
-    const who = `${joinNames(named.map((row) => row.agent.name || row.agent.id))} on ${machineLabel(first.runnerId)}`;
-    const agentsThere = first.rows.length - named.length;
-    const elsewhere = [
-      ...(agentsThere ? [counted(agentsThere, "other agent there", "other agents there")] : []),
-      ...(others.length ? [counted(others.length, "other machine", "other machines")] : []),
-    ];
-    const more = elsewhere.length
-      ? ` ${elsewhere.join(" and ")} also ${agentsThere + others.length === 1 ? "reports" : "report"} errors.`
-      : "";
-    return `${who}: ${sentence(oneLine(reason))}${more}`;
+    const summary = skillDeploymentErrorSummary(skill.name, runners, machineSkills);
+    if (!summary) return "A machine reported a deployment error.";
+    const { who, detail, more } = skillDeploymentErrorWords(summary, machineLabel);
+    return `${who}: ${detail}${more ? ` ${more}` : ""}`;
   }
   if (kind === "edited") {
     const machines = loaded.filter(({ state }) => reportedSkillDrift(state.reported, skill.name).length > 0)

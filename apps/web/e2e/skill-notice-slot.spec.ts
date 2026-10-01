@@ -84,6 +84,19 @@ test.describe("at 1440×900", () => {
     await expect(directRows(page)).toContainText(["Claude Code on All Machines"]);
   });
 
+  test("a deployment error reads the same in the Library Overview and in the notice Review opens (#2293)", async ({ page }) => {
+    await page.goto(`/command-inbox-projects-e2e.html?fullShell=1&history=1&skills=notices&path=${encodeURIComponent("/skills")}`);
+    const row = page.locator(".skills-overview .surface > .row")
+      .filter({ has: page.getByRole("button", { name: "Review deploy-bot", exact: true }) });
+    const detail = "Permission denied: ~/.codex/skills/deploy-bot is owned by root.";
+    await expect(row.locator(".row-sub")).toHaveText(`Codex on Studio Workstation: ${detail}`);
+    await row.getByRole("button", { name: "Review deploy-bot", exact: true }).click();
+    await expect(notice(page).locator(".notice-title")).toHaveText("Couldn't Deploy to Studio Workstation");
+    await expect(notice(page).locator(".notice-body > p")).toHaveText("Codex on Studio Workstation reported an error for this skill.");
+    await notice(page).getByRole("button", { name: "Show Details" }).click();
+    await expect(notice(page).locator(".notice-details-body")).toHaveText(detail);
+  });
+
   test("every notice's actions sit under its body, left-aligned, and none is wider than its label", async ({ page }) => {
     const titles: Record<string, string> = {
       "skill-n1": "Codex and Pi Can't Run Manual-Only Skills",

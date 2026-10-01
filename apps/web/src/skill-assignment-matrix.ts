@@ -86,13 +86,6 @@ export function skillManualOnlyErrors<T extends SkillRule>(
   return [...byRule.values()];
 }
 
-/** A machine that reports a deployment error for this skill: the list's Error status, per machine. */
-export interface SkillDeploymentError {
-  runnerId: string;
-  /** The machine's own words, sanitized by the runner. */
-  detail?: string;
-}
-
 /** A machine whose Deployment rows show Error for this skill, with those rows in agent order. */
 export interface SkillMachineErrors {
   runnerId: string;
@@ -103,7 +96,7 @@ export interface SkillMachineErrors {
  * a Manual Only target the agent cannot run, a Conflict or an Unsupported link. The list's Error
  * status and the Library Overview's reason read this, so they agree with Deployment (#2282). A
  * machine whose report has not loaded says nothing, and an agent nothing targets that holds no link
- * says nothing about a machine-wide error. */
+ * says nothing about a machine-wide error. `skillDeploymentErrorSummary` tells it in one account. */
 export function skillMachineErrors(
   skillName: string,
   runners: ReadonlyArray<RunnerView>,
@@ -119,19 +112,55 @@ export function skillMachineErrors(
   });
 }
 
-/** Machines that deploy this skill and report an error for an agent that can receive it, in the
- * order given: the machines whose Deployment rows show Error for a reason the machine reported. A
- * machine whose report has not loaded says nothing. A skipped Manual Only agent is
- * `skillManualOnlyErrors`', which the notice ranks first. */
-export function skillDeploymentErrors(
+/** A skill's deployment error as the Library Overview and the notice slot both tell it (#2293): the
+ * first machine whose Deployment rows show Error, the agents there that give its first reason, that
+ * reason, and how many other agents there and other machines also show Error. */
+export interface SkillDeploymentErrorSummary {
+  runnerId: string;
+  /** The agents' names, in Deployment's order. */
+  agents: string[];
+  /** Deployment's reason for them: the machine's own words, or a sentence of ours. */
+  detail: string;
+  /** Agents on that machine that show Error for another reason. */
+  otherAgents: number;
+  /** Other machines with an agent that shows Error. */
+  moreMachines: number;
+  /** A Manual Only target the agents can't run, which has a notice of its own. */
+  manualOnly: boolean;
+}
+
+/**
+ * The one account of a skill's deployment error, or null when Deployment shows none. A Manual Only
+ * skip is told on its own and first, as the notice ranks it: it has its own fix. `kind` narrows it:
+ * "manual-only" reads only those skips, "machine" only the rest (the notice's Couldn't Deploy).
+ */
+export function skillDeploymentErrorSummary(
   skillName: string,
   runners: ReadonlyArray<RunnerView>,
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
-): SkillDeploymentError[] {
-  return skillMachineErrors(skillName, runners, machineSkills).flatMap(({ runnerId, rows }) => {
-    const failed = rows.find((row) => !row.manualOnly);
-    return failed ? [{ runnerId, ...(failed.reason ? { detail: failed.reason } : {}) }] : [];
-  });
+  kind?: "manual-only" | "machine",
+): SkillDeploymentErrorSummary | null {
+  const all = skillMachineErrors(skillName, runners, machineSkills);
+  // The notice's test (`skillManualOnlyErrors`): a Manual Only target the agent can't run is a skip
+  // even when the machine also reports an error for it, which Deployment shows first.
+  const skips = (row: SkillAgentDeployment) => row.invocation === "manual" && !supportsManualOnly(row.agent.driver);
+  const manualOnly = (kind ?? (all.some(({ rows }) => rows.some(skips)) ? "manual-only" : "machine")) === "manual-only";
+  const [first, ...others] = all
+    .map(({ runnerId, rows }) => ({ runnerId, rows: rows.filter((row) => skips(row) === manualOnly) }))
+    .filter(({ rows }) => rows.length > 0);
+  if (!first) return null;
+  const reasonOf = (row: SkillAgentDeployment) =>
+    manualOnly ? "Can't run manual-only skills." : row.reason ?? "Deployment didn't succeed.";
+  const detail = reasonOf(first.rows[0]!);
+  const named = first.rows.filter((row) => reasonOf(row) === detail);
+  return {
+    runnerId: first.runnerId,
+    agents: named.map((row) => row.agent.name || row.agent.id),
+    detail,
+    otherAgents: first.rows.length - named.length,
+    moreMachines: others.length,
+    manualOnly,
+  };
 }
 
 /** One agent's row in Deployment: one status from the skill vocabulary (§11.2), and anything more

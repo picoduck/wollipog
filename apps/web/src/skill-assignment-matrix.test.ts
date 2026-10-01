@@ -6,7 +6,7 @@ import {
   skillAgentDeployment,
   skillAgentMatrixCell,
   skillAssignedBy,
-  skillDeploymentErrors,
+  skillDeploymentErrorSummary,
   skillMachineDeployment,
   skillManualOnlyErrors,
   skillRuleUnreachableAgents,
@@ -191,23 +191,36 @@ test("a Manual Only error clears as soon as the rule changes, and an unknown rul
   assert.deepEqual(skillManualOnlyErrors("review", [studio], { studio: { ...told([["codex", "manual"]]), loadError: "x" } }, [manual]), []);
 });
 
-test("deployment errors are the machines that report an Error for an agent that can receive the skill", () => {
-  const healthy = state();
-  const failed = state(); failed.reported!.error = "Sync failed";
-  const linkError = state(); linkError.reported!.deployed![0]!.links[0] = { agentId: "codex", status: "error", detail: "Permission denied" };
+test("a deployment error is the first machine that reports an Error for an agent that can receive the skill (#2293)", () => {
+  // Agent Invocable, so Codex can run it: a Manual Only target it can't run is a skip, told apart.
+  const invocable = () => { const value = state(); value.desired[0]!.targets[0]!.invocation = "agent"; return value; };
+  const healthy = invocable();
+  const failed = invocable(); failed.reported!.error = "Sync failed";
+  const linkError = invocable(); linkError.reported!.deployed![0]!.links[0] = { agentId: "codex", status: "error", detail: "Permission denied" };
   const machines = [{ ...runner, runnerId: "a", agents: [agent] }, { ...runner, runnerId: "b", agents: [agent] }, { ...runner, runnerId: "c", agents: [agent] }];
-  assert.deepEqual(skillDeploymentErrors("review", machines, { a: healthy, b: failed, c: linkError }),
-    [{ runnerId: "b", detail: "Sync failed" }, { runnerId: "c", detail: "Permission denied" }]);
+  const summary = (machineSkills: Record<string, RunnerSkillsResponse>) =>
+    skillDeploymentErrorSummary("review", machines, machineSkills, "machine");
+  assert.deepEqual(summary({ a: healthy, b: failed, c: linkError }),
+    { runnerId: "b", agents: [agent.name], detail: "Sync failed", otherAgents: 0, moreMachines: 1, manualOnly: false });
+  assert.equal(summary({ a: healthy }), null);
   // A machine-wide error belongs to this skill only on a machine that deploys it.
   const unrelated: RunnerSkillsResponse = { desired: [], reported: { deployed: [], error: "Sync failed" } };
-  assert.deepEqual(skillDeploymentErrors("review", machines, { a: unrelated }), []);
+  assert.equal(summary({ a: unrelated }), null);
   // An unsupported link (a manual-only skip) is not a machine error; the manual-only notice owns it.
   const skipped = state(); skipped.reported!.deployed![0]!.links[0] = { agentId: "codex", status: "unsupported", detail: "Manual-only invocation is not supported for this agent." };
-  assert.deepEqual(skillDeploymentErrors("review", machines, { a: skipped }), []);
+  assert.equal(summary({ a: skipped }), null);
+  assert.deepEqual(skillDeploymentErrorSummary("review", machines, { a: skipped }),
+    { runnerId: "a", agents: [agent.name], detail: "Can't run manual-only skills.", otherAgents: 0, moreMachines: 0, manualOnly: true },
+    "told on its own and first when no kind is asked for");
+  // A machine that also reports an error still skips a Manual Only target Codex can't run (CR-1.1).
+  const skippedAndFailed = state(); skippedAndFailed.reported!.error = "Sync failed";
+  assert.equal(summary({ b: skippedAndFailed }), null, "the notice tells it as a skip");
+  assert.deepEqual(skillDeploymentErrorSummary("review", machines, { a: skipped, b: skippedAndFailed }),
+    { runnerId: "a", agents: [agent.name], detail: "Can't run manual-only skills.", otherAgents: 0, moreMachines: 1, manualOnly: true });
   // Any other unsupported link is an Error row, so the notice names its machine too (#1981).
   const unsupported = state(); unsupported.desired[0]!.targets[0]!.invocation = "agent";
   unsupported.reported!.deployed![0]!.links[0] = { agentId: "codex", status: "unsupported", detail: "The WSL distribution name is invalid." };
-  assert.deepEqual(skillDeploymentErrors("review", machines, { a: unsupported }), [{ runnerId: "a", detail: "The WSL distribution name is invalid." }]);
+  assert.equal(summary({ a: unsupported })?.detail, "The WSL distribution name is invalid.");
 });
 
 /* --- Deployment rows (#1981) --- */
@@ -316,7 +329,7 @@ test("a held edit of one variant holds every agent's link, so each is Edited and
   const state = linkedTo([["claude", "conflict", held], ["codex", "conflict", held]], [["claude", "manual"], ["codex", "agent"]]);
   state.reported!.drift = [{ name: "review", digest: "digest", variant: "manual", held: true }];
   assert.deepEqual(skillMachineDeployment(machine, "review", state).rows.map((row) => row.status), ["edited", "edited"]);
-  assert.deepEqual(skillDeploymentErrors("review", [machine], { [machine.runnerId]: state }), []);
+  assert.equal(skillDeploymentErrorSummary("review", [machine], { [machine.runnerId]: state }), null);
   // An edit that holds nothing leaves the other variant's real conflict an Error.
   state.reported!.drift = [{ name: "review", digest: "digest", variant: "manual", held: false }];
   assert.equal(skillAgentDeployment(machine, codex, "review", state).status, "error");

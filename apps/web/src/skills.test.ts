@@ -340,7 +340,7 @@ test("Needs Attention lists exactly the skills skillAttention() marks, most urge
       (a, b) => ["s-broken", "s-edited", "s-held"].indexOf(a) - ["s-broken", "s-edited", "s-held"].indexOf(b)),
     "the overview and the list's badges mark the same skills; a recommendation is not an item");
   assert.deepEqual(items.map((item) => item.reason), [
-    "Claude Code and Codex on Studio Workstation: can't run manual-only skills. 1 other machine also reports errors.",
+    "Claude Code and Codex on Studio Workstation: can't run manual-only skills. 1 more machine also reports errors.",
     "Studio Workstation has an edited copy of this skill.",
     "An update to Git commit 0123456789ab waits for your review.",
     "Machines keep 4 edited copies that no library skill shows.",
@@ -420,10 +420,10 @@ test("the list and Needs Attention flag a manual-only skip, a conflict and an un
   assert.deepEqual(overview({ r1: mixed }).map((item) => item.reason),
     ["Claude Code on Studio: A file on this machine blocks the link. 1 other agent there also reports errors."]);
   assert.deepEqual(overview({ r1: mixed, r2: mixed }, [studio, laptop]).map((item) => item.reason),
-    ["Claude Code on Studio: A file on this machine blocks the link. 1 other agent there and 1 other machine also report errors."]);
+    ["Claude Code on Studio: A file on this machine blocks the link. 1 other agent there and 1 more machine also report errors."]);
   const both: RunnerSkillsResponse = { desired: told("agent"), reported: links("conflict", "conflict") };
   assert.deepEqual(overview({ r1: both, r2: mixed, r3: mixed }, [studio, laptop, { ...studio, runnerId: "r3" } as RunnerView]).map((item) => item.reason),
-    ["Claude Code and Codex on Studio: A file on this machine blocks the link. 2 other machines also report errors."]);
+    ["Claude Code and Codex on Studio: A file on this machine blocks the link. 2 more machines also report errors."]);
 });
 
 test("an offline machine's agents update when it reconnects", () => {

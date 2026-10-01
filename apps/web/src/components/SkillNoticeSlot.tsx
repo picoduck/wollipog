@@ -7,6 +7,7 @@ import { useAccessibleMenu } from "./interactions.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import {
   reportedSkillDrift,
+  skillDeploymentErrorWords,
   skillRecommended,
   skillVersionLabel,
   type RunnerSkillsResponse,
@@ -14,9 +15,9 @@ import {
   type SkillSummary,
 } from "../skills.js";
 import {
-  skillDeploymentErrors,
+  skillDeploymentErrorSummary,
   skillManualOnlyErrors,
-  type SkillDeploymentError,
+  type SkillDeploymentErrorSummary,
   type SkillManualOnlyError,
   type SkillRule,
 } from "../skill-assignment-matrix.js";
@@ -29,7 +30,7 @@ import {
  */
 export type SkillNoticeItem<T extends SkillRule = SkillRule> =
   | { kind: "manual-only"; error: SkillManualOnlyError<T> }
-  | { kind: "deployment-error"; error: SkillDeploymentError; more: number }
+  | { kind: "deployment-error"; error: SkillDeploymentErrorSummary }
   | { kind: "edited"; runnerId: string; entry: SkillDriftState }
   | { kind: "git-held"; held: NonNullable<SkillGitAutoUpdate["held"]> }
   | { kind: "built-in-held"; release: string }
@@ -52,8 +53,9 @@ export function skillNoticeItem<T extends SkillRule>(
   // A rule that skips agents outranks a machine's own error: the page can name its fix.
   const manualOnly = skillManualOnlyErrors(skill.name, runners, machineSkills, rules, rulesComplete)[0];
   if (manualOnly) return { kind: "manual-only", error: manualOnly };
-  const [failed, ...others] = skillDeploymentErrors(skill.name, runners, machineSkills);
-  if (failed) return { kind: "deployment-error", error: failed, more: others.length };
+  // The machine's own error, told as the Library Overview tells it (#2293).
+  const failed = skillDeploymentErrorSummary(skill.name, runners, machineSkills, "machine");
+  if (failed) return { kind: "deployment-error", error: failed };
   // Deployment keeps no list of edited copies, so a copy that can be resolved now goes first: an
   // offline machine's copy must not hide another machine's behind its disabled actions.
   const edited = runners.flatMap((runner) => {
@@ -291,8 +293,9 @@ export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps
       </Notice>
     );
   } else if (item.kind === "deployment-error") {
-    const { runnerId, detail } = item.error;
+    const { runnerId } = item.error;
     const machine = machineName(runnerId);
+    const words = skillDeploymentErrorWords(item.error, machineName);
     const online = runnerOf(runnerId)?.status === "online";
     const title = `Couldn't Deploy to ${machine}`;
     notice = (
@@ -301,7 +304,7 @@ export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps
         tone="danger"
         title={title}
         ariaLabel={title}
-        details={detail ? <p>{detail}</p> : undefined}
+        details={<p>{words.detail}</p>}
         actions={
           <BusyButton
             className="btn sm"
@@ -315,10 +318,7 @@ export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps
           </BusyButton>
         }
       >
-        <p>
-          {item.more > 0 ? `${machine} and ${item.more} more machine${item.more === 1 ? "" : "s"}` : machine} reported
-          an error for this skill. It may not reach every agent there.
-        </p>
+        <p>{words.who} reported an error for this skill.{words.more && ` ${words.more}`}</p>
         {reason(online ? null : `${machine} is offline.`)}
       </Notice>
     );
