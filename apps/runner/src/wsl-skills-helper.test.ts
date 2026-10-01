@@ -245,7 +245,6 @@ finally: os.close(home_fd)
 test("real native and helper processes elect one winner while a release mirror finishes publication", async (t) => {
   for (const contenders of ["native", "helper", "both"] as const) await t.test(contenders, async (t) => {
     const home = mkdtempSync(join(tmpdir(), "wollipog-wsl-release-window-"));
-    t.after(() => rmSync(home, { recursive: true, force: true }));
     const released = join(home, "released");
     const finishMirror = join(home, "finish-mirror");
     const mirrored = join(home, "mirrored");
@@ -258,7 +257,8 @@ test("real native and helper processes elect one winner while a release mirror f
     const exits: Array<Promise<{ code: number | null; stderr: string }>> = [];
     t.after(async () => {
       for (const child of children) child.kill("SIGKILL");
-      await Promise.all(exits);
+      await Promise.allSettled(exits);
+      rmSync(home, { recursive: true, force: true });
     });
     const launch = (command: string, args: string[]) => {
       const child = spawn(command, args, { env: { ...process.env, HOME: home }, stdio: ["ignore", "ignore", "pipe"] });
