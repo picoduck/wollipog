@@ -12958,8 +12958,7 @@ export class SessionManager {
       if (!client && source.driver !== "pi") {
         const priorCapabilities = source.capabilities;
         const priorSessionSlashCommands = source.sessionSlashCommands;
-        const launchPreparation = this.prepareLaunch?.(source);
-        if (launchPreparation) await launchPreparation;
+        const launchPreparation = await this.prepareLaunch?.(source);
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
         }
@@ -12997,7 +12996,7 @@ export class SessionManager {
           source.driver,
           {
             command: source.command,
-            args: source.args,
+            args: launchPreparation?.codexLaunchArgs ?? source.args,
             cwd: source.worktreePath,
             env: source.env,
             config: source.config,

@@ -225,7 +225,11 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     let manager!: SessionManager;
     const factory = (kind: AgentDriverKind, options: DriverOptions, _callbacks: DriverCallbacks): Driver => ({
       get pid() { return undefined; },
-      initialize: async () => { if (kind === "pi") piInitializations++; },
+      initialize: async () => {
+        if (kind === "pi") piInitializations++;
+        if (kind === "codex-app-server") assert.deepEqual(options.args, ["-c", "plugins.review@local.enabled=true"],
+          "temporary fork providers must receive the prepared plugin and guard argv");
+      },
       newSession: async () => options.resumeId ?? "",
       agentSessionId: () => options.resumeId ?? null,
       forkSession: async (_turn, cwd) => {
@@ -267,6 +271,9 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       },
       [],
       (launchMeta) => {
+        if (launchMeta.driver === "codex-app-server") {
+          return { codexLaunchArgs: ["-c", "plugins.review@local.enabled=true"] };
+        }
         if (launchMeta.driver !== "claude-code") return;
         claudeCatalogPreparations++;
         // Discovery returns fresh objects on every scan. Only the first semantic change should
