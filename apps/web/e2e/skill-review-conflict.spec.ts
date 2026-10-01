@@ -89,7 +89,7 @@ const reviews: Review[] = [{
 }, {
   title: "Import Edit as New Version",
   first: 2, fresh: 3, consent: "Deploy to 2 existing assignments", freshConsent: "Deploy to 3 existing assignments",
-  primary: "Import Edit as New Version",
+  primary: "Import as v4",
   async open(page, server) {
     const drift = { name: "code-review", digest, variant: "agent", observedDigest, held: true,
       detail: "Updates and removals for this skill are held until the edit is imported as a new version or the library version is restored." };
@@ -106,13 +106,16 @@ const reviews: Review[] = [{
     } }));
     await page.route("**/api/skill-drift/review-1/import", (route) => server.accept(route, { released: false, pinMoved: false }));
     await page.route("**/api/skill-drift/review-1", (route) => route.fulfill({ status: 204, body: "" }));
+    await page.route("**/api/skills/skill-1/versions", (route) => route.fulfill({ json: {
+      versions: [{ id: "skillv_3", digest, createdAt: 1_700_000_000_000, versionNumber: 3 }], nextCursor: null,
+    } }));
     await page.goto("/skills-removals-e2e.html?drift=1");
     await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
     await page.locator(".skill-notice-slot").getByRole("button", { name: "Review Edit…" }).click();
     return page.getByRole("dialog", { name: "Import Edit as New Version" });
   },
 }, {
-  title: "Review Orphaned Copy",
+  title: "Import Orphaned Copy",
   first: 0, fresh: 2, consent: null, freshConsent: "Deploy to 2 existing assignments", primary: "Import as New Version",
   async open(page, server) {
     const id = "0f0e0d0c-0b0a-4908-8706-050403020100";
@@ -133,13 +136,13 @@ const reviews: Review[] = [{
     await page.goto("/skills-removals-e2e.html?orphans=1");
     await page.locator(".master-detail-list .row", { hasText: "Orphaned Copies" }).click();
     await page.getByRole("region", { name: "Orphaned Copies" }).locator("article", { hasText: "Build Machine" })
-      .getByRole("button", { name: "Review and Import" }).first().click();
-    return page.getByRole("dialog", { name: "Review Orphaned Copy" });
+      .getByRole("button", { name: "Import…" }).first().click();
+    return page.getByRole("dialog", { name: "Import Orphaned Copy" });
   },
 }, {
   title: "Review Built-In Update",
   first: 2, fresh: 1, consent: "Deploy to 2 existing assignments", freshConsent: "Deploy to 1 existing assignment",
-  primary: "Accept Built-In Version",
+  primary: "Accept Built-In Update",
   async open(page, server) {
     await page.route("**/api/skills/skill-1/built-in-version", (route) => route.request().method() === "POST"
       ? server.accept(route, { skill: { id: "skill-1", name: "code-review" } })

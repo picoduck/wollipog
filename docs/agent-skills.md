@@ -68,7 +68,8 @@ owner/admin actions:
   moves its pin to the new version. If the machine no longer deploys the skill, the captured copy
   is released: it is discarded under the same observation fence as a restore, and its links are
   removed like any undesired skill's.
-- **Restore Library Version** requires confirmation and names the copy's current digest as reported
+- **Restore Library Version** (also the import review's alternative, **Restore Library Version…**,
+  which opens the same confirmation) requires confirmation and names the copy's current digest as reported
   by the machine. If the copy changed after that report, the runner refuses rather than discard an
   unreviewed edit. The runner builds the library version in a staging directory, verifies it, and
   swaps it in with two renames (a harness can briefly see no directory between them). It checks
@@ -114,7 +115,8 @@ Each entry shows the skill name, the version the copy came from, its invocation 
 was kept aside, whether it is readable skill content, and a kept-aside copy's store entry. A copy of
 a skill the viewer cannot access is not listed. Owners and admins have two actions:
 
-- **Review and Import** reads the copy through a correlated runner command and shows every file.
+- **Import…** opens **Import Orphaned Copy**, which reads the copy through a correlated runner
+  command and shows every file.
   When a library skill has the copy's name, the review is a diff against its latest version, and the
   import adds a new version once the diff is accepted. Otherwise the import creates a new skill with
   no assignments. The rules of **Import Edit as New Version** apply: a Manual Only copy loses only
@@ -122,7 +124,8 @@ a skill the viewer cannot access is not listed. Owners and admins have two actio
   (including the frontmatter name). The copy is read again at commit and must still have the
   reviewed digest, and a library change since the review refuses the import. Because the library
   then holds exactly those bytes, the machine discards its copy under the same observation fence.
-  A copy kept aside before records existed is imported exactly as stored.
+  A copy kept aside before records existed is imported exactly as stored. The review offers
+  **Discard Copy…** as its alternative, with the same confirmation as the list.
 - **Discard Copy** requires confirmation and names the observation the machine reported: a
   fingerprint of every entry's path, type, identity, size, and modification and change times (never
   its contents), and for a readable copy also its content digest. Generated artifacts such as
@@ -210,7 +213,7 @@ reconcile when they reconnect; unsupported platforms retain their existing no-wr
 A review's consent names what accepting deploys, such as "Deploy to 2 existing assignments", and a
 preview with no assignments asks for no consent at all. So the accept is fenced on what the preview
 showed. Every preview that can add a new latest version (Import from Git, Import from Machine,
-Import Edit as New Version, Review Orphaned Copy, the built-in review and Version History) reports
+Import Edit as New Version, Import Orphaned Copy, the built-in review and Version History) reports
 `deploymentImpact`, a digest of the skill's direct and group assignments, and the count its consent
 names, both from one read. The dashboard sends the digest back as `expectedDeploymentImpact`. When
 an assignment was added, removed or edited in between (an edit can change which of two equal rules

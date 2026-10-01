@@ -14349,6 +14349,54 @@ body.shell-dock-dragging * {
   .modal-foot > .review-consent,
   .modal-foot > .review-conflict { flex-basis: 100%; }
 }
+/* The edited-copy, orphaned-copy and built-in reviews (#1973): the header's one sentence, then a
+   facts row, at most one compact notice and the diff under its heading, each block on the body's
+   16px gap. The facts are a strip whose values read at body size (§5.4: a region sets the size). */
+.skill-review .skill-review-facts dd { font: var(--type-body); }
+.skill-review .skill-review-facts .skeleton-bar {
+  display: inline-block;
+  width: 72px;
+  vertical-align: middle;
+}
+.skill-review-changes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.skill-review-changes-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.skill-review-changes-title {
+  margin: 0;
+  color: var(--text);
+  font: var(--type-section);
+}
+.skill-review-changes-note {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* While the files are read, one skeleton block holds the diff's place and names what is read (§12.3). */
+.skill-review-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 240px;
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  color: var(--text-dim);
+  font: var(--type-body);
+  background: linear-gradient(90deg, var(--bg-elev) 0%, var(--bg-elev-2) 50%, var(--bg-elev) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.4s var(--ease-out) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skill-review-loading { animation: none; background: var(--bg-elev-2); }
+}
 /* Import from Machine (#1963): a `.modal.lg` at full height whose body is two panes, the machine's
    skill folders beside the selected folder's review, each scrolling on its own. On a phone sheet
    the body is one column and shows one step at a time (the dialog renders only that pane). */

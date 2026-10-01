@@ -19,7 +19,7 @@ import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
 import { SkillMachineVersionDialog } from "./SkillMachineVersionDialog.js";
 import { SkillDriftImportDialog } from "./SkillDriftImportDialog.js";
 import { SkillOrphanImportDialog } from "./SkillOrphanImportDialog.js";
-import { SkillOrphanedCopies } from "./SkillOrphanedCopies.js";
+import { canResolveOrphanedCopy, orphanedCopyDiscardable, SkillOrphanedCopies } from "./SkillOrphanedCopies.js";
 import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
 import { NewSkillDialog } from "./NewSkillDialog.js";
 import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
@@ -101,7 +101,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
   const [versionRunnerId, setVersionRunnerId] = useState<string | undefined>();
-  const [driftImport, setDriftImport] = useState<{ runnerId: string; copy: SkillDriftCopy } | null>(null);
+  const [driftImport, setDriftImport] = useState<{ runnerId: string; copy: SkillDriftCopy; entry: SkillDriftState } | null>(null);
   const [orphanImport, setOrphanImport] = useState<{ runnerId: string; copy: OrphanedSkillCopy } | null>(null);
   /** A failed action (or machine refresh): a notice above the panes, not a load failure. */
   const [error, setError] = useState<string | null>(null);
@@ -447,7 +447,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     await refreshMachines();
   };
 
-  const discardOrphan = async (runner: RunnerView, copy: OrphanedSkillCopy) => {
+  /** `onConfirmed` closes the review the discard was chosen from (#1973). */
+  const discardOrphan = async (runner: RunnerView, copy: OrphanedSkillCopy, onConfirmed?: () => void) => {
     const machine = machineLabels.get(runner.runnerId) ?? runner.runnerId;
     const fenced = "It is deleted only if it still matches what this page shows; if it changed, nothing is deleted.";
     const copyName = `${copy.kind === "kept_aside" ? "kept-aside" : "edited"} copy${copy.name ? ` of “${copy.name}”` : ""}`;
@@ -465,6 +466,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       tone: "danger",
     });
     if (!confirmed) return;
+    onConfirmed?.();
     await mutate(async () => {
       // Exactly what the machine reported: a kept-aside copy's fingerprint of every entry, plus its content
       // digest when readable; a deleted skill's copy by its digest, or null when it was unreadable.
@@ -475,7 +477,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     });
   };
 
-  const restoreDrift = async (runner: RunnerView, entry: SkillDriftState) => {
+  /** `onConfirmed` closes the review the restore was chosen from (#1973). */
+  const restoreDrift = async (runner: RunnerView, entry: SkillDriftState, onConfirmed?: () => void) => {
     const machine = machineLabels.get(runner.runnerId) ?? runner.runnerId;
     const confirmed = await confirm({
       title: "Restore Library Version",
@@ -485,12 +488,17 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       tone: "danger",
     });
     if (!confirmed) return;
+    onConfirmed?.();
     await mutate(async () => {
       const result = await api.restoreSkillDrift(runner.runnerId,
         { name: entry.name, digest: entry.digest, variant: entry.variant }, entry.observedDigest ?? null);
       await driftResolved(result);
     });
   };
+
+  // The machines whose copy an open review is of, for its restore or discard alternative (#1973).
+  const driftRunner = driftImport ? runners.find((runner) => runner.runnerId === driftImport.runnerId) : undefined;
+  const orphanRunner = orphanImport ? runners.find((runner) => runner.runnerId === orphanImport.runnerId) : undefined;
 
   const latest = detail?.latestVersion ?? null;
   const gitSource = detail?.gitSource ?? latest?.gitSource;
@@ -709,6 +717,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 onReviewEdit={(runnerId, entry) => setDriftImport({
                   runnerId,
                   copy: { name: entry.name, digest: entry.digest, variant: entry.variant },
+                  entry,
                 })}
                 onRestore={(runner, entry) => void restoreDrift(runner, entry)}
                 onReviewGitUpdate={() => setDialog("git-update")}
@@ -885,6 +894,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       {driftImport && detail && (
         <SkillDriftImportDialog
           key={`${driftImport.runnerId}:${driftImport.copy.variant}:${driftImport.copy.digest}`}
+          skillId={detail.id}
           runnerId={driftImport.runnerId}
           machineLabel={machineLabels.get(driftImport.runnerId) ?? driftImport.runnerId}
           copy={driftImport.copy}
@@ -893,6 +903,9 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
             setDriftImport(null);
             await driftResolved(result);
           }}
+          onRestore={(closeReview) => { if (driftRunner) void restoreDrift(driftRunner, driftImport.entry, closeReview); }}
+          restoreDisabled={busy || !driftRunner || driftRunner.status !== "online" ||
+            !runnerSupportsProtocol(driftRunner.protocolVersion, "skillDrift")}
         />
       )}
       {orphanImport && (
@@ -906,6 +919,9 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
             setOrphanImport(null);
             await orphanResolved(result);
           }}
+          onDiscard={(closeReview) => { if (orphanRunner) void discardOrphan(orphanRunner, orphanImport.copy, closeReview); }}
+          discardDisabled={busy || !orphanRunner || !canResolveOrphanedCopy(orphanRunner, orphanImport.copy) ||
+            !orphanedCopyDiscardable(orphanImport.copy)}
         />
       )}
       {dialog === "built-in-review" && detail && (
@@ -913,6 +929,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
           key={detail.id}
           skillId={detail.id}
           skillName={detail.name}
+          kind={detail.builtIn ? "update" : "adopt"}
           onClose={() => setDialog(null)}
           onAccepted={async () => {
             setDialog(null);

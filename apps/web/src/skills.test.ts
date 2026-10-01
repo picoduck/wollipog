@@ -5,6 +5,7 @@ import {
   describeAgentSelector,
   describeAssignmentScope,
   filterSkillList,
+  findSkillVersions,
   groupSkillList,
   invocationLabel,
   normalizeRemovalReporting,
@@ -107,6 +108,33 @@ test("a version is named by its number, or by its short digest against a control
   assert.deepEqual(skillVersionLabel({ digest: "0123456789abcdef", versionNumber: 1.5 }), { text: "0123456789ab", mono: true });
   assert.equal(skillVersionLabel({ id: "skillv_a" }), null);
   assert.equal(skillVersionLabel(null), null);
+});
+
+test("a review finds the versions it names a page at a time, and stops once it has them (#1973)", async () => {
+  const pages: Record<string, { versions: Array<{ id: string; digest: string; versionNumber: number }>; nextCursor: string | null }> = {
+    first: { versions: [{ id: "v5", digest: "e", versionNumber: 5 }, { id: "v4", digest: "a", versionNumber: 4 }], nextCursor: "v4" },
+    v4: { versions: [{ id: "v3", digest: "c", versionNumber: 3 }, { id: "v2", digest: "b", versionNumber: 2 }], nextCursor: "v2" },
+    v2: { versions: [{ id: "v1", digest: "a", versionNumber: 1 }], nextCursor: null },
+  };
+  const read: string[] = [];
+  const listPage = async (before?: string) => { read.push(before ?? "first"); return pages[before ?? "first"]!; };
+
+  const found = await findSkillVersions(listPage, { digests: ["b"], ids: ["v3"] });
+  assert.equal(found.latest?.versionNumber, 5);
+  assert.equal(found.byDigest.get("b")?.versionNumber, 2);
+  assert.equal(found.byId.get("v3")?.versionNumber, 3);
+  assert.deepEqual(read, ["first", "v4"], "the last page is not read once every wanted version is found");
+
+  // A restore repeats bytes, so a digest names its newest version.
+  read.length = 0;
+  assert.equal((await findSkillVersions(listPage, { digests: ["a"] })).byDigest.get("a")?.versionNumber, 4);
+  assert.deepEqual(read, ["first"]);
+
+  // A version the list does not have is simply not found, and the reading stops at the bound.
+  read.length = 0;
+  const missing = await findSkillVersions(listPage, { digests: ["z"] }, 2);
+  assert.equal(missing.byDigest.get("z"), undefined);
+  assert.deepEqual(read, ["first", "v4"]);
 });
 
 test("a skill's source is Built-In, Git, Machine or Library, in that precedence", () => {

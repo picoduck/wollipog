@@ -39,6 +39,9 @@ async function openReview(page: Page, width: number) {
     digest: observedDigest, importable: true, disposition: "update", publishedFromLatest: true, pinned: false, assignmentCount: 2,
   } }));
   await page.route("**/api/skill-drift/review-1", (route) => route.fulfill({ status: 204, body: "" }));
+  await page.route("**/api/skills/skill-1/versions", (route) => route.fulfill({ json: {
+    versions: [{ id: "skillv_3", digest, createdAt: 1_700_000_000_000, versionNumber: 3 }], nextCursor: null,
+  } }));
   await page.goto("/skills-removals-e2e.html?drift=1");
   await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await page.locator(".skill-notice-slot").getByRole("button", { name: "Review Edit…" }).click();
@@ -117,7 +120,7 @@ test("the consent sits in the footer beside the disabled primary and unlocks it"
   const dialog = await openReview(page, 1440);
   const footer = dialog.locator(".modal-foot");
   const consent = footer.getByRole("checkbox", { name: "Deploy to 2 existing assignments", exact: true });
-  const primary = footer.getByRole("button", { name: "Import Edit as New Version" });
+  const primary = footer.getByRole("button", { name: "Import as v4" });
   await expect(primary).toBeDisabled();
   const consentBox = await footer.locator(".review-consent").boundingBox();
   const primaryBox = await primary.boundingBox();
@@ -134,7 +137,7 @@ test("on a phone sheet the consent is a full-width row above the two footer butt
   const [consent, cancel, primary] = await Promise.all([
     footer.locator(".review-consent").boundingBox(),
     footer.getByRole("button", { name: "Cancel" }).boundingBox(),
-    footer.getByRole("button", { name: "Import Edit as New Version" }).boundingBox(),
+    footer.getByRole("button", { name: "Import as v4" }).boundingBox(),
   ]);
   expect(consent!.y + consent!.height).toBeLessThanOrEqual(cancel!.y + 1);
   expect(Math.abs(cancel!.y - primary!.y)).toBeLessThanOrEqual(1);

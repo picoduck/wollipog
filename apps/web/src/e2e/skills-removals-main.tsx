@@ -264,6 +264,9 @@ const client = {
     runnerSkills: api.runnerSkills, getMachineSkillVersionPolicy: api.getMachineSkillVersionPolicy,
   } : {}),
   ...(drift || orphans ? { runnerSkills: api.runnerSkills, syncRunnerSkills: api.syncRunnerSkills } : {}),
+  // `?pins=1` (#1973): the machine version policy comes from the spec's routes too, so a review can
+  // name the version a machine is pinned to. (The version list always does.)
+  ...(new URLSearchParams(location.search).has("pins") ? { getMachineSkillVersionPolicy: api.getMachineSkillVersionPolicy } : {}),
 } as unknown as ApiClient;
 
 function SkillsWhenReady() {

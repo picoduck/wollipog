@@ -262,10 +262,6 @@ export function reportedSkillDrift(reported: ReportedSkillsState | null | undefi
     (entry.variant === "agent" || entry.variant === "manual"));
 }
 
-export function driftVariantLabel(variant: SkillInvocationPolicy): string {
-  return variant === "manual" ? "Manual Only Copy" : "Agent Invocable Copy";
-}
-
 /** How the resolution routes address one orphaned copy. */
 export type OrphanedSkillCopyRef =
   | { kind: "kept_aside"; id: string }
@@ -395,10 +391,53 @@ export const SHORT_DIGEST_LENGTH = 12;
  * digest instead (`mono` tells the caller to set it in the monospace face); `skillv_…` ids never show.
  */
 export function skillVersionLabel(version: SkillVersionSummary | null | undefined): { text: string; mono: boolean } | null {
-  const number = version?.versionNumber;
-  if (typeof number === "number" && Number.isInteger(number) && number > 0) return { text: `v${number}`, mono: false };
+  const number = skillVersionNumber(version);
+  if (number !== null) return { text: `v${number}`, mono: false };
   if (version?.digest) return { text: version.digest.slice(0, SHORT_DIGEST_LENGTH), mono: true };
   return null;
+}
+
+/** A version's number, or null from a control plane that predates version numbers (#1962). */
+export function skillVersionNumber(version: SkillVersionSummary | null | undefined): number | null {
+  const number = version?.versionNumber;
+  return typeof number === "number" && Number.isInteger(number) && number > 0 ? number : null;
+}
+
+/** The versions a skill review names (#1973), read from the skill's version list. */
+export interface SkillReviewVersions {
+  latest: SkillVersionSummary | null;
+  /** The newest version with each digest: a restore repeats an earlier version's bytes. */
+  byDigest: ReadonlyMap<string, SkillVersionSummary>;
+  byId: ReadonlyMap<string, SkillVersionSummary>;
+}
+
+/**
+ * Reads a skill's version list, newest first, a page at a time until every wanted digest and id is
+ * found or the list ends. A review only names versions with it, so a version it cannot find is named
+ * in words rather than by a digest; `maxPages` bounds a very long history.
+ */
+export async function findSkillVersions(
+  listPage: (before?: string) => Promise<{ versions: SkillVersionSummary[]; nextCursor: string | null }>,
+  wanted: { digests?: readonly string[]; ids?: readonly string[] },
+  maxPages = 20,
+): Promise<SkillReviewVersions> {
+  const byDigest = new Map<string, SkillVersionSummary>();
+  const byId = new Map<string, SkillVersionSummary>();
+  let latest: SkillVersionSummary | null = null;
+  let cursor: string | undefined;
+  const missing = () => (wanted.digests ?? []).some((digest) => !byDigest.has(digest)) ||
+    (wanted.ids ?? []).some((id) => !byId.has(id));
+  for (let page = 0; page < maxPages; page++) {
+    const { versions, nextCursor } = await listPage(cursor);
+    latest ??= versions[0] ?? null;
+    for (const version of versions) {
+      if (version.digest && !byDigest.has(version.digest)) byDigest.set(version.digest, version);
+      if (version.id) byId.set(version.id, version);
+    }
+    if (!nextCursor || !missing()) break;
+    cursor = nextCursor;
+  }
+  return { latest, byDigest, byId };
 }
 
 export type SkillSourceKind = "built_in" | "git" | "machine" | "library";

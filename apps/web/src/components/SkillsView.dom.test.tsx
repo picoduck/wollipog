@@ -267,7 +267,7 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
     getSkill: async () => ({ skill: { id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest, versionNumber: 3 } },
       latestVersion: { id: "v1", digest, versionNumber: 3, files: [{ path: "SKILL.md", content: skillMd, encoding: "utf8" as const }] } }),
     listSkillAssignments: async () => ({ assignments: [] }),
-    listSkillVersions: async () => ({ versions: [], nextCursor: null }),
+    listSkillVersions: async () => ({ versions: [{ id: "v1", digest, versionNumber: 3 }], nextCursor: null }),
     getMachineSkillVersionPolicy: async () => ({ policy: null }),
     runnerSkills: async () => current,
     syncRunnerSkills: async () => current.reported!,
@@ -353,10 +353,10 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
   await act(async () => { button("Review Edit…")!.click(); });
   await act(settle);
   const dialog = container.querySelector('[role="dialog"]');
-  assert.ok(dialog, "Import Edit as New Version opens a review dialog");
+  assert.ok(dialog, "Review Edit… opens Import Edit as New Version");
   assert.match(dialog!.textContent ?? "", /Hand edit\./);
   const importButton = [...dialog!.querySelectorAll<HTMLButtonElement>("button")]
-    .find((candidate) => candidate.textContent?.trim() === "Import Edit as New Version");
+    .find((candidate) => candidate.textContent?.trim() === "Import as v4");
   assert.equal(importButton!.disabled, true, "the version diff must be accepted first");
   await act(async () => { dialog!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); });
   assert.equal(importButton!.disabled, false);
@@ -488,15 +488,16 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   assert.match(items[1]!.textContent ?? "", /Unidentified Copy.*Kept Aside.*Unknown.*Unreadable/);
   assert.match(items[2]!.textContent ?? "", /retired.*Deleted Skill.*Agent Invocable.*links still serve the copy/);
   assert.match(machine!.textContent ?? "", /2 more kept-aside copies are not listed\./);
-  assert.equal(button("Review and Import")[1]!.disabled, true, "an unreadable copy cannot be reviewed");
+  assert.equal(button("Import…")[1]!.disabled, true, "an unreadable copy cannot be reviewed");
   assert.equal(button("Discard Copy")[1]!.disabled, false, "a fingerprinted unreadable copy can be discarded");
 
-  await act(async () => { button("Review and Import")[0]!.click(); });
+  await act(async () => { button("Import…")[0]!.click(); });
   await act(settle);
   const dialog = container.querySelector('[role="dialog"]');
-  assert.ok(dialog, "Review and Import opens a review dialog");
+  assert.ok(dialog, "Import… opens Import Orphaned Copy");
   assert.match(dialog!.textContent ?? "", /Recovered edit\./);
-  assert.match(dialog!.textContent ?? "", /creates it with no assignments/);
+  assert.deepEqual([...dialog!.querySelectorAll(".skill-review-facts dd")].map((value) => value.textContent?.trim()).slice(-1),
+    ["New skill"]);
   const importButton = [...dialog!.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === "Import as New Skill");
   assert.equal(importButton?.disabled, false, "a new skill needs no diff acceptance");
@@ -923,7 +924,7 @@ test("SkillsView offers a same-name skill the built-in version and adopts it aft
 
   await view.click(view.button("Review Built-In Version…"));
   const dialog = view.container.querySelector('[role="dialog"]')!;
-  assert.match(dialog.textContent ?? "", /2 existing assignments and every machine pin stay as they are/);
+  assert.match(dialog.textContent ?? "", /Its assignments and every machine pin stay as they are\./);
   assert.match(dialog.textContent ?? "", /Accepting turns off this skill's automatic Git updates\./);
   const file = dialog.querySelector(".skill-diff-file")!;
   assert.match(file.querySelector(".skill-diff-file-head")?.textContent ?? "", /SKILL\.md.*Changed/);

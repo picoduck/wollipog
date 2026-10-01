@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const digest = "4f1c".padEnd(64, "0");
 const observedDigest = "9b2e".padEnd(64, "0");
@@ -22,14 +22,24 @@ const resolved = {
   reported: { ...drifted.reported, drift: [], deployed: [{ name: "code-review", digest, links: [{ agentId: "claude", status: "linked" }] }] },
 };
 
-async function openDrift(page: Page, width: number, theme: string, assignmentCount = 2) {
+async function openDrift(page: Page, width: number, theme: string, assignmentCount = 2,
+  options: { previewDelay?: Promise<void> } = {}) {
   let state: typeof drifted = drifted;
   const requests: Array<{ url: string; body: unknown }> = [];
   await page.setViewportSize({ width, height: 900 });
   await page.route("**/api/runners/runner-1/skills", (route) => route.fulfill({ json: state }));
+  // The review names versions from the version list and the machine's pin (#1973): the copy is of
+  // v3, the latest, and Build Machine is pinned to it.
+  await page.route("**/api/skills/skill-1/versions", (route) => route.fulfill({ json: {
+    versions: [{ id: "skillv_3", digest, createdAt: 1_700_000_000_000, versionNumber: 3 }], nextCursor: null,
+  } }));
+  await page.route("**/api/skills/skill-1/machines/runner-1/version-policy", (route) => route.fulfill({ json: {
+    policy: { versionId: "skillv_3", revision: "r1" },
+  } }));
   await page.route("**/api/runners/runner-1/skills/sync", (route) => route.fulfill({ json: { state: state.reported } }));
   await page.route("**/api/runners/runner-1/skill-drift/preview", async (route) => {
     requests.push({ url: "preview", body: route.request().postDataJSON() });
+    await options.previewDelay;
     await route.fulfill({ json: {
       previewId: "review-1",
       drift: { name: "code-review", digest, variant: "agent", observedDigest },
@@ -49,7 +59,7 @@ async function openDrift(page: Page, width: number, theme: string, assignmentCou
     state = resolved;
     await route.fulfill({ json: { status: "restored", state: resolved.reported } });
   });
-  await page.goto("/skills-removals-e2e.html?drift=1");
+  await page.goto("/skills-removals-e2e.html?drift=1&pins=1");
   await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
   await expect(page.locator(".master-detail-list .row").getByText("Edited", { exact: true })).toBeVisible();
   await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
@@ -58,6 +68,19 @@ async function openDrift(page: Page, width: number, theme: string, assignmentCou
 
 const noHorizontalOverflow = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+
+/** No two consecutive text blocks before the diff are more than 16px apart (#1973). */
+async function expectTextBlocksWithin16px(dialog: Locator) {
+  const gaps = await dialog.evaluate((element) => {
+    const blocks = [
+      ...element.querySelectorAll(".modal-body > .skill-review-facts, .modal-body > .notice"),
+      ...element.querySelectorAll(".skill-review-changes-title, .skill-review-changes-note"),
+    ].map((block) => block.getBoundingClientRect()).sort((a, b) => a.top - b.top);
+    return blocks.slice(1).map((block, index) => Math.round(block.top - blocks[index]!.bottom));
+  });
+  expect(gaps.length).toBeGreaterThanOrEqual(3);
+  for (const gap of gaps) expect(gap).toBeLessThanOrEqual(16);
+}
 
 for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
   test(`an edited deployed copy shows Edited and imports as a new version at ${width} in ${theme}`, async ({ page }, info) => {
@@ -76,7 +99,14 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
 
     await notice.getByRole("button", { name: "Review Edit…" }).click();
     const dialog = page.getByRole("dialog", { name: "Import Edit as New Version" });
-    await expect(dialog).toContainText("This machine is pinned to a version of this skill.");
+    // #1973: one sentence, the facts, one notice for the pin, then the diff under its heading.
+    await expect(dialog.locator(".modal-desc")).toHaveText(
+      "Importing records the files edited on Build Machine as a new version of code-review.");
+    await expect(dialog.locator(".skill-review-facts dt")).toHaveText(["Machine", "Edited Copy Of", "Copy", "Result"]);
+    await expect(dialog.locator(".skill-review-facts dd")).toHaveText(["Build Machine", "v3", "Agent Invocable", "New version v4"]);
+    await expect(dialog.locator(".modal-body > .notice")).toHaveText(["Build Machine is pinned to v3. Importing moves its pin to v4."]);
+    await expect(dialog.getByRole("heading", { name: "Changes From v3" })).toBeVisible();
+    await expectTextBlocksWithin16px(dialog);
     // One highlighted diff (#1948): the changed file is open, its header counts the change, and the
     // added line is announced as one.
     const file = dialog.locator(".skill-diff-file", { hasText: "SKILL.md" });
@@ -87,7 +117,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await expect(file.locator(".diff-line-add")).toContainText("Added line");
     await expect(file.locator(".diff-line-add")).toContainText("Also check the tests before approving.");
     await expect(dialog.getByRole("heading", { name: "Current" })).toHaveCount(0);
-    const importButton = dialog.getByRole("button", { name: "Import Edit as New Version" });
+    const importButton = dialog.getByRole("button", { name: "Import as v4" });
     await expect(importButton).toBeDisabled();
     // The consent names what importing deploys, beside the primary it unlocks.
     const consent = dialog.locator(".modal-foot").getByRole("checkbox", { name: "Deploy to 2 existing assignments", exact: true });
@@ -112,7 +142,7 @@ test("an edit whose skill has no assignments imports without a consent row", asy
   const dialog = page.getByRole("dialog", { name: "Import Edit as New Version" });
   await expect(dialog.locator(".skill-diff-file")).toHaveCount(1);
   await expect(dialog.getByRole("checkbox")).toHaveCount(0);
-  const importButton = dialog.getByRole("button", { name: "Import Edit as New Version" });
+  const importButton = dialog.getByRole("button", { name: "Import as v4" });
   await expect(importButton).toBeEnabled();
   await importButton.click();
   await expect(dialog).toBeHidden();
@@ -137,3 +167,57 @@ for (const width of [1280, 320]) {
     } }]);
   });
 }
+
+for (const width of [1280, 390]) {
+  test(`Restore Library Version… in the review opens the same confirmation and closes the review at ${width}`, async ({ page }, info) => {
+    const { requests } = await openDrift(page, width, "dark");
+    await page.locator(".skill-notice-slot").getByRole("button", { name: "Review Edit…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Import Edit as New Version" });
+    await expect(dialog.locator(".skill-diff-file")).toHaveCount(1);
+    const restore = dialog.getByRole("button", { name: "Restore Library Version…" });
+    if (width > 760) {
+      // §7.3: the destructive tertiary is far left in the footer.
+      await expect(dialog.locator(".modal-foot > .modal-tertiary").getByRole("button")).toHaveText("Restore Library Version…");
+    } else {
+      // §7.5: a sheet's footer keeps two buttons; the alternative is a full-width row at the body's end.
+      await expect(dialog.locator(".modal-foot > .btn")).toHaveText(["Cancel", "Import as v4"]);
+      await expect(dialog.locator(".modal-body > .modal-tertiary").getByRole("button")).toHaveText("Restore Library Version…");
+      await expect(dialog.locator(".modal-body > :last-child")).toHaveClass(/modal-tertiary/);
+      // Full width: the row spans the body's content box (offsetWidth: the sheet opens transformed).
+      const widths = await restore.evaluate((button) => {
+        const body = button.closest(".modal-body")!;
+        const style = getComputedStyle(body);
+        return { row: (button as HTMLElement).offsetWidth,
+          content: body.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) };
+      });
+      expect(widths.row).toBe(widths.content);
+      await restore.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: info.outputPath(`drift-review-sheet-${width}.png`) });
+      expect(await noHorizontalOverflow(page)).toBe(true);
+    }
+    await restore.click();
+    const confirmation = page.getByRole("dialog", { name: "Restore Library Version" });
+    await expect(confirmation).toContainText("The edited copy of “code-review”");
+    await confirmation.getByRole("button", { name: "Restore Library Version" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(confirmation).toBeHidden();
+    await expect(page.locator(".skills-machine .status")).toHaveText("Linked");
+    expect(requests.map((request) => request.url)).toEqual(["preview", "restore"]);
+  });
+}
+
+test("while the edited copy is read, the review keeps the diff's place with a skeleton", async ({ page }, info) => {
+  let release!: () => void;
+  await openDrift(page, 1440, "dark", 2, { previewDelay: new Promise((resolve) => { release = resolve; }) });
+  await page.locator(".skill-notice-slot").getByRole("button", { name: "Review Edit…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Import Edit as New Version" });
+  const loading = dialog.locator(".skill-review-loading");
+  await expect(loading).toHaveText("Reading the edited copy…");
+  await expect(loading).toHaveAttribute("role", "status");
+  expect(await loading.evaluate((block) => (block as HTMLElement).offsetHeight)).toBe(240);
+  await expect(dialog.getByRole("button", { name: "Restore Library Version…" })).toBeDisabled();
+  await page.screenshot({ path: info.outputPath("drift-review-loading-1440.png") });
+  release();
+  await expect(dialog.locator(".skill-diff-file")).toHaveCount(1);
+  await expect(loading).toHaveCount(0);
+});

@@ -141,6 +141,8 @@ test("Import Edit as New Version: a conflict asks for a fresh preview, whose con
       digest: "c".repeat(64), importable: true, disposition: "update" as const, publishedFromLatest: true, pinned: false, ...preview(),
     }),
     discardSkillDriftPreview: async () => undefined,
+    getMachineSkillVersionPolicy: async () => ({ policy: null }),
+    listSkillVersions: async () => ({ versions: [{ id: "v3", digest: copy.digest, versionNumber: 3 }], nextCursor: null }),
     importSkillDrift: async (_previewId: string, acceptUpdate: boolean, expected?: string) => {
       assert.equal(acceptUpdate, true);
       server.accept(expected);
@@ -148,15 +150,15 @@ test("Import Edit as New Version: a conflict asks for a fresh preview, whose con
     },
   } as ApiClient;
   let imported = 0;
-  const unmount = await mount(client, <SkillDriftImportDialog runnerId="runner-1" machineLabel="Build Machine" copy={copy}
+  const unmount = await mount(client, <SkillDriftImportDialog skillId="skill-1" runnerId="runner-1" machineLabel="Build Machine" copy={copy}
     onClose={() => undefined} onImported={async () => { imported++; }} />);
-  await assertConflictRoundTrip("Import Edit as New Version", { consent: null, freshConsent: "Deploy to 1 existing assignment" });
+  await assertConflictRoundTrip("Import as v4", { consent: null, freshConsent: "Deploy to 1 existing assignment" });
   assert.deepEqual(server.sent, ["impact-1", "impact-2"]);
   assert.equal(imported, 1);
   await unmount();
 });
 
-test("Review Orphaned Copy: a conflict asks for a fresh preview, whose consent names the current count", async () => {
+test("Import Orphaned Copy: a conflict asks for a fresh preview, whose consent names the current count", async () => {
   const preview = previews(2, 3);
   const server = accepts();
   const copy = { kind: "kept_aside" as const, id: "copy-1", name: "code-review", skillId: "skill-1" };
@@ -167,6 +169,7 @@ test("Review Orphaned Copy: a conflict asks for a fresh preview, whose consent n
       previousFiles: [file("Library")], digest: "c".repeat(64), importable: true, disposition: "update" as const, ...preview(),
     }),
     discardOrphanedSkillCopyPreview: async () => undefined,
+    listSkillVersions: async () => ({ versions: [{ id: "v2", digest: "a".repeat(64), versionNumber: 2 }], nextCursor: null }),
     importOrphanedSkillCopy: async (_previewId: string, acceptUpdate: boolean, expected?: string) => {
       assert.equal(acceptUpdate, true);
       server.accept(expected);
@@ -198,7 +201,7 @@ test("the built-in review: a conflict asks for a fresh review, whose consent nam
   } as ApiClient;
   const unmount = await mount(client, <SkillBuiltInReviewDialog skillId="skill-1" skillName="code-review"
     onClose={() => undefined} onAccepted={async () => undefined} />);
-  await assertConflictRoundTrip("Accept Built-In Version",
+  await assertConflictRoundTrip("Accept Built-In Update",
     { consent: "Deploy to 2 existing assignments", freshConsent: "Deploy to 1 existing assignment" });
   assert.deepEqual(server.sent, ["impact-1", "impact-2"]);
   await unmount();

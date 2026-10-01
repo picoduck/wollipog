@@ -86,10 +86,14 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.screenshot({ path: info.outputPath(`orphans-list-${width}-${theme}.png`), fullPage: true });
     expect(await noHorizontalOverflow(page)).toBe(true);
 
-    await machine.getByRole("button", { name: "Review and Import" }).first().click();
-    const dialog = page.getByRole("dialog", { name: "Review Orphaned Copy" });
-    await expect(dialog).toContainText("creates it with no assignments");
-    await expect(dialog).toContainText("injected disable-model-invocation line is left out");
+    await machine.getByRole("button", { name: "Import…" }).first().click();
+    const dialog = page.getByRole("dialog", { name: "Import Orphaned Copy" });
+    // #1973: the facts, then one notice: the Manual Only setting, in words.
+    await expect(dialog.locator(".skill-review-facts dt")).toHaveText(["Machine", "Kept Aside", "Result"]);
+    await expect(dialog.locator(".skill-review-facts dd").last()).toHaveText("New skill");
+    await expect(dialog.locator(".modal-body > .notice")).toHaveText(
+      ["The copy was Manual Only. That setting isn't imported; choose it when you assign the skill."]);
+    await expect(dialog).not.toContainText("disable-model-invocation");
     // A new skill's file is Added and every line of it is a + line (#1948); nothing to consent to.
     const file = dialog.locator(".skill-diff-file", { hasText: "SKILL.md" });
     await expect(file.locator(".skill-diff-file-head")).toContainText("Added");
@@ -127,9 +131,38 @@ test("an unreadable edited copy of a deleted skill explains that discarding move
   await entry.click();
   const olderMachine = page.getByRole("region", { name: "Orphaned Copies" }).locator("article", { hasText: "Older Machine" });
   await expect(olderMachine).toContainText("discarding it moves it aside first");
-  await expect(olderMachine.getByRole("button", { name: "Review and Import" })).toBeDisabled();
+  await expect(olderMachine.getByRole("button", { name: "Import…" })).toBeDisabled();
   await olderMachine.getByRole("button", { name: "Discard Copy" }).click();
   const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog"));
   await expect(confirmation).toContainText("The edited copy of “legacy-lint”");
   await expect(confirmation).toContainText("appears here as a kept-aside copy");
 });
+
+for (const width of [1280, 390]) {
+  test(`Discard Copy… in the review opens the list's confirmation and closes the review at ${width}`, async ({ page }) => {
+    const { requests, entry } = await openOrphans(page, width, "dark");
+    await page.route("**/api/runners/runner-1/orphaned-skill-copies/discard", async (route) => {
+      requests.push({ url: "discard", body: route.request().postDataJSON() });
+      await route.fulfill({ json: { status: "discarded", state: reported } });
+    });
+    await entry.click();
+    const machine = page.getByRole("region", { name: "Orphaned Copies" }).locator("article", { hasText: "Build Machine" });
+    await machine.getByRole("button", { name: "Import…" }).first().click();
+    const dialog = page.getByRole("dialog", { name: "Import Orphaned Copy" });
+    await expect(dialog.locator(".skill-diff-file")).toHaveCount(1);
+    await expect(dialog.locator(width > 760 ? ".modal-foot > .modal-tertiary" : ".modal-body > .modal-tertiary"))
+      .toHaveText("Discard Copy…");
+    await dialog.getByRole("button", { name: "Discard Copy…" }).click();
+    const confirmation = page.getByRole("dialog", { name: "Discard Copy" });
+    await expect(confirmation).toContainText("The kept-aside copy of “release-notes” on Build Machine");
+    await expect(confirmation).toContainText("nothing is deleted");
+    await confirmation.getByRole("button", { name: "Discard Copy" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(confirmation).toBeHidden();
+    expect(requests).toEqual([
+      { url: "preview", body: { kind: "kept_aside", id: keptId } },
+      { url: "discard", body: { kind: "kept_aside", id: keptId, observedFingerprint: "7e1d".padEnd(64, "0"),
+        observedDigest: "9b2e".padEnd(64, "0"), confirmation: "explicit" } },
+    ]);
+  });
+}

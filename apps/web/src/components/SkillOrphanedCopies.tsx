@@ -49,7 +49,7 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
       </div>
       <p className="skills-hint">
         Edited skill copies that a machine kept but no library skill shows: copies a restore kept aside, and edited copies
-        of skills deleted from the library. Review and import a copy to keep it in the library, or discard it.
+        of skills deleted from the library. Import a copy to keep it in the library, or discard it.
       </p>
       {runners.length === 0 && <p className="skills-hint">No machines are connected.</p>}
       {runners.map((runner) => {
@@ -110,7 +110,7 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
                           disabled={!actionable || !copy.observedDigest}
                           onClick={() => onReview(runner, copy)}
                         >
-                          Review and Import
+                          Import…
                         </button>
                         <button
                           type="button"
