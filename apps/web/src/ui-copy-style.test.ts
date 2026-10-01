@@ -18,6 +18,13 @@ import {
   switchAgentsConsent,
 } from "./components/ReviewConsent.js";
 import { copyShortcutHelper, TRANSCRIPT_SHARE_COPY } from "./components/TranscriptShareDialog.js";
+import {
+  CHOOSE_DESTINATION_LABEL,
+  DESTINATION_MENU_LABEL,
+  offlineDestinationNote,
+  openDestinationLabel,
+} from "./components/EditorSelect.js";
+import { TERMINAL_UPDATE_NOTE } from "./components/SessionPanelToggles.js";
 import { shareCreatedLabel, shareExpiryLabel, shareMoment } from "./transcript-share-time.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
@@ -641,6 +648,35 @@ test("the session bar's navigation and project labels are Title Case (#2146)", (
   for (const retired of ["Manage Project", "Move Session…", "Project Actions"]) {
     assert.ok(![...projectMenu, ...moreActions].includes(retired), `${retired} is gone from the bar's menus`);
   }
+});
+
+test("the session bar's panel toggles and Open control are Title Case, and their notes are sentences (#2164)", () => {
+  // The toggles' names and tooltips are literals in SessionPanelToggles; read them from the source so
+  // a renamed toggle cannot slip past, then hold each to Title Case.
+  const toggles = uiCopy(parseSource(path.join(SOURCE_ROOT, "components/SessionPanelToggles.tsx")))
+    .map((copy) => copy.value.trim());
+  for (const label of ["Panels", "Pinned Summary", "Terminal", "Side Panel"]) {
+    assert.ok(toggles.includes(label), `${label} is rendered (found ${JSON.stringify(toggles)})`);
+    assert.ok(isTitleCase(label), `${label} is Title Case`);
+  }
+  for (const retired of [/^Show\b/, /^Hide\b/, /^Toggle\b/]) {
+    assert.ok(!toggles.some((label) => retired.test(label)), `no toggle copy matches ${retired}`);
+  }
+  for (const label of [
+    CHOOSE_DESTINATION_LABEL,
+    DESTINATION_MENU_LABEL,
+    openDestinationLabel({ kind: "reveal", name: "File Manager" }, true),
+    openDestinationLabel({ kind: "reveal", name: "File Manager" }, false),
+    openDestinationLabel({ kind: "editor", name: "VS Code" }, false),
+  ]) assert.ok(isTitleCase(label), `${label} is Title Case`);
+  assert.equal(openDestinationLabel({ kind: "reveal", name: "Finder" }, true), "Open Folder");
+  // Machine and editor names are proper names, so each sentence is checked around a placeholder.
+  for (const sentence of [offlineDestinationNote("Machine"), TERMINAL_UPDATE_NOTE, "Couldn't open the folder in it."]) {
+    assert.ok(/[.]$/.test(sentence) && sentence.split(/(?<=[.!?])\s+/).every(isSentenceCase), sentence);
+  }
+  const editorSource = readFileSync(path.join(SOURCE_ROOT, "components/EditorSelect.tsx"), "utf8");
+  assert.match(editorSource, /showToast\(`Couldn't open the folder in \$\{destination\.name\}\.`/,
+    "the launch failure toast is the sentence checked above");
 });
 
 test("Share Transcript's titles, labels and buttons are Title Case, and its sentences are sentence case (#2148)", () => {

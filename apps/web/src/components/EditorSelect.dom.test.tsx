@@ -9,7 +9,13 @@ import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
-import { EditorSelect } from "./EditorSelect.js";
+import {
+  CHOOSE_DESTINATION_LABEL,
+  EditorSelect,
+  offlineDestinationNote,
+  openDestinationLabel,
+} from "./EditorSelect.js";
+import { FeedbackContext, type ToastOptions } from "./FeedbackProvider.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -125,6 +131,8 @@ function snapshot(runnerView: RunnerView = runner, boxes: BoxView[] = []): UiSna
   };
 }
 
+type RecordedToast = { message: string; options?: ToastOptions };
+
 async function mountEditor(client: ApiClient, runnerView: RunnerView = runner, boxes: BoxView[] = []) {
   domWindow.localStorage.clear();
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -137,18 +145,28 @@ async function mountEditor(client: ApiClient, runnerView: RunnerView = runner, b
     createSocket: () => socket,
     close() {},
   };
+  const toasts: RecordedToast[] = [];
+  const feedback = {
+    confirm: async () => false,
+    showToast: (message: string, options?: ToastOptions) => toasts.push({ message, options }),
+    showUndo: () => -1,
+    dismissToast: () => undefined,
+  };
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
-        <StoreProvider connection={connection} navigation={navigation}>
-          <EditorWhenReady />
-        </StoreProvider>
+        <FeedbackContext.Provider value={feedback}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <EditorWhenReady />
+          </StoreProvider>
+        </FeedbackContext.Provider>
       </ApiProvider>,
     );
   });
   await act(async () => { socket.push(snapshot(runnerView, boxes)); });
   return {
     container,
+    toasts,
     async pushRunner(nextRunner: RunnerView, nextBoxes: BoxView[] = []) {
       await act(async () => { socket.push(snapshot(nextRunner, nextBoxes)); });
     },
@@ -158,6 +176,9 @@ async function mountEditor(client: ApiClient, runnerView: RunnerView = runner, b
     },
   };
 }
+
+const doc = () => domWindow.document as unknown as Document;
+const menuRadios = () => [...doc().querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
 
 test("destination menu launches immediately, persists the primary action, and restores keyboard focus", async () => {
   const calls: Array<{ sessionId: string; action: Parameters<ApiClient["hostAction"]>[1] }> = [];
@@ -171,22 +192,36 @@ test("destination menu launches immediately, persists the primary action, and re
   const mounted = await mountEditor(client);
   const { container } = mounted;
   try {
-    const choose = container.querySelector<HTMLButtonElement>('button[aria-label="Choose Destination"]');
+    const choose = container.querySelector<HTMLButtonElement>(`button[aria-label="${CHOOSE_DESTINATION_LABEL}"]`);
     const defaultMain = container.querySelector<HTMLButtonElement>('button[aria-label="Open in VS Code"]');
     assert.ok(choose);
     assert.ok(defaultMain);
+    assert.equal(CHOOSE_DESTINATION_LABEL, "Choose Where to Open");
     assert.equal(defaultMain.textContent?.trim(), "Open", "the primary action has a visible label");
+    assert.equal(defaultMain.title, "Open in VS Code", "the tooltip repeats the name");
+    assert.equal(choose.title, "Choose Where to Open");
+    assert.ok(defaultMain.classList.contains("ghost") && choose.classList.contains("ghost"), "both segments are quiet");
+    assert.ok(container.querySelector(".editor-select.split"));
 
     await act(async () => { choose.click(); });
-    const choices = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
-    assert.deepEqual(choices.map((item) => item.textContent?.replace("✓", "").trim()), [
+    const menu = doc().querySelector<HTMLElement>('[role="menu"]');
+    assert.equal(menu?.getAttribute("aria-label"), "Open In");
+    assert.equal(menu?.querySelector(".menu-label")?.textContent, "Open In", "the menu has a Title Case label");
+    const choices = menuRadios();
+    assert.deepEqual(choices.map((item) => item.textContent?.trim()), [
       "VS Code", "Cursor", "Devin Desktop", "Future Editor", "IntelliJ IDEA", "WebStorm", "File Manager",
     ]);
+    const separator = menu?.querySelector('[role="separator"]');
+    assert.ok(separator, "File Manager follows a separator");
+    assert.equal(separator?.nextElementSibling, choices.at(-1));
+    assert.equal(choices[0]?.getAttribute("aria-checked"), "true", "the remembered destination is checked");
+    assert.ok(choices[0]?.querySelector(".menu-check"), "with a trailing check");
     assert.ok(choices[0]?.querySelector('[data-destination-icon="code"]'), "known editors receive their recognizable icon");
     assert.ok(choices[2]?.querySelector('[data-destination-icon="windsurf"]'),
       "legacy runner metadata is rebranded without changing the integration id");
     assert.ok(choices[3]?.querySelector('[data-destination-icon="generic-editor"]'), "unknown editors remain visible with a fallback icon");
     assert.ok(choices[6]?.querySelector('[data-destination-icon="file-manager"]'));
+    assertNoDomNode(menu?.querySelector(".menu-note") ?? null, "an online machine needs no note");
 
     const cursor = choices.find((item) => item.textContent?.includes("Cursor"));
     assert.ok(cursor);
@@ -199,7 +234,7 @@ test("destination menu launches immediately, persists the primary action, and re
     }], "choosing a destination launches it immediately");
     assert.equal(domWindow.localStorage.getItem("wollipog.editor.lastUsed"), "cursor");
     assert.equal(domWindow.localStorage.getItem("wollipog.openDestination.lastUsed"), "editor:cursor");
-    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "selection closes the menu");
+    assertNoDomNode(doc().querySelector('[role="menu"]'), "selection closes the menu");
     assert.equal(domWindow.document.activeElement, choose, "selection restores focus to the picker");
 
     const selectedMain = container.querySelector<HTMLButtonElement>('button[aria-label="Open in Cursor"]');
@@ -214,7 +249,7 @@ test("destination menu launches immediately, persists the primary action, and re
       choose.focus();
       choose.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as unknown as Event);
     });
-    const editorChoices = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+    const editorChoices = menuRadios();
     const selectedCursor = editorChoices.find((item) => item.textContent?.includes("Cursor"));
     const unselectedCode = editorChoices.find((item) => item.textContent?.includes("VS Code"));
     assert.ok(selectedCursor);
@@ -229,7 +264,7 @@ test("destination menu launches immediately, persists the primary action, and re
       );
     });
     await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
-    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
+    assertNoDomNode(doc().querySelector('[role="menu"]'));
     assert.equal(domWindow.document.activeElement, choose, "Escape restores focus to the chevron");
   } finally {
     await mounted.cleanup();
@@ -248,11 +283,10 @@ test("file-manager choices use the fixed session-scoped reveal action and OS-app
   const mounted = await mountEditor(client, { ...runner, os: "windows" });
   const { container } = mounted;
   try {
-    const choose = container.querySelector<HTMLButtonElement>('button[aria-label="Choose Destination"]');
+    const choose = container.querySelector<HTMLButtonElement>(`button[aria-label="${CHOOSE_DESTINATION_LABEL}"]`);
     assert.ok(choose);
     await act(async () => { choose.click(); });
-    const explorer = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
-      .find((item) => item.textContent?.includes("Explorer"));
+    const explorer = menuRadios().find((item) => item.textContent?.includes("Explorer"));
     assert.ok(explorer);
     await act(async () => { explorer.click(); });
     assert.deepEqual(calls, [{ kind: "reveal" }]);
@@ -266,7 +300,7 @@ test("file-manager choices use the fixed session-scoped reveal action and OS-app
   }
 });
 
-test("busy launches stay focusable, suppress duplicates, and expose failure feedback", async () => {
+test("a busy launch stays focusable and suppresses duplicates, and a failure is an error toast", async () => {
   const calls: Parameters<ApiClient["hostAction"]>[1][] = [];
   let settleLaunch!: (reason?: Error) => void;
   const launchSettlement = new Promise<void>((resolve, reject) => {
@@ -284,7 +318,7 @@ test("busy launches stay focusable, suppress duplicates, and expose failure feed
   const { container } = mounted;
   try {
     const main = container.querySelector<HTMLButtonElement>('button[aria-label="Open in VS Code"]');
-    const choose = container.querySelector<HTMLButtonElement>('button[aria-label="Choose Destination"]');
+    const choose = container.querySelector<HTMLButtonElement>(`button[aria-label="${CHOOSE_DESTINATION_LABEL}"]`);
     assert.ok(main);
     assert.ok(choose);
     act(() => { main.click(); });
@@ -294,53 +328,137 @@ test("busy launches stay focusable, suppress duplicates, and expose failure feed
     assert.equal(choose.getAttribute("aria-disabled"), "true");
     act(() => { main.click(); });
     assert.equal(calls.length, 1);
-    assert.equal(container.querySelector('[role="status"]')?.textContent, "A destination launch is already in progress.");
     act(() => { choose.click(); });
-    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "the menu cannot start another launch while busy");
+    assertNoDomNode(doc().querySelector('[role="menu"]'), "the menu cannot start another launch while busy");
 
     await act(async () => {
       settleLaunch(new Error("Editor process failed to start."));
       await launchSettlement.catch(() => undefined);
     });
     assert.equal(main.getAttribute("aria-disabled"), "false");
-    assert.equal(container.querySelector('[role="status"]')?.textContent, "Editor process failed to start.");
+    assert.deepEqual(mounted.toasts, [{
+      message: "Couldn't open the folder in VS Code.",
+      options: { tone: "error", detail: "Editor process failed to start." },
+    }]);
+    assertNoDomNode(container.querySelector('[role="status"]'), "no floating note under the button");
+    assertNoDomNode(container.querySelector(".editor-note"));
   } finally {
     await mounted.cleanup();
   }
 });
 
-test("offline runners remain understandable while remote and unsupported runners expose no host action", async () => {
-  const client = { ...api, hostAction: async () => ({ ok: true as const }) } as ApiClient;
-
-  const offline = await mountEditor(client, { ...runner, status: "offline" });
+test("offline, Open is disabled and described by the menu's note, and the menu still opens on it (#2164)", async () => {
+  const calls: Parameters<ApiClient["hostAction"]>[1][] = [];
+  const client = {
+    ...api,
+    hostAction: async (_sessionId: string, action: Parameters<ApiClient["hostAction"]>[1]) => {
+      calls.push(structuredClone(action));
+      return { ok: true as const };
+    },
+  } as ApiClient;
+  const offlineRunner: RunnerView = { ...runner, displayName: "Build Machine", status: "offline" };
+  const note = "Build Machine is offline. You can open the folder again when it reconnects.";
+  assert.equal(offlineDestinationNote("Build Machine"), note);
+  const offline = await mountEditor(client, offlineRunner);
   try {
-    const main = offline.container.querySelector<HTMLButtonElement>('button[aria-label="Open Unavailable: Runner Offline"]');
-    const choose = offline.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Choose Destination Unavailable: Runner Offline"]',
-    );
-    assert.ok(main);
-    assert.ok(choose);
+    const main = offline.container.querySelector<HTMLButtonElement>('button[aria-label="Open in VS Code"]');
+    const choose = offline.container.querySelector<HTMLButtonElement>(`button[aria-label="${CHOOSE_DESTINATION_LABEL}"]`);
+    assert.ok(main, "Open keeps its name offline");
+    assert.ok(choose, "the caret keeps its name offline");
     assert.equal(main.textContent?.trim(), "Open");
     assert.equal(main.getAttribute("aria-disabled"), "true");
+    assert.equal(choose.getAttribute("aria-disabled"), "false", "the caret still opens the menu");
+    const describedBy = main.getAttribute("aria-describedby");
+    assert.ok(describedBy);
+    assert.equal(doc().getElementById(describedBy)?.textContent, note, "closed, the description is the note's text");
+    assert.equal(main.title, "Open in VS Code", "the tooltip names the action, not a reason");
+    assertNoDomNode(doc().querySelector('[title="Runner is offline."]'));
     await act(async () => { main.click(); });
-    assert.equal(offline.container.querySelector('[role="status"]')?.textContent, "Runner is offline.");
-    await offline.pushRunner({ ...runner, status: "online" });
-    assertNoDomNode(offline.container.querySelector('[role="status"]'), "reconnecting clears stale offline feedback");
+    assert.deepEqual(calls, [], "a disabled Open launches nothing");
+    assertNoDomNode(offline.container.querySelector('[role="status"]'));
 
-    const reopenedChoose = offline.container.querySelector<HTMLButtonElement>('button[aria-label="Choose Destination"]');
-    assert.ok(reopenedChoose);
-    await act(async () => { reopenedChoose.click(); });
-    await offline.pushRunner({ ...runner, status: "offline" });
-    const cursor = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
-      .find((item) => item.textContent?.includes("Cursor"));
-    assert.ok(cursor);
-    await act(async () => { cursor.click(); });
-    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "an offline transition closes the stale menu");
-    assert.equal(offline.container.querySelector('[role="status"]')?.textContent, "Runner is offline.");
+    await act(async () => { choose.click(); });
+    const menu = doc().querySelector<HTMLElement>('[role="menu"]');
+    assert.ok(menu);
+    const menuNote = menu.querySelector<HTMLElement>(".menu-note");
+    assert.equal(menuNote?.textContent, note);
+    assert.equal(menuNote?.id, describedBy, "Open points at the menu's note");
+    assert.equal(doc().querySelectorAll(`[id="${describedBy}"]`).length, 1, "one note, never two with one id");
+    const choices = menuRadios();
+    assert.equal(choices.length, 7);
+    assert.ok(choices.every((item) => item.getAttribute("aria-disabled") === "true"), "no enabled destination");
+    assert.equal(domWindow.document.activeElement, menu, "with nothing to choose, the menu itself takes focus");
+    await act(async () => { choices[1]!.click(); });
+    assert.deepEqual(calls, []);
+    assert.ok(doc().querySelector('[role="menu"]'), "a disabled destination leaves the menu open on its note");
+    await act(async () => {
+      menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event);
+    });
+    assertNoDomNode(doc().querySelector('[role="menu"]'), "Escape closes it");
+
+    await offline.pushRunner({ ...offlineRunner, status: "online" });
+    assert.equal(main.getAttribute("aria-disabled"), "false", "reconnecting enables Open");
+    assert.equal(main.getAttribute("aria-describedby"), null);
+    await act(async () => { choose.click(); });
+    assert.ok(menuRadios().every((item) => item.getAttribute("aria-disabled") === null));
+    assertNoDomNode(doc().querySelector(".menu-note"));
+
+    // A destination that has focus when the machine drops keeps it, and the note appears.
+    const focused = menuRadios()[0]!;
+    focused.focus();
+    await offline.pushRunner(offlineRunner);
+    assert.equal(domWindow.document.activeElement, focused);
+    assert.equal(focused.getAttribute("aria-disabled"), "true");
+    assert.equal(doc().querySelector(".menu-note")?.textContent, note);
   } finally {
     await offline.cleanup();
   }
+});
 
+test("one destination is a single Open Folder button with no caret", async () => {
+  const calls: Parameters<ApiClient["hostAction"]>[1][] = [];
+  const client = {
+    ...api,
+    hostAction: async (_sessionId: string, action: Parameters<ApiClient["hostAction"]>[1]) => {
+      calls.push(structuredClone(action));
+      return { ok: true as const };
+    },
+  } as ApiClient;
+  const revealOnly = await mountEditor(client, { ...runner, editors: [] });
+  try {
+    const buttons = [...revealOnly.container.querySelectorAll<HTMLButtonElement>("button")];
+    assert.equal(buttons.length, 1);
+    const [button] = buttons;
+    assert.equal(button!.getAttribute("aria-label"), "Open Folder");
+    assert.equal(button!.textContent?.trim(), "Open Folder");
+    assert.equal(button!.title, "Open Folder");
+    assert.ok(button!.classList.contains("btn") && button!.classList.contains("ghost"));
+    assert.equal(button!.getAttribute("aria-haspopup"), null);
+    assertNoDomNode(revealOnly.container.querySelector(".split"), "a single button is not a split");
+    await act(async () => { button!.click(); });
+    assert.deepEqual(calls, [{ kind: "reveal" }]);
+  } finally {
+    await revealOnly.cleanup();
+  }
+  assert.equal(openDestinationLabel({ kind: "editor", name: "Zed" }, true), "Open in Zed");
+  assert.equal(openDestinationLabel({ kind: "reveal", name: "Finder" }, false), "Open in Finder");
+
+  const offlineOnly = await mountEditor(client, { ...runner, editors: [], status: "offline" });
+  try {
+    const button = offlineOnly.container.querySelector<HTMLButtonElement>('button[aria-label="Open Folder"]');
+    assert.ok(button);
+    assert.equal(button.getAttribute("aria-disabled"), "true");
+    const describedBy = button.getAttribute("aria-describedby");
+    assert.equal(doc().getElementById(describedBy ?? "")?.textContent,
+      "runner-1 is offline. You can open the folder again when it reconnects.",
+      "an unnamed machine is named by its runner id");
+  } finally {
+    await offlineOnly.cleanup();
+  }
+});
+
+test("remote and unsupported runners expose no host action", async () => {
+  const client = { ...api, hostAction: async () => ({ ok: true as const }) } as ApiClient;
   const unsupported = await mountEditor(client, { ...runner, protocolVersion: 21 });
   try {
     assertNoDomNode(unsupported.container.querySelector(".editor-select"));
@@ -360,12 +478,5 @@ test("offline runners remain understandable while remote and unsupported runners
     assertNoDomNode(remote.container.querySelector(".editor-select"));
   } finally {
     await remote.cleanup();
-  }
-
-  const revealOnly = await mountEditor(client, { ...runner, editors: [] });
-  try {
-    assert.ok(revealOnly.container.querySelector('button[aria-label="Open in File Manager"]'));
-  } finally {
-    await revealOnly.cleanup();
   }
 });

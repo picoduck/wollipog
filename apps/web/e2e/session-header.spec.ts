@@ -62,9 +62,9 @@ async function mobileSessionHeaderGeometry(page: Page) {
       return box ? { left: box.left, right: box.right, center: box.left + box.width / 2 } : null;
     };
     return {
-      pinned: rect('[aria-label="Toggle Pinned Summary"]', topbar),
-      terminal: rect('[aria-label="Show Terminal"], [aria-label="Hide Terminal"]', topbar),
-      sidePanel: rect('[aria-label="Show Side Panel"], [aria-label="Hide Side Panel"]', topbar),
+      pinned: rect('button[aria-label="Pinned Summary"]', topbar),
+      terminal: rect('button[aria-label="Terminal"]', topbar),
+      sidePanel: rect('button[aria-label="Side Panel"]', topbar),
       fork: optionalRect('[aria-label="Fork Conversation"]', header),
       share: rect('[aria-label="Share"]', header),
       moreActions: rect('[aria-label="More Actions"]', header),
@@ -116,7 +116,7 @@ for (const viewport of [
     await page.getByRole("button", { name: /Alpha Session/ }).click();
     const expand = page.getByRole("button", { name: "Expand Session" });
     if (await expand.isVisible()) await expand.click();
-    const toggle = page.getByRole("button", { name: "Show Side Panel" });
+    const toggle = page.getByRole("button", { name: "Side Panel", exact: true, pressed: false });
     await expect(toggle).toBeVisible();
 
     expect(await page.evaluate(() => {
@@ -138,7 +138,7 @@ for (const viewport of [
 
     await expect(page.locator("#right-panel")).toBeVisible();
     await expect(page.locator("#right-panel")).toHaveAccessibleName("Panel");
-    await expect(page.getByRole("button", { name: "Hide Side Panel" })).toBeFocused();
+    await expect(page.getByRole("button", { name: "Side Panel", exact: true, pressed: true })).toBeFocused();
     const persisted = await page.evaluate(() => ({
       open: localStorage.getItem("wollipog.rightpanel.open"),
       mode: localStorage.getItem("wollipog.rightpanel.mode"),
@@ -245,10 +245,10 @@ test("resolving a closed Requests surface leaves the cross-session generic toggl
   await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("button", { name: /No Project Session/ }).click();
   await page.getByRole("button", { name: "Expand Session" }).click();
-  const toggle = page.getByRole("button", { name: "Show Side Panel" });
+  const toggle = page.getByRole("button", { name: "Side Panel", exact: true, pressed: false });
   await toggle.click();
   await expect(page.locator("#right-panel")).toHaveAccessibleName("Panel");
-  await expect(page.getByRole("button", { name: "Hide Side Panel" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Side Panel", exact: true, pressed: true })).toBeFocused();
 });
 
 test("the session bar balances navigation, the project button, status, and actions on one row", async ({ page }) => {

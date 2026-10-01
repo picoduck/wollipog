@@ -555,7 +555,7 @@ Rules
   control-height token.
 - Segmented and split buttons count as one control.
 - **Split button** (`.split`): a primary action and the menu of its alternatives (Open in VS Code
-  and Choose Destination). Two `.btn`s in a `.split` join on one shared edge: the first loses its
+  and Choose Where to Open). Two `.btn`s in a `.split` join on one shared edge: the first loses its
   trailing radius, the second its leading radius, a 1px overlap, and 8px side padding for the
   chevron. The recipe sits at a single class's weight (`:where()`), so a component can size its
   segments. The session header's Open control is the first consumer (`EditorSelect`).

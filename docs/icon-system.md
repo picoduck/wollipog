@@ -75,7 +75,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `CopyIcon` | Lucide | `Copy` | Generic copy action. |
 | `CheckIcon` | Lucide | `Check` | Generic success state. |
 | `WarningIcon` | Lucide | `TriangleAlert` | Generic warning state. |
-| `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices. |
+| `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices; the session bar's Pinned Summary toggle, which opens the session's details column. |
 | `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step. |
 | `PlanPendingIcon` | Lucide | `Circle` | A plan step not started yet. |
 | `PlanInProgressIcon` | Lucide | `CircleDot` | The plan step in progress. |
@@ -86,12 +86,10 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
 | `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |
 | `EyeOffIcon` | Lucide | `EyeOff` | Hide a revealed personal identifier. |
-| `PinnedPanelIcon` | Lucide | `PictureInPicture2` | The Pinned Summary card floating over the transcript; distinct from the list layout and the side panel. |
-| `DockBottomIcon` | Lucide | `PanelBottom` | Bottom dock placement. |
 | `PanelRightIcon` | Lucide | `PanelRight` | Right panel placement. |
 | `PanelLeftOpenIcon` | Lucide | `PanelLeftOpen` | Expand Navigation: show names in the desktop rail. |
 | `PanelLeftCloseIcon` | Lucide | `PanelLeftClose` | Collapse Navigation: return the desktop rail to icons. |
-| `CommandLineIcon` | Lucide | `SquareTerminal` | Command-line destination. |
+| `CommandLineIcon` | Lucide | `SquareTerminal` | Command-line destination; the session bar's Terminal toggle. |
 | `GlobeIcon` | Lucide | `Globe` | Remote host. |
 | `FolderIcon` | Lucide | `Folder` | Generic directory. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |

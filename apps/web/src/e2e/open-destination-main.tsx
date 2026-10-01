@@ -4,7 +4,8 @@ import { PROTOCOL_VERSION, type HostAction, type RunnerView, type SessionView, t
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { EditorSelect } from "../components/EditorSelect.js";
-import { DockBottomIcon, PanelRightIcon, PinnedPanelIcon } from "../components/Icons.js";
+import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { CommandLineIcon, InfoIcon, PanelRightIcon } from "../components/Icons.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -17,16 +18,19 @@ declare global {
 }
 
 const fixtureParams = new URLSearchParams(window.location.search);
+document.documentElement.dataset.theme = fixtureParams.get("theme") === "light" ? "light" : "dark";
 
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "fixture-runner",
+  displayName: "Build Machine",
   os: "linux",
   version: "1",
   status: fixtureParams.get("offline") === "1" ? "offline" : "online",
   agents: [],
   workspaces: [],
-  editors: [
+  // `?editors=none`: a machine with no editors, whose folder has the file manager alone.
+  editors: fixtureParams.get("editors") === "none" ? [] : [
     { id: "code", name: "VS Code" },
     { id: "cursor", name: "Cursor" },
     { id: "windsurf", name: "Windsurf" },
@@ -131,34 +135,33 @@ function SessionActions() {
   return (
     <>
       <EditorSelect sessionId={session.id} />
-      <button type="button" className="icon-btn" aria-label="Toggle Pinned Summary"><PinnedPanelIcon /></button>
-      <button type="button" className="icon-btn" aria-label="Show Terminal"><DockBottomIcon /></button>
-      <button type="button" className="icon-btn" aria-label="Show Side Panel"><PanelRightIcon /></button>
+      <span className="detail-actions-divider" aria-hidden="true" />
+      <div className="panel-toggles" role="group" aria-label="Panels">
+        <button type="button" className="icon-btn" aria-label="Pinned Summary" aria-pressed="false"><InfoIcon size={16} /></button>
+        <button type="button" className="icon-btn" aria-label="Terminal" aria-pressed="false"><CommandLineIcon size={16} /></button>
+        <button type="button" className="icon-btn" aria-label="Side Panel" aria-pressed="false"><PanelRightIcon size={16} /></button>
+      </div>
     </>
   );
 }
 
+/**
+ * The desktop session bar's right end inside the `app` size container, so the compact tier's rules
+ * (§15.2) apply below 1100px as they do in the shell. Phones never render the Open control.
+ */
 function Harness() {
-  const mobile = fixtureParams.get("mobile") === "1";
-  if (!mobile) {
-    return (
-      <main className="session-detail">
-        <header className="detail-bar session-bar">
-          <div className="detail-actions">
-            <div className="topbar-actions"><SessionActions /></div>
-          </div>
-        </header>
-      </main>
-    );
-  }
   return (
-    <header className="topbar">
-      <h1>Destination Fixture</h1>
-      {/* The Session actions alone: Settings moved into the rail's More sheet (#458) and the phone
-          layout has no instance switcher (#1970), so a fixture that still renders either measures a
-          phone header production no longer builds. */}
-      <div className="topbar-actions topbar-mobile-controls"><SessionActions /></div>
-    </header>
+    <div className="app">
+      <main className="main">
+        <div className="session-detail">
+          <header className="detail-bar session-bar">
+            <div className="detail-actions">
+              <div className="topbar-actions"><SessionActions /></div>
+            </div>
+          </header>
+        </div>
+      </main>
+    </div>
   );
 }
 
@@ -166,8 +169,10 @@ const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
 createRoot(root).render(
   <ApiProvider client={client}>
-    <StoreProvider connection={connection} navigation={navigation}>
-      <Harness />
-    </StoreProvider>
+    <FeedbackProvider>
+      <StoreProvider connection={connection} navigation={navigation}>
+        <Harness />
+      </StoreProvider>
+    </FeedbackProvider>
   </ApiProvider>,
 );

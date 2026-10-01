@@ -1,10 +1,12 @@
 import { runnerSupportsProtocol, type EditorInfo, type OS } from "@wollipog/protocol";
-import { useEffect, useRef, useState, type ComponentType } from "react";
+import { useId, useRef, useState, type ComponentType } from "react";
 import { useApi } from "../api-context.js";
 import { titleCaseLabel } from "../format.js";
+import { runnerDisplay } from "../runners.js";
 import { useStoreSelector } from "../store.js";
+import { useFeedback } from "./FeedbackProvider.js";
 import { useAccessibleMenu } from "./interactions.js";
-import { MenuItem, MenuSurface } from "./Menu.js";
+import { MenuItem, MenuLabel, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
 import {
   ChevronDownIcon,
   CodeIcon,
@@ -20,8 +22,8 @@ import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-st
 const EDITOR_STORAGE_KEY = "wollipog.editor.lastUsed";
 const DESTINATION_STORAGE_KEY = "wollipog.openDestination.lastUsed";
 const REVEAL_DESTINATION_KEY = "reveal";
-const LAUNCH_IN_PROGRESS_NOTE = "A destination launch is already in progress.";
-const RUNNER_OFFLINE_NOTE = "Runner is offline.";
+export const CHOOSE_DESTINATION_LABEL = "Choose Where to Open";
+export const DESTINATION_MENU_LABEL = "Open In";
 
 type OpenDestination =
   | { kind: "editor"; key: string; editorId: string; name: string }
@@ -43,6 +45,16 @@ export function fileManagerLabel(os: OS): "Explorer" | "Finder" | "File Manager"
   if (os === "windows") return "Explorer";
   if (os === "macos") return "Finder";
   return "File Manager";
+}
+
+/** The menu note of an offline machine, which the disabled Open also names as its description. */
+export function offlineDestinationNote(machine: string): string {
+  return `${machine} is offline. You can open the folder again when it reconnects.`;
+}
+
+/** The Open control's name: the folder on its own, or the destination it opens in. */
+export function openDestinationLabel(destination: { kind: "editor" | "reveal"; name: string }, only: boolean): string {
+  return only && destination.kind === "reveal" ? "Open Folder" : `Open in ${destination.name}`;
 }
 
 function editorDestination(editor: EditorInfo): OpenDestination {
@@ -71,18 +83,21 @@ function DestinationIcon({ destination, size = 16 }: { destination: OpenDestinat
 }
 
 /**
- * Session-root destination split button. The server resolves the root from the session ID; the
- * browser can choose only a discovered editor ID or the fixed file-manager reveal action.
+ * Session-root destination split button (docs/design-system.md §3.2). The server resolves the root
+ * from the session ID; the browser can choose only a discovered editor ID or the fixed file-manager
+ * reveal action. It is a quiet control: two ghost segments on a hairline, because opening the folder
+ * is never the page's primary action. With one destination it is a single button with no menu.
  */
 export function EditorSelect({ sessionId }: { sessionId: string }) {
   const api = useApi();
+  const { showToast } = useFeedback();
   const sessions = useStoreSelector((s) => s.sessions);
   const runners = useStoreSelector((s) => s.runners);
   const boxes = useStoreSelector((s) => s.boxes);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
   const busyRef = useRef(false);
+  const noteId = `${useId().replace(/:/g, "")}-offline`;
   const [lastUsed, setLastUsed] = useState<string | null>(() => {
     try {
       const destination = loadBrowserStorageValue(DESTINATION_STORAGE_KEY);
@@ -97,20 +112,18 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
 
   const session = sessions.get(sessionId);
   const runner = session ? runners.get(session.runnerId) : undefined;
-  const offline = runner?.status !== "online";
-  useEffect(() => {
-    if (!offline) setNote((current) => current === RUNNER_OFFLINE_NOTE ? null : current);
-  }, [offline]);
   if (!session) return null;
   const isRemote = [...boxes.values()].some((b) => b.runnerId === session.runnerId);
   if (!runner || isRemote || !runnerSupportsProtocol(runner.protocolVersion, "hostActions")) return null;
 
-  const destinations: OpenDestination[] = [
-    ...(runner.editors ?? []).map(editorDestination),
-    { kind: "reveal", key: REVEAL_DESTINATION_KEY, name: fileManagerLabel(runner.os) },
-  ];
+  const offline = runner.status !== "online";
+  const offlineNote = offlineDestinationNote(runnerDisplay(runner, undefined, runner.runnerId).name);
+  const editors = (runner.editors ?? []).map(editorDestination);
+  const reveal: OpenDestination = { kind: "reveal", key: REVEAL_DESTINATION_KEY, name: fileManagerLabel(runner.os) };
+  const destinations: OpenDestination[] = [...editors, reveal];
+  const only = destinations.length === 1;
   const chosen = destinations.find((destination) => destination.key === lastUsed) ?? destinations[0]!;
-  const unavailable = offline || busy;
+  const mainLabel = openDestinationLabel(chosen, only);
 
   const rememberDestination = (destination: OpenDestination) => {
     saveBrowserStorageValue(DESTINATION_STORAGE_KEY, destination.key);
@@ -119,95 +132,96 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
   };
 
   const launch = async (destination: OpenDestination) => {
-    if (offline) {
-      setNote(RUNNER_OFFLINE_NOTE);
-      return;
-    }
-    if (busyRef.current) {
-      setNote(LAUNCH_IN_PROGRESS_NOTE);
-      return;
-    }
+    if (offline || busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
-    setNote(null);
     try {
       await api.hostAction(session.id, destination.kind === "editor"
         ? { kind: "open_editor", editorId: destination.editorId }
         : { kind: "reveal" });
     } catch (e) {
-      const message = (e as Error).message;
-      setNote(message);
-      window.setTimeout(() => setNote((current) => current === message ? null : current), 6000);
+      showToast(`Couldn't open the folder in ${destination.name}.`, { tone: "error", detail: (e as Error).message });
     } finally {
       busyRef.current = false;
       setBusy(false);
-      setNote((current) => current === LAUNCH_IN_PROGRESS_NOTE ? null : current);
     }
   };
 
   const chooseAndLaunch = (destination: OpenDestination) => {
-    if (unavailable) {
-      menu.close(true);
-      return void launch(destination);
-    }
-    rememberDestination(destination);
+    // An offline menu stays open on its note; its destinations do nothing.
+    if (offline) return;
     menu.close(true);
+    if (busyRef.current) return;
+    rememberDestination(destination);
     void launch(destination);
   };
 
-  const availabilityLabel = offline ? "Open Unavailable: Runner Offline" : `Open in ${chosen.name}`;
+  // `aria-disabled` rather than `disabled`: a destination that has focus when the machine drops
+  // keeps it, instead of losing it to the page.
+  const destinationItem = (destination: OpenDestination) => (
+    <MenuItem
+      key={destination.key}
+      role="menuitemradio"
+      checked={destination.key === chosen.key}
+      aria-disabled={offline || undefined}
+      icon={<DestinationIcon destination={destination} />}
+      data-menu-label={destination.name}
+      onClick={() => chooseAndLaunch(destination)}
+    >
+      {destination.name}
+    </MenuItem>
+  );
 
   return (
-    <div className="editor-select split">
-      {note && <span className="editor-note" role="status">{note}</span>}
+    <div className={only ? "editor-select" : "editor-select split"}>
       <button
         type="button"
-        className="btn editor-main"
-        aria-disabled={unavailable}
+        className="btn ghost editor-main"
+        aria-disabled={offline || busy}
+        aria-describedby={offline ? noteId : undefined}
         onClick={() => void launch(chosen)}
-        title={offline ? "Runner is offline." : availabilityLabel}
-        aria-label={availabilityLabel}
+        title={mainLabel}
+        aria-label={mainLabel}
       >
         <DestinationIcon destination={chosen} size={16} />
-        <span className="editor-main-label">Open</span>
+        <span className="editor-main-label">{only ? mainLabel : "Open"}</span>
       </button>
-      <button
-        ref={menu.triggerRef}
-        type="button"
-        className="btn editor-caret"
-        aria-disabled={unavailable}
-        onClick={() => { if (!unavailable) menu.toggle(); }}
-        onKeyDown={(event) => { if (!unavailable) menu.onTriggerKeyDown(event); }}
-        title={offline ? "Runner is offline." : "Choose Destination"}
-        aria-label={offline ? "Choose Destination Unavailable: Runner Offline" : "Choose Destination"}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={menu.menuId}
-      >
-        <ChevronDownIcon size={14} />
-      </button>
+      {!only && (
+        <button
+          ref={menu.triggerRef}
+          type="button"
+          className="btn ghost"
+          aria-disabled={busy}
+          onClick={() => { if (!busy) menu.toggle(); }}
+          onKeyDown={(event) => { if (!busy) menu.onTriggerKeyDown(event); }}
+          title={CHOOSE_DESTINATION_LABEL}
+          aria-label={CHOOSE_DESTINATION_LABEL}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-controls={menu.menuId}
+        >
+          <ChevronDownIcon size={14} />
+        </button>
+      )}
+      {/* The note the disabled Open points to while the menu that shows it is closed. */}
+      {offline && !open && <span id={noteId} hidden>{offlineNote}</span>}
       {open && (
         <MenuSurface
           surfaceRef={menu.menuRef}
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
-          label="Choose Destination"
+          label={DESTINATION_MENU_LABEL}
           align="end"
+          // With every destination disabled, the menu itself takes focus so Escape and the note reach it.
+          tabIndex={-1}
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
         >
-          {destinations.map((destination) => (
-            <MenuItem
-              key={destination.key}
-              role="menuitemradio"
-              checked={destination.key === chosen.key}
-              icon={<DestinationIcon destination={destination} />}
-              data-menu-label={destination.name}
-              onClick={() => chooseAndLaunch(destination)}
-            >
-              {destination.name}
-            </MenuItem>
-          ))}
+          <MenuLabel>{DESTINATION_MENU_LABEL}</MenuLabel>
+          {editors.map(destinationItem)}
+          {editors.length > 0 && <MenuSeparator />}
+          {destinationItem(reveal)}
+          {offline && <MenuNote id={noteId}>{offlineNote}</MenuNote>}
         </MenuSurface>
       )}
     </div>

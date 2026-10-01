@@ -6,14 +6,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   AutomationsIcon,
   CheckIcon,
+  CommandLineIcon,
   CursorEditorIcon,
   DevinDesktopIcon,
   GitHubIcon,
   GridIcon,
   ICON_SIZES,
-  ListIcon,
+  InfoIcon,
   PanelRightIcon,
-  PinnedPanelIcon,
   ServiceTierIcon,
   ShieldIcon,
   StopTurnIcon,
@@ -88,8 +88,16 @@ test("the Fast service tier and Automations no longer share a glyph", () => {
   const tier = renderToStaticMarkup(<ServiceTierIcon />);
   assert.notEqual(tier, renderToStaticMarkup(<AutomationsIcon />));
   assert.match(tier, /lucide-gauge\b/);
-  assert.notEqual(renderToStaticMarkup(<PinnedPanelIcon />), renderToStaticMarkup(<ListIcon />));
-  assert.notEqual(renderToStaticMarkup(<PinnedPanelIcon />), renderToStaticMarkup(<PanelRightIcon />));
+});
+
+test("the session bar's panel toggles each draw the glyph of the panel they open (#2164)", () => {
+  const pinned = renderToStaticMarkup(<InfoIcon />);
+  const terminal = renderToStaticMarkup(<CommandLineIcon />);
+  const sidePanel = renderToStaticMarkup(<PanelRightIcon />);
+  assert.match(pinned, /lucide-info\b/);
+  assert.match(terminal, /lucide-square-terminal\b/);
+  assert.match(sidePanel, /lucide-panel-right\b/);
+  assert.equal(new Set([pinned, terminal, sidePanel]).size, 3);
 });
 
 test("explicit accessibility and styling overrides remain available", () => {

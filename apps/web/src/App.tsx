@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { runnerCapabilityRequirement, runnerSupportsProtocol } from "@wollipog/protocol";
+import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { useStoreActions, useStoreSelector, type View } from "./store.js";
 import { useApi } from "./api-context.js";
 import { notifier } from "./notify.js";
@@ -25,6 +25,7 @@ import { ActiveInstanceConnectionProvider, activeInstanceConnection, useInstance
 import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type PushSetting } from "./push.js";
 import { pickTopmost } from "./layers.js";
 import { useIsMobile } from "./components/useIsMobile.js";
+import { SessionPanelToggles } from "./components/SessionPanelToggles.js";
 import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
 import { sessionVisibleForReminderMode } from "./session-reminders.js";
@@ -78,7 +79,7 @@ import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { Modal } from "./components/common.js";
 import { Notice } from "./components/Notice.js";
 import { OfflineBanner } from "./components/OfflineBanner.js";
-import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon } from "./components/Icons.js";
+import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { sessionDisplayTitle } from "./session-title.js";
@@ -336,7 +337,6 @@ export function Shell() {
   const filesSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionFiles");
   const conversationSteeringSupported = runnerSupportsProtocol(activeRunnerProtocol, "conversationSteering");
   const turnInterruptionSupported = runnerSupportsProtocol(activeRunnerProtocol, "turnInterruptionAck");
-  const terminalHint = runnerCapabilityRequirement(activeRunnerProtocol, "sessionShells", "Session terminal access");
   const [dialog, setDialog] = useState<null | { kind: "session"; preset?: NewSessionPreset } | { kind: "run" } | { kind: "pod" }>(null);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
   // What had focus when the reference opened: its focus zone picks the "Current Page" group.
@@ -688,7 +688,7 @@ export function Shell() {
   // or file manager on the runner host is intentionally not a phone action.
   const sessionPanelControls = view.name === "session" ? (
     <>
-      {/* Keyed by session: transient state (open menu, in-flight launch, error note)
+      {/* Keyed by session: transient state (open menu, in-flight launch)
           must not leak from one session's bar into the next. */}
       {!isMobile && (
         <>
@@ -696,42 +696,20 @@ export function Shell() {
           <span className="detail-actions-divider" aria-hidden="true" />
         </>
       )}
-      <button
-        type="button"
-        className={isMobile ? "icon-btn sm" : "icon-btn"}
-        ref={pinnedSummary.toggleRef}
-        onClick={pinnedSummary.toggle}
-        title="Toggle Pinned Summary"
-        aria-label="Toggle Pinned Summary"
-        aria-pressed={pinnedSummary.open}
-      >
-        <PinnedPanelIcon size={16} />
-      </button>
-      <button
-        type="button"
-        className={isMobile ? "icon-btn sm" : "icon-btn"}
-        onClick={() => {
+      <SessionPanelToggles
+        small={isMobile}
+        pinnedSummaryOpen={pinnedSummary.open}
+        pinnedSummaryRef={pinnedSummary.toggleRef}
+        onPinnedSummary={pinnedSummary.toggle}
+        terminalSupported={terminalSupported}
+        terminalOpen={dockVisible}
+        onTerminal={() => {
           if (terminalSupported) setDockVisible((v) => !v);
           else rightPanel.show("launcher");
         }}
-        title={terminalSupported ? `${dockVisible ? "Hide" : "Show"} Terminal (${shortcutDisplay("toggle-terminal")})` : terminalHint}
-        aria-label={
-          terminalSupported ? (dockVisible ? "Hide Terminal" : "Show Terminal") : "Terminal Unavailable: Update Runner"
-        }
-        aria-pressed={terminalSupported && dockVisible}
-      >
-        <DockBottomIcon size={16} />
-      </button>
-      <button
-        type="button"
-        className={isMobile ? "icon-btn sm" : "icon-btn"}
-        onClick={rightPanel.toggle}
-        title={rightPanel.open ? "Hide Side Panel" : "Show Side Panel"}
-        aria-label={rightPanel.open ? "Hide Side Panel" : "Show Side Panel"}
-        aria-pressed={rightPanel.open}
-      >
-        <PanelRightIcon size={16} />
-      </button>
+        sidePanelOpen={rightPanel.open}
+        onSidePanel={rightPanel.toggle}
+      />
     </>
   ) : null;
 

@@ -1,42 +1,77 @@
-import { expect, test } from "@playwright/test";
-import { dialogMotionSettled } from "./dialog-motion.js";
+import { expect, test, type Page } from "@playwright/test";
+
+/**
+ * The session bar's Open control (#2164; docs/design-system.md §3.2, §9.1, §15.2): a quiet split of
+ * two ghost segments on a hairline, a menu labelled Open In, a single Open Folder button when the
+ * folder has one destination, an offline machine explained by the menu's note, and launch failures
+ * as error toasts. The harness puts the bar in the `app` size container, as the shell does.
+ */
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => localStorage.clear());
 });
 
-test("the desktop session header renders a cohesive labeled split button and usable destination menu", async ({ page }) => {
-  await page.setViewportSize({ width: 1000, height: 700 });
-  await page.goto("/open-destination-e2e.html");
+const OFFLINE_NOTE = "Build Machine is offline. You can open the folder again when it reconnects.";
 
-  const main = page.getByRole("button", { name: "Open in VS Code" });
-  const choose = page.getByRole("button", { name: "Choose Destination" });
-  await expect(main).toHaveText("Open");
-  const geometry = await page.locator(".editor-select").evaluate((element) => {
-    const mainBox = element.querySelector(".editor-main")!.getBoundingClientRect();
-    const caretBox = element.querySelector(".editor-caret")!.getBoundingClientRect();
-    return {
-      mainRight: mainBox.right,
-      caretLeft: caretBox.left,
-      mainTop: mainBox.top,
-      caretTop: caretBox.top,
-      mainBottom: mainBox.bottom,
-      caretBottom: caretBox.bottom,
-    };
+async function openFixture(page: Page, width: number, query = "") {
+  await page.setViewportSize({ width, height: 700 });
+  await page.goto(`/open-destination-e2e.html${query ? `?${query}` : ""}`);
+  await expect(page.locator(".editor-select")).toBeVisible();
+}
+
+/** The resolved value of a custom property on the root, as the browser serializes colours. */
+async function tokenColour(page: Page, token: string): Promise<string> {
+  return page.evaluate((name) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${name})`;
+    document.body.append(probe);
+    const colour = getComputedStyle(probe).color;
+    probe.remove();
+    return colour;
+  }, token);
+}
+
+for (const theme of ["dark", "light"] as const) {
+  test(`the split is two ghost segments on a hairline, with no fill at rest (${theme})`, async ({ page }) => {
+    await openFixture(page, 1440, `theme=${theme}`);
+    const main = page.getByRole("button", { name: "Open in VS Code" });
+    const choose = page.getByRole("button", { name: "Choose Where to Open" });
+    await expect(main).toHaveText("Open");
+    await expect(main).toHaveAttribute("title", "Open in VS Code");
+    await expect(choose).toHaveAttribute("title", "Choose Where to Open");
+    const border = await tokenColour(page, "--border");
+    const textDim = await tokenColour(page, "--text-dim");
+    for (const segment of [main, choose]) {
+      await expect(segment).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await expect(segment).toHaveCSS("border-top-color", border);
+      await expect(segment).toHaveCSS("color", textDim);
+      await expect(segment).toHaveCSS("height", "32px");
+    }
+    const geometry = await page.locator(".editor-select").evaluate((element) => {
+      const [mainBox, caretBox] = [...element.querySelectorAll("button")].map((button) => button.getBoundingClientRect());
+      return { mainRight: mainBox!.right, caretLeft: caretBox!.left, mainTop: mainBox!.top, caretTop: caretBox!.top };
+    });
+    // One shared edge: the caret overlaps the main segment's trailing border by 1px (§3.2).
+    expect(Math.abs(geometry.mainRight - geometry.caretLeft)).toBeLessThanOrEqual(1.1);
+    expect(geometry.mainTop).toBe(geometry.caretTop);
   });
-  expect(Math.abs(geometry.mainRight - geometry.caretLeft)).toBeLessThanOrEqual(1.1);
-  expect(Math.abs(geometry.mainTop - geometry.caretTop)).toBeLessThanOrEqual(0.5);
-  expect(Math.abs(geometry.mainBottom - geometry.caretBottom)).toBeLessThanOrEqual(0.5);
+}
 
-  await choose.click();
-  const menu = page.getByRole("menu");
-  await expect(menu.getByRole("menuitemradio")).toHaveCount(6);
+test("the menu is labelled Open In, checks the remembered destination, and puts File Manager after a separator", async ({ page }) => {
+  await openFixture(page, 1000);
+  await page.getByRole("button", { name: "Choose Where to Open" }).click();
+  const menu = page.getByRole("menu", { name: "Open In" });
+  await expect(menu.locator(".menu-label")).toHaveText("Open In");
+  await expect(menu.locator(".menu-label")).toHaveCSS("text-transform", "none");
+  const radios = menu.getByRole("menuitemradio");
+  await expect(radios).toHaveText(["VS Code", "Cursor", "Devin Desktop", "Zed", "Future Editor", "File Manager"]);
+  await expect(menu.getByRole("menuitemradio", { name: "VS Code" })).toHaveAttribute("aria-checked", "true");
+  await expect(menu.getByRole("menuitemradio", { name: "VS Code" }).locator(".menu-check")).toBeVisible();
+  const separatorBeforeFileManager = await menu.evaluate((element) =>
+    element.querySelector('[role="separator"]')?.nextElementSibling?.textContent?.trim());
+  expect(separatorBeforeFileManager).toBe("File Manager");
   await expect(menu.getByRole("menuitemradio", { name: "Devin Desktop" })
     .locator('[data-destination-icon="windsurf"]')).toBeVisible();
-  await expect(menu.getByRole("menuitemradio", { name: "Zed" })
-    .locator('[data-destination-icon="zed"]')).toBeVisible();
-  await expect(menu.getByRole("menuitemradio", { name: "Future Editor" })
-    .locator('[data-destination-icon="generic-editor"]')).toBeVisible();
   await expect(menu.getByRole("menuitemradio", { name: "File Manager" })
     .locator('[data-destination-icon="file-manager"]')).toBeVisible();
   const menuBox = await menu.boundingBox();
@@ -51,67 +86,66 @@ test("the desktop session header renders a cohesive labeled split button and usa
   await expect(page.getByRole("button", { name: "Open in Devin Desktop" })).toHaveText("Open");
 });
 
-test("the compact mobile presentation stays on one line and inside the viewport", async ({ page }) => {
-  await page.setViewportSize({ width: 320, height: 640 });
-  await page.goto("/open-destination-e2e.html?mobile=1");
+test("with one destination it is a single Open Folder button with no caret", async ({ page }) => {
+  await openFixture(page, 1440, "editors=none");
+  const select = page.locator(".editor-select");
+  await expect(select.getByRole("button")).toHaveCount(1);
+  const button = select.getByRole("button", { name: "Open Folder", exact: true });
+  await expect(button).toHaveText("Open Folder");
+  await expect(button).not.toHaveAttribute("aria-haspopup", /.*/);
+  await expect(button).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await button.click();
+  await expect.poll(() => page.evaluate(() => window.hostActions)).toEqual([{ kind: "reveal" }]);
+});
 
-  const metrics = await page.locator(".topbar").evaluate((element) => {
-    const group = element.querySelector(".editor-select")!.getBoundingClientRect();
-    const main = element.querySelector(".editor-main")!.getBoundingClientRect();
-    const caret = element.querySelector(".editor-caret")!.getBoundingClientRect();
-    const header = element.getBoundingClientRect();
-    const label = element.querySelector(".editor-main-label")!;
-    return {
-      headerLeft: header.left,
-      headerRight: header.right,
-      scrollWidth: element.scrollWidth,
-      clientWidth: element.clientWidth,
-      groupLeft: group.left,
-      groupRight: group.right,
-      groupWidth: group.width,
-      mainWidth: main.width,
-      caretWidth: caret.width,
-      labelDisplay: getComputedStyle(label).display,
-    };
-  });
-  expect(metrics.labelDisplay).toBe("none");
-  expect(metrics.groupWidth).toBeLessThanOrEqual(64);
-  expect(metrics.mainWidth).toBeGreaterThanOrEqual(34);
-  expect(metrics.caretWidth).toBeGreaterThanOrEqual(28);
-  expect(metrics.groupLeft).toBeGreaterThanOrEqual(metrics.headerLeft);
-  expect(metrics.groupRight).toBeLessThanOrEqual(metrics.headerRight);
-  expect(metrics.scrollWidth).toBe(metrics.clientWidth);
+test("offline, Open is disabled and the menu explains why above destinations that are all disabled", async ({ page }) => {
+  await openFixture(page, 1440, "offline=1");
+  const main = page.getByRole("button", { name: "Open in VS Code" });
+  await expect(main).toBeDisabled();
+  await expect(main).toHaveAccessibleDescription(OFFLINE_NOTE);
+  await expect(page.locator('[title="Runner is offline."]')).toHaveCount(0);
+  await main.dispatchEvent("click");
+  expect(await page.evaluate(() => window.hostActions)).toEqual([]);
 
-  await page.getByRole("button", { name: "Choose Destination" }).click();
-  // On a phone the menu is a bottom sheet across the screen (docs/design-system.md §9.2).
-  await expect(page.getByRole("menu")).toBeVisible();
-  await dialogMotionSettled(page);
-  const menuBox = await page.getByRole("menu").boundingBox();
-  expect(menuBox).not.toBeNull();
-  expect(menuBox!.x).toBe(0);
-  expect(menuBox!.width).toBe(320);
-  expect(menuBox!.y + menuBox!.height).toBeCloseTo(640, 0);
+  const choose = page.getByRole("button", { name: "Choose Where to Open" });
+  await expect(choose).toBeEnabled();
+  await choose.click();
+  const menu = page.getByRole("menu", { name: "Open In" });
+  await expect(menu.locator(".menu-note")).toHaveText(OFFLINE_NOTE);
+  await expect(main).toHaveAccessibleDescription(OFFLINE_NOTE);
+  const radios = menu.getByRole("menuitemradio");
+  await expect(radios).toHaveCount(6);
+  for (const radio of await radios.all()) await expect(radio).toBeDisabled();
+  await expect(menu).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(choose).toBeFocused();
+});
 
-  await page.goto("/open-destination-e2e.html?mobile=1&offline=1");
-  await page.getByRole("button", { name: "Open Unavailable: Runner Offline" }).dispatchEvent("click");
-  const offlineNote = page.getByRole("status");
-  await expect(offlineNote).toHaveText("Runner is offline.");
-  await expect(offlineNote).toHaveCSS("pointer-events", "none");
-  const offlineMetrics = await page.locator(".topbar").evaluate((element) => ({
-    scrollWidth: element.scrollWidth,
-    clientWidth: element.clientWidth,
-    rightmostControl: element.querySelector(".topbar-actions:last-child")!.getBoundingClientRect().right,
-    viewportWidth: window.innerWidth,
-  }));
-  expect(offlineMetrics.scrollWidth).toBe(offlineMetrics.clientWidth);
-  expect(offlineMetrics.rightmostControl).toBeLessThanOrEqual(offlineMetrics.viewportWidth);
-
-  await page.goto("/open-destination-e2e.html?mobile=1&fail=1");
+test("a failed launch is an error toast, not a note under the button", async ({ page }) => {
+  await openFixture(page, 1440, "fail=1");
   await page.getByRole("button", { name: "Open in VS Code" }).click();
-  const failureNote = page.getByRole("status");
-  const failureBox = await failureNote.boundingBox();
-  expect(failureBox).not.toBeNull();
-  await expect(failureNote).toHaveCSS("pointer-events", "none");
-  expect(failureBox!.x).toBeGreaterThanOrEqual(8);
-  expect(failureBox!.x + failureBox!.width).toBeLessThanOrEqual(312);
+  const toast = page.getByRole("alert").filter({ hasText: "Couldn't open the folder in VS Code." });
+  await expect(toast).toBeVisible();
+  await expect(toast).toContainText("VS Code is not installed or is not available on PATH on the runner host.");
+  await expect(page.locator(".editor-note")).toHaveCount(0);
+});
+
+test("at 940px both segments are icon-only, named by their tooltips", async ({ page }) => {
+  await openFixture(page, 940);
+  const main = page.getByRole("button", { name: "Open in VS Code" });
+  const choose = page.getByRole("button", { name: "Choose Where to Open" });
+  await expect(main.locator(".editor-main-label")).toBeHidden();
+  await expect(main).toHaveAttribute("title", "Open in VS Code");
+  await expect(choose).toHaveAttribute("title", "Choose Where to Open");
+  const mainBox = await main.boundingBox();
+  expect(mainBox).toMatchObject({ width: 32, height: 32 });
+  const caretBox = await choose.boundingBox();
+  expect(caretBox!.width).toBeLessThanOrEqual(32);
+
+  await openFixture(page, 940, "editors=none");
+  const folder = page.getByRole("button", { name: "Open Folder", exact: true });
+  await expect(folder.locator(".editor-main-label")).toBeHidden();
+  await expect(folder).toHaveAttribute("title", "Open Folder");
+  expect(await folder.boundingBox()).toMatchObject({ width: 32, height: 32 });
 });

@@ -24,7 +24,7 @@ async function openSession(page: Page, width: number, storage: Record<string, st
   await expect(page.locator(".md table")).toBeVisible();
 }
 
-const toggle = (page: Page) => page.getByRole("button", { name: "Toggle Pinned Summary" });
+const toggle = (page: Page) => page.getByRole("button", { name: "Pinned Summary", exact: true });
 const summary = (page: Page) => page.locator('aside.ps[aria-label="Pinned Summary"]');
 
 async function box(locator: Locator) {
@@ -232,7 +232,7 @@ test("at 390px the summary starts closed and opens as a bottom sheet with Close"
 
 test("at 390px the sheet replaces the full-screen right panel and keeps focus", async ({ page }) => {
   await openSession(page, 390, { "wollipog.pinned.open": "1" });
-  await page.getByRole("button", { name: "Show Side Panel" }).click();
+  await page.getByRole("button", { name: "Side Panel", exact: true, pressed: false }).click();
   await expect(page.locator(".right-panel")).toBeVisible();
 
   await toggle(page).click();

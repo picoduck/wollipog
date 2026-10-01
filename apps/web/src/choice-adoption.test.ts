@@ -82,13 +82,12 @@ type Pattern = keyof typeof PATTERNS;
  * The inventory, exact. `[file, pattern, count]`.
  *
  * Two entries are DELIBERATE and stay: both `aria-pressed` groups are genuine toggles — the
- * pinned-panel, dock and right-panel buttons in `App`, and the follow-tail control in
- * `SessionDetail`. A toggle is what `aria-pressed` is for; it is only wrong when it describes one
- * of N alternatives. They are counted rather than exempted so that a FOURTH one in `App.tsx` fails
- * here instead of hiding behind a whole-file exemption.
+ * Pinned Summary, Terminal and Side Panel buttons in `SessionPanelToggles` (#2164), and the
+ * follow-tail control in `SessionDetail`. A toggle is what `aria-pressed` is for; it is only wrong
+ * when it describes one of N alternatives. They are counted rather than exempted so that a FOURTH
+ * one in `SessionPanelToggles.tsx` fails here instead of hiding behind a whole-file exemption.
  */
 const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
-  ["App.tsx", "aria-pressed", 3],
   ["components/AddBoxDialog.tsx", "native-select", 1],
   ["components/AgentSessionDiscoveryDialog.tsx", "agent-pick", 1],
   ["components/AutomationsView.tsx", "native-select", 12],
@@ -101,6 +100,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/ProjectLocationDialog.tsx", "native-select", 1],
   ["components/SessionApproval.tsx", "question-option", 2],
   ["components/SessionDetail.tsx", "aria-pressed", 1],
+  ["components/SessionPanelToggles.tsx", "aria-pressed", 3],
   // Instructions' file chips (#1980): §11.3 meta chips (`button.chip` with `aria-pressed`, as the
   // issue specifies) that choose which file the one view shows. A view switch, not a form choice.
   ["components/SkillInstructions.tsx", "aria-pressed", 1],

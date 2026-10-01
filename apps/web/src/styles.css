@@ -1061,7 +1061,7 @@ kbd {
    container is also the box `position: fixed` resolves against for everything inside it. Every
    anchored surface in the column accounts for that (fixed-containing-block.ts), or is portalled
    out of it. Not on a phone: there the column is the viewport's width, so a container adds nothing,
-   and the phone's full-screen right panel and editor note are placed in viewport coordinates. */
+   and the phone's full-screen right panel is placed in viewport coordinates. */
 @media (min-width: 761px) {
   .main { container: app / inline-size; }
 }
@@ -1297,6 +1297,13 @@ kbd {
   display: flex;
   align-items: center;
   gap: 2px;
+}
+/* The Panels group keeps the spacing of the row it sits in, on the desktop bar and the phone's. */
+.panel-toggles {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: inherit;
 }
 
 /* ---------------------------- Page anatomy ------------------------------ */
@@ -1620,54 +1627,28 @@ kbd {
   .master-detail[data-detail-open] > .master-detail-list,
   .master-detail:not([data-detail-open]) > .master-detail-detail { display: none; }
 }
-/* Labeled session-root destination split button: the shared `.split` of two `.btn`s. The wrapper
-   also anchors the launch note. */
+/* The session bar's Open control (§3.2): the shared `.split` of two ghost segments, or one ghost
+   button when the folder has a single destination. A hairline edge says it is one control without a
+   fill that would make it the page's primary action. The destination icon takes the segment's ink,
+   so it dims, brightens and goes faint with the label. */
 .editor-select {
-  position: relative;
+  display: inline-flex;
+  flex: none;
   margin-right: 4px;
 }
+.editor-select > .btn.ghost { border-color: var(--border); }
 .editor-destination-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-dim);
 }
-.editor-note {
-  position: absolute;
-  z-index: var(--z-popover);
-  top: calc(100% + 6px);
-  right: 0;
-  font-size: 11.5px;
-  color: var(--danger-text);
-  max-width: 260px;
-  padding: 3px 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-@media (max-width: 760px) {
-  /* Viewport coordinates inside the main column: safe only because a phone's `.main` is not the
-     `app` container (§2.10), so no containing block sits between the note and the viewport. */
-  .editor-note {
-    position: fixed;
-    pointer-events: none;
-    top: calc(50px + env(safe-area-inset-top, 0px) + var(--space-2));
-    right: calc(var(--space-2) + env(safe-area-inset-right, 0px));
-    left: calc(var(--space-2) + env(safe-area-inset-left, 0px));
-    max-width: none;
-  }
-  .editor-select > .editor-main {
-    width: 34px;
-    max-width: none;
-    padding-inline: var(--space-2);
-  }
+/* The compact tier (§15.2): text buttons become icon buttons whose names are their tooltips. */
+@container app (max-width: 1099px) {
   .editor-main-label { display: none; }
-  .editor-select > .editor-caret {
-    min-width: 28px;
-    padding-inline: var(--space-1);
+  .editor-select > .editor-main {
+    width: var(--control-h);
+    max-width: none;
+    padding: 0;
   }
 }
 
@@ -2634,7 +2615,8 @@ button.status { cursor: pointer; }
   flex: none;
   width: var(--icon);
 }
-.menu-item:disabled .menu-icon { color: var(--text-faint); }
+.menu-item:disabled .menu-icon,
+.menu-item[aria-disabled="true"] .menu-icon { color: var(--text-faint); }
 .menu-body {
   display: flex;
   flex: 1;

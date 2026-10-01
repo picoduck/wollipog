@@ -435,7 +435,9 @@ export function useAccessibleMenu(
       (item) => item.getAttribute("aria-checked") === "true" || item.getAttribute("aria-current") === "page",
     );
     const target = selected ?? (initialFocus.current === "last" ? items.at(-1) : items[0]);
-    target?.focus();
+    // A menu whose every item is unavailable takes focus itself when it can (`tabIndex={-1}`), so
+    // Escape and the arrow keys still reach it and a screen reader enters it.
+    (target ?? menuRef.current)?.focus();
   }, [open]);
 
   useEffect(() => () => {

@@ -54,11 +54,9 @@ import {
   MonitorCog as LucideMonitorCog,
   NotebookText as LucideNotebookText,
   Package as LucidePackage,
-  PanelBottom as LucidePanelBottom,
   PanelLeftClose as LucidePanelLeftClose,
   PanelLeftOpen as LucidePanelLeftOpen,
   PanelRight as LucidePanelRight,
-  PictureInPicture2 as LucidePictureInPicture2,
   Pencil as LucidePencil,
   Pin as LucidePin,
   Plus as LucidePlus,
@@ -353,14 +351,6 @@ export function EyeIcon(props: IconProps) {
 
 export function EyeOffIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideEyeOff} {...props} />;
-}
-
-export function PinnedPanelIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucidePictureInPicture2} {...props} />;
-}
-
-export function DockBottomIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucidePanelBottom} {...props} />;
 }
 
 export function PanelRightIcon(props: IconProps) {

@@ -177,7 +177,7 @@ for (const width of [320, 1280]) {
 
       if (width === 1280 && watchdogState === "terminal_without_continuation") {
         const pinned = page.getByRole("complementary", { name: "Pinned Summary" });
-        if (!await pinned.isVisible()) await page.getByRole("button", { name: "Toggle Pinned Summary" }).click();
+        if (!await pinned.isVisible()) await page.getByRole("button", { name: "Pinned Summary", exact: true }).click();
         const pinnedBadge = pinned.locator(".status[data-group='background-work']");
         await expect(pinnedBadge).toHaveText(label);
         await expect(pinnedBadge).toHaveAccessibleName(`Background Work: ${label}. ${description}`);

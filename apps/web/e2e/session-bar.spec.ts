@@ -13,12 +13,15 @@ const LONG_TITLE =
 async function openBar(
   page: Page,
   width: number,
-  options: { session?: RegExp; height?: number; scenario?: string; legacyWorkspaces?: boolean } = {},
+  options: { session?: RegExp; height?: number; scenario?: string; legacyWorkspaces?: boolean; theme?: "dark" | "light" } = {},
 ) {
   await page.setViewportSize({ width, height: options.height ?? 900 });
   await page.goto(`/command-inbox-projects-e2e.html?scenario=${options.scenario ?? "git-visibility"}&reviewReady=1&fullShell=1${
     options.legacyWorkspaces ? "&legacyWorkspaces=1" : ""}`);
-  await page.evaluate(() => localStorage.clear());
+  await page.evaluate((theme) => {
+    localStorage.clear();
+    if (theme) localStorage.setItem("wollipog.theme", theme);
+  }, options.theme);
   await page.reload();
   // Changes are a Pinned Summary fact (#2160), so two campaign request badges keep the row under
   // the pressure of three statuses that the review and change badges used to supply.
@@ -79,7 +82,7 @@ test("at 1440px the bar is one 48px row and every control in it is 32px tall", a
   });
   expect(geometry.height).toBe(48);
   const names = geometry.controls.map((control) => control.name);
-  for (const name of ["Back to Sessions", "Alpha", "Share", "More Actions", "Toggle Pinned Summary", "Show Side Panel"]) {
+  for (const name of ["Back to Sessions", "Alpha", "Share", "More Actions", "Pinned Summary", "Terminal", "Side Panel"]) {
     expect(names).toContain(name);
   }
   expect(geometry.controls.length).toBeGreaterThanOrEqual(8);
@@ -93,9 +96,9 @@ test("at 1440px the bar is one 48px row and every control in it is 32px tall", a
   await expect(bar.locator("h1#page-title")).toHaveCSS("font-weight", "600");
   // One divider before the Open picker and one after it, ahead of the panel toggles.
   const order = await bar.locator(".detail-actions").evaluate((actions) =>
-    [...actions.querySelectorAll(".editor-select, .detail-actions-divider, [aria-label='More Actions'], [aria-label='Toggle Pinned Summary']")]
+    [...actions.querySelectorAll(".editor-select, .detail-actions-divider, [aria-label='More Actions'], [aria-label='Panels']")]
       .map((node) => node.classList.contains("detail-actions-divider") ? "|" : node.classList.contains("editor-select") ? "Open" : node.getAttribute("aria-label")));
-  expect(order).toEqual(["More Actions", "|", "Open", "|", "Toggle Pinned Summary"]);
+  expect(order).toEqual(["More Actions", "|", "Open", "|", "Panels"]);
 });
 
 test("the project button renders short names whole and truncates a long one at 220px", async ({ page }) => {
@@ -381,6 +384,102 @@ test("a generated title shows its first line in the bar and the window title", a
   await expect(page).toHaveTitle("Add a dark mode toggle to the site header – Wollipog");
 });
 
+/** The resolved value of a custom property on the root, as the browser serializes colours. */
+async function tokenColour(page: Page, token: string): Promise<string> {
+  return page.evaluate((name) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${name})`;
+    document.body.append(probe);
+    const colour = getComputedStyle(probe).color;
+    probe.remove();
+    return colour;
+  }, token);
+}
+
+/** A control's fill and edge once the pointer rests on it and its transitions have finished. */
+async function hoveredLook(page: Page, name: string) {
+  const button = page.locator("header.session-bar .panel-toggles").getByRole("button", { name, exact: true });
+  await button.hover();
+  await page.waitForFunction(() => !document.getAnimations().some((animation) => animation instanceof CSSTransition));
+  return button.evaluate((element) => ({
+    background: getComputedStyle(element).backgroundColor,
+    boxShadow: getComputedStyle(element).boxShadow,
+  }));
+}
+
+for (const theme of ["dark", "light"] as const) {
+  test(`at 1440px the Panels toggles keep their names, and a hovered on toggle keeps its edge (${theme}, #2164)`, async ({ page }) => {
+    await openBar(page, 1440, { theme });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const group = page.locator("header.session-bar").getByRole("group", { name: "Panels" });
+    await expect(group.getByRole("button")).toHaveText(["", "", ""]);
+    const names = await group.getByRole("button").evaluateAll((buttons) => buttons.map((button) => ({
+      name: button.getAttribute("aria-label"),
+      title: button.getAttribute("title"),
+      glyph: ["lucide-info", "lucide-square-terminal", "lucide-panel-right"]
+        .find((glyph) => button.querySelector("svg")?.classList.contains(glyph)),
+    })));
+    expect(names.map(({ name }) => name)).toEqual(["Pinned Summary", "Terminal", "Side Panel"]);
+    expect(names.map(({ title }) => title)).toEqual(["Pinned Summary", "Terminal (Ctrl+`)", "Side Panel"]);
+    expect(names.map(({ glyph }) => glyph)).toEqual([
+      "lucide-info", "lucide-square-terminal", "lucide-panel-right",
+    ]);
+
+    const sidePanel = group.getByRole("button", { name: "Side Panel", exact: true });
+    await sidePanel.click();
+    await expect(sidePanel).toHaveAttribute("aria-pressed", "true");
+    await expect(sidePanel).toHaveAccessibleName("Side Panel");
+    await expect(group.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-pressed", "false");
+    await sidePanel.evaluate((element) => (element as HTMLElement).blur());
+
+    const outline = await tokenColour(page, "--control-outline");
+    const hoveredOff = await hoveredLook(page, "Terminal");
+    const hoveredOn = await hoveredLook(page, "Side Panel");
+    expect(hoveredOff.boxShadow).toBe("none");
+    expect(hoveredOn.boxShadow).toBe(`${outline} 0px 0px 0px 1px inset`);
+    expect(hoveredOn).not.toEqual(hoveredOff);
+    await page.mouse.move(0, 0);
+    await page.waitForFunction(() => !document.getAnimations().some((animation) => animation instanceof CSSTransition));
+    await expect(sidePanel).toHaveCSS("background-color", await tokenColour(page, "--bg-elev-3"));
+    await expect(sidePanel).toHaveCSS("box-shadow", `${outline} 0px 0px 0px 1px inset`);
+  });
+}
+
+test("at 940px the Open control is icon-only with its name as the tooltip (#2164)", async ({ page }) => {
+  await openBar(page, 940);
+  // The fixture's machine has no editors, so its folder has one destination: Open Folder.
+  const open = page.locator("header.session-bar .editor-select").getByRole("button", { name: "Open Folder", exact: true });
+  await expect(open).toHaveAttribute("title", "Open Folder");
+  await expect(open.locator(".editor-main-label")).toBeHidden();
+  expect(await open.boundingBox()).toMatchObject({ width: 32, height: 32 });
+  await expect(page.locator("header.session-bar .editor-select button")).toHaveCount(1);
+});
+
+test("in the shell, Open becomes a split once the machine has editors, and offline it names the machine (#2164)", async ({ page }) => {
+  await openBar(page, 1440);
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerEditors([{ id: "code", name: "VS Code" }, { id: "cursor", name: "Cursor" }]);
+  });
+  const select = page.locator("header.session-bar .editor-select");
+  const main = select.getByRole("button", { name: "Open in VS Code" });
+  const choose = select.getByRole("button", { name: "Choose Where to Open" });
+  await expect(main).toHaveText("Open");
+  await choose.click();
+  const menu = page.getByRole("menu", { name: "Open In" });
+  await expect(menu.getByRole("menuitemradio")).toHaveText(["VS Code", "Cursor", "File Manager"]);
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
+  const note = "runner-1 is offline. You can open the folder again when it reconnects.";
+  await expect(main).toBeDisabled();
+  await expect(main).toHaveAccessibleDescription(note);
+  await choose.click();
+  await expect(menu.locator(".menu-note")).toHaveText(note);
+  await expect(menu.getByRole("menuitemradio", { disabled: false })).toHaveCount(0);
+  await expect(page.locator('[title="Runner is offline."]')).toHaveCount(0);
+});
+
 test.describe("phone", () => {
   test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
 
@@ -391,6 +490,10 @@ test.describe("phone", () => {
     await expect(topbar.locator("h1")).toHaveText("Add a dark mode toggle to the site header");
     await expect(topbar.locator("h1")).toHaveCSS("font-size", "16px");
     await expect(topbar.locator("h1")).toHaveCSS("font-weight", "600");
+    // Opening the folder on the machine is not a phone action (#2164), and a coarse pointer's
+    // Terminal tooltip carries no keycap.
+    await expect(page.locator(".editor-select")).toHaveCount(0);
+    await expect(topbar.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("title", "Terminal");
     await expect(page).toHaveTitle("Add a dark mode toggle to the site header – Wollipog");
     await expect(page.locator(".session-project-button, .session-bar-project")).toHaveCount(0);
     await expect(topbar.getByRole("button")).toHaveText(["", "", "", ""]);
@@ -421,9 +524,9 @@ test.describe("phone", () => {
     // Sans); this test is about the controls and their hit areas, so it reads the disclosure as +N.
     expect(targets.map((target) => target.name?.replace(/^\+\d+: Show \d+ Hidden Status(es)?$/, "+N"))).toEqual([
       "Back to Sessions",
-      "Toggle Pinned Summary",
-      "Show Terminal",
-      "Show Side Panel",
+      "Pinned Summary",
+      "Terminal",
+      "Side Panel",
       "+N",
       "Share",
       "More Actions",

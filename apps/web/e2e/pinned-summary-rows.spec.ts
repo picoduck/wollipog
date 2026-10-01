@@ -24,7 +24,7 @@ async function openSession(page: Page, width: number, storage: Record<string, st
   await expect(page.locator(".md table")).toBeVisible();
 }
 
-const toggle = (page: Page) => page.getByRole("button", { name: "Toggle Pinned Summary" });
+const toggle = (page: Page) => page.getByRole("button", { name: "Pinned Summary", exact: true });
 const docked = (page: Page) => page.locator('aside.ps[aria-label="Pinned Summary"]');
 const gitSection = (scope: Locator) => scope.getByRole("region", { name: "Git" });
 /** The row whose label reads exactly `label`. */

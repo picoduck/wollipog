@@ -81,6 +81,12 @@ export function useIsTabletOrSmaller(): boolean {
   return useMediaQuery(TABLET_QUERY);
 }
 
+/** Live coarse-pointer flag: the stylesheet hides keycaps under this query (§11.5), and a tooltip
+ * that would name a chord leaves it out to match. */
+export function useIsCoarsePointer(): boolean {
+  return useMediaQuery("(pointer: coarse)");
+}
+
 /** Live flag for a viewport at most SHORT_VIEWPORT_PX tall. */
 export function useIsShortViewport(): boolean {
   return useMediaQuery(SHORT_QUERY);
