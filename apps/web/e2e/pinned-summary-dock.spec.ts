@@ -230,6 +230,23 @@ test("at 390px the summary starts closed and opens as a bottom sheet with Close"
   expect(await page.evaluate(() => localStorage.getItem("wollipog.pinned.open")), "the sheet is not persisted").toBe("1");
 });
 
+test("at 390px the sheet replaces the full-screen right panel and keeps focus", async ({ page }) => {
+  await openSession(page, 390, { "wollipog.pinned.open": "1" });
+  await page.getByRole("button", { name: "Show Side Panel" }).click();
+  await expect(page.locator(".right-panel")).toBeVisible();
+
+  await toggle(page).click();
+  const sheet = page.getByRole("dialog", { name: "Pinned Summary" });
+  await expect(sheet).toBeVisible();
+  await expect(page.locator(".right-panel")).toHaveCount(0);
+  // The closed panel's deferred focus restore runs on the next frames; it must not pull focus out
+  // of the sheet behind its scrim.
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  expect(await sheet.evaluate((dialog) => dialog.contains(document.activeElement))).toBe(true);
+  await sheet.getByRole("button", { name: "Close" }).click();
+  await expect(toggle(page)).toBeFocused();
+});
+
 test("loading and resizing pick the summary's state deterministically (#121)", async ({ page }) => {
   await openSession(page, 1440, { "wollipog.pinned.open": "0" });
   await expect(summary(page)).toHaveCount(0);

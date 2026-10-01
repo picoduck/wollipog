@@ -273,6 +273,9 @@ export function RightPanel({
     const target = panelReturnFocusTarget(returnFocusRef.current, session.id);
     returnFocusRef.current = null;
     window.requestAnimationFrame(() => {
+      // An overlay that replaced the panel (the phone's Pinned Summary sheet, #2147) owns focus by
+      // now; pulling it back to the opener behind that dialog's scrim would escape its focus trap.
+      if (document.activeElement?.closest('[aria-modal="true"]')) return;
       if (target?.isConnected) target.focus();
     });
   }, [session.id, state.open]);
