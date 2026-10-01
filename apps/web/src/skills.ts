@@ -815,7 +815,25 @@ export function skillVersionNote(
 ): string | null | undefined {
   if (version.note === undefined) return undefined;
   const text = oneLine(version.note);
-  if (!text) return null;
+  return text ? nameVersionIds(text, known) : null;
+}
+
+/**
+ * A version's whole note (#2286), for the selected version's detail: its own line breaks kept, the
+ * spaces at each line's end and runs of blank lines dropped, and internal ids named as on the row.
+ * Null for a version without a note; undefined when the note was not read (an older control plane).
+ */
+export function skillVersionFullNote(
+  version: SkillVersionSummary,
+  known?: ReadonlyMap<string, SkillVersionSummary>,
+): string | null | undefined {
+  if (version.note === undefined) return undefined;
+  const text = (version.note ?? "").replace(/\r\n?/g, "\n").replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n").trim();
+  return text ? nameVersionIds(text, known) : null;
+}
+
+/** A note names a version by its internal id, which never shows: its number when `known` has it. */
+function nameVersionIds(text: string, known?: ReadonlyMap<string, SkillVersionSummary>): string {
   return text.replace(/skillv_[A-Za-z0-9_-]+/g, (id) => {
     const number = skillVersionNumber(known?.get(id));
     return number === null ? "an earlier version" : `v${number}`;

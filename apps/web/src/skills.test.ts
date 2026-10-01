@@ -29,6 +29,7 @@ import {
   skillSourceKind,
   skillSourceLabel,
   skillVersionLabel,
+  skillVersionFullNote,
   skillVersionNote,
   skillVersionSource,
   skillFromPayload,
@@ -130,6 +131,18 @@ test("a version's note is one line and names a restored version by number, never
   assert.equal(skillVersionNote({ note: "  " }), null);
   // A control plane that does not list notes: not "No note", which would be a claim.
   assert.equal(skillVersionNote({ id: "skillv_b2" }), undefined);
+});
+
+test("a version's whole note keeps its line breaks and names a restored version by number (#2286)", () => {
+  const v2 = { id: "skillv_b2", versionNumber: 2 };
+  const known = new Map([[v2.id, v2]]);
+  assert.equal(skillVersionFullNote({ note: "  Add migration checks.  \r\n\r\n\r\n\r\nThen  test coverage.\n" }),
+    "Add migration checks.\n\nThen  test coverage.");
+  assert.equal(skillVersionFullNote({ note: "Restored from skillv_b2" }, known), "Restored from v2");
+  assert.equal(skillVersionFullNote({ note: "Restored from skillv_zz9\nby hand" }, known), "Restored from an earlier version\nby hand");
+  assert.equal(skillVersionFullNote({ note: null }), null);
+  assert.equal(skillVersionFullNote({ note: " \n\t " }), null);
+  assert.equal(skillVersionFullNote({ id: "skillv_b2" }), undefined);
 });
 
 test("a version's source names where its content came from (#1984)", () => {

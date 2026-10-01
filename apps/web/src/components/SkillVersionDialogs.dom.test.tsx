@@ -99,9 +99,60 @@ test("Version History against a control plane without numbers or notes names ver
   assert.deepEqual(rows().map((row) => row.querySelector(".row-title")!.textContent), ["b".repeat(12), "a".repeat(12)]);
   // Without notes there is no second line, rather than a "No note" the server never said.
   assert.equal(dialog().querySelectorAll(".row-sub").length, 0);
+  assertNoDomNode(dialog().querySelector(".skill-version-full-note"), "nor a Note in the detail (#2286)");
   assert.equal(heading(), `Changes If You Restore ${"a".repeat(12)}`);
   assert.doesNotMatch(dialog().textContent!, /skillv_|[0-9a-f]{64}/);
   await unmount();
+});
+
+test("Version History shows the selected version's whole note in its detail, and No Note only when it has none (#2286)", async () => {
+  const long = "Tighten the review checklist so every caller of a changed function is read, not only the diff.\n\n" +
+    "Also restores the migration checks from skillv_1, which skillv_gone had dropped.";
+  const client = {
+    ...api,
+    listSkillVersions: async () => ({ versions: [
+      { id: "skillv_3", versionNumber: 3, digest: "c", note: null },
+      { id: "skillv_2", versionNumber: 2, digest: "b", note: long },
+      { id: "skillv_1", versionNumber: 1, digest: "a", note: "First" },
+    ], nextCursor: null }),
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => ({
+      version: { id: versionId, versionNumber: Number(versionId.slice(7)), digest: versionId.slice(7).repeat(64), files: [file(`Body ${versionId.slice(7)}`)] },
+      currentVersion: { id: "skillv_3", versionNumber: 3, digest: "3".repeat(64), files: [file("current")] },
+    }),
+  } as unknown as ApiClient;
+  const noteValue =() => dialog().querySelector(".skill-version-full-note dd");
+  const resize = async (phone: boolean) => {
+    phoneWidth = phone;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+    await settle();
+  };
+  try {
+    const unmount = await history(client);
+    // Wide: the dialog opens on v2, the version before the current one.
+    assert.equal(heading(), "Changes If You Restore v2");
+    assert.equal(dialog().querySelector(".skill-version-full-note dt")?.textContent, "Note");
+    assert.equal(noteValue()?.textContent,
+      "Tighten the review checklist so every caller of a changed function is read, not only the diff.\n\n" +
+      "Also restores the migration checks from v1, which an earlier version had dropped.");
+    assert.ok(!noteValue()?.classList.contains("is-empty"));
+    // The row keeps its one line.
+    assert.equal(rows()[1]!.querySelector(".row-sub")?.textContent,
+      "Tighten the review checklist so every caller of a changed function is read, not only the diff. " +
+      "Also restores the migration checks from v1, which an earlier version had dropped.");
+    assert.doesNotMatch(dialog().textContent!, /skillv_/);
+    // A version without a note says so, dimmed like its row.
+    await click(rows()[0]!);
+    assert.equal(heading(), "Files in v3");
+    assert.equal(noteValue()?.textContent, "No note");
+    assert.ok(noteValue()?.classList.contains("is-empty"));
+    // On a phone the chosen version's detail shows the whole note too.
+    await resize(true);
+    await click(dialog().querySelector<HTMLButtonElement>('button[aria-label="Back to Versions"]')!);
+    await click(rows()[1]!);
+    assert.equal(rows().length, 0);
+    assert.match(noteValue()?.textContent ?? "", /^Tighten the review checklist[^]*which an earlier version had dropped\.$/u);
+    await unmount();
+  } finally { phoneWidth = false; }
 });
 
 test("Version History: a failed list is a notice whose Retry replaces it, and older pages load without an observer", async () => {

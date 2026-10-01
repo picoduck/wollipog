@@ -3,6 +3,7 @@ import { useApi } from "../api-context.js";
 import { relativeTime } from "../format.js";
 import {
   SHORT_DIGEST_LENGTH,
+  skillVersionFullNote,
   skillVersionLabel,
   skillVersionNote,
   skillVersionSource,
@@ -203,6 +204,11 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
 
   const digest = shown?.version.digest ?? selected?.digest;
   const createdAt = shown?.version.createdAt ?? selected?.createdAt;
+  // The row cuts its note to one line; the detail shows all of it (#2286). Nothing shows when the
+  // control plane didn't send notes at all.
+  const fullNote = selected
+    ? skillVersionFullNote(selected.note !== undefined || !shown ? selected : shown.version, byId)
+    : undefined;
   const detail = <>
     {outcome && <Notice tone="success" role="status">{outcome}</Notice>}
     {!selected ? (!pages.loading && versions.length > 0 && <p className="skill-version-note">Choose a version to see what restoring it changes.</p>)
@@ -217,6 +223,9 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
             </span>
             : "Unknown" },
         ]} />
+        {fullNote !== undefined && <dl className="facts skill-version-full-note">
+          <div><dt>Note</dt><dd className={fullNote === null ? "is-empty" : undefined}>{fullNote ?? "No note"}</dd></div>
+        </dl>}
         <SkillReviewChanges
           title={isCurrent ? `Files in ${name}` : `Changes If You Restore ${name}`}
           note={isCurrent ? "Restoring the current version changes nothing." : skillReviewSafetyNote("restoring")}

@@ -143,6 +143,32 @@ for (const theme of ["dark", "light"]) {
   });
 }
 
+for (const width of [1440, 390]) {
+  test(`the selected version's whole note shows in its detail at ${width} (#2286)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    const long = "Tighten the review checklist so every caller of a changed function is read, not only the diff, " +
+      "and say which callers were checked in the review summary.\nKeep the migration and test-coverage checks from v1.";
+    await routeVersions(page, () => [v3, { ...v2, note: long }, v1]);
+    const dialog = await openHistory(page);
+    const rows = dialog.getByRole("group", { name: "Versions" }).getByRole("button");
+    if (width === 390) await rows.nth(1).click();
+    await expect(dialog.getByRole("heading", { name: "Changes If You Restore v2" })).toBeVisible();
+    const note = dialog.locator(".skill-version-full-note dd");
+    await expect(note).toBeVisible();
+    // The whole note, wrapped on its author's line break, and nothing cut off.
+    expect(await note.evaluate((element) => element.textContent)).toBe(long);
+    expect(await note.evaluate((element) => element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight + 1)).toBe(true);
+    expect(await note.evaluate((element) => element.getClientRects().length > 0 && element.getBoundingClientRect().height > 40)).toBe(true);
+    await expect(dialog.locator(".skill-version-full-note dt")).toHaveText("Note");
+    if (width === 1440) {
+      // The row keeps its one line.
+      const sub = rows.nth(1).locator(".row-sub");
+      expect(await sub.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+    }
+    await expect(dialog).not.toContainText("skillv_");
+  });
+}
+
 test("older versions load as the list scrolls to its end", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const make = (n: number) => ({ id: `skillv_n${n}`, versionNumber: n, digest: n.toString(16).padStart(64, "0"), createdAt: Date.now() - (61 - n) * day, note: `Revision ${n}` });

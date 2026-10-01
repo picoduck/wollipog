@@ -14409,7 +14409,10 @@ body.shell-dock-dragging * {
   min-width: 0;
 }
 :is(.skill-version-history, .skill-machine-version) :is(h3, p) { margin: 0; }
-.skill-version-history .row-sub.is-empty { color: var(--text-faint); }
+.skill-version-history .row-sub.is-empty,
+.skill-version-full-note dd.is-empty { color: var(--text-faint); }
+/* The selected version's whole note (#2286), wrapped, with the line breaks its author wrote. */
+.skill-version-full-note dd { white-space: pre-line; }
 .skill-version-history .row-title.mono,
 .skill-version-hash .mono { font-family: var(--font-mono); font-size: var(--text-sm); }
 /* A fingerprint is one 12-character run beside its Copy button, never broken across lines. */
