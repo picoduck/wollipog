@@ -189,12 +189,14 @@ test("a change shows a spinner on its own control only, and the body keeps its h
   await expect(dialog.locator(".skill-groups-members").getByRole("button", { name: "Remove…" }).first()).toBeFocused();
 });
 
-test("the dialog's in-place menus open beside their triggers, with no containing block between them and the viewport", async ({ page }) => {
+for (const width of [1440, 390]) test(`the dialog's in-place menus at ${width} have no containing block between them and the viewport`, async ({ page }) => {
   await installSkillGroupsFixture(page, { library: "full" });
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width, height: width > 760 ? 900 : 844 });
   await page.goto("/skills-removals-e2e.html?groups=1");
   await choosePageAction(page, "Manage Groups…");
   const dialog = manageGroups(page);
+  // A phone opens the group as the sheet's second step, where each menu is a bottom sheet.
+  if (width <= 760) await dialog.locator(".skill-groups-list > .row").first().click();
   await expect(dialog.locator(".skill-assignment")).toHaveCount(2);
   // At the build floor (§2.10) a size container, a transform or layout containment between an
   // in-place menu and the viewport becomes its fixed containing block and moves it off its trigger.
@@ -221,9 +223,11 @@ test("the dialog's in-place menus open beside their triggers, with no containing
       return { containing, gap: Math.round(box.top - button.bottom), right: Math.round(button.right - box.right) };
     }, await trigger.getAttribute("aria-controls"));
     expect(boxes.containing).toEqual([]);
-    expect(boxes.gap).toBeGreaterThanOrEqual(0);
-    expect(boxes.gap).toBeLessThanOrEqual(12);
-    expect(Math.abs(boxes.right)).toBeLessThanOrEqual(2);
+    if (width > 760) {
+      expect(boxes.gap).toBeGreaterThanOrEqual(0);
+      expect(boxes.gap).toBeLessThanOrEqual(12);
+      expect(Math.abs(boxes.right)).toBeLessThanOrEqual(2);
+    }
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
   }

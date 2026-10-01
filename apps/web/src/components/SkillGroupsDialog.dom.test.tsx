@@ -66,7 +66,7 @@ const runner: RunnerView = {
 interface Deferred { resolve: () => void; reject: (error: Error) => void }
 
 /** A library with three owned groups and a legacy one. Writes wait for `release` when `hold` is set. */
-function fakeApi(options: { groups?: SkillGroupView[]; skills?: SkillSummary[]; creationScope?: ResourceScope | null } = {}) {
+function fakeApi(options: { groups?: SkillGroupView[]; skills?: SkillSummary[]; creationScope?: ResourceScope | null; identityFails?: boolean } = {}) {
   let groups: SkillGroupView[] = options.groups ?? [
     { id: "review", name: "Review Team", scope: orgScope },
     { id: "platform", name: "Platform Tools", scope: teamScope },
@@ -86,8 +86,9 @@ function fakeApi(options: { groups?: SkillGroupView[]; skills?: SkillSummary[]; 
   ] as SkillGroupAssignmentView[];
   const writes: Array<[string, ...unknown[]]> = [];
   const held: Deferred[] = [];
-  const state = { hold: false, fail: null as string | null, rulesFail: null as string | null, holdRules: false };
+  const state = { hold: false, fail: null as string | null, rulesFail: null as string | null, holdRules: false, holdLibrary: false };
   const heldReads: Array<() => void> = [];
+  const heldLibrary: Array<() => void> = [];
   const write = async <T,>(entry: [string, ...unknown[]], apply: () => T): Promise<T> => {
     writes.push(entry);
     if (state.hold) await new Promise<void>((resolve, reject) => held.push({ resolve, reject }));
@@ -96,15 +97,21 @@ function fakeApi(options: { groups?: SkillGroupView[]; skills?: SkillSummary[]; 
   };
   const client = {
     listSkillGroups: async () => ({ groups: groups.map((group) => ({ ...group })), creationScope: options.creationScope === undefined ? orgScope : options.creationScope }),
-    listSkills: async () => ({ skills: skills.map((skill) => ({ ...skill })) }),
-    getIdentity: async () => ({
+    listSkills: async () => {
+      const answer = { skills: skills.map((skill) => ({ ...skill })) };
+      if (state.holdLibrary) await new Promise<void>((resolve) => heldLibrary.push(resolve));
+      return answer;
+    },
+    getIdentity: async () => options.identityFails ? Promise.reject(new Error("HTTP 403")) : ({
       context: { userId: "user_42", userName: "Ada", organizationId: "org_personal", organizationName: "Personal", role: "owner", deviceId: null, localBootstrap: true },
       organizations: [], memberships: [], teams: [{ teamId: "team_7f3a", name: "Platform", organizationId: "org_personal", members: [] }],
     }),
     listSkillGroupAssignments: async (id: string) => {
       if (state.rulesFail) throw new Error(state.rulesFail);
+      // The answer is what the server held when asked, however late it arrives.
+      const assignments = rules.filter((rule) => rule.groupId === id).map((rule) => ({ ...rule }));
       if (state.holdRules) await new Promise<void>((resolve) => heldReads.push(resolve));
-      return { assignments: rules.filter((rule) => rule.groupId === id) };
+      return { assignments };
     },
     createSkillGroup: (body: { name: string }) => write(["create", body], () => {
       const group = { id: `g-${groups.length}`, name: body.name, scope: orgScope };
@@ -137,7 +144,10 @@ function fakeApi(options: { groups?: SkillGroupView[]; skills?: SkillSummary[]; 
     }),
   };
   const release = async () => { await act(async () => { held.splice(0).forEach((entry) => entry.resolve()); }); await settle(); };
-  return { client: client as unknown as ApiClient, writes, state, release };
+  /** Lets the oldest held rules read answer, with what the server held when it was asked. */
+  const releaseRead = async () => { await act(async () => { heldReads.shift()?.(); }); await settle(); };
+  const releaseLibrary = async () => { await act(async () => { heldLibrary.splice(0).forEach((resolve) => resolve()); }); await settle(); };
+  return { client: client as unknown as ApiClient, writes, state, release, releaseRead, releaseLibrary };
 }
 
 async function mount(api = fakeApi(), initialGroupId?: string) {
@@ -432,6 +442,69 @@ test("a saved rule shows its new value before its controls unlock, even while th
     assert.equal(dialog.querySelector('.skill-assignment [data-rule-control="invocation"]')?.getAttribute("aria-label"), "Invocation: Manual Only");
   } finally {
     await view.unmount();
+  }
+});
+
+test("a rules read that began before a change never lands over what the change saved", async () => {
+  phone = false;
+  const view = await mount();
+  try {
+    const dialog = view.dialog();
+    view.api.state.holdRules = true;
+    const enabled = () => dialog.querySelector<HTMLButtonElement>('.skill-assignment [role="switch"]')!;
+    await click(enabled());
+    assert.equal(enabled().getAttribute("aria-checked"), "false");
+    // The second change saves, then waits on its library refresh; meanwhile the read the first change
+    // started answers, saying the rule is off. It began before this change, so it must not land.
+    view.api.state.holdLibrary = true;
+    await click(enabled());
+    assert.deepEqual(view.api.writes.at(-1), ["update-rule", "review", "rule-1", { enabled: true }]);
+    await view.api.releaseRead();
+    assert.equal(enabled().getAttribute("aria-checked"), "true", "an older read does not overwrite the newer change");
+    view.api.state.holdLibrary = false;
+    await view.api.releaseLibrary();
+    assert.equal(enabled().disabled, false, "the change finished");
+    assert.equal(enabled().getAttribute("aria-checked"), "true");
+    await click(enabled());
+    assert.deepEqual(view.api.writes.at(-1), ["update-rule", "review", "rule-1", { enabled: false }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a new assignment shows before the dialog unlocks, even while the rules reload is slow", async () => {
+  phone = false;
+  const view = await mount(fakeApi(), "platform");
+  try {
+    const dialog = view.dialog();
+    assert.equal(dialog.querySelector(".skill-assignment")?.textContent, "No assignments. Add one to deploy this group's skills.");
+    view.api.state.holdRules = true;
+    await click(button(dialog, "Add Assignment…"));
+    await click(button(view.dialogs().at(-1), "Add Assignment"));
+    assert.equal(view.dialogs().length, 1);
+    assert.deepEqual([...dialog.querySelectorAll(".skill-assignment-title")].map((node) => node.textContent), ["All Agents on All Machines"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a private group says Only you only when the identity names its owner as the person looking", async () => {
+  phone = false;
+  const otherUser: ResourceScope = { organizationId: "org_personal", owner: { kind: "user", userId: "user_99" } };
+  const groups = [{ id: "mine", name: "My Drafts", scope: userScope }, { id: "theirs", name: "Their Drafts", scope: otherUser }];
+  for (const [identityFails, expected] of [[false, ["Only you", "Only its owner"]], [true, ["Only its owner", "Only its owner"]]] as const) {
+    const view = await mount(fakeApi({ groups, skills: [], identityFails }));
+    try {
+      const dialog = view.dialog();
+      const shown = [];
+      for (const row of listRows(dialog)) {
+        await click(row);
+        shown.push(dialog.querySelector(".skill-groups-owner")?.textContent);
+      }
+      assert.deepEqual(shown, expected, identityFails ? "an unreadable identity never claims Only you" : "a known identity");
+    } finally {
+      await view.unmount();
+    }
   }
 });
 

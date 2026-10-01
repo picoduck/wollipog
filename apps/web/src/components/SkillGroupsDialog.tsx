@@ -18,15 +18,18 @@ import { useIsMobile } from "./useIsMobile.js";
 type Identity = IdentityAdministrationView | null;
 
 /** Who a group belongs to, as a label: "Shared with your organization", "Shared with Platform",
- * "Only you". Never an id: a team the identity does not name is "a team". */
+ * "Only you". Never an id: a team the identity does not name is "a team". A private group says "Only
+ * you" only once the identity names its owner as the person looking; an administrator can see
+ * another person's, and while the identity is unknown it is "Only its owner". */
 export function groupOwnership(scope: ResourceScope, identity: Identity): string {
   const owner = scope.owner;
   if (owner.kind === "organization") return "Shared with your organization";
   if (owner.kind === "team") return `Shared with ${identity?.teams.find((team) => team.teamId === owner.teamId)?.name ?? "a team"}`;
-  return identity && identity.context.userId !== owner.userId ? "Only its owner" : "Only you";
+  return identity?.context.userId === owner.userId ? "Only you" : "Only its owner";
 }
 
-/** The same ownership inside a sentence: "shared with your organization", "visible only to you". */
+/** The same ownership inside a sentence: "shared with your organization", "visible only to you".
+ * Used for the server's creation scope, which is always the person asking. */
 function ownershipInSentence(scope: ResourceScope, identity: Identity): string {
   return scope.owner.kind === "user" ? "visible only to you" : `s${groupOwnership(scope, identity).slice(1)}`;
 }
@@ -83,7 +86,14 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
   const [addError, setAddError] = useState<string | null>(null);
   const [pending, setPendingState] = useState<Pending | null>(null);
   const pendingRef = useRef<Pending | null>(null);
-  const setPending = (next: Pending | null) => { pendingRef.current = next; setPendingState(next); };
+  /** Bumped by every read of a group's rules and by the start of every change, so a read that began
+   * before a change can never land over what that change saved. */
+  const rulesFence = useRef(0);
+  const setPending = (next: Pending | null) => {
+    if (next !== null) rulesFence.current += 1;
+    pendingRef.current = next;
+    setPendingState(next);
+  };
   const [error, setError] = useState<string | null>(null);
   /** What the last change did, for a screen reader only: the lists themselves show it. */
   const [announcement, setAnnouncement] = useState("");
@@ -127,12 +137,14 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
     const owned = Boolean(selected?.scope);
     if (!groupId || !owned) { setGroupRules(null); return; }
     let active = true;
+    const token = ++rulesFence.current;
+    const current = () => active && token === rulesFence.current;
     // A reload of the same group keeps its rules on screen, so the body does not jump.
-    setGroupRules((current) => current?.groupId === groupId ? current : { groupId, rules: null, error: null });
+    setGroupRules((shown) => shown?.groupId === groupId ? shown : { groupId, rules: null, error: null });
     api.listSkillGroupAssignments(groupId).then((result) => {
-      if (active) setGroupRules({ groupId, rules: result.assignments, error: null });
+      if (current()) setGroupRules({ groupId, rules: result.assignments, error: null });
     }).catch((cause) => {
-      if (active) setGroupRules({ groupId, rules: null, error: (cause as Error).message });
+      if (current()) setGroupRules({ groupId, rules: null, error: (cause as Error).message });
     });
     return () => { active = false; };
   }, [api, selected?.id, Boolean(selected?.scope), rulesRevision]);
@@ -205,6 +217,8 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
     } catch (cause) {
       setPending(null);
       setError((cause as Error).message);
+      // Starting the change fenced off any rules read in flight; read them again.
+      setRulesRevision((revision) => revision + 1);
       return false;
     }
     let refreshFailed = false;
@@ -349,10 +363,16 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
     setError(null);
     setPending("add-rule");
     try {
-      await api.createSkillGroupAssignment(group.id, input);
+      // The new rule shows before the dialog unlocks; the reload of the rules lands later.
+      const created = (await api.createSkillGroupAssignment(group.id, input))?.assignment;
+      if (created) {
+        setGroupRules((current) => current?.groupId === group.id && current.rules && !current.rules.some((rule) => rule.id === created.id)
+          ? { ...current, rules: [...current.rules, created] } : current);
+      }
     } catch (cause) {
       setPending(null);
       setAddError((cause as Error).message);
+      setRulesRevision((revision) => revision + 1);
       return;
     }
     let refreshFailed = false;
