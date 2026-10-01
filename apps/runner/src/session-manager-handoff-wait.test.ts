@@ -323,9 +323,13 @@ test("a provider-account switch held by a never-ending monitor is bounded the sa
     ];
     const internals = manager as unknown as {
       resolveProviderAccount: ProviderAccountResolver;
+      transferAccountTranscript: () => Promise<void>;
       prepareLaunch: (meta: { providerCredentialHome?: string; env: Record<string, string> }) => void;
     };
     internals.resolveProviderAccount = (spec) => accounts.find((account) => account.id === spec.providerAccountId);
+    // This fake provider tests the background-work handoff, without writing Claude transcripts.
+    // The account-switch filesystem regression exercises the real history transfer.
+    internals.transferAccountTranscript = async () => {};
     internals.prepareLaunch = (meta) => {
       if (meta.providerCredentialHome) meta.env = { CLAUDE_CONFIG_DIR: meta.providerCredentialHome };
     };
