@@ -135,6 +135,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   const [detailError, setDetailError] = useState<{ skillId: string; message: string } | null>(null);
   /** The group Manage Groups opens at, from a group rule's Edit in Groups…. */
   const [groupsDialogId, setGroupsDialogId] = useState<string | undefined>();
+  /** The held commit an open Check for Updates reviews, from Review Update… (#2280). */
+  const [heldReview, setHeldReview] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | "built-in-review" | null>(null);
 
   /** The selection as of now, for async work that finishes after the user moved on. */
@@ -580,13 +582,14 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   // The open skill's actions (#1962): Add Assignment… beside ⋯ on a wide pane; on a phone the
   // detail bar's ⋯ holds Add Assignment… and then the same items.
   const addAssignment = { label: "Add Assignment…", disabled: busy, onClick: () => { setError(null); setDialog("add-assignment"); } };
+  const reviewHeldUpdate = (commit: string) => { setHeldReview(commit); setDialog("git-update"); };
   const openNewSkill = () => { setError(null); setDialog("new-skill"); };
   /** Closing a dialog that shows its own failure takes the failure with it, rather than leaving it on the page. */
   const closeErrorDialog = () => { setDialog(null); setError(null); };
   const detailMenu = detail ? skillDetailMenu(detail, busy, {
     onVersionHistory: () => setDialog("version-history"),
     onMachineVersion: () => { setVersionRunnerId(undefined); setDialog("machine-versions"); },
-    onCheckForUpdates: () => setDialog("git-update"),
+    onCheckForUpdates: () => { setHeldReview(null); setDialog("git-update"); },
     onDelete: () => void deleteSkill(detail),
   }) : [];
   const importItems = [
@@ -771,7 +774,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                   entry,
                 })}
                 onRestore={(runner, entry) => void restoreDrift(runner, entry)}
-                onReviewGitUpdate={() => setDialog("git-update")}
+                onReviewGitUpdate={reviewHeldUpdate}
                 onReviewBuiltInUpdate={() => setDialog("built-in-review")}
                 onAssign={(runnerId) => void assignRecommended(detail.id, runnerId)}
                 onChooseAgents={addAssignment.onClick}
@@ -825,7 +828,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                   saving: autoUpdateSave.state?.id === detail.id && autoUpdateSave.state.state === "saving",
                   saved: autoUpdateSave.state?.id === detail.id && autoUpdateSave.state.state === "saved",
                 }}
-                onCheckForUpdates={() => setDialog("git-update")}
+                onCheckForUpdates={() => { setHeldReview(null); setDialog("git-update"); }}
+                onReviewHeldUpdate={reviewHeldUpdate}
                 onSetAutoUpdate={(enabled) => void setGitAutoUpdate(detail.id, enabled)}
                 onShowRecommendation={() => showRecommendation(detail.id)}
                 onReviewBuiltIn={() => setDialog("built-in-review")}
@@ -859,7 +863,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       }} />}
       {(dialog === "git-import" || dialog === "git-update") && <SkillGitImportDialog
         check={dialog === "git-update" && gitSource && detail
-          ? { skillName: detail.name, source: { ...gitSource, subdirectory: gitSource.path }, autoUpdate: detail.gitAutoUpdate }
+          ? { skillName: detail.name, source: { ...gitSource, subdirectory: gitSource.path }, autoUpdate: detail.gitAutoUpdate,
+            ...(heldReview ? { heldCommit: heldReview } : {}) }
           : undefined}
         libraryVersions={new Map((skills ?? []).map((skill) => [skill.name, skill.latestVersion]))}
         onClose={() => setDialog(null)} onImported={async () => {

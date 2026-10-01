@@ -47,7 +47,11 @@ export interface SkillVersionSummary {
   builtInSource?: SkillBuiltInRelease;
 }
 
-export interface SkillGitSource { url: string; ref: string; subdirectory: string }
+export interface SkillGitSource {
+  url: string; ref: string; subdirectory: string;
+  /** Reads this commit rather than the ref's head: reviewing a held automatic update (#2280). */
+  commit?: string;
+}
 /** Opt-in unattended Git updates; `held` waits for a reviewed import through the preview. */
 export interface SkillGitAutoUpdate {
   enabled: boolean;
@@ -117,6 +121,8 @@ export interface SkillGitPreview {
     /** Where accepting this candidate deploys; see `MachineSkillPreview`. */
     deploymentImpact?: string;
   }>;
+  /** A preview of `commit`: where its ref points now, or null when that couldn't be read. */
+  refCommit?: string | null;
 }
 
 export interface SkillSummary {

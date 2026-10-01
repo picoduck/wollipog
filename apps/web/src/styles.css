@@ -14527,6 +14527,8 @@ body.shell-dock-dragging * {
   }
   .skill-git-import.is-review .skill-git-pane.review { flex: 1 1 auto; }
   .skill-git-import.is-review .skill-git-message { padding: var(--space-5); }
+  /* A held commit's branch notice sits over the panes, whose own padding spaces it. */
+  .skill-git-import.is-review .skill-git-branch { padding-bottom: 0; }
 }
 @media (max-width: 760px) {
   .modal-foot > .skill-git-reason { flex-basis: 100%; }

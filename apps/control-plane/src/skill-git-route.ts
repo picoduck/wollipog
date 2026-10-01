@@ -3,11 +3,11 @@ import type { FastifyInstance } from "fastify";
 import type { SkillsRouteDeps } from "./skills-route.js";
 import { LOCAL_OWNER_USER_ID } from "./identity.js";
 import { SkillImportConflictError } from "./db.js";
-import { discoverGitSkills, parseSkillGitSource, type SkillGitCandidate } from "./skill-git.js";
+import { discoverGitSkills, discoverGitSkillsAtCommit, parseSkillGitSource, type SkillGitCandidate } from "./skill-git.js";
 import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 
 export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDeps,
-  discover = discoverGitSkills): void {
+  discover = discoverGitSkills, discoverAtCommit = discoverGitSkillsAtCommit): void {
   type Snapshot = { owner: string; expires: number; candidates: SkillGitCandidate[]; versions: Map<string, string | null> };
   const snapshots = new Map<string, Snapshot>();
   let discovering = false;
@@ -28,7 +28,9 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
     catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
     discovering = true;
     try {
-      const candidates = await discover(source);
+      // A held update is reviewed at the commit that was held, and told where its branch is now.
+      const pinned = source.commit ? await discoverAtCommit({ ...source, commit: source.commit }) : null;
+      const candidates = pinned ? pinned.candidates : await discover(source);
       const versions = new Map<string, string | null>();
       const previews = candidates.map((candidate) => {
         const existing = deps.db.getSkillByName(candidate.name);
@@ -42,7 +44,7 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
       });
       const previewId = randomUUID();
       snapshots.set(previewId, { owner: `${principal.organizationId}:${principal.userId}`, expires: Date.now() + 600_000, candidates, versions });
-      return { previewId, candidates: previews };
+      return { previewId, candidates: previews, ...(pinned ? { refCommit: pinned.refCommit } : {}) };
     } catch (error) {
       return reply.code(400).send({ error: (error as Error).message });
     } finally { discovering = false; }

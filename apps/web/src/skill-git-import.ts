@@ -74,7 +74,32 @@ export function gitPreviewFailure(message: string): string {
   if (/^Could not read the Git source/.test(message)) {
     return "Wollipog couldn't read the repository. Check the address, the branch or tag, and your access, then try again.";
   }
+  const held = /^Could not read held commit ([a-f0-9]+)/.exec(message);
+  if (held) return gitHeldCommitFailure(held[1]!);
   return message;
+}
+
+/** A held commit the repository no longer serves: a force-push removed it, or the server can't
+ * send one commit by its hash. Only the branch's latest commit can be reviewed then. */
+export function gitHeldCommitFailure(commit: string): string {
+  return `Wollipog couldn't read commit ${shortCommit(commit)}. It may have been removed from the branch, or the server can't send a single commit.`;
+}
+
+/**
+ * The notice over the review of a held commit when its branch has moved on since the hold: both
+ * commits, and that the newer one is a review of its own (`newer`). When the branch's head couldn't
+ * be read, it says so instead. Null when the branch is still at the held commit.
+ */
+export function gitHeldBranchNotice(ref: string, held: string, refCommit: string | null | undefined):
+  { title: string; body: string; newer: boolean } | null {
+  const named = !ref || ref === "HEAD" ? null : ref;
+  if (refCommit === null) {
+    return { title: "Couldn't Check for Newer Commits", newer: false,
+      body: `Wollipog couldn't read ${named ?? "the default branch"}, so it may have newer commits. This review imports commit ${shortCommit(held)} only.` };
+  }
+  if (!refCommit || refCommit === held) return null;
+  return { title: named ? `Newer Commit on ${named}` : "Newer Commit on the Default Branch", newer: true,
+    body: `${named ?? "The default branch"} is now at commit ${shortCommit(refCommit)}. This review imports commit ${shortCommit(held)} only; review the newer commit on its own before importing it.` };
 }
 
 function plural(count: number, noun: string): string {

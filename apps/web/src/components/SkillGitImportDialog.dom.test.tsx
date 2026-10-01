@@ -61,8 +61,9 @@ const candidate = (spec: string) => {
 function server(options: { failImport?: (path: string) => boolean } = {}) {
   const requests: SkillGitSource[] = [];
   const imported: string[] = [];
+  const importedFrom: string[] = [];
   const discarded: string[] = [];
-  const pending: Array<{ resolve: (preview: SkillGitPreview) => void }> = [];
+  const pending: Array<{ resolve: (preview: SkillGitPreview) => void; reject: (error: Error) => void }> = [];
   let running = 0;
   let refused = 0;
   const client = {
@@ -71,22 +72,35 @@ function server(options: { failImport?: (path: string) => boolean } = {}) {
       requests.push(source);
       if (running > 0) { refused++; return Promise.reject(new ApiError("Another import is in progress. Finish or cancel a preview first.", 429)); }
       running++;
-      return new Promise<SkillGitPreview>((resolve) => {
-        pending.push({ resolve: (preview) => { running--; resolve(preview); } });
+      return new Promise<SkillGitPreview>((resolve, reject) => {
+        pending.push({ resolve: (preview) => { running--; resolve(preview); }, reject: (error) => { running--; reject(error); } });
       });
     },
     discardGitSkillPreview: async (id: string) => { discarded.push(id); },
-    importGitSkill: async (body: { path: string }) => {
+    importGitSkill: async (body: { previewId: string; path: string }) => {
       if (options.failImport?.(body.path)) throw new ApiError("Skill import failed. Preview the source again before retrying.", 500);
       imported.push(body.path);
+      importedFrom.push(body.previewId);
       return {} as never;
     },
   } as ApiClient;
   return {
-    client, requests, discarded, pending, imported,
+    client, requests, discarded, pending, imported, importedFrom,
     get refused() { return refused; },
     async answer(index: number, id: string, names: string[]) {
       await act(async () => { pending[index]!.resolve({ previewId: id, candidates: names.map(candidate) }); });
+      await settle();
+    },
+    /** Answers a read of one commit: its candidates are of `commit`, and `refCommit` is the branch's head. */
+    async answerAt(index: number, id: string, names: string[], commit: string, refCommit?: string | null) {
+      await act(async () => {
+        pending[index]!.resolve({ previewId: id, candidates: names.map((name) => ({ ...candidate(name), commit })),
+          ...(refCommit === undefined ? {} : { refCommit }) });
+      });
+      await settle();
+    },
+    async fail(index: number, message: string) {
+      await act(async () => { pending[index]!.reject(new ApiError(message, 400)); });
       await settle();
     },
   };
@@ -240,5 +254,106 @@ test("a partial import keeps its failure and the rows left, even when they all m
   assert.ok(!heading("code-review Is Up to Date"), "the remaining identical row does not end the review");
   assert.match(document.querySelector('[role="alert"]')?.textContent ?? "", /Skill import failed/);
   assert.equal(document.querySelectorAll(".choice-row").length, 1, "lint-rules is still there to retry");
+  await unmount();
+});
+
+const HELD = "a1b2c3d4e5f6".padEnd(40, "1");
+const NEWER = "0f9e8d7c6b5a".padEnd(40, "2");
+const heldCheck: SkillGitUpdateCheck = { skillName: "code-review", heldCommit: HELD,
+  source: { url: "https://github.com/example/skills.git", ref: "main", subdirectory: "skills/code-review" } };
+const dialogTitle = () => document.querySelector('[role="dialog"] h2')?.textContent;
+const notice = (title: string) => document.querySelector(`section[aria-label="${title}"]`);
+const alertText = () => document.querySelector('[role="alert"]')?.textContent ?? "";
+
+test("Review Update… reads the held commit, names both commits once the branch moved, and imports the held one", async () => {
+  const fake = server();
+  const unmount = await mount(fake.client, heldCheck);
+  assert.deepEqual(fake.requests, [{ url: "https://github.com/example/skills.git", ref: "main", subdirectory: "skills/code-review", commit: HELD }]);
+  await fake.answerAt(0, "held", ["code-review:update"], HELD, NEWER);
+  assert.equal(dialogTitle(), "Review Held Update");
+  const moved = notice("Newer Commit on main");
+  assert.ok(moved, "the branch's move is a notice over the review");
+  assert.equal(moved.querySelector(".notice-body")?.textContent,
+    "main is now at commit 0f9e8d7c6b5a. This review imports commit a1b2c3d4e5f6 only; review the newer commit on its own before importing it.");
+  assert.match(document.querySelector(".skill-git-strip")?.textContent ?? "", /a1b2c3d4e5f6/);
+  assert.ok(checkbox("code-review").checked);
+  await act(async () => button("Import Update").click());
+  await settle();
+  assert.deepEqual(fake.importedFrom, ["held"], "the import is of the held commit's preview");
+  await unmount();
+});
+
+test("Review Newer Commit is a review of its own: the branch's head, nothing carried over", async () => {
+  const fake = server();
+  const unmount = await mount(fake.client, { ...heldCheck, source: { ...heldCheck.source, ref: "HEAD" } });
+  await fake.answerAt(0, "held", ["code-review:update"], HELD, NEWER);
+  assert.ok(notice("Newer Commit on the Default Branch"));
+  await act(async () => checkbox("code-review").click());
+  await settle();
+  await act(async () => button("Review Newer Commit").click());
+  await settle();
+  assert.deepEqual(fake.discarded, ["held"], "the held commit's preview is discarded");
+  // The field leaves the default branch empty, and the read is the branch's head: no commit.
+  assert.deepEqual(fake.requests[1], { url: "https://github.com/example/skills.git", ref: "", subdirectory: "skills/code-review" });
+  await fake.answerAt(1, "newer", ["code-review:update"], NEWER);
+  assert.equal(dialogTitle(), "Check for Updates");
+  assertNoDomNode(notice("Newer Commit on the Default Branch"), "the newer commit's review has no held notice");
+  assert.match(document.querySelector(".skill-git-strip")?.textContent ?? "", /0f9e8d7c6b5a/);
+  assert.ok(checkbox("code-review").checked, "the newer review starts from its own defaults");
+  await nextFrame();
+  assert.ok(document.querySelector('[role="dialog"]')!.contains(document.activeElement), "focus stays inside the dialog");
+  await unmount();
+});
+
+test("a held commit still at the branch's head shows no notice; an unreadable head says so", async () => {
+  const fake = server();
+  let unmount = await mount(fake.client, heldCheck);
+  await fake.answerAt(0, "current", ["code-review:update"], HELD, HELD);
+  assertNoDomNode(document.querySelector(".skill-git-branch"), "nothing moved");
+  await unmount();
+  unmount = await mount(fake.client, heldCheck);
+  await fake.answerAt(1, "unknown", ["code-review:update"], HELD, null);
+  const unknown = notice("Couldn't Check for Newer Commits");
+  assert.ok(unknown);
+  assert.equal(unknown.querySelectorAll("button").length, 0, "there is no newer commit to offer");
+  assert.match(unknown.textContent ?? "", /This review imports commit a1b2c3d4e5f6 only\./);
+  await unmount();
+});
+
+test("an identical held commit is Up to Date and still names the newer commit to review", async () => {
+  const fake = server();
+  const unmount = await mount(fake.client, heldCheck);
+  await fake.answerAt(0, "same", ["code-review:identical"], HELD, NEWER);
+  assert.ok(heading("code-review Is Up to Date"));
+  assert.ok(notice("Newer Commit on main"));
+  await act(async () => button("Review Newer Commit").click());
+  await settle();
+  assert.equal(fake.requests[1]!.commit, undefined);
+  await fake.answerAt(1, "newer", ["code-review:update"], NEWER);
+  assert.ok(!heading("code-review Is Up to Date"));
+  assert.ok(checkbox("code-review").checked);
+  await unmount();
+});
+
+test("a held commit the server can't read, or answers with another commit, is refused with a way to the latest", async () => {
+  const fake = server();
+  const unmount = await mount(fake.client, heldCheck);
+  // A control plane that ignores the pin answers with the branch's head; importing it would skip the review.
+  await fake.answerAt(0, "head", ["code-review:update"], NEWER);
+  assert.deepEqual(fake.discarded, ["head"]);
+  assert.equal(document.querySelectorAll(".choice-row").length, 0, "nothing from the wrong commit is offered");
+  assert.match(alertText(), /Couldn't Read the Held Commit/);
+  assert.match(alertText(), /Wollipog couldn't read commit a1b2c3d4e5f6\. It may have been removed from the branch, or the server can't send a single commit\./);
+  await act(async () => button("Try Again").click());
+  await settle();
+  assert.equal(fake.requests[1]!.commit, HELD, "Try Again reads the held commit again");
+  await fake.fail(1, "Could not read held commit a1b2c3d4e5f6 from the Git source. It may have been removed from the branch.");
+  assert.match(alertText(), /Wollipog couldn't read commit a1b2c3d4e5f6\./);
+  await act(async () => button("Review Latest Commit").click());
+  await settle();
+  assert.equal(fake.requests[2]!.commit, undefined, "the latest commit is read without the pin");
+  await fake.answerAt(2, "latest", ["code-review:update"], NEWER);
+  assert.equal(dialogTitle(), "Check for Updates");
+  assert.ok(checkbox("code-review").checked);
   await unmount();
 });

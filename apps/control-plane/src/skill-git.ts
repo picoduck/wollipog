@@ -8,13 +8,22 @@ import { SKILL_MAX_FILE_BYTES, SKILL_MAX_FILES, SKILL_MAX_TOTAL_BYTES, type Skil
 import { readSkillFrontmatter, validateSkillPayload, type ValidatedSkillPayload } from "./skills.js";
 
 const exec = promisify(execFile);
-export interface SkillGitSource { url: string; ref: string; subdirectory: string }
+export interface SkillGitSource {
+  url: string;
+  ref: string;
+  subdirectory: string;
+  /** Reads this commit instead of the ref's head: the review of a held automatic update. `ref`
+   * stays the tracked branch, so the import's provenance keeps following it. */
+  commit?: string;
+}
 export interface SkillGitCandidate extends ValidatedSkillPayload {
   path: string;
   commit: string;
   source: SkillGitSource;
   executablePaths: string[];
 }
+/** A held commit's snapshot, and the commit its tracked ref points at now (null when unreadable). */
+export interface SkillGitCommitDiscovery { candidates: SkillGitCandidate[]; refCommit: string | null }
 
 /** Bound fetch storage too, before any untrusted tree is inspected. No checkout is created. */
 async function checkRepositoryBudget(directory: string): Promise<void> {
@@ -63,10 +72,18 @@ export function parseSkillGitSource(input: unknown): SkillGitSource {
         !part || part === "." || part === ".." || /[\\\x00-\x1f\x7f]/.test(part))))) {
     throw new Error("Use a relative repository subdirectory without traversal.");
   }
-  return { url: url.href, ref, subdirectory };
+  const commit = value.commit;
+  if (commit !== undefined && (typeof commit !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit))) {
+    throw new Error("Use a full commit hash to review a held update.");
+  }
+  return { url: url.href, ref, subdirectory, ...(commit ? { commit } : {}) };
 }
 
-export async function discoverGitSkills(source: SkillGitSource): Promise<SkillGitCandidate[]> {
+type GitReader = (args: string[], maxBuffer?: number) => Promise<Buffer>;
+
+/** Runs `read` in an empty bare repository bounded in time, size and transports, removed afterwards.
+ * `checkBudget` bounds what a fetch stored before any of it is inspected. */
+async function withGitRepository<T>(read: (git: GitReader, checkBudget: () => Promise<void>) => Promise<T>): Promise<T> {
   const directory = await mkdtemp(join(tmpdir(), "wollipog-skill-git-"));
   const abort = new AbortController();
   let checking = false;
@@ -78,7 +95,7 @@ export async function discoverGitSkills(source: SkillGitSource): Promise<SkillGi
   watchdog.unref();
   const deadline = setTimeout(() => abort.abort(), 90_000);
   deadline.unref();
-  const git = async (args: string[], maxBuffer = 2 * 1024 * 1024): Promise<Buffer> => {
+  const git: GitReader = async (args, maxBuffer = 2 * 1024 * 1024) => {
     try {
       const result = await exec("git", ["-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
         "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always", "-C", directory, ...args], {
@@ -93,9 +110,7 @@ export async function discoverGitSkills(source: SkillGitSource): Promise<SkillGi
   };
   try {
     await git(["init", "--bare", "--template=", "."]);
-    await git(["-c", "fetch.unpackLimit=1", "fetch", "--depth=1", "--no-tags", "--no-recurse-submodules", "--", source.url, source.ref]);
-    await checkRepositoryBudget(directory);
-    return await readGitSkillSnapshot(source, git);
+    return await read(git, () => checkRepositoryBudget(directory));
   } finally {
     clearInterval(watchdog);
     clearTimeout(deadline);
@@ -103,11 +118,52 @@ export async function discoverGitSkills(source: SkillGitSource): Promise<SkillGi
   }
 }
 
+const fetchArgs = (url: string, want: string, options: string[] = []) =>
+  ["-c", "fetch.unpackLimit=1", "fetch", "--depth=1", ...options, "--no-tags", "--no-recurse-submodules", "--", url, want];
+
+/** A held commit the source no longer serves (or never did); the review offers the ref's head. */
+export const heldCommitUnreadable = (commit: string) =>
+  `Could not read held commit ${commit.slice(0, 12)} from the Git source. It may have been removed from the branch.`;
+
+export async function discoverGitSkills(source: SkillGitSource): Promise<SkillGitCandidate[]> {
+  return await withGitRepository(async (git, checkBudget) => {
+    await git(fetchArgs(source.url, source.ref));
+    await checkBudget();
+    return await readGitSkillSnapshot(source, git);
+  });
+}
+
+/**
+ * Reads exactly `source.commit` (a held update), then where `source.ref` points now, so the review
+ * can say the branch moved on since the hold. The ref is resolved by the same fetch an unpinned
+ * read uses, but only its commit object is wanted: a newer commit is reviewed on its own preview.
+ */
+export async function discoverGitSkillsAtCommit(source: SkillGitSource & { commit: string }): Promise<SkillGitCommitDiscovery> {
+  return await withGitRepository(async (git, checkBudget) => {
+    try { await git(fetchArgs(source.url, source.commit)); }
+    catch { throw new Error(heldCommitUnreadable(source.commit)); }
+    await checkBudget();
+    const candidates = await readGitSkillSnapshot(source, git);
+    let refCommit: string | null = null;
+    try {
+      // A server without partial-clone support ignores the filter and sends the tree as well.
+      await git(fetchArgs(source.url, source.ref, ["--filter=tree:0"]));
+      await checkBudget();
+      const head = (await git(["rev-parse", "--verify", "FETCH_HEAD^{commit}"])).toString("utf8").trim();
+      if (/^[a-f0-9]{40,64}$/.test(head)) refCommit = head;
+    } catch {
+      // The held commit is still reviewable; the dialog says the branch's head is unknown.
+    }
+    return { candidates, refCommit };
+  });
+}
+
 /** Object-reader seam also exercises the importer against local Git fixtures without network. */
 export async function readGitSkillSnapshot(source: SkillGitSource,
   git: (args: string[], maxBuffer?: number) => Promise<Buffer>): Promise<SkillGitCandidate[]> {
     const commit = (await git(["rev-parse", "--verify", "FETCH_HEAD^{commit}"])).toString("utf8").trim();
     if (!/^[a-f0-9]{40,64}$/.test(commit)) throw new Error("The source did not resolve to a commit.");
+    if (source.commit && commit !== source.commit) throw new Error(heldCommitUnreadable(source.commit));
     const tree = (await git(["ls-tree", "-r", "-z", "-l", commit])).toString("utf8");
     const entries = tree.split("\0").filter(Boolean).map((line) => {
       const match = /^(\d+) (\w+) ([a-f0-9]+)\s+(\d+|-)\t([\s\S]+)$/.exec(line);

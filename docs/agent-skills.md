@@ -568,10 +568,16 @@ a preview. A check compares the fetched tip with the last commit handled for the
   comparison. For a version imported before that was recorded, the first update that changes an
   existing file is held once. Removing a script is not held. Instruction and data changes, such
   as `SKILL.md` text, apply automatically by design; opting in accepts them. The update is also held when the library's latest version has local edits
-  without Git provenance, so an upstream commit cannot silently replace them. **Review Held
-  Update** opens the same preview and diff acceptance as **Check for Updates**, and a reviewed
-  import clears the hold. A later commit is compared with the current library version again, so
-  a hold is replaced or cleared as upstream changes.
+  without Git provenance, so an upstream commit cannot silently replace them. **Review Update…**
+  on the held notice opens the same preview and diff acceptance as **Check for Updates**, but of
+  the held commit itself, fetched by hash, even when the ref has moved on since the hold. The
+  imported version records that commit while keeping the tracked ref, and a reviewed import
+  clears the hold. When the ref now points elsewhere, the review names both commits, and the
+  newer one is a separate preview (or the next check holds it again). A server that cannot send a
+  single commit by hash (Git protocol v0 without `uploadpack.allowReachableSHA1InWant`), or a
+  commit removed by a force-push, fails the review and offers the ref's latest commit instead.
+  A later commit is compared with the current library version again, so a hold is replaced or
+  cleared as upstream changes.
 - Fetch, validation, or rename failure: the error is recorded on the skill and existing versions
   and deployments stay unchanged. The next attempt is one interval later.
 - The library changes during a check: the result is discarded and the skill is checked again.

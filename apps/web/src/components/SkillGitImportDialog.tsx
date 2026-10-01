@@ -4,6 +4,8 @@ import {
   gitCandidateConsequence,
   gitCandidateCounts,
   gitFolderError,
+  gitHeldBranchNotice,
+  gitHeldCommitFailure,
   gitImportLabel,
   gitNextCheckText,
   gitPreviewFailure,
@@ -19,6 +21,7 @@ import { FieldError } from "./FieldError.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { BranchIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
+import { Notice } from "./Notice.js";
 import { deployToAssignmentsConsent, isDeploymentImpactConflict, ReviewConflict, ReviewConsent } from "./ReviewConsent.js";
 import { SkillReviewChanges, SkillReviewFacts, skillReviewSafetyNote } from "./SkillReviewParts.js";
 import { State } from "./State.js";
@@ -30,6 +33,9 @@ export interface SkillGitUpdateCheck {
   skillName: string;
   source: SkillGitSource;
   autoUpdate?: SkillGitAutoUpdate;
+  /** Review Update… on a held update: the commit its notice names. The review reads exactly that
+   * commit, not the branch's head, which may have moved on since the hold (#2280). */
+  heldCommit?: string;
 }
 
 type Fields = Record<SkillGitField, string>;
@@ -78,6 +84,9 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
   const [step, setStep] = useState<"source" | "review">(check ? "review" : "source");
   /** The source the shown preview (or the one being read) came from, for the strip. */
   const [reviewed, setReviewed] = useState<Fields>(fields);
+  /** The held commit the shown preview (or the one being read) is of; null reads the ref's head.
+   * Review Newer Commit and Change Source drop it for good. */
+  const [held, setHeld] = useState<string | null>(check?.heldCommit ?? null);
   const [finding, setFinding] = useState(Boolean(check));
   const [preview, setPreview] = useState<SkillGitPreview | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -163,8 +172,9 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
    * Read a preview of the source. From step one, Find Skills stays busy there until the preview
    * arrives, and a failure stays there too; from step two (opened from a skill, Try Again, or
    * Preview Again after a conflict, which keeps what was checked) the review shows the read.
+   * `commit` reads that held commit instead of the ref's head.
    */
-  const find = async (again = false) => {
+  const find = async (again = false, commit = held) => {
     const errors: Partial<Fields> = {};
     for (const name of ["url", "ref", "folder"] as const) {
       const message = validate(name, fields[name]);
@@ -173,6 +183,7 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
     setFieldErrors(errors);
     const invalid = (["url", "ref", "folder"] as const).find((name) => errors[name]);
     if (invalid) {
+      setHeld(null);
       setStep("source");
       focusField.current = invalid;
       return;
@@ -182,6 +193,7 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
     const source = { url: fields.url.trim(), ref: fields.ref, folder: fields.folder };
     const keep = again ? checked : [];
     setReviewed(source);
+    setHeld(commit);
     setFinding(true);
     setFailure(null); setError(null); setConflict(null); setAccepted(false); setUpToDate(false);
     if (previewRef.current) discard(previewRef.current.previewId);
@@ -199,11 +211,18 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
         if (runningDiscovery === waited) runningDiscovery = null;
         if (!current()) return;
       }
-      const reading = api.previewGitSkills({ url: source.url, ref: source.ref, subdirectory: source.folder });
+      const reading = api.previewGitSkills({ url: source.url, ref: source.ref, subdirectory: source.folder, ...(commit ? { commit } : {}) });
       runningDiscovery = reading;
       void reading.catch(() => undefined).finally(() => { if (runningDiscovery === reading) runningDiscovery = null; });
       const next = await reading;
       if (!current()) { discard(next.previewId); return; }
+      // A control plane that can't read one commit returns the head: importing it would skip the
+      // review the hold asked for, so it is refused like an unreadable commit.
+      if (commit && next.candidates.some((entry) => entry.commit !== commit)) {
+        discard(next.previewId);
+        setFailure(gitHeldCommitFailure(commit));
+        return;
+      }
       const paths = new Set(next.candidates.map((entry) => entry.path));
       const initial = again ? keep.filter((path) => paths.has(path))
         : check ? next.candidates.filter((entry) => entry.name === check.skillName && entry.disposition === "update").map((entry) => entry.path)
@@ -239,6 +258,7 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
 
   const changeSource = () => {
     generation.current++;
+    setHeld(null);
     if (previewRef.current) discard(previewRef.current.previewId);
     setPreview(null); setFinding(false); setFailure(null); setError(null); setConflict(null);
     setChecked([]); setAccepted(false); setUpToDate(false);
@@ -331,7 +351,7 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
     {failure && <State variant="error" title="Couldn't Read the Repository">{failure}</State>}
   </form>;
 
-  const commit = candidates[0]?.commit;
+  const commit = candidates[0]?.commit ?? held;
   const strip = <div className="skill-git-strip">
     <SkillReviewFacts facts={[
       { label: "Repository", value: reviewed.url },
@@ -342,17 +362,35 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
   </div>;
 
   const nextCheck = upToDate ? gitNextCheckText(check?.autoUpdate, Date.now()) : null;
+  // Reading the branch's head is a new review, so nothing checked or accepted for the held commit carries over.
+  const reviewLatest = () => void find(false, null);
+  const branchNotice = held && preview && !finding ? gitHeldBranchNotice(reviewed.ref, held, preview.refCommit) : null;
+  const branch = branchNotice && <div className="skill-git-message skill-git-branch">
+    <Notice as="section" tone="info" title={branchNotice.title} ariaLabel={branchNotice.title}
+      actions={branchNotice.newer
+        ? <button type="button" className="btn sm" disabled={importing} onClick={reviewLatest}>Review Newer Commit</button>
+        : undefined}>
+      <p>{branchNotice.body}</p>
+    </Notice>
+  </div>;
   const review = upToDate && preview
-    ? <State icon={<BranchIcon size={24} />} title={`${check!.skillName} Is Up to Date`} headingLevel={3} compact>
-      <p>Commit <span className="mono">{shortCommit(candidates[0]!.commit)}</span> on {reviewed.ref || "the default branch"} has the same files as the library.</p>
-      {nextCheck && <p>{nextCheck}</p>}
-    </State>
+    ? <>
+      <State icon={<BranchIcon size={24} />} title={`${check!.skillName} Is Up to Date`} headingLevel={3} compact>
+        <p>Commit <span className="mono">{shortCommit(candidates[0]!.commit)}</span> on {reviewed.ref || "the default branch"} has the same files as the library.</p>
+        {nextCheck && <p>{nextCheck}</p>}
+      </State>
+      {branch}
+    </>
     : <>
       {strip}
+      {branch}
       {failure
         ? <div className="skill-git-message">
-          <State variant="error" title="Couldn't Read the Repository"
-            actions={<button type="button" className="btn sm" onClick={() => void find()}>Try Again</button>}>{failure}</State>
+          <State variant="error" title={held ? "Couldn't Read the Held Commit" : "Couldn't Read the Repository"}
+            actions={<>
+              <button type="button" className="btn sm" onClick={() => void find()}>Try Again</button>
+              {held && <button type="button" className="btn sm" onClick={reviewLatest}>Review Latest Commit</button>}
+            </>}>{failure}</State>
         </div>
         : finding
           ? <div className="skill-git-panes">
@@ -406,7 +444,7 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
   const primaryBlocked = step === "source" ? finding
     : finding || !preview || !checkedCandidates.length || conflict !== null || (needsConsent && !accepted);
 
-  return <Modal title={check ? "Check for Updates" : "Import from Git"} size="lg" phoneSheet="full"
+  return <Modal title={check ? held ? "Review Held Update" : "Check for Updates" : "Import from Git"} size="lg" phoneSheet="full"
     className={`skill-review skill-git-import${step === "review" && !upToDate ? " is-review" : ""}`}
     description={step === "source" ? "Find the skills in a repository, then review every file before importing." : undefined}
     onClose={close} footer={<>

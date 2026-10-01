@@ -123,7 +123,8 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await install(page, { ...off, enabled: true, checkedAt: at, checkedCommit: "c".repeat(40),
       held: { commit: "c".repeat(40), reason: "scripts", scriptPaths: ["scripts/collect.sh", "tool.py"], heldAt: at } });
     await page.route("**/api/skill-git/preview", async (route) => {
-      expect(route.request().postDataJSON()).toEqual({ url: gitSource.url, ref: "main", subdirectory: "skills/code-review" });
+      // The held commit, not the branch's head (#2280).
+      expect(route.request().postDataJSON()).toEqual({ url: gitSource.url, ref: "main", subdirectory: "skills/code-review", commit: "c".repeat(40) });
       await route.fulfill({ json: { previewId: "held", candidates: [] } });
     });
     await open(page);
@@ -139,8 +140,8 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     expect(await stretched(page)).toEqual([]);
     await page.screenshot({ path: info.outputPath(`git-auto-update-held-${width}-${theme}.png`), fullPage: true });
     await held.getByRole("button", { name: "Review Update…" }).click();
-    // It opens on the review of the recorded source (#1983), which the route above checks.
-    await expect(page.getByRole("dialog", { name: "Check for Updates", exact: true })).toBeVisible();
+    // It opens on the review of the held commit of the recorded source (#1983, #2280), which the route above checks.
+    await expect(page.getByRole("dialog", { name: "Review Held Update", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "No Skills Found", exact: true })).toBeVisible();
   });
 }
@@ -166,7 +167,7 @@ test("a held update behind a more urgent notice is a notice inside Source with R
   await source(page).scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath("git-auto-update-held-in-source-1280.png"), fullPage: true });
   await held.getByRole("button", { name: "Review Update…" }).click();
-  await expect(page.getByRole("dialog", { name: "Check for Updates", exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Review Held Update", exact: true })).toBeVisible();
 });
 
 test("a failed check is a danger notice in Source with Check for Updates… and Show Details", async ({ page }, info) => {
@@ -195,4 +196,86 @@ test("an update over an import without recorded modes explains its one-time revi
     .toContainText(`Commit ${"e".repeat(12)} changes SKILL.md and tool, which the last import didn't check for scripts.`);
   await expect(page.getByRole("button", { name: "Review Update…" })).toHaveCount(1);
   await page.screenshot({ path: info.outputPath("git-auto-update-untracked-390.png"), fullPage: true });
+});
+
+// #2280: Review Update… reads the commit the notice names, even after the branch moved on.
+const heldCommit = "a1b2c3d4e5f6".padEnd(40, "1");
+const newerCommit = "0f9e8d7c6b5a".padEnd(40, "2");
+const reviewFile = (path: string, content: string) => ({ path, encoding: "utf8", content });
+const heldCandidate = (commit: string, script: string) => ({
+  name: "code-review", path: "skills/code-review", commit, digest: `d-${commit.slice(0, 4)}`,
+  source: { url: gitSource.url, ref: "main", subdirectory: "skills/code-review" },
+  files: [reviewFile("SKILL.md", "---\nname: code-review\n---\n\nAlways review the diff.\n"), reviewFile("scripts/collect.sh", script)],
+  previousFiles: [reviewFile("SKILL.md", "---\nname: code-review\n---\n\nAlways review the diff.\n")],
+  disposition: "update", assignmentCount: 0, executablePaths: [],
+});
+
+async function movedBranch(page: Page) {
+  await install(page, { ...off, enabled: true, checkedAt: at, checkedCommit: heldCommit,
+    held: { commit: heldCommit, reason: "scripts", scriptPaths: ["scripts/collect.sh"], heldAt: at } });
+  const previews: unknown[] = [];
+  const imports: unknown[] = [];
+  await page.route("**/api/skill-git/preview", async (route) => {
+    const body = route.request().postDataJSON() as { commit?: string };
+    previews.push(body);
+    await route.fulfill({ json: body.commit
+      ? { previewId: "held", candidates: [heldCandidate(heldCommit, "#!/bin/sh\ngit log -1\n")], refCommit: newerCommit }
+      : { previewId: "newer", candidates: [heldCandidate(newerCommit, "#!/bin/sh\ngit log -1\ncurl -fsS https://example.com/collect\n")] } });
+  });
+  await page.route("**/api/skill-git/preview/*", (route) => route.fulfill({ status: 204 }));
+  await page.route("**/api/skill-git/import", async (route) => {
+    imports.push(route.request().postDataJSON());
+    await route.fulfill({ json: { skill: { id: "skill-1", name: "code-review" } } });
+  });
+  await open(page);
+  await page.getByRole("region", { name: "Update Held for Review" }).getByRole("button", { name: "Review Update…" }).click();
+  return { previews, imports };
+}
+
+for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
+  test(`a held update whose branch moved on reviews the held commit and names the newer one at ${width} in ${theme}`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const { previews, imports } = await movedBranch(page);
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    const dialog = page.getByRole("dialog", { name: "Review Held Update", exact: true });
+    await expect(dialog).toBeVisible();
+    expect(previews).toEqual([{ url: gitSource.url, ref: "main", subdirectory: "skills/code-review", commit: heldCommit }]);
+    const moved = dialog.getByRole("region", { name: "Newer Commit on main" });
+    await expect(moved).toContainText("main is now at commit 0f9e8d7c6b5a. This review imports commit a1b2c3d4e5f6 only; review the newer commit on its own before importing it.");
+    await expect(dialog.locator(".skill-git-strip .skill-review-facts dd")).toHaveText([gitSource.url, "main", "a1b2c3d4e5f6"]);
+    await expect(dialog.getByRole("checkbox", { name: "code-review", exact: true })).toBeChecked();
+    await expect(dialog.locator(".skill-git-pane.review")).toContainText("git log -1");
+    await expect(dialog.locator(".skill-git-pane.review")).not.toContainText("curl");
+    expect(await dialog.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(false);
+    await page.mouse.move(0, 0);
+    await page.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== "running" ||
+      animation.effect?.getComputedTiming().iterations === Infinity));
+    await page.screenshot({ path: info.outputPath(`git-held-review-moved-${width}-${theme}.png`) });
+    if (width === 390 || theme === "light") return;
+
+    await dialog.getByRole("button", { name: "Import Update", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(imports).toEqual([{ previewId: "held", path: "skills/code-review", acceptUpdate: true }]);
+  });
+}
+
+test("Review Newer Commit is a separate review of the branch's head", async ({ page }, info) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const { previews, imports } = await movedBranch(page);
+  const held = page.getByRole("dialog", { name: "Review Held Update", exact: true });
+  await held.getByRole("button", { name: "Review Newer Commit", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Check for Updates", exact: true });
+  await expect(dialog.locator(".skill-git-strip .skill-review-facts dd")).toHaveText([gitSource.url, "main", "0f9e8d7c6b5a"]);
+  expect(previews).toEqual([
+    { url: gitSource.url, ref: "main", subdirectory: "skills/code-review", commit: heldCommit },
+    { url: gitSource.url, ref: "main", subdirectory: "skills/code-review" },
+  ]);
+  await expect(dialog.getByRole("region", { name: "Newer Commit on main" })).toHaveCount(0);
+  await expect(dialog.locator(".skill-git-pane.review")).toContainText("curl -fsS https://example.com/collect");
+  expect(await page.evaluate(() => Boolean(document.activeElement?.closest("[role='dialog']")))).toBe(true);
+  await page.mouse.move(0, 0);
+  await page.screenshot({ path: info.outputPath("git-held-review-newer-1280-dark.png") });
+  await dialog.getByRole("button", { name: "Import Update", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(imports).toEqual([{ previewId: "newer", path: "skills/code-review", acceptUpdate: true }]);
 });

@@ -180,12 +180,12 @@ export function RecommendedNotice({ runners, machineLabels, busy, onAssign, onCh
 }
 
 /** A held Git update and its review (#1972). The slot shows it when nothing outranks it; otherwise
- * Source does, so it is one notice in one place. Review Update… opens Check for Updates on the
- * tracked ref. */
+ * Source does, so it is one notice in one place. Review Update… reviews the commit it names, not
+ * the tracked ref's head, which may have moved on (#2280). */
 export function GitHeldNotice({ held, busy, onReview }: {
   held: NonNullable<SkillGitAutoUpdate["held"]>;
   busy: boolean;
-  onReview: () => void;
+  onReview: (commit: string) => void;
 }) {
   const commit = held.commit.slice(0, 12);
   const paths = listText(held.scriptPaths, 3);
@@ -195,7 +195,7 @@ export function GitHeldNotice({ held, busy, onReview }: {
       tone="warning"
       title="Update Held for Review"
       ariaLabel="Update Held for Review"
-      actions={<button type="button" className="btn sm" disabled={busy} onClick={onReview}>Review Update…</button>}
+      actions={<button type="button" className="btn sm" disabled={busy} onClick={() => onReview(held.commit)}>Review Update…</button>}
     >
       <p>
         {held.reason === "scripts" && paths ? `Commit ${commit} adds or changes ${paths}.`
@@ -229,7 +229,8 @@ export interface SkillNoticeSlotProps<T extends SkillRule> {
   onSync: (runnerId: string) => void;
   onReviewEdit: (runnerId: string, entry: SkillDriftState) => void;
   onRestore: (runner: RunnerView, entry: SkillDriftState) => void;
-  onReviewGitUpdate: () => void;
+  /** Review Update… on a held Git update, with the commit its notice names. */
+  onReviewGitUpdate: (commit: string) => void;
   onReviewBuiltInUpdate: () => void;
   onAssign: (runnerId: string | null) => void;
   onChooseAgents: () => void;

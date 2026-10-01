@@ -29,6 +29,8 @@ export interface SkillSourceProps {
   /** Automatic Updates' own request is in flight, and whether its "Saved" check shows. */
   autoUpdate: { saving: boolean; saved: boolean };
   onCheckForUpdates: () => void;
+  /** Review Update… on the held update Source shows, with the commit it names. */
+  onReviewHeldUpdate: (commit: string) => void;
   onSetAutoUpdate: (enabled: boolean) => void;
   onShowRecommendation: () => void;
   onReviewBuiltIn: () => void;
@@ -62,7 +64,7 @@ export function SkillSource(props: SkillSourceProps) {
       actions={git && <button type="button" className="btn ghost sm" onClick={props.onCheckForUpdates}>Check for Updates…</button>}
     >
       <div className="surface skill-source">
-        {held && <GitHeldNotice held={held} busy={busy} onReview={props.onCheckForUpdates} />}
+        {held && <GitHeldNotice held={held} busy={busy} onReview={props.onReviewHeldUpdate} />}
         {failed && <GitCheckFailedNotice error={failed} busy={busy} onCheck={props.onCheckForUpdates} />}
         {offer && (
           <Notice

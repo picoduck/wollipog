@@ -10,6 +10,8 @@ import {
   gitCandidateConsequence,
   gitCandidateCounts,
   gitFolderError,
+  gitHeldBranchNotice,
+  gitHeldCommitFailure,
   gitImportLabel,
   gitNextCheckText,
   gitPreviewFailure,
@@ -129,4 +131,21 @@ test("Up to Date names the next automatic check only while automatic updates are
   assert.equal(gitNextCheckText({ enabled: true, checkedAt: now - 15 * 60_000 }, now), "Automatic updates check again in 45 minutes.");
   assert.equal(gitNextCheckText({ enabled: true, checkedAt: now - 60 * 60_000 }, now), "Automatic updates check again within a minute.");
   assert.equal(gitNextCheckText({ enabled: true, checkedAt: now, intervalMs: 6 * 60 * 60_000 }, now), "Automatic updates check again in 6 hours.");
+});
+
+test("a held commit's review names the branch's newer commit, or says the branch couldn't be read", () => {
+  const held = "a1b2c3d4e5f6".padEnd(40, "1");
+  const newer = "0f9e8d7c6b5a".padEnd(40, "2");
+  assert.equal(gitHeldBranchNotice("main", held, held), null);
+  assert.equal(gitHeldBranchNotice("main", held, undefined), null, "a control plane that predates the field says nothing");
+  assert.deepEqual(gitHeldBranchNotice("main", held, newer), { title: "Newer Commit on main", newer: true,
+    body: "main is now at commit 0f9e8d7c6b5a. This review imports commit a1b2c3d4e5f6 only; review the newer commit on its own before importing it." });
+  assert.equal(gitHeldBranchNotice("HEAD", held, newer)?.title, "Newer Commit on the Default Branch");
+  assert.match(gitHeldBranchNotice("", held, newer)!.body, /^The default branch is now at commit 0f9e8d7c6b5a\./);
+  assert.deepEqual(gitHeldBranchNotice("release/2", held, null), { title: "Couldn't Check for Newer Commits", newer: false,
+    body: "Wollipog couldn't read release/2, so it may have newer commits. This review imports commit a1b2c3d4e5f6 only." });
+  assert.equal(gitPreviewFailure("Could not read held commit a1b2c3d4e5f6 from the Git source. It may have been removed from the branch."),
+    gitHeldCommitFailure(held));
+  assert.equal(gitHeldCommitFailure(held),
+    "Wollipog couldn't read commit a1b2c3d4e5f6. It may have been removed from the branch, or the server can't send a single commit.");
 });
