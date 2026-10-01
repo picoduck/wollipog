@@ -715,6 +715,21 @@ kbd {
      used the class and became a 6-23% size change across the app the moment twenty-one more did.
      The size belongs to the call site; the rail and the sections below set their own. */
 }
+/* A multi-colour brand mark (`.multicolor-mark`, Visual Studio Code's; not the app's `.brand-mark`
+   logo) paints its shapes in fixed brand fills, so unlike a currentColor icon it would not dim with
+   its control. Inside any disabled control (a disabled menu item, an `aria-disabled` Open segment)
+   it is drawn in one ink, the control's: every painted shape takes currentColor, the drop shadows go
+   and the shading layers hide. That ink is --text-faint, or GrayText in forced colors. Busy is
+   running, not unavailable, so a busy control keeps the brand colours. A mask's fill stays: only its
+   alpha counts. */
+:is(:disabled, [aria-disabled="true"]):not([aria-busy="true"]) .multicolor-mark :not(mask, mask *)[fill]:not([fill="none"]) {
+  fill: currentColor;
+}
+:is(:disabled, [aria-disabled="true"]):not([aria-busy="true"]) .multicolor-mark :not(mask, mask *)[stroke]:not([stroke="none"]) {
+  stroke: currentColor;
+}
+:is(:disabled, [aria-disabled="true"]):not([aria-busy="true"]) .multicolor-mark [filter] { filter: none; }
+:is(:disabled, [aria-disabled="true"]):not([aria-busy="true"]) .multicolor-mark .multicolor-mark-shading { display: none; }
 
 /* ------------------------------- Layout --------------------------------- */
 .app {
@@ -1643,7 +1658,8 @@ kbd {
 /* The session bar's Open control (§3.2): the shared `.split` of two ghost segments, or one ghost
    button when the folder has a single destination. A hairline edge says it is one control without a
    fill that would make it the page's primary action. The destination icon takes the segment's ink,
-   so it dims, brightens and goes faint with the label. */
+   so it dims, brightens and goes faint with the label; a multi-colour brand mark keeps its colours
+   while the segment is enabled and goes faint with it otherwise (`.multicolor-mark`, by `.app-icon`). */
 .editor-select {
   display: inline-flex;
   flex: none;
@@ -2625,6 +2641,7 @@ button.status { cursor: pointer; }
   flex: none;
   width: var(--icon);
 }
+/* A disabled row's icon goes faint with its words, a brand mark's too (`.multicolor-mark`, by `.app-icon`). */
 .menu-item:disabled .menu-icon,
 .menu-item[aria-disabled="true"] .menu-icon { color: var(--text-faint); }
 .menu-body {
@@ -2675,9 +2692,20 @@ button.status { cursor: pointer; }
 @media (forced-colors: active) {
   .menu-check { color: inherit; }
 }
+/* A disabled row's check takes the trail's faint ink: it still says which is chosen, but not in the
+   accent that reads as available. Inheriting lets forced colors' GrayText reach it too. */
+.menu-item:is(:disabled, [aria-disabled="true"]) .menu-check { color: inherit; }
 .menu-item.danger,
 .menu-item.danger .menu-icon { color: var(--danger-text); }
 .menu-item.danger:disabled { color: var(--text-faint); }
+/* Forced colors draws a native `:disabled` row and everything in it GrayText, but an `aria-disabled`
+   row like an enabled one, and turns each part's own author colour into CanvasText rather than
+   letting it inherit. So that row names GrayText for its words, icon, trail (and so its check) and
+   reason, after the danger rules so it wins there too. */
+@media (forced-colors: active) {
+  .menu-item[aria-disabled="true"],
+  .menu-item[aria-disabled="true"] :is(.menu-icon, .menu-trail, .menu-desc) { color: GrayText; }
+}
 .menu-label {
   display: flex;
   flex: none;

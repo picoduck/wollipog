@@ -180,7 +180,7 @@ export const CSS_SURFACE = {
   "border-radius", "border-right", "border-style", "border-top", "border-top-color",
   "border-top-left-radius", "border-top-right-radius", "bottom", "box-shadow", "box-sizing",
   "clip", "clip-path", "color", "color-scheme", "column-gap", "container", "container-type", "content",
-  "counter-increment", "counter-reset", "cursor", "display", "fill", "flex",
+  "counter-increment", "counter-reset", "cursor", "display", "fill", "filter", "flex",
   "flex-basis", "flex-direction", "flex-shrink", "flex-wrap", "font", "font-display",
   "font-family", "font-size", "font-style", "font-variant-numeric", "font-weight", "gap",
   "grid-area", "grid-auto-columns", "grid-auto-flow", "grid-column", "grid-row",

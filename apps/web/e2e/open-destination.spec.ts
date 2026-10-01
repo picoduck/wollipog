@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 /**
  * The session bar's Open control (#2164; docs/design-system.md §3.2, §9.1, §15.2): a quiet split of
@@ -30,6 +30,87 @@ async function tokenColour(page: Page, token: string): Promise<string> {
     return colour;
   }, token);
 }
+
+/** The Visual Studio Code mark's brand fills, in its asset's paint order. */
+const VS_CODE_FILLS = ["rgb(0, 101, 169)", "rgb(0, 122, 204)", "rgb(31, 156, 240)"];
+
+/**
+ * How a Visual Studio Code mark paints: its drawn size, the computed fill of each brand shape,
+ * whether its overlay shading shows, and the drop-shadow filters still applied.
+ */
+async function vsCodeMarkPaint(mark: Locator) {
+  return mark.evaluate((svg) => {
+    const shading = svg.querySelector(".multicolor-mark-shading");
+    const shapes = [...svg.querySelectorAll("g[mask] path")].filter((shape) => !shading?.contains(shape));
+    const box = svg.getBoundingClientRect();
+    return {
+      size: `${box.width}x${box.height}`,
+      fills: shapes.map((shape) => getComputedStyle(shape).fill),
+      shadingDisplay: shading ? getComputedStyle(shading).display : "missing",
+      filters: [...svg.querySelectorAll("[filter]")].map((group) => getComputedStyle(group).filter),
+    };
+  });
+}
+
+function vsCodeMark(scope: Locator): Locator {
+  return scope.locator('[data-destination-icon="code"] svg.multicolor-mark');
+}
+
+for (const theme of ["dark", "light"] as const) {
+  test(`the Visual Studio Code mark keeps its brand colours while enabled and goes faint while disabled (${theme}, #2274)`, async ({ page }) => {
+    const brand = { size: "16x16", fills: VS_CODE_FILLS, shadingDisplay: "inline", filters: [expect.stringMatching(/^url\(/), expect.stringMatching(/^url\(/)] };
+    await openFixture(page, 1440, `theme=${theme}`);
+    const main = page.getByRole("button", { name: "Open in VS Code" });
+    expect(await vsCodeMarkPaint(vsCodeMark(main))).toEqual(brand);
+    await page.getByRole("button", { name: "Choose Where to Open" }).click();
+    const menu = page.getByRole("menu", { name: "Open In" });
+    const vsCodeRow = menu.getByRole("menuitemradio", { name: "VS Code" });
+    expect(await vsCodeMarkPaint(vsCodeMark(vsCodeRow))).toEqual(brand);
+    await expect(vsCodeRow.locator(".menu-check")).toHaveCSS("color", await tokenColour(page, "--accent"));
+
+    // Offline, every row and the Open segment are disabled: the mark is one faint ink, like its
+    // words and the other destinations' icons, at the full width and in the icon-only tier.
+    for (const width of [1440, 940]) {
+      await openFixture(page, width, `theme=${theme}&offline=1`);
+      const faint = await tokenColour(page, "--text-faint");
+      const disabledMark = { size: "16x16", fills: [faint, faint, faint], shadingDisplay: "none", filters: ["none", "none"] };
+      const offlineMain = page.getByRole("button", { name: "Open in VS Code" });
+      await expect(offlineMain).toHaveCSS("color", faint);
+      expect(await vsCodeMarkPaint(vsCodeMark(offlineMain))).toEqual(disabledMark);
+      await page.getByRole("button", { name: "Choose Where to Open" }).click();
+      const offlineMenu = page.getByRole("menu", { name: "Open In" });
+      const offlineRow = offlineMenu.getByRole("menuitemradio", { name: "VS Code" });
+      await expect(offlineRow).toHaveCSS("color", faint);
+      expect(await vsCodeMarkPaint(vsCodeMark(offlineRow))).toEqual(disabledMark);
+      for (const icon of await offlineMenu.locator(".menu-icon").all()) await expect(icon).toHaveCSS("color", faint);
+      await expect(offlineRow.locator(".menu-check")).toHaveCSS("color", faint);
+    }
+  });
+}
+
+test("in forced colors a disabled Visual Studio Code mark is GrayText, like its words (#2274)", async ({ page }) => {
+  await page.emulateMedia({ forcedColors: "active", colorScheme: "dark" });
+  await openFixture(page, 1440, "offline=1");
+  const grayText = await page.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.color = "GrayText";
+    document.body.append(probe);
+    const colour = getComputedStyle(probe).color;
+    probe.remove();
+    return colour;
+  });
+  const disabledMark = { size: "16x16", fills: [grayText, grayText, grayText], shadingDisplay: "none", filters: ["none", "none"] };
+  const main = page.getByRole("button", { name: "Open in VS Code" });
+  await expect(main).toHaveCSS("color", grayText);
+  expect(await vsCodeMarkPaint(vsCodeMark(main))).toEqual(disabledMark);
+  await page.getByRole("button", { name: "Choose Where to Open" }).click();
+  const menu = page.getByRole("menu", { name: "Open In" });
+  const row = menu.getByRole("menuitemradio", { name: "VS Code" });
+  await expect(row).toHaveCSS("color", grayText);
+  expect(await vsCodeMarkPaint(vsCodeMark(row))).toEqual(disabledMark);
+  await expect(row.locator(".menu-check")).toHaveCSS("color", grayText);
+  for (const icon of await menu.locator(".menu-icon svg").all()) await expect(icon).toHaveCSS("color", grayText);
+});
 
 for (const theme of ["dark", "light"] as const) {
   test(`the split is two ghost segments on a hairline, with no fill at rest (${theme})`, async ({ page }) => {

@@ -176,6 +176,33 @@ test("VS Code renders Microsoft's official stable multicolor mark", () => {
   assert.ok(vscode.querySelector('path[fill="#1F9CF0"]'));
   assert.ok(vscode.querySelector("linearGradient"));
   assert.ok(vscode.classList.contains("app-icon"));
+  // A brand mark, so a disabled control draws it in its own ink (styles.css, by `.app-icon`; #2274).
+  assert.ok(vscode.classList.contains("multicolor-mark"));
+  assert.equal(vscode.querySelectorAll(".multicolor-mark-shading").length, 1);
+  assert.ok(vscode.querySelector(".multicolor-mark-shading path[fill^='url(']"), "the overlay is the shading layer");
+  const styled = renderedSvg(renderToStaticMarkup(<VisualStudioCodeIcon className="sample" />));
+  assert.deepEqual([...styled.classList], ["app-icon", "multicolor-mark", "sample"]);
+});
+
+test("every icon painted in a fixed colour is a brand mark, so it dims with a disabled control (#2274)", async () => {
+  const icons = await import("./Icons.js");
+  const unmarked: string[] = [];
+  let painted = 0;
+  for (const [name, Icon] of Object.entries(icons)) {
+    if (!/^[A-Z]\w*Icon$/.test(name) || typeof Icon !== "function") continue;
+    const svg = renderedSvg(renderToStaticMarkup(React.createElement(Icon as React.ComponentType)));
+    // Paint that is neither absent, the control's ink nor a paint server is a fixed brand colour.
+    const fixed = [svg, ...svg.querySelectorAll("*")].some((node) =>
+      !node.closest("mask") && ["fill", "stroke", "stop-color"].some((attribute) => {
+        const value = node.getAttribute(attribute);
+        return value !== null && !/^(none|currentColor|url\(.*\))$/i.test(value);
+      }));
+    if (!fixed) continue;
+    painted += 1;
+    if (!svg.classList.contains("multicolor-mark")) unmarked.push(name);
+  }
+  assert.ok(painted >= 1, "the Visual Studio Code mark is painted in fixed colours");
+  assert.deepEqual(unmarked, []);
 });
 
 test("multiple VS Code marks receive unique paint-server ids", () => {

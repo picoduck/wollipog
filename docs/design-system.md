@@ -1335,7 +1335,11 @@ workflow step list is a different component and keeps a local name.
 - Separator: 1px `--border` with 4px vertical margin, full width.
 - Destructive items are last, after a separator, in `--danger-text`, with a trailing ellipsis if they
   confirm.
-- Disabled items: `--text-faint` with the reason as the second line.
+- Disabled items: `--text-faint` with the reason as the second line. The icon and the selection
+  check go faint with the words. A multi-colour brand mark (`.multicolor-mark`, such as the Visual
+  Studio Code mark in Open In) is drawn in that one ink inside any disabled control, and keeps its
+  brand colours only while enabled. In forced colors a disabled item, its icon and its check are
+  `GrayText`.
 - Keyboard: arrow keys, Home/End, type-ahead, Enter/Space, Escape closes and returns focus.
 - **Note** (`.menu-note`, `MenuNote`): one sentence of context at the end of a menu, `--type-small`
   in `--text-dim`, max 280px. It replaced `.menu-caution` (#1803).
