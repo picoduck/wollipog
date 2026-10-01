@@ -6,7 +6,7 @@ import ts from "typescript";
 import type { SessionReminderView } from "@wollipog/protocol";
 import { ApiError } from "./api.js";
 import { archiveAndStopMessage } from "./archive-actions.js";
-import { deleteSessionMessage, signOutOfAgentMessage, stopSessionMessage } from "./session-confirmation-copy.js";
+import { deleteSessionMessage, signOutOfAgentMessage, stopArchivedSessionMessage, stopSessionMessage } from "./session-confirmation-copy.js";
 import { closeWarning } from "./components/DesktopCloseGuard.js";
 import { heldUpdateMessage } from "./desktop-updates.js";
 import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
@@ -807,7 +807,7 @@ const MAX_BODY_BRANCHES = 256;
  * sentence check below; a new unreadable body fails until it is listed here and tested.
  */
 const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^conflict\.message$/, /^closeWarning\(/, /^heldUpdateMessage\(/,
-  /^stopSessionMessage\(/, /^deleteSessionMessage\(/, /^signOutOfAgentMessage\(/];
+  /^stopSessionMessage\(/, /^stopArchivedSessionMessage\(/, /^deleteSessionMessage\(/, /^signOutOfAgentMessage\(/];
 
 /**
  * Every text a confirmation body can produce: conditions, template holes and `+` concatenation are
@@ -1015,11 +1015,12 @@ test("confirmation bodies built by a helper are one or two sentences too", () =>
     ...["0.29.0", null].flatMap((version) => [0, 1, 3].map((count) => heldUpdateMessage(version, count))),
     ...[null, "Fix the half-cent rounding bug.\nRequirements:\n- keep cents"].flatMap((title) => [
       ...[0, 1, 3].map((count) => stopSessionMessage(title, count)),
+      ...[0, 1, 3].map((count) => stopArchivedSessionMessage(title, count)),
       deleteSessionMessage(title),
     ]),
     ...["Studio Mac", null].map((machine) => signOutOfAgentMessage("Gemini CLI", machine)),
   ];
-  assert.equal(bodies.length, 32);
+  assert.equal(bodies.length, 38);
   for (const body of bodies) assert.ok(sentenceCount(body) <= 2, JSON.stringify(body));
 });
 

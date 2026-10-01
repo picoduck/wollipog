@@ -13,13 +13,26 @@ export function quotedSessionTitle(title: string | null | undefined): string | n
   return line ? `“${line}”` : null;
 }
 
-/** Stop Session. The queued-message clause is left out when nothing is queued. */
-export function stopSessionMessage(title: string | null | undefined, queuedCount: number): string {
+/** What Stop Session does to the session. The queued-message clause is left out when nothing is queued. */
+function stopsNowSentence(title: string | null | undefined, queuedCount: number): string {
   const name = quotedSessionTitle(title) ?? "This session";
   const queued = queuedCount > 0
     ? ` and its ${queuedCount} queued ${queuedCount === 1 ? "message is" : "messages are"} discarded`
     : "";
-  return `${name} stops now${queued}. To interrupt only the current turn, use Stop Turn in the composer.`;
+  return `${name} stops now${queued}.`;
+}
+
+/** Stop Session. The queued-message clause is left out when nothing is queued. */
+export function stopSessionMessage(title: string | null | undefined, queuedCount: number): string {
+  return `${stopsNowSentence(title, queuedCount)} To interrupt only the current turn, use Stop Turn in the composer.`;
+}
+
+/**
+ * Stop Session in Archived Sessions: the same first sentence, then where the session stays. An
+ * archived session shows no composer, so Stop Turn is not offered.
+ */
+export function stopArchivedSessionMessage(title: string | null | undefined, queuedCount: number): string {
+  return `${stopsNowSentence(title, queuedCount)} It stays in Archived Sessions with its transcript.`;
 }
 
 /** Delete Session. */

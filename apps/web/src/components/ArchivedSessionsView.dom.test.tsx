@@ -8,6 +8,7 @@ import type { ControlPlaneToUi, SessionCommandPermissions, SessionView, UiSnapsh
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { requestArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
+import { deleteSessionMessage, stopArchivedSessionMessage } from "../session-confirmation-copy.js";
 import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -624,6 +625,72 @@ test("a successful deletion cannot be resurrected by the live session overlay", 
     "an unrelated live update does not merge the deleted cached session back into the catalog");
   assert.doesNotMatch(fixture.container.textContent ?? "", /Archived Session 5/,
     "a bounded page does not expand based on websocket arrival order");
+  await fixture.unmount();
+});
+
+/** Opens a row action's confirmation and returns its body, then cancels it. */
+async function confirmationBody(container: HTMLElement, action: string): Promise<string> {
+  const item = await rowAction(container, action);
+  await act(async () => {
+    fireDomEvent.click(item);
+    await Promise.resolve();
+  });
+  const body = container.querySelector(".feedback-confirmation .confirmation-message")?.textContent ?? "";
+  await act(async () => {
+    fireDomEvent.click(button(container, "Cancel"));
+    await Promise.resolve();
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  return body;
+}
+
+const MULTI_LINE_TITLE = "Fix the half-cent rounding bug\nRequirements:\n- keep cents";
+
+test("Delete Session names the session by its one-line title in the session header's words (#2278)", async () => {
+  const fixture = await mount([session(6, { title: MULTI_LINE_TITLE, status: "stopped" })]);
+
+  const body = await confirmationBody(fixture.container, "Delete");
+  assert.equal(body, deleteSessionMessage(MULTI_LINE_TITLE));
+  assert.equal(body, "“Fix the half-cent rounding bug” and its history are removed from Wollipog. This can't be undone.");
+  assert.ok(!body.includes("\n") && !body.includes("Requirements"), "only the title's first line is quoted");
+  await fixture.unmount();
+});
+
+test("Stop Session names the session by its one-line title and mentions queued messages only when there are some (#2278)", async () => {
+  const queued = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `queued-${index}`, text: `Queued ${index}` }));
+  for (const [count, expected] of [
+    [0, "“Fix the half-cent rounding bug” stops now. It stays in Archived Sessions with its transcript."],
+    [1, "“Fix the half-cent rounding bug” stops now and its 1 queued message is discarded. It stays in Archived Sessions with its transcript."],
+    [2, "“Fix the half-cent rounding bug” stops now and its 2 queued messages are discarded. It stays in Archived Sessions with its transcript."],
+  ] as const) {
+    const fixture = await mount([session(7, {
+      title: MULTI_LINE_TITLE,
+      status: "running",
+      ...(count ? { queued: queued(count) } : {}),
+    })]);
+
+    const body = await confirmationBody(fixture.container, "Stop");
+    assert.equal(body, expected);
+    assert.equal(body, stopArchivedSessionMessage(MULTI_LINE_TITLE, count));
+    assert.ok(!body.includes("\n") && !body.includes("Requirements"), "only the title's first line is quoted");
+    assert.equal(/queued/.test(body), count > 0, "the queued clause appears only when messages are queued");
+    assert.doesNotMatch(body, /Stop Turn|composer/, "an archived session shows no composer");
+    await fixture.unmount();
+  }
+});
+
+test("Stop Session counts only queued messages still waiting, not settled delivery receipts (#2278)", async () => {
+  const fixture = await mount([session(8, {
+    title: "Settled Receipts",
+    status: "running",
+    queued: [
+      { id: "waiting", text: "Still waiting" },
+      { id: "failed", text: "Failed to deliver", durableDeliveryState: "failed" },
+    ],
+  })]);
+
+  const body = await confirmationBody(fixture.container, "Stop");
+  assert.equal(body, "“Settled Receipts” stops now and its 1 queued message is discarded. It stays in Archived Sessions with its transcript.");
   await fixture.unmount();
 });
 
@@ -1263,7 +1330,7 @@ test("every row action behind ⋯ is reachable from the keyboard: Stop, Open, th
 
     // Enter activates the focused item, as a button does natively.
     await act(async () => { (doc.activeElement as HTMLButtonElement).click(); await Promise.resolve(); });
-    assert.match(doc.querySelector('[role="dialog"]')?.textContent ?? "", /permanently removed/u, "Delete asks for confirmation");
+    assert.match(doc.querySelector('[role="dialog"]')?.textContent ?? "", /removed from Wollipog/u, "Delete asks for confirmation");
     const cancel = [...doc.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')]
       .find((candidate) => candidate.textContent?.trim() === "Cancel")!;
     await act(async () => { cancel.click(); await Promise.resolve(); });
