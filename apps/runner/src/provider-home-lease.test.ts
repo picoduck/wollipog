@@ -857,7 +857,8 @@ test("a long journal remains valid and never empties across repeated orderly han
     registry.releaseAll();
     assert.ok(readdirSync(leasePaths(home).lock).length > 0);
   }
-  assert.equal(readdirSync(leasePaths(home).lock).length, 129);
+  assert.ok(readdirSync(leasePaths(home).lock).length <= 34);
+  assert.equal(JSON.parse(readFileSync(join(leasePaths(home).root, "mutable-home.recovery.json"), "utf8")).version, 3);
 });
 
 test("a predecessor modified after publication invalidates its hash-linked successor", (t) => {

@@ -193,9 +193,9 @@ evidence = None
 def snapshot():
     return [(directory, name, open(os.path.join(directory, name), "rb").read())
         for directory in (root_path, lock_path) for name in sorted(os.listdir(directory)) if name != "mutable-home.lock"]
-def interleaved(root, lock, include_snapshot=False):
+def interleaved(root, lock, include_snapshot=False, include_details=False):
     global reads, evidence
-    if include_snapshot:
+    if include_snapshot and not include_details:
         reads += 1
         if reads == 2:
             if change == "complete": os.link(source, mirror)
@@ -221,7 +221,7 @@ def interleaved(root, lock, include_snapshot=False):
                 raw = open(source, "rb").read() + b" " if change == "bytes" else b"{}" if change == "malformed" else b"x" * 4097
                 with open(mirror, "wb") as stream: stream.write(raw)
             evidence = snapshot()
-    return original_read(root, lock, include_snapshot)
+    return original_read(root, lock, include_snapshot, include_details)
 read_owned_lease_chain = interleaved
 home_fd, _ = open_root(os.environ["HOME"])
 try:
@@ -314,14 +314,14 @@ try {
     if (contenders !== "native") launch("python3", ["-c", leaseProgram(`
 original_read = read_owned_lease_chain
 reads = 0
-def interleaved(root, lock, include_snapshot=False):
+def interleaved(root, lock, include_snapshot=False, include_details=False):
     global reads
-    if include_snapshot:
+    if include_snapshot and not include_details:
         reads += 1
         if reads == 2:
             with open(${JSON.stringify(helperReady)}, "w") as stream: stream.write("ready")
             while not os.path.exists(${JSON.stringify(mirrored)}): time.sleep(0.01)
-    return original_read(root, lock, include_snapshot)
+    return original_read(root, lock, include_snapshot, include_details)
 read_owned_lease_chain = interleaved
 home_fd, _ = open_root(os.environ["HOME"])
 try:
@@ -661,13 +661,14 @@ test("native and WSL helper leases hand off through one retained external canoni
   assert.deepEqual(readFileSync(join(leaseRoot, "mutable-home.recovery.json")), proof);
   assert.equal(native.acquireHome(home), true, "the helper's explicit release hands back to native");
   native.releaseAll();
-  // Exercise the helper past its legacy compaction threshold; external proof is never exchanged.
+  // Exercise negotiated checkpoint selection past the canonical compaction threshold.
   for (let pass = 0; pass < 9; pass++) {
     const result = await invoke(home, spec);
     assert.equal(result.status, 0, result.stderr || result.stdout);
   }
   assert.deepEqual(compactionSiblings(home), []);
-  assert.deepEqual(readFileSync(join(leaseRoot, "mutable-home.recovery.json")), proof);
+  assert.equal(JSON.parse(readFileSync(join(leaseRoot, "mutable-home.recovery.json"), "utf8")).version, 3);
+  assert.ok(readdirSync(leaseRoot).length <= 20);
   assert.equal(native.acquireHome(home), true);
   native.releaseAll();
 });
