@@ -1,0 +1,32 @@
+name: Stop Obsolete Merge-Group CI
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [in_progress]
+
+# The workflow_run event executes trusted default-branch code. Never check out
+# the triggering integration or load its artifacts with this write-capable token.
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+
+concurrency:
+  group: merge-group-cleanup-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    if: github.event.workflow_run.event == 'merge_group' && github.event.workflow_run.repository.full_name == github.repository
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Watch the Integration Until CI Finishes or Becomes Obsolete
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/merge-group-cleanup.mjs
