@@ -135,8 +135,8 @@ const reviews: Review[] = [{
     await page.route("**/api/orphaned-skill-copies/review-1", (route) => route.fulfill({ status: 204, body: "" }));
     await page.goto("/skills-removals-e2e.html?orphans=1");
     await page.locator(".master-detail-list .row", { hasText: "Orphaned Copies" }).click();
-    await page.getByRole("region", { name: "Orphaned Copies" }).locator("article", { hasText: "Build Machine" })
-      .getByRole("button", { name: "Import…" }).first().click();
+    await page.getByRole("region", { name: "Orphaned Copies" }).locator("section", { hasText: "Build Machine" })
+      .getByRole("button", { name: /^Import .*…$/ }).first().click();
     return page.getByRole("dialog", { name: "Import Orphaned Copy" });
   },
 }, {

@@ -78,7 +78,6 @@ const BASELINE: Readonly<Record<string, number>> = {
   "components/ShellDock.tsx": 1,
   "components/SideChatPanel.tsx": 3,
   "components/SkillGitImportDialog.tsx": 2,
-  "components/SkillOrphanedCopies.tsx": 1,
   "components/SnoozeDialog.tsx": 1,
   "components/SwitchAccountDialog.tsx": 1,
   "components/UsageView.tsx": 4,

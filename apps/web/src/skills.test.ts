@@ -9,8 +9,13 @@ import {
   groupSkillList,
   invocationLabel,
   normalizeRemovalReporting,
+  orphanedCopyDiscardBlocker,
+  orphanedCopyImportBlocker,
   orphanedCopyKey,
+  orphanedCopyLimitation,
   orphanedCopyRef,
+  orphanedCopySentence,
+  orphanedCopyStoreEntry,
   reportedOrphanedCopies,
   reportedSkillDrift,
   reportedSkillLinkRemovals,
@@ -566,4 +571,58 @@ test("orphaned copies are read defensively and addressed without paths", () => {
     "kept:0f0e0d0c-0b0a-4908-8706-050403020100", `deleted:retired:manual:${"d".repeat(64)}`,
   ]);
   assert.deepEqual(reportedOrphanedCopies(undefined), []);
+});
+
+test("an orphaned copy's row says what it is in one sentence, with a formatted date (#1974)", () => {
+  const at = Date.UTC(2023, 10, 14, 22, 13, 20);
+  const options = { locale: "en-US", timeZone: "UTC" };
+  assert.equal(orphanedCopySentence({ kind: "kept_aside", id: "a", digest: "d", variant: "manual", keptAsideAt: at }, options),
+    "Kept aside by a restore on Nov\u00a014,\u00a02023. Manual Only.", "the date's spaces never break");
+  assert.equal(orphanedCopySentence({ kind: "kept_aside", id: "a", digest: "d", variant: "agent" }, options),
+    "Kept aside by a restore. Agent Invocable.");
+  assert.equal(orphanedCopySentence({ kind: "kept_aside", id: "a", keptAsideAt: Number.NaN }, options),
+    "Kept aside by an earlier runner.", "a copy kept aside before records existed has no date or invocation");
+  assert.equal(orphanedCopySentence({ kind: "deleted_skill", name: "x", digest: "d", variant: "agent", held: true }),
+    "Its skill was deleted from the library; links still serve this copy. Agent Invocable.");
+  assert.equal(orphanedCopySentence({ kind: "deleted_skill", name: "x", digest: "d", variant: "manual", held: false }),
+    "Its skill was deleted from the library; no link serves it. Manual Only.");
+  // A date, never a time of day that could break as "4:13:20 / PM".
+  assert.doesNotMatch(orphanedCopySentence({ kind: "kept_aside", id: "a", digest: "d", keptAsideAt: at }, options), /:\d\d|PM|AM/);
+});
+
+test("an orphaned copy's store entry is copied, not shown, and only a kept-aside copy has one", () => {
+  assert.equal(orphanedCopyStoreEntry({ kind: "kept_aside", id: "0f0e" }), ".drift-0f0e");
+  assert.equal(orphanedCopyStoreEntry({ kind: "deleted_skill", name: "x", digest: "d", variant: "agent" }), null);
+});
+
+test("an orphaned copy that can't be imported or discarded says why, with the runner's own reason", () => {
+  const unreadable = {
+    kind: "kept_aside" as const, id: "a", observedFingerprint: "f",
+    detail: "An earlier runner kept this edited copy aside without recording the skill version it came from. It cannot be read as skill content: it contains a symlink.",
+  };
+  assert.equal(orphanedCopyImportBlocker(unreadable, true), "Can't be imported: its content can't be read as a skill (it contains a symlink).");
+  assert.equal(orphanedCopyImportBlocker({ ...unreadable, detail: undefined }, true), "Can't be imported: its content can't be read as a skill.");
+  assert.equal(orphanedCopyImportBlocker({
+    kind: "kept_aside", id: "a",
+    detail: "A restore kept this edited copy aside in the skill store instead of deleting it. It cannot be read as skill content: a file exceeds the skill file size limit. It is too large to verify, so it can only be removed on the machine itself.",
+  }, true), "Can't be imported: its content can't be read as a skill (a file exceeds the skill file size limit).");
+  const readable = { kind: "deleted_skill" as const, name: "x", digest: "d", variant: "agent" as const, observedDigest: "o" };
+  assert.equal(orphanedCopyImportBlocker(readable, true), null);
+  assert.equal(orphanedCopyImportBlocker(readable, false), "Update this machine's runner to import it here.");
+  // Unreadable content is the reason even on an older runner: updating would not make it importable.
+  assert.match(orphanedCopyImportBlocker(unreadable, false) ?? "", /^Can't be imported/);
+
+  assert.equal(orphanedCopyDiscardBlocker(unreadable, true), null, "a fingerprinted unreadable copy can be discarded");
+  assert.equal(orphanedCopyDiscardBlocker({ kind: "kept_aside", id: "a" }, true),
+    "It's too large to verify, so remove it on the machine itself.");
+  assert.equal(orphanedCopyDiscardBlocker(readable, true), null, "a deleted skill's copy is fenced on its digest");
+  assert.equal(orphanedCopyDiscardBlocker(readable, false), "Update this machine's runner to discard it here.");
+});
+
+test("what a runner cannot report about orphaned copies is one sentence", () => {
+  assert.equal(orphanedCopyLimitation(false, 0), null);
+  assert.equal(orphanedCopyLimitation(true, 0), "This machine's runner can't list copies a restore kept aside. Update it to list them here.");
+  assert.equal(orphanedCopyLimitation(false, 1),
+    "1 more kept-aside copy isn't listed. Resolve the listed copies, or remove copies on the machine, to list the rest.");
+  assert.match(orphanedCopyLimitation(true, 3) ?? "", /^This machine's runner can't list .* 3 more kept-aside copies aren't listed\./);
 });

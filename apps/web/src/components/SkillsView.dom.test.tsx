@@ -480,18 +480,29 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   assert.match(entry!.textContent ?? "", /Orphaned Copies5/, "copies beyond the runner's bound are counted");
   await act(async () => { entry!.click(); });
   await act(settle);
-  const machine = container.querySelector('[aria-label="Orphaned Copies"] .skill-orphans-machine');
-  assert.match(machine?.textContent ?? "", /Build Machine/);
-  const items = [...machine!.querySelectorAll(".skills-orphans li")];
-  assert.equal(items.length, 3);
-  assert.match(items[0]!.textContent ?? "", /notes.*Kept Aside.*Manual Only.*dddddddddddd.*Readable.*\.drift-0f0e0d0c/);
-  assert.match(items[1]!.textContent ?? "", /Unidentified Copy.*Kept Aside.*Unknown.*Unreadable/);
-  assert.match(items[2]!.textContent ?? "", /retired.*Deleted Skill.*Agent Invocable.*links still serve the copy/);
-  assert.match(machine!.textContent ?? "", /2 more kept-aside copies are not listed\./);
-  assert.equal(button("Import…")[1]!.disabled, true, "an unreadable copy cannot be reviewed");
-  assert.equal(button("Discard Copy")[1]!.disabled, false, "a fingerprinted unreadable copy can be discarded");
+  const pane = container.querySelector('[aria-label="Orphaned Copies"]')!;
+  assert.equal(pane.querySelector("h2")?.textContent, "Orphaned Copies");
+  const machine = pane.querySelector("section[aria-labelledby]");
+  assert.match(machine?.querySelector("h3")?.textContent ?? "", /Build Machine/);
+  const rows = () => [...pane.querySelectorAll<HTMLElement>(".skill-orphans-list > li.row")];
+  assert.equal(rows().length, 3);
+  const [kept, unreadable, deleted] = rows();
+  assert.equal(kept!.querySelector(".row-title")?.textContent, "notes");
+  assert.match(kept!.querySelector(".row-sub")?.textContent ?? "", /^Kept aside by a restore on .+\. Manual Only\.$/);
+  assert.equal(unreadable!.querySelector(".row-title")?.textContent, "Unidentified Copy");
+  assert.equal(unreadable!.querySelector(".skill-orphans-reason")?.textContent, "Can't be imported: its content can't be read as a skill.");
+  assert.match(deleted!.querySelector(".row-sub")?.textContent ?? "", /^Its skill was deleted from the library; links still serve this copy\. Agent Invocable\.$/);
+  // Kinds are facts on line 2, not badges, and no store entry or digest is shown (#1974).
+  assertNoDomNode(machine!.querySelector(".skill-orphans-list .status"));
+  assert.doesNotMatch(machine!.textContent ?? "", /\.drift-|dddddddddddd|Readable/);
+  assert.match(machine!.querySelector(".notice")?.textContent ?? "", /2 more kept-aside copies aren't listed\./);
+  const importOf = (row: Element) => row.querySelector<HTMLButtonElement>(".skill-orphans-actions > .btn")!;
+  assert.equal(importOf(unreadable!).textContent, "Import…");
+  assert.equal(importOf(unreadable!).disabled, true, "an unreadable copy cannot be imported");
+  assert.equal(importOf(unreadable!).getAttribute("aria-describedby"), unreadable!.querySelector(".skill-orphans-reason")!.id);
+  assert.equal(importOf(kept!).disabled, false);
 
-  await act(async () => { button("Import…")[0]!.click(); });
+  await act(async () => { importOf(kept!).click(); });
   await act(settle);
   const dialog = container.querySelector('[role="dialog"]');
   assert.ok(dialog, "Import… opens Import Orphaned Copy");
@@ -504,9 +515,14 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   await act(async () => { importButton!.click(); });
   await act(settle);
   assertNoDomNode(container.querySelector('[role="dialog"]'));
-  assert.equal(container.querySelectorAll(".skills-orphans li").length, 2);
+  assert.equal(rows().length, 2);
 
-  await act(async () => { button("Discard Copy")[0]!.click(); });
+  // Discard Copy… lives in the row's ⋯ menu, after Copy Store Entry for a kept-aside copy.
+  await act(async () => { rows()[0]!.querySelector<HTMLButtonElement>('[aria-label="More Actions for Unidentified Copy"]')!.click(); });
+  const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menu"] [role="menuitem"]')];
+  assert.deepEqual(items.map((item) => item.querySelector(".copy-btn-labels, .menu-text")?.textContent), ["Copy Store Entry", "Discard Copy…"]);
+  assert.equal(items[1]!.disabled, false, "a fingerprinted unreadable copy can be discarded");
+  await act(async () => { items[1]!.click(); });
   await act(settle);
   assert.deepEqual(confirmations, ["Discard Copy|Discard Copy"]);
   assert.deepEqual(calls, [
@@ -514,7 +530,10 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
     "import:review-1:false",
     `discard:runner-1:kept_aside:${unreadableId}:{"observedFingerprint":"${"f".repeat(64)}"}`,
   ]);
-  assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "", /No orphaned copies are reported\./);
+  // The last copy resolved on the pane: one state says so, with the way back to the overview.
+  assert.equal(pane.querySelector(".state-title")?.textContent, "All Resolved");
+  assertNoDomNode(pane.querySelector("section[aria-labelledby]"));
+  assert.ok(button("Open Library Overview")[0]);
 
   await act(async () => root.unmount());
   mountPoint.remove();
@@ -568,8 +587,8 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
     .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
   assert.equal(entry?.getAttribute("aria-current"), "true", "/skills/orphans opens the panes on the entry");
   assertNoDomNode(entry!.querySelector(".count-badge"), "no count is claimed");
-  assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "",
-    /This runner version cannot report copies a restore kept aside\. Update it to list them here\./);
+  assert.match(container.querySelector('[aria-label="Orphaned Copies"] .notice')?.textContent ?? "",
+    /This machine's runner can't list copies a restore kept aside\. Update it to list them here\./);
 
   await act(async () => root.unmount());
   mountPoint.remove();

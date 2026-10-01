@@ -111,9 +111,17 @@ or runs a version that keeps copies aside without reporting them, the skill list
   The runner keeps its links while they serve it. It moves back to a skill's Deployment section
   when a skill with the same name exists again.
 
-Each entry shows the skill name, the version the copy came from, its invocation variant, when it
-was kept aside, whether it is readable skill content, and a kept-aside copy's store entry. A copy of
-a skill the viewer cannot access is not listed. Owners and admins have two actions:
+Each machine with something to show is a section with its status. Each copy is one row: its skill
+name ("Unidentified Copy" when the copy names none), then one sentence with what kind of copy it is,
+the date a restore kept it aside, and its invocation variant. A copy that cannot be imported keeps
+**Import…** disabled and says why on that line: its content is not readable skill content (with the
+runner's reason), or the machine's runner is too old to resolve it. On an offline machine, the
+header says copies can be imported or discarded when it is back online. What a runner cannot report
+(kept-aside copies on an older runner, copies beyond its report bound) is one notice under that
+machine. Store entries and digests are not shown; a kept-aside copy's **⋯ › Copy Store Entry** copies
+its entry name for support. When no copy is left, the pane says **All Resolved** and links back to
+the Library Overview. A copy of a skill the viewer cannot access is not listed. Owners and admins
+have two actions:
 
 - **Import…** opens **Import Orphaned Copy**, which reads the copy through a correlated runner
   command and shows every file.
@@ -126,7 +134,7 @@ a skill the viewer cannot access is not listed. Owners and admins have two actio
   then holds exactly those bytes, the machine discards its copy under the same observation fence.
   A copy kept aside before records existed is imported exactly as stored. The review offers
   **Discard Copy…** as its alternative, with the same confirmation as the list.
-- **Discard Copy** requires confirmation and names the observation the machine reported: a
+- **Discard Copy…**, in the row's ⋯ menu, requires confirmation and names the observation the machine reported: a
   fingerprint of every entry's path, type, identity, size, and modification and change times (never
   its contents), and for a readable copy also its content digest. Generated artifacts such as
   `__pycache__` are outside the content digest but inside the fingerprint, and an import's release

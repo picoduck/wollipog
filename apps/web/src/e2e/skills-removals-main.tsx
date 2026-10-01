@@ -121,8 +121,11 @@ const snapshot: ControlPlaneToUi = {
   runners: [runner, ...(new URLSearchParams(location.search).has("matrix") ? [{ ...runner, runnerId: "runner-2", displayName: "Other Machine",
     ...(targets ? { executionTargets: [hostTarget("runner-2")] } : {}),
     status: new URLSearchParams(location.search).has("onlineMatrix") ? "online" as const : "offline" as const }] : []),
-    ...(orphans ? [{ ...runner, runnerId: "runner-2", hostname: "older-host", displayName: "Older Machine",
-      protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift }] : [])],
+    // `&orphansOffline=1` (#1974) takes the older machine offline; `&orphansSingle=1` leaves it out,
+    // so no runner keeps copies it cannot report.
+    ...(orphans && !new URLSearchParams(location.search).has("orphansSingle") ? [{ ...runner, runnerId: "runner-2", hostname: "older-host", displayName: "Older Machine",
+      protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift,
+      ...(new URLSearchParams(location.search).has("orphansOffline") ? { status: "offline" as const } : {}) }] : [])],
   boxes: [],
   sessions: [],
   runs: [],

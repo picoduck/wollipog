@@ -647,9 +647,11 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
               machineSkills={machineSkills}
               busy={busy}
               syncingRunnerId={syncingRunnerId}
+              showTitle={!isMobile}
               onSync={(runnerId) => void syncMachine(runnerId)}
               onReview={(runner, copy) => setOrphanImport({ runnerId: runner.runnerId, copy })}
               onDiscard={(runner, copy) => void discardOrphan(runner, copy)}
+              onOpenOverview={() => openPane("overview")}
             />
           ) : selectedId && detailError?.skillId === selectedId ? (
             <State

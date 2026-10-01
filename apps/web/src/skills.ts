@@ -335,6 +335,78 @@ export function orphanedCopyKey(copy: OrphanedSkillCopy): string {
   return copy.kind === "kept_aside" ? `kept:${copy.id}` : `deleted:${copy.name}:${copy.variant}:${copy.digest}`;
 }
 
+/** The skill-store entry a kept-aside copy lives in, which support may ask for. A deleted skill's
+ * edited copy has none: it is addressed by its name and digest. */
+export function orphanedCopyStoreEntry(copy: OrphanedSkillCopy): string | null {
+  return copy.kind === "kept_aside" && copy.id ? `.drift-${copy.id}` : null;
+}
+
+/** A kept-aside copy may be discarded only against the fingerprint of every entry; a copy too large
+ * to fingerprint has nothing to fence a discard on. */
+export function orphanedCopyDiscardable(copy: OrphanedSkillCopy): boolean {
+  return copy.kind === "deleted_skill" || !!copy.observedFingerprint;
+}
+
+/**
+ * The second line of an orphaned copy's row (#1974): what kind of copy it is, when a restore kept it
+ * aside, and its invocation, as sentences. The date is formatted as a date, never a time of day, and
+ * its spaces are non-breaking, so a wrapping line never splits it.
+ */
+export function orphanedCopySentence(copy: OrphanedSkillCopy, options: { locale?: string; timeZone?: string } = {}): string {
+  let kind: string;
+  if (copy.kind === "kept_aside") {
+    const at = typeof copy.keptAsideAt === "number" && Number.isFinite(copy.keptAsideAt) ? new Date(copy.keptAsideAt) : null;
+    kind = at && !Number.isNaN(at.getTime())
+      ? `Kept aside by a restore on ${new Intl.DateTimeFormat(options.locale, {
+        dateStyle: "medium", ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+      }).format(at).replace(/\s/g, "\u00a0")}.`
+      // Only a copy kept aside before records existed has no record, and so no date or version.
+      : copy.digest ? "Kept aside by a restore." : "Kept aside by an earlier runner.";
+  } else {
+    kind = copy.held
+      ? "Its skill was deleted from the library; links still serve this copy."
+      : "Its skill was deleted from the library; no link serves it.";
+  }
+  return copy.variant ? `${kind} ${invocationLabel(copy.variant)}.` : kind;
+}
+
+/** The runner's own words for why a copy is not skill content ("it contains a symlink"). */
+const UNREADABLE_REASON = /cannot be read as skill content: (.+?)\.(?:\s|$)/;
+
+/**
+ * Why an orphaned copy cannot be imported, as the row's visible reason (§3.1), or null when it can be
+ * imported once its machine is online. `runnerSupports` is whether the machine's runner can resolve a
+ * copy of this kind at all.
+ */
+export function orphanedCopyImportBlocker(copy: OrphanedSkillCopy, runnerSupports: boolean): string | null {
+  if (!copy.observedDigest) {
+    const reason = copy.detail?.match(UNREADABLE_REASON)?.[1];
+    return `Can't be imported: its content can't be read as a skill${reason ? ` (${reason})` : ""}.`;
+  }
+  return runnerSupports ? null : "Update this machine's runner to import it here.";
+}
+
+/** Why an orphaned copy cannot be discarded from this page, or null when it can be once its machine
+ * is online. */
+export function orphanedCopyDiscardBlocker(copy: OrphanedSkillCopy, runnerSupports: boolean): string | null {
+  if (!runnerSupports) return "Update this machine's runner to discard it here.";
+  return orphanedCopyDiscardable(copy) ? null : "It's too large to verify, so remove it on the machine itself.";
+}
+
+/**
+ * What a machine's runner cannot tell this page about its orphaned copies (#1974), as one sentence
+ * for a compact notice under the machine, or null when it reports everything.
+ */
+export function orphanedCopyLimitation(keptAsideUnsupported: boolean, omitted: number): string | null {
+  const parts: string[] = [];
+  if (keptAsideUnsupported) parts.push("This machine's runner can't list copies a restore kept aside. Update it to list them here.");
+  if (omitted > 0) {
+    parts.push(`${omitted === 1 ? "1 more kept-aside copy isn't" : `${omitted} more kept-aside copies aren't`} listed. ` +
+      "Resolve the listed copies, or remove copies on the machine, to list the rest.");
+  }
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
 /* Wrapped-or-bare payload aliases for the list routes, so the API client stays honest about the
  * two shapes the concurrent control-plane workstream may settle on. */
 export type SkillListPayload = SkillSummary[] | { skills?: SkillSummary[] };
