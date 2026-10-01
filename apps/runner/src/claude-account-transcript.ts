@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, readdir, rename, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
@@ -21,20 +21,28 @@ export async function transferClaudeAccountTranscript(
     });
     return;
   }
+  // Configured homes may be aliases chosen by the operator. Transcript entries themselves
+  // still cannot redirect a copy through symlinks.
+  const canonicalTargetHome = await realpath(targetHome);
   const sourceRoot = join(sourceHome, "projects");
-  const targetRoot = join(targetHome, "projects");
-  await requireDirectory(sourceRoot);
-  const matches: string[] = [];
-  for (const project of await readdir(sourceRoot, { withFileTypes: true })) {
-    if (!project.isDirectory()) continue;
-    const transcript = await lstat(join(sourceRoot, project.name, `${sessionId}.jsonl`)).catch(() => null);
-    if (transcript?.isFile() && transcript.size > 0) matches.push(project.name);
+  const targetRoot = join(canonicalTargetHome, "projects");
+  const canonicalSourceRoot = await realpath(sourceRoot).catch(() => null);
+  const canonicalTargetRoot = await realpath(targetRoot).catch(() => null);
+  if (canonicalSourceRoot && canonicalSourceRoot === canonicalTargetRoot) {
+    if ((await conversationProjects(canonicalSourceRoot, sessionId)).length !== 1) {
+      throw new Error("the shared account store has no unique saved conversation to resume");
+    }
+    return;
   }
+  const matches = await conversationProjects(sourceRoot, sessionId);
+  // Older runners changed the account binding without moving history. Returning to the
+  // account that already owns the exact conversation remains a valid recovery operation.
+  if (matches.length === 0 && (await conversationProjects(targetRoot, sessionId)).length === 1) return;
   if (matches.length !== 1) throw new Error("the source account has no unique saved conversation to resume");
   const project = matches[0]!;
   const source = join(sourceRoot, project);
   const target = join(targetRoot, project);
-  await requireDirectory(targetHome);
+  await requireDirectory(canonicalTargetHome);
   await requireDirectory(targetRoot, true);
   await requireDirectory(target, true);
   // Claude stores subagent transcripts in the directory named for this conversation.
@@ -57,6 +65,22 @@ export async function transferClaudeAccountTranscript(
   }
 }
 
+async function conversationProjects(root: string, sessionId: string): Promise<string[]> {
+  const info = await lstat(root).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!info) return [];
+  if (!info.isDirectory()) throw new Error("the conversation store is not a real directory");
+  const matches: string[] = [];
+  for (const project of await readdir(root, { withFileTypes: true })) {
+    if (!project.isDirectory()) continue;
+    const transcript = await lstat(join(root, project.name, `${sessionId}.jsonl`)).catch(() => null);
+    if (transcript?.isFile() && transcript.size > 0) matches.push(project.name);
+  }
+  return matches;
+}
+
 async function requireDirectory(path: string, create = false): Promise<void> {
   if (create) await mkdir(path, { recursive: true });
   const info = await lstat(path);
@@ -73,20 +97,38 @@ async function requireTree(path: string): Promise<void> {
 // Homes and session ids remain positional arguments, including shell metacharacters.
 export const WSL_TRANSFER = `set -eu
 source_root=$1/projects
-target_root=$2/projects
+target_home=$(readlink -f -- "$2")
+[ -d "$target_home" ]
+target_root=$target_home/projects
 id=$3
-[ -d "$source_root" ] && [ ! -L "$source_root" ]
-count=0
-for project in "$source_root"/*; do
-  [ -d "$project" ] && [ ! -L "$project" ] || continue
-  file=$project/$id.jsonl
-  [ -f "$file" ] && [ ! -L "$file" ] && [ -s "$file" ] || continue
-  selected=$project
-  count=$((count + 1))
-done
-[ "$count" = 1 ]
-[ -d "$2" ] && [ ! -L "$2" ]
+scan() {
+  count=0
+  for project in "$1"/*; do
+    [ -d "$project" ] && [ ! -L "$project" ] || continue
+    file=$project/$id.jsonl
+    [ -f "$file" ] && [ ! -L "$file" ] && [ -s "$file" ] || continue
+    selected=$project
+    count=$((count + 1))
+  done
+}
+source_real=$(readlink -f -- "$source_root" || true)
+target_real=$(readlink -f -- "$target_root" || true)
+if [ -n "$source_real" ] && [ "$source_real" = "$target_real" ]; then
+  scan "$source_real"
+  [ "$count" = 1 ]
+  exit 0
+fi
+[ ! -L "$source_root" ]
 [ ! -L "$target_root" ]
+if [ -e "$source_root" ]; then [ -d "$source_root" ]; fi
+if [ -e "$target_root" ]; then [ -d "$target_root" ]; fi
+scan "$source_root"
+if [ "$count" = 0 ]; then
+  scan "$target_root"
+  [ "$count" = 1 ]
+  exit 0
+fi
+[ "$count" = 1 ]
 mkdir -p -- "$target_root"
 project_name=\${selected##*/}
 target=$target_root/$project_name

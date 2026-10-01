@@ -7325,6 +7325,13 @@ export class SessionManager {
       // Credential homes also own Claude's projects store. A same-id resume cannot find its
       // conversation after an account switch until its exact history is in the new home. Bwrap
       // already mounts the same session-owned store across credential contexts.
+      if (meta.driver === "claude-code" && !resumeId && meta.providerCredentialHome) {
+        // No provider history exists yet. Its first turn will write into the selected home,
+        // including when the account was changed before Claude established a conversation id.
+        meta.providerConversationHome = meta.providerCredentialHome;
+        this.store.patchMeta(sessionId, { providerConversationHome: meta.providerConversationHome });
+        this.store.flush(sessionId);
+      }
       if (meta.driver === "claude-code" && resumeId && meta.providerConversationHome &&
           meta.providerCredentialHome && meta.providerConversationHome !== meta.providerCredentialHome) {
         if (this.executionIsolation.mode !== "bwrap") {

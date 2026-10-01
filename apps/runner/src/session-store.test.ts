@@ -760,6 +760,7 @@ test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command
   const snap = metaToSnapshot(meta({
     controlPlaneLaunchId: "launch-proof-1",
     resolvedModel: "claude-opus-5[1m]",
+    providerConversationHome: "/private-account-home",
     sessionSlashCommandProvenance: {
       driver: "claude-code",
       context: "native",
@@ -773,6 +774,7 @@ test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command
   assert.equal((snap as Record<string, unknown>).agentSessionId, undefined);
   assert.equal((snap as Record<string, unknown>).repoPath, undefined);
   assert.equal((snap as Record<string, unknown>).sessionSlashCommandProvenance, undefined);
+  assert.equal((snap as Record<string, unknown>).providerConversationHome, undefined);
   assert.equal(snap.id, "s_abc");
   assert.equal(snap.controlPlaneLaunchId, "launch-proof-1");
   assert.equal(snap.seq, 0);

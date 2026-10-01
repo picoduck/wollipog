@@ -680,7 +680,7 @@ test("an exhausted structured window schedules an automatic switch only after th
   }
 });
 
-for (const scenario of ["idle", "dormant", "interrupted transfer"] as const) {
+for (const scenario of ["idle", "dormant", "interrupted transfer", "before first turn", "legacy missing history"] as const) {
   test(`Claude account switching preserves the transcript for resume and switching back (${scenario})`, async () => {
     const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-transcript-"));
     const messages: RunnerToControlPlane[] = [];
@@ -693,8 +693,9 @@ for (const scenario of ["idle", "dormant", "interrupted transfer"] as const) {
     let completed = 0;
     let manager: SessionManager | undefined;
     try {
-      const factory = (_driver: unknown, launch: { env: Record<string, string>; resumeId?: string }) => {
-        const home = launch.env.CLAUDE_CONFIG_DIR!;
+    const factory = (_driver: unknown, launch: { env: Record<string, string>; resumeId?: string }) => {
+      const home = launch.env.CLAUDE_CONFIG_DIR!;
+      let established = Boolean(launch.resumeId);
         return {
           initialize: async () => {},
           newSession: async () => sessionId,
@@ -705,12 +706,13 @@ for (const scenario of ["idle", "dormant", "interrupted transfer"] as const) {
             }
             mkdirSync(join(home, "projects", project), { recursive: true });
             const prior = existsSync(transcript(home)) ? readFileSync(transcript(home), "utf8") : "";
-            writeFileSync(transcript(home), prior + JSON.stringify({ type: "user", message: text, sessionId }) + "\n");
+          writeFileSync(transcript(home), prior + JSON.stringify({ type: "user", message: text, sessionId }) + "\n");
+          established = true;
             completed++;
             return "end_turn" as const;
           },
           cancel: () => {}, dispose: () => {}, setConfig: async () => {}, resolvePermission: () => false,
-          agentSessionId: () => sessionId,
+          agentSessionId: () => established ? sessionId : null,
         };
       };
       let made = makeManager(root, factory, messages, true);
@@ -721,8 +723,39 @@ for (const scenario of ["idle", "dormant", "interrupted transfer"] as const) {
       (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
       const spec = launchSpec(root, "claude-code", "work");
       assert.equal(await manager.start(spec), true);
+      if (scenario === "before first turn") {
+        assert.equal(made.store.readMeta(spec.sessionId)?.agentSessionId, null);
+        assert.equal(made.store.readMeta(spec.sessionId)?.seq, 0);
+        await manager.switchProviderAccount(spec.sessionId, "personal");
+      }
       manager.prompt(spec.sessionId, "first turn");
       await waitFor(() => made.store.readMeta(spec.sessionId)?.status === "idle" && completed === 1, "first turn did not settle");
+      if (scenario === "before first turn") {
+        await manager.switchProviderAccount(spec.sessionId, "work");
+        manager.prompt(spec.sessionId, "Continue, please.");
+        await waitFor(() => failures.length > 0 || (completed === 2 && made.store.readMeta(spec.sessionId)?.status === "idle"), "continued turn did not settle");
+        assert.deepEqual(failures, [], "a switch before the first turn must remember where that turn saved history");
+        return;
+      }
+      if (scenario === "legacy missing history") {
+        // An old runner changed the credential binding without copying history or persisting a
+        // source marker. Recovering by selecting the original account must still work.
+        manager.shutdownAll();
+        made.store.patchMeta(spec.sessionId, {
+          providerAccountId: "personal", providerAccountLabel: "personal", providerAccountProvider: "claude",
+          providerCredentialHome: homes.personal, providerConversationHome: undefined,
+        });
+        made.store.flush(spec.sessionId);
+        made = makeManager(root, factory, messages, true);
+        manager = made.manager;
+        (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
+        await manager.switchProviderAccount(spec.sessionId, "work");
+        manager.prompt(spec.sessionId, "Continue, please.");
+        await waitFor(() => failures.length > 0 || (completed === 2 && made.store.readMeta(spec.sessionId)?.status === "idle"), "legacy recovery did not settle");
+        assert.deepEqual(failures, []);
+        assert.equal(completed, 2);
+        return;
+      }
       if (scenario === "dormant") {
         manager.shutdownAll();
         made = makeManager(root, factory, messages, true);

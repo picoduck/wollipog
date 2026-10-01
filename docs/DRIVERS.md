@@ -370,6 +370,10 @@ text and `cmd.exe` metacharacters out of the Windows command line.
   interrupted transfers recoverable. Credentials, account configuration, and unrelated histories
   are not copied. Switching back refreshes the original transcript with intervening turns.
   Bubblewrap already mounts the same session-owned projects store across credential homes.
+  Switching before the first turn pins history to the account where that turn will run. For a
+  legacy failed switch, selecting an account that already owns the exact conversation can resume
+  its existing history when the prior home has none. Configured home aliases and already shared
+  projects stores continue to work without copying a store onto itself.
 - **stdio control protocol** (interactive modes): when claude needs permission for a tool it writes a
   `control_request` JSONL frame on stdout —
   `{"type":"control_request","request_id":"<id>","request":{"subtype":"can_use_tool","tool_name":"Bash","description":"…","input":{…}}}`.

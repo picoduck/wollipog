@@ -42,21 +42,44 @@ for (const implementation of ["native", "WSL shell"] as const) {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test(`${implementation}: missing or ambiguous source history fails before overwriting the target`, { skip }, async () => {
+  test(`${implementation}: missing source uses existing target history, but absent or ambiguous history fails`, { skip }, async () => {
     const root = mkdtempSync(join(tmpdir(), "claude-transfer-missing-"));
     try {
       const source = join(root, "source");
       const target = join(root, "target");
       for (const home of [source, target]) mkdirSync(join(home, "projects", "project"), { recursive: true });
       const destination = join(target, "projects", "project", `${id}.jsonl`);
-      writeFileSync(destination, "destination history");
       await assert.rejects(run(source, target));
+      writeFileSync(destination, "destination history");
+      await run(source, target);
+      assert.equal(readFileSync(destination, "utf8"), "destination history");
       for (const project of ["project", "duplicate"]) {
         mkdirSync(join(source, "projects", project), { recursive: true });
         writeFileSync(join(source, "projects", project, `${id}.jsonl`), "source history");
       }
       await assert.rejects(run(source, target));
       assert.equal(readFileSync(destination, "utf8"), "destination history");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test(`${implementation}: configured home aliases and an already shared projects store remain usable`, { skip: skip || process.platform === "win32" }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "claude-transfer-alias-"));
+    try {
+      const source = join(root, "source");
+      const realTarget = join(root, "target");
+      const alias = join(root, "alias");
+      mkdirSync(join(source, "projects", "project"), { recursive: true });
+      mkdirSync(realTarget);
+      symlinkSync(realTarget, alias, "dir");
+      writeFileSync(join(source, "projects", "project", `${id}.jsonl`), "source history");
+      await run(source, alias);
+      assert.equal(readFileSync(join(realTarget, "projects", "project", `${id}.jsonl`), "utf8"), "source history");
+
+      const sharedHome = join(root, "shared-home");
+      mkdirSync(sharedHome);
+      symlinkSync(join(source, "projects"), join(sharedHome, "projects"), "dir");
+      await run(source, sharedHome);
+      assert.equal(readFileSync(join(sharedHome, "projects", "project", `${id}.jsonl`), "utf8"), "source history");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
