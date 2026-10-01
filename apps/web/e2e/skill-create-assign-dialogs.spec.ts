@@ -206,6 +206,26 @@ test("selects fill their field and open lists at least as wide as their trigger"
   await expect(dialog).not.toContainText(/Native|Non-Interactive|Pi RPC/);
 });
 
+// #2285: an option's name is its label alone, and its description and any disabled reason are its
+// accessible description, as the browser computes them.
+test("each agent option is named by its label and described by its second lines", async ({ page }) => {
+  const dialog = await openAddAssignment(page);
+  await dialog.getByRole("button", { name: /^Agents:/ }).click();
+  const options = page.getByRole("listbox").getByRole("option");
+  await expect(options.first()).toBeVisible();
+  if (process.env.EVIDENCE_DIR) await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/select-option-names-agents.png` });
+  const rows = await options.evaluateAll((elements) => elements.map((element) => ({
+    label: element.querySelector(".ui-select-option-body > span")?.textContent ?? "",
+    lines: [...element.querySelectorAll(".ui-select-option-desc, .ui-select-option-reason")]
+      .map((line) => line.textContent ?? "").join(" "),
+  })));
+  expect(rows.some((row) => row.lines !== ""), "some option has a second line").toBe(true);
+  for (const [index, row] of rows.entries()) {
+    await expect(options.nth(index)).toHaveAccessibleName(row.label);
+    await expect(options.nth(index)).toHaveAccessibleDescription(row.lines);
+  }
+});
+
 for (const open of [openNewSkill, openAddAssignment]) {
   test(`at 390px ${open === openNewSkill ? "New Skill" : "Add Assignment"} is a bottom sheet with equal 48px Cancel and primary buttons`, async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });

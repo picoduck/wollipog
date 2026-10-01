@@ -71,7 +71,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await page.getByRole("menu", { name: "Add Skill" }).getByRole("menuitem", { name: "code-review", exact: true }).click();
     await confirmation(page, "Add Skill to Group").getByRole("button", { name: "Add Skill", exact: true }).click();
     await expect(manageGroups(page).locator(".skill-groups-members .row-title")).toHaveText(["code-review"]);
-    await addRule(page, "Build Machine", "Claude Claude Code");
+    await addRule(page, "Build Machine", "Claude");
     await expect(manageGroups(page).locator(".skill-assignment-title")).toHaveText(["Claude on Build Machine"]);
     expect(fixture.writes.find(write => write.path.endsWith("/assignments"))?.body).toEqual({ scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "agent", agentId: "claude" }, invocation: "agent" });
     await page.mouse.move(0, 0);
