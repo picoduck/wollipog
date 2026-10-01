@@ -18,6 +18,7 @@ import {
   Code as LucideCode,
   Columns3 as LucideColumns3,
   Copy as LucideCopy,
+  Download as LucideDownload,
   CornerUpLeft as LucideCornerUpLeft,
   Ellipsis as LucideEllipsis,
   EllipsisVertical as LucideEllipsisVertical,
@@ -42,6 +43,7 @@ import {
   Inbox as LucideInbox,
   Info as LucideInfo,
   Keyboard as LucideKeyboard,
+  Link as LucideLink,
   List as LucideList,
   ListChecks as LucideListChecks,
   Lock as LucideLock,
@@ -246,6 +248,14 @@ export function MoreVerticalIcon(props: IconProps) {
 
 export function ShareIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideShare} {...props} />;
+}
+
+export function LinkIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideLink} {...props} />;
+}
+
+export function DownloadIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideDownload} {...props} />;
 }
 
 export function RefreshIcon(props: IconProps) {

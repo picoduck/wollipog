@@ -61,6 +61,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `MoreHorizontalIcon` | Lucide | `Ellipsis` | Horizontal overflow menu. |
 | `MoreVerticalIcon` | Lucide | `EllipsisVertical` | Vertical overflow menu. |
 | `ShareIcon` | Lucide | `Share` | Generic share action. |
+| `LinkIcon` | Lucide | `Link` | Copy a link to a page. |
+| `DownloadIcon` | Lucide | `Download` | Export or download a file. |
 | `RefreshIcon` | Lucide | `RefreshCw` | Generic refresh action. |
 | `UpdateIcon` | Lucide | `Upload` | Install or upload an update. |
 | `SearchIcon` | Lucide | `Search` | Generic search action. |

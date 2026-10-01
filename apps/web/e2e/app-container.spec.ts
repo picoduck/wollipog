@@ -126,7 +126,7 @@ for (const banner of [false, true]) {
     await openShell(page, "/inbox", "Sessions", banner);
     await forceFloorEngine(page);
     await page.locator(".inbox-row-shell").first().click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Snooze Session…", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Snooze…", exact: true }).click();
     const expression = page.getByRole("combobox", { name: "Natural Language" });
     await dialogMotionSettled(page);
     await expression.fill("fri");

@@ -13,10 +13,10 @@ const LONG_TITLE =
 async function openBar(
   page: Page,
   width: number,
-  options: { session?: RegExp; height?: number; legacyWorkspaces?: boolean } = {},
+  options: { session?: RegExp; height?: number; scenario?: string; legacyWorkspaces?: boolean } = {},
 ) {
   await page.setViewportSize({ width, height: options.height ?? 900 });
-  await page.goto(`/command-inbox-projects-e2e.html?scenario=git-visibility&reviewReady=1&fullShell=1${
+  await page.goto(`/command-inbox-projects-e2e.html?scenario=${options.scenario ?? "git-visibility"}&reviewReady=1&fullShell=1${
     options.legacyWorkspaces ? "&legacyWorkspaces=1" : ""}`);
   await page.evaluate(() => localStorage.clear());
   await page.reload();
@@ -178,7 +178,7 @@ test("folding while More Actions is disabled by a running export hands focus to 
   const bar = page.locator("header.session-bar");
   const moreActions = bar.getByRole("button", { name: "More Actions" });
   await bar.getByRole("button", { name: "Share" }).click();
-  await page.getByRole("menuitem", { name: "Export Markdown" }).click();
+  await page.getByRole("menuitem", { name: "Export as Markdown" }).click();
   await expect(moreActions).toBeDisabled();
 
   const button = bar.locator(".session-project-button");
@@ -222,7 +222,7 @@ test("cancelling Move to Project after the bar folds while More Actions is disab
   await openBar(page, 1440);
   const bar = page.locator("header.session-bar");
   await bar.getByRole("button", { name: "Share" }).click();
-  await page.getByRole("menuitem", { name: "Export Markdown" }).click();
+  await page.getByRole("menuitem", { name: "Export as Markdown" }).click();
   await expect(bar.getByRole("button", { name: "More Actions" })).toBeDisabled();
   const button = bar.locator(".session-project-button");
   await button.click();
@@ -278,26 +278,15 @@ test("on a control plane without projects the workspace menu files the session, 
   await expect(button).toHaveText("Alpha");
 });
 
-test("a long transient note keeps to one line inside the 48px bar", async ({ page, context }) => {
+test("a menu result is a toast, and the bar never shows a transient note", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await openBar(page, 940);
   const bar = page.locator("header.session-bar");
   await bar.getByRole("button", { name: "Share" }).click();
-  await page.getByRole("menuitem", { name: "Copy Internal Session Link" }).click();
-  const note = bar.locator(".session-header-note");
-  await expect(note).toBeVisible();
-  // Stand in for a long export or reprocessing error, which the same slot shows.
-  const long = "The transcript export failed because the control plane could not read the session's history from disk.";
-  const geometry = await note.evaluate((element, text) => {
-    element.textContent = text;
-    const box = element.getBoundingClientRect();
-    const barBox = element.closest(".session-bar")!.getBoundingClientRect();
-    return { top: box.top, bottom: box.bottom, barTop: barBox.top, barBottom: barBox.bottom, lineHeight: parseFloat(getComputedStyle(element).lineHeight) || 16 };
-  }, long);
-  expect(geometry.top).toBeGreaterThanOrEqual(geometry.barTop);
-  expect(geometry.bottom).toBeLessThanOrEqual(geometry.barBottom);
-  expect(geometry.bottom - geometry.top).toBeLessThan(2 * geometry.lineHeight);
-  await expect(note).toHaveCSS("text-overflow", "ellipsis");
+  await page.getByRole("menuitem", { name: "Copy Session Link" }).click();
+  await expect(page.locator(".toast", { hasText: "Link copied." })).toBeVisible();
+  await expect(bar.locator(".session-header-note, .detail-note, [role='status'][aria-live]")).toHaveCount(0);
+  expect(await bar.evaluate((element) => element.getBoundingClientRect().height)).toBe(48);
 });
 
 test("a session with no project shows a faint No Project whose menu only moves it", async ({ page }) => {
@@ -360,7 +349,7 @@ for (const width of [761, 834, 940, 1099]) {
     expect(geometry.actions.right).toBeLessThanOrEqual(geometry.bar.right);
 
     await bar.getByRole("button", { name: "More Actions" }).click();
-    const rows = page.getByRole("menu", { name: "Session Actions" }).locator("[role='menuitem'], [role='separator']");
+    const rows = page.getByRole("menu", { name: "More Actions" }).locator("[role='menuitem'], [role='separator']");
     await expect(rows.nth(0)).toHaveText("Open Alpha");
     await expect(rows.nth(1)).toHaveText("Move to Another Project…");
     await expect(rows.nth(2)).toHaveAttribute("role", "separator");
@@ -428,13 +417,14 @@ test.describe("phone", () => {
         return { name: button.getAttribute("aria-label"), width: box.width, height: box.height, corners };
       });
     });
-    expect(targets.map((target) => target.name)).toEqual([
+    // How many statuses the disclosure holds depends on the UI font (one here, two in CI's DejaVu
+    // Sans); this test is about the controls and their hit areas, so it reads the disclosure as +N.
+    expect(targets.map((target) => target.name?.replace(/^\+\d+: Show \d+ Hidden Status(es)?$/, "+N"))).toEqual([
       "Back to Sessions",
       "Toggle Pinned Summary",
       "Show Terminal",
       "Show Side Panel",
-      "+2: Show 2 Hidden Statuses",
-      "Fork Conversation",
+      "+N",
       "Share",
       "More Actions",
     ]);
@@ -445,11 +435,106 @@ test.describe("phone", () => {
     }
 
     await page.locator(".session-bar").getByRole("button", { name: "More Actions" }).click();
-    const sheet = page.getByRole("menu", { name: "Session Actions" });
+    const sheet = page.getByRole("menu", { name: "More Actions" });
     await expect(sheet.locator(".menu-head")).toHaveText("Add a dark mode toggle to the site header");
     const rows = sheet.locator("[role='menuitem'], [role='separator']");
     await expect(rows.nth(0)).toHaveText("Open Alpha");
     await expect(rows.nth(1)).toHaveText("Move to Another Project…");
     await expect(rows.nth(2)).toHaveAttribute("role", "separator");
+  });
+});
+
+// The issue estimated 260px; the shared §9.1 described row (52px) and the specified copy measure 287px
+// here and 303px in CI's DejaVu Sans, against 410px for the old menu. The bound keeps that small margin.
+test("at 1440px Share holds four described items and one note in at most 310px", async ({ page }) => {
+  await openBar(page, 1440);
+  await page.locator("header.session-bar").getByRole("button", { name: "Share" }).click();
+  const menu = page.getByRole("menu", { name: "Share" });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("menuitem")).toHaveText([
+    /^Share Transcript…/, /^Copy Session Link/, /^Export as Markdown/, /^Export as JSON/,
+  ]);
+  await expect(menu.locator(".menu-note")).toHaveCount(1);
+  await expect(menu.locator(".menu-label")).toHaveCount(0);
+  const shape = await menu.evaluate((element) => ({
+    height: element.getBoundingClientRect().height,
+    secondLines: [...element.querySelectorAll('[role="menuitem"]')].map((item) => {
+      const line = document.getElementById(item.getAttribute("aria-describedby") ?? "");
+      return line && line.getBoundingClientRect().height > 0 ? line.textContent : null;
+    }),
+  }));
+  expect(shape.height).toBeLessThanOrEqual(310);
+  expect(shape.secondLines.every(Boolean), JSON.stringify(shape.secondLines)).toBe(true);
+});
+
+test("More Actions separates its groups once each and ends with the red Stop Session…", async ({ page }) => {
+  await openBar(page, 1440);
+  await page.locator("header.session-bar").getByRole("button", { name: "More Actions" }).click();
+  const menu = page.getByRole("menu", { name: "More Actions" });
+  await expect(menu.locator(".menu-label")).toHaveCount(0);
+  const rows = await menu.evaluate((element) => [...element.querySelectorAll('[role="menuitem"], [role="separator"]')]
+    .map((row) => row.getAttribute("role") === "separator" ? "—" : row.querySelector(".menu-text")?.textContent ?? ""));
+  expect(rows[0]).not.toBe("—");
+  expect(rows.at(-1)).toBe("Stop Session…");
+  expect(rows.join("|")).not.toContain("—|—");
+  const colors = await menu.evaluate((element) => {
+    const color = (label: string) => {
+      const item = [...element.querySelectorAll('[role="menuitem"]')]
+        .find((row) => row.querySelector(".menu-text")?.textContent === label)!;
+      return getComputedStyle(item).color;
+    };
+    const probe = document.createElement("span");
+    probe.style.color = "var(--danger-text)";
+    document.body.append(probe);
+    const danger = getComputedStyle(probe).color;
+    probe.remove();
+    return { stop: color("Stop Session…"), rename: color("Rename…"), danger };
+  });
+  expect(colors.stop).toBe(colors.danger);
+  expect(colors.rename).not.toBe(colors.danger);
+});
+
+test("Fork Conversation lives in More Actions: enabled after a finished turn, disabled with its reason during one, absent without a worktree", async ({ page }) => {
+  // A worktree session whose turns have finished (the edit-in-fork fixture).
+  for (const width of [1440, 1000]) {
+    await openBar(page, width, { scenario: "edit-in-fork" });
+    await expect(page.locator('header.session-bar [aria-label="Fork Conversation"]')).toHaveCount(0);
+  }
+  const bar = page.locator("header.session-bar");
+  const moreActions = bar.getByRole("button", { name: "More Actions" });
+  await moreActions.click();
+  const fork = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem", { name: "Fork Conversation…" });
+  await expect(fork).toBeEnabled();
+  await expect(fork.locator("kbd")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { status: "running" });
+  });
+  await moreActions.click();
+  await expect(fork).toBeDisabled();
+  await expect(fork).toHaveAccessibleDescription("Wait for the current turn or approval before creating a fork.");
+  await expect(fork.locator(".menu-desc")).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      status: "idle", useWorktree: false, worktreePath: null,
+    });
+  });
+  await moreActions.click();
+  await expect(page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem", { name: "Rename…" })).toBeVisible();
+  await expect(fork).toHaveCount(0);
+});
+
+test.describe("phone action line", () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test("has no Fork button; the sheet offers Fork Conversation…", async ({ page }) => {
+    await openBar(page, 390, { height: 844, scenario: "edit-in-fork" });
+    await expect(page.locator('.session-bar [aria-label="Fork Conversation"]')).toHaveCount(0);
+    await page.locator(".session-bar").getByRole("button", { name: "More Actions" }).click();
+    await expect(page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem", { name: "Fork Conversation…" }))
+      .toBeVisible();
   });
 });

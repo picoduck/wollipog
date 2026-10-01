@@ -722,6 +722,16 @@ extending the settled one-bar session chrome app-wide.
   The title is the only element that absorbs width, and shows `sessionDisplayTitle()`: the stored
   title's first non-empty line, whitespace collapsed, a trailing period dropped. Control planes
   without Projects show the same button with the folder icon for the workspace menu.
+- The session bar's two menus (#2161) use the shared `Menu` with no section labels. Share holds
+  Share Transcript…, Copy Session Link, a separator, Export as Markdown and Export as JSON, each
+  with a 16px icon and a second line, then one note about redaction. More Actions groups, each
+  after a separator: the folded project items (compact tier and phones), then Rename…, the
+  reminder item (never on an archived session), Dismiss Reminder, Fork Conversation… and
+  Switch Account…, then Reprocess Transcript and Sign Out of Agent…, then the archive item and
+  Restart Session, and last the red Retry Stop, Stop Session… and Delete Session…. Fork lives
+  only here, never as a bar button; it is left out where the session can never fork. Every
+  disabled item says why on its second line, and results are toasts (§13.1), never a note in the
+  bar.
 
 ### 4.4 Bar Height: 48px
 

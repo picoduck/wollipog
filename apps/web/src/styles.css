@@ -3447,24 +3447,6 @@ textarea {
   height: 18px;
   background: var(--border);
 }
-.detail-note {
-  font-size: 12px;
-  color: var(--text-dim);
-  max-width: 260px;
-  overflow-wrap: anywhere;
-}
-.session-bar > .session-header-note {
-  flex: 0 1 260px;
-  min-width: 0;
-}
-/* The desktop bar is a fixed 48px row, so a transient note keeps to one line there and truncates,
-   with its full text in the tooltip and announced whole by its live region. The phone's second
-   line gives the note a row of its own and lets it wrap. */
-.detail-bar.session-bar > .session-header-note {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 /* "⋯" overflow menu for infrequent actions (e.g. Reprocess) */
 .overflow-menu {
   position: relative;
@@ -3493,11 +3475,6 @@ textarea {
 }
 .session-status-popover-content .session-status-indicators {
   flex-wrap: wrap;
-}
-@media (max-width: 600px) {
-  .detail-note {
-    max-width: 160px;
-  }
 }
 .detail-scroll {
   flex: 1;
@@ -13559,7 +13536,6 @@ body.shell-dock-dragging * {
     padding-right: var(--mobile-session-trailing-inset);
     border-bottom: 1px solid var(--border);
   }
-  .session-bar:has(> .session-header-note) { row-gap: 4px; }
   .session-bar > .session-header-statuses {
     /* Statuses stay in the leading grid track so the action track is always complete. The
        measured badge row hides only its overflowing suffix and hands the exact hidden count to the
@@ -13612,12 +13588,6 @@ body.shell-dock-dragging * {
      lifecycle badge it belongs beside and made the header taller the moment a job started (#784).
      It now rides the measured status row: the row's priority order keeps it visible and pushes
      passive statuses into the +N disclosure instead. */
-  .session-bar > .session-header-note {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    width: 100%;
-    max-width: none;
-  }
   .detail-scroll {
     padding: 12px 0;
   }

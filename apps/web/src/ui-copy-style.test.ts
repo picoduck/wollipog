@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import ts from "typescript";
+import type { SessionReminderView } from "@wollipog/protocol";
 import { ApiError } from "./api.js";
 import { archiveAndStopMessage } from "./archive-actions.js";
 import { closeWarning } from "./components/DesktopCloseGuard.js";
@@ -10,6 +11,7 @@ import { heldUpdateMessage } from "./desktop-updates.js";
 import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
 import { lifecycleConflictPresentation } from "./components/RunnersView.js";
 import { backLabel } from "./navigation.js";
+import { reminderMenuActionLabel } from "./session-reminders.js";
 import {
   DEPLOY_TO_TRACKING_MACHINES_CONSENT,
   deployToAssignmentsConsent,
@@ -665,6 +667,76 @@ test("Share Transcript's titles, labels and buttons are Title Case, and its sent
   assert.ok(isTitleCase(`Revoke Link That Expires ${shareMoment(expiresAt, now)}`));
   assert.equal(shareExpiryLabel({ status: "active", expiresAt }, now), "Expires in 2 days");
   assert.ok(isSentenceCase(shareCreatedLabel(now, now).replace(/\d.*$/, "").trim()));
+});
+
+test("the session menus' labels are Title Case, with an ellipsis only where a dialog or confirmation follows (#2161)", () => {
+  const sourceFile = parseSource(path.join(SOURCE_ROOT, "components/SessionHeader.tsx"));
+  const items = uiCopy(sourceFile)
+    .filter((copy) => copy.kind === "<MenuItem>")
+    .map((copy) => copy.value.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  // Each item, and whether a dialog or a confirmation follows it.
+  const expected: ReadonlyArray<readonly [string, boolean]> = [
+    ["Share Transcript…", true],
+    ["Copy Session Link", false],
+    ["Export as Markdown", false],
+    ["Export as JSON", false],
+    ["Rename…", true],
+    ["Dismiss Reminder", false],
+    ["Fork Conversation…", true],
+    ["Switch Account…", true],
+    ["Reprocess Transcript", false],
+    ["Sign Out of Agent…", true],
+    ["Restart Session", false],
+    ["Retry Stop", false],
+    ["Stop Session…", true],
+    ["Delete Session…", true],
+  ];
+  for (const [label, opensDialog] of expected) {
+    assert.ok(items.includes(label), `${label} is rendered (found ${JSON.stringify(items)})`);
+    assert.ok(isTitleCase(label), `${label} is Title Case`);
+    assert.equal(label.endsWith("…"), opensDialog, `${label} ends in an ellipsis only before a dialog or confirmation`);
+  }
+  // The reminder item reads the same in both session menus; the archive item confirms only when it stops.
+  for (const label of [reminderMenuActionLabel(), reminderMenuActionLabel({ state: "pending" } as SessionReminderView),
+    reminderMenuActionLabel({ state: "fired" } as SessionReminderView)]) {
+    assert.ok(isTitleCase(label) && label.endsWith("…"), `${label} opens the Snooze dialog`);
+  }
+  assert.deepEqual([reminderMenuActionLabel(), reminderMenuActionLabel({ state: "pending" } as SessionReminderView),
+    reminderMenuActionLabel({ state: "fired" } as SessionReminderView)], ["Snooze…", "Change Reminder…", "Snooze Again…"]);
+  for (const retired of ["Rename Session…", "Restart", "Sign Out", "↻ Reprocess Transcript", "Export Markdown",
+    "Export JSON", "Copy Internal Session Link"]) {
+    assert.ok(!items.includes(retired), `${retired} is gone from the session menus`);
+  }
+  assert.doesNotMatch(sourceFile.text, /<MenuLabel>/, "the session menus have no section labels");
+
+  // Second lines and the note are sentences; Wollipog is a name.
+  const sentences: string[] = [];
+  const visit = (node: ts.Node) => {
+    const collect = (child: ts.Node) => {
+      if (ts.isStringLiteralLike(child) && /\s/.test(child.text)) sentences.push(child.text);
+      if (ts.isTemplateExpression(child)) {
+        sentences.push([child.head.text, ...child.templateSpans.map((span) => span.literal.text)].join("X"));
+        return;
+      }
+      ts.forEachChild(child, collect);
+    };
+    if (ts.isJsxAttribute(node) && node.name.getText(sourceFile) === "description" && node.initializer) {
+      collect(node.initializer);
+    }
+    // The reasons an item is unavailable are named `…Reason` (or `…_REASON`, `…_HINT`) before they reach it.
+    if (ts.isVariableDeclaration(node) && /(?:reason|_HINT)$/i.test(node.name.getText(sourceFile)) && node.initializer
+      && !/Refusal/.test(node.initializer.getText(sourceFile))) collect(node.initializer);
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  sentences.push(...uiCopy(sourceFile).filter((copy) => copy.kind === "<MenuNote>").map((copy) => copy.value));
+  assert.ok(sentences.length >= 8, `read ${sentences.length} second lines`);
+  // A template made only of other reasons (each read on its own) holds no copy of its own.
+  for (const sentence of sentences.filter((text) => !/^[X\s]*$/.test(text))) {
+    assert.ok(isSentenceCase(sentence.replace(/\bWollipog\b/g, "wollipog")), `${sentence} is sentence case`);
+    assert.match(sentence, /\.$/, `${sentence} is a full sentence`);
+  }
 });
 
 test("the copy rules tell a sentence from a title", () => {

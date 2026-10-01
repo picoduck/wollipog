@@ -1551,6 +1551,7 @@ export function InboxView({
             busy={displayedSelection ? busySessionIds.has(displayedSelection) : false}
             forkAvailability={previewForkControls?.availability ?? {
               available: false,
+              offered: true,
               reason: "Fork availability is still loading.",
             }}
             onApprove={() => {

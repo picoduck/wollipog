@@ -115,9 +115,9 @@ test("a Viewer sees Stop Session disabled with the reason, and nothing is confir
     commandPermissions: readOnly,
   } as SessionView, calls);
   try {
-    const stop = menuItem(page(), "Stop Session");
+    const stop = menuItem(page(), "Stop Session…");
     assert.equal(stop.disabled, true);
-    assert.equal(stop.title, VIEWER);
+    assert.equal(stop.getAttribute("title"), null, "the reason is the second line, not a tooltip (#2161)");
     assert.equal(description(stop), VIEWER);
     await act(async () => { stop.click(); await tick(); });
     assert.deepEqual(calls, []);
@@ -133,7 +133,7 @@ test("a Viewer sees Restart and Retry Stop disabled with the reason (#1843)", as
     commandPermissions: readOnly,
   } as SessionView, calls);
   try {
-    const restart = menuItem(page(), "Restart");
+    const restart = menuItem(page(), "Restart Session");
     assert.equal(restart.disabled, true);
     assert.equal(description(restart), VIEWER);
     await act(async () => { restart.click(); await tick(); });
@@ -152,8 +152,8 @@ test("a Viewer sees Restart and Retry Stop disabled with the reason (#1843)", as
     const retry = menuItem(page(), "Retry Stop");
     assert.equal(retry.disabled, true);
     assert.equal(description(retry), VIEWER);
-    assert.equal(page().querySelectorAll("#session-runtime-caution").length, 1,
-      "one caution serves every refused Runtime item");
+    assert.equal(page().querySelectorAll(".menu-note").length, 0,
+      "each refused item carries its own line; no shared caution note (#2161)");
     await act(async () => { retry.click(); await tick(); });
   } finally {
     await failed.unmount();
@@ -174,10 +174,10 @@ test("a person who may stop and restart keeps the Runtime items as before (#1843
       ...(commandPermissions ? { commandPermissions } : {}),
     } as SessionView, calls);
     try {
-      const stop = menuItem(page(), "Stop Session");
+      const stop = menuItem(page(), "Stop Session…");
       assert.equal(stop.disabled, false);
       assert.equal(stop.getAttribute("aria-describedby"), null);
-      assert.equal(stop.title, "Terminate the agent process and discard queued messages");
+      assert.equal(stop.getAttribute("title"), null);
       assertNoDomNode(page().querySelector("#session-runtime-caution"));
       await act(async () => { stop.click(); await tick(); await tick(); });
       assert.deepEqual(calls, ["confirm", "stop:session-running"]);
@@ -197,9 +197,9 @@ const stopFailedArchive = {
 
 test("a Viewer sees the archive item disabled with the reason in every state, and nothing is confirmed or sent", async () => {
   const cases: Array<{ label: string; session: Partial<SessionView>; unarchiveAndRestart?: boolean }> = [
-    { label: "Archive and Stop", session: { status: "running", archived: false } },
+    { label: "Archive and Stop…", session: { status: "running", archived: false } },
     { label: "Archive", session: { status: "stopped", archived: false } },
-    { label: "Retry Stop", session: { status: "running", archived: false, ...stopFailedArchive } as Partial<SessionView> },
+    { label: "Retry Stop…", session: { status: "running", archived: false, ...stopFailedArchive } as Partial<SessionView> },
     { label: "Unarchive", session: { status: "stopped", archived: true } },
     { label: "Unarchive and Restart", session: { status: "stopped", archived: true }, unarchiveAndRestart: true },
   ];
@@ -211,7 +211,7 @@ test("a Viewer sees the archive item disabled with the reason in every state, an
     try {
       const item = menuItem(page(), label);
       assert.equal(item.disabled, true, `${label} is disabled`);
-      assert.equal(item.title, VIEWER);
+      assert.equal(item.getAttribute("title"), null);
       assert.equal(description(item), VIEWER, `${label} is described by the reason`);
       assert.equal(page().querySelector("#session-archive-caution")?.textContent, VIEWER,
         "the reason is visible in the menu");
@@ -239,7 +239,7 @@ test("a person who may archive and unarchive keeps the archive item as before", 
       ...(commandPermissions ? { commandPermissions } : {}),
     } as SessionView, calls);
     try {
-      const archive = menuItem(page(), "Archive and Stop");
+      const archive = menuItem(page(), "Archive and Stop…");
       assert.equal(archive.disabled, false);
       assert.equal(archive.getAttribute("aria-describedby"), null);
       assertNoDomNode(page().querySelector("#session-archive-caution"));
@@ -272,10 +272,10 @@ test("a Viewer sees Rename Session disabled with the reason, and the rename dial
       ...(commandPermissions ? { commandPermissions } : {}),
     } as SessionView, []);
     try {
-      const rename = menuItem(page(), "Rename Session…");
+      const rename = menuItem(page(), "Rename…");
       assert.equal(rename.disabled, refused, refused ? "refused rename is disabled" : "rename is offered as before");
       if (refused) {
-        assert.equal(rename.title, VIEWER);
+        assert.equal(rename.getAttribute("title"), null);
         assert.equal(description(rename), VIEWER);
         assert.equal(page().querySelector("#session-rename-caution")?.textContent, VIEWER);
       } else {
@@ -290,28 +290,28 @@ test("a Viewer sees Rename Session disabled with the reason, and the rename dial
   }
 });
 
-test("a Viewer's Fork Conversation is disabled and describes the refusal; an allowed person's is unchanged (#1864)", async () => {
+test("a Viewer's Fork Conversation… is disabled with the refusal as its second line; an allowed person's is enabled (#1864)", async () => {
   const calls: string[] = [];
   const refused = await renderHeader({
     id: "session-fork", runnerId: "runner-1", title: "Fork", status: "idle", archived: false,
     commandPermissions: { ...readOnly, fork: { allowed: false, reason: VIEWER } },
   } as SessionView, calls, false, {
     // SessionDetail folds the fork verdict into the availability it passes down.
-    forkAvailability: { available: false, reason: VIEWER },
+    forkAvailability: { available: false, offered: true, reason: VIEWER },
     onFork: () => { calls.push("fork"); },
   });
   try {
-    const fork = refused.container.querySelector<HTMLButtonElement>('button[aria-label="Fork Conversation"]');
-    assert.ok(fork, "missing Fork Conversation");
+    assertNoDomNode(refused.container.querySelector('[aria-label="Fork Conversation"]'),
+      "the bar has no Fork button at any width (#2161)");
+    const fork = menuItem(page(), "Fork Conversation…");
     assert.equal(fork.disabled, true);
-    assert.equal(fork.title, VIEWER);
-    assert.equal(description(fork), VIEWER, "the reason is announced, not only shown on hover");
+    assert.equal(fork.getAttribute("title"), null);
+    assert.equal(description(fork), VIEWER, "the reason is visible and announced, not only shown on hover");
     await act(async () => { fork.click(); await tick(); });
     assert.deepEqual(calls, []);
   } finally {
     await refused.unmount();
   }
-
   for (const commandPermissions of [{ ...readOnly, fork: { allowed: true } }, undefined]) {
     const allowedCalls: string[] = [];
     const allowed = await renderHeader({
@@ -322,14 +322,42 @@ test("a Viewer's Fork Conversation is disabled and describes the refusal; an all
       onFork: () => { allowedCalls.push("fork"); },
     });
     try {
-      const fork = allowed.container.querySelector<HTMLButtonElement>('button[aria-label="Fork Conversation"]');
-      assert.ok(fork, "missing Fork Conversation");
+      const fork = menuItem(page(), "Fork Conversation…");
       assert.equal(fork.disabled, false);
-      assert.equal(fork.title, "Fork Conversation");
       assert.equal(fork.getAttribute("aria-describedby"), null);
-      assertNoDomNode(page().querySelector("#session-fork-refusal"));
+      await act(async () => { fork.click(); await tick(); });
+      assert.deepEqual(allowedCalls, ["fork"]);
     } finally {
       await allowed.unmount();
     }
+  }
+});
+
+test("a running turn keeps Fork Conversation… disabled with its reason; a session that can never fork has no item (#2161)", async () => {
+  const running = await renderHeader({
+    id: "session-fork", runnerId: "runner-1", title: "Fork", status: "running", archived: false,
+  } as SessionView, [], false, {
+    forkAvailability: { available: false, offered: true, reason: "Wait for the current turn or approval before creating a fork." },
+    onFork: () => undefined,
+  });
+  try {
+    const fork = menuItem(page(), "Fork Conversation…");
+    assert.equal(fork.disabled, true);
+    assert.equal(description(fork), "Wait for the current turn or approval before creating a fork.");
+  } finally {
+    await running.unmount();
+  }
+  const noWorktree = await renderHeader({
+    id: "session-fork", runnerId: "runner-1", title: "Fork", status: "idle", archived: false,
+  } as SessionView, [], false, {
+    forkAvailability: { available: false, offered: false, reason: "Conversation forks require an isolated worktree session." },
+    onFork: () => undefined,
+  });
+  try {
+    const labels = [...page().querySelectorAll('[role="menuitem"] .menu-text')].map((node) => node.textContent);
+    assert.equal(labels.includes("Fork Conversation…"), false, "forking is structurally impossible here");
+    assert.ok(labels.includes("Rename…"), "the menu itself is open");
+  } finally {
+    await noWorktree.unmount();
   }
 });

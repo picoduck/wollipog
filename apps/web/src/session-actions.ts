@@ -36,9 +36,12 @@ export interface ConversationForkContext extends EditInForkContext {
   forkInProgress: boolean;
 }
 
+/** `offered` is false where this session can never fork (no worktree, or a provider that cannot
+ * fork), so the session menu leaves the item out. Otherwise a block is temporary and the item stays
+ * visible, disabled with `reason`. */
 export type ConversationForkAvailability =
   | { available: true; forkTurn: number }
-  | { available: false; reason: string };
+  | { available: false; offered: boolean; reason: string };
 
 /** `offered` is false where this message can never be edited in a fork in this session, so no
  * control is shown. Otherwise the control stays visible, disabled with `reason`. */
@@ -141,37 +144,41 @@ export function conversationForkAvailability(
   latestKnownTurn: number | undefined,
   context: ConversationForkContext,
 ): ConversationForkAvailability {
-  if (context.forkRefusal) return { available: false, reason: context.forkRefusal };
+  // Whether the item is shown never changes which reason is given: the transcript's per-message
+  // fork and the Sessions list's F shortcut read the same reasons in the same order.
+  const offered = context.hasWorktree && context.providerSupported;
+  if (context.forkRefusal) return { available: false, offered, reason: context.forkRefusal };
   if (!Number.isInteger(forkTurn) || forkTurn! <= 0) {
-    return { available: false, reason: "Complete a conversation turn before creating a fork." };
+    return { available: false, offered, reason: "Complete a conversation turn before creating a fork." };
   }
   if (!context.hasWorktree) {
-    return { available: false, reason: "Conversation forks require an isolated worktree session." };
+    return { available: false, offered, reason: "Conversation forks require an isolated worktree session." };
   }
   if (!context.runnerOnline) {
-    return { available: false, reason: "Reconnect the runner before creating a fork." };
+    return { available: false, offered, reason: "Reconnect the runner before creating a fork." };
   }
   if (!runnerSupportsProtocol(context.runnerProtocolVersion, "conversationFork")) {
-    return { available: false, reason: "Update and restart the runner to enable conversation forks." };
+    return { available: false, offered, reason: "Update and restart the runner to enable conversation forks." };
   }
   if (!context.providerSupported) {
-    return { available: false, reason: "This provider does not support conversation forks." };
+    return { available: false, offered, reason: "This provider does not support conversation forks." };
   }
   if (context.forkInProgress) {
-    return { available: false, reason: "A conversation fork is already in progress for this session." };
+    return { available: false, offered, reason: "A conversation fork is already in progress for this session." };
   }
   if (["queued", "running", "starting", "input_required"].includes(context.status)) {
-    return { available: false, reason: "Wait for the current turn or approval before creating a fork." };
+    return { available: false, offered, reason: "Wait for the current turn or approval before creating a fork." };
   }
   if (context.queuedPrompts > 0) {
-    return { available: false, reason: "Cancel or wait for queued messages before creating a fork." };
+    return { available: false, offered, reason: "Cancel or wait for queued messages before creating a fork." };
   }
   if (context.busy) {
-    return { available: false, reason: "Another session action is already in progress." };
+    return { available: false, offered, reason: "Another session action is already in progress." };
   }
   if ((context.driver === "claude-code" || context.driver === "pi") && forkTurn !== latestKnownTurn) {
     return {
       available: false,
+      offered,
       reason: `${context.driver === "pi" ? "Pi" : "Claude Code"} can fork only its latest completed conversation checkpoint.`,
     };
   }

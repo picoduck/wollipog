@@ -102,24 +102,35 @@ test("plain conversation forks share runtime gates and preserve Claude and Pi la
   assert.equal(historicalPi.available, false);
   if (!historicalPi.available) assert.match(historicalPi.reason, /^Pi can fork only/u);
 
+  // `offered` is false only where this session can never fork; every other block is temporary and
+  // keeps the session menu's item, disabled with its reason (#2161).
   const blocked = [
-    { context: { ...context, hasWorktree: false }, reason: /isolated worktree/ },
-    { context: { ...context, runnerOnline: false }, reason: /Reconnect the runner/ },
-    { context: { ...context, runnerProtocolVersion: 27 }, reason: /Update and restart/ },
-    { context: { ...context, providerSupported: false }, reason: /provider does not support/ },
-    { context: { ...context, forkInProgress: true }, reason: /already in progress/ },
-    { context: { ...context, status: "running" as const }, reason: /current turn or approval/ },
-    { context: { ...context, queuedPrompts: 1 }, reason: /queued messages/ },
-    { context: { ...context, busy: true }, reason: /Another session action/ },
+    { context: { ...context, hasWorktree: false }, reason: /isolated worktree/, offered: false },
+    { context: { ...context, runnerOnline: false }, reason: /Reconnect the runner/, offered: true },
+    { context: { ...context, runnerProtocolVersion: 27 }, reason: /Update and restart/, offered: true },
+    { context: { ...context, providerSupported: false }, reason: /provider does not support/, offered: false },
+    { context: { ...context, forkInProgress: true }, reason: /already in progress/, offered: true },
+    { context: { ...context, status: "running" as const }, reason: /current turn or approval/, offered: true },
+    { context: { ...context, queuedPrompts: 1 }, reason: /queued messages/, offered: true },
+    { context: { ...context, busy: true }, reason: /Another session action/, offered: true },
+    { context: { ...context, forkRefusal: "Your Viewer role is read-only." }, reason: /Viewer/, offered: true },
+    { context: { ...context, hasWorktree: false, forkRefusal: "Your Viewer role is read-only." }, reason: /Viewer/,
+      offered: false },
   ];
-  for (const { context: blockedContext, reason } of blocked) {
+  for (const { context: blockedContext, reason, offered } of blocked) {
     const availability = conversationForkAvailability(2, 2, blockedContext);
     assert.equal(availability.available, false);
-    if (!availability.available) assert.match(availability.reason, reason);
+    if (!availability.available) {
+      assert.match(availability.reason, reason);
+      assert.equal(availability.offered, offered, String(reason));
+    }
   }
   const noCheckpoint = conversationForkAvailability(undefined, undefined, context);
   assert.equal(noCheckpoint.available, false);
-  if (!noCheckpoint.available) assert.match(noCheckpoint.reason, /Complete a conversation turn/);
+  if (!noCheckpoint.available) {
+    assert.match(noCheckpoint.reason, /Complete a conversation turn/);
+    assert.equal(noCheckpoint.offered, true, "a worktree session without a finished turn will be able to fork");
+  }
 });
 
 const failedReceipt: QueuedPromptView = {
@@ -264,9 +275,9 @@ test("the fixed composer control stops only when the active turn has no draft co
 test("a person refused Fork sees that reason on every fork, edit-in-fork and handoff entry point (#1864)", () => {
   const reason = "Your Viewer role is read-only.";
   const context = { ...base, providerSupported: true, forkInProgress: false };
-  assert.deepEqual(conversationForkAvailability(2, 2, { ...context, forkRefusal: reason }), { available: false, reason });
+  assert.deepEqual(conversationForkAvailability(2, 2, { ...context, forkRefusal: reason }), { available: false, offered: true, reason });
   assert.deepEqual(conversationForkAvailability(undefined, undefined, { ...context, runnerOnline: false, forkRefusal: reason }),
-    { available: false, reason }, "the refusal comes before every runtime gate");
+    { available: false, offered: true, reason }, "the refusal comes before every runtime gate");
   assert.deepEqual(editInForkAvailability(2, new Set([1, 2]), { ...base, forkRefusal: reason }),
     { available: false, offered: true, reason });
   assert.deepEqual(editInForkAvailability(2, new Set([1, 2]), { ...base, runnerOnline: false, forkRefusal: reason }),

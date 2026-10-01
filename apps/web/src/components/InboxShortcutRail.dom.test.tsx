@@ -88,7 +88,7 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
   await act(async () => {
     root.render(<InboxShortcutRail
       {...props}
-      forkAvailability={{ available: false, reason: "Reconnect the runner before creating a fork." }}
+      forkAvailability={{ available: false, offered: true, reason: "Reconnect the runner before creating a fork." }}
       session={session()}
       pinned={false}
       busy={false}

@@ -168,9 +168,9 @@ test("at 834px the toggle opens a drawer under the session bar that Escape close
   // The bar stays live: More Actions and Share open over the drawer, and Escape peels the menu
   // before the drawer.
   await page.getByRole("button", { name: "More Actions" }).click();
-  await expect(page.getByRole("menu", { name: "Session Actions" })).toBeVisible();
+  await expect(page.getByRole("menu", { name: "More Actions" })).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("menu", { name: "Session Actions" })).toHaveCount(0);
+  await expect(page.getByRole("menu", { name: "More Actions" })).toHaveCount(0);
   await expect(aside).toBeVisible();
   await page.getByRole("button", { name: "Share", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: /Share Transcript/ })).toBeVisible();

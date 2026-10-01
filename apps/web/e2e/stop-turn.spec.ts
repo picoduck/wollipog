@@ -87,8 +87,9 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
 
   // Stop Session lives in the session bar's ⋯ menu now; the confirmation dialog is unchanged.
   await page.getByRole("button", { name: "More Actions" }).click();
-  const stopSession = page.getByRole("menuitem", { name: "Stop Session" });
-  await expect(stopSession).toHaveAttribute("title", "Terminate the agent process and discard queued messages");
+  const stopSession = page.getByRole("menuitem", { name: "Stop Session…" });
+  // The confirmation explains what Stop Session does; the item carries no tooltip (#2161).
+  await expect(stopSession).not.toHaveAttribute("title");
   await stopSession.click();
   const confirmation = page.getByRole("dialog", { name: "Stop Session" });
   await expect(confirmation).toContainText("The agent process ends and every queued message is discarded");
@@ -104,7 +105,7 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   // ACCEPTING must also land back on the trigger: the action's busy state disables it while
   // the mutation runs, so restoration is reclaimed after busy clears (regression coverage).
   await moreActions.click();
-  await page.getByRole("menuitem", { name: "Stop Session" }).click();
+  await page.getByRole("menuitem", { name: "Stop Session…" }).click();
   await confirmation.getByRole("button", { name: "Stop Session" }).click();
   await expect(confirmation).toBeHidden();
   await expect.poll(() => page.evaluate(() =>

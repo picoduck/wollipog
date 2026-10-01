@@ -477,14 +477,7 @@ test("mobile Session statuses stay on one measured line before fixed actions", (
   assert.deepEqual(
     phoneRule.declarationsForSelector(".session-bar").get("row-gap"),
     ["0"],
-    "an absent transient note must not leave an empty second-row gap",
-  );
-  assert.deepEqual(
-    phoneRule.declarationsForSelector(
-      ".session-bar:has(> .session-header-note)",
-    ).get("row-gap"),
-    ["4px"],
-    "a present transient note retains separation from the status/action row",
+    "a single-row bar must not leave an empty second-row gap",
   );
   assert.deepEqual(
     phoneRule.declarationsForSelector(

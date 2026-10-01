@@ -624,7 +624,7 @@ test("a live runner queue entry keeps its enabled Cancel Queued Message control"
 test("a person refused Fork gets that reason from the preview surface that drives the Inbox Fork and F key (#1864)", async () => {
   const reason = "Your Viewer role is read-only.";
   for (const [fork, expected] of [
-    [{ allowed: false, reason }, { available: false, reason }],
+    [{ allowed: false, reason }, { available: false, offered: true, reason }],
     [{ allowed: true }, { available: true, forkTurn: 1 }],
     [undefined, { available: true, forkTurn: 1 }],
   ] as const) {

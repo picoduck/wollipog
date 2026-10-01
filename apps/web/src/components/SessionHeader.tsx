@@ -24,23 +24,22 @@ import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { absoluteViewUrl, backLabel } from "../navigation.js";
 import { reminderMenuActionLabel } from "../session-reminders.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
-import { DASHBOARD_ORIGIN } from "../config.js";
+import { DEVELOPMENT_BUILD } from "../config.js";
 import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
 import {
   ActiveSubagentsBadge,
   BackgroundDeliveryBadge,
   BackgroundWorkBadge,
-  CopyButton,
   SessionStatusIndicators,
 } from "./common.js";
 import {
   useAccessibleMenu,
   useDismissiblePopover,
 } from "./interactions.js";
-import { MenuItem, MenuLabel, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
+import { MenuItem, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { TranscriptShareDialog } from "./TranscriptShareDialog.js";
-import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
+import { ChevronLeftIcon, DownloadIcon, LinkIcon, MoreVerticalIcon, RefreshIcon, ShareIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
 import { sessionDisplayTitle } from "../session-title.js";
@@ -81,6 +80,39 @@ export function statusKeepOrder(items: HTMLElement[]): HTMLElement[] {
     .map(({ item }) => item);
 }
 
+/** The second line of an item that waits on another session action already running. */
+const BUSY_REASON = "Available when the current action finishes.";
+const NO_SESSION_LINK_REASON = "Open Wollipog in a browser to copy a link.";
+/** A contributor hint, shown by development builds only (§17.2 keeps env var names out of releases). */
+const DEVELOPMENT_LINK_HINT = "Development builds can set VITE_DASHBOARD_ORIGIN.";
+
+/** Copies `text`, falling back to a selected hidden field where the Clipboard API is unavailable
+ * (a plain-HTTP dashboard). The fallback moves focus, which the caller restores. A refused write
+ * settles late; when `current()` says the person has moved on by then, the fallback is skipped so
+ * it cannot take focus from what they opened since, and the result is `null`. */
+async function writeClipboardText(text: string, current: () => boolean): Promise<boolean | null> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    if (!current()) return null;
+    const fallback = document.createElement("textarea");
+    fallback.value = text;
+    fallback.readOnly = true;
+    fallback.style.position = "fixed";
+    fallback.style.opacity = "0";
+    document.body.appendChild(fallback);
+    fallback.select();
+    try {
+      return document.execCommand("copy");
+    } catch {
+      return false;
+    } finally {
+      fallback.remove();
+    }
+  }
+}
+
 /**
  * The responsive Session bar (docs/design-system.md §4.3). Desktop keeps one 48px row: Back, the
  * project menu button, the title, the statuses, then Share / More Actions and the shell controls.
@@ -91,6 +123,7 @@ export function SessionHeader({
   session,
   onBack,
   runnerOnline,
+  machineName,
   runnerProtocolVersion,
   providerLogoutSupported,
   stopBeforeArchiveSupported,
@@ -115,10 +148,13 @@ export function SessionHeader({
   onOpenAttention,
   onOpenCampaignRequests,
   titleId,
+  developmentBuild = DEVELOPMENT_BUILD,
 }: {
   session: SessionView;
   onBack: () => void;
   runnerOnline: boolean;
+  /** The session's machine, named in the reasons its items are unavailable. */
+  machineName?: string;
   runnerProtocolVersion: number | null | undefined;
   providerLogoutSupported: boolean;
   stopBeforeArchiveSupported: boolean;
@@ -158,6 +194,8 @@ export function SessionHeader({
   onOpenCampaignRequests?: () => void;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
+  /** Contributor hints (the dashboard-origin build variable) appear only in development builds. */
+  developmentBuild?: boolean;
 }) {
   const api = useApi();
   const instances = useInstances();
@@ -186,7 +224,6 @@ export function SessionHeader({
   // On a phone the action line's icon buttons are the small size: 36px with a borrowed 44px hit
   // area on touch (§2.8, §15.1).
   const actionSize = isMobile ? " sm" : "";
-  const [note, setNote] = useState<string | null>(null);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-actions-menu");
   const shareMenu = useAccessibleMenu(shareMenuOpen, setShareMenuOpen, "session-share-menu");
   const statusPopover = useDismissiblePopover(
@@ -217,13 +254,6 @@ export function SessionHeader({
   const restartRefusal = sessionCommandRefusal(session, "restart");
   const archiveRefusal = sessionArchiveActionRefusal(session);
   const renameRefusal = sessionCommandRefusal(session, "rename");
-  // `forkAvailability` already carries this reason; a disabled button's title is announced by
-  // nothing, so a refused person also gets it as the button's description (#1864).
-  const forkRefusal = sessionCommandRefusal(session, "fork");
-  const runtimeCaution = [...new Set([
-    showRetryStop || !terminal ? stopRefusal : null,
-    showRestart ? restartRefusal : null,
-  ].filter((reason): reason is string => reason !== null))].join(" ");
   const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
     ? undefined
     : session.backgroundWorkState;
@@ -240,6 +270,32 @@ export function SessionHeader({
   const internalSessionUrl = dashboardOrigin
     ? absoluteViewUrl(dashboardOrigin, { name: "session", id: session.id })
     : null;
+  // Every disabled menu item says why on its second line, in the person's terms (§9.1, §9.3).
+  const runnerUpdateReason = `Update Wollipog on ${machineName || "this machine"} to use this.`;
+  const transcriptReason = busy ? BUSY_REASON : exportReady ? null : "Available when the transcript finishes loading.";
+  const sessionLinkReason = transcriptReason ?? (internalSessionUrl ? null : developmentBuild
+    ? `${NO_SESSION_LINK_REASON} ${DEVELOPMENT_LINK_HINT}`
+    : NO_SESSION_LINK_REASON);
+  const switchAccountReason = busy
+    ? BUSY_REASON
+    : !runnerOnline ? `${machineName || "This machine"} is offline.` : accountSwitchSupported ? null : runnerUpdateReason;
+  const reprocessReason = busy ? BUSY_REASON : reprocessSupported ? null : runnerUpdateReason;
+  const signOutReason = busy
+    ? BUSY_REASON
+    : session.status !== "idle"
+      ? "Available when the agent is idle."
+      : pendingQueuedPromptCount(session.queued) > 0 ? "Available when queued messages are sent." : null;
+  const forkOffered = forkAvailability !== undefined && (forkAvailability.available || forkAvailability.offered);
+  const forkReason = busy ? BUSY_REASON : forkAvailability?.available === false ? forkAvailability.reason : null;
+  const archiveReason = busy ? BUSY_REASON : archiveRefusal;
+  const restartReason = busy ? BUSY_REASON : restartRefusal;
+  const stopReason = busy ? BUSY_REASON : stopRefusal;
+  // Archiving that also stops the session asks first, so only that label takes the ellipsis.
+  const archiveAction = sessionArchiveActionLabel(session, stopBeforeArchiveSupported, unarchiveAndRestartSupported);
+  const archiveLabel = !session.archived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)
+    ? `${archiveAction}…`
+    : archiveAction;
+  const signOutOffered = session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported;
   const renderBackgroundWork = () => visibleBackgroundWorkState && (
     <BackgroundWorkBadge state={visibleBackgroundWorkState} compact responsiveCompact announce={false}
       onOpen={onOpenBackgroundWork ? () => {
@@ -290,6 +346,14 @@ export function SessionHeader({
     menu.close(restoreFocus);
   };
 
+  // Hands an action to a confirmation the caller opens itself (Fork's Create Fork, the Sessions
+  // list's Archive and Stop). The confirmation returns focus to whatever held it as it opened, so
+  // the trigger takes focus now rather than after the menu item has gone.
+  const closeMenuToTrigger = () => {
+    menu.close(false);
+    menu.triggerRef.current?.focus();
+  };
+
   const projectFolded = () => {
     if (isMobile) return true;
     const slot = projectSlotRef.current;
@@ -299,6 +363,14 @@ export function SessionHeader({
   const closeShareMenu = (restoreFocus = false) => {
     shareMenu.close(restoreFocus);
   };
+
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const closeStatusPopover = (restoreFocus = false) => {
     statusPopover.close(restoreFocus);
@@ -463,6 +535,9 @@ export function SessionHeader({
     setBusy(true);
     try {
       await fn();
+    } catch (error) {
+      // A failure is an error toast with the server's sentence (§13.1); the bar holds no note.
+      showToast(error instanceof Error ? error.message : String(error), { tone: "error" });
     } finally {
       setBusy(false);
       // Async menu actions disable the ⋯ trigger while they run, so a restoration queued at
@@ -479,35 +554,329 @@ export function SessionHeader({
 
   // Re-import an adopted session: re-parse its original CLI transcript with the current formatter.
   // The control plane broadcasts a session_events_reset, so every open dashboard swaps in the fresh
-  // timeline (no manual refetch needed).
-  const reprocess = () =>
-    run(async () => {
-      closeMenu(true); // the invoking menu item unmounts; the ⋯ trigger is the durable focus home
-      setNote("Reprocessing…");
-      try {
-        await api.reprocessSession(session.id);
-        setNote(null);
-      } catch (e) {
-        setNote((e as Error).message);
-      } finally {
-        window.setTimeout(() => menu.triggerRef.current?.focus(), 0);
-      }
-    });
+  // timeline (no manual refetch needed), and that new timeline is the result: no toast repeats it.
+  const reprocess = () => {
+    closeMenu(true); // the invoking menu item unmounts; the ⋯ trigger is the durable focus home
+    void run(() => api.reprocessSession(session.id));
+  };
 
-  const downloadTranscript = (format: "json" | "markdown") =>
-    run(async () => {
-      closeShareMenu(true);
-      setNote("Preparing export…");
-      try {
-        const { blob, filename } = await api.transcriptExport(session.id, format);
-        requestTranscriptDownload(blob, filename);
-        setNote("Download requested");
-      } catch (e) {
-        setNote((e as Error).message);
-      } finally {
-        window.setTimeout(() => shareMenu.triggerRef.current?.focus(), 0);
-      }
+  const downloadTranscript = (format: "json" | "markdown") => {
+    closeShareMenu(true);
+    void run(async () => {
+      const { blob, filename } = await api.transcriptExport(session.id, format);
+      requestTranscriptDownload(blob, filename);
+      showToast("Transcript exported.", { tone: "success" });
     }, shareMenu.triggerRef);
+  };
+
+  const copySessionLink = async (url: string) => {
+    // The menu closes now, not when the write settles, so a slow clipboard can never close a menu
+    // opened in the meantime. A refusal falls back only while the copy still owns the interaction:
+    // the bar is mounted and focus is on the item that started it (a refusal can be synchronous: a
+    // plain-HTTP page has no Clipboard API), the Share trigger it is handed to, or nowhere. Anything
+    // opened since (Share again, More Actions, a dialog) or leaving the page makes it stale.
+    const invoker = document.activeElement;
+    closeShareMenu(true);
+    const copyStillCurrent = () => mountedRef.current && (document.activeElement === null ||
+      document.activeElement === document.body || document.activeElement === invoker ||
+      document.activeElement === shareMenu.triggerRef.current);
+    const copied = await writeClipboardText(url, copyStillCurrent);
+    if (copied === null) return;
+    // The fallback's selection dropped focus; hand it back to the trigger it came from.
+    if (document.activeElement === document.body || document.activeElement === null) {
+      shareMenu.triggerRef.current?.focus();
+    }
+    if (copied) showToast("Link copied.", { tone: "success" });
+    else showToast("Couldn't copy the link.", { tone: "error" });
+  };
+
+  // More Actions (§9.1): no section labels, a separator between groups, destructive items last.
+  const moreActionGroups = (
+    [
+      // Where the project button is folded away (the compact tier) or absent (phones).
+      (isMobile || projectInMenu) && (onOpenProject || renderMoveProjectDialog) ? [
+        projectName && onOpenProject && (
+          <MenuItem
+            key="open-project"
+            onClick={() => {
+              closeMenu(false);
+              onOpenProject();
+            }}
+          >
+            Open {projectName}
+          </MenuItem>
+        ),
+        renderMoveProjectDialog && (
+          <MenuItem
+            key="move-project"
+            onClick={() => {
+              closeMenu(false);
+              setMoveProjectOpen(true);
+            }}
+          >
+            {projectName ? `Move to Another ${projectLabel}…` : `Move to a ${projectLabel}…`}
+          </MenuItem>
+        ),
+      ] : [],
+      [
+        <MenuItem
+          key="rename"
+          disabled={renameRefusal !== null}
+          description={renameRefusal ?? undefined}
+          descriptionId="session-rename-caution"
+          onClick={() => {
+            if (renameRefusal !== null) return;
+            closeMenu(false);
+            setRenameDialogOpen(true);
+          }}
+        >
+          Rename…
+        </MenuItem>,
+        // Snoozing hides a session from the Sessions list, which an archived session has already left.
+        onSnooze && !session.archived && (
+          <MenuItem
+            key="reminder"
+            disabled={busy}
+            description={busy ? BUSY_REASON : undefined}
+            onClick={() => {
+              closeMenu(false);
+              onSnooze();
+            }}
+          >
+            {reminderMenuActionLabel(reminder)}
+          </MenuItem>
+        ),
+        reminder?.state === "fired" && onDismissReminder && (
+          <MenuItem
+            key="dismiss-reminder"
+            disabled={busy}
+            description={busy ? BUSY_REASON : undefined}
+            onClick={() => {
+              closeMenu(true);
+              onDismissReminder();
+            }}
+          >
+            Dismiss Reminder
+          </MenuItem>
+        ),
+        // Shown wherever this session can fork at all; a temporary block keeps it, disabled, with
+        // its reason (#1864).
+        forkOffered && onFork && (
+          <MenuItem
+            key="fork"
+            disabled={forkReason !== null}
+            description={forkReason ?? undefined}
+            onClick={() => {
+              if (forkReason !== null) return;
+              closeMenuToTrigger();
+              onFork();
+            }}
+          >
+            Fork Conversation…
+          </MenuItem>
+        ),
+        accountSwitchApplicable && (
+          <MenuItem
+            key="switch-account"
+            disabled={switchAccountReason !== null}
+            description={switchAccountReason ?? undefined}
+            onClick={() => {
+              if (switchAccountReason !== null) return;
+              closeMenu(false);
+              setSwitchAccountDialogOpen(true);
+            }}
+          >
+            Switch Account…
+          </MenuItem>
+        ),
+      ],
+      [
+        session.adopted && (
+          <MenuItem
+            key="reprocess"
+            icon={<RefreshIcon size={16} />}
+            disabled={reprocessReason !== null}
+            description={reprocessReason ?? undefined}
+            onClick={() => {
+              if (reprocessReason === null) reprocess();
+            }}
+          >
+            Reprocess Transcript
+          </MenuItem>
+        ),
+        signOutOffered && (
+          <MenuItem
+            key="sign-out"
+            disabled={signOutReason !== null}
+            description={signOutReason ?? undefined}
+            onClick={() => {
+              if (signOutReason !== null) return;
+              closeMenu(false);
+              void (async () => {
+                if (!await confirm({ title: "Sign Out", message: "New sessions with this agent will need to sign in again. Its credentials stay on the runner host.", confirmLabel: "Sign Out", tone: "danger", returnFocus: menu.triggerRef })) return;
+                void run(async () => {
+                  await api.logoutAgent(session.id);
+                  showToast("Signed out.", { tone: "success" });
+                });
+              })();
+            }}
+          >
+            Sign Out of Agent…
+          </MenuItem>
+        ),
+      ],
+      [
+        <MenuItem
+          key="archive"
+          disabled={archiveReason !== null}
+          description={archiveReason ?? undefined}
+          descriptionId="session-archive-caution"
+          onClick={() => {
+            if (archiveReason !== null) return;
+            if (!session.archived && onArchive) {
+              closeMenuToTrigger();
+              onArchive();
+              return;
+            }
+            closeMenu(true);
+            if (sessionUnarchiveRestarts(session, unarchiveAndRestartSupported)) {
+              // No Undo: re-archiving a relaunched session without a Stop would hide live work.
+              void run(async () => {
+                try {
+                  await api.unarchiveAndRestart(session.id);
+                  showToast("Session restored and restarting.");
+                } catch (cause) {
+                  const failure = unarchiveAndRestartFailureMessage(cause);
+                  showToast(failure.message, { tone: "error" });
+                  // The server may have restored and relaunched this session before the
+                  // response was lost; the header would otherwise keep showing it archived.
+                  // The reload can fail for the very reason the outcome was unconfirmed —
+                  // the toast already says so, and an escaping rejection would be unhandled.
+                  if (failure.ambiguous) {
+                    try {
+                      await onReloadSession?.();
+                    } catch {
+                      /* the session state stays as it was; the toast already reports the uncertainty */
+                    }
+                  }
+                }
+              });
+              return;
+            }
+            void run(async () => {
+              const nextArchived = !session.archived;
+              if (nextArchived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
+                const retrying = session.archiveStatus === "stop_failed";
+                const accepted = await confirm({
+                  title: retrying ? "Retry Stop" : "Archive and Stop Session",
+                  message: archiveAndStopMessage(session.title, retrying),
+                  confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
+                  tone: "danger",
+                });
+                if (!accepted) return;
+              }
+              const updated = nextArchived && session.archiveStatus === "stop_failed"
+                ? await api.retryStop(session.id)
+                : await api.setArchived(session.id, nextArchived);
+              const message = !nextArchived
+                ? "Session restored."
+                : updated.archiveStatus === "stop_pending"
+                  ? "Archive requested. Stop is pending until runtime capacity is released."
+                  : updated.archiveStatus === "stop_failed"
+                    ? "Stop failed. Runtime capacity may still be held."
+                    : "Session archived.";
+              showUndo(message, async () => {
+                await api.setArchived(session.id, !nextArchived);
+              });
+            });
+          }}
+        >
+          {archiveLabel}
+        </MenuItem>,
+        showRestart && (
+          <MenuItem
+            key="restart"
+            disabled={restartReason !== null}
+            description={restartReason ?? undefined}
+            onClick={() => {
+              if (restartReason !== null) return;
+              closeMenu(true);
+              void run(() => api.restart(session.id));
+            }}
+          >
+            Restart Session
+          </MenuItem>
+        ),
+      ],
+      // Process-lifecycle destruction stays last and in --danger-text (§3.3). Stop Session keeps its
+      // confirmation, so one extra menu click loses no safety; the frequent Stop Turn lives on the
+      // composer's send button. Delete remains archived-only, one deliberate step beyond the inbox.
+      [
+        showRetryStop && (
+          <MenuItem
+            key="retry-stop"
+            danger
+            disabled={stopReason !== null}
+            description={stopReason ?? undefined}
+            onClick={() => {
+              if (stopReason !== null) return;
+              closeMenu(true);
+              void run(() => api.retryStop(session.id));
+            }}
+          >
+            Retry Stop
+          </MenuItem>
+        ),
+        !terminal && (
+          <MenuItem
+            key="stop"
+            danger
+            disabled={stopReason !== null}
+            description={stopReason ?? undefined}
+            onClick={() => {
+              if (stopReason !== null) return;
+              closeMenu(false);
+              void (async () => {
+                if (!await confirm({
+                  title: "Stop Session",
+                  message: "The agent process ends and every queued message is discarded. To interrupt only the active turn, use Stop Turn in the composer.",
+                  confirmLabel: "Stop Session",
+                  tone: "danger",
+                  returnFocus: menu.triggerRef,
+                })) return;
+                await run(() => api.stop(session.id));
+              })();
+            }}
+          >
+            Stop Session…
+          </MenuItem>
+        ),
+        session.archived && (
+          <MenuItem
+            key="delete"
+            danger
+            disabled={busy}
+            description={busy ? BUSY_REASON : undefined}
+            onClick={() => {
+              closeMenu(false);
+              void (async () => {
+                if (!await confirm({ title: "Delete Session", message: "This session and its history are permanently removed. This cannot be undone.", confirmLabel: "Delete Session", tone: "danger", returnFocus: menu.triggerRef })) return;
+                void run(async () => {
+                  await api.deleteSession(session.id);
+                  removeFromInstanceKeySet(SESSION_PIN_KEY, instanceScope, session.id); // a deleted session must not resurrect as pinned
+                  void discardComposerDraft(session.id, instanceScope);
+                  onBack(); // don't strand the user on a deleted session
+                });
+              })();
+            }}
+          >
+            Delete Session…
+          </MenuItem>
+        ),
+      ],
+    ] satisfies Array<Array<React.ReactElement | false | null | undefined | "">>
+  ).map((group) => group.filter((item): item is React.ReactElement => Boolean(item)))
+    .filter((group) => group.length > 0);
 
   // Focus restoration after dialogs is owned by Modal's returnFocusRef (the durable header
   // trigger); the menu item that launched them unmounts with the menu and cannot take focus back.
@@ -552,7 +921,6 @@ export function SessionHeader({
           <BackgroundWorkBadge state={visibleBackgroundWorkState} compact responsiveCompact />
         </span>
       )}
-      {note && <span className="detail-note session-header-note" role="status" aria-live="polite" title={note}>{note}</span>}
       <div className="detail-actions">
         {hiddenStatusCount > 0 && (
           <div className="overflow-menu">
@@ -616,24 +984,6 @@ export function SessionHeader({
             )}
           </div>
         )}
-        {forkAvailability && (
-          <button
-            type="button"
-            className={`icon-btn${actionSize} session-header-action`}
-            disabled={busy || !forkAvailability.available}
-            title={busy
-              ? "Another session action is already in progress."
-              : forkAvailability.available ? "Fork Conversation" : forkAvailability.reason}
-            aria-label="Fork Conversation"
-            aria-describedby={forkRefusal !== null ? "session-fork-refusal" : undefined}
-            onClick={forkAvailability.available ? onFork : undefined}
-          >
-            <ThreadForkIcon size={16} />
-          </button>
-        )}
-        {forkAvailability && forkRefusal !== null && (
-          <span id="session-fork-refusal" className="sr-only">{forkRefusal}</span>
-        )}
         <div className="overflow-menu">
           <button
             ref={shareMenu.triggerRef}
@@ -666,57 +1016,55 @@ export function SessionHeader({
               surfaceRef={shareMenu.menuRef}
               anchor={{ trigger: shareMenu.triggerRef }}
               id={shareMenu.menuId}
-              label="Session Sharing"
+              label="Share"
               align="end"
               onDismiss={() => closeShareMenu(true)}
               onKeyDown={shareMenu.onMenuKeyDown}
             >
-              <MenuLabel>Share</MenuLabel>
-              <MenuNote id="transcript-share-caution">
-                {exportReady ? "Cached and possibly partial. Message text is operationally redacted but may still contain secrets or source." : "Sharing becomes available after the initial timeline load."}
-              </MenuNote>
               <MenuItem
-                aria-describedby="transcript-share-caution"
-                disabled={busy || !exportReady}
+                icon={<ShareIcon size={16} />}
+                disabled={transcriptReason !== null}
+                description={transcriptReason ?? "Create a read-only link anyone can open."}
                 onClick={() => {
+                  if (transcriptReason !== null) return;
                   closeShareMenu(false);
                   setShareDialogOpen(true);
                 }}
               >
                 Share Transcript…
               </MenuItem>
-              <MenuNote id="internal-session-link-caution">
-                {internalSessionUrl
-                  ? "Internal links require access to this dashboard and do not grant transcript access."
-                  : "Configure VITE_DASHBOARD_ORIGIN or open the browser-hosted dashboard to copy a usable link."}
-              </MenuNote>
-              {internalSessionUrl ? (
-                <CopyButton
-                  text={internalSessionUrl}
-                  label="Copy Internal Session Link"
-                  className="menu-item"
-                  role="menuitem"
-                  describedBy="internal-session-link-caution"
-                  onResult={(copied) => {
-                    setNote(copied ? "Session link copied" : "Unable to copy session link");
-                    closeShareMenu(true);
-                  }}
-                />
-              ) : (
-                <MenuItem disabled aria-describedby="internal-session-link-caution">
-                  Copy Internal Session Link
-                </MenuItem>
-              )}
-              <MenuLabel>Export</MenuLabel>
-              <MenuNote id="transcript-export-caution">
-                {exportReady ? "Cached and possibly partial. Message text is operationally redacted but may still contain secrets or source." : "Export becomes available after the initial timeline load."}
-              </MenuNote>
-              <MenuItem aria-describedby="transcript-export-caution" onClick={() => void downloadTranscript("markdown")} disabled={busy || !exportReady}>
-                Export Markdown
+              <MenuItem
+                icon={<LinkIcon size={16} />}
+                disabled={sessionLinkReason !== null}
+                description={sessionLinkReason ?? "Opens this page for people who already use this Wollipog."}
+                onClick={() => {
+                  if (sessionLinkReason === null && internalSessionUrl) void copySessionLink(internalSessionUrl);
+                }}
+              >
+                Copy Session Link
               </MenuItem>
-              <MenuItem aria-describedby="transcript-export-caution" onClick={() => void downloadTranscript("json")} disabled={busy || !exportReady}>
-                Export JSON
+              <MenuSeparator />
+              <MenuItem
+                icon={<DownloadIcon size={16} />}
+                disabled={transcriptReason !== null}
+                description={transcriptReason ?? "Save a readable copy of the conversation."}
+                onClick={() => {
+                  if (transcriptReason === null) downloadTranscript("markdown");
+                }}
+              >
+                Export as Markdown
               </MenuItem>
+              <MenuItem
+                icon={<DownloadIcon size={16} />}
+                disabled={transcriptReason !== null}
+                description={transcriptReason ?? "Save every event for other tools to read."}
+                onClick={() => {
+                  if (transcriptReason === null) downloadTranscript("json");
+                }}
+              >
+                Export as JSON
+              </MenuItem>
+              <MenuNote>Shared and exported transcripts are redacted, but can still include secrets or source code.</MenuNote>
             </MenuSurface>
           )}
         </div>
@@ -754,296 +1102,19 @@ export function SessionHeader({
                 surfaceRef={menu.menuRef}
                 anchor={{ trigger: menu.triggerRef }}
                 id={menu.menuId}
-                label="Session Actions"
+                label="More Actions"
                 // The phone sheet is titled with the session it acts on.
                 head={isMobile ? <div className="menu-head" aria-hidden="true">{displayTitle}</div> : undefined}
                 align="end"
                 onDismiss={() => closeMenu(true)}
                 onKeyDown={menu.onMenuKeyDown}
               >
-                {(isMobile || projectInMenu) && (onOpenProject || renderMoveProjectDialog) && (
-                  <>
-                    {projectName && onOpenProject && (
-                      <MenuItem
-                        onClick={() => {
-                          closeMenu(false);
-                          onOpenProject();
-                        }}
-                      >
-                        Open {projectName}
-                      </MenuItem>
-                    )}
-                    {renderMoveProjectDialog && (
-                      <MenuItem
-                        onClick={() => {
-                          closeMenu(false);
-                          setMoveProjectOpen(true);
-                        }}
-                      >
-                        {projectName ? `Move to Another ${projectLabel}…` : `Move to a ${projectLabel}…`}
-                      </MenuItem>
-                    )}
-                    <MenuSeparator />
-                  </>
-                )}
-                <MenuLabel>Session</MenuLabel>
-                <MenuItem
-                  disabled={renameRefusal !== null}
-                  description={renameRefusal ?? undefined}
-                  descriptionId="session-rename-caution"
-                  title={renameRefusal ?? undefined}
-                  onClick={() => {
-                    if (renameRefusal !== null) return;
-                    closeMenu(false);
-                    setRenameDialogOpen(true);
-                  }}
-                >
-                  Rename Session…
-                </MenuItem>
-                {accountSwitchApplicable && (
-                  <MenuItem
-                    disabled={busy || !runnerOnline || !accountSwitchSupported}
-                    title={!runnerOnline
-                      ? "Runner is offline."
-                      : accountSwitchSupported
-                        ? "Continue this conversation with another account on the same Machine"
-                        : runnerCapabilityRequirement(
-                            runnerProtocolVersion,
-                            "sessionProviderAccountSwitch",
-                            "Session account switching",
-                          )}
-                    onClick={() => {
-                      closeMenu(false);
-                      setSwitchAccountDialogOpen(true);
-                    }}
-                  >
-                    Switch Account…
-                  </MenuItem>
-                )}
-                {onSnooze && (
-                  <MenuItem
-                    disabled={busy}
-                    onClick={() => {
-                      closeMenu(false);
-                      onSnooze();
-                    }}
-                  >
-                    {reminderMenuActionLabel(reminder)}
-                  </MenuItem>
-                )}
-                {reminder?.state === "fired" && onDismissReminder && (
-                  <MenuItem
-                    disabled={busy}
-                    onClick={() => {
-                      closeMenu(true);
-                      onDismissReminder();
-                    }}
-                  >
-                    Dismiss Reminder
-                  </MenuItem>
-                )}
-                <MenuItem
-                  disabled={busy || archiveRefusal !== null}
-                  description={archiveRefusal ?? undefined}
-                  descriptionId="session-archive-caution"
-                  title={archiveRefusal ?? undefined}
-                  onClick={() => {
-                    closeMenu(true);
-                    if (!session.archived && onArchive) {
-                      onArchive();
-                      return;
-                    }
-                    if (sessionUnarchiveRestarts(session, unarchiveAndRestartSupported)) {
-                      // No Undo: re-archiving a relaunched session without a Stop would hide live work.
-                      void run(async () => {
-                        try {
-                          await api.unarchiveAndRestart(session.id);
-                          showToast("Session restored and restarting.");
-                        } catch (cause) {
-                          const failure = unarchiveAndRestartFailureMessage(cause);
-                          showToast(failure.message, { tone: "error" });
-                          // The server may have restored and relaunched this session before the
-                          // response was lost; the header would otherwise keep showing it archived.
-                          // The reload can fail for the very reason the outcome was unconfirmed —
-                          // the toast already says so, and an escaping rejection would be unhandled.
-                          if (failure.ambiguous) {
-                            try {
-                              await onReloadSession?.();
-                            } catch {
-                              /* the session state stays as it was; the toast already reports the uncertainty */
-                            }
-                          }
-                        }
-                      });
-                      return;
-                    }
-                    void run(async () => {
-                      const nextArchived = !session.archived;
-                      if (nextArchived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
-                        const retrying = session.archiveStatus === "stop_failed";
-                        const accepted = await confirm({
-                          title: retrying ? "Retry Stop" : "Archive and Stop Session",
-                          message: archiveAndStopMessage(session.title, retrying),
-                          confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
-                          tone: "danger",
-                        });
-                        if (!accepted) return;
-                      }
-                      const updated = nextArchived && session.archiveStatus === "stop_failed"
-                        ? await api.retryStop(session.id)
-                        : await api.setArchived(session.id, nextArchived);
-                      const message = !nextArchived
-                        ? "Session restored."
-                        : updated.archiveStatus === "stop_pending"
-                          ? "Archive requested. Stop is pending until runtime capacity is released."
-                          : updated.archiveStatus === "stop_failed"
-                            ? "Stop failed. Runtime capacity may still be held."
-                            : "Session archived.";
-                      showUndo(message, async () => {
-                        await api.setArchived(session.id, !nextArchived);
-                      });
-                    });
-                  }}
-                >
-                  {sessionArchiveActionLabel(session, stopBeforeArchiveSupported, unarchiveAndRestartSupported)}
-                </MenuItem>
-                {(session.adopted || (session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported)) && (
-                  <MenuLabel>Maintenance</MenuLabel>
-                )}
-                {session.adopted && (
-                  <MenuItem
-                    onClick={reprocess}
-                    disabled={busy || !reprocessSupported}
-                    title={
-                      reprocessSupported
-                        ? "Re-parse this adopted session's original CLI transcript with the latest formatter"
-                        : runnerCapabilityRequirement(runnerProtocolVersion, "sessionReprocess", "Session reprocessing")
-                    }
-                  >
-                    ↻ Reprocess Transcript
-                  </MenuItem>
-                )}
-                {session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported && (
-                  <MenuItem
-                    disabled={busy || session.status !== "idle" || pendingQueuedPromptCount(session.queued) > 0}
-                    title="Uses this ACP agent's negotiated logout capability; credentials stay on the runner host"
-                    onClick={() => {
-                      closeMenu(false);
-                      void (async () => {
-                        if (!await confirm({ title: "Sign Out", message: "New sessions with this agent will need to sign in again. Its credentials stay on the runner host.", confirmLabel: "Sign Out", tone: "danger", returnFocus: menu.triggerRef })) return;
-                        void run(async () => {
-                          setNote("Signing out…");
-                          try {
-                            await api.logoutAgent(session.id);
-                            setNote("Signed out");
-                          } catch (error) {
-                            setNote((error as Error).message);
-                          }
-                        });
-                      })();
-                    }}
-                  >
-                    Sign Out
-                  </MenuItem>
-                )}
-                {/* Runtime heads only what is not destructive (Restart). The destructive items (Retry
-                    Stop, Stop Session and, for an archived session, Delete Session) come last, after
-                    one separator (§9.1). */}
-                {showRestart && <MenuLabel>Runtime</MenuLabel>}
-                {showRestart && runtimeCaution && (
-                  <MenuNote id="session-runtime-caution">
-                    {runtimeCaution}
-                  </MenuNote>
-                )}
-                {showRestart && (
-                  <MenuItem
-                    disabled={busy || restartRefusal !== null}
-                    aria-describedby={restartRefusal ? "session-runtime-caution" : undefined}
-                    title={restartRefusal ?? undefined}
-                    onClick={() => {
-                      closeMenu(true);
-                      void run(() => api.restart(session.id));
-                    }}
-                  >
-                    Restart
-                  </MenuItem>
-                )}
-                {(showRetryStop || !terminal || session.archived) && (
-                  <>
-                    <MenuSeparator />
-                    {!showRestart && runtimeCaution && (
-                      <MenuNote id="session-runtime-caution">
-                        {runtimeCaution}
-                      </MenuNote>
-                    )}
-                    {showRetryStop && (
-                      <MenuItem
-                        danger
-                        disabled={busy || stopRefusal !== null}
-                        aria-describedby={stopRefusal ? "session-runtime-caution" : undefined}
-                        title={stopRefusal ?? "Retry the same Stop operation without archiving the session"}
-                        onClick={() => {
-                          closeMenu(true);
-                          void run(() => api.retryStop(session.id));
-                        }}
-                      >
-                        Retry Stop
-                      </MenuItem>
-                    )}
-                    {/* Process-lifecycle destruction stays last and visually distinct: Stop Session
-                        keeps its confirmation dialog, so one extra menu click loses no safety, and
-                        the frequent action (Stop Turn) lives on the composer's send button. */}
-                    {!terminal && (
-                      <MenuItem
-                        danger
-                        disabled={busy || stopRefusal !== null}
-                        aria-describedby={stopRefusal ? "session-runtime-caution" : undefined}
-                        title={stopRefusal ?? "Terminate the agent process and discard queued messages"}
-                        onClick={() => {
-                          closeMenu(false);
-                          void (async () => {
-                            if (!await confirm({
-                              title: "Stop Session",
-                              message: "The agent process ends and every queued message is discarded. To interrupt only the active turn, use Stop Turn in the composer.",
-                              confirmLabel: "Stop Session",
-                              tone: "danger",
-                              returnFocus: menu.triggerRef,
-                            })) return;
-                            await run(() => api.stop(session.id));
-                          })();
-                        }}
-                      >
-                        Stop Session
-                      </MenuItem>
-                    )}
-                    {/* Delete remains archived-only, keeping the destructive action one deliberate
-                        step beyond the everyday inbox. */}
-                    {session.archived && (
-                      <MenuItem
-                        danger
-                        disabled={busy}
-                        onClick={() => {
-                          closeMenu(false);
-                          void (async () => {
-                            if (!await confirm({ title: "Delete Session", message: "This session and its history are permanently removed. This cannot be undone.", confirmLabel: "Delete Session", tone: "danger", returnFocus: menu.triggerRef })) return;
-                            void run(async () => {
-                              try {
-                                await api.deleteSession(session.id);
-                                removeFromInstanceKeySet(SESSION_PIN_KEY, instanceScope, session.id); // a deleted session must not resurrect as pinned
-                                void discardComposerDraft(session.id, instanceScope);
-                                onBack(); // don't strand the user on a deleted session
-                              } catch (e) {
-                                setNote((e as Error).message);
-                              }
-                            });
-                          })();
-                        }}
-                      >
-                        Delete Session
-                      </MenuItem>
-                    )}
-                  </>
-                )}
+                {moreActionGroups.map((group, index) => (
+                  <React.Fragment key={index}>
+                    {index > 0 && <MenuSeparator />}
+                    {group}
+                  </React.Fragment>
+                ))}
               </MenuSurface>
             )}
           </div>
@@ -1058,7 +1129,7 @@ export function SessionHeader({
           <RenameSessionDialog
             session={session}
             onClose={() => setRenameDialogOpen(false)}
-            onRenamed={() => setNote("Session renamed")}
+            onRenamed={() => showToast("Session renamed.", { tone: "success" })}
             returnFocusRef={menu.triggerRef}
           />
         )}
@@ -1067,9 +1138,9 @@ export function SessionHeader({
             session={session}
             onClose={() => setSwitchAccountDialogOpen(false)}
             onSwitched={(scheduled) => {
-              setNote(scheduled
-                ? "Account switch scheduled for the next turn boundary."
-                : "Account switched.");
+              showToast(scheduled ? "The account switches after the current turn." : "Account switched.", {
+                tone: "success",
+              });
             }}
             returnFocusRef={menu.triggerRef}
           />

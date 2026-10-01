@@ -131,6 +131,6 @@ export function reminderBadgeDescription(reminder: SessionReminderView): string 
 }
 
 export function reminderMenuActionLabel(reminder?: SessionReminderView): string {
-  if (!reminder) return "Snooze Session…";
-  return reminder.state === "fired" ? "Snooze Again…" : "Edit Reminder…";
+  if (!reminder) return "Snooze…";
+  return reminder.state === "fired" ? "Snooze Again…" : "Change Reminder…";
 }

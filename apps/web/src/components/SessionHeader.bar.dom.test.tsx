@@ -43,7 +43,7 @@ function button(label: string): HTMLButtonElement {
 
 /** The More Actions menu's rows in order: item names, and "—" for a separator. */
 function moreActionsRows(): string[] {
-  const menu = page().querySelector('[role="menu"][aria-label="Session Actions"]');
+  const menu = page().querySelector('[role="menu"][aria-label="More Actions"]');
   assert.ok(menu, "More Actions is open");
   return [...menu.querySelectorAll('[role="menuitem"], [role="separator"]')].map((row) =>
     row.getAttribute("role") === "separator" ? "—" : (row.querySelector(".menu-text")?.textContent ?? row.textContent ?? "").trim());
@@ -126,7 +126,7 @@ test("above the compact tier More Actions does not repeat the visible project bu
   });
   try {
     await act(async () => { button("More Actions").click(); });
-    assert.equal(moreActionsRows()[0], "Rename Session…");
+    assert.equal(moreActionsRows()[0], "Rename…");
   } finally {
     await cleanUp(root);
   }
@@ -145,7 +145,7 @@ test("when the stylesheet hides the project button, its actions lead More Action
     slot.style.display = "none";
     await act(async () => { button("More Actions").click(); });
     assert.deepEqual(moreActionsRows().slice(0, 4),
-      ["Open Payments Service", "Move to Another Project…", "—", "Rename Session…"]);
+      ["Open Payments Service", "Move to Another Project…", "—", "Rename…"]);
     await act(async () => { button("Open Payments Service").click(); });
     assert.equal(opened, 1);
 
@@ -171,7 +171,7 @@ test("on a phone More Actions leads with the project and the sheet is titled wit
     }
     await act(async () => { button("More Actions").click(); });
     assert.deepEqual(moreActionsRows().slice(0, 3), ["Open Payments Service", "Move to Another Project…", "—"]);
-    const sheetHead = page().querySelector('[role="menu"][aria-label="Session Actions"] > .menu-head');
+    const sheetHead = page().querySelector('[role="menu"][aria-label="More Actions"] > .menu-head');
     assert.equal(sheetHead?.textContent, "Add a dark mode toggle to the site header");
   } finally {
     await cleanUp(root);
@@ -183,7 +183,7 @@ test("a session with no project offers only Move to a Project…", async () => {
   const root = await renderBar({ onOpenProject: undefined });
   try {
     await act(async () => { button("More Actions").click(); });
-    assert.deepEqual(moreActionsRows().slice(0, 3), ["Move to a Project…", "—", "Rename Session…"]);
+    assert.deepEqual(moreActionsRows().slice(0, 3), ["Move to a Project…", "—", "Rename…"]);
   } finally {
     await cleanUp(root);
   }

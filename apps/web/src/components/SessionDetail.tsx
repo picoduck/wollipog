@@ -5005,6 +5005,7 @@ function SessionDetailLoaded({
         <SessionHeader
           session={session}
           runnerOnline={runnerOnline}
+          machineName={runnerDisp.name}
           runnerProtocolVersion={runner?.protocolVersion}
           stopBeforeArchiveSupported={stopBeforeArchiveSupported}
           unarchiveAndRestartSupported={unarchiveAndRestartSupported}

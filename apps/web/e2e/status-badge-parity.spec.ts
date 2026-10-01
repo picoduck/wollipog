@@ -59,6 +59,19 @@ async function applyStatuses(page: Page, patch: { status: string; backgroundWork
   }, patch);
 }
 
+/**
+ * An Orchestrator Action badge fills the row again at phone widths. Since changes became a Pinned
+ * Summary fact (#2160) and Fork Conversation left the action line (#2161), the plain fixture fits at
+ * 390px; with this badge the row overflows at 390px and below and still fits at 768px.
+ */
+async function addOrchestratorAction(page: Page) {
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      orchestratorCampaign: { pendingRequests: { human: 0, orchestrator: 1 } },
+    } as never);
+  });
+}
+
 async function openSession(page: Page) {
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
@@ -207,6 +220,7 @@ for (const width of WIDTHS) {
 for (const width of MOBILE_WIDTHS) {
   test(`a full status row sheds passive statuses before background work at ${width}px`, async ({ page }) => {
     await loadInbox(page, width);
+    await addOrchestratorAction(page);
     await openSession(page);
     const trigger = page.locator(".session-status-overflow-trigger");
     await expect(trigger).toBeVisible();
@@ -291,13 +305,9 @@ test("remeasuring the row keeps focus on the badge it keeps", async ({ page }) =
 
 test("a badge that loses the row hands focus to the existing disclosure", async ({ page }) => {
   await loadInbox(page, 600);
-  // An Orchestrator Action badge takes the place the "No Changes" badge held before changes became
-  // a Pinned Summary fact (#2160), so the row already overflows at 600px.
-  await page.evaluate(() => {
-    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
-      orchestratorCampaign: { pendingRequests: { human: 0, orchestrator: 1 } },
-    } as never);
-  });
+  // With the Orchestrator Action badge the row already overflows at 600px, while Attention keeps
+  // its place (540–610px in both this machine's UI font and CI's DejaVu Sans).
+  await addOrchestratorAction(page);
   await openSession(page);
   const badge = page.locator(
     '.session-header-statuses > .session-status-indicators > [aria-label="Attention: Approval Required"]',
@@ -318,6 +328,7 @@ test("the first overflow hands focus to the disclosure once it exists", async ({
   // At 768px every badge fits, so there is no `+N` trigger to hand focus to at measurement time:
   // this is the deferred path, where the handover waits for the trigger to render.
   await loadInbox(page, 768);
+  await addOrchestratorAction(page);
   await openSession(page);
   await expect(page.locator(".session-status-overflow-trigger")).toHaveCount(0);
   const badge = page.locator(

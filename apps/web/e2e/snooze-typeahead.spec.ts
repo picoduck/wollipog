@@ -15,7 +15,7 @@ async function openNewSnoozeDialog(page: Page) {
     await directSnooze.click();
   } else {
     await page.getByRole("button", { name: "More Actions" }).click();
-    await page.getByRole("menuitem", { name: "Snooze Session…", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Snooze…", exact: true }).click();
   }
   await expect(page.getByRole("heading", { name: "Snooze Session" })).toBeVisible();
 }

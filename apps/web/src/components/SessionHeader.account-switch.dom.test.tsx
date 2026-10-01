@@ -8,6 +8,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionHeader } from "./SessionHeader.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/session/session-account-switch" });
 for (const [name, value] of Object.entries({
@@ -39,7 +40,12 @@ const session = {
   providerAccountLabel: "Work",
 } as SessionView;
 
-async function renderHeader(protocolVersion: number, client: ApiClient, current: SessionView = session) {
+async function renderHeader(
+  protocolVersion: number,
+  client: ApiClient,
+  current: SessionView = session,
+  { runnerOnline = true, toasts = [] as string[] } = {},
+) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   // Dialogs are portalled to <body>, so the test queries the body.
@@ -50,14 +56,15 @@ async function renderHeader(protocolVersion: number, client: ApiClient, current:
       <ApiProvider client={client}>
         <FeedbackContext.Provider value={{
           confirm: async () => false,
-          showToast: () => 1,
+          showToast: (message: string) => { toasts.push(message); return 1; },
           showUndo: () => 1,
           dismissToast: () => undefined,
         }}>
           <SessionHeader
             session={current}
             onBack={() => undefined}
-            runnerOnline
+            runnerOnline={runnerOnline}
+            machineName="build-box"
             runnerProtocolVersion={protocolVersion}
             providerLogoutSupported={false}
             stopBeforeArchiveSupported
@@ -96,12 +103,15 @@ test("Switch Account lists headroom and submits the selected account", async () 
       return { accepted: true as const, scheduled: false };
     },
   } as ApiClient;
+  const toasts: string[] = [];
   const { container, mountPoint, root } = await renderHeader(
     RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch,
     client,
+    session,
+    { toasts },
   );
   const action = [...page().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-    .find((button) => button.textContent?.trim() === "Switch Account…");
+    .find((button) => button.querySelector(".menu-text")?.textContent === "Switch Account…");
   assert.ok(action);
   assert.equal(action.disabled, false);
   await act(async () => { action.click(); await tick(); await tick(); });
@@ -112,6 +122,8 @@ test("Switch Account lists headroom and submits the selected account", async () 
   assert.ok(submit);
   await act(async () => { submit.click(); await tick(); });
   assert.deepEqual(requests, ["personal"]);
+  assert.deepEqual(toasts, ["Account switched."], "the result is a toast, not a note in the bar (#2161)");
+  assertNoDomNode(page().querySelector(".session-header-note, .detail-note"), "the bar holds no note");
   await act(async () => root.unmount());
   mountPoint.remove();
 });
@@ -122,12 +134,35 @@ test("an older runner exposes the action as disabled with an update requirement"
     { ...api } as ApiClient,
   );
   const action = [...page().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-    .find((button) => button.textContent?.trim() === "Switch Account…");
+    .find((button) => button.querySelector(".menu-text")?.textContent === "Switch Account…");
   assert.ok(action);
   assert.equal(action.disabled, true);
-  assert.match(action.title, /requires protocol v171/i);
+  assert.equal(action.getAttribute("title"), null, "the reason is visible, not a tooltip (#2161)");
+  const reason = page().querySelector(`#${action.getAttribute("aria-describedby")}`);
+  assert.equal(reason?.textContent, "Update Wollipog on build-box to use this.");
   await act(async () => root.unmount());
   mountPoint.remove();
+});
+
+test("with its machine offline, Switch Account is disabled and its second line names the machine", async () => {
+  const { mountPoint, root } = await renderHeader(
+    RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch,
+    { ...api } as ApiClient,
+    session,
+    { runnerOnline: false },
+  );
+  try {
+    const action = [...page().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((button) => button.querySelector(".menu-text")?.textContent === "Switch Account…");
+    assert.ok(action);
+    assert.equal(action.disabled, true);
+    assert.equal(action.getAttribute("title"), null);
+    assert.equal(page().querySelector(`#${action.getAttribute("aria-describedby")}`)?.textContent,
+      "build-box is offline.");
+  } finally {
+    await act(async () => root.unmount());
+    mountPoint.remove();
+  }
 });
 
 test("email-shaped account labels stay masked in the header and the Switch Account picker", async () => {
@@ -155,7 +190,7 @@ test("email-shaped account labels stay masked in the header and the Switch Accou
       HTMLButtonElement | undefined;
   const openSwitch = async () => {
     const action = [...page().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-      .find((button) => button.textContent?.trim() === "Switch Account…");
+      .find((button) => button.querySelector(".menu-text")?.textContent === "Switch Account…");
     assert.ok(action);
     await act(async () => { action.click(); await tick(); await tick(); });
   };

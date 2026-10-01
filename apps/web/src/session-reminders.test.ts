@@ -210,7 +210,7 @@ test("fired reminders return to the top with a text-backed reason until dismisse
   assert.equal(reminderBadgeLabel(fired), "Returned from Snooze");
   assert.match(reminderBadgeDescription(fired), /Returned from snooze\. Snooze ended/);
   assert.equal(reminderBadgeLabel({ ...fired, wakeReason: "agent_response" }), "Activity Reminder");
-  assert.equal(reminderMenuActionLabel(), "Snooze Session…");
-  assert.equal(reminderMenuActionLabel(reminder("pending")), "Edit Reminder…");
+  assert.equal(reminderMenuActionLabel(), "Snooze…");
+  assert.equal(reminderMenuActionLabel(reminder("pending")), "Change Reminder…");
   assert.equal(reminderMenuActionLabel(fired), "Snooze Again…");
 });

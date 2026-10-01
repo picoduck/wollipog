@@ -66,7 +66,9 @@ for (const width of [320, 390, 700, 1280]) {
       // of its own, and its live region retains the complete descriptive name.
       await expect(header.locator(`.sr-only [aria-label="Background Work: ${label}"]`)).toHaveCount(1);
       const statusOverflow = header.locator(".session-status-overflow-trigger");
-      if (width === 390) await expect(statusOverflow).toBeVisible();
+      // At 390px the whole row now fits (changes moved to the Pinned Summary in #2160 and Fork left
+      // the action line in #2161), so the 320px floor is where a status has to yield.
+      if (width === 320) await expect(statusOverflow).toBeVisible();
       await expect(badge).toHaveAccessibleName(`Background Work: ${label}`);
       await expectUnclipped(badge);
       await badge.focus();

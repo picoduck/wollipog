@@ -86,7 +86,7 @@ test("the menu names its session, offers its actions, and takes initial focus", 
   try {
     assert.equal(menu.getAttribute("aria-label"), "Session Actions for Fix the Parser");
     const items = [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
-    assert.deepEqual(items, ["Rename Session…", "Pin Session", "Snooze Session…", "Archive"]);
+    assert.deepEqual(items, ["Rename Session…", "Pin Session", "Snooze…", "Archive"]);
     assert.equal(domWindow.document.activeElement?.textContent, "Rename Session…",
       "the virtualized collections never focus rows, so the menu takes focus itself");
     assert.ok(menu.querySelector(".menu-item.danger")?.textContent === "Archive");

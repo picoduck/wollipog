@@ -187,7 +187,7 @@ test("the session actions menu keeps the menu keyboard contract", async () => {
   try {
     const trigger = mounted.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]');
     assert.ok(trigger);
-    await assertKeyboardContract("Session Actions", async () => {
+    await assertKeyboardContract("More Actions", async () => {
       trigger.focus();
       await press("ArrowDown", trigger);
       return trigger;
@@ -199,33 +199,28 @@ test("the session actions menu keeps the menu keyboard contract", async () => {
 });
 
 /**
- * A section label heads its own items (§9.1): the next thing after it (past a note) is an item, never
- * a separator and never the end of the menu. Destructive items come last, after one separator.
+ * More Actions has no section labels (§9.1, #2161): a separator sits only between two groups, never
+ * first, last or beside another, and the destructive items are the last group, after a separator.
  */
-function assertSectionsHeadItems(menu: Element, state: string): void {
+function assertGroupsSeparated(menu: Element, state: string): void {
   const children = [...menu.children].filter((child) =>
     !child.classList.contains("sheet-grabber") && !child.classList.contains("menu-head"));
+  assert.equal(children.filter((child) => child.classList.contains("menu-label")).length, 0,
+    `${state}: no section labels`);
   children.forEach((child, index) => {
-    if (!child.classList.contains("menu-label")) return;
-    const next = children.slice(index + 1).find((candidate) => !candidate.classList.contains("menu-note"));
-    assert.ok(next, `${state}: "${child.textContent}" is the last thing in the menu`);
-    assert.ok(!next.classList.contains("menu-sep") && !next.classList.contains("menu-label"),
-      `${state}: "${child.textContent}" heads a ${next.className} instead of an item`);
+    if (!child.classList.contains("menu-sep")) return;
+    assert.ok(index > 0 && index < children.length - 1, `${state}: a separator sits between two groups`);
+    assert.ok(!children[index + 1]!.classList.contains("menu-sep"), `${state}: separators never touch`);
   });
-  const separators = children.filter((child) => child.classList.contains("menu-sep"));
   const danger = children.filter((child) => child.classList.contains("danger"));
   if (danger.length === 0) return;
-  assert.equal(separators.length, 1, `${state}: one separator introduces the destructive items`);
-  const separatorAt = children.indexOf(separators[0]!);
-  for (const item of danger) {
-    assert.ok(children.indexOf(item) > separatorAt, `${state}: "${item.textContent}" comes after the separator`);
-  }
-  assert.ok(children.slice(separatorAt + 1).every((child) =>
-    child.classList.contains("danger") || child.classList.contains("menu-note")),
-  `${state}: only destructive items follow the separator`);
+  const lastSeparatorAt = children.map((child) => child.classList.contains("menu-sep")).lastIndexOf(true);
+  assert.ok(lastSeparatorAt > 0, `${state}: a separator introduces the destructive items`);
+  assert.deepEqual(children.slice(lastSeparatorAt + 1), danger,
+    `${state}: the destructive items are the whole last group`);
 }
 
-test("every Session Actions state keeps its section labels over their own items", async () => {
+test("every More Actions state separates its groups and ends with the destructive items", async () => {
   const restore = stubViewport(false);
   const states: Array<[string, Partial<SessionView>]> = [
     ["running", { status: "running", archived: false }],
@@ -270,9 +265,9 @@ test("every Session Actions state keeps its section labels over their own items"
         const trigger = mounted.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]');
         assert.ok(trigger);
         await act(async () => { trigger.click(); await tick(); });
-        const menu = doc().querySelector('[role="menu"][aria-label="Session Actions"]');
+        const menu = doc().querySelector('[role="menu"][aria-label="More Actions"]');
         assert.ok(menu, `${state}: the menu opens`);
-        assertSectionsHeadItems(menu, state);
+        assertGroupsSeparated(menu, state);
       } finally {
         await unmount(mounted);
       }

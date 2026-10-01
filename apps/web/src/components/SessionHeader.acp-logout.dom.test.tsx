@@ -45,13 +45,13 @@ const durablePending: QueuedPromptView = {
   durableDeliveryState: "pending",
 };
 
-/** Opens Session Actions on an idle ACP Session and returns the Sign Out menu item. */
-async function signOutItem(queued: QueuedPromptView[] | undefined) {
+/** Opens More Actions on an ACP Session and returns the Sign Out of Agent item's state. */
+async function signOutState(queued: QueuedPromptView[] | undefined, status: SessionView["status"] = "idle") {
   const session = {
     id: "session-acp-logout",
     runnerId: "runner-1",
     title: "ACP Session",
-    status: "idle",
+    status,
     archived: false,
     driver: "acp",
     ...(queued ? { queued } : {}),
@@ -87,12 +87,21 @@ async function signOutItem(queued: QueuedPromptView[] | undefined) {
   assert.ok(trigger, "the Session Actions trigger is rendered");
   await act(async () => { trigger.click(); await tick(); });
   const item = [...page().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-    .find((candidate) => candidate.textContent?.trim() === "Sign Out");
-  assert.ok(item, "an idle ACP Session with a capable runner offers Sign Out");
-  const disabled = item.disabled;
+    .find((candidate) => candidate.querySelector(".menu-text")?.textContent === "Sign Out of Agent…");
+  assert.ok(item, "an ACP Session with a capable runner offers Sign Out of Agent…");
+  const describedBy = item.getAttribute("aria-describedby");
+  const state = {
+    disabled: item.disabled,
+    reason: describedBy ? page().querySelector(`#${describedBy}`)?.textContent ?? null : null,
+    title: item.getAttribute("title"),
+  };
   await act(async () => root.unmount());
   container.remove();
-  return disabled;
+  return state;
+}
+
+async function signOutItem(queued: QueuedPromptView[] | undefined) {
+  return (await signOutState(queued)).disabled;
 }
 
 /** Menus are portalled to <body> (the shared MenuSurface), so queries look there. */
@@ -112,4 +121,12 @@ test("pending work still disables ACP Sign Out, with or without a receipt beside
   assert.equal(await signOutItem([durablePending]), true, "a durable delivery awaiting admission blocks sign-out");
   assert.equal(await signOutItem([failedReceipt, liveEntry]), true,
     "a receipt beside genuinely queued work does not mask that work");
+});
+
+test("a disabled Sign Out of Agent… says why on its second line, never in a tooltip (#2161)", async () => {
+  assert.deepEqual(await signOutState(undefined, "running"),
+    { disabled: true, reason: "Available when the agent is idle.", title: null });
+  assert.deepEqual(await signOutState([liveEntry]),
+    { disabled: true, reason: "Available when queued messages are sent.", title: null });
+  assert.deepEqual(await signOutState(undefined), { disabled: false, reason: null, title: null });
 });
