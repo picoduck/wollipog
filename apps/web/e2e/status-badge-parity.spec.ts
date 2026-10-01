@@ -49,9 +49,6 @@ async function applyStatuses(page: Page, patch: { status: string; backgroundWork
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       status,
       backgroundWorkState,
-      // An Orchestrator Action badge takes the place the "No Changes" badge held before changes
-      // became a Pinned Summary fact (#2160), so the row still fills at the widths below.
-      orchestratorCampaign: { pendingRequests: { human: 0, orchestrator: 1 } },
       pendingApproval: {
         kind: "permission",
         requestId: "background-approval",
@@ -294,6 +291,13 @@ test("remeasuring the row keeps focus on the badge it keeps", async ({ page }) =
 
 test("a badge that loses the row hands focus to the existing disclosure", async ({ page }) => {
   await loadInbox(page, 600);
+  // An Orchestrator Action badge takes the place the "No Changes" badge held before changes became
+  // a Pinned Summary fact (#2160), so the row already overflows at 600px.
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      orchestratorCampaign: { pendingRequests: { human: 0, orchestrator: 1 } },
+    } as never);
+  });
   await openSession(page);
   const badge = page.locator(
     '.session-header-statuses > .session-status-indicators > [aria-label="Attention: Approval Required"]',
