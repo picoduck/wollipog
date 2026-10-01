@@ -481,6 +481,31 @@ test("a secondary action is a ghost button before Cancel that runs, closes and r
   await cleanup();
 });
 
+test("a dialog the secondary action opens keeps focus; the invoker behind it does not take it back", async () => {
+  const { open, footButtons, activeText, cleanup } = await renderConfirmationService();
+  const host = domWindow.document.createElement("div");
+  domWindow.document.body.append(host);
+  const opened = createRoot(host as unknown as HTMLDivElement);
+  await open({
+    title: "Archive and Stop Session",
+    message: "“Alpha” stops and moves to Archived Sessions. You can restore it later.",
+    confirmLabel: "Archive and Stop",
+    // Snooze Instead… opens Snooze, a dialog that focuses itself as it mounts.
+    secondaryAction: {
+      label: "Snooze Instead…",
+      run: () => opened.render(<Modal title="Snooze" onClose={() => undefined}><button>Snooze Field</button></Modal>),
+    },
+    tone: "danger",
+  });
+  await act(async () => { footButtons()[0]!.click(); await tick(); await tick(); });
+  assert.equal(document.querySelector('[role="dialog"] h2')?.textContent, "Snooze");
+  assert.notEqual(activeText(), "Invoker", "the invoker behind the opened dialog does not take focus back");
+  assert.ok(domWindow.document.activeElement?.closest('[role="dialog"]'), "focus stays in the dialog the secondary action opened");
+  await act(async () => { opened.unmount(); });
+  host.remove();
+  await cleanup();
+});
+
 test("a double click on the secondary action runs it once", async () => {
   const { open, outcomes, footButtons } = await renderConfirmationService();
   let shown = 0;

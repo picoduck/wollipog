@@ -74,6 +74,8 @@ const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 const UNFILED_WORKSPACE = FIXTURE_QUERY.get("unfiledWorkspace") === "1";
 const LONG_AGENT = FIXTURE_QUERY.get("longAgent") === "1";
 const SESSION_REMINDERS = FIXTURE_QUERY.get("reminders") === "1";
+/** The runner's agent is an ACP agent that can sign out (Sign Out of Agent, #2162). */
+const ACP_LOGOUT = FIXTURE_QUERY.get("acpLogout") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
 
@@ -766,6 +768,7 @@ function saveModel(): void {
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "fixture-runner",
+  ...(ACP_LOGOUT ? { displayName: "Studio Mac" } : {}),
   os: "linux",
   version: "1",
   status: "online",
@@ -778,6 +781,11 @@ const runner: RunnerView = {
     driver: LONG_AGENT ? "acp" : "codex-app-server",
     context: { kind: "native" },
     available: true,
+    ...(ACP_LOGOUT ? {
+      name: "Gemini CLI",
+      driver: "acp" as const,
+      acp: { logout: true, loadSession: true, sessionList: false, sessionDelete: false, sessionResume: false, sessionClose: false },
+    } : {}),
     capabilities: {
       models: [],
       effortLevels: [],
@@ -1699,6 +1707,14 @@ const client = {
       });
       pendingCancelTurnSettlement = null;
     }
+    return structuredClone(value);
+  },
+  renameSession: async (id: string, title: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    Object.assign(value, { title, updatedAt: value.updatedAt + 1 });
+    saveModel();
+    socket?.push({ type: "session_upsert", session: structuredClone(value) });
     return structuredClone(value);
   },
   stop: async (id: string) => {

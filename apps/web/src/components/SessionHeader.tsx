@@ -11,6 +11,7 @@ import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import {
   archiveAndStopMessage,
+  archiveResultMessage,
   sessionArchiveActionLabel,
   sessionArchiveRequiresStop,
   sessionUnarchiveRestarts,
@@ -37,6 +38,8 @@ import { ChevronLeftIcon, DownloadIcon, LinkIcon, MoreVerticalIcon, RefreshIcon,
 import { useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
 import { sessionDisplayTitle } from "../session-title.js";
+import { deleteSessionMessage, signOutOfAgentMessage, stopSessionMessage } from "../session-confirmation-copy.js";
+import { sessionAgentLabel } from "./agent-options.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionStatusSummary } from "../status-meta.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
@@ -461,7 +464,13 @@ export function SessionHeader({
               if (signOutReason !== null) return;
               closeMenu(false);
               void (async () => {
-                if (!await confirm({ title: "Sign Out", message: "New sessions with this agent will need to sign in again. Its credentials stay on the runner host.", confirmLabel: "Sign Out", tone: "danger", returnFocus: menu.triggerRef })) return;
+                if (!await confirm({
+                  title: "Sign Out",
+                  message: signOutOfAgentMessage(sessionAgentLabel(session.agentName, session.driver, session.agentId), machineName),
+                  confirmLabel: "Sign Out",
+                  tone: "danger",
+                  returnFocus: menu.triggerRef,
+                })) return;
                 void run(async () => {
                   await api.logoutAgent(session.id);
                   showToast("Signed out.", { tone: "success" });
@@ -515,24 +524,22 @@ export function SessionHeader({
               const nextArchived = !session.archived;
               if (nextArchived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
                 const retrying = session.archiveStatus === "stop_failed";
+                // Repeating a stop the person already asked for is the safe path, so Retry Stop is
+                // not destructive and opens on its primary (§7.4). Snooze is the harmless
+                // alternative to archiving, offered beside it on desktop.
                 const accepted = await confirm({
                   title: retrying ? "Retry Stop" : "Archive and Stop Session",
                   message: archiveAndStopMessage(session.title, retrying),
                   confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
-                  tone: "danger",
+                  tone: retrying ? "default" : "danger",
+                  ...(!retrying && onSnooze ? { secondaryAction: { label: "Snooze Instead…", run: onSnooze } } : {}),
                 });
                 if (!accepted) return;
               }
               const updated = nextArchived && session.archiveStatus === "stop_failed"
                 ? await api.retryStop(session.id)
                 : await api.setArchived(session.id, nextArchived);
-              const message = !nextArchived
-                ? "Session restored."
-                : updated.archiveStatus === "stop_pending"
-                  ? "Archive requested. Stop is pending until runtime capacity is released."
-                  : updated.archiveStatus === "stop_failed"
-                    ? "Stop failed. Runtime capacity may still be held."
-                    : "Session archived.";
+              const message = nextArchived ? archiveResultMessage(updated.archiveStatus) : "Session restored.";
               showUndo(message, async () => {
                 await api.setArchived(session.id, !nextArchived);
               });
@@ -587,7 +594,7 @@ export function SessionHeader({
               void (async () => {
                 if (!await confirm({
                   title: "Stop Session",
-                  message: "The agent process ends and every queued message is discarded. To interrupt only the active turn, use Stop Turn in the composer.",
+                  message: stopSessionMessage(session.title, pendingQueuedPromptCount(session.queued)),
                   confirmLabel: "Stop Session",
                   tone: "danger",
                   returnFocus: menu.triggerRef,
@@ -608,7 +615,13 @@ export function SessionHeader({
             onClick={() => {
               closeMenu(false);
               void (async () => {
-                if (!await confirm({ title: "Delete Session", message: "This session and its history are permanently removed. This cannot be undone.", confirmLabel: "Delete Session", tone: "danger", returnFocus: menu.triggerRef })) return;
+                if (!await confirm({
+                  title: "Delete Session",
+                  message: deleteSessionMessage(session.title),
+                  confirmLabel: "Delete Session",
+                  tone: "danger",
+                  returnFocus: menu.triggerRef,
+                })) return;
                 void run(async () => {
                   await api.deleteSession(session.id);
                   removeFromInstanceKeySet(SESSION_PIN_KEY, instanceScope, session.id); // a deleted session must not resurrect as pinned

@@ -9188,7 +9188,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     border-radius: var(--radius-pill);
     background: var(--border-strong);
   }
-  .modal-backdrop { align-items: flex-end; }
+  /* A sheet sits on the software keyboard, not behind it, so its footer stays visible while one of
+     its fields has focus (§7.5). --keyboard-inset is published only by browsers that shrink just
+     the visual viewport; elsewhere 100dvh already ends at the keyboard and this is the screen's
+     bottom edge. */
+  .modal-backdrop {
+    align-items: flex-end;
+    bottom: var(--keyboard-inset, 0px);
+  }
   /* The one sheet: a dialog, and every menu and popover (§9.2). */
   .modal,
   .modal.sm,
@@ -9207,7 +9214,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .modal,
   .modal.sm,
   .modal.lg,
-  .modal.full { max-height: 92dvh; }
+  .modal.full { max-height: calc(92dvh - var(--keyboard-inset, 0px)); }
   /* A menu sheet docks itself: it is not inside a dialog backdrop. Fixed anchors to the layout
      viewport, so the software keyboard's occlusion is added to the bottom edge. At --z-popover it
      already covers the tab bar, the dock and the phone right panel under its scrim. */
@@ -9254,8 +9261,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .menu-label.repeats-title { display: none; }
   /* Long forms open as a full-height sheet with a back arrow and no grabber. */
   .modal.sheet-full {
-    height: 100dvh;
-    max-height: 100dvh;
+    height: calc(100dvh - var(--keyboard-inset, 0px));
+    max-height: calc(100dvh - var(--keyboard-inset, 0px));
     border: 0;
     border-radius: 0;
   }

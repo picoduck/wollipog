@@ -298,6 +298,15 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
         presentNext();
         return;
       }
+      // A dialog the outcome opened (a secondary action such as Snooze Instead… opening Snooze) has
+      // already taken focus; handing it back to the invoker behind that dialog would pull it out.
+      // The confirmation's own panel does not count: it can still be mounted here.
+      const focused = document.activeElement;
+      const focusedDialog = focused instanceof HTMLElement && focused.isConnected ? focused.closest('[role="dialog"]') : null;
+      if (focusedDialog && !focusedDialog.classList.contains("feedback-confirmation")) {
+        stableConfirmationInvoker.current = null;
+        return;
+      }
       // Try each candidate and verify it actually took focus — a connected target can still
       // refuse (it may have been disabled by the action the confirmation approved).
       const explicit = request.returnFocus?.current;

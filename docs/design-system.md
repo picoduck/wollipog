@@ -1170,6 +1170,9 @@ stacks on the first. Desktop keeps stacked dialogs as above.
   width, 48px** (`--control-h-lg` coarse): Cancel left, primary right. A destructive tertiary moves
   into the body end as a full-width ghost danger row. A confirmation's harmless secondary action is
   not shown (§7.4).
+- The sheet sits on the software keyboard, never behind it: while one of its fields has focus, the
+  footer stays fully visible and the sheet's height shrinks by the keyboard (`--keyboard-inset` on
+  browsers that shrink only the visual viewport).
 - A label longer than its half of the footer ("Interrupt Sessions and Update" at 390px) wraps,
   centered, inside its button, and never truncates: the person reads the whole action before
   confirming it. Two lines fit the 48px; a third grows both buttons together, so the pair keeps one

@@ -1,7 +1,7 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { TabList } from "./Tabs.js";
-import { archiveAndStopMessage, sessionArchiveRequiresStop } from "../archive-actions.js";
+import { archiveAndStopMessage, archiveResultMessage, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
   INBOX_COLLAPSED_THREADS_KEY,
@@ -1084,11 +1084,25 @@ export function InboxView({
     try {
       if (sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
         const retrying = session.archiveStatus === "stop_failed";
+        // Snooze Instead hands Snooze's focus back to whatever asked to archive, as the menus do.
+        const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        // Repeating a stop the person already asked for is the safe path, so Retry Stop is not
+        // destructive and opens on its primary (§7.4). Snooze is the harmless alternative to
+        // archiving, offered beside it on desktop.
         const accepted = await confirm({
           title: retrying ? "Retry Stop" : "Archive and Stop Session",
           message: archiveAndStopMessage(session.title, retrying),
           confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
-          tone: "danger",
+          tone: retrying ? "default" : "danger",
+          ...(!retrying && sessionRemindersSupported ? {
+            secondaryAction: {
+              label: "Snooze Instead…",
+              run: () => {
+                setSnoozeReturnFocusRef(invoker ? { current: invoker } : undefined);
+                setSnoozeSessionId(sessionId);
+              },
+            },
+          } : {}),
         });
         if (!accepted) return;
       }
@@ -1097,14 +1111,14 @@ export function InboxView({
         : await api.setArchived(sessionId, true);
       loadSession(updated);
       if (updated.archiveStatus === "stop_pending") {
-        showUndo("Archive requested. Stop is pending until runtime capacity is released.", async () => {
+        showUndo(archiveResultMessage(updated.archiveStatus), async () => {
           const restored = await api.setArchived(sessionId, false);
           loadSession(restored);
         });
         return;
       }
       if (updated.archiveStatus === "stop_failed") {
-        showToast("Stop failed. Runtime capacity may still be held. Use Retry Stop.");
+        showToast(archiveResultMessage(updated.archiveStatus));
         return;
       }
       const archiveSelection = inboxSelectionAfterArchive(
@@ -1120,7 +1134,7 @@ export function InboxView({
           else onCollapse?.();
         }
       }
-      showUndo("Session archived.", async () => {
+      showUndo(archiveResultMessage(updated.archiveStatus), async () => {
         const restored = await api.setArchived(sessionId, false);
         loadSession(restored);
       });
@@ -1129,7 +1143,7 @@ export function InboxView({
     } finally {
       endBusy(sessionId);
     }
-  }, [activeSplit?.key, api, beginBusy, confirm, displayedIds, endBusy, loadSession, onCollapse, onExpand, selectSession, sessions, showToast, showUndo, stopBeforeArchiveSupported]);
+  }, [activeSplit?.key, api, beginBusy, confirm, displayedIds, endBusy, loadSession, onCollapse, onExpand, selectSession, sessionRemindersSupported, sessions, showToast, showUndo, stopBeforeArchiveSupported]);
 
   /** Open the session with one exact request focused; the session's own request card takes it. */
   const openRequest = useCallback((targetSession: SessionView, requestId: string) => {

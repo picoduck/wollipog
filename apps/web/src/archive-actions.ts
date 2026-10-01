@@ -1,4 +1,5 @@
 import { archiveRequiresStop, type SessionView } from "@wollipog/protocol";
+import { quotedSessionTitle } from "./session-confirmation-copy.js";
 
 type ArchiveActionSession = Pick<SessionView, "archiveStatus" | "archived" | "status"> &
   Partial<Pick<SessionView, "stopOperation">>;
@@ -14,13 +15,23 @@ export function sessionUnarchiveRestarts(
     session.stopOperation?.status !== "stop_failed";
 }
 
-/** The body of the Archive and Stop Session confirmation (docs/design-system.md §7.4): what happens,
- * to which session, and that it can be restored. Shared by the Sessions list and the session header. */
+/** The body of the Archive and Stop Session confirmation, or of Retry Stop after that stop failed
+ * (docs/design-system.md §7.4): what happens, to which session, and whether it can be undone. Shared
+ * by the Sessions list and the session header. Snooze, the alternative that keeps the session
+ * running, is the confirmation's secondary action rather than a sentence here. */
 export function archiveAndStopMessage(title: string | null | undefined, retrying: boolean): string {
-  const name = title ? `“${title}”` : "This session";
+  const name = quotedSessionTitle(title);
   return retrying
-    ? `The previous stop of ${name} failed, so it may still be running. Retry Stop repeats the same archive.`
-    : `${name} stops now and moves to Archived Sessions, and its queued work is canceled. You can restore it, or use Snooze instead to keep it running.`;
+    ? `The last stop didn't finish, so ${name ?? "this session"} may still be running. Wollipog tries to stop it again, then archives it.`
+    : `${name ?? "This session"} stops, its queued messages are canceled, and it moves to Archived Sessions. You can restore it later.`;
+}
+
+/** The result of archiving one session, in the person's terms: archived, still stopping, or a stop
+ * that failed and may have left it running. */
+export function archiveResultMessage(archiveStatus: SessionView["archiveStatus"]): string {
+  if (archiveStatus === "stop_pending") return "Archiving. The session is still stopping.";
+  if (archiveStatus === "stop_failed") return "The stop failed, so the session may still be running.";
+  return "Session archived.";
 }
 
 export function sessionArchiveRequiresStop(

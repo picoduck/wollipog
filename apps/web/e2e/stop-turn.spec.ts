@@ -85,14 +85,15 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(4);
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha"));
 
-  // Stop Session lives in the session bar's ⋯ menu now; the confirmation dialog is unchanged.
+  // Stop Session lives in the session bar's ⋯ menu now; the confirmation names the session (#2162).
   await page.getByRole("button", { name: "More Actions" }).click();
   const stopSession = page.getByRole("menuitem", { name: "Stop Session…" });
   // The confirmation explains what Stop Session does; the item carries no tooltip (#2161).
   await expect(stopSession).not.toHaveAttribute("title");
   await stopSession.click();
   const confirmation = page.getByRole("dialog", { name: "Stop Session" });
-  await expect(confirmation).toContainText("The agent process ends and every queued message is discarded");
+  await expect(confirmation).toContainText("“Alpha Session” stops now");
+  await expect(confirmation).toContainText("To interrupt only the current turn, use Stop Turn in the composer.");
   await expect(confirmation.getByRole("button", { name: "Stop Session" })).toBeVisible();
 
   // Cancelling must return keyboard focus to the durable ⋯ trigger — the menu item that
