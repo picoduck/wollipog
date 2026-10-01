@@ -569,7 +569,7 @@ test("a late async dismissal cannot clear a reused provider request id", () => {
   }
 });
 
-for (const outcome of ["accepted", "rejected", "uncertain", "cancelled"] as const) {
+for (const outcome of ["accepted", "rejected", "uncertain", "cancelled", "restored", "discarded"] as const) {
   test(`a durable async answer uses steering and handles ${outcome} delivery without reopening`, async () => {
     const { sm, sent, store, cleanup } = makeHarness(true);
     try {
@@ -594,6 +594,9 @@ for (const outcome of ["accepted", "rejected", "uncertain", "cancelled"] as cons
       });
       const recoveryId = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
       const transitions: string[] = [];
+      // Hold the lane before provider submission, as when an earlier steering attempt owns it.
+      const beforeProvider = outcome === "restored" || outcome === "discarded";
+      if (beforeProvider) (sm as any).steeringLaneRunning.add("s_perm");
       sm.answerRecoveredQuestion("s_perm", "codex-async:steer", recoveryId, { "0": "Patch" }, {
         commandId: "async_steer_command",
         beginSteering: () => { transitions.push("steering"); },
@@ -601,9 +604,30 @@ for (const outcome of ["accepted", "rejected", "uncertain", "cancelled"] as cons
         queued: () => { transitions.push("queued"); },
         started: () => { transitions.push("started"); },
         completed: () => { transitions.push("completed"); },
-        failed: (error) => { assert.fail(error); },
+        failed: () => { transitions.push("failed"); },
         uncertain: () => { transitions.push("uncertain"); },
       });
+      if (beforeProvider) {
+        assert.equal(steers.length, 0);
+        assert.equal(entry.reservedPromotions.size, 1);
+        // Replacement restores unsubmitted work first; Stop/delete discard its reservation.
+        if (outcome === "restored") (sm as any).restoreUnsubmittedPromotions("s_perm", entry);
+        (sm as any).clearSteeringState("s_perm", "pre-provider teardown");
+        (sm as any).steeringLaneRunning.delete("s_perm");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.deepEqual(transitions, outcome === "restored" ? ["queued"] : ["queued", "failed"]);
+        assert.equal(entry.queue.length, outcome === "restored" ? 1 : 0);
+        assert.equal(entry.reservedPromotions.size, 0);
+        if (outcome === "restored") {
+          assert.equal(entry.queue[0]!.durable!.commandId, "async_steer_command");
+          assert.equal(store.readMeta("s_perm")!.pendingApproval, null);
+          assert.equal(eventsOf(sent, "question_request").length, 1);
+        } else {
+          assert.equal(store.readMeta("s_perm")!.pendingApproval!.recoveryId, recoveryId);
+          assert.equal(eventsOf(sent, "question_request").length, 2);
+        }
+        return;
+      }
       if (outcome === "cancelled") {
         for (let attempt = 0; attempt < 40 && steers.length === 0; attempt += 1) {
           await new Promise<void>((resolve) => setImmediate(resolve));

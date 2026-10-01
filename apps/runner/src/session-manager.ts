@@ -8249,7 +8249,9 @@ export class SessionManager {
     for (const operation of this.steeringRegistry.get(sessionId)?.values() ?? []) {
       operation.resolveLifecycle();
       if (!operation.settled) {
-        const durable = operation.source?.durable;
+        // Replacement already returned this source to its FIFO. Clearing the old steering
+        // operation must leave that command's queued lifecycle available to the new launch.
+        const durable = operation.sourceRestored ? undefined : operation.source?.durable;
         const uncertain = Boolean(durable && operation.providerStarted);
         if (durable && !uncertain) durable.failed(message, "COMMAND_CANCELLED");
         this.settleSteering(operation, this.makeSteeringResult(
