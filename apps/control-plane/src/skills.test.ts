@@ -52,20 +52,29 @@ test("readSkillFrontmatter bounds values and tolerates a BOM", () => {
   assert.ok(wide.description!.length <= 1024);
 });
 
-test("readSkillFrontmatter reads back the name and a one-line description of a SKILL.md built from fields", () => {
-  // The New Skill dialog writes this frontmatter. The reader is line-based, not YAML: it keeps a
-  // one-line description with colons exactly; escapes stay escaped, which is why the dialog also
-  // sends the description explicitly and the explicit one is what the library stores.
+test("readSkillFrontmatter reads back exactly the name and description of a SKILL.md built from fields", () => {
+  // The New Skill dialog writes this frontmatter. An import (from a machine, Git, or a folder with
+  // no Description) sends no explicit description, so the reader alone decides what is stored.
+  const descriptions = [
+    "Use when: the user asks for a review, or 'checks' a PR.",
+    "Line one: colons.\nLine two \"quoted\" and C:\\temp\\new.",
+    "Tab\there, \u0085NEL and \u2028LS.",
+  ];
   for (const name of ["code-review", "1.5", "true"]) {
-    const description = "Use when: the user asks for a review, or 'checks' a PR.";
-    const content = skillMarkdownFromFields({ name, description, body: "Review the diff." });
-    assert.deepEqual(readSkillFrontmatter(content), { name, description }, name);
+    for (const description of descriptions) {
+      const content = skillMarkdownFromFields({ name, description, body: "Review the diff." });
+      assert.deepEqual(readSkillFrontmatter(content), { name, description }, `${name}: ${JSON.stringify(description)}`);
+      const imported = validateSkillPayload({ name, files: [{ path: "SKILL.md", content, encoding: "utf8" }] });
+      assert.ok(imported.ok, imported.ok ? "" : imported.error);
+      assert.equal(imported.description, description, "an import without an explicit description stores it exactly");
+    }
   }
-  const description = "Line one: colons.\nLine two \"quoted\".";
-  const content = skillMarkdownFromFields({ name: "code-review", description, body: "Review the diff." });
-  const created = validateSkillPayload({ name: "code-review", description, files: [{ path: "SKILL.md", content, encoding: "utf8" }] });
-  assert.ok(created.ok, created.ok ? "" : created.error);
-  assert.equal(created.description, description, "the explicit description is stored exactly");
+});
+
+test("readSkillFrontmatter keeps a double-quoted value that is not JSON as written", () => {
+  assert.deepEqual(readSkillFrontmatter('---\nname: "my-skill"\ndescription: "C:\\path\\to it"\n---\n'),
+    { name: "my-skill", description: "C:\\path\\to it" });
+  assert.deepEqual(readSkillFrontmatter("---\ndescription: 'single ''quoted'''\n---\n"), { description: "single ''quoted''" });
 });
 
 /* ------------------------------- Validation ------------------------------ */

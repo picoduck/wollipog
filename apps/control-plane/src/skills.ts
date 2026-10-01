@@ -35,6 +35,16 @@ const FRONTMATTER_MAX_LINES = 128;
 const LEGACY_FRONTMATTER_VALUE_MAX_CHARS = 280;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
+function decodedDoubleQuoted(value: string): string {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (typeof parsed === "string") return parsed;
+  } catch {
+    // Not JSON: fall through to the quotes-stripped text.
+  }
+  return value.slice(1, -1);
+}
+
 /** The unbounded `name:` / `description:` values of a closed SKILL.md frontmatter block. */
 function readRawSkillFrontmatter(content: string): { name?: string; description?: string } {
   const bounded = Buffer.from(content, "utf8")
@@ -50,8 +60,12 @@ function readRawSkillFrontmatter(content: string): { name?: string; description?
     const match = /^(name|description)\s*:\s*(.*)$/.exec(line);
     if (!match) continue;
     let value = match[2]!.trim();
-    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'")))) {
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+      // A double-quoted value is decoded as the JSON string it usually is (New Skill writes its
+      // description that way, escaping quotes and line breaks), as the runner's reader does. One
+      // that is not valid JSON keeps the old reading: its quotes stripped, its text as written.
+      value = decodedDoubleQuoted(value).trim();
+    } else if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
       value = value.slice(1, -1).trim();
     }
     if (value) values[match[1] as "name" | "description"] = value;

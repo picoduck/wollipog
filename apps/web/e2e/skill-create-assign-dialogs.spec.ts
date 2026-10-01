@@ -67,6 +67,18 @@ test("the description grows from 3 to 12 rows and then scrolls, and Enter insert
   await expect(dialog).toBeVisible();
 });
 
+test("the description is measured again when its width changes, so rewrapped text still grows", async ({ page }) => {
+  await page.setViewportSize({ width: 760, height: 900 });
+  const dialog = await openNewSkill(page);
+  const description = dialog.getByLabel("Description", { exact: true });
+  await description.fill("Reviews a pull request for correctness before style. ".repeat(9).trim());
+  const wide = await visibleRows(description);
+  expect(wide).toBeGreaterThan(3);
+  await page.setViewportSize({ width: 390, height: 900 });
+  await expect.poll(() => visibleRows(description)).toBeGreaterThan(wide);
+  expect(await description.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true);
+});
+
 test("a 1,100-character paste leaves exactly 1,024 characters, and the counter turns amber at 924", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const dialog = await openNewSkill(page);
