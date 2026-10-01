@@ -5275,7 +5275,7 @@ export interface SubscriptionUsageResponse {
 }
 
 /** Principal-scoped choice for one session. Only accounts on its current Machine and provider are
- * projected, and exhausted accounts are omitted by the control plane. */
+ * projected, and accounts that cannot take over are listed separately with a reason. */
 export interface SessionProviderAccountOption {
   id: string;
   label: string;
@@ -5285,8 +5285,36 @@ export interface SessionProviderAccountOption {
   buckets: SubscriptionUsageBucket[];
 }
 
+/** Why the control plane does not offer one of the session's same-Machine, same-provider accounts
+ * (#2276). `signed_out` and `sign_in_unknown` come from the account's sign-in status. A signed-in
+ * account is `usage_unknown` when it has no usage source, or a source whose state is not
+ * `available`, and `usage_exhausted` when its current reading reports a window used up. Clients
+ * treat a code they do not know as unavailable for an unstated reason. */
+export type SessionProviderAccountUnavailableReason =
+  | "signed_out"
+  | "sign_in_unknown"
+  | "usage_unknown"
+  | "usage_exhausted";
+
+/** A same-Machine, same-provider account the switch endpoint will not offer. It carries no
+ * credential, email or token beyond the account's display label, and is listed only to a requester
+ * who can already see the Machine's account inventory. */
+export interface SessionProviderAccountUnavailable {
+  id: string;
+  label: string;
+  reason: SessionProviderAccountUnavailableReason;
+  /** For `usage_exhausted`, the used-up window that keeps the account unavailable longest, when
+   * the reading names one. */
+  exhaustedWindow?: SubscriptionUsageBucket;
+}
+
 export interface SessionProviderAccountOptionsResponse {
   accounts: SessionProviderAccountOption[];
+  /** Every other same-Machine, same-provider account, with why it is not offered. The session's
+   * own account is never listed here, and the list is empty for a requester who can see the session
+   * but not its Machine's account inventory. Absent from control planes older than #2276; clients
+   * then derive the reasons themselves. */
+  unavailable?: SessionProviderAccountUnavailable[];
 }
 
 export interface SwitchSessionProviderAccountRequest {

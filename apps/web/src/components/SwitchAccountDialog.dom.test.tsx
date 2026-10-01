@@ -7,6 +7,7 @@ import type {
   PendingApproval,
   ProviderAccountDefinition,
   SessionProviderAccountOption,
+  SessionProviderAccountUnavailable,
   SessionView,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
@@ -86,9 +87,12 @@ async function renderDialog({
   machineAccounts = MACHINE as readonly ProviderAccountDefinition[] | undefined,
   deferSwitch = false,
   load,
+  unavailable,
 }: {
   session?: typeof SESSION;
   accounts?: SessionProviderAccountOption[];
+  /** The endpoint's unavailable accounts (#2276); absent, as from an older control plane, by default. */
+  unavailable?: SessionProviderAccountUnavailable[];
   machineAccounts?: readonly ProviderAccountDefinition[];
   deferSwitch?: boolean;
   /** Answers the account-list request; the call number counts from 1. Defaults to `accounts`. */
@@ -102,7 +106,10 @@ async function renderDialog({
   let settle: ((outcome: { ok: boolean; message?: string }) => void) | null = null;
   const client = {
     ...api,
-    sessionProviderAccounts: async () => ({ accounts: load ? await load(++loads) : accounts }),
+    sessionProviderAccounts: async () => ({
+      accounts: load ? await load(++loads) : accounts,
+      ...(unavailable ? { unavailable } : {}),
+    }),
     switchSessionProviderAccount: (_id: string, providerAccountId: string) => {
       switches.push(providerAccountId);
       if (!deferSwitch) return Promise.resolve({ accepted: true as const, scheduled: false });
@@ -334,7 +341,7 @@ test("with no other account on the machine, the dialog offers Open Connections a
   }
 });
 
-test("accounts the endpoint did not offer are disabled rows with their reason, and offered ones never are", async () => {
+test("from an older control plane with no unavailable list, accounts it did not offer are disabled rows with derived reasons", async () => {
   const view = await renderDialog({
     session: ALIASED,
     accounts: [option("work", "Work")],
@@ -363,6 +370,81 @@ test("accounts the endpoint did not offer are disabled rows with their reason, a
       assert.equal(radio(row).getAttribute("aria-disabled"), "true");
     }
     assertNoDomNode(view.body.querySelector(".switch-account-reason"), "an account can take over");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the endpoint's unavailable list and reasons are preferred, so exhausted and unknown usage read differently", async () => {
+  const resetsAt = Date.now() + 3 * 3_600_000 - 60_000;
+  const view = await renderDialog({
+    session: ALIASED,
+    accounts: [option("work", "Work")],
+    unavailable: [
+      { id: "drained", label: "Drained", reason: "usage_exhausted",
+        exhaustedWindow: { id: "weekly", label: "Weekly", remainingPercent: 0, resetsAt } },
+      { id: "unread", label: "Unread", reason: "usage_unknown" },
+      { id: "spent", label: "Spent", reason: "usage_exhausted" },
+      { id: "signed-out", label: "Signed Out", reason: "signed_out" },
+      { id: "unknown", label: "Unknown", reason: "sign_in_unknown" },
+      { id: "future", label: "Future", reason: "a_newer_reason" as SessionProviderAccountUnavailable["reason"] },
+    ],
+    // The dashboard's inventory differs from the endpoint's; the endpoint wins.
+    machineAccounts: [
+      machineAccount("current", "Current"),
+      machineAccount("work", "Work"),
+      machineAccount("drained", "Drained"),
+      machineAccount("stray", "Stray"),
+    ],
+  });
+  try {
+    const all = rows(view.body);
+    assert.deepEqual(all.map(rowTitle), ["Current", "Work", "Drained", "Unread", "Spent", "Signed Out", "Unknown", "Future"],
+      "an account only the dashboard lists is not added");
+    const reason = (row: HTMLElement) => row.querySelector(".choice-row-reason")?.textContent;
+    const [, work, drained, unread, spent, signedOut, unknown, future] = all;
+    assert.equal(work!.classList.contains("is-disabled"), false);
+    assert.equal(radio(work!).checked, true);
+    assert.equal(reason(drained!), "The Weekly window is used up and resets in 3 hours.");
+    assert.equal(reason(unread!), "No current usage reading is available.");
+    assert.equal(reason(spent!), "A usage window is used up.");
+    assert.equal(reason(signedOut!), "Signed out on build-box.");
+    assert.equal(reason(unknown!), "Sign-in status unknown on build-box.");
+    assert.equal(reason(future!), "Not available for this session right now.");
+    for (const row of [drained!, unread!, spent!, signedOut!, unknown!, future!]) {
+      assert.equal(row.classList.contains("is-disabled"), true);
+      assert.equal(radio(row).getAttribute("aria-disabled"), "true");
+    }
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an empty unavailable list is the endpoint's answer, not an older control plane's silence", async () => {
+  const view = await renderDialog({
+    session: ALIASED,
+    accounts: [option("work", "Work")],
+    unavailable: [],
+    machineAccounts: [machineAccount("current", "Current"), machineAccount("work", "Work"), machineAccount("drained", "Drained")],
+  });
+  try {
+    assert.deepEqual(rows(view.body).map(rowTitle), ["Current", "Work"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("only unavailable accounts from the endpoint keep the primary disabled with the footer reason", async () => {
+  const view = await renderDialog({
+    session: ALIASED,
+    accounts: [],
+    unavailable: [{ id: "unread", label: "Unread", reason: "usage_unknown" }],
+  });
+  try {
+    assert.deepEqual(rows(view.body).map(rowTitle), ["Current", "Unread"]);
+    assert.equal(button(view.body, "Switch Account")?.disabled, true);
+    assert.equal(view.body.querySelector(".modal-foot > .switch-account-reason")?.textContent,
+      "None of these accounts can take over right now.");
   } finally {
     await view.unmount();
   }

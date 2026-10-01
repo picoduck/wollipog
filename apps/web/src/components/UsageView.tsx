@@ -42,6 +42,7 @@ import { UsageChart } from "./UsageChart.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { PageHeader } from "./PageHeader.js";
 import { destination } from "../navigation.js";
+import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
 
 const RANGES = [7, 30, 90, 365] as const;
 const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
@@ -53,17 +54,6 @@ const GRANULARITY_LABEL: Record<UsageAggregationGranularity, { noun: string; adj
   day: { noun: "Day", adjective: "Daily" },
   week: { noun: "Week", adjective: "Weekly" },
 };
-
-export function subscriptionResetLabel(timestamp: number, now = Date.now()): string {
-  const difference = timestamp - now;
-  if (difference <= 0) return "Reset time has passed";
-  const minutes = Math.ceil(difference / 60_000);
-  if (minutes < 60) return `Resets in ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
-  const hours = Math.ceil(minutes / 60);
-  if (hours < 48) return `Resets in ${hours} ${hours === 1 ? "hour" : "hours"}`;
-  const days = Math.ceil(hours / 24);
-  return `Resets in ${days} days`;
-}
 
 /** A provider's availability in the shared usage vocabulary. A stale reading is still the last known
  * value, so it says so instead of claiming the provider is available now. */

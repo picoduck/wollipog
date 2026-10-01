@@ -106,6 +106,7 @@ import {
   type SetArchivedRequest,
   type SetSessionReminderRequest,
   type SetColumnRequest,
+  type SessionProviderAccountOptionsResponse,
   type SetSessionTitleRequest,
   type SetWorkspaceRequest,
   type SetProjectRequest,
@@ -242,7 +243,7 @@ import {
 } from "./subscription-usage.js";
 import { validateRegistryApproval, type RegistryApprovalInput } from "./registry-approval.js";
 import {
-  providerAccountSwitchOptions,
+  providerAccountSwitchChoices,
   providerForSessionAccountSwitch,
 } from "./provider-account-switch.js";
 import { registerAuthenticationRecoveryRoutes } from "./authentication-recovery-routes.js";
@@ -997,18 +998,20 @@ function runnerCapabilityError(
     : runnerCapabilityRequirement(protocolVersion, capability, label);
 }
 
-function sessionProviderAccountOptions(
+function sessionProviderAccountChoices(
   principal: HumanPrincipal,
   session: SessionView,
-) {
+): Required<SessionProviderAccountOptionsResponse> {
   const runner = db.getRunner(session.runnerId);
-  if (!runner) return [];
+  if (!runner) return { accounts: [], unavailable: [] };
   const usage = db.subscriptionUsageForPrincipal(
     principal,
     Date.now(),
     SUBSCRIPTION_USAGE_STALE_AFTER_MS,
   );
-  return providerAccountSwitchOptions(session, runner.providerAccounts ?? [], usage.sources);
+  return providerAccountSwitchChoices(session, runner.providerAccounts ?? [], usage.sources, {
+    listUnavailable: db.canAccessRunner(principal, session.runnerId),
+  });
 }
 
 // Push-on-change/push-on-registration for managed skills: fire-and-forget the authoritative
@@ -4372,7 +4375,7 @@ app.get("/api/sessions/:id/provider-accounts", async (req, reply) => {
   if (!session.providerAccountId || !providerForSessionAccountSwitch(session.driver)) {
     return reply.code(409).send({ error: "this session is not bound to a switchable provider account" });
   }
-  return { accounts: sessionProviderAccountOptions(principal, session) };
+  return sessionProviderAccountChoices(principal, session);
 });
 
 app.post("/api/sessions/:id/provider-account", async (req, reply) => {
@@ -4394,7 +4397,7 @@ app.post("/api/sessions/:id/provider-account", async (req, reply) => {
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.providerAccountId)) {
     return reply.code(400).send({ error: "providerAccountId is invalid" });
   }
-  if (!sessionProviderAccountOptions(principal, session).some((account) =>
+  if (!sessionProviderAccountChoices(principal, session).accounts.some((account) =>
     account.id === body.providerAccountId)) {
     return reply.code(409).send({ error: "that account is unavailable, exhausted, or not compatible with this session" });
   }

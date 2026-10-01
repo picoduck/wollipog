@@ -2,7 +2,11 @@ import type {
   ProviderAccountDefinition,
   ProviderAuthenticationAccountOption,
   SessionProviderAccountOption,
+  SessionProviderAccountOptionsResponse,
+  SessionProviderAccountUnavailable,
+  SessionProviderAccountUnavailableReason,
   SessionView,
+  SubscriptionUsageBucket,
   SubscriptionUsageSourceView,
 } from "@wollipog/protocol";
 
@@ -43,8 +47,70 @@ export function providerAuthenticationAccountOptions(
   });
 }
 
-/** Select only same-Machine, same-provider, signed-in accounts whose latest provider windows do
- * not report exhaustion. Unknown usage is not headroom and therefore stays out of the chooser. */
+function bucketExhausted(bucket: SubscriptionUsageBucket): boolean {
+  return bucket.status === "exhausted" || bucket.remainingPercent === 0 ||
+    (bucket.usedPercent !== undefined && bucket.usedPercent >= 100);
+}
+
+/** The used-up window that keeps an account unavailable longest: one with no reset time, else the
+ * one that resets last. */
+function longestExhaustedWindow(buckets: SubscriptionUsageBucket[]): SubscriptionUsageBucket | undefined {
+  return buckets.filter(bucketExhausted).reduce<SubscriptionUsageBucket | undefined>((longest, bucket) =>
+    !longest || (longest.resetsAt !== undefined &&
+      (bucket.resetsAt === undefined || bucket.resetsAt > longest.resetsAt)) ? bucket : longest, undefined);
+}
+
+/** Split the session's same-Machine, same-provider accounts into the ones a switch may choose and
+ * the ones it may not, each of those with a typed reason (#2276). Only signed-in accounts whose
+ * latest provider windows do not report exhaustion are offered; unknown usage is not headroom. The
+ * session's own account is offered only while a failed switch to it is being retried, and is never
+ * listed as unavailable.
+ *
+ * The unavailable list names accounts from the Machine's inventory, so it is filled only for a
+ * requester who can already see that inventory (`listUnavailable`). A session can be shared with
+ * people who cannot see its Machine; they get an empty list. */
+export function providerAccountSwitchChoices(
+  session: Pick<SessionView,
+    "driver" | "runnerId" | "providerAccountId" | "providerAccountSwitchFailure"
+  >,
+  accounts: ProviderAccountDefinition[],
+  sources: SubscriptionUsageSourceView[],
+  { listUnavailable = true }: { listUnavailable?: boolean } = {},
+): Required<SessionProviderAccountOptionsResponse> {
+  const offered: SessionProviderAccountOption[] = [];
+  const unavailable: SessionProviderAccountUnavailable[] = [];
+  const provider = providerForSessionAccountSwitch(session.driver);
+  if (!provider) return { accounts: offered, unavailable };
+  for (const account of accounts) {
+    if (account.provider !== provider) continue;
+    const own = account.id === session.providerAccountId;
+    const retryingFailedAccount = session.providerAccountSwitchFailure?.providerAccountId === account.id;
+    if (own && !retryingFailedAccount) continue;
+    const reject = (reason: SessionProviderAccountUnavailableReason, exhaustedWindow?: SubscriptionUsageBucket) => {
+      if (!own && listUnavailable) {
+        unavailable.push({ id: account.id, label: account.label, reason, ...(exhaustedWindow ? { exhaustedWindow } : {}) });
+      }
+    };
+    if (account.authStatus === "unauthenticated") { reject("signed_out"); continue; }
+    if (account.authStatus !== "authenticated") { reject("sign_in_unknown"); continue; }
+    const source = sources.find((candidate) =>
+      candidate.runnerId === session.runnerId && candidate.providerAccountId === account.id);
+    if (!source || source.state !== "available") { reject("usage_unknown"); continue; }
+    if (source.buckets.some(bucketExhausted)) { reject("usage_exhausted", longestExhaustedWindow(source.buckets)); continue; }
+    offered.push({
+      id: account.id,
+      label: account.label,
+      authStatus: account.authStatus,
+      usageState: source.state,
+      freshness: source.freshness,
+      buckets: source.buckets,
+    });
+  }
+  return { accounts: offered, unavailable };
+}
+
+/** The accounts a switch may choose: same-Machine, same-provider, signed-in accounts whose latest
+ * provider windows do not report exhaustion. */
 export function providerAccountSwitchOptions(
   session: Pick<SessionView,
     "driver" | "runnerId" | "providerAccountId" | "providerAccountSwitchFailure"
@@ -52,27 +118,5 @@ export function providerAccountSwitchOptions(
   accounts: ProviderAccountDefinition[],
   sources: SubscriptionUsageSourceView[],
 ): SessionProviderAccountOption[] {
-  const provider = providerForSessionAccountSwitch(session.driver);
-  if (!provider) return [];
-  return accounts.flatMap((account) => {
-    const retryingFailedAccount = session.providerAccountSwitchFailure?.providerAccountId === account.id;
-    if (account.provider !== provider ||
-        (account.id === session.providerAccountId && !retryingFailedAccount) ||
-        account.authStatus !== "authenticated") return [];
-    const source = sources.find((candidate) =>
-      candidate.runnerId === session.runnerId && candidate.providerAccountId === account.id);
-    if (!source || source.state !== "available") return [];
-    const exhausted = source.buckets.some((bucket) =>
-      bucket.status === "exhausted" || bucket.remainingPercent === 0 ||
-      (bucket.usedPercent !== undefined && bucket.usedPercent >= 100));
-    if (exhausted) return [];
-    return [{
-      id: account.id,
-      label: account.label,
-      authStatus: account.authStatus,
-      usageState: source.state,
-      freshness: source.freshness,
-      buckets: source.buckets,
-    }];
-  });
+  return providerAccountSwitchChoices(session, accounts, sources).accounts;
 }

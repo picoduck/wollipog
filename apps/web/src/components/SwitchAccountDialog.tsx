@@ -3,8 +3,10 @@ import {
   pendingRequests,
   type ProviderAccountDefinition,
   type SessionProviderAccountOption,
+  type SessionProviderAccountUnavailable,
   type SessionView,
 } from "@wollipog/protocol";
+import { accountUnavailableReason, derivedAccountUnavailableReason } from "../account-unavailable-reasons.js";
 import { useApi } from "../api-context.js";
 import { isPersonalIdentifier } from "../personal-identifiers.js";
 import { Modal } from "./common.js";
@@ -23,18 +25,6 @@ export function sessionAccountSwitchApplicable(session: Pick<SessionView, "provi
 
 function accountProvider(driver: SessionView["driver"]): ProviderAccountDefinition["provider"] {
   return driver === "claude-code" ? "claude" : "codex";
-}
-
-/**
- * Why a Machine account the switch endpoint did not offer cannot be chosen, from what the dashboard
- * knows about it. The endpoint offers only signed-in accounts with usage headroom, and a signed-in
- * account it left out has either no current usage reading or a window that is used up; the client
- * cannot tell which, so the reason says only that no headroom was reported.
- */
-function unavailableReason(account: ProviderAccountDefinition, machine: string): string {
-  if (account.authStatus === "unauthenticated") return `Signed out on ${machine}.`;
-  if (account.authStatus === "unknown") return `Sign-in status unknown on ${machine}.`;
-  return "No usage headroom reported.";
 }
 
 function listedAccount(option: SessionProviderAccountOption): AccountRowAccount {
@@ -73,6 +63,8 @@ export function SwitchAccountDialog({
 }) {
   const api = useApi();
   const [options, setOptions] = useState<SessionProviderAccountOption[] | null>(null);
+  // The accounts the endpoint will not offer, with its reasons; null from an older control plane.
+  const [unavailableAccounts, setUnavailableAccounts] = useState<SessionProviderAccountUnavailable[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -95,12 +87,14 @@ export function SwitchAccountDialog({
     // A new current account is a new list: nothing chosen from the old one can be submitted, and
     // the old rows are not shown as if they were current.
     setOptions(null);
+    setUnavailableAccounts(null);
     setSelectedId(null);
     setLoadError(null);
     void api.sessionProviderAccounts(session.id).then((response) => {
       if (cancelled) return;
       setLoadError(null);
       setOptions(response.accounts);
+      setUnavailableAccounts(Array.isArray(response.unavailable) ? response.unavailable : null);
       // The first account that can take over; the session's own account only when it is the one
       // offered (a failed switch to it being retried).
       const others = response.accounts.filter((account) => account.id !== currentId);
@@ -155,15 +149,23 @@ export function SwitchAccountDialog({
   };
 
   // The endpoint's options are authoritative: an account it offers can always be chosen. Other
-  // accounts of the provider on the Machine are listed after them, each with why it cannot.
+  // accounts of the provider on the Machine are listed after them, each with why it cannot: the
+  // endpoint's own list and reasons when it sends them (#2276), otherwise the dashboard's Machine
+  // inventory with reasons derived from what it knows.
   const machineAccount = machineAccounts?.find((account) => account.id === currentId);
   const currentOption = options?.find((account) => account.id === currentId);
   const offered = new Set(options?.map((account) => account.id) ?? []);
+  const now = Date.now();
+  const unavailableRows: AccountRowAccount[] = unavailableAccounts
+    ? unavailableAccounts
+      .filter((account) => account.id !== currentId && !offered.has(account.id))
+      .map((account) => ({ id: account.id, label: account.label, disabledReason: accountUnavailableReason(account, machine, now) }))
+    : (machineAccounts ?? [])
+      .filter((account) => account.provider === provider && account.id !== currentId && !offered.has(account.id))
+      .map((account) => ({ id: account.id, label: account.label, disabledReason: derivedAccountUnavailableReason(account, machine) }));
   const accounts: AccountRowAccount[] = options === null ? [] : [
     ...options.filter((account) => account.id !== currentId).map(listedAccount),
-    ...(machineAccounts ?? [])
-      .filter((account) => account.provider === provider && account.id !== currentId && !offered.has(account.id))
-      .map((account) => ({ id: account.id, label: account.label, disabledReason: unavailableReason(account, machine) })),
+    ...unavailableRows,
   ];
   const current: CurrentAccountRow | null = currentId ? {
     id: currentId,

@@ -22,6 +22,8 @@ import {
   type RunnerView,
   type SessionConfig,
   type SessionProviderAccountOption,
+  type SessionProviderAccountOptionsResponse,
+  type SessionProviderAccountUnavailable,
   type SessionCommandInvocationView,
   type SessionCapabilityOverlay,
   type SessionEvent,
@@ -81,7 +83,8 @@ const ACP_LOGOUT = FIXTURE_QUERY.get("acpLogout") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
 /** The `switch-account` scenario's machine (#2149): `default`, `removed` (the session's account was
- * removed from the machine), `none` (no other account) or `auth` (blocked on authentication). */
+ * removed from the machine), `none` (no other account), `auth` (blocked on authentication) or
+ * `reasons` (the endpoint lists an exhausted and an unknown-usage account with its reasons, #2276). */
 const SWITCH_ACCOUNTS = SCENARIO === "switch-account" ? FIXTURE_QUERY.get("accounts") ?? "default" : null;
 
 interface FixtureModel {
@@ -837,7 +840,11 @@ const runner: RunnerView = {
   ...(SWITCH_ACCOUNTS ? {
     providerAccounts: [
       ...(SWITCH_ACCOUNTS === "removed" ? [] : [codexAccount("acct-current", "current.me@example.com")]),
-      ...(SWITCH_ACCOUNTS === "none" ? [] : [
+      ...(SWITCH_ACCOUNTS === "none" ? [] : SWITCH_ACCOUNTS === "reasons" ? [
+        codexAccount("acct-work", "work.me@example.com"),
+        codexAccount("acct-drained", "drained.me@example.net"),
+        codexAccount("acct-unread", "unread.me@example.org"),
+      ] : [
         codexAccount("acct-work", "work.me@example.com"),
         codexAccount("acct-spare", "spare.me@example.org"),
         codexAccount("acct-old", "old.me@example.net", "unauthenticated"),
@@ -1491,16 +1498,38 @@ function switchAccountOption(
 }
 
 /** The accounts the switch endpoint offers in the `switch-account` scenario: signed in, with headroom. */
-const switchAccountOptions: SessionProviderAccountOption[] = SWITCH_ACCOUNTS === "none" ? [] : [
+const switchAccountOptions: SessionProviderAccountOption[] = SWITCH_ACCOUNTS === "none" ? [] : SWITCH_ACCOUNTS === "reasons" ? [
+  switchAccountOption("acct-work", "work.me@example.com", "fresh", 78, 39),
+] : [
   switchAccountOption("acct-work", "work.me@example.com", "fresh", 78, 39),
   switchAccountOption("acct-spare", "spare.me@example.org", "stale", 18, 64),
 ];
+
+/** The accounts the endpoint will not offer in the `reasons` variant; the others predate the list. */
+const switchAccountUnavailable = (): SessionProviderAccountOptionsResponse["unavailable"] => SWITCH_ACCOUNTS === "reasons" ? [
+  // Resets 2 hours from when the list is read, less a minute so it does not round up to 3.
+  unavailableSwitchAccount("acct-drained", "drained.me@example.net", "usage_exhausted",
+    { id: "five-hour", label: "5-Hour", remainingPercent: 0, resetsAt: Date.now() + 2 * 3_600_000 - 60_000 }),
+  unavailableSwitchAccount("acct-unread", "unread.me@example.org", "usage_unknown"),
+] : undefined;
+
+function unavailableSwitchAccount(
+  id: string,
+  email: string,
+  reason: SessionProviderAccountUnavailable["reason"],
+  exhaustedWindow?: SessionProviderAccountUnavailable["exhaustedWindow"],
+): SessionProviderAccountUnavailable {
+  return { id, label: email, reason, ...(exhaustedWindow ? { exhaustedWindow } : {}) };
+}
 
 const client = {
   ...api,
   ...shellSkillsApi,
   ...(SWITCH_ACCOUNTS ? {
-    sessionProviderAccounts: async () => structuredClone({ accounts: switchAccountOptions }),
+    sessionProviderAccounts: async () => {
+      const unavailable = switchAccountUnavailable();
+      return structuredClone({ accounts: switchAccountOptions, ...(unavailable ? { unavailable } : {}) });
+    },
     // Held until the page settles it, so the busy primary can be observed.
     switchSessionProviderAccount: () => new Promise<{ accepted: true; scheduled: boolean }>((resolve) => {
       (window as unknown as { __settleSwitchAccount?: () => void }).__settleSwitchAccount =
