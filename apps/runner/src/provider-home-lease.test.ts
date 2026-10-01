@@ -245,7 +245,7 @@ test("whole-root quarantine requires restarting the originating failed-initializ
 });
 
 test("failed initialization retry refuses changed evidence, successors, and rollback directories", (t) => {
-  for (const change of ["proof", "owner", "host", "pid", "missing", "corrupt", "retained", "directory", "successor", "during-retry"] as const) {
+  for (const change of ["proof", "owner", "host", "live-pid", "missing", "corrupt", "retained", "directory", "successor", "during-retry"] as const) {
     const home = mkdtempSync(join(tmpdir(), `wollipog-provider-retry-refuse-${change}-`));
     const { root, lock } = leasePaths(home);
     t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -255,6 +255,7 @@ test("failed initialization retry refuses changed evidence, successors, and roll
       writeFileSync(proofPath, JSON.stringify({ ...proof, createdAt: "changed" }));
     };
     const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+      pid: 101,
       afterInitializationPublishForTest: () => { throw new Error("failed before mkdir"); },
       beforeTransitionPublishForTest: change === "during-retry" ? mutate : undefined,
     });
@@ -263,7 +264,7 @@ test("failed initialization retry refuses changed evidence, successors, and roll
     if (change === "proof") mutate();
     if (change === "owner") writeFileSync(proofPath, JSON.stringify({ ...proof, ownerHash: OWNER_B }));
     if (change === "host") writeFileSync(proofPath, JSON.stringify({ ...proof, hostname: "foreign-host" }));
-    if (change === "pid") writeFileSync(proofPath, JSON.stringify({ ...proof, pid: process.pid }));
+    if (change === "live-pid") writeFileSync(proofPath, `${JSON.stringify({ ...proof, pid: process.pid })}\n`);
     if (change === "missing") renameSync(proofPath, join(home, "retained-proof.json"));
     if (change === "corrupt") writeFileSync(proofPath, "{");
     if (change === "retained") writeFileSync(proofPath, JSON.stringify({ ...proof, recoveredEntriesHash: "c".repeat(64) }));

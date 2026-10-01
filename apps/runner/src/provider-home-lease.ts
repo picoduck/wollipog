@@ -269,7 +269,7 @@ class ProviderHomeLeaseRefusal extends Error {
 
 function refusal(lockDir: string, reason: string, restartAfterQuarantine = false): Error {
   const recovery = restartAfterQuarantine
-    ? "restart the runner before retrying; this registry retains its failed initialization reservation after quarantine"
+    ? "restart the runner before retrying; quarantine does not clear this registry's in-memory failed initialization reservations"
     : "retry";
   return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and ${recovery}; do not remove individual records`);
 }
