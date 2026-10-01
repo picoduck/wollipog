@@ -119,6 +119,20 @@ advising journal quarantine. Normal exit removes only the exact process-owned he
 private directory; unknown entries and substitutions are retained. Killed runners can leave
 external helper caches, which are outside the canonical journal bounds.
 
+Existing system temp and explicitly configured existing runner-data parents may be inside the
+provider HOME, as they normally are on Windows. Only unique process-private fixed helper
+bootstrap artifacts use these parents before acquisition; this grants no access to credential
+or provider mutations. The canonical lease root and every descendant remain excluded by both
+lexical paths and exact physical ancestor identities, including Windows short-name aliases.
+Shared parents are never created or chmodded. Canonical ancestry and the private root/file
+identity are rechecked across compilation, probing, reuse and cleanup. Helper files are bounded
+to 16 MiB and ancestor proof walks to 256 directories. Reuse and cleanup require a regular
+single-link file with the captured full-byte digest and exact root/file identities; checking
+expected entries reads at most two directory entries. Unknown entries, incomplete compiler
+output, changed bytes and substituted or hard-linked artifacts are retained. Windows loads
+digest-verified bytes in memory from a bounded read that denies shared writes/deletion, and
+executes the fixed probe before any lease journal publication.
+
 Initial unowned admission takes the permanent fence without waiting. Critical publication,
 post-publication continuation and release allow at most 10 seconds to obtain it, using a
 monotonic deadline, 10 ms polling and parent-liveness checks. The exact preimage is checked
@@ -134,6 +148,9 @@ so runner event-loop timers and heartbeat work can be delayed during the transac
 physical record/byte budgets bound work; they are not a low-latency or heartbeat guarantee.
 Truncated or unproven checkpoint candidates remain untouched, even if another slot is free;
 the documented growth cap then stops admission while preserving the last valid chain.
+Unproven publication staging litter is also preserved and counts toward the fixed directory
+entry and metadata-byte admission caps. Repeated interruptions can exhaust those caps; new
+acquisitions then refuse without removing evidence or resetting the selected chain.
 
 After an interrupted completed candidate, the new owner first acquires successor Q. It may adopt
 candidate P only if P commits to the currently verified anchor and historical active tip, its full

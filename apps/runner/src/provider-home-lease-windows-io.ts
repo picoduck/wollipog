@@ -1,8 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { LeaseHelperArtifact, leaseHelperParent } from "./provider-home-lease-staging.js";
 
 /** Lease-only native handles. This shares no skill/adoption or account ownership state. */
 export const WINDOWS_LEASE_IO_TYPES = String.raw`
@@ -17,6 +15,7 @@ using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 public static class WollipogProviderHomeLeaseIo {
+  public static void Probe() {}
   const uint READ=0x80000000, WRITE=0x40000000, DELETE=0x10000, SHARE_READ=1, SHARE_WRITE=2, SHARE_DELETE=4;
   const uint BACKUP=0x02000000, REPARSE=0x00200000, WRITE_THROUGH=0x80000000, DIRECTORY=0x10, REPARSE_ATTRIBUTE=0x400;
   const string GUARD="protocol-v4.json", ANCHOR="mutable-home.recovery.json", ALIAS=".mutable-home.retired";
@@ -209,55 +208,44 @@ public static class WollipogProviderHomeLeaseIo {
 }
 `;
 
-let assembly: { path: string; sha256: string; dev: bigint; ino: bigint } | undefined;
+let assembly: { artifact: LeaseHelperArtifact; sha256: string } | undefined;
 const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
-const sha256 = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
+
+function verifiedAssemblyCommand(path: string, hash: string, method: "Probe" | "Run"): string {
+  return `$ErrorActionPreference='Stop';$f=[IO.File]::Open(${quote(path)},[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);try{$n=$f.Length;if($n -lt 1 -or $n -gt 16777216){throw 'fixed lease helper byte limit exceeded'};$reader=New-Object IO.BinaryReader($f);$bytes=$reader.ReadBytes([int]$n);if($bytes.Length -ne $n -or $f.ReadByte() -ne -1){throw 'fixed lease helper changed during read'}}finally{$f.Dispose()};$sha=[Security.Cryptography.SHA256]::Create();$hash=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant();if($hash -ne ${quote(hash)}){throw 'trusted lease helper changed'};$loaded=[Reflection.Assembly]::Load($bytes);$loaded.GetType('WollipogProviderHomeLeaseIo').GetMethod(${quote(method)}).Invoke($null,@())|Out-Null`;
+}
 
 /** Load verified assembly bytes into memory instead of reopening a mutable path after hashing. */
-export function windowsLeaseIoCommand(roots = [tmpdir()]): { command: string; args: string[] } {
+export function windowsLeaseIoCommand(roots = [tmpdir()], providerHome?: string): { command: string; args: string[] } {
   if (process.platform !== "win32") throw new Error("native Windows lease I/O requires Windows");
-  if (assembly && existsSync(assembly.path)) {
-    if (!roots.some(root => { const path = relative(root, assembly!.path); return path !== ".." && !path.startsWith("..\\") && !isAbsolute(path); })) throw new Error("safe Windows lease helper staging directory unavailable");
-    const file = lstatSync(assembly.path, { bigint: true });
-    if (!file.isFile() || file.isSymbolicLink() || file.nlink !== 1n || file.dev !== assembly.dev || file.ino !== assembly.ino || sha256(readFileSync(assembly.path)) !== assembly.sha256) throw new Error("trusted Windows lease helper changed");
+  if (assembly) {
+    leaseHelperParent(assembly.artifact.root, providerHome);
+    assembly.artifact.verify();
   }
-  if (!assembly || !existsSync(assembly.path) || sha256(readFileSync(assembly.path)) !== assembly.sha256) {
-    assembly = undefined;
-    const stagingRoot = roots.find(root => { try { const stat = lstatSync(root); return stat.isDirectory() && !stat.isSymbolicLink(); } catch { return false; } });
+  if (!assembly) {
+    const stagingRoot = roots.find(root => { try { return leaseHelperParent(root, providerHome) === root; } catch { return false; } });
     if (!stagingRoot) throw new Error("safe Windows lease helper staging directory unavailable");
-    const directory = mkdtempSync(join(stagingRoot, "wollipog-provider-home-lease-io-"));
-    const directoryStat = lstatSync(directory, { bigint: true });
-    const path = join(directory, "lease-io.dll");
-    let fileIdentity: { dev: bigint; ino: bigint } | undefined;
-    const cleanup = () => {
-      try {
-        const current = lstatSync(directory, { bigint: true });
-        if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== directoryStat.dev || current.ino !== directoryStat.ino) return;
-        if (fileIdentity) {
-          const file = lstatSync(path, { bigint: true });
-          if (!file.isFile() || file.isSymbolicLink() || file.dev !== fileIdentity.dev || file.ino !== fileIdentity.ino) return;
-          unlinkSync(path);
-        }
-        rmdirSync(directory);
-      } catch { /* Retain unknown or substituted cache entries. */ }
-    };
+    const artifact = new LeaseHelperArtifact(stagingRoot, "lease-io.dll");
+    const path = artifact.path;
     const program = `$ErrorActionPreference='Stop';$source=[Console]::In.ReadToEnd();Add-Type -TypeDefinition $source -OutputAssembly ${quote(path)}`;
     const compiled = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program],
       { input: WINDOWS_LEASE_IO_TYPES, encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true });
-    if (existsSync(path)) {
-      const file = lstatSync(path, { bigint: true });
-      if (file.isFile() && !file.isSymbolicLink() && file.nlink === 1n) fileIdentity = { dev: file.dev, ino: file.ino };
-    }
     if (compiled.error || compiled.status !== 0) {
-      cleanup();
+      artifact.cleanup();
       throw new Error("the fixed Windows provider-HOME lease helper could not be compiled", {
         cause: new Error((compiled.stderr ?? "").slice(0, 2_048)),
       });
     }
-    if (!fileIdentity) { cleanup(); throw new Error("unsafe Windows lease helper staging file"); }
-    assembly = { path, sha256: sha256(readFileSync(path)), ...fileIdentity };
-    process.once("exit", cleanup);
+    try {
+      const file = artifact.capture();
+      const probe = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", verifiedAssemblyCommand(path, file.sha256, "Probe")],
+        { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024, windowsHide: true });
+      artifact.verify();
+      if (probe.error || probe.status !== 0) throw new Error("fixed Windows lease helper execution probe failed");
+      assembly = { artifact, sha256: file.sha256 };
+      process.once("exit", artifact.cleanup);
+    } catch (error) { artifact.cleanup(); throw error; }
   }
-  const program = `$ErrorActionPreference='Stop';$bytes=[IO.File]::ReadAllBytes(${quote(assembly.path)});$sha=[Security.Cryptography.SHA256]::Create();$hash=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant();if($hash -ne ${quote(assembly.sha256)}){throw 'trusted lease helper changed'};$loaded=[Reflection.Assembly]::Load($bytes);$loaded.GetType('WollipogProviderHomeLeaseIo').GetMethod('Run').Invoke($null,@())|Out-Null`;
+  const program = verifiedAssemblyCommand(assembly.artifact.path, assembly.sha256, "Run");
   return { command: "powershell.exe", args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program] };
 }
