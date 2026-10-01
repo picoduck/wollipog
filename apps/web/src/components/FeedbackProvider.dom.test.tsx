@@ -629,6 +629,13 @@ test("a type-to-confirm confirmation focuses its field and keeps the danger butt
   }
   await typeInto(field, "Review Team");
   assert.equal(confirmButton().disabled, false);
+  // An input method's commit Enter (composing, or reported only as keyCode 229) does not confirm.
+  for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+    const commit = new domWindow.KeyboardEvent("keydown", { bubbles: true, key: "Enter", ...("isComposing" in init ? init : {}) });
+    if ("keyCode" in init) Object.defineProperty(commit, "keyCode", { value: init.keyCode });
+    await act(async () => { field.dispatchEvent(commit as unknown as Event); await tick(); });
+    assert.equal(outcomes[first], undefined, `an IME commit Enter (${JSON.stringify(init)}) does not confirm`);
+  }
   await act(async () => { confirmButton().click(); await tick(); });
   assert.equal(outcomes[first], true);
   assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);

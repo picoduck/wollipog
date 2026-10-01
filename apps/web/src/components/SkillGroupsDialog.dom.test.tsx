@@ -86,7 +86,7 @@ function fakeApi(options: { groups?: SkillGroupView[]; skills?: SkillSummary[]; 
   ] as SkillGroupAssignmentView[];
   const writes: Array<[string, ...unknown[]]> = [];
   const held: Deferred[] = [];
-  const state = { hold: false, fail: null as string | null };
+  const state = { hold: false, fail: null as string | null, rulesFail: null as string | null };
   const write = async <T,>(entry: [string, ...unknown[]], apply: () => T): Promise<T> => {
     writes.push(entry);
     if (state.hold) await new Promise<void>((resolve, reject) => held.push({ resolve, reject }));
@@ -100,7 +100,10 @@ function fakeApi(options: { groups?: SkillGroupView[]; skills?: SkillSummary[]; 
       context: { userId: "user_42", userName: "Ada", organizationId: "org_personal", organizationName: "Personal", role: "owner", deviceId: null, localBootstrap: true },
       organizations: [], memberships: [], teams: [{ teamId: "team_7f3a", name: "Platform", organizationId: "org_personal", members: [] }],
     }),
-    listSkillGroupAssignments: async (id: string) => ({ assignments: rules.filter((rule) => rule.groupId === id) }),
+    listSkillGroupAssignments: async (id: string) => {
+      if (state.rulesFail) throw new Error(state.rulesFail);
+      return { assignments: rules.filter((rule) => rule.groupId === id) };
+    },
     createSkillGroup: (body: { name: string }) => write(["create", body], () => {
       const group = { id: `g-${groups.length}`, name: body.name, scope: orgScope };
       groups = [...groups, group];
@@ -272,6 +275,58 @@ test("removing a member confirms naming the skill, the group and its assignments
     assert.equal(view.changed(), 1);
     // The removed row's Remove… is gone; focus moves to the row that took its place.
     assert.ok(active() === buttons(dialog, "Remove…")[1], `focus is on the next Remove…, not ${active()?.outerHTML}`);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a removal never claims a group has no assignments when its rules could not be read", async () => {
+  phone = false;
+  const api = fakeApi();
+  api.state.rulesFail = "HTTP 503";
+  const view = await mount(api);
+  try {
+    const dialog = view.dialog();
+    assert.match(dialog.textContent ?? "", /Couldn't Load the Group's Assignments/);
+    await click(buttons(dialog, "Remove…")[0]!);
+    const message = view.confirmation()!.querySelector(".confirmation-message")?.textContent ?? "";
+    assert.doesNotMatch(message, /no assignments|nothing is removed/);
+    assert.match(message, /^“code-review” leaves “Review Team” and is removed from the machines the group's assignments deployed it to/);
+    await click(button(view.confirmation(), "Cancel"));
+
+    // A group whose rules read as empty does say so.
+    api.state.rulesFail = null;
+    await click(listRows(dialog)[1]!);
+    await click(listRows(dialog)[0]!);
+    await click(buttons(dialog, "Remove…")[0]!);
+    assert.match(view.confirmation()!.querySelector(".confirmation-message")?.textContent ?? "", /these assignments deployed it to/);
+    await click(button(view.confirmation(), "Cancel"));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Escape that dismisses an input method's candidates keeps the new group's name; a plain Escape cancels", async () => {
+  phone = false;
+  const view = await mount();
+  try {
+    const dialog = view.dialog();
+    await click(button(dialog, "New Group"));
+    const field = dialog.querySelector<HTMLInputElement>("#skill-groups-new-name")!;
+    await typeInto(field, "Review");
+    for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+      const escape = new domWindow.KeyboardEvent("keydown", { bubbles: true, key: "Escape", ...("isComposing" in init ? init : {}) });
+      if ("keyCode" in init) Object.defineProperty(escape, "keyCode", { value: init.keyCode });
+      await act(async () => { field.dispatchEvent(escape as unknown as Event); });
+      await settle();
+      assert.ok(field.isConnected, `the form stays (${JSON.stringify(init)})`);
+      assert.equal(field.value, "Review");
+    }
+    await act(async () => { field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { bubbles: true, key: "Escape" }) as unknown as Event); });
+    await settle();
+    assertNoDomNode(dialog.querySelector("#skill-groups-new-name"), "a plain Escape leaves the name field");
+    assert.equal(view.dialogs().length, 1, "and not the dialog");
+    assert.ok(active() === button(dialog, "New Group"), "focus returns to New Group");
   } finally {
     await view.unmount();
   }

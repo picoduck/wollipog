@@ -14592,7 +14592,7 @@ body.shell-dock-dragging * {
    never does. A refused change's notice sits under both panes, above the footer. On a phone sheet
    the body is one column and shows one step at a time (the dialog renders only that pane). */
 @media (min-width: 761px) {
-  .modal.lg:has(> .modal-panel-host > .skill-groups) { height: calc(100dvh - 48px); }
+  .modal.lg:has(> .modal-panel-host > .skill-groups):not(:has(.skill-groups-empty)) { height: calc(100dvh - 48px); }
   .skill-groups > .modal-body {
     gap: 0;
     padding: 0;

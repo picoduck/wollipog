@@ -689,7 +689,8 @@ function ConfirmationDialog({ request, onSettle }: {
           <input id={typedId} autoFocus value={typed} autoComplete="off" spellCheck={false} readOnly={running}
             onChange={(event) => setTyped(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+              // An input method's commit Enter is not a confirmation; some report it only as keyCode 229.
+              if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229) return;
               event.preventDefault();
               void confirm();
             }} />

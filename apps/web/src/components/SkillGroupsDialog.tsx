@@ -270,9 +270,14 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
 
   const removeMember = async (group: SkillGroupView, skill: SkillSummary, index: number) => {
     const rows = group.scope ? ruleRows() : [];
+    // Only a successful read of the group's rules can say it has none; while they load or after a
+    // failed read the removal is described without listing them.
+    const noRules = !group.scope || (rules?.rules !== null && rules?.rules !== undefined && rules.rules.length === 0);
     const message = rows.length
       ? `${quoted(skill.name)} leaves ${quoted(group.name)} and is removed from the machines these assignments deployed it to, unless its own assignments keep it there. The skill, its direct assignments and its version pins stay.`
-      : `${quoted(skill.name)} leaves ${quoted(group.name)}. The group has no assignments, so nothing is removed from any machine.`;
+      : noRules
+        ? `${quoted(skill.name)} leaves ${quoted(group.name)}. The group has no assignments, so nothing is removed from any machine.`
+        : `${quoted(skill.name)} leaves ${quoted(group.name)} and is removed from the machines the group's assignments deployed it to, unless its own assignments keep it there. The skill, its direct assignments and its version pins stay.`;
     if (!await confirm({ title: "Remove Skill from Group", message, detailRows: rows, confirmLabel: "Remove Skill", tone: "danger" })) return;
     await change(`remove-member:${skill.id}`, () => api.updateSkill(skill.id, { groupId: null }).then(() => undefined),
       `Removed ${skill.name} from ${group.name}.`,
@@ -373,7 +378,8 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
           aria-describedby={library?.creationScope ? "skill-groups-new-owner" : undefined}
           onChange={(event) => setNewName(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key !== "Escape" || pending === "create") return;
+            // Escape that dismisses an input method's candidates keeps the name.
+            if (event.key !== "Escape" || pending === "create" || event.nativeEvent.isComposing || event.keyCode === 229) return;
             // Escape leaves the name field, not the dialog.
             event.preventDefault();
             cancelCreate();
@@ -387,8 +393,8 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
       </div>
     </form>
   );
-  const newGroupButton = (
-    <button type="button" className="btn ghost sm" data-group-control="new" disabled={busy || creating || !library?.creationScope}
+  const newGroupButton = (variant: "list" | "empty") => (
+    <button type="button" className={variant === "list" ? "btn ghost sm" : "btn"} data-group-control="new" disabled={busy || creating || !library?.creationScope}
       aria-describedby={library && !library.creationScope ? "skill-groups-create-reason" : undefined}
       onClick={() => { setError(null); setCreating(true); }}>
       <PlusIcon size={14} />New Group
@@ -411,14 +417,14 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
     content = <div className="skill-groups-empty">
       <h3>No Groups Yet</h3>
       <p>A group deploys its skills together, under assignments it shares with every skill in it.</p>
-      {creating ? newGroupForm : <div className="actions">{newGroupButton}</div>}
+      {creating ? newGroupForm : <div className="actions">{newGroupButton("empty")}</div>}
       {createReason}
     </div>;
   } else {
     const list = <div className="skill-groups-pane list" ref={listRef}>
       <div className="skill-groups-list-head">
         <span className="skill-groups-label" id="skill-groups-list-label">Groups</span>
-        {newGroupButton}
+        {newGroupButton("list")}
       </div>
       {newGroupForm}
       {createReason}
