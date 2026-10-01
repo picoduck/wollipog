@@ -22,12 +22,25 @@ export function runnerFrameBypassesInventory(type: string): boolean {
   return INVENTORY_BYPASS_TYPES.has(type);
 }
 
+/** Kept separate from queue accounting so the actual WebSocket close handshake can be tested. */
+export function setRunnerReceivePressure(
+  socket: { readyState: number; pause(): void; resume(): void }, paused: boolean,
+): boolean {
+  // A graceful close still needs to read the peer's acknowledgement. ws permits resume() in
+  // CLOSING; skipping it strands a pressure-paused close until the transport's close timer.
+  if (socket.readyState !== 1 && (paused || socket.readyState !== 2)) return false;
+  if (paused) socket.pause();
+  else socket.resume();
+  return true;
+}
+
 export class RunnerFrameQueue<T> {
   private pending: Array<{ message: T; bytes: number }> = [];
   private bytes = 0;
   private draining = false;
   private closed = false;
   private pressured = false;
+  private inventoryFrameReserve = 0;
 
   constructor(
     private readonly handle: (message: T) => Promise<void>,
@@ -42,6 +55,7 @@ export class RunnerFrameQueue<T> {
    * fixed regardless of inventory size. Call only after authenticating the registration. */
   reserveInventory(snapshotCount: number): void {
     if (!Number.isSafeInteger(snapshotCount) || snapshotCount < 0) return;
+    this.inventoryFrameReserve = Math.max(this.inventoryFrameReserve, snapshotCount);
     this.limits = { ...this.limits, frames: Math.max(this.limits.frames, snapshotCount + 4096) };
   }
 
@@ -68,7 +82,11 @@ export class RunnerFrameQueue<T> {
   private updatePressure(): void {
     // Pause well below the hard ceiling, leaving room for the socket's already-buffered data
     // and one full legal frame. Hysteresis prevents pause/resume chatter on a busy stream.
-    const highFrames = Math.max(1, Math.min(1024, Math.floor(this.limits.frames / 2)));
+    // The early ACK permits an entire advertised inventory to arrive before registration has
+    // finished. Do not pause that legitimate metadata burst and strand liveness frames behind it.
+    // Byte pressure still paces large snapshots/output at the same fixed memory ceiling.
+    const highFrames = this.inventoryFrameReserve + Math.max(1,
+      Math.min(1024, Math.floor((this.limits.frames - this.inventoryFrameReserve) / 2)));
     const highBytes = this.limits.bytes / 4;
     const paused = !this.closed && (this.pressured
       ? this.pending.length > highFrames / 2 || this.bytes > highBytes / 2

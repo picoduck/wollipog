@@ -26,7 +26,7 @@ import {
   RunnerConnectionLimits,
   runnerAuthTimeoutMs,
 } from "./runner-channel.js";
-import { RunnerFrameQueue, runnerFrameBypassesInventory } from "./runner-frame-queue.js";
+import { RunnerFrameQueue, runnerFrameBypassesInventory, setRunnerReceivePressure } from "./runner-frame-queue.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
 import { legacyPeerWorktreeRetirement } from "./worktree-retirement.js";
@@ -1695,9 +1695,7 @@ app.register(async (instance) => {
       "runner replay exceeded its bounded queue or failed");
     socket.terminate();
   }, undefined, flushRuntimeAttention, (paused) => {
-    if (socket.readyState !== 1) return;
-    if (paused) socket.pause();
-    else socket.resume();
+    if (!setRunnerReceivePressure(socket, paused)) return;
     app.log.debug({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused },
       "runner receive flow control changed");
   });

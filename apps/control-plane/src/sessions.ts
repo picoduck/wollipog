@@ -1447,6 +1447,8 @@ export class SessionsService {
   /** Carry an interrupted pass's before-views into its replacement so resolved-request wakeups
    * are not lost when some snapshots committed before the old socket disappeared. */
   private readonly registrationAttention = new Map<string, Map<string, SessionView>>();
+  /** Notification progress is separate from durable request-token before-views. */
+  private readonly registrationNotificationViews = new Map<string, SessionView>();
   private readonly promptOutbox: SessionPromptOutbox;
   /** Process-local epochs fence late initial/manual results. Durable title/source checks provide
    * the cross-restart fence, so an abandoned request can never overwrite newer state. */
@@ -1502,7 +1504,18 @@ export class SessionsService {
         this.db.settleManagedBackgroundDeliveryStatus(sessionId, Date.now())) {
       view = this.db.getSession(sessionId);
     }
-    if (view) this.notify(prev, view);
+    if (view) {
+      this.notify(prev, view);
+      // An own-session/HTTP transition may notify while a child batch holds an older campaign
+      // before-view. Consume the notification only; durable request-resolved/cleared events must
+      // still compare against the original token set when that batch eventually publishes.
+      for (const campaigns of this.registrationAttention.values()) {
+        if (campaigns.has(sessionId)) {
+          this.registrationNotificationViews.set(sessionId, view);
+          break;
+        }
+      }
+    }
   }
 
   private ensureBuiltinWorkflows(): void {
@@ -6829,7 +6842,7 @@ export class SessionsService {
         now,
       });
     }
-    this.notifyTransition(before, before.id);
+    this.notifyTransition(this.registrationNotificationViews.get(before.id) ?? before, before.id);
     this.hub.sessionChangedById(before.id);
   }
 
@@ -12493,11 +12506,17 @@ export class SessionsService {
     for (const before of campaigns.values()) {
       if (!isCurrent()) return; // replacement inherits before-views for partially committed frames
       this.publishCampaignAttentionTransition(before);
-      campaigns.delete(before.id);
+      this.discardCampaignAttentionBefore(campaigns, before.id);
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     if (this.registrationAttention.get(runnerId) === campaigns && campaigns.size === 0)
       this.registrationAttention.delete(runnerId);
+  }
+
+  private discardCampaignAttentionBefore(campaigns: Map<string, SessionView>, campaignId: string): void {
+    campaigns.delete(campaignId);
+    for (const pending of this.registrationAttention.values()) if (pending.has(campaignId)) return;
+    this.registrationNotificationViews.delete(campaignId);
   }
 
   /** Socket registration uses this bounded drain; a superseded connection cannot finish an
@@ -12729,7 +12748,7 @@ export class SessionsService {
       // An immediate publication during this yield may have consumed the human transition.
       const before = campaigns.get(campaignId);
       if (before) this.publishCampaignAttentionTransition(before);
-      campaigns.delete(campaignId);
+      this.discardCampaignAttentionBefore(campaigns, campaignId);
     }
     this.registrationAttention.delete(runnerId);
     // The box no longer reports these ordinary user-delete tombstones -> the delete took. Fork

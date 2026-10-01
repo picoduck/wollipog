@@ -5,6 +5,25 @@ import { MAX_RUNNER_CLIENT_MESSAGE_BYTES } from "./runner-channel.js";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+test("count pressure leaves room for the entire negotiated inventory and ordinary replay headroom", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const pressure: boolean[] = [];
+  const queue = new RunnerFrameQueue<number>(async (n) => { if (n === 0) await held; },
+    () => assert.fail("inventory plus headroom must fit"), undefined, undefined,
+    (paused) => pressure.push(paused));
+  queue.enqueue(0, 1);
+  queue.reserveInventory(5000);
+  for (let n = 1; n <= 5000; n++) queue.enqueue(n, 1);
+  assert.deepEqual(pressure, [], "metadata replay must not prevent liveness frames from being read");
+  for (let n = 5001; n <= 6024; n++) queue.enqueue(n, 1);
+  assert.deepEqual(pressure, [true], "count pressure remains finite after the advertised burst");
+  queue.close();
+  release();
+  await tick();
+  assert.deepEqual(pressure, [true, false]);
+});
+
 test("flow control pauses below hard limits and resumes after draining with hysteresis", async () => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });

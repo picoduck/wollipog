@@ -5,6 +5,7 @@ import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
+import { pushDecision } from "./push-decision.js";
 
 function fixture(children = 1000) {
   const db = ControlPlaneDb.open(":memory:");
@@ -28,6 +29,52 @@ function fixture(children = 1000) {
   }
   return { db, hub, svc, snapshots, logs };
 }
+
+test("a campaign's own runtime transition does not repeat its notification at batch flush", async () => {
+  const { db, hub, snapshots } = fixture(10);
+  const messages: string[] = [];
+  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, (before, after) => {
+    const message = pushDecision(before, after);
+    if (message?.sessionId === "campaign-0") messages.push(message.title);
+  });
+  try {
+    db.updateSessionStatus("campaign-0", "running", 3);
+    db.setPendingApproval("child-0", { requestId: "pending", kind: "question", title: "Synthetic question", options: [],
+      questions: [{ id: "choice", question: "Synthetic question", header: "Choice", options: [{ label: "Yes" }] }] });
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", snapshots[0]!, batch);
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, id: "campaign-0", status: "idle" }, batch);
+    assert.equal(messages.length, 1, "the own-session idle transition notifies immediately");
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(messages.length, 1, "the deferred attention publication must not notify the same transition twice");
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE campaign_session_id=? AND kind='human_blockers_cleared'")
+      .get("campaign-0")?.n, 1, "consuming status notifications must preserve the cleared-request before-view");
+  } finally { db.close(); }
+});
+
+test("own campaign notifications consume attention projections without losing later fresh requests", async () => {
+  const { db, hub, snapshots } = fixture(10);
+  const messages: string[] = [];
+  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, (before, after) => {
+    const message = pushDecision(before, after);
+    if (message?.sessionId === "campaign-0") messages.push(message.title);
+  });
+  const ask = (requestId: string) => ({ requestId, kind: "question" as const, title: "Synthetic question", options: [],
+    questions: [{ id: "choice", question: "Synthetic question", header: "Choice", options: [{ label: "Yes" }] }] });
+  try {
+    db.updateSessionStatus("campaign-0", "running", 3);
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: ask("first") }, batch);
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, id: "campaign-0", status: "idle" }, batch);
+    assert.equal(messages.length, 1, "own frame already reported the new child request");
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(messages.length, 1, "status-only consumption would repeat the human attention projection");
+    const next = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: ask("second") }, next);
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(messages.length, 2, "consumption ends with the batch; a later distinct request still notifies");
+  } finally { db.close(); }
+});
 
 test("registration attention scans scale with campaigns, not retained children", () => {
   const { db, svc, snapshots } = fixture();

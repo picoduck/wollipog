@@ -16,6 +16,7 @@ import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import { MAX_RUNNER_CLIENT_MESSAGE_BYTES, MAX_RUNNER_CONNECTIONS_PER_IP } from "./runner-channel.js";
+import { RunnerFrameQueue, setRunnerReceivePressure } from "./runner-frame-queue.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const testRequire = createRequire(import.meta.url);
@@ -24,8 +25,12 @@ const StrictWebSocket = websocketPluginRequire("ws").WebSocket as new (url: stri
 
 interface StrictSocket {
   readyState: number;
+  readonly isPaused: boolean;
   send(data: string | Buffer): void;
-  close(): void;
+  close(code?: number, reason?: string): void;
+  terminate(): void;
+  pause(): void;
+  resume(): void;
   ping(): void;
   once(event: "pong", listener: () => void): void;
   on(event: "message", listener: (data: Buffer) => void): void;
@@ -59,7 +64,41 @@ function runnerToken(index: number): string {
   return `wollipogr_${String(index).padStart(43, "a")}`;
 }
 
-test("1000 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, async (t) => {
+test("a real WebSocket closing under queue pressure completes its handshake without the close timer", { timeout: 10_000 }, async (t) => {
+  const WebSocketServer = websocketPluginRequire("ws").WebSocketServer as new (options: { host: string; port: number }) => {
+    address(): { port: number };
+    once(event: "listening", listener: () => void): void;
+    once(event: "connection", listener: (socket: StrictSocket) => void): void;
+    close(callback: () => void): void;
+  };
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolvePromise) => server.once("listening", resolvePromise));
+  const connected = new Promise<StrictSocket>((resolvePromise) => server.once("connection", resolvePromise));
+  const client = await openSocket(`ws://127.0.0.1:${server.address().port}`);
+  const peer = await connected;
+  t.after(async () => {
+    client.terminate();
+    peer.terminate();
+    await new Promise<void>((resolvePromise) => server.close(resolvePromise));
+  });
+  let release!: () => void;
+  const held = new Promise<void>((resolvePromise) => { release = resolvePromise; });
+  const queue = new RunnerFrameQueue<number>(async (n) => {
+    if (n === 0) await held;
+    if (n === 1) peer.close(1008, "Synthetic invalid frame");
+  }, () => assert.fail("synthetic backlog must remain below hard limits"), { frames: 8, bytes: 100 }, undefined,
+  (paused) => { setRunnerReceivePressure(peer, paused); });
+  queue.enqueue(0, 1);
+  for (let n = 1; n <= 5; n++) queue.enqueue(n, 10);
+  assert.equal(peer.isPaused, true, "the failure starts on a receive-paused socket");
+  const closed = waitForClose(peer, 2000);
+  release();
+  assert.equal((await closed).code, 1008, "the peer's close acknowledgement is read promptly");
+  assert.equal(peer.isPaused, false);
+  queue.close();
+});
+
+test("1500 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, async (t) => {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-reconcile-responsive-"));
   const databasePath = join(temp, "control-plane.db");
@@ -80,7 +119,7 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
   for (let i = 0; i < 10; i++) seed.createSession({ ...base, id: `campaign-${i}`,
     orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") });
   const snapshots: SessionSnapshot[] = [];
-  for (let i = 0; i < 1000; i++) {
+  for (let i = 0; i < 1500; i++) {
     const id = `child-${i}`;
     seed.createSession({ ...base, id, parentSessionId: `campaign-${i % 10}` });
     seed.updateSessionStatus(id, "completed", 2);
@@ -88,7 +127,7 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
       driver: "claude-code", useWorktree: false, worktreePath: null, config: {}, preview: null,
       pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 });
   }
-  seed.createShell({ shellId: "burst-shell", sessionId: "child-999", runnerId, name: "Synthetic Burst", createdAt: 1 });
+  seed.createShell({ shellId: "burst-shell", sessionId: "child-1499", runnerId, name: "Synthetic Burst", createdAt: 1 });
   seed.raw().exec("PRAGMA synchronous=FULL");
   seed.close();
   let output = "";
@@ -153,13 +192,13 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
       const timer = setTimeout(() => reject(new Error("Agent Control handshake stalled during inventory")), 2000);
       socket.on("message", (raw) => {
         const message = JSON.parse(raw.toString());
-        if (message.type !== "agent_control_credential_registered" || message.sessionId !== "child-999") return;
+        if (message.type !== "agent_control_credential_registered" || message.sessionId !== "child-1499") return;
         clearTimeout(timer);
         assert.equal(message.accepted, true);
         resolvePromise();
       });
     });
-    socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "child-999", tokenHash: "a".repeat(64) }));
+    socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "child-1499", tokenHash: "a".repeat(64) }));
     await credentialHandshake;
     // The real runner republishes negotiated metadata for every retained session immediately
     // after registration. Exercise that burst, not just one isolated live update.
@@ -167,7 +206,7 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
       snapshot: { ...snap, preview: `Negotiated ${pass}` } }));
     // A live update arriving during the inventory must win, even on a replacement socket.
     const liveSnapshot = {
-      ...snapshots[999], title: `Live ${pass}`, updatedAt: 3 + pass,
+      ...snapshots[1499], title: `Live ${pass}`, updatedAt: 3 + pass,
     };
     const fingerprint = createHash("sha256").update(JSON.stringify(liveSnapshot)).digest("hex");
     socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot: liveSnapshot }));
@@ -193,11 +232,11 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
     // entire replay, not just its first few steps; HTTP/pong deadlines remain two seconds.
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
-      if (read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-999'").get()?.runner_snapshot_fingerprint === fingerprint) break;
+      if (read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint === fingerprint) break;
       await probe();
       await delay(50);
     }
-    assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-999'").get()?.runner_snapshot_fingerprint,
+    assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint,
       fingerprint, `newer snapshot did not converge\n${output}`);
     if (newBindings) assert.deepEqual(await newBindings, [true, true], "new session bindings wait for materialization rather than being rejected");
   }
@@ -208,7 +247,7 @@ test("1000 retained campaign children reconcile while real HTTP and heartbeat po
   let disconnected = false;
   burstSocket.once("close", () => { disconnected = true; });
   for (let seq = 1; seq <= 2000; seq++) burstSocket.send(JSON.stringify({ type: "shell_output",
-    sessionId: "child-999", shellId: "burst-shell", stream: "stdout", data, seq }));
+    sessionId: "child-1499", shellId: "burst-shell", stream: "stdout", data, seq }));
   const burstDeadline = Date.now() + 60_000;
   while (Date.now() < burstDeadline && !disconnected) {
     if (read.prepare("SELECT output_end_seq FROM session_shells WHERE shell_id='burst-shell'").get()?.output_end_seq === 2000) break;
