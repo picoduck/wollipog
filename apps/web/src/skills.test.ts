@@ -36,6 +36,7 @@ import {
   skillRecentChanges,
   skillRecommended,
   skillsFromPayload,
+  skillUncheckedMachineSentence,
   skillVersionChangeDetail,
   validateSkillDraft,
   type RunnerSkillsResponse,
@@ -308,6 +309,15 @@ test("an offline machine's agents update when it reconnects", () => {
     "Laptop is offline; its agents update when it reconnects.");
   assert.equal(skillOfflineMachineSentence([runner("r1", "offline"), runner("r2", "offline")], label),
     "2 machines are offline; their agents update when they reconnect.");
+
+  const loaded: RunnerSkillsResponse = { desired: [], reported: null };
+  const failed: RunnerSkillsResponse = { ...loaded, loadError: "Skills status could not be loaded." };
+  assert.equal(skillUncheckedMachineSentence([runner("r1", "online")], { r1: loaded }, label), null);
+  assert.equal(skillUncheckedMachineSentence([runner("r1", "online")], {}, label), null, "still loading is not a failure");
+  assert.equal(skillUncheckedMachineSentence([runner("r1", "online"), runner("r2", "online")], { r1: loaded, r2: failed }, label),
+    "Laptop's skill status could not be loaded, so its skills are not checked.");
+  assert.equal(skillUncheckedMachineSentence([runner("r1", "online"), runner("r2", "online")], { r1: failed, r2: failed }, label),
+    "2 machines' skill status could not be loaded, so their skills are not checked.");
 });
 
 test("Recently Changed shows each skill's newest change, newest first, at most five", () => {

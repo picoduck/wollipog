@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { RunnerView } from "@wollipog/protocol";
 import { relativeTime } from "../format.js";
 import { statusMeta } from "../status-meta.js";
@@ -9,6 +9,7 @@ import {
   skillOfflineMachineSentence,
   skillRecentChanges,
   skillRecommended,
+  skillUncheckedMachineSentence,
   type RunnerSkillsResponse,
   type SkillGroupView,
   type SkillOverviewAttentionItem,
@@ -61,9 +62,31 @@ export function SkillsOverview({
   // Until every machine's report is in, "nothing needs attention" would be a guess.
   const checking = runners.some((runner) => !machineSkills[runner.runnerId]);
   const offline = skillOfflineMachineSentence(runners, machineLabel);
+  const unchecked = skillUncheckedMachineSentence(runners, machineSkills, machineLabel);
+
+  // Assigning or dismissing a recommendation removes its row, trigger included, so focus moves on
+  // to the next recommendation's View, or else to the Needs Attention heading. A failed action
+  // keeps the row, and focus stays on its Assign button.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const focusAfter = useRef<string | null>(null);
+  const settle = (skillId: string, apply: () => void) => {
+    focusAfter.current = skillId;
+    apply();
+  };
+  useEffect(() => {
+    const pending = focusAfter.current;
+    if (!pending || busy) return;
+    focusAfter.current = null;
+    const root = rootRef.current;
+    const next = recommended.some((skill) => skill.id === pending)
+      ? [...root?.querySelectorAll<HTMLElement>("[data-skill-assign]") ?? []].find((trigger) => trigger.dataset.skillAssign === pending)
+      : root?.querySelector<HTMLElement>("[data-skill-view]") ??
+        root?.querySelector<HTMLElement>(`#${id}-attention`);
+    next?.focus();
+  }, [busy, recommended, id]);
 
   return (
-    <div className="skills-overview">
+    <div className="skills-overview" ref={rootRef}>
       <header className="skills-overview-head">
         {showTitle && <h2 className="skills-overview-title">Library Overview</h2>}
         <p className="skills-overview-summary">
@@ -77,7 +100,7 @@ export function SkillsOverview({
 
       <section className="section" aria-labelledby={`${id}-attention`}>
         <div className="section-head">
-          <h3 className="section-title" id={`${id}-attention`}>
+          <h3 className="section-title" id={`${id}-attention`} tabIndex={-1}>
             Needs Attention
             {attention.length > 0 && <span className="skills-overview-count">{attention.length}</span>}
           </h3>
@@ -111,12 +134,14 @@ export function SkillsOverview({
           </div>
         ) : checking ? (
           <p className="skills-hint">Checking each machine's skills…</p>
-        ) : (
+        ) : unchecked ? null : (
           <p className="skills-overview-ok">
             <span className="skills-overview-dot" aria-hidden="true" />
             <span>Every skill is deployed as assigned.{offline ? ` ${offline}` : ""}</span>
           </p>
         )}
+        {/* A machine whose report failed says nothing to skillAttention(), so it is never called healthy. */}
+        {unchecked && <p className="skills-hint">{unchecked}</p>}
       </section>
 
       {recommended.length > 0 && (
@@ -140,15 +165,15 @@ export function SkillsOverview({
                     {description && <span className="row-sub" title={description}>{description}</span>}
                   </span>
                   <span className="skills-overview-actions">
-                    <button type="button" className="btn ghost sm" aria-label={`View ${skill.name}`}
+                    <button type="button" className="btn ghost sm" aria-label={`View ${skill.name}`} data-skill-view=""
                       onClick={() => onOpenSkill(skill.id)}>View</button>
                     <AssignMenu
                       skill={skill}
                       runners={runners}
                       machineLabel={machineLabel}
                       disabled={busy}
-                      onAssign={(runnerId) => onAssignRecommended(skill.id, runnerId)}
-                      onDismiss={() => onDismissRecommendation(skill.id)}
+                      onAssign={(runnerId) => settle(skill.id, () => onAssignRecommended(skill.id, runnerId))}
+                      onDismiss={() => settle(skill.id, () => onDismissRecommendation(skill.id))}
                     />
                   </span>
                 </div>
@@ -231,6 +256,7 @@ function AssignMenu({ skill, runners, machineLabel, disabled, onAssign, onDismis
         type="button"
         className="btn sm"
         aria-label={`Assign ${skill.name}`}
+        data-skill-assign={skill.id}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menu.menuId : undefined}

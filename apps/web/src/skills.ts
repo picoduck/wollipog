@@ -640,6 +640,19 @@ export function skillOfflineMachineSentence(
     : `${offline.length} machines are offline; their agents update when they reconnect.`;
 }
 
+/** Machines whose skills report failed to load, which `skillAttention()` cannot check. */
+export function skillUncheckedMachineSentence(
+  runners: ReadonlyArray<RunnerView>,
+  machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
+  machineLabel: (runnerId: string) => string,
+): string | null {
+  const unchecked = runners.filter((runner) => machineSkills[runner.runnerId]?.loadError);
+  if (!unchecked.length) return null;
+  return unchecked.length === 1
+    ? `${machineLabel(unchecked[0]!.runnerId)}'s skill status could not be loaded, so its skills are not checked.`
+    : `${unchecked.length} machines' skill status could not be loaded, so their skills are not checked.`;
+}
+
 /** One Recently Changed row: the skill's newest change, a version or an assignment edit. */
 export interface SkillRecentChange {
   skill: SkillSummary;

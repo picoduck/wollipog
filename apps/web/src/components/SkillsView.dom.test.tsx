@@ -1966,6 +1966,89 @@ test("Recommended by Wollipog assigns from a menu or dismisses, and never counts
   }
 });
 
+test("a machine whose skill status failed to load is never reported as healthy", async () => {
+  const view = await mountRouted(oneSkillClient({
+    runnerSkills: async () => { throw new Error("HTTP 503"); },
+  }), "skills-overview-unchecked");
+  try {
+    const section = overviewSection(view.container, "Needs Attention")!;
+    assertNoDomNode(section.querySelector(".skills-overview-ok"), "no green line while a machine is unchecked");
+    assert.equal(section.querySelector(".skills-hint")?.textContent,
+      "Build Machine's skill status could not be loaded, so its skills are not checked.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("editing an assignment refreshes the library, so Recently Changed sees the change", async () => {
+  let listed = 0;
+  let changedAt: number | undefined;
+  const assignment = { id: "assignment-1", skillId: "skill-1", scopeKind: "instance" as const,
+    agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const };
+  const view = await mountRouted(oneSkillClient({
+    listSkills: async () => {
+      listed += 1;
+      return { skills: [{ ...oneSkill, ...(changedAt ? { lastAssignmentChangedAt: changedAt } : {}) }] };
+    },
+    listSkillAssignments: async () => ({ assignments: [assignment] }),
+    updateSkillAssignment: async (_id: string, patch: { enabled?: boolean }) => {
+      Object.assign(assignment, patch);
+      changedAt = Date.now();
+      return { assignment };
+    },
+  }), "skills-overview-assignment-edit", { name: "skills", id: "skill-1" });
+  try {
+    const before = listed;
+    await act(async () => view.container.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Enabled"]')!.click());
+    await act(settle);
+    assert.equal(listed, before + 1, "the toggle reloads the library summaries");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("after a recommendation leaves, focus moves to the next View, then to Needs Attention; a failure keeps it on Assign", async () => {
+  const skills = ["orchestrate-issues", "using-wollipog"].map((name) => ({
+    id: `s-${name}`, name, builtIn: { release: "0.29.0", heldUpdate: null }, recommendation: { dismissed: false },
+    assignmentCount: 0, latestVersion: versionAt(daysAgo(1)),
+  }));
+  let fail = false;
+  const view = await mountRouted(oneSkillClient({
+    listSkills: async () => ({ skills: structuredClone(skills) }),
+    setSkillRecommendationDismissed: async (id: string, dismissed: boolean) => {
+      if (fail) throw new Error("HTTP 500");
+      skills.find((entry) => entry.id === id)!.recommendation = { dismissed };
+      return { skill: structuredClone(skills.find((entry) => entry.id === id)) };
+    },
+  }), "skills-overview-focus");
+  const { container } = view;
+  const dismiss = async (name: string) => {
+    const trigger = container.querySelector<HTMLButtonElement>(`button[aria-label="Assign ${name}"]`)!;
+    trigger.focus();
+    await act(async () => trigger.click());
+    const item = [...container.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]')]
+      .find((entry) => entry.textContent === "Dismiss Recommendation")!;
+    item.focus();
+    await act(async () => item.click());
+    await act(settle);
+  };
+  const focused = () => domWindow.document.activeElement as unknown as HTMLElement | null;
+  try {
+    await dismiss("orchestrate-issues");
+    assert.equal(focused()?.getAttribute("aria-label"), "View using-wollipog", "the next recommendation's View");
+
+    fail = true;
+    await dismiss("using-wollipog");
+    assert.equal(focused()?.getAttribute("aria-label"), "Assign using-wollipog", "a failed dismissal keeps its row and focus");
+
+    fail = false;
+    await dismiss("using-wollipog");
+    assert.equal(focused()?.firstChild?.textContent, "Needs Attention", "the last one hands focus to the section heading");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("Recommended by Wollipog's Assign › machine assigns to that machine, and View opens the skill", async () => {
   const skill = { id: "s-using", name: "using-wollipog", builtIn: { release: "0.29.0", heldUpdate: null },
     recommendation: { dismissed: false }, assignmentCount: 0, latestVersion: versionAt(daysAgo(1)) };

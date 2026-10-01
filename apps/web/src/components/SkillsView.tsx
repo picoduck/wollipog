@@ -905,6 +905,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                                   onChange={(value) => void mutate(
                                     () => api.updateSkillAssignment(assignment.id, { invocation: value }),
                                     async () => {
+                                      // The library's lastAssignmentChangedAt feeds Recently Changed.
+                                      await refreshList();
                                       await refreshDetail(detail.id);
                                       await refreshMachines();
                                     },
@@ -923,6 +925,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                                   onClick={() => void mutate(
                                     () => api.updateSkillAssignment(assignment.id, { enabled: !assignment.enabled }),
                                     async () => {
+                                      await refreshList();
                                       await refreshDetail(detail.id);
                                       await refreshMachines();
                                     },
