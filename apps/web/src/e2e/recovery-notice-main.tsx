@@ -39,7 +39,6 @@ if (params.has("theme")) {
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
 const frameWidth = Number(params.get("width") ?? "900");
-const pinnedOpen = params.get("pinned") === "1";
 const pagination = params.get("pagination") === "1";
 const retryPagination = params.get("pagination") === "retry";
 const resolvedPagination = params.get("pagination") === "resolve" || retryPagination;
@@ -484,7 +483,6 @@ createRoot(document.getElementById("root")!).render(
           mode={mode}
           rightPanel={rightPanel}
           onOpenTerminal={() => {}}
-          pinnedOpen={pinnedOpen}
           composerDraftLoader={async () => null}
         />
       </div>

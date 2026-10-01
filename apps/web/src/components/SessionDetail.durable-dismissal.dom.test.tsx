@@ -219,7 +219,6 @@ async function mountFixture(options: {
             sessionId={currentSession.id}
             rightPanel={rightPanel}
             onOpenTerminal={() => {}}
-            pinnedOpen={false}
             composerFocusIntent="message"
             composerDraftLoader={async () => null}
             {...(options.onPreviewForkReady

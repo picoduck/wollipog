@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import postcss from "postcss";
-import { allDeclarations, customProperties, declarationsOf, mediaBlocks, topLevelRule } from "./css-rules.js";
+import { allDeclarations, containerBlocks, customProperties, declarationsOf, mediaBlocks, topLevelRule } from "./css-rules.js";
+import { PINNED_SUMMARY_DOCK_MIN_PX, PINNED_SUMMARY_WIDTH_PX } from "./components/pinned-summary-state.js";
 
 const raw = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 /** Comments carry example declarations and prose; every check below reasons about real rules. */
@@ -110,8 +111,17 @@ test("every referenced custom property is defined in the shared root scope", () 
     "--zone-line-width",
   ]);
 
+  // Component-local by design (docs/design-system.md §19.4 rejects promoting them): each is
+  // declared on the one component rule that owns it, and only that component reads it.
+  const COMPONENT_LOCAL = new Map([
+    ["--summary-w", ".detail-body"], // the Pinned Summary's width, read by the body grid and `.ps`
+  ]);
+  for (const [name, owner] of COMPONENT_LOCAL) {
+    assert.ok(soleRuleProps(owner).has(name), `${name} is declared on ${owner}`);
+  }
+
   const unresolved = [...referenced]
-    .filter((name) => !shared.has(name) && !RUNTIME_PUBLISHED.has(name))
+    .filter((name) => !shared.has(name) && !RUNTIME_PUBLISHED.has(name) && !COMPONENT_LOCAL.has(name))
     .sort();
   assert.deepEqual(unresolved, [],
     `used but not defined in the shared :root scope: ${unresolved.join(", ")}`);
@@ -574,13 +584,8 @@ test("the recovery pill is a permanently-sized in-flow slot, never an overlay", 
  * pane is therefore a height-queried container: below the threshold the slot collapses entirely
  * (independent of activity, so toggling recovery still cannot change layout) and active recovery
  * is echoed inside the status strip — the persistent status surface that must always survive.
- *
- * SUMMARY EXCLUSION — the floating pinned summary used to reserve the strip with a hardcoded
- * `calc(100% - 66px)`, which knew nothing of the dynamic-height slot beneath it. Its containing
- * block is now the reader region (the scroller only), so its bounds end above the slot
- * structurally rather than by a pixel constant.
  */
-test("short panes keep the status strip, and the pinned summary is bounded by the reader", () => {
+test("short panes keep the status strip", () => {
   // The pane is a size container so the compact switch keys on the PANE's own height (set by a
   // splitter position), which no viewport media query can observe.
   assert.match(soleRuleBody(".detail-main"), /container:\s*transcript-pane \/ size;/);
@@ -639,49 +644,10 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
     "the meter must yield without shifting a full-height phone Session",
   );
 
-  // The pinned summary's containing block is the reader region — which the DOM tests pin as
-  // containing the scroller and neither the slot nor the strip — so no pixel reservation for
-  // siblings may reappear in its max-height.
-  assert.match(soleRuleBody(".detail-reader"), /position:\s*relative;/);
-  const summary = soleRuleBody(".pinned-summary");
-  assert.match(summary, /max-height:\s*calc\(100% - 24px\);/,
-    "the summary reserves only its own top offset and bottom breathing room");
-  assert.doesNotMatch(summary, /66px/,
-    "the old strip-and-slot pixel reservation must not return");
-
   // The reader region clips: in panes shorter than the scroller's own padding floor, the
   // scroller would otherwise overflow the reader down over the strip and swallow its clicks.
   assert.match(soleRuleBody(".detail-reader"), /overflow:\s*clip;/,
     "nothing inside the reader may paint or intercept below its bounds");
-
-  // A reader too short to CONTAIN the summary must hide it: a max-height cap cannot shrink the
-  // card below its own offset + padding floor, so an escaped card covered the compact strip.
-  assert.match(soleRuleBody(".detail-reader"), /container:\s*transcript-reader \/ size;/);
-  const shortReader = /@container transcript-reader \(max-height:\s*(\d+)px\)\s*\{([\s\S]*?)\n\}/.exec(css);
-  assert.ok(shortReader, "the short-reader mode must exist");
-  assert.match(shortReader![2]!, /\.pinned-summary\s*\{\s*display:\s*none;\s*\}/,
-    "a reader that cannot contain the summary must hide it, not let it escape over the strip");
-
-  // Threshold COORDINATION, so growing the pane never reduces disclosure: at the first
-  // non-compact pane height the slot returns and shrinks the reader — if the summary's hide
-  // threshold reached that reader height, dragging a splitter taller would hide the card at
-  // the mode switch and only reshow it once the pane out-grew the slot. Derived from the
-  // rules' own declarations: nominal slot = slot vertical padding + pill vertical box + one
-  // 18px --text-sm line (the pill band's long-documented single-line allowance).
-  const paneThreshold = Number(/@container transcript-pane \(max-height:\s*(\d+)px\)/.exec(css)![1]);
-  const readerThreshold = Number(shortReader![1]);
-  const slotPad = /padding:\s*(\d+)px\s+\d+px\s+(\d+)px;/.exec(soleRuleBody(".transcript-recovery-slot"));
-  const pill = soleRuleBody(".transcript-recovery-notice");
-  const pillPad = Number(/padding:\s*(\d+)px/.exec(pill)?.[1]);
-  const pillBorder = Number(/border:\s*(\d+)px/.exec(pill)?.[1]);
-  assert.ok(slotPad && Number.isFinite(pillPad) && Number.isFinite(pillBorder),
-    "slot and pill must declare px paddings/borders so the nominal slot height is derivable");
-  const nominalSlot = Number(slotPad![1]) + Number(slotPad![2]) + 2 * pillPad + 2 * pillBorder + 18;
-  const stripMin = Number(/min-height:\s*(\d+)px/.exec(soleRuleBody(".transcript-status-strip"))![1]);
-  const readerAtModeSwitch = paneThreshold + 1 - stripMin - nominalSlot;
-  assert.ok(readerThreshold < readerAtModeSwitch,
-    `the summary hides at ${readerThreshold}px of reader or less, but the first non-compact ` +
-    `pane leaves only ${readerAtModeSwitch}px — growing the pane would re-hide the card`);
 
   // The compact echo overlays toward free space from the context seat. Its preferred width leaves
   // the adjacent Live Output gap unchanged, while the side-track bound keeps the inner label
@@ -692,6 +658,48 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
     /position:\s*absolute;[\s\S]*right:\s*0;[\s\S]*width:\s*min\(80px,\s*calc\(25cqw - 11px\),\s*100%\);[\s\S]*max-width:\s*none;/,
     "the compact echo uses available side-track width without changing cluster spacing");
   assert.match(soleRuleBody(".transcript-recovery-strip-echo > span:last-child"), /text-overflow:\s*ellipsis;/);
+});
+
+/**
+ * The Pinned Summary takes its own space (#2147): a column beside the reader while the reader keeps
+ * 560px, otherwise a drawer in the reader's grid cell, and on a phone a sheet dialog. The floating
+ * card (absolutely positioned over the transcript) and its 35vh phone scroll box must not return.
+ */
+test("the Pinned Summary docks beside the reader only while the reader keeps 560px", () => {
+  const summaryRule = (selector: string) => /\.(ps|ps-scrim|ps-body)(?![\w-])/.test(selector);
+  for (const declaration of allDeclarations(css)) {
+    assert.ok(!declaration.selectors.some((selector) => selector.includes("pinned-summary")),
+      `the floating card's rules are gone (line ${declaration.line}: ${declaration.selector})`);
+    if (!declaration.selectors.some(summaryRule)) continue;
+    assert.notEqual(declaration.prop, "position",
+      `the summary is laid out by the grid, never positioned (line ${declaration.line}: ${declaration.selector})`);
+    assert.ok(!(declaration.prop === "max-height" && /vh/.test(declaration.value)),
+      `the summary is never a viewport-capped scroll box (line ${declaration.line}: ${declaration.selector})`);
+    assert.notEqual(declaration.prop, "order",
+      `the summary is never reordered above the transcript (line ${declaration.line}: ${declaration.selector})`);
+  }
+
+  // One width, held equal to the JS constant the toggle and the docking rule use.
+  assert.deepEqual(soleRuleProps(".detail-body").get("--summary-w"), [`${PINNED_SUMMARY_WIDTH_PX}px`]);
+  assert.match(soleRuleBody(".detail-body"), /grid-auto-columns:\s*var\(--summary-w\);/);
+  assert.match(soleRuleBody(".ps"), /width:\s*var\(--summary-w\);/);
+  assert.match(soleRuleBody(".ps"), /overflow-y:\s*auto;/, "the summary scrolls on its own");
+  assert.match(soleRuleBody(".ps-body"), /padding:\s*var\(--space-3\) var\(--space-3\) var\(--space-6\);/,
+    "24px of bottom padding, so the last row is never clipped");
+
+  // The body is a named size container on desktop and compact, so docking follows the room the
+  // right panel leaves rather than the viewport; a phone keeps viewport coordinates for its sheet.
+  const containerMedia = mediaBlocks(css).filter((block) =>
+    block.declarationsForSelector(".detail-body").get("container")?.includes("session-body / inline-size"));
+  assert.deepEqual(containerMedia.map((block) => block.params), ["(min-width: 761px)"]);
+
+  // Docked from exactly the reader minimum plus the summary width, mirrored by the JS presentation.
+  const docked = containerBlocks(css).filter((block) => block.params.startsWith("session-body"));
+  assert.equal(docked.length, 1, "one docking rule");
+  assert.equal(docked[0]!.params, `session-body (min-width: ${PINNED_SUMMARY_DOCK_MIN_PX}px)`);
+  assert.deepEqual(docked[0]!.declarationsForSelector(".ps").get("grid-area"), ["1 / 2"],
+    "docked, the summary takes the column after the reader");
+  assert.deepEqual(docked[0]!.declarationsForSelector(".ps-scrim").get("display"), ["none"]);
 });
 
 test("wrapped code blocks break long prose instead of scrolling sideways", () => {

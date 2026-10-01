@@ -388,7 +388,6 @@ function HarnessShell() {
               expandedSessionId={view.name === "session" ? view.id : null}
               rightPanel={rightPanel}
               onOpenTerminal={() => {}}
-              pinnedOpen={false}
               onCollapse={() => navigate(sessionsDestination(SCOPE))}
               onNewSession={() => {}}
             />

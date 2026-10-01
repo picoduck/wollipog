@@ -20,6 +20,7 @@ import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import "../styles.css";
+import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 
 /**
  * #1977: the project setup suggestion and the skills-unavailable notice.
@@ -292,7 +293,6 @@ function SessionsSurface() {
             expandedSessionId={view.name === "session" ? view.id : null}
             rightPanel={rightPanel}
             onOpenTerminal={() => {}}
-            pinnedOpen={false}
             onCollapse={() => navigate({ name: "inbox" })}
             onNewSession={() => {}}
           />
@@ -312,7 +312,7 @@ function SessionSurface() {
             mode="expanded"
             rightPanel={rightPanel}
             onOpenTerminal={() => {}}
-            pinnedOpen={pinned}
+            pinnedSummary={staticPinnedSummary(pinned)}
             composerDraftLoader={async () => null}
           />
         </div>

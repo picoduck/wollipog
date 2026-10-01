@@ -109,7 +109,8 @@ export function PinnedSummary({
   };
 
   return (
-    <aside className="pinned-summary" aria-label="Pinned Summary">
+    // The container (docked column, drawer or phone sheet) is PinnedSummaryDock or the sheet dialog.
+    <div className="ps-body">
       {/* Keep session identity and freshness together at the top of the pinned summary. */}
       <div className="ps-section">
         <div className="ps-section-head">
@@ -314,7 +315,7 @@ export function PinnedSummary({
           )}
         </div>
       )}
-    </aside>
+    </div>
   );
 }
 

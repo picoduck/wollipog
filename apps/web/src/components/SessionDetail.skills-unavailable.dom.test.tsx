@@ -13,6 +13,7 @@ import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { staticPinnedSummary } from "./pinned-summary-state.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -142,7 +143,7 @@ async function withSession(
         <FeedbackContext.Provider value={{ confirm: async () => true, showToast: () => 0, dismissToast: () => {} } as never}>
           <StoreProvider connection={connection} navigation={navigation}>
             <SessionDetail sessionId={current.id} mode={options.mode ?? "expanded"} rightPanel={rightPanel}
-              onOpenTerminal={() => {}} pinnedOpen={options.pinnedOpen ?? false} composerDraftLoader={async () => null} />
+              onOpenTerminal={() => {}} pinnedSummary={staticPinnedSummary(options.pinnedOpen ?? false)} composerDraftLoader={async () => null} />
           </StoreProvider>
         </FeedbackContext.Provider>
       </ApiProvider>,

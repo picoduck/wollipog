@@ -152,7 +152,6 @@ async function mount(
             mode="expanded"
             rightPanel={rightPanel}
             onOpenTerminal={() => {}}
-            pinnedOpen={false}
             composerDraftLoader={async () => null}
           />
         </StoreProvider>

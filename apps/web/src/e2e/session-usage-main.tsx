@@ -10,6 +10,7 @@ import { OfflineBanner } from "../components/OfflineBanner.js";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
 import "../styles.css";
+import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 
 declare global {
   interface Window {
@@ -718,7 +719,7 @@ const frame = (
       mode={mode}
       rightPanel={rightPanel}
       onOpenTerminal={() => {}}
-      pinnedOpen={pinnedOpen}
+      pinnedSummary={staticPinnedSummary(pinnedOpen)}
       composerDraftLoader={async () => ({
         text: composerDraftText,
         images: composerDraftImages,

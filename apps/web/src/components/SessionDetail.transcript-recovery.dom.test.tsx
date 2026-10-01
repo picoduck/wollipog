@@ -20,6 +20,7 @@ import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { staticPinnedSummary } from "./pinned-summary-state.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -302,7 +303,7 @@ async function mountFixture(
             mode={nextMode}
             rightPanel={rightPanel}
             onOpenTerminal={() => {}}
-            pinnedOpen={pinnedOpen}
+            pinnedSummary={staticPinnedSummary(pinnedOpen)}
             composerDraftLoader={async () => null}
           />
         </StoreProvider>
@@ -595,20 +596,22 @@ test("a reader away from the tail keeps their place through recovery and its com
   }
 });
 
-test("the pinned summary is contained by the reader region, which excludes the slot and strip", async () => {
+test("the docked pinned summary sits beside the reader column, never over the transcript", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages, 12, { pinnedOpen: true });
   try {
     assert.equal(recoveryActive(fixture), true);
-    const reader = fixture.container.querySelector(".detail-reader") as HTMLElement;
-    const summary = fixture.container.querySelector(".pinned-summary") as HTMLElement | null;
+    const body = fixture.container.querySelector(".detail-body") as HTMLElement;
+    const chat = fixture.container.querySelector(".detail-chat") as HTMLElement;
+    const summary = fixture.container.querySelector('aside.ps[aria-label="Pinned Summary"]') as HTMLElement | null;
     assert.ok(summary, "the pinned summary renders while pinned open");
-    // Structural exclusion: the summary's containing block is the reader region, and the reader
-    // region contains neither the recovery slot nor the status strip — so the summary's bounds
-    // can never intersect the pill regardless of the pill's rendered height.
-    assert.ok(reader.contains(summary), "the summary is anchored inside the reader region");
-    assert.equal(reader.contains(recoverySlot(fixture)), false);
-    assert.equal(reader.contains(fixture.container.querySelector(".transcript-status-strip")!), false);
+    // Structural exclusion (#2147): the summary is the reader column's sibling in the session
+    // body, so it can cover neither the transcript, the recovery slot nor the status strip.
+    assert.equal(summary.parentElement, body);
+    assert.equal(chat.parentElement, body);
+    assert.equal(chat.contains(summary), false, "the summary is outside the reader column");
+    assert.equal(summary.dataset.presentation, "docked");
+    assertNoDomNode(fixture.container.querySelector(".ps-scrim"), "a docked summary has no scrim");
   } finally {
     await unmountFixture(fixture);
   }

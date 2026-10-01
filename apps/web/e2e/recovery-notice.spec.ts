@@ -40,25 +40,19 @@ test("a short preview pane always keeps the status strip and its follow control 
   await chip.click();
 });
 
-test("a tall pane shows the in-flow pill and the pinned summary can never intersect it", async ({ page }) => {
+test("a tall pane shows the in-flow pill below the reader region", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 720 });
-  await page.goto("/recovery-notice-e2e.html?mode=expanded&height=640&pinned=1");
+  await page.goto("/recovery-notice-e2e.html?mode=expanded&height=640");
   const slot = page.locator(".transcript-recovery-slot");
   await expect(slot).toBeVisible();
   await expect(page.locator(".transcript-recovery-notice")).toBeVisible();
   await expect(page.locator(".transcript-recovery-notice")).toContainText("Checking for Missed Activity…");
-  const summary = page.locator(".pinned-summary");
-  await expect(summary).toBeVisible();
 
-  // The summary is bounded by the reader region, and the reader region ends where the slot
-  // begins — so the summary cannot intersect the active pill REGARDLESS of the pill's rendered
-  // height (no hardcoded pixel reservation involved).
+  // The reader region ends where the slot begins, so nothing in the reader covers the pill
+  // whatever its rendered height.
   const readerBox = await box(page.locator(".detail-reader"));
-  const summaryBox = await box(summary);
   const slotBox = await box(slot);
-  expect(summaryBox.bottom).toBeLessThanOrEqual(readerBox.bottom + 0.5);
   expect(slotBox.top).toBeGreaterThanOrEqual(readerBox.bottom - 0.5);
-  expect(summaryBox.bottom).toBeLessThanOrEqual(slotBox.top + 0.5);
 
   // In the tall pane the compact echo stays out of the strip.
   await expect(page.locator(".transcript-recovery-strip-echo")).toBeHidden();
@@ -190,12 +184,9 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
   expect(widestActive.leading.left).toBeGreaterThanOrEqual(widestActive.strip.left - 0.5);
 });
 
-test("a compressed expanded pane hides the pinned summary instead of letting it cover the strip", async ({ page }) => {
+test("a compressed expanded pane keeps the compact status strip inside the pane", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 720 });
-  await page.goto("/recovery-notice-e2e.html?mode=expanded&height=250&pinned=1");
-  // The reader is too short to contain the floating card, so it must not render at all —
-  // an escaped card previously covered the compact status strip.
-  await expect(page.locator(".pinned-summary")).toBeHidden();
+  await page.goto("/recovery-notice-e2e.html?mode=expanded&height=250");
 
   // The compact strip (with its echo) survives fully inside the pane and stays usable.
   const strip = page.locator(".transcript-status-strip");
@@ -231,18 +222,6 @@ test("in a narrow compact expanded pane the active echo wins the leading cell ov
   expect(geometry.visible).toBeGreaterThan(0);
   expect(geometry.full).toBeGreaterThanOrEqual(geometry.visible);
   expect(geometry.textOverflow).toBe("ellipsis");
-});
-
-test("growing the pane past the compact threshold never re-hides the pinned summary", async ({ page }) => {
-  await page.setViewportSize({ width: 800, height: 720 });
-  // Just below the pane's compact switch, at the first non-compact pane (the slot returns and
-  // shrinks the reader), and comfortably above it: disclosure must be monotonic — the summary
-  // stays visible at every step of a splitter drag upward. Before the threshold coordination,
-  // the middle height hid the card until the pane out-grew the returning slot by ~30px.
-  for (const height of [439, 439.5, 469]) {
-    await page.goto(`/recovery-notice-e2e.html?mode=expanded&height=${height}&pinned=1`);
-    await expect(page.locator(".pinned-summary"), `pinned summary at harness height ${height}`).toBeVisible();
-  }
 });
 
 test("a 320px-wide compact pane keeps the echo inside the viewport, truncating in place", async ({ page }) => {

@@ -271,7 +271,6 @@ function Fixture() {
         mode="expanded"
         rightPanel={rightPanel}
         onOpenTerminal={() => {}}
-        pinnedOpen={false}
         composerDraftLoader={async () => null}
       />
     </div>

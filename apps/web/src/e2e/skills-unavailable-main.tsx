@@ -169,7 +169,6 @@ createRoot(document.getElementById("root")!).render(
           mode="expanded"
           rightPanel={rightPanel}
           onOpenTerminal={() => {}}
-          pinnedOpen={false}
           composerDraftLoader={async () => null}
         />
       </div>

@@ -59,6 +59,7 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { useNewSessionShortcut } from "../useNewSessionShortcut.js";
 import "../styles.css";
+import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SCENARIO = FIXTURE_QUERY.get("scenario");
@@ -606,6 +607,28 @@ if (SCENARIO === "edit-in-fork") {
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "user_message", text: "Shorten them to five bullets.", final: true } },
     { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "agent_message", text: "Shortened the release notes.", final: true } },
     { id: 6, sessionId: "session-alpha", seq: 6, ts: 6, payload: { kind: "conversation_checkpoint", turn: 2 } },
+  ]);
+}
+if (SCENARIO === "pinned-summary") {
+  // The content a floating summary used to cover (#2147): a table as wide as the reading column,
+  // with its last column at the right edge, and code blocks whose Copy Code sits top right.
+  const table = [
+    "| Area | Owner | Status | Opened | Updated | Next Step | Notes |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+    ...["Session bar", "Pinned Summary", "Notice slot", "Composer", "Right panel"].map((area, index) =>
+      `| ${area} | Platform | In review | 2026-09-0${index + 1} | 2026-09-2${index} | Ship behind the frame epic | Last column reaches the edge ${index + 1} |`),
+  ].join("\n");
+  const code = (name: string) => [
+    "```ts",
+    `export function ${name}(width: number): boolean {`,
+    "  return width >= 840; // the reader keeps 560px beside a 280px summary",
+    "}",
+    "```",
+  ].join("\n");
+  sessionEvents.set("session-alpha", [
+    { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Show me the frame status and the docking check.", final: true } },
+    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: `Here is the status of each area.\n\n${table}\n\nThe docking check:\n\n${code("docks")}\n\nAnd the drawer check:\n\n${code("drawerOpens")}`, final: true } },
+    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
   ]);
 }
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
@@ -2613,7 +2636,7 @@ function FixtureSurface() {
           mode="expanded"
           rightPanel={rightPanel}
           onOpenTerminal={openTerminal}
-          pinnedOpen={SCENARIO === "git-visibility"}
+          pinnedSummary={staticPinnedSummary(SCENARIO === "git-visibility")}
           providerCommandAttachmentPolicy={providerCommandAttachmentPolicy}
         />
         {terminalSessionId === view.id && (
@@ -2636,7 +2659,7 @@ function FixtureSurface() {
         expandedSessionId={view.name === "session" ? view.id : null}
         rightPanel={rightPanel}
         onOpenTerminal={openTerminal}
-        pinnedOpen={SCENARIO === "git-visibility"}
+        pinnedSummary={staticPinnedSummary(SCENARIO === "git-visibility")}
         onNewSession={openNewSession}
         onShortcutNewSessionPresetChange={setShortcutPreset}
       />

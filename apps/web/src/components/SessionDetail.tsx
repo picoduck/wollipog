@@ -95,6 +95,8 @@ import {
 import { ApprovalsControl, ModelEffortControl } from "./ComposerControls.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
+import { PinnedSummaryDock } from "./PinnedSummaryDock.js";
+import type { PinnedSummaryState } from "./pinned-summary-state.js";
 import { deriveGitPresentation } from "../pinned-summary.js";
 import { useVoiceDictation } from "./useVoiceDictation.js";
 import { appendTranscript } from "../dictation.js";
@@ -484,7 +486,9 @@ export type SessionDetailProps = {
   attentionTarget?: import("../navigation.js").AttentionTarget;
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
-  pinnedOpen: boolean;
+  /** The Pinned Summary's state (#2147). Only the expanded session shows the summary; without it,
+   * none is shown. */
+  pinnedSummary?: PinnedSummaryState;
   composerFocusIntent?: "message" | "reply";
   onComposerFocusConsumed?: () => void;
   onBack?: () => void;
@@ -807,7 +811,7 @@ function SessionDetailLoaded({
   attentionTarget,
   rightPanel,
   onOpenTerminal,
-  pinnedOpen,
+  pinnedSummary: pinnedSummaryProp,
   composerFocusIntent,
   onComposerFocusConsumed,
   mode = "expanded",
@@ -1641,9 +1645,29 @@ function SessionDetailLoaded({
   // Inbox previews render neither the composer Git chip, pinned summary, nor Review panel. Do not
   // turn keyboard preview navigation into runner Git/gh fanout for facts nobody can see.
   const gitConsumerSession = mode === "expanded" ? session : undefined;
-  const summaryConsumerSession = mode === "expanded" && (richGitSupported || pinnedOpen)
+  const pinnedSummary = mode === "expanded" ? pinnedSummaryProp : undefined;
+  const summaryConsumerSession = mode === "expanded" && (richGitSupported || pinnedSummary?.open)
     ? session
     : undefined;
+  // The summary docks while the session body leaves the reader 560px beside it. The stylesheet's
+  // container query lays that out; this mirrors it, so the toggle, focus and scrim agree. A body
+  // with no layout (width 0) reports nothing.
+  const [detailBody, setDetailBody] = useState<HTMLDivElement | null>(null);
+  const reportSummaryBodyWidth = pinnedSummary?.reportBodyWidth;
+  useLayoutEffect(() => {
+    if (!detailBody || !reportSummaryBodyWidth) return;
+    const report = (width: number) => {
+      if (width > 0) reportSummaryBodyWidth(width);
+    };
+    report(detailBody.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries.at(-1);
+      if (entry) report(entry.contentRect.width);
+    });
+    observer.observe(detailBody);
+    return () => observer.disconnect();
+  }, [detailBody, reportSummaryBodyWidth]);
   const git = useGitStatus(
     gitConsumerSession,
     runnerOnline,
@@ -4950,6 +4974,24 @@ function SessionDetailLoaded({
       </section>
     ) : null;
 
+  // The summary's contents (#2160 rebuilds them); the container depends on the presentation.
+  const pinnedSummaryContent = pinnedSummary?.open ? (
+    <PinnedSummary
+      session={session}
+      git={git}
+      gitSummary={gitSummary}
+      gitPresentation={gitPresentation}
+      richGitSupported={richGitSupported}
+      items={items}
+      onOpenReview={() => rightPanel.show("review")}
+      onOpenBackgroundWork={() => rightPanel.show("background")}
+      onOpenSourceLocation={openSourceLocation}
+      skillsUnavailableReason={skillsUnavailable
+        ? skillsUnavailableSentence(runnerDisp.name, skillsUnavailable.adapter, null)
+        : null}
+    />
+  ) : null;
+
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
       {mode === "expanded" ? (
@@ -5107,6 +5149,9 @@ function SessionDetailLoaded({
           lives at the app shell (survives navigation); its per-session bodies (e.g. the Files
           browser) reset with SessionDetail's own session-id key. */}
       <div className="detail-columns">
+        {/* The session body: the reader column, then the docked Pinned Summary (#2147). It is the
+            `session-body` container, so docking follows the room the right panel leaves. */}
+        <div className="detail-body" ref={setDetailBody}>
         <div className="detail-chat">
           {/* Inside the CHAT COLUMN (not .session-detail) so the card centers against the
               same width the transcript and composer use — with the right panel open, a
@@ -5139,31 +5184,10 @@ function SessionDetailLoaded({
               }
             }}
           >
-            {/* The reader region: the scroller and its floating pinned summary, and NOTHING
-                below them. It is the summary's containing block, so the card's bounds can never
-                reach the recovery slot or the status strip regardless of the pill's rendered
-                height — a structural exclusion, not a pixel reservation. */}
+            {/* The reader region: the scroller, and NOTHING below it. It clips, so in a pane
+                shorter than the scroller's padding floor nothing can paint over the recovery slot
+                or the status strip. */}
             <div className="detail-reader">
-            {/* Floating pinned summary overlays the TRANSCRIPT's top-right (Codex behavior);
-                the timeline does not reflow around it, and it shifts with the right panel.
-                Anchored inside detail-reader — not the whole chat column — so its max-height
-                can never extend down over the recovery slot, status strip, or composer. */}
-            {mode === "expanded" && pinnedOpen && (
-              <PinnedSummary
-                session={session}
-                git={git}
-                gitSummary={gitSummary}
-                gitPresentation={gitPresentation}
-                richGitSupported={richGitSupported}
-                items={items}
-                onOpenReview={() => rightPanel.show("review")}
-                onOpenBackgroundWork={() => rightPanel.show("background")}
-                onOpenSourceLocation={openSourceLocation}
-                skillsUnavailableReason={skillsUnavailable
-                  ? skillsUnavailableSentence(runnerDisp.name, skillsUnavailable.adapter, null)
-                  : null}
-              />
-            )}
             <div
               className="detail-scroll measured-virtual-scroll"
               ref={scrollRef}
@@ -6042,6 +6066,16 @@ function SessionDetailLoaded({
             </div>
           )}
         </div>
+        {pinnedSummary && pinnedSummaryContent && pinnedSummary.presentation !== "sheet" && (
+          <PinnedSummaryDock
+            presentation={pinnedSummary.presentation}
+            onClose={pinnedSummary.closeOverlay}
+            toggleRef={pinnedSummary.toggleRef}
+          >
+            {pinnedSummaryContent}
+          </PinnedSummaryDock>
+        )}
+        </div>
 
         {mode === "expanded" && <RightPanel
           state={rightPanel}
@@ -6087,6 +6121,18 @@ function SessionDetailLoaded({
           onRetryBackgroundInventory={retryBackgroundInventory}
         />}
       </div>
+      {/* A phone opens the summary as a bottom sheet (§7.5, §9.2), so the transcript never sits
+          behind a nested scroll box. */}
+      {pinnedSummary && pinnedSummaryContent && pinnedSummary.presentation === "sheet" && (
+        <Modal
+          title="Pinned Summary"
+          onClose={pinnedSummary.closeOverlay}
+          returnFocusRef={pinnedSummary.toggleRef}
+          className="ps-sheet"
+        >
+          {pinnedSummaryContent}
+        </Modal>
+      )}
       {mode === "expanded" && inspectedWorkspaceReference && (
         <Modal
           title="Workspace Reference"

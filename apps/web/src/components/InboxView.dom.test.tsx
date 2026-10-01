@@ -287,7 +287,7 @@ for (const viewport of ["mobile", "desktop"] as const) {
       await act(async () => {
         root.render(
           <StoreProvider connection={connection} navigation={navigation}>
-            <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+            <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
           </StoreProvider>,
         );
       });
@@ -325,7 +325,7 @@ for (const viewport of ["mobile", "desktop"] as const) {
     await act(async () => {
       root.render(
         <StoreProvider connection={connection} navigation={navigation}>
-          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
         </StoreProvider>,
       );
     });
@@ -363,7 +363,7 @@ test("InboxView preserves the server-authoritative Project count when reminders 
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -426,7 +426,7 @@ test("Active and Snoozed badges follow the selected Project split and live remin
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -511,7 +511,7 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -590,7 +590,7 @@ test("a Project's archive confirmation lists its sessions from Active and Snooze
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
         <FeedbackProvider>
-          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
         </FeedbackProvider>
       </StoreProvider>,
     );
@@ -669,7 +669,7 @@ test("the tab the URL names survives widening from a phone to a desktop that rem
   });
   const render = (routeSplit?: string | null) => root.render(
     <StoreProvider connection={connection} navigation={spyNavigation}>
-      <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} routeSplit={routeSplit} />
+      <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} routeSplit={routeSplit} />
     </StoreProvider>,
   );
   await act(async () => { render(); });
@@ -745,7 +745,6 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
           viewMode={viewMode}
           rightPanel={rightPanel}
           onOpenTerminal={() => undefined}
-          pinnedOpen={false}
         />
       </StoreProvider>,
     );
@@ -844,7 +843,6 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
         <InboxView
           rightPanel={rightPanel}
           onOpenTerminal={() => undefined}
-          pinnedOpen={false}
         />
       </StoreProvider>,
     );
@@ -937,7 +935,7 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -1085,7 +1083,7 @@ test("InboxView does not offer a reorder when only a removed selected id remains
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -1119,7 +1117,7 @@ test("InboxView does not arm the order hold when it mounts in an unfocused windo
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -1162,7 +1160,7 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -1286,7 +1284,7 @@ test("a 409 reconciles the open Snooze dialog without WebSocket delivery", async
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
-          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
         </StoreProvider>
       </ApiProvider>,
     );
@@ -1366,7 +1364,7 @@ test("desktop search Enter focuses the exact filtered result set without activat
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={spyNavigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -1487,7 +1485,7 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={spyNavigation}>
-        <InboxView viewMode="board" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView viewMode="board" rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -1568,7 +1566,7 @@ test("row and card context menus share one surface, act on their target, and nev
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={spyNavigation}>
-          <InboxView viewMode={viewMode} rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          <InboxView viewMode={viewMode} rightPanel={rightPanel} onOpenTerminal={() => undefined} />
         </StoreProvider>
       </ApiProvider>,
     );
@@ -1676,7 +1674,7 @@ test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing 
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
-          <InboxView viewMode="list" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          <InboxView viewMode="list" rightPanel={rightPanel} onOpenTerminal={() => undefined} />
         </StoreProvider>
       </ApiProvider>,
     );
@@ -1725,7 +1723,7 @@ test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing 
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
-          <InboxView viewMode="board" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          <InboxView viewMode="board" rightPanel={rightPanel} onOpenTerminal={() => undefined} />
         </StoreProvider>
       </ApiProvider>,
     );
@@ -1764,7 +1762,7 @@ test("row and card context menus pin their exact target, reorder immediately, pe
   const mountView = (viewMode: "list" | "board") => act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={spyNavigation}>
-        <InboxView viewMode={viewMode} rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView viewMode={viewMode} rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -1853,7 +1851,7 @@ test("a touch long-press opens the row menu and suppresses the tap it rode in on
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -1909,7 +1907,7 @@ test("a long-press over a card's approval button opens the menu without approvin
       root.render(
         <ApiProvider client={client}>
           <StoreProvider connection={connection} navigation={navigation}>
-            <InboxView viewMode="board" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+            <InboxView viewMode="board" rightPanel={rightPanel} onOpenTerminal={() => undefined} />
           </StoreProvider>
         </ApiProvider>,
       );
@@ -1965,7 +1963,7 @@ test("a quick tap after a dismissed long-press still selects, and an archived ta
     await act(async () => {
       root.render(
         <StoreProvider connection={connection} navigation={navigation}>
-          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
         </StoreProvider>,
       );
     });
@@ -2044,7 +2042,7 @@ test("a cancelled press and a source-landed release click both leave the next ba
     await act(async () => {
       root.render(
         <StoreProvider connection={connection} navigation={navigation}>
-          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
         </StoreProvider>,
       );
     });
@@ -2099,7 +2097,7 @@ test("InboxView threads a family under its parent and t, Shift+T, p, and the arr
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -2191,7 +2189,7 @@ test("InboxView keeps a hidden selection on its nearest visible ancestor and Shi
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -2260,7 +2258,7 @@ test("an expanded child inside a collapsed thread is the session marked seen, no
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView expandedSessionId="Lone" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        <InboxView expandedSessionId="Lone" rightPanel={rightPanel} onOpenTerminal={() => undefined} />
       </StoreProvider>,
     );
   });
@@ -2308,7 +2306,7 @@ test("the Inbox lists recommended built-in skills above the sessions in list and
       root.render(
         <ApiProvider client={client}>
           <StoreProvider connection={connection} navigation={spyNavigation}>
-            <InboxView key={viewMode} viewMode={viewMode} rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+            <InboxView key={viewMode} viewMode={viewMode} rightPanel={rightPanel} onOpenTerminal={() => undefined} />
           </StoreProvider>
         </ApiProvider>,
       );
@@ -2357,7 +2355,7 @@ test("the setup suggestion is one notice above an eligible Project's list, never
     root.render(
       <ApiProvider client={api}>
         <StoreProvider connection={connection} navigation={navigation}>
-          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
         </StoreProvider>
       </ApiProvider>,
     );

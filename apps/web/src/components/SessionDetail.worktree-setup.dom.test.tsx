@@ -110,7 +110,7 @@ async function clickSetupRetry(
         <FeedbackContext.Provider value={{ confirm: async () => true, showToast: () => 0, dismissToast: () => {} } as never}>
           <StoreProvider connection={connection} navigation={navigation}>
             <SessionDetail sessionId={current.id} mode="expanded" rightPanel={rightPanel}
-              onOpenTerminal={() => {}} pinnedOpen={false} composerDraftLoader={async () => null} />
+              onOpenTerminal={() => {}} composerDraftLoader={async () => null} />
           </StoreProvider>
         </FeedbackContext.Provider>
       </ApiProvider>,

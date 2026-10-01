@@ -41,6 +41,7 @@ import { InboxCreateMenu } from "./InboxCreateMenu.js";
 import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
 import { SessionDetail, type PreviewForkControls } from "./SessionDetail.js";
 import type { RightPanelState } from "./RightPanel.js";
+import type { PinnedSummaryState } from "./pinned-summary-state.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useInboxKeys, type InboxKeyActions } from "../useInboxKeys.js";
 import {
@@ -175,7 +176,8 @@ export interface InboxViewProps {
   topbarControls?: ReactNode;
   rightPanel: RightPanelState;
   onOpenTerminal: () => void;
-  pinnedOpen: boolean;
+  /** The Pinned Summary's state; the expanded session shows it. */
+  pinnedSummary?: PinnedSummaryState;
   focusComposerSessionId?: string | null;
   onComposerFocusConsumed?: () => void;
   onExpand?: (sessionId: string, focusComposer: boolean) => void;
@@ -193,7 +195,7 @@ export function InboxView({
   topbarControls,
   rightPanel,
   onOpenTerminal,
-  pinnedOpen,
+  pinnedSummary,
   focusComposerSessionId = null,
   onComposerFocusConsumed,
   onExpand,
@@ -1611,7 +1613,7 @@ export function InboxView({
                 topbarControls={expanded ? topbarControls : undefined}
                 rightPanel={rightPanel}
                 onOpenTerminal={onOpenTerminal}
-                pinnedOpen={pinnedOpen}
+                pinnedSummary={expanded ? pinnedSummary : undefined}
                 composerFocusIntent={focusComposerSessionId === surfaceSessionId ? "reply" : undefined}
                 onComposerFocusConsumed={onComposerFocusConsumed}
                 onBack={onCollapse}

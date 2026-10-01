@@ -181,7 +181,7 @@ async function mount(current: SessionView, { online = true, client: overrides = 
         <StoreProvider connection={connection} navigation={navigation}>
           {events && <EventSeeder sessionId={current.id} payloads={events} />}
           <SessionDetail sessionId={current.id} mode="expanded" rightPanel={rightPanel}
-            onOpenTerminal={() => {}} pinnedOpen={false} composerDraftLoader={async () => null} />
+            onOpenTerminal={() => {}} composerDraftLoader={async () => null} />
         </StoreProvider>
       </FeedbackContext.Provider>
     </ApiProvider>,

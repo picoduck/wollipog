@@ -41,6 +41,7 @@ import { SkillsView } from "./components/SkillsView.js";
 import { UsageView } from "./components/UsageView.js";
 import { ShellDock } from "./components/ShellDock.js";
 import { useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
+import { usePinnedSummaryState } from "./components/pinned-summary-state.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
 import { closeGuardLinks } from "./desktop-close-guard.js";
@@ -428,22 +429,6 @@ export function Shell() {
     }
   }, [dockVisible]);
 
-  // Pinned summary (the Codex-style floating environment card). Open by default.
-  const [pinnedOpen, setPinnedOpen] = useState(() => {
-    try {
-      return loadBrowserStorageValue("wollipog.pinned.open") !== "0";
-    } catch {
-      return true;
-    }
-  });
-  useEffect(() => {
-    try {
-      saveBrowserStorageValue("wollipog.pinned.open", pinnedOpen ? "1" : "0");
-    } catch {
-      /* best-effort */
-    }
-  }, [pinnedOpen]);
-
   // Stable, because the identity chain runs all the way down: an inline arrow here rebuilds
   // InboxView's `expand`, which rebuilds `handleSelect`, which gives every mounted InboxRow unequal
   // props — so a session upsert anywhere re-renders every visible row despite the memo. Making the
@@ -453,6 +438,23 @@ export function Shell() {
     navigate({ name: "session", id: sessionId });
   }, [navigate]);
   const isMobile = useIsMobile();
+  // The Pinned Summary: docked beside the reader, a drawer, or a phone sheet (#2147). Only one
+  // overlay is open at a time, and the right panel is an overlay only on a phone, so there opening
+  // either closes the other.
+  const pinnedSummary = usePinnedSummaryState(isMobile, {
+    onOverlayOpen: () => { if (isMobile) rightPanel.close(); },
+  });
+  const pinnedSummaryRef = useRef(pinnedSummary);
+  pinnedSummaryRef.current = pinnedSummary;
+  const rightPanelWasOpen = useRef(rightPanel.open);
+  useEffect(() => {
+    const opened = rightPanel.open && !rightPanelWasOpen.current;
+    rightPanelWasOpen.current = rightPanel.open;
+    if (opened && isMobile) pinnedSummaryRef.current.closeOverlay();
+  }, [rightPanel.open, isMobile]);
+  // The drawer and the sheet belong to the session they were opened on.
+  const pinnedSummarySessionId = view.name === "session" ? view.id : null;
+  useEffect(() => pinnedSummaryRef.current.closeOverlay(), [pinnedSummarySessionId]);
   // The breakpoint-specific controls (the instance tile and gear) are unmounted by a
   // crossing, and a keyboard user standing on one is left on <body>. Accessibility zoom crosses
   // 760px too, so this is not only a window-drag case.
@@ -531,6 +533,14 @@ export function Shell() {
       if (backdrops.length) {
         e.preventDefault();
         pickTopmost(backdrops, (el) => Number.parseInt(getComputedStyle(el).zIndex, 10) || 0)?.click();
+        return;
+      }
+      // The summary drawer is the next layer down (§16.2); the phone sheet is a dialog.
+      const summary = pinnedSummaryRef.current;
+      if (viewRef.current.name === "session" && summary.presentation === "drawer" && summary.open) {
+        e.preventDefault();
+        summary.closeOverlay();
+        summary.toggleRef.current?.focus();
         return;
       }
       if (handleSettingsNavigationKey(e, {
@@ -683,10 +693,11 @@ export function Shell() {
       <button
         type="button"
         className="icon-btn"
-        onClick={() => setPinnedOpen((v) => !v)}
+        ref={pinnedSummary.toggleRef}
+        onClick={pinnedSummary.toggle}
         title="Toggle Pinned Summary"
         aria-label="Toggle Pinned Summary"
-        aria-pressed={pinnedOpen}
+        aria-pressed={pinnedSummary.open}
       >
         <PinnedPanelIcon size={16} />
       </button>
@@ -791,7 +802,7 @@ export function Shell() {
               onOpenTerminal={() => {
                 if (terminalSupported) setDockVisible(true);
               }}
-              pinnedOpen={pinnedOpen}
+              pinnedSummary={pinnedSummary}
               focusComposerSessionId={composerFocusSessionId}
               onComposerFocusConsumed={() => setComposerFocusSessionId(null)}
               onExpand={expandSession}
