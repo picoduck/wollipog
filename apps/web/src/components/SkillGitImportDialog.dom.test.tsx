@@ -45,15 +45,21 @@ const settle = async () => {
 /** Past the dialog's focus fallback, which runs on the next animation frame. */
 const nextFrame = () => act(async () => { await new Promise((resolve) => domWindow.requestAnimationFrame(() => resolve(undefined))); });
 
-const candidate = (name: string) => ({
-  name, path: `skills/${name}`, commit: "4f1c9b2e7a3d".padEnd(40, "0"), digest: "d", executablePaths: [],
-  files: [{ path: "SKILL.md", encoding: "utf8" as const, content: `---\nname: ${name}\n---\nBody.` }], previousFiles: [],
-  source: { url: "https://github.com/example/skills.git", ref: "HEAD", subdirectory: "" }, disposition: "new" as const, assignmentCount: 0,
-});
+type Disposition = "new" | "update" | "identical";
+/** A candidate by name; `name:update` or `name:identical` sets its disposition (new by default). */
+const candidate = (spec: string) => {
+  const [name, disposition = "new"] = spec.split(":") as [string, Disposition?];
+  return {
+    name, path: `skills/${name}`, commit: "4f1c9b2e7a3d".padEnd(40, "0"), digest: "d", executablePaths: [],
+    files: [{ path: "SKILL.md", encoding: "utf8" as const, content: `---\nname: ${name}\n---\nBody.` }], previousFiles: [],
+    source: { url: "https://github.com/example/skills.git", ref: "HEAD", subdirectory: "" }, disposition, assignmentCount: 0,
+  };
+};
 
 /** A fake server whose previews resolve when the test says, refusing overlap the way the real one does. */
-function server() {
+function server(options: { failImport?: (path: string) => boolean } = {}) {
   const requests: SkillGitSource[] = [];
+  const imported: string[] = [];
   const discarded: string[] = [];
   const pending: Array<{ resolve: (preview: SkillGitPreview) => void }> = [];
   let running = 0;
@@ -69,10 +75,14 @@ function server() {
       });
     },
     discardGitSkillPreview: async (id: string) => { discarded.push(id); },
-    importGitSkill: async () => ({}) as never,
+    importGitSkill: async (body: { path: string }) => {
+      if (options.failImport?.(body.path)) throw new ApiError("Skill import failed. Preview the source again before retrying.", 500);
+      imported.push(body.path);
+      return {} as never;
+    },
   } as ApiClient;
   return {
-    client, requests, discarded, pending,
+    client, requests, discarded, pending, imported,
     get refused() { return refused; },
     async answer(index: number, id: string, names: string[]) {
       await act(async () => { pending[index]!.resolve({ previewId: id, candidates: names.map(candidate) }); });
@@ -93,6 +103,12 @@ async function mount(client: ApiClient, check?: SkillGitUpdateCheck) {
   await settle();
   return async () => { await act(async () => root.unmount()); host.remove(); };
 }
+
+const codeReviewCheck: SkillGitUpdateCheck = { skillName: "code-review",
+  source: { url: "https://github.com/example/skills.git", ref: "HEAD", subdirectory: "skills/code-review" } };
+const heading = (text: string) => [...document.querySelectorAll("h3")].some((entry) => entry.textContent === text);
+const checkbox = (name: string) => [...document.querySelectorAll<HTMLInputElement>('.choice-row input[type="checkbox"]')]
+  .find((input) => input.closest(".choice-row")?.querySelector(".choice-row-title")?.textContent === name)!;
 
 /** Type into a controlled field the way happy-dom lets React see it. Focusing a field that already
  * has focus fires no focusin, so this does not hide a missed initial focus. */
@@ -173,5 +189,55 @@ test("a recorded folder and branch reach the server exactly as recorded", async 
     source: { url: "https://github.com/example/skills.git", ref: "stable", subdirectory: " skills/code-review" } });
   assert.deepEqual(fake.requests, [{ url: "https://github.com/example/skills.git", ref: "stable", subdirectory: " skills/code-review" }]);
   await fake.answer(0, "first", ["code-review"]);
+  await unmount();
+});
+
+test("closing during a preview and reopening at once waits for the first instead of being refused", async () => {
+  const fake = server();
+  const closeFirst = await mount(fake.client, codeReviewCheck);
+  assert.equal(fake.requests.length, 1);
+  await closeFirst();
+  const closeSecond = await mount(fake.client, codeReviewCheck);
+  assert.equal(fake.requests.length, 1, "the reopened dialog waits for the read still running");
+  await fake.answer(0, "abandoned", ["code-review:update"]);
+  assert.deepEqual(fake.discarded, ["abandoned"], "the closed dialog's preview is discarded on the server");
+  assert.equal(fake.requests.length, 2);
+  await fake.answer(1, "current", ["code-review:update"]);
+  assert.equal(fake.refused, 0);
+  assert.equal(document.querySelectorAll(".choice-row").length, 1);
+  await closeSecond();
+});
+
+test("Up to Date needs the checked skill: another folder's unchanged skills are a review", async () => {
+  const fake = server();
+  const unmount = await mount(fake.client, codeReviewCheck);
+  await fake.answer(0, "other", ["lint-rules:identical"]);
+  assert.ok(!heading("code-review Is Up to Date"), "lint-rules says nothing about code-review");
+  assert.ok(button("Change Source"), "the review keeps its way back");
+  await unmount();
+});
+
+test("Up to Date shows when the checked skill matches the library", async () => {
+  const fake = server();
+  const unmount = await mount(fake.client, codeReviewCheck);
+  await fake.answer(0, "same", ["code-review:identical"]);
+  assert.ok(heading("code-review Is Up to Date"));
+  assert.ok(button("Done"));
+  await unmount();
+});
+
+test("a partial import keeps its failure and the rows left, even when they all match the library", async () => {
+  const fake = server({ failImport: (path) => path === "skills/lint-rules" });
+  const unmount = await mount(fake.client, codeReviewCheck);
+  await fake.answer(0, "mixed", ["code-review:update", "lint-rules:identical"]);
+  assert.ok(checkbox("code-review").checked, "the update is checked");
+  await act(async () => checkbox("lint-rules").click());
+  await settle();
+  await act(async () => button("Import 2 Updates").click());
+  await settle();
+  assert.deepEqual(fake.imported, ["skills/code-review"]);
+  assert.ok(!heading("code-review Is Up to Date"), "the remaining identical row does not end the review");
+  assert.match(document.querySelector('[role="alert"]')?.textContent ?? "", /Skill import failed/);
+  assert.equal(document.querySelectorAll(".choice-row").length, 1, "lint-rules is still there to retry");
   await unmount();
 });

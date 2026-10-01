@@ -35,6 +35,13 @@ export interface SkillGitUpdateCheck {
 type Fields = Record<SkillGitField, string>;
 
 /**
+ * The preview request still running, superseded or not, from this dialog or one closed a moment
+ * ago: the server reads one source at a time and refuses a second with 429, so a newer request
+ * waits for it to settle. Module-wide because closing and reopening the dialog does not stop it.
+ */
+let runningDiscovery: Promise<unknown> | null = null;
+
+/**
  * Import from Git (#1983), two steps in one `.modal.lg` and a full-height sheet on phones.
  *
  * Step one is the source: Repository, then Branch or Tag and Folder side by side. Find Skills reads
@@ -78,6 +85,10 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
   const [error, setError] = useState<string | null>(null);
   /** The skill whose import was refused because its assignments changed after the preview (#2129). */
   const [conflict, setConflict] = useState<string | null>(null);
+  /** Opened from a skill, the preview found that skill and nothing that differs from the library.
+   * Decided when the preview arrives, so imports that remove rows later never turn a review (or
+   * its failure) into this state. */
+  const [upToDate, setUpToDate] = useState(false);
 
   const fieldRefs = { url: useRef<HTMLInputElement>(null), ref: useRef<HTMLInputElement>(null), folder: useRef<HTMLInputElement>(null) };
   /** The control that takes focus when a commit removes the focused one: this state's first. */
@@ -87,9 +98,6 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
   const focusField = useRef<SkillGitField | null>(null);
   /** Each preview request's number; a result for an older one is discarded, not shown. */
   const generation = useRef(0);
-  /** The preview request still running, superseded or not: the server reads one source at a time
-   * and refuses a second with 429, so a newer request waits for it to settle. */
-  const inFlight = useRef<Promise<unknown> | null>(null);
   const closed = useRef(false);
   const previewRef = useRef<SkillGitPreview | null>(null);
   previewRef.current = preview;
@@ -172,18 +180,18 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
     const keep = again ? checked : [];
     setReviewed(source);
     setFinding(true);
-    setFailure(null); setError(null); setConflict(null); setAccepted(false);
+    setFailure(null); setError(null); setConflict(null); setAccepted(false); setUpToDate(false);
     if (previewRef.current) discard(previewRef.current.previewId);
     setPreview(null);
     const current = () => request === generation.current && !closed.current;
     try {
-      while (inFlight.current) {
-        await inFlight.current.catch(() => undefined);
+      while (runningDiscovery) {
+        await runningDiscovery.catch(() => undefined);
         if (!current()) return;
       }
       const reading = api.previewGitSkills({ url: source.url, ref: source.ref, subdirectory: source.folder });
-      inFlight.current = reading;
-      void reading.catch(() => undefined).finally(() => { if (inFlight.current === reading) inFlight.current = null; });
+      runningDiscovery = reading;
+      void reading.catch(() => undefined).finally(() => { if (runningDiscovery === reading) runningDiscovery = null; });
       const next = await reading;
       if (!current()) { discard(next.previewId); return; }
       const paths = new Set(next.candidates.map((entry) => entry.path));
@@ -191,6 +199,8 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
         : check ? next.candidates.filter((entry) => entry.name === check.skillName && entry.disposition === "update").map((entry) => entry.path)
           : [];
       setPreview(next);
+      setUpToDate(Boolean(check && next.candidates.some((entry) => entry.name === check.skillName) &&
+        next.candidates.every((entry) => entry.disposition === "identical")));
       setChecked(initial);
       setShown((shownPath) => shownPath && paths.has(shownPath) ? shownPath : initial[0] ?? next.candidates[0]?.path ?? null);
       setStep("review");
@@ -221,7 +231,7 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
     generation.current++;
     if (previewRef.current) discard(previewRef.current.previewId);
     setPreview(null); setFinding(false); setFailure(null); setError(null); setConflict(null);
-    setChecked([]); setAccepted(false);
+    setChecked([]); setAccepted(false); setUpToDate(false);
     setStep("source");
     focusField.current = "url";
   };
@@ -231,7 +241,6 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
   const deployedAssignments = checkedCandidates.filter((entry) => entry.disposition === "update")
     .reduce((sum, entry) => sum + entry.assignmentCount, 0);
   const needsConsent = deployedAssignments > 0;
-  const upToDate = Boolean(check && preview && candidates.length > 0 && candidates.every((entry) => entry.disposition === "identical"));
   const shownCandidate = candidates.find((entry) => entry.path === shown) ?? null;
 
   const submit = async () => {
