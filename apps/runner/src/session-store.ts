@@ -150,6 +150,7 @@ export interface SessionMeta {
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
+  projectMemory?: import("@wollipog/protocol").SessionProjectMemory;
   config: SessionConfig;
   /** Durable one-shot fence; never evicted, so old runner commands cannot replay mutations. */
   githubIssueClosureAttempts?: Record<string, string>;

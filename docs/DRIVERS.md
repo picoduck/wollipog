@@ -1317,3 +1317,43 @@ for the credential lifecycle, route/audit boundary, commands, and compatibility 
 | approve/deny | select ACP optionId | stdio `control_response` allow/deny | reply `{decision}` to server-request |
 | session resume | ACP session id | `--session-id` / `--resume` | `thread/resume {threadId}` |
 | auth | per adapter | `CLAUDE_CODE_OAUTH_TOKEN` (subscription) | `~/.codex/auth.json` (ChatGPT plan) |
+
+
+### Project Memory Sharing
+
+Protocol v195 adds a human-managed per-Project **Memory Sharing** setting. The default is
+**Keep Account Memories Separate**. **Share Project Memory** explicitly selects one shared memory
+directory for that Project's Claude accounts on each machine. Locations on different machines
+have independent stores; this setting does not synchronize files between machines.
+
+Claude Code 2.1.284+ receives an `autoMemoryDirectory` override merged with its effective launch
+settings, including managed hooks and permissions. Private partitions are keyed by Project and
+credential home, while shared partitions are keyed by Project. The chosen directory receives its
+own writable bind/allow under Bubblewrap and Seatbelt, including strict Orchestrator sessions.
+WSL uses an attested runner-owner namespace in the distro. Provider mode and Windows Job apply
+provider configuration; this choice is not an OS access-control boundary against arbitrary tools.
+Container/cloud targets and unverified Claude versions refuse the managed selection with an
+update/host-target instruction rather than silently using an old shared directory.
+
+Codex exec and App Server retain their native account memories. Current Codex memory combines
+projects in an account-wide database, so project-only sharing is unavailable and the UI says so.
+No Codex memories, SQLite indexes, credentials, or unrelated account data are copied by this policy.
+Other harnesses also expose an unavailable state. This PR does not replace Codex native memory
+with a new notes system; Codex project sharing remains an acceptance criterion on #2264.
+
+The control plane sends the current authoritative policy at registration, assignment changes,
+launch, and prompt delivery, outside durable command hashes. Runners persist it for account
+switches, recovery, and restart. Claude's persistent process is replaced at a safe provider boundary,
+using the same conversation id and preserving the FIFO. Current turns and their background-work
+settlement keep the old policy; the next ordinary turn waits for the replacement.
+
+Upgrade does not import legacy memory whose account provenance may be unknown. Original account
+memory and prior session-owned shared memory remain in place; new managed directories start empty.
+Changing the choice retains both private and shared partitions. Turning sharing off selects the
+account's private partition again; turning it on reuses the retained shared partition. This is
+configuration of additional auto-memory access, not forgetting: conversation history can already
+contain injected memory and the provider can learn from continued history under its own settings.
+
+Runner logs include content-free `project_memory_policy_updated` and `project_memory_policy_applied`
+events keyed by session id and provider, with saved/effective policy. Launch failures name the
+unavailable capability. No saved memory contents, credential values, or memory paths are logged.

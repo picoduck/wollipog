@@ -2169,6 +2169,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`agent control ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
       break;
+    case "set_session_project_memory":
+      sessions.setProjectMemory(msg.sessionId, msg.projectMemory);
+      break;
     case "start_session":
       log(`start_session ${msg.spec.sessionId} (${msg.spec.agentId})`);
       if (!validatePromptImageInputs(msg.initialImages ?? []).ok) {
@@ -2206,6 +2209,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log("ignored prompt_session with malformed prompt images");
         break;
       }
+      if (msg.projectMemory) sessions.setProjectMemory(msg.sessionId, msg.projectMemory);
       sessions.prompt(msg.sessionId, msg.text, msg.images, msg.slashCommand, msg.config);
       break;
     case "steer_session": {
@@ -2289,6 +2293,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       sendUp(response);
       if (!("handle" in claim)) break;
       const lifecycle = durableLifecycle(claim.handle);
+      if (msg.projectMemory) {
+        if (msg.command.type === "start_session") msg.command.spec.projectMemory = msg.projectMemory;
+        else sessions.setProjectMemory(msg.command.sessionId, msg.projectMemory);
+      }
       if (msg.command.type === "start_session") {
         try {
           provisionClaudeHooks(

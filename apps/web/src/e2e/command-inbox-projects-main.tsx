@@ -2402,7 +2402,7 @@ declare global {
     __WOLLIPOG_TOASTS_E2E__?: { show(message: string, options?: Omit<ToastOptions, "action"> & { actionLabel?: string }): number };
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
       failNextProjectUpdate(message?: string): void;
-      updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults">>): void;
+      updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults" | "memorySharing">>): void;
       updateSession(
         id: string,
         patch: Partial<Pick<SessionView,
@@ -2445,6 +2445,7 @@ declare global {
       deferNextCancelTurn(): void;
       settleDeferredCancelTurn(): void;
       setRunnerProtocolVersion(version: number): void;
+      setProjectMemoryClaudeVersion(version: string): void;
       setRunnerStatus(status: RunnerView["status"]): void;
       /** The editors the fixture machine advertises; none by default, so Open is Open Folder. */
       setRunnerEditors(editors: NonNullable<RunnerView["editors"]>): void;
@@ -2683,6 +2684,13 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   settleDeferredCancelTurn() {
     if (!pendingCancelTurnSettlement) throw new Error("no cancel turn request is awaiting settlement");
     pendingCancelTurnSettlement();
+  },
+  setProjectMemoryClaudeVersion(version) {
+    runner.agents = [...runner.agents.filter((agent) => agent.id !== "memory-claude"), {
+      id: "memory-claude", name: "Claude", command: "claude", args: [], env: {},
+      driver: "claude-code", context: { kind: "native" }, version, available: true,
+    }];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
   },
   setRunnerProtocolVersion(version) {
     runner.protocolVersion = version;

@@ -863,3 +863,50 @@ for (const state of ["unused", "attempted", "imported"] as const) {
     } finally { manager?.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
   });
 }
+
+
+test("a running turn retains its memory policy; the queued turn resumes the same conversation with the changed policy", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-memory-runtime-"));
+  const launches: Array<{ directory?: string; resumeId?: string }> = [];
+  const prompts: Array<{ text: string; directory?: string }> = [];
+  let finishFirst!: () => void;
+  const gate = new Promise<void>((resolve) => { finishFirst = resolve; });
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  let manager: SessionManager | undefined;
+  try {
+    const made = makeManager(root, (_driver: unknown, launch: { projectMemoryDirectory?: string; resumeId?: string }) => {
+      const directory = launch.projectMemoryDirectory;
+      launches.push({ directory, resumeId: launch.resumeId });
+      return { pid: launches.length, initialize: async () => {}, newSession: async () => {}, loadSession: async () => {},
+        prompt: async (text: string) => {
+          prompts.push({ text, directory });
+          if (text === "first") { started(); await gate; }
+          return "end_turn" as const;
+        }, cancel: () => {}, dispose: () => {}, setConfig: async () => {}, resolvePermission: () => false,
+        agentSessionId: () => "memory-conversation" };
+    }, []);
+    manager = made.manager;
+    const spec = { ...launchSpec(root, "claude-code", "claude-work"), agentVersion: "2.1.284",
+      projectMemory: { projectId: "project", sharing: "separate" as const } };
+    assert.equal(await manager.start(spec), true);
+    made.store.patchMeta(spec.sessionId, { agentSessionId: "memory-conversation" });
+    assert.equal(manager.prompt(spec.sessionId, "first"), true); await ready;
+    manager.setProjectMemory(spec.sessionId, { projectId: "project", sharing: "shared" });
+    assert.equal(manager.prompt(spec.sessionId, "second"), true);
+    assert.equal(launches.length, 1); finishFirst();
+    await waitFor(() => prompts.length === 2, "new policy did not reach queued turn");
+    assert.notEqual(prompts[0]?.directory, prompts[1]?.directory);
+    assert.equal(launches[1]?.resumeId, "memory-conversation");
+    await waitFor(() => made.store.readMeta(spec.sessionId)?.status === "idle", "turn did not settle");
+    await manager.switchProviderAccount(spec.sessionId, "claude-personal");
+    assert.equal(launches.at(-1)?.directory, prompts[1]?.directory, "shared memory follows the Project across accounts");
+    manager.setProjectMemory(spec.sessionId, { projectId: "project", sharing: "separate" });
+    await waitFor(() => launches.length === 4, "separation did not relaunch");
+    assert.notEqual(launches.at(-1)?.directory, prompts[1]?.directory);
+    assert.notEqual(launches.at(-1)?.directory, prompts[0]?.directory, "each account retains a separate partition");
+    await manager.switchProviderAccount(spec.sessionId, "claude-work");
+    assert.equal(launches.at(-1)?.directory, prompts[0]?.directory);
+    assert.deepEqual(made.store.readMeta(spec.sessionId)?.projectMemory, { projectId: "project", sharing: "separate" });
+  } finally { finishFirst?.(); manager?.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
+});

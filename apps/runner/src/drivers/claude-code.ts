@@ -25,6 +25,7 @@ import { approvalScopeContext } from "../approval-scope.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
+import { withClaudeProjectMemory } from "../project-memory.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
 import {
   PLACELESS_CWD,
@@ -2444,12 +2445,13 @@ export class ClaudeCodeDriver implements Driver {
       this.hookCircuitOpenedAt = null;
     }
     if (prepared.healed) this.cb.onStderr("Claude manager hook settings were restored before launch.");
+    const memoryArgs = withClaudeProjectMemory(prepared.args, this.opts.projectMemoryDirectory, this.cwd);
     return this.opts.orchestrator
       ? claudeStructuredOrchestratorArgs(
-        prepared.args,
+        memoryArgs,
         this.opts.orchestrator.strictProjectIsolation,
       )
-      : prepared.args;
+      : memoryArgs;
   }
 
   cancel(): void {
