@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import type { SkillFile } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
 
