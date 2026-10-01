@@ -3401,6 +3401,12 @@ textarea {
   gap: 5px;
 }
 .session-bar > .session-header-statuses { overflow-x: clip; }
+/* Nor do the groups inside it wrap: a change group that wraps elsewhere would otherwise stack its
+   badges into a second line the moment the row is a fraction of a pixel short. */
+.session-bar > .session-header-statuses > :is(.session-status-indicators, .change-status-indicators) {
+  flex: none;
+  flex-wrap: nowrap;
+}
 .session-bar > .detail-actions { margin-left: auto; }
 /* The compact tier (§15.2): the project button and its separator give way to the head of More
    Actions, and the title keeps a readable width (SessionHeader sets the custom property to the

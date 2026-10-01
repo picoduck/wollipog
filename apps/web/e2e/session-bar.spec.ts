@@ -35,8 +35,20 @@ async function expectThreeStatuses(page: Page) {
   await expect(statuses.getByText("Uncommitted Changes", { exact: true })).toBeAttached();
 }
 
+/** Every status badge the row paints sits on one line: the row clips, it never wraps (§15.2). */
+async function expectStatusesOnOneLine(page: Page) {
+  const tops = await page.locator("header.session-bar .session-header-statuses").evaluate((row) =>
+    [...row.querySelectorAll<HTMLElement>(".status")]
+      .filter((badge) => badge.getClientRects().length > 0)
+      .map((badge) => Math.round(badge.getBoundingClientRect().top)));
+  expect(tops.length).toBeGreaterThanOrEqual(3);
+  expect(new Set(tops).size, `badge tops ${tops.join(", ")}`).toBe(1);
+}
+
 test("at 1440px the bar is one 48px row and every control in it is 32px tall", async ({ page }) => {
   await openBar(page, 1440);
+  // A title long enough to put the row under pressure, as in a real generated title.
+  await setTitle(page, LONG_TITLE);
   await expectThreeStatuses(page);
   const bar = page.locator("header.session-bar");
   const geometry = await bar.evaluate((element) => {
@@ -62,6 +74,7 @@ test("at 1440px the bar is one 48px row and every control in it is 32px tall", a
     // Centred in the row: the 47px above the bottom hairline leaves 7.5px of air either side.
     expect(control.top, control.name).toBe(7.5);
   }
+  await expectStatusesOnOneLine(page);
   await expect(bar.locator("h1#page-title")).toHaveCSS("font-size", "16px");
   await expect(bar.locator("h1#page-title")).toHaveCSS("font-weight", "600");
   // One divider before the Open picker and one after it, ahead of the panel toggles.
@@ -167,6 +180,7 @@ for (const width of [761, 834, 940, 1099]) {
       };
     });
     expect(geometry.bar.bottom - geometry.bar.top).toBe(48);
+    await expectStatusesOnOneLine(page);
     for (const child of geometry.children) {
       expect(child.top, child.name).toBeGreaterThanOrEqual(geometry.bar.top);
       expect(child.bottom, child.name).toBeLessThanOrEqual(geometry.bar.bottom);
