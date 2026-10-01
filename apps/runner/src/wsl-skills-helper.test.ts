@@ -296,7 +296,7 @@ ${acquireAndRelease}
     assert.equal(existsSync(join(root, "mutable-home.lock", releaseName)), false, "release mirror has not been published");
     const nativeProgram = join(home, "native-contender.ts");
     writeFileSync(nativeProgram, `
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, renameSync, writeFileSync } from "node:fs";
 import { ProviderHomeLeaseRegistry } from ${JSON.stringify(new URL("./provider-home-lease.ts", import.meta.url).href)};
 const wait = (path) => { const deadline = Date.now() + 10000; while (!existsSync(path)) {
     if (Date.now() > deadline) throw new Error("publication barrier timed out");
@@ -305,12 +305,16 @@ const wait = (path) => { const deadline = Date.now() + 10000; while (!existsSync
 const registry = new ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, {
     beforeTransitionPublishForTest: () => { writeFileSync(${JSON.stringify(nativeReady)}, "ready"); wait(${JSON.stringify(mirrored)}); },
   });
+const publishResult = (result) => {
+  writeFileSync(${JSON.stringify(nativeResult + ".tmp")}, result);
+  renameSync(${JSON.stringify(nativeResult + ".tmp")}, ${JSON.stringify(nativeResult)});
+};
 try {
   registry.acquireHome(${JSON.stringify(home)});
-  writeFileSync(${JSON.stringify(nativeResult)}, "won");
+  publishResult("won");
   wait(${JSON.stringify(finishWinner)});
   registry.releaseAll();
-} catch (error) { writeFileSync(${JSON.stringify(nativeResult)}, "lost:" + error.message); }
+} catch (error) { publishResult("lost:" + error.message); }
   `);
     if (contenders !== "helper") launch(process.execPath, ["--import", "tsx", nativeProgram]);
     if (contenders !== "native") launch("python3", ["-c", leaseProgram(`
@@ -325,13 +329,16 @@ def interleaved(root, lock, include_snapshot=False, include_details=False):
             while not os.path.exists(${JSON.stringify(mirrored)}): time.sleep(0.01)
     return original_read(root, lock, include_snapshot, include_details)
 read_owned_lease_chain = interleaved
+def publish_result(result):
+    with open(${JSON.stringify(helperResult + ".tmp")}, "w") as stream: stream.write(result)
+    os.replace(${JSON.stringify(helperResult + ".tmp")}, ${JSON.stringify(helperResult)})
 home_fd, _ = open_root(os.environ["HOME"])
 try:
     lease = acquire_lease(home_fd, "${owner}")
 except Exception as error:
-    with open(${JSON.stringify(helperResult)}, "w") as stream: stream.write("lost:" + str(error))
+    publish_result("lost:" + str(error))
 else:
-    with open(${JSON.stringify(helperResult)}, "w") as stream: stream.write("won")
+    publish_result("won")
     while not os.path.exists(${JSON.stringify(finishWinner)}): time.sleep(0.01)
     release_lease(lease)
 finally: os.close(home_fd)
@@ -340,11 +347,13 @@ finally: os.close(home_fd)
     const resultPaths = contenders === "both" ? [nativeResult, helperResult] : [contenders === "native" ? nativeResult : helperResult];
     await waitFor(...readyPaths);
     writeFileSync(finishMirror, "go");
+    // Each contender renames a complete result into place. File creation alone
+    // can expose an empty result before a Python buffered writer has closed it.
     await waitFor(...resultPaths);
     const outcomes = resultPaths.map((path) => readFileSync(path, "utf8"));
     assert.equal(outcomes.filter((result) => result === "won").length, 1, outcomes.join("\n"));
     assert.equal(outcomes.filter((result) => result.startsWith("lost:")).length, contenders === "both" ? 1 : 0, outcomes.join("\n"));
-    if (contenders === "both") assert.match(outcomes.find((result) => result.startsWith("lost:"))!, /lease changed during recovery/);
+    if (contenders === "both") assert.match(outcomes.find((result) => result.startsWith("lost:"))!, /lease changed during (recovery|publication)/);
     assert.deepEqual(readFileSync(join(root, "mutable-home.lock", releaseName)), readFileSync(join(root, releaseName)));
     writeFileSync(finishWinner, "done");
     const statuses = await Promise.all(exits);
