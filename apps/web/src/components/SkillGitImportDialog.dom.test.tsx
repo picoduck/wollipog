@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import type { SkillGitPreview, SkillGitSource } from "../skills.js";
 import { SkillGitImportDialog, type SkillGitUpdateCheck } from "./SkillGitImportDialog.js";
@@ -165,7 +166,7 @@ test("Change Source during a preview, then Find Skills, waits for the first to s
   await fake.answer(1, "current", ["code-review", "lint-rules"]);
   assert.equal(fake.refused, 0);
   assert.equal(document.querySelectorAll(".choice-row").length, 2);
-  assert.equal(document.querySelector('[role="alert"]'), null, "no failure is shown");
+  assertNoDomNode(document.querySelector('[role="alert"]'), "no failure is shown");
   await unmount();
 });
 

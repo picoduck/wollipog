@@ -40,6 +40,9 @@ type Fields = Record<SkillGitField, string>;
  * waits for it to settle. Module-wide because closing and reopening the dialog does not stop it.
  */
 let runningDiscovery: Promise<unknown> | null = null;
+/** The server abandons a discovery after 90s; a request still unsettled well past that is a lost
+ * connection, and waiting on it would leave every later dialog finding forever. */
+const DISCOVERY_WAIT_MS = 100_000;
 
 /**
  * Import from Git (#1983), two steps in one `.modal.lg` and a full-height sheet on phones.
@@ -186,7 +189,14 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
     const current = () => request === generation.current && !closed.current;
     try {
       while (runningDiscovery) {
-        await runningDiscovery.catch(() => undefined);
+        const waited = runningDiscovery;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          waited.catch(() => undefined),
+          new Promise((resolve) => { timer = setTimeout(resolve, DISCOVERY_WAIT_MS); }),
+        ]);
+        clearTimeout(timer);
+        if (runningDiscovery === waited) runningDiscovery = null;
         if (!current()) return;
       }
       const reading = api.previewGitSkills({ url: source.url, ref: source.ref, subdirectory: source.folder });
