@@ -1928,6 +1928,160 @@ test("idle Orchestrators durably coalesce nested request and child-ready events 
   }
 });
 
+for (const resolutionPath of ["child_thread", "live", "indexed_history", "legacy_history"] as const) {
+  test(`child-thread question resolution clears the exact descendant and wakes an exited idle parent via ${resolutionPath}`, async () => {
+    const { db, svc, hub } = makeHarness();
+    try {
+      const meta = runnerMeta();
+      meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"],
+      };
+      db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+      const root = svc.createSession({
+        runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+        config: { permissionMode: "orchestrator" }, parentControl: "questions_and_approvals",
+      }).data!;
+      db.updateSessionStatus(root.id, "running", Date.now());
+      const createChild = (parentSessionId: string) => {
+        const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+        let child = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+        if (child.status === 428) {
+          const approval = db.getSession(parentSessionId)!.pendingApproval!;
+          assert.ok(svc.approve(parentSessionId, approval.requestId, "allow").ok);
+          child = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+        }
+        assert.ok(child.ok && child.data, child.error);
+        db.updateSessionStatus(child.data.id, "running", Date.now());
+        return child.data;
+      };
+      const nested = createChild(root.id);
+      const child = createChild(nested.id);
+      svc.onSessionEvent(child.id, {
+        kind: "question_request", requestId: "child-question", occurrenceId: "request_child_question",
+        questions: [{ id: "q", header: "Choice", question: "Choose", secret: true,
+          options: [{ label: "Continue" }] }],
+      });
+      db.updateSessionStatus(root.id, "idle", Date.now() - 60_000);
+      assert.equal(hub.activeTurnIdForSession(root.id), undefined);
+      assert.equal(db.campaignProjection(root.id)?.pendingRequests?.human, 1);
+      assert.equal(svc.retryDuePrompts(Date.now() + 2_000), 0);
+      assert.equal(svc.answerQuestion(child.id, "child-question", { q: "Continue" },
+        undefined, "submit", undefined, "request_stale_question").status, 409);
+      svc.onSessionEvent(child.id, {
+        kind: "question_resolved", requestId: "child-question", occurrenceId: "request_stale_question",
+        answered: true, resolutionReason: "submitted",
+      });
+      assert.equal(db.getSession(child.id)?.pendingApproval?.occurrenceId, "request_child_question");
+      const resolved: SessionEventPayload = {
+        kind: "question_resolved", requestId: "child-question", occurrenceId: "request_child_question",
+        answered: true, resolutionReason: "submitted",
+      };
+      if (resolutionPath === "child_thread") {
+        assert.ok(svc.answerQuestion(child.id, "child-question", { q: "Continue" }).ok);
+      } else if (resolutionPath === "live") {
+        svc.onSessionEvent(child.id, resolved);
+      } else {
+        db.registerRunner(meta, Date.now(), resolutionPath === "legacy_history" ? 53 : PROTOCOL_VERSION);
+        const clearedBefore = db.campaignContinuationEvents(root.id).filter((event) => event.kind === "human_blockers_cleared").length;
+        let stale = true;
+        hub.requestHandler = (message) => {
+          const events = [{ seq: stale ? 1 : 2, ts: Date.now(),
+            payload: stale ? { ...resolved, occurrenceId: "request_stale_question" } : resolved }];
+          if (message.type === "session_history_page") return {
+            type: "session_history_page_result", requestId: message.requestId, sessionId: child.id,
+            ok: true, events,
+            page: { logEpoch: 0, throughSeq: stale ? 1 : 2, nextAfterSeq: stale ? 1 : 2, hasMore: false },
+          };
+          if (message.type === "session_history") return {
+            type: "session_history_result", requestId: message.requestId, sessionId: child.id, ok: true, events,
+          };
+          throw new Error("unexpected history request");
+        };
+        await svc.hydrateHistory(child.id, { force: true });
+        assert.equal(db.getSession(child.id)?.pendingApproval?.occurrenceId, "request_child_question",
+          "historical answers for an old occurrence cannot settle the current question");
+        assert.equal(db.campaignContinuationEvents(root.id).filter((event) => event.kind === "human_blockers_cleared").length, clearedBefore);
+        stale = false;
+        await svc.hydrateHistory(child.id, { force: true });
+        db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+      }
+      assert.equal(db.getSession(child.id)?.pendingApproval, null,
+        "an answer in the child's thread must retire its campaign blocker");
+      assert.equal(db.campaignProjection(root.id)?.pendingRequests?.human, 0);
+      assert.deepEqual(svc.descendantRequests(root.id, () => true, "human").data?.requests, []);
+      const resumedHub = new FakeHub();
+      const resumed = new SessionsService(db, resumedHub as unknown as Hub, NOOP_LOG);
+      assert.equal(resumed.retryDuePrompts(Date.now() + 4_000), 1,
+        "the durable answer event resumes a parent with no active turn, even after service recreation");
+      const delivery = resumedHub.sentOfType("durable_session_command").at(-1)!;
+      assert.equal(delivery.command.sessionId, root.id);
+      assert.match(delivery.command.type === "prompt_session" ? delivery.command.text : "", /human_blockers_cleared/u);
+      assert.ok(resumed.onDurablePromptReceipt(RUNNER_ID, {
+        type: "durable_session_command_result", requestId: delivery.requestId,
+        commandId: delivery.commandId, sessionId: root.id, state: "accepted", revision: 1, duplicate: false,
+      }));
+      assert.equal(resumed.retryDuePrompts(Date.now() + 5_000), 0);
+    } finally {
+      db.close();
+    }
+  });
+}
+
+test("answering one child-thread question names remaining blockers and preserves a reused occurrence", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const root = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions_and_approvals",
+    }).data!;
+    db.updateSessionStatus(root.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: root.id });
+    if (created.status === 428) {
+      const approval = db.getSession(root.id)!.pendingApproval!;
+      assert.ok(svc.approve(root.id, approval.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: root.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    const ask = (requestId: string, occurrenceId: string) => svc.onSessionEvent(child.id, {
+      kind: "question_request", requestId, occurrenceId, ownerToolUseId: "nested-tool",
+      questions: [{ id: "q", header: "Choice", question: `Choose for ${requestId}`, secret: true,
+        options: [{ label: "Continue" }] }],
+    });
+    ask("first", "request_first");
+    ask("remaining", "request_remaining");
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    assert.ok(svc.answerQuestion(child.id, "first", { q: "Continue" }).ok);
+    assert.equal(db.campaignProjection(root.id)?.status, "waiting_human");
+    assert.deepEqual(svc.descendantRequests(root.id, () => true, "human").data?.requests
+      .map(({ occurrenceId, request }) => [occurrenceId, request.title]),
+    [["request_remaining", "Choose for remaining"]]);
+    assert.equal(svc.retryDuePrompts(Date.now() + 2_000), 0);
+    hub.deliveryHandler = (_runnerId, message) => {
+      if (message.type === "answer_question" && message.requestId === "remaining") {
+        ask("remaining", "request_replacement");
+      }
+      return true;
+    };
+    assert.ok(svc.answerQuestion(child.id, "remaining", { q: "Continue" }).ok);
+    assert.equal(db.getSession(child.id)?.pendingApproval?.occurrenceId, "request_replacement",
+      "answer delivery cannot clear a newer occurrence that reused the provider request id");
+    assert.equal(db.campaignProjection(root.id)?.pendingRequests?.human, 1);
+    assert.equal(svc.retryDuePrompts(Date.now() + 4_000), 0);
+  } finally {
+    db.close();
+  }
+});
+
 test("a staged campaign continuation rechecks human blockers before runner delivery", () => {
   const { db, svc, hub } = makeHarness();
   try {

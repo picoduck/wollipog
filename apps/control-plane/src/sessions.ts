@@ -8854,8 +8854,8 @@ export class SessionsService {
     const pending = pendingRequests(session.pendingApproval).find((request) => request.requestId === requestId) ?? session.pendingApproval;
     if (!pending) return fail("no pending question for this session", 409);
     if (pending.requestId !== requestId) return fail("question request id does not match the pending one", 409);
-    if (pending.async && (!occurrenceId || occurrenceId !== pending.occurrenceId)) {
-      return fail("async question occurrence is stale or missing", 409);
+    if ((pending.async || occurrenceId !== undefined) && (!occurrenceId || occurrenceId !== pending.occurrenceId)) {
+      return fail("question occurrence is stale or missing", 409);
     }
     if (pending.expiresAt != null && pending.expiresAt <= Date.now()) return fail("question request has expired", 409);
     if (pending.kind !== "question") return fail("the pending approval is not a question", 409);
@@ -8955,8 +8955,11 @@ export class SessionsService {
     const now = Date.now();
     // The runner records question_resolved into the box log and streams it back (same
     // no-duplicate rule as permission_resolved); update local state for immediate feedback.
-    const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, requestId);
-    this.db.setPendingApproval(sessionId, remaining);
+    this.clearResolvedQuestion(sessionId, {
+      kind: "question_resolved", requestId, occurrenceId: pending.occurrenceId,
+      answered: action === "submit",
+    });
+    const remaining = this.db.getSession(sessionId)?.pendingApproval ?? null;
     this.db.updateSessionStatus(
       sessionId,
       pending.async ? session.status : hasBlockingPendingRequest(remaining) ? "input_required" : pending.recoveryReason === "provider_restart" && action === "dismiss"
@@ -12323,13 +12326,14 @@ export class SessionsService {
         requests?.delete(payload.requestId);
         if (!requests?.size) this.automaticQuestions.delete(sessionId);
       }
-      const current = this.db.getSession(sessionId)?.pendingApproval;
-      const settledRequest = pendingRequests(current).find((request) => request.requestId === payload.requestId &&
-        (payload.kind !== "question_resolved" || !payload.occurrenceId ||
-          request.occurrenceId === payload.occurrenceId));
-      if ((!settledRequest && !(payload.kind === "question_resolved" && payload.occurrenceId)) ||
-          (settledRequest && !isPolicyApproval(settledRequest))) {
-        this.db.setPendingApproval(sessionId, removePendingRequest(current, payload.requestId));
+      if (payload.kind === "question_resolved") {
+        this.clearResolvedQuestion(sessionId, payload);
+      } else {
+        const current = this.db.getSession(sessionId)?.pendingApproval;
+        const settledRequest = pendingRequests(current).find((request) => request.requestId === payload.requestId);
+        if (!settledRequest || !isPolicyApproval(settledRequest)) {
+          this.db.setPendingApproval(sessionId, removePendingRequest(current, payload.requestId));
+        }
       }
       this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -12771,6 +12775,32 @@ export class SessionsService {
     }
   }
 
+  /** History may deliver the answer after its live frame was lost or deferred behind a gap.
+   * Retire only the matching question, preserving newer occurrences and policy barriers. */
+  private clearResolvedQuestion(
+    sessionId: string,
+    payload: Extract<SessionEventPayload, { kind: "question_resolved" }>,
+  ): boolean {
+    const current = this.db.getSession(sessionId)?.pendingApproval;
+    const question = pendingRequests(current).find((request) =>
+      request.kind === "question" && request.requestId === payload.requestId &&
+      (!payload.occurrenceId || request.occurrenceId === payload.occurrenceId));
+    if (!question) return false;
+    this.db.setPendingApproval(sessionId, removePendingRequest(current, question.requestId));
+    return true;
+  }
+
+  private settleHydratedQuestionResolution(sessionId: string, payload: SessionEventPayload): void {
+    if (payload.kind !== "question_resolved") return;
+    const campaignBefore = this.campaignAttentionController(this.db.getSession(sessionId));
+    if (!this.clearResolvedQuestion(sessionId, payload)) return;
+    const now = Date.now();
+    this.gateOnPolicy(sessionId, now);
+    this.reconcilePolicyHookTimeouts(now, sessionId);
+    this.hub.sessionChangedById(sessionId);
+    this.publishCampaignAttentionTransition(campaignBefore);
+  }
+
   /** v54 history is a frozen, count/byte-bounded chain. Each page commits atomically before its
    * targeted broadcasts; a concurrent tail advance is recovered by a later frozen pass. */
   private async fetchIndexedHistoryChain(sessionId: string, force = false): Promise<void> {
@@ -12888,6 +12918,7 @@ export class SessionsService {
           this.hub.sessionEvent(event, { suppressReminderWake: answered });
           trailingAsk = this.updateTrailingAsk(trailingAsk, applied.events[i]!.payload);
           const payload = applied.events[i]!.payload;
+          this.settleHydratedQuestionResolution(sessionId, payload);
           if (this.reconcileSteeringFromUserMessage(sessionId, payload, event.ts)) projectedSteering = true;
           if (payload.kind === "background_continuation_delivered") projectedBackgroundDelivery = true;
           if (payload.kind === "policy_transport") {
@@ -12957,6 +12988,7 @@ export class SessionsService {
         this.hub.sessionEvent(ev, { suppressReminderWake: attribution !== null });
         if (attribution) this.hub.sessionEvent(attribution);
         trailingAsk = this.updateTrailingAsk(trailingAsk, ev.payload);
+        this.settleHydratedQuestionResolution(sessionId, ev.payload);
         if (this.reconcileSteeringFromUserMessage(sessionId, ev.payload, ev.ts)) projectedSteering = true;
         if (ev.payload.kind === "background_continuation_delivered") {
           this.hub.sessionChangedById(sessionId);
