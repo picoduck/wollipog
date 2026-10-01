@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
   pendingRequests,
   type ProviderAccountDefinition,
@@ -78,6 +78,10 @@ export function SwitchAccountDialog({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
+  const dismissRef = useRef<HTMLButtonElement | null>(null);
+  // Whether focus was last inside this dialog. A commit that unmounts the focused control (rows
+  // replaced by a reload) drops focus to <body> without a focusin, so this stays true across it.
+  const focusInsideRef = useRef(false);
   const rowsId = useId();
   const reasonId = useId();
 
@@ -88,6 +92,11 @@ export function SwitchAccountDialog({
 
   useEffect(() => {
     let cancelled = false;
+    // A new current account is a new list: nothing chosen from the old one can be submitted, and
+    // the old rows are not shown as if they were current.
+    setOptions(null);
+    setSelectedId(null);
+    setLoadError(null);
     void api.sessionProviderAccounts(session.id).then((response) => {
       if (cancelled) return;
       setLoadError(null);
@@ -102,12 +111,31 @@ export function SwitchAccountDialog({
     return () => { cancelled = true; };
   }, [api, session.id, currentId]);
 
+  useEffect(() => {
+    const document = dismissRef.current?.ownerDocument;
+    if (!document) return;
+    const track = (event: FocusEvent) => {
+      const dialog = dismissRef.current?.closest('[role="dialog"]');
+      focusInsideRef.current = Boolean(dialog && event.target instanceof Node && dialog.contains(event.target));
+    };
+    document.addEventListener("focusin", track);
+    return () => document.removeEventListener("focusin", track);
+  }, []);
+  // After every commit: focus that was in the dialog and is now lost goes to Cancel (or Done), which
+  // every state renders. Focus that is still somewhere is never moved.
+  useLayoutEffect(() => {
+    const dismiss = dismissRef.current;
+    const active = dismiss?.ownerDocument.activeElement;
+    if (!dismiss || !focusInsideRef.current || dismiss.disabled) return;
+    if (!active || active === dismiss.ownerDocument.body || !active.isConnected) dismiss.focus();
+  });
+
   const close = () => {
     if (!submittingRef.current) onClose();
   };
 
   const submit = async () => {
-    if (submittingRef.current || !selectedId) return;
+    if (submittingRef.current || !selectedId || options === null || loadError !== null) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError(null);
@@ -136,7 +164,8 @@ export function SwitchAccountDialog({
   ];
   const current: CurrentAccountRow | null = currentId ? {
     id: currentId,
-    label: currentOption?.label ?? machineAccount?.label ?? session.providerAccountLabel ?? "Current Account",
+    // The session keeps the label it was bound with, even if the Machine's account was renamed.
+    label: session.providerAccountLabel ?? machineAccount?.label ?? currentOption?.label ?? "Current Account",
     ...(machineAccounts && !machineAccount ? { removedFrom: machine } : {}),
     ...(currentOption ? { buckets: currentOption.buckets, stale: currentOption.freshness === "stale", selectable: true } : {}),
   } : null;
@@ -154,30 +183,35 @@ export function SwitchAccountDialog({
     .some((request) => request.kind === "authentication");
 
   const unavailable = options !== null && !noOthers && !canChoose;
+  const ready = options !== null && loadError === null;
   return (
     <Modal
       title="Switch Account"
       description={`Continue this conversation with another ${providerName} account on ${machine}.`}
       onClose={close}
       {...(returnFocusRef ? { returnFocusRef } : {})}
-      footer={noOthers ? (
-        <button className="btn" type="button" onClick={close}>Done</button>
-      ) : (
+      // One structure for every state, so the dismiss button is the same element when a load turns
+      // Cancel into Done and keeps the focus a person put on it.
+      footer={(
         <>
           {unavailable && (
             <p className="switch-account-reason" id={reasonId}>None of these accounts can take over right now.</p>
           )}
-          <button className="btn" type="button" onClick={close} disabled={submitting}>Cancel</button>
-          <BusyButton
-            className="btn primary"
-            busy={submitting}
-            progress="Switching the account…"
-            disabled={!selectedId}
-            aria-describedby={unavailable ? reasonId : undefined}
-            onClick={() => void submit()}
-          >
-            Switch Account
-          </BusyButton>
+          <button ref={dismissRef} className="btn" type="button" onClick={close} disabled={submitting}>
+            {noOthers ? "Done" : "Cancel"}
+          </button>
+          {!noOthers && (
+            <BusyButton
+              className="btn primary"
+              busy={submitting}
+              progress="Switching the account…"
+              disabled={!ready || !selectedId}
+              aria-describedby={unavailable ? reasonId : undefined}
+              onClick={() => void submit()}
+            >
+              Switch Account
+            </BusyButton>
+          )}
         </>
       )}
     >

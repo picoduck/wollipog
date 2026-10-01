@@ -62,6 +62,7 @@ function machineAccount(id: string, label: string, overrides: Partial<ProviderAc
 }
 
 const OTHERS = [option("work", "work.me@example.com"), option("spare", "spare.me@example.org")];
+const ALIASED = { ...SESSION, providerAccountLabel: "Current" };
 const MACHINE = [
   machineAccount("current", "current.me@example.com"),
   machineAccount("work", "work.me@example.com"),
@@ -75,6 +76,7 @@ interface Rendered {
   switched: boolean[];
   connections: () => number;
   finish: (outcome: { ok: boolean; message?: string }) => void;
+  rerender: (session: typeof SESSION) => Promise<void>;
   unmount: () => Promise<void>;
 }
 
@@ -83,12 +85,16 @@ async function renderDialog({
   accounts = OTHERS,
   machineAccounts = MACHINE as readonly ProviderAccountDefinition[] | undefined,
   deferSwitch = false,
+  load,
 }: {
   session?: typeof SESSION;
   accounts?: SessionProviderAccountOption[];
   machineAccounts?: readonly ProviderAccountDefinition[];
   deferSwitch?: boolean;
+  /** Answers the account-list request; the call number counts from 1. Defaults to `accounts`. */
+  load?: (call: number) => Promise<SessionProviderAccountOption[]>;
 } = {}): Promise<Rendered> {
+  let loads = 0;
   const switches: string[] = [];
   const switched: boolean[] = [];
   let closes = 0;
@@ -96,7 +102,7 @@ async function renderDialog({
   let settle: ((outcome: { ok: boolean; message?: string }) => void) | null = null;
   const client = {
     ...api,
-    sessionProviderAccounts: async () => ({ accounts }),
+    sessionProviderAccounts: async () => ({ accounts: load ? await load(++loads) : accounts }),
     switchSessionProviderAccount: (_id: string, providerAccountId: string) => {
       switches.push(providerAccountId);
       if (!deferSwitch) return Promise.resolve({ accepted: true as const, scheduled: false });
@@ -110,20 +116,19 @@ async function renderDialog({
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   const root = createRoot(mountPoint);
-  await act(async () => {
-    root.render(
-      <ApiProvider client={client}>
-        <SwitchAccountDialog
-          session={session}
-          machineName="build-box"
-          {...(machineAccounts ? { machineAccounts } : {})}
-          onClose={() => { closes += 1; }}
-          onSwitched={(scheduled) => switched.push(scheduled)}
-          onOpenConnections={() => { connections += 1; }}
-        />
-      </ApiProvider>,
-    );
-  });
+  const render = (current: typeof SESSION) => root.render(
+    <ApiProvider client={client}>
+      <SwitchAccountDialog
+        session={current}
+        machineName="build-box"
+        {...(machineAccounts ? { machineAccounts } : {})}
+        onClose={() => { closes += 1; }}
+        onSwitched={(scheduled) => switched.push(scheduled)}
+        onOpenConnections={() => { connections += 1; }}
+      />
+    </ApiProvider>,
+  );
+  await act(async () => { render(session); });
   await act(async () => { await tick(); await tick(); });
   return {
     body: domWindow.document.body as unknown as HTMLElement,
@@ -134,6 +139,10 @@ async function renderDialog({
     finish: (outcome) => {
       assert.ok(settle, "a switch is in flight");
       settle(outcome);
+    },
+    rerender: async (next) => {
+      await act(async () => { render(next); });
+      await act(async () => { await tick(); await tick(); });
     },
     unmount: async () => {
       await act(async () => root.unmount());
@@ -232,6 +241,7 @@ test("without the machine's account list, the current account is never called re
 
 test("each listed account shows one meter per usage window, warning under 25%, and Last Known when stale", async () => {
   const view = await renderDialog({
+    session: ALIASED,
     accounts: [
       option("work", "Work"),
       option("spare", "Spare", {
@@ -326,6 +336,7 @@ test("with no other account on the machine, the dialog offers Open Connections a
 
 test("accounts the endpoint did not offer are disabled rows with their reason, and offered ones never are", async () => {
   const view = await renderDialog({
+    session: ALIASED,
     accounts: [option("work", "Work")],
     machineAccounts: [
       machineAccount("current", "Current"),
@@ -359,6 +370,7 @@ test("accounts the endpoint did not offer are disabled rows with their reason, a
 
 test("with only unavailable accounts the primary stays disabled and the footer says why", async () => {
   const view = await renderDialog({
+    session: ALIASED,
     accounts: [],
     machineAccounts: [machineAccount("current", "Current"), machineAccount("drained", "Drained")],
   });
@@ -378,6 +390,7 @@ test("with only unavailable accounts the primary stays disabled and the footer s
 
 test("a failed switch being retried offers the current account itself, once and choosable", async () => {
   const view = await renderDialog({
+    session: ALIASED,
     accounts: [option("current", "Current")],
     machineAccounts: [machineAccount("current", "Current")],
   });
@@ -415,6 +428,80 @@ test("the primary keeps its label while switching, and a failure is a danger not
     assert.equal(notice?.textContent?.includes("that account is unavailable"), true);
     assert.equal(primary.getAttribute("aria-busy"), null);
     assert.equal(view.closed(), 0);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the current row keeps the label the session was bound with, even after the machine renamed it", async () => {
+  const view = await renderDialog({
+    session: { ...SESSION, providerAccountLabel: "Work (Bound)" },
+    machineAccounts: [machineAccount("current", "Work (Renamed)"), ...MACHINE.slice(1)],
+  });
+  try {
+    assert.equal(rowTitle(rows(view.body)[0]!), "Work (Bound)");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a new current account reloads the list, and a failed reload leaves nothing to submit", async () => {
+  const view = await renderDialog({
+    load: async (call) => {
+      if (call === 1) return OTHERS;
+      throw new Error("the runner is offline");
+    },
+  });
+  try {
+    assert.equal(radio(rows(view.body)[1]!).checked, true, "work is chosen from the first list");
+    await view.rerender({ ...SESSION, providerAccountId: "work", providerAccountLabel: "work.me@example.com" });
+    assert.equal(rows(view.body).length, 0, "the old rows are gone");
+    assert.ok(view.body.querySelector('.notice.t-danger[role="alert"]')?.textContent?.includes("the runner is offline"));
+    const primary = button(view.body, "Switch Account");
+    assert.ok(primary);
+    assert.equal(primary.disabled, true, "nothing chosen from the old list can be switched to");
+    await act(async () => { primary.click(); await tick(); });
+    assert.deepEqual(view.switches, []);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Cancel keeps its focus when a slow load turns it into Done", async () => {
+  let answer: (accounts: SessionProviderAccountOption[]) => void = () => undefined;
+  const view = await renderDialog({
+    machineAccounts: [MACHINE[0]!],
+    load: () => new Promise((resolve) => { answer = resolve; }),
+  });
+  try {
+    const cancel = button(view.body, "Cancel");
+    assert.ok(cancel);
+    await act(async () => { cancel.focus(); });
+    assert.ok(domWindow.document.activeElement === (cancel as unknown), "Cancel has focus while loading");
+    await act(async () => { answer([]); await tick(); await tick(); });
+    const done = button(view.body, "Done");
+    assert.ok(done === cancel, "the dismiss button is the same element");
+    assert.ok(domWindow.document.activeElement === (done as unknown), "focus stays on it");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("focus on a row that a reload removes moves to Cancel instead of leaving the dialog", async () => {
+  let answer: (accounts: SessionProviderAccountOption[]) => void = () => undefined;
+  const view = await renderDialog({
+    load: (call) => call === 1 ? Promise.resolve(OTHERS) : new Promise((resolve) => { answer = resolve; }),
+  });
+  try {
+    const chosen = radio(rows(view.body)[1]!);
+    await act(async () => { chosen.focus(); });
+    assert.ok(domWindow.document.activeElement === (chosen as unknown));
+    await view.rerender({ ...SESSION, providerAccountId: "work", providerAccountLabel: "work.me@example.com" });
+    const cancel = button(view.body, "Cancel");
+    assert.ok(cancel);
+    assert.ok(domWindow.document.activeElement === (cancel as unknown), "lost focus is rescued to Cancel");
+    await act(async () => { answer(OTHERS); await tick(); await tick(); });
+    assert.ok(domWindow.document.activeElement === (cancel as unknown), "focus that is somewhere is not moved");
   } finally {
     await view.unmount();
   }
