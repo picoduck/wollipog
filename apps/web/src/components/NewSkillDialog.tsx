@@ -1,5 +1,5 @@
 import { useCallback, useId, useRef, useState, type DragEvent } from "react";
-import { SKILL_MAX_FILES, isSkillScriptFile, skillMarkdownFromFields, type SkillFile } from "@wollipog/protocol";
+import { SKILL_MAX_FILES, isSkillScriptFile, readSkillFrontmatter, skillMarkdownFromFields, type SkillFile } from "@wollipog/protocol";
 import {
   skillFilesFromUploads,
   skillMarkdownFrontmatterName,
@@ -62,7 +62,8 @@ async function uploadsFromDrop(transfer: DataTransfer): Promise<UploadedSkillFil
  * New Skill (docs/design-system.md §7, §8): a name, a description, and instructions either written
  * here or uploaded as a folder. Written instructions are the SKILL.md body; its frontmatter is
  * built from the name and description when the skill is created, so there is one place to edit
- * each. An uploaded folder is used as it is, with its own SKILL.md.
+ * each. An uploaded folder is used as it is, with its own SKILL.md; its frontmatter fills an empty
+ * Name and Description, so the fields show what the skill is saved with (#2290).
  */
 export function NewSkillDialog({ onClose, onCreate, busy, error }: {
   onClose: () => void;
@@ -78,7 +79,15 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
   const [name, setName] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
-  const [description, setDescription] = useState("");
+  const [description, setDescriptionState] = useState("");
+  // The field's latest value, for uploads read asynchronously while the person types, and the
+  // value a folder last filled it with: a later folder replaces that, never a typed description.
+  const descriptionRef = useRef("");
+  const filledDescription = useRef<string | null>(null);
+  const setDescription = (next: string) => {
+    descriptionRef.current = next;
+    setDescriptionState(next);
+  };
   const [source, setSource] = useState<InstructionsSource>("write");
   const [body, setBody] = useState("");
   const [folderFiles, setFolderFiles] = useState<SkillFile[]>([]);
@@ -96,6 +105,10 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
   }, [growBody]);
 
   const trimmedName = name.trim();
+  // An empty Description saves the uploaded SKILL.md's own description, so the field says so.
+  const uploadedSkillMd = source === "upload" ? folderFiles.find((file) => file.path === "SKILL.md") : undefined;
+  const keepsFolderDescription = !description.trim() && uploadedSkillMd?.encoding === "utf8" &&
+    Boolean(readSkillFrontmatter(uploadedSkillMd.content).description);
 
   const applyUploads = (uploads: UploadedSkillFile[] | null) => {
     if (!uploads) {
@@ -114,6 +127,13 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
     if (named && !nameRef.current?.value.trim()) {
       setName(named);
       setNameError((error) => error && skillNameError(named));
+    }
+    // Its description too, read as the library will store it, unless the person typed one.
+    const current = descriptionRef.current;
+    if (!current.trim() || current === filledDescription.current) {
+      const folderDescription = skillMd?.encoding === "utf8" ? readSkillFrontmatter(skillMd.content).description ?? "" : "";
+      filledDescription.current = folderDescription || null;
+      setDescription(folderDescription);
     }
   };
 
@@ -204,7 +224,8 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
             : <p className="field-helper" id={nameHelperId}>Lowercase letters, digits, dots, dashes or underscores; it also names the skill's folder.</p>}
         </div>
 
-        <SkillDescriptionField value={description} onChange={setDescription} />
+        <SkillDescriptionField value={description} onChange={setDescription}
+          helper={keepsFolderDescription ? "Left empty, the skill keeps the description in the folder's SKILL.md." : undefined} />
 
         <div className="field">
           <div className="field-head">

@@ -1623,6 +1623,63 @@ export function validSkillName(name: string): boolean {
   return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name);
 }
 
+// Deliberately non-YAML, mirroring the runner's parseClaudeCommandMetadata stance: a bounded
+// line-based `key: value` reader for exactly the two keys the library needs. Anything a YAML
+// parser would accept beyond that is treated as opaque body text.
+const SKILL_FRONTMATTER_MAX_BYTES = 16 * 1024;
+const SKILL_FRONTMATTER_MAX_LINES = 128;
+
+function decodedDoubleQuoted(value: string): string {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (typeof parsed === "string") return parsed;
+  } catch {
+    // Not JSON: fall through to the quotes-stripped text.
+  }
+  return value.slice(1, -1);
+}
+
+/** The unbounded `name:` / `description:` values of a closed SKILL.md frontmatter block. */
+export function readRawSkillFrontmatter(content: string): { name?: string; description?: string } {
+  // A cut through a multi-byte character decodes to U+FFFD; the byte order mark is kept for the
+  // replace below, so exactly one leading mark is dropped.
+  const bounded = new TextDecoder("utf-8", { ignoreBOM: true })
+    .decode(new TextEncoder().encode(content).subarray(0, SKILL_FRONTMATTER_MAX_BYTES))
+    .replace(/^﻿/, "");
+  const lines = bounded.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return {};
+  const values: { name?: string; description?: string } = {};
+  for (let index = 1; index < lines.length && index <= SKILL_FRONTMATTER_MAX_LINES; index += 1) {
+    const line = lines[index]!;
+    if (line.trim() === "---" || line.trim() === "...") return values;
+    const match = /^(name|description)\s*:\s*(.*)$/.exec(line);
+    if (!match) continue;
+    let value = match[2]!.trim();
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+      // A double-quoted value is decoded as the JSON string it usually is (New Skill writes its
+      // description that way, escaping quotes and line breaks), as the runner's reader does. One
+      // that is not valid JSON keeps the old reading: its quotes stripped, its text as written.
+      value = decodedDoubleQuoted(value).trim();
+    } else if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+      value = value.slice(1, -1).trim();
+    }
+    if (value) values[match[1] as "name" | "description"] = value;
+  }
+  // An unterminated frontmatter block is ordinary body text, not partially trusted metadata.
+  return {};
+}
+
+/** Read `name:` / `description:` from a SKILL.md frontmatter block, bounded and best-effort, as the
+ * control plane stores them (New Skill shows the same description, #2290). A description over the
+ * Agent Skills limit is shortened at a word boundary with an ellipsis. */
+export function readSkillFrontmatter(content: string): { name?: string; description?: string } {
+  const raw = readRawSkillFrontmatter(content);
+  return {
+    ...(raw.name ? { name: raw.name.slice(0, SKILL_DESCRIPTION_MAX_CHARS) } : {}),
+    ...(raw.description ? { description: shortenAtWordBoundary(raw.description, SKILL_DESCRIPTION_MAX_CHARS) } : {}),
+  };
+}
+
 /** Plain scalars YAML would read as something other than a string (YAML 1.1 and 1.2 booleans and
  * nulls), which a valid skill name can spell. */
 const YAML_PLAIN_NON_STRINGS = new Set(["y", "n", "yes", "no", "on", "off", "true", "false", "null"]);

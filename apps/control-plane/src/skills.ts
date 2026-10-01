@@ -9,6 +9,8 @@ import {
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_FILES,
   SKILL_MAX_TOTAL_BYTES,
+  readRawSkillFrontmatter,
+  readSkillFrontmatter,
   runnerSupportsProtocol,
   shortenAtWordBoundary,
   validSkillFilePath,
@@ -25,64 +27,13 @@ import type { ControlPlaneDb, SkillAgentSelector, SkillAssignmentView } from "./
 
 /* ------------------------------ Frontmatter ------------------------------ */
 
-// Deliberately non-YAML, mirroring the runner's parseClaudeCommandMetadata stance: a bounded
-// line-based `key: value` reader for exactly the two keys the control plane needs. Anything a
-// YAML parser would accept beyond that is treated as opaque body text.
-const FRONTMATTER_MAX_BYTES = 16 * 1024;
-const FRONTMATTER_MAX_LINES = 128;
+// The reader lives in the protocol so New Skill fills Description with what is stored here (#2290).
+export { readSkillFrontmatter };
+
 // Earlier releases stored name and description cut hard at this many UTF-16 units; the startup
 // repair below recognises exactly that cut.
 const LEGACY_FRONTMATTER_VALUE_MAX_CHARS = 280;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
-
-function decodedDoubleQuoted(value: string): string {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (typeof parsed === "string") return parsed;
-  } catch {
-    // Not JSON: fall through to the quotes-stripped text.
-  }
-  return value.slice(1, -1);
-}
-
-/** The unbounded `name:` / `description:` values of a closed SKILL.md frontmatter block. */
-function readRawSkillFrontmatter(content: string): { name?: string; description?: string } {
-  const bounded = Buffer.from(content, "utf8")
-    .subarray(0, FRONTMATTER_MAX_BYTES)
-    .toString("utf8")
-    .replace(/^\uFEFF/, "");
-  const lines = bounded.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return {};
-  const values: { name?: string; description?: string } = {};
-  for (let index = 1; index < lines.length && index <= FRONTMATTER_MAX_LINES; index += 1) {
-    const line = lines[index]!;
-    if (line.trim() === "---" || line.trim() === "...") return values;
-    const match = /^(name|description)\s*:\s*(.*)$/.exec(line);
-    if (!match) continue;
-    let value = match[2]!.trim();
-    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-      // A double-quoted value is decoded as the JSON string it usually is (New Skill writes its
-      // description that way, escaping quotes and line breaks), as the runner's reader does. One
-      // that is not valid JSON keeps the old reading: its quotes stripped, its text as written.
-      value = decodedDoubleQuoted(value).trim();
-    } else if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
-      value = value.slice(1, -1).trim();
-    }
-    if (value) values[match[1] as "name" | "description"] = value;
-  }
-  // An unterminated frontmatter block is ordinary body text, not partially trusted metadata.
-  return {};
-}
-
-/** Read `name:` / `description:` from a SKILL.md frontmatter block, bounded and best-effort. A
- * description over the Agent Skills limit is shortened at a word boundary with an ellipsis. */
-export function readSkillFrontmatter(content: string): { name?: string; description?: string } {
-  const raw = readRawSkillFrontmatter(content);
-  return {
-    ...(raw.name ? { name: raw.name.slice(0, SKILL_DESCRIPTION_MAX_CHARS) } : {}),
-    ...(raw.description ? { description: shortenAtWordBoundary(raw.description, SKILL_DESCRIPTION_MAX_CHARS) } : {}),
-  };
-}
 
 /**
  * Replace descriptions an earlier release cut mid-word at 280 characters. An entry is repaired only

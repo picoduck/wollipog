@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { SKILL_DESCRIPTION_MAX_CHARS, skillMarkdownFromFields, type SkillFile } from "@wollipog/protocol";
+import { SKILL_DESCRIPTION_MAX_CHARS, readSkillFrontmatter, skillMarkdownFromFields, type SkillFile } from "@wollipog/protocol";
 import { NewSkillDialog } from "./NewSkillDialog.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -226,6 +226,117 @@ test("Upload Folder is a dropzone with Choose Folder… and a list of files to r
     assertNoDomNode(dialog.querySelector(".skill-dropzone"), "Write shows no dropzone");
     await act(async () => button(dialog, "Upload Folder").click());
     assert.deepEqual(rows(), ["scripts/run.shScriptRemove"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+/** Pick a folder through Upload Folder's hidden input, as the browser reports it. */
+async function pickFolder(dialog: HTMLElement, files: Record<string, string>) {
+  if (!dialog.querySelector(".skill-dropzone")) await act(async () => button(dialog, "Upload Folder").click());
+  const input = dialog.querySelector<HTMLInputElement>('input[type="file"]')!;
+  const picked = Object.entries(files).map(([path, text]) => {
+    const value = new domWindow.File([text], path.split("/").at(-1)!);
+    Object.defineProperty(value, "webkitRelativePath", { value: path });
+    return value;
+  });
+  Object.defineProperty(input, "files", { configurable: true, value: picked });
+  await act(async () => { input.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as unknown as Event); });
+  await settle();
+}
+
+const DESCRIPTION_HELPER = "Agents read this to decide when the skill applies. Say what it does and when to use it.";
+
+test("an uploaded SKILL.md's description fills an empty Description, and Create Skill saves what the field shows (#2290)", async () => {
+  const view = await mount();
+  try {
+    const { dialog, created } = view;
+    const skillMd = "---\nname: code-review\ndescription: \"Reviews a diff.\\nUse when: asked to \\\"review\\\".\"\n---\nReview.";
+    await pickFolder(dialog, { "review/SKILL.md": skillMd });
+    const description = labelled(dialog, "Description");
+    // Decoded as the library stores it: the double-quoted value is a JSON string.
+    assert.equal(description.value, "Reviews a diff.\nUse when: asked to \"review\".");
+    assert.equal(dialog.querySelector(".field-counter")?.textContent, "44 / 1,024");
+    assert.deepEqual(describedBy(description), [DESCRIPTION_HELPER, "44 / 1,024"]);
+    await act(async () => button(dialog, "Create Skill").click());
+    await settle();
+    assert.deepEqual(created, [{
+      name: "code-review",
+      description: "Reviews a diff.\nUse when: asked to \"review\".",
+      files: [{ path: "SKILL.md", encoding: "utf8", content: skillMd }],
+    }], "the folder is uploaded as it is, with the description the field shows");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a SKILL.md without a description leaves Description empty, and a typed description is never replaced (#2290)", async () => {
+  let view = await mount();
+  try {
+    await pickFolder(view.dialog, { "review/SKILL.md": "---\nname: code-review\n---\nReview." });
+    assert.equal(labelled(view.dialog, "Description").value, "");
+    assert.deepEqual(describedBy(labelled(view.dialog, "Description")), [DESCRIPTION_HELPER, "0 / 1,024"],
+      "nothing to keep, so the usual helper");
+    await act(async () => button(view.dialog, "Create Skill").click());
+    await settle();
+    assert.equal(view.created[0]?.description, "");
+  } finally {
+    await view.unmount();
+  }
+
+  view = await mount();
+  try {
+    await type(labelled(view.dialog, "Description"), "My own words.");
+    await pickFolder(view.dialog, { "review/SKILL.md": "---\nname: code-review\ndescription: The folder's words.\n---\nReview." });
+    assert.equal(labelled(view.dialog, "Description").value, "My own words.");
+    await act(async () => button(view.dialog, "Create Skill").click());
+    await settle();
+    assert.equal(view.created[0]?.description, "My own words.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("another folder replaces a description the last folder filled, and an emptied field says it keeps the folder's (#2290)", async () => {
+  const view = await mount();
+  try {
+    const { dialog, created } = view;
+    const description = () => labelled(dialog, "Description");
+    await pickFolder(dialog, { "a/SKILL.md": "---\nname: code-review\ndescription: 'First folder.'\n---\n" });
+    assert.equal(description().value, "First folder.");
+    await pickFolder(dialog, { "b/SKILL.md": "---\nname: code-review\ndescription: Second folder.\n---\n" });
+    assert.equal(description().value, "Second folder.", "the untouched fill follows the folder");
+    await pickFolder(dialog, { "c/SKILL.md": "---\nname: code-review\n---\n" });
+    assert.equal(description().value, "", "a folder without one takes the last folder's away");
+
+    await pickFolder(dialog, { "d/SKILL.md": "---\nname: code-review\ndescription: Fourth folder.\n---\n" });
+    await type(description(), "Fourth folder, edited.");
+    await pickFolder(dialog, { "e/SKILL.md": "---\nname: code-review\ndescription: Fifth folder.\n---\n" });
+    assert.equal(description().value, "Fourth folder, edited.", "an edited fill is the person's");
+
+    // Emptied while the folder has a description: the library stores the folder's, and says so.
+    await type(description(), "");
+    assert.deepEqual(describedBy(description()), ["Left empty, the skill keeps the description in the folder's SKILL.md.", "0 / 1,024"]);
+    await act(async () => button(dialog, "Write").click());
+    assert.deepEqual(describedBy(description()), [DESCRIPTION_HELPER, "0 / 1,024"], "Write builds SKILL.md from the fields");
+    await act(async () => button(dialog, "Upload Folder").click());
+    await act(async () => button(dialog, "Create Skill").click());
+    await settle();
+    assert.equal(created[0]?.description, "");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a description over 1,024 characters fills the field as the library stores it, shortened at a word (#2290)", async () => {
+  const view = await mount();
+  try {
+    const long = `${"word ".repeat(300)}end`;
+    const skillMd = `---\nname: code-review\ndescription: ${long}\n---\n`;
+    await pickFolder(view.dialog, { "review/SKILL.md": skillMd });
+    const value = labelled(view.dialog, "Description").value;
+    assert.equal(value, readSkillFrontmatter(skillMd).description);
+    assert.ok(value.length <= SKILL_DESCRIPTION_MAX_CHARS && value.endsWith("word…"), value.slice(-12));
   } finally {
     await view.unmount();
   }

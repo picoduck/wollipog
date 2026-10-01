@@ -7,6 +7,7 @@ import {
   SKILL_MAX_TOTAL_BYTES,
   isSkillScriptFile,
   isSkillScriptPath,
+  readRawSkillFrontmatter,
   shortenAtWordBoundary,
   skillMarkdownFromFields,
   validSkillFilePath,
@@ -256,4 +257,55 @@ test("the manual-invocation variant of a SKILL.md built from fields stays valid 
   const description = "Use when: asked.\nSecond \"line\".";
   const variant = withManualInvocationFrontmatter(skillMarkdownFromFields({ name: "code-review", description, body: "Body." }));
   assert.deepEqual(generatedSkillMarkdown(variant).frontmatter, { "disable-model-invocation": true, name: "code-review", description });
+});
+
+/** The control plane's reader before it moved here (#2290), verbatim but for its name: bounded with
+ * Node's Buffer, which the protocol cannot use in a browser. */
+function bufferReference(content: string): { name?: string; description?: string } {
+  const decoded = (value: string) => {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (typeof parsed === "string") return parsed;
+    } catch {
+      // Not JSON.
+    }
+    return value.slice(1, -1);
+  };
+  const bounded = Buffer.from(content, "utf8").subarray(0, 16 * 1024).toString("utf8").replace(/^\uFEFF/, "");
+  const lines = bounded.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return {};
+  const values: { name?: string; description?: string } = {};
+  for (let index = 1; index < lines.length && index <= 128; index += 1) {
+    const line = lines[index]!;
+    if (line.trim() === "---" || line.trim() === "...") return values;
+    const match = /^(name|description)\s*:\s*(.*)$/.exec(line);
+    if (!match) continue;
+    let value = match[2]!.trim();
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) value = decoded(value).trim();
+    else if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1).trim();
+    if (value) values[match[1] as "name" | "description"] = value;
+  }
+  return {};
+}
+
+test("readRawSkillFrontmatter reads a SKILL.md exactly as the control plane's Buffer-based reader did (#2290)", () => {
+  const bom = "\uFEFF";
+  const cases = [
+    `${bom}---\nname: a\ndescription: One mark.\n---\n`,
+    `${bom}${bom}---\nname: a\n---\n`,
+    `---\r\nname: 'a'\r\ndescription: "Line.\\nTwo \\"quoted\\"."\r\n...\r\n`,
+    `---\nname: a\ndescription: "not json \\x"\n---\n`,
+    // The 16 KiB bound falls inside a three-byte character, before or after the closing line.
+    `---\nname: a\ndescription: ${"€".repeat(6000)}\n---\n`,
+    `---\nname: a\ndescription: ${"x".repeat(16 * 1024 - 33)}€€€\n---\n`,
+    `---\nname: a\ndescription: ok\n${"#".repeat(16 * 1024 - 33)}€\n---\n`,
+    `---\nname: a\ndescription: ok\n---\n${"€".repeat(8000)}`,
+    `---\n${"k: v\n".repeat(130)}name: late\n---\n`,
+  ];
+  for (const content of cases) {
+    assert.deepEqual(readRawSkillFrontmatter(content), bufferReference(content), JSON.stringify(content.slice(0, 48)));
+  }
+  assert.deepEqual(readRawSkillFrontmatter(cases[0]!), { name: "a", description: "One mark." });
+  assert.deepEqual(readRawSkillFrontmatter(cases[2]!), { name: "a", description: "Line.\nTwo \"quoted\"." });
+  assert.deepEqual(readRawSkillFrontmatter(cases[7]!), { name: "a", description: "ok" });
 });

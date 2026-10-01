@@ -18,11 +18,14 @@ export function skillDescriptionCount(value: string): string {
  * counter under it. Enter inserts a line break; nothing here submits. New Skill uses it, and an
  * Edit Description surface can reuse it unchanged.
  */
-export function SkillDescriptionField({ value, onChange, disabled = false, label = "Description" }: {
+export function SkillDescriptionField({ value, onChange, disabled = false, label = "Description", helper }: {
   value: string;
   onChange: (value: string) => void;
   disabled?: boolean;
   label?: string;
+  /** Replaces the usual helper, when the field's meaning differs (an empty field in New Skill's
+   * upload keeps the folder's own description). */
+  helper?: string;
 }) {
   const id = useId();
   const helperId = `${id}-helper`;
@@ -45,7 +48,7 @@ export function SkillDescriptionField({ value, onChange, disabled = false, label
       />
       <div className="field-foot">
         <p className="field-helper" id={helperId}>
-          Agents read this to decide when the skill applies. Say what it does and when to use it.
+          {helper ?? "Agents read this to decide when the skill applies. Say what it does and when to use it."}
         </p>
         {/* Not a live region: announcing every keystroke's count would drown out the typing. */}
         <span className={`field-counter${nearLimit ? " is-near-limit" : ""}`} id={counterId}>
