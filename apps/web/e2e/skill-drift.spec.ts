@@ -201,7 +201,7 @@ for (const width of [1280, 390]) {
     await confirmation.getByRole("button", { name: "Restore Library Version" }).click();
     await expect(dialog).toBeHidden();
     await expect(confirmation).toBeHidden();
-    await expect(page.locator(".skills-machine .status")).toHaveText("Linked");
+    await expect(page.locator("table.skill-deployment .skill-deployment-agent .status")).toHaveText("Linked");
     expect(requests.map((request) => request.url)).toEqual(["preview", "restore"]);
   });
 }
