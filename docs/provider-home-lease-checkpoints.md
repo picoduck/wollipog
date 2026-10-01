@@ -88,6 +88,12 @@ their authorizing checkpoint. Windows byte-range fencing uses a range beyond the
 so ordinary reads of the guard do not conflict with its own lock. Microsoft documents
 [locking beyond EOF and conflicts through other handles](https://learn.microsoft.com/en-us/windows/win32/fileio/locking-and-unlocking-byte-ranges-in-files).
 
+Only the fixed retirement alias can change which currently selected manifest tuple it holds.
+Readers still require its full digest and exact device/inode to match a committed tuple and
+recheck its named identity after reading. Every ordinary retired path requires its own named
+tuple. A surviving alias is committed again before the next selected anchor replaces the old
+proof; it never grants ownership or authorizes cleanup on its own.
+
 This relies on the local NTFS rename and FlushFileBuffers metadata semantics. It does not infer
 a general Windows directory-fsync guarantee. Handle-relative POSIX replacement preserves
 open target proof handles and refuses unsupported APIs. See the
@@ -115,7 +121,7 @@ publication without republishing or adding a borrowed reference. Failed release 
 held and pending tokens and emits a bounded, deduplicated diagnostic so exact release can be
 retried; transient contention carries retry advice without a quarantine remedy.
 
-Lease I/O is synchronous today. A maximal admitted migration measured roughly 50–52 seconds,
+Lease I/O is synchronous today. A maximal admitted migration measured roughly 50–77 seconds,
 so runner event-loop timers and heartbeat work can be delayed during the transaction. The
 physical record/byte budgets bound work; they are not a low-latency or heartbeat guarantee.
 Truncated or unproven checkpoint candidates remain untouched, even if another slot is free;

@@ -11,6 +11,9 @@ const ASSET = "wollipog/provider-home-lease-io";
 export type LeaseIoWork = { records: number; bytes: number };
 let workObserver: ((work: LeaseIoWork) => void) | undefined;
 export function observeLeaseIoWorkForTest(observer?: (work: LeaseIoWork) => void): void { workObserver = observer; }
+let rejectProbeForTest: ((path: string) => boolean) | undefined;
+/** May only reject an otherwise successful fixed-helper probe; cannot bypass its checks. */
+export function refuseLeaseIoProbeForTest(predicate?: (path: string) => boolean): void { rejectProbeForTest = predicate; }
 const DEFAULT_BUDGET = { records: 131072, bytes: 268435456 };
 const IPC_BYTES = 64 * 1024 * 1024;
 const RECORD_BYTES = 2 * 1024 * 1024;
@@ -132,7 +135,7 @@ function nativeExecutable(): string {
       const hash = digest(readFileSync(path));
       const probe = spawnSync(path, ["--probe"], { timeout: 10_000, maxBuffer: 1024, env: {} });
       const verified = lstatSync(path, { bigint: true });
-      if (probe.error || probe.status !== 0 || !verified.isFile() || verified.isSymbolicLink() || verified.dev !== file.dev || verified.ino !== file.ino || digest(readFileSync(path)) !== hash) throw new Error("helper execution probe failed");
+      if (probe.error || probe.status !== 0 || !verified.isFile() || verified.isSymbolicLink() || verified.dev !== file.dev || verified.ino !== file.ino || digest(readFileSync(path)) !== hash || rejectProbeForTest?.(path)) throw new Error("helper execution probe failed");
       executable = { path, digest: hash, dev: file.dev, ino: file.ino };
       process.once("exit", cleanup);
       return path;

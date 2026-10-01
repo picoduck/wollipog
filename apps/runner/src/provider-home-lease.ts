@@ -357,13 +357,24 @@ function verifyRetired(root: string, lockDir: string, retired: LeaseRetirementEn
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw error;
     }
-    if (String(stat.dev) !== entry.device || String(stat.ino) !== entry.inode || !stat.isFile() || stat.isSymbolicLink() ||
-        readRecord(path).hash !== entry.hash) throw unexpectedEntries(lockDir);
+    const hash = readRecord(path).hash;
+    // This single fixed witness may hold a different source moved by the selected manifest.
+    // It never supplies acquisition authority; every ordinary path keeps its named proof.
+    const expected = entry.directory === "root" && entry.name === RETIREMENT_ALIAS
+      ? retired.find(item => item.device === String(stat.dev) && item.inode === String(stat.ino) && item.hash === hash)
+      : entry;
+    if (!expected || String(stat.dev) !== expected.device || String(stat.ino) !== expected.inode || !stat.isFile() || stat.isSymbolicLink() ||
+        hash !== expected.hash) throw unexpectedEntries(lockDir);
     const after = metadataStat(path);
-    if (String(after.dev) !== entry.device || String(after.ino) !== entry.inode) throw unexpectedEntries(lockDir);
+    if (String(after.dev) !== expected.device || String(after.ino) !== expected.inode) throw unexpectedEntries(lockDir);
     present.add(`${entry.directory}/${entry.name}`);
   }
   return present;
+}
+
+/** Test selected retirement tuples without substituting unrelated chain errors. */
+export function verifyLeaseRetirementForTest(snapshot: LeaseIoSnapshot, retired: LeaseRetirementEntry[]): void {
+  withSnapshot(snapshot, () => { verifyRetired(snapshot.root, join(snapshot.root, "mutable-home.lock"), retired); });
 }
 
 function canonicalRootEntries(root: string, lockDir: string): string[] {
@@ -791,7 +802,7 @@ export class ProviderHomeLeaseRegistry {
       this.mirrorRecord(root, lockDir, RECOVERY_MARKER, "checkpoint.json", true);
       readChain(lockDir);
     }
-    const migrationRequired = (() => { const chain = readChain(lockDir); return chain.external && chain.transitions >= LIMITS.hardTransitions - 1; })();
+    const migrationRequired = this.pendingMigrations.has(key) || (() => { const chain = readChain(lockDir); return chain.external && chain.transitions >= LIMITS.hardTransitions - 1; })();
     if (migrationRequired) this.pendingMigrations.add(key);
     const compacted = this.compactHeld(root, lockDir, record.leaseId);
     if (migrationRequired && !compacted) throw refusal(lockDir, "requires successful bounded catch-up before this HOME can be granted; preserve the acquired reservation and retry with this registry");

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import fc from "fast-check";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { ProviderHomeLeaseRegistry, observeLeaseVerificationWorkForTest, verifyLeaseCheckpointForTest } from "./provider-home-lease.js";
+import { ProviderHomeLeaseRegistry, observeLeaseVerificationWorkForTest, verifyLeaseCheckpointForTest, verifyLeaseRetirementForTest } from "./provider-home-lease.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS } from "./provider-home-lease-checkpoint.js";
 import { observeLeaseIoWorkForTest, readLeaseIoSnapshot } from "./provider-home-lease-io.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
@@ -385,6 +385,45 @@ test("checkpoint proof rejects arbitrary traversal manifests in both readers wit
   }), { numRuns: 20 });
 });
 
+test("the fixed retirement witness accepts only exact currently committed tuples in both validators", { skip: process.platform !== "linux" }, (t) => {
+  const home = fixture(t), { root, lock } = paths(home);
+  fs.mkdirSync(lock, { recursive: true, mode: 0o700 });
+  const alias = join(root, ".mutable-home.retired"), source = join(root, `next-${randomUUID()}.json`);
+  const raw = () => `${JSON.stringify({ version: 2, state: "active", ownerHash: owner, leaseId: randomUUID(),
+    previousLeaseId: null, previousRecordHash: null, pid: process.pid, hostname: hostname(), provider: "skills", createdAt: "2026-10-01" })}\n`;
+  fs.writeFileSync(alias, raw(), { mode: 0o600 }); fs.writeFileSync(source, raw(), { mode: 0o600 });
+  const snapshot = readLeaseIoSnapshot(root);
+  const retired = snapshot.entries.map(entry => ({ directory: entry.directory, name: entry.name, device: entry.device, inode: entry.inode,
+    hash: createHash("sha256").update(entry.raw).digest("hex") }));
+  const helper = (code = "") => spawnSync("python3", ["-c", program(`root=os.open(${JSON.stringify(root)},os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)\nlock=child_dir(root,"mutable-home.lock")\nretired=json.loads(${JSON.stringify(JSON.stringify(retired))})\n${code}\nverify_retired(root,lock,retired)\nos.close(lock);os.close(root)\n`)], { encoding: "utf8", timeout: 10_000 });
+  verifyLeaseRetirementForTest(snapshot, retired); assert.equal(helper().status, 0);
+  fs.renameSync(source, alias);
+  verifyLeaseRetirementForTest(readLeaseIoSnapshot(root), retired);
+  assert.equal(helper().status, 0, "moving another current manifest source into the fixed witness is valid");
+  const bytes = fs.readFileSync(alias);
+  for (const scenario of ["body", "inode", "uncommitted", "symlink"]) {
+    const replacement = join(home, `replacement-${scenario}`);
+    if (scenario === "body") fs.appendFileSync(alias, " ");
+    else if (scenario === "symlink") { fs.renameSync(alias, replacement); fs.symlinkSync(replacement, alias); }
+    else { fs.writeFileSync(replacement, scenario === "inode" ? bytes : raw(), { mode: 0o600 }); fs.renameSync(replacement, alias); }
+    const before = fs.readFileSync(alias);
+    assert.throws(() => verifyLeaseRetirementForTest(readLeaseIoSnapshot(root), retired));
+    assert.notEqual(helper().status, 0, scenario);
+    assert.deepEqual(fs.readFileSync(alias), before, "refusal did not delete or reset the witness");
+    if (scenario === "body") fs.writeFileSync(alias, bytes);
+    else if (scenario === "symlink") { fs.unlinkSync(alias); fs.renameSync(replacement, alias); }
+    // Re-establish a proof for the deliberately replaced fixture inode before the next case.
+    const current = fs.lstatSync(alias, { bigint: true });
+    const tuple = retired.find(entry => entry.name !== ".mutable-home.retired")!;
+    tuple.device = String(current.dev); tuple.inode = String(current.ino); tuple.hash = createHash("sha256").update(fs.readFileSync(alias)).digest("hex");
+  }
+  assert.equal(helper().status, 0, "the final named-identity race begins with a valid committed fixture");
+  const replacement = join(home, "changed-during-read"); fs.writeFileSync(replacement, fs.readFileSync(alias), { mode: 0o600 });
+  const changed = helper(`original_read=read_lease_record\ndef replaced_read(directory,name,*args):\n    result=original_read(directory,name,*args)\n    if name==".mutable-home.retired": os.replace(${JSON.stringify(replacement)},${JSON.stringify(alias)})\n    return result\nread_lease_record=replaced_read`);
+  assert.notEqual(changed.status, 0); assert.match(changed.stderr, /retirement identity changed/);
+  assert.equal(fs.existsSync(alias), true);
+});
+
 test("compaction preserves partial historical evidence and both readers refuse a changed retained digest", { skip: process.platform !== "linux" }, (t) => {
   const home = fixture(t);
   const { lock } = paths(home);
@@ -534,6 +573,24 @@ function oldCanonicalJournal(home: string, transitions: number) {
     previous = next;
   }
 }
+
+test("pending migration still withholds HOME after checkpoint selection until exact retry reports success", { skip: process.platform !== "linux" }, (t) => {
+  const home = fixture(t); oldCanonicalJournal(home, 64);
+  const registry = new ProviderHomeLeaseRegistry(owner);
+  const transaction = registry as unknown as { compactHeld(root: string, lock: string, leaseId: string): boolean };
+  const compact = transaction.compactHeld.bind(registry); let attempts = 0;
+  transaction.compactHeld = (...args) => {
+    if (attempts++ === 0) assert.equal(compact(...args), true, "select the real checkpoint before simulating a lost completion");
+    return false;
+  };
+  assert.throws(() => registry.acquireHome(home), /bounded catch-up/);
+  assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 4);
+  const before = evidence(home);
+  assert.throws(() => registry.acquireHome(home), /bounded catch-up/, "selected checkpoint cannot clear the pending migration obligation");
+  assert.deepEqual(evidence(home), before);
+  transaction.compactHeld = compact;
+  assert.equal(registry.acquireHome(home), true); assert.equal(registry.releaseHome(home), true);
+});
 
 test("bounded migration catches up legacy journals at the admission bound and refuses one above unchanged", { timeout: 300_000, skip: process.platform !== "linux" }, (t) => {
   for (const writer of ["native", "helper"] as const) for (const transitions of [64, 512, LIMITS.migrationEntries - 6]) {

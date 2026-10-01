@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { readLeaseIoSnapshot } from "./provider-home-lease-io.js";
@@ -33,7 +33,7 @@ async function fenceReady(child: ChildProcess, marker: string): Promise<void> {
 
 function leaseEvidence(root: string): Array<[string, string]> {
   return [root, join(root, "mutable-home.lock")].flatMap((directory) => readdirSync(directory).filter((name) => name !== "mutable-home.lock")
-    .map((name): [string, string] => [`${directory}/${name}`, createHash("sha256").update(readFileSync(join(directory, name))).digest("hex")]));
+    .map((name): [string, string] => [join(directory, name), createHash("sha256").update(readFileSync(join(directory, name))).digest("hex")]));
 }
 
 /** A real v2 chain avoids spending eight provider lifetimes preparing each crash fixture. */
@@ -100,8 +100,8 @@ test("post-publication deadline retains an immutable completion token without ad
   await new Promise<void>(resolve => writer!.once("close", () => resolve()));
   assert.equal(registry.acquireHome(home), true, "same registry completes its own publication");
   const after = leaseEvidence(root);
-  assert.deepEqual(after.filter(([path]) => !path.startsWith(`${root}/mutable-home.lock/`)),
-    before.filter(([path]) => !path.startsWith(`${root}/mutable-home.lock/`)), "no republished canonical successor or checkpoint");
+  assert.deepEqual(after.filter(([path]) => dirname(path) === root),
+    before.filter(([path]) => dirname(path) === root), "no republished canonical successor or checkpoint");
   for (const [path, hash] of before) assert.equal(new Map(after).get(path), hash, "existing proof bytes preserved; exact mirror completion is allowed");
   assert.equal(registry.releaseHome(home), true, "retry did not add a borrowed reference");
 });
@@ -148,11 +148,7 @@ test("native POSIX and Windows checkpoints recover actual killed-parent publicat
       readdirSync(directory).filter((name) => name !== "mutable-home.lock").map((name) =>
         [directory, name, createHash("sha256").update(readFileSync(join(directory, name))).digest("hex")]));
     const before = evidence();
-    // Before the permanent guard is published Windows denies a reader sharing the writer's
-    // open staging file. Refusal still preserves every byte and grants no HOME authority.
-    const liveRefusal = process.platform === "win32" && ["guard-temp-written", "guard-file-durable"].includes(boundary)
-      ? /already in use|cannot be verified/ : /already in use/;
-    assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), liveRefusal, `${boundary}: live writer/fence`);
+    assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /already in use/, `${boundary}: live writer/fence`);
     assert.deepEqual(evidence(), before, `${boundary}: contender changed live writer evidence`);
     const ended = new Promise<void>((resolve) => child.once("close", () => resolve()));
     child.kill("SIGKILL"); await ended;

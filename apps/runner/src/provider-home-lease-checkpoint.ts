@@ -128,11 +128,14 @@ def verify_retired(root, lock, retired):
         if directory is None: continue
         try: info = os.stat(entry["name"], dir_fd=directory, follow_symlinks=False)
         except FileNotFoundError: continue
-        if (not stat.S_ISREG(info.st_mode) or (str(info.st_dev), str(info.st_ino)) != (entry["device"], entry["inode"]) or
-            read_lease_record(directory, entry["name"], 3)[1] != entry["hash"]):
+        digest = read_lease_record(directory, entry["name"], 3)[1]
+        expected = next((item for item in retired if (item["device"], item["inode"], item["hash"]) ==
+            (str(info.st_dev), str(info.st_ino), digest)), None) if entry["directory"] == "root" and entry["name"] == ".mutable-home.retired" else entry
+        if (not expected or not stat.S_ISREG(info.st_mode) or (str(info.st_dev), str(info.st_ino)) != (expected["device"], expected["inode"]) or
+            digest != expected["hash"]):
             fail("provider-home checkpoint retirement evidence changed")
         after = os.stat(entry["name"], dir_fd=directory, follow_symlinks=False)
-        if (str(after.st_dev), str(after.st_ino)) != (entry["device"], entry["inode"]): fail("provider-home retirement identity changed")
+        if (str(after.st_dev), str(after.st_ino)) != (expected["device"], expected["inode"]): fail("provider-home retirement identity changed")
         present.add((entry["directory"], entry["name"]))
     return present
 

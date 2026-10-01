@@ -86,8 +86,12 @@ public static class WollipogProviderHomeLeaseIo {
   static SafeFileHandle Open(string path,bool directory,bool write=false,bool deletion=false,bool shareWrite=false){
     uint access=READ|(write?WRITE:0)|(deletion?DELETE:0);uint sharing=SHARE_READ|(directory||shareWrite?SHARE_WRITE:0)|(directory?0:SHARE_DELETE);
     if(Path.GetFileName(path)==GUARD)sharing&=~SHARE_DELETE;
-    var handle=CreateFileW(path,access,sharing,IntPtr.Zero,3,REPARSE|(directory?BACKUP:0)|(write?WRITE_THROUGH:0),IntPtr.Zero);
-    if(handle.IsInvalid){int error=Marshal.GetLastWin32Error();handle.Dispose();throw new Win32Exception(error);}
+    SafeFileHandle handle;var elapsed=Stopwatch.StartNew();
+    for(;;){handle=CreateFileW(path,access,sharing,IntPtr.Zero,3,REPARSE|(directory?BACKUP:0)|(write?WRITE_THROUGH:0),IntPtr.Zero);
+      if(!handle.IsInvalid)break;int error=Marshal.GetLastWin32Error();handle.Dispose();
+      if(error!=32&&error!=33)throw new Win32Exception(error);
+      Alive();if(elapsed.ElapsedMilliseconds>=fenceWaitMs)throw new Refusal(2,"provider HOME already in use: checkpoint publication is in progress; retry (Windows code "+error+")");Thread.Sleep(10);
+    }
     try{INFO info=Info(handle);Need((info.Attributes&REPARSE_ATTRIBUTE)==0&&((info.Attributes&DIRECTORY)!=0)==directory,"unsafe reparse or lease entry type");return handle;}catch{handle.Dispose();throw;}
   }
   static bool Missing(Exception error){var native=error as Win32Exception;return native!=null&&(native.NativeErrorCode==2||native.NativeErrorCode==3);}
