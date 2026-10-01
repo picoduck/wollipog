@@ -69,8 +69,7 @@ export function registerSkillBuiltInRoutes(
       files: content.files,
       currentVersion: skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null,
       expectedLatestVersionId: skill.latestVersion?.id ?? null,
-      assignmentCount: skill.assignmentCount,
-      deploymentImpact: db.skillDeploymentImpact(skill.id),
+      ...db.skillDeploymentImpact(skill.id),
       gitAutoUpdate: skill.gitAutoUpdate?.enabled ?? false,
     };
   });

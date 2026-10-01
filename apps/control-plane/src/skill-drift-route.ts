@@ -167,8 +167,8 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
         disposition: payload && latest?.digest === payload.digest ? "identical" : "update",
         publishedFromLatest: latest?.digest === target.digest,
         pinned: !!pin?.versionId,
-        assignmentCount: skill.assignmentCount,
-        deploymentImpact: db.skillDeploymentImpact(skill.id),
+        // Read after the machine read, so the count and the digest describe the current assignments.
+        ...db.skillDeploymentImpact(skill.id),
       };
     } catch {
       return reply.code(502).send({ error: "The edited copy could not be read or failed validation. Sync the machine and try again." });

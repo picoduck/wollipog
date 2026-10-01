@@ -36,8 +36,7 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
         versions.set(candidate.name, existing?.latestVersion?.id ?? null);
         const prior = existing?.latestVersion ? deps.db.getSkillVersion(existing.latestVersion.id) : null;
         return { ...candidate, existingSkillId: existing?.id ?? null,
-          assignmentCount: existing?.assignmentCount ?? 0,
-          deploymentImpact: deps.db.skillDeploymentImpact(existing?.id ?? null),
+          ...deps.db.skillDeploymentImpact(existing?.id ?? null),
           disposition: prior?.digest === candidate.digest ? "identical" : prior ? "update" : "new",
           previousFiles: prior?.files ?? [] };
       });

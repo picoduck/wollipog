@@ -118,28 +118,31 @@ test("the deployment impact digests the direct and group assignments' targets", 
     const skill = db.createSkill({ name: "alpha", files: v1.files, manifest: v1.manifest, digest: v1.digest, scope });
     const other = payload("beta", "Other");
     const unrelated = db.createSkill({ name: "beta", files: other.files, manifest: other.manifest, digest: other.digest });
-    const impact = () => db.skillDeploymentImpact(skill.id);
+    const impact = () => db.skillDeploymentImpact(skill.id).deploymentImpact;
     const none = impact();
-    assert.equal(db.skillDeploymentImpact(null), none, "a skill that does not exist yet has no assignments");
+    assert.deepEqual(db.skillDeploymentImpact(null), { assignmentCount: 0, deploymentImpact: none },
+      "a skill that does not exist yet has no assignments");
     db.createSkillAssignment({ skillId: unrelated.id, scopeKind: "instance", agentSelector: { kind: "all" } });
     assert.equal(impact(), none, "another skill's assignments do not count");
 
-    const direct = db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "all" } });
+    const direct = db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "all" }, now: 10 });
     const one = impact();
     assert.notEqual(one, none);
-    db.updateSkillAssignment(direct.id, { invocation: "manual" });
-    assert.equal(impact(), one, "invocation decides how the skill is offered, not where it deploys");
-    db.updateSkillAssignment(direct.id, { enabled: false });
+    assert.equal(db.skillDeploymentImpact(skill.id).assignmentCount, 1);
+    db.updateSkillAssignment(direct.id, { enabled: false }, 10);
     assert.notEqual(impact(), one, "disabling an assignment changes where the skill deploys");
-    db.updateSkillAssignment(direct.id, { enabled: true });
+    db.updateSkillAssignment(direct.id, { enabled: true }, 10);
     assert.equal(impact(), one);
+    // Between two equal rules the later edit wins, so any edit can change where the skill deploys.
+    db.updateSkillAssignment(direct.id, { invocation: "manual" }, 11);
+    assert.notEqual(impact(), one, "an edit that only moves the rule's edit time changes the impact");
 
     // Replacing an assignment with another keeps the count but not the impact.
     db.deleteSkillAssignment(direct.id);
     db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "all" } });
     const replaced = impact();
     assert.notEqual(replaced, one);
-    assert.equal(db.getSkill(skill.id)!.assignmentCount, 1);
+    assert.equal(db.skillDeploymentImpact(skill.id).assignmentCount, 1);
 
     const group = db.createSkillGroup("Tools", 1, scope);
     db.createSkillGroupAssignment({ groupId: group.id, scopeKind: "instance", runnerId: null, agentSelector: { kind: "all" },
@@ -147,7 +150,8 @@ test("the deployment impact digests the direct and group assignments' targets", 
     assert.equal(impact(), replaced, "a group the skill is not in does not count");
     db.updateSkill(skill.id, { groupId: group.id });
     assert.notEqual(impact(), replaced, "joining a group adds the group's assignments");
-    assert.equal(db.getSkill(skill.id)!.assignmentCount, 2);
+    assert.equal(db.skillDeploymentImpact(skill.id).assignmentCount, 2);
+    assert.equal(db.getSkill(skill.id)!.assignmentCount, 2, "the count is the one the skill reports");
   } finally { db.close(); }
 });
 
@@ -419,5 +423,30 @@ test("an assignment added while an edited-copy import re-reads the machine is st
     assert.equal(db.getSkill(skill.id)!.latestVersion!.digest, v1.digest);
     assert.equal(state.syncs, 0);
     db.listSkillAssignments(skill.id).forEach((assignment) => db.deleteSkillAssignment(assignment.id));
+  }
+});
+
+test("an edited-copy preview reports the count and impact of the assignments after its machine read", async (t) => {
+  const { db, app, skill, v1, state } = editedCopyFixture(t);
+  const id = randomUUID();
+  const copy = files("alpha", "Kept edit");
+  state.keptAside.set(id, copy);
+  state.edited = files("alpha", "Hand edit");
+  const drift = { name: "alpha", digest: v1.digest, variant: "agent" as const };
+  db.setRunnerSkillState("runner-1", { deployed: [], unmanaged: [],
+    drift: [{ ...drift, observedDigest: skillVersionDigest(state.edited), held: true }],
+    keptAside: [{ id, name: "alpha", digest: v1.digest, variant: "agent", keptAsideAt: 5, observedDigest: skillVersionDigest(copy) }] } as never, Date.now());
+  for (const [previewUrl, previewBody] of [
+    ["/api/runners/runner-1/skill-drift/preview", drift],
+    ["/api/runners/runner-1/orphaned-skill-copies/preview", { kind: "kept_aside", id }],
+  ] as const) {
+    db.listSkillAssignments(skill.id).forEach((assignment) => db.deleteSkillAssignment(assignment.id));
+    // An assignment added while the preview reads the machine is in both the count and the digest,
+    // so a consent-free preview never carries a digest that already includes an assignment.
+    state.onRead = () => { db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "all" } }); };
+    const shown = (await app.inject({ method: "POST", url: previewUrl, payload: previewBody })).json();
+    state.onRead = undefined;
+    assert.equal(shown.assignmentCount, 1, previewUrl);
+    assert.equal(shown.deploymentImpact, db.skillDeploymentImpact(skill.id).deploymentImpact, previewUrl);
   }
 });

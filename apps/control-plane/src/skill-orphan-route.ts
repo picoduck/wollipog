@@ -267,8 +267,7 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
         importable: !!payload,
         ...(importBlocker ? { importBlocker } : {}),
         disposition,
-        assignmentCount: skill?.assignmentCount ?? 0,
-        deploymentImpact: db.skillDeploymentImpact(skill?.id ?? null),
+        ...db.skillDeploymentImpact(skill?.id ?? null),
       };
     } catch {
       return reply.code(502).send({ error: "The copy could not be read or failed validation. Sync the machine and try again." });

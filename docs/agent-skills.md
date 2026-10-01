@@ -211,12 +211,13 @@ A review's consent names what accepting deploys, such as "Deploy to 2 existing a
 preview with no assignments asks for no consent at all. So the accept is fenced on what the preview
 showed. Every preview that can add a new latest version (Import from Git, Import from Machine,
 Import Edit as New Version, Review Orphaned Copy, the built-in review and Version History) reports
-`deploymentImpact`, a digest of the skill's direct and group assignments by identity and target.
-The dashboard sends it back as `expectedDeploymentImpact`. When an assignment was added, removed,
-retargeted, enabled or disabled in between, and the accept would deploy new content, the control
-plane refuses it with `409` and `code: "deployment_impact_changed"`, and nothing is committed or
-deployed. The review dialog then replaces its consent with the conflict and offers **Preview
-Again**, whose consent names the current assignments.
+`deploymentImpact`, a digest of the skill's direct and group assignments, and the count its consent
+names, both from one read. The dashboard sends the digest back as `expectedDeploymentImpact`. When
+an assignment was added, removed or edited in between (an edit can change which of two equal rules
+wins), and the accept would deploy new content, the control plane refuses it with `409` and
+`code: "deployment_impact_changed"`, and nothing is committed or deployed. The review dialog then
+replaces its consent with the conflict and offers **Preview Again**, whose consent names the
+current assignments.
 
 An accept without `expectedDeploymentImpact`, from a dashboard that predates the fence, keeps its
 earlier behavior, so mixed-version deployments keep working. The fence covers assignments, not

@@ -248,8 +248,8 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       discovery.preview = { id: randomUUID(), candidate, payload, expectedVersionId: existing?.latestVersion?.id ?? null, executablePaths: executable };
       const prior = existing?.latestVersion ? deps.db.getSkillVersion(existing.latestVersion.id) : null;
       return { previewId: discovery.preview.id, candidate, files: payload.files, digest: payload.digest, executablePaths: executable, previousFiles: prior?.files ?? [],
-        disposition: prior?.digest === payload.digest ? "identical" : prior ? "update" : "new", assignmentCount: existing?.assignmentCount ?? 0,
-        deploymentImpact: deps.db.skillDeploymentImpact(existing?.id ?? null) };
+        disposition: prior?.digest === payload.digest ? "identical" : prior ? "update" : "new",
+        ...deps.db.skillDeploymentImpact(existing?.id ?? null) };
     } catch { return reply.code(502).send({ error: "Snapshot failed validation or the source changed. Discover it again. Symlinks, hard links, special files, and oversized trees are not supported." }); }
     finally { pending = false; }
   });

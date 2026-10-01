@@ -499,7 +499,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const version = db.getSkillVersion(versionId);
     if (!version || version.skillId !== id) return reply.code(404).send({ error: "version not found" });
     return { version, currentVersion: skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null,
-      deploymentImpact: db.skillDeploymentImpact(id) };
+      deploymentImpact: db.skillDeploymentImpact(id).deploymentImpact };
   });
 
   app.post("/api/skills/:id/restore", async (req, reply) => {

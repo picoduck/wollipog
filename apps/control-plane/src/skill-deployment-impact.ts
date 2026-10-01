@@ -24,7 +24,7 @@ export function deploymentImpactRefusal(db: ControlPlaneDb, skillId: string | nu
   if (typeof expected !== "string" || !expected || expected.length > 100) {
     return { status: 400, body: { error: "expectedDeploymentImpact must be the value the preview reported." } };
   }
-  return expected === db.skillDeploymentImpact(skillId)
+  return expected === db.skillDeploymentImpact(skillId).deploymentImpact
     ? null
     : { status: 409, body: { error: DEPLOYMENT_IMPACT_CHANGED, code: DEPLOYMENT_IMPACT_CHANGED_CODE } };
 }
