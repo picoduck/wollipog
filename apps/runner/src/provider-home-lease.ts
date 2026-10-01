@@ -220,16 +220,18 @@ function unexpectedEntries(lockDir: string): Error {
   return refusal(lockDir, "contains unexpected entries; refusing unsafe recovery");
 }
 
-class ProviderHomeLeaseRefusal extends Error {}
+class ProviderHomeLeaseRefusal extends Error {
+  constructor(readonly reason: string, message: string) { super(message); }
+}
 
 function refusal(lockDir: string, reason: string): Error {
-  return new ProviderHomeLeaseRefusal(`provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and retry; do not remove individual records`);
+  return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and retry; do not remove individual records`);
 }
 
 function verificationRefusal(lockDir: string, error: unknown): Error {
   // Preserve the complete remedy once, and never put malformed record contents from a parser's
   // exception into operator-visible output.
-  return error instanceof ProviderHomeLeaseRefusal ? error : refusal(lockDir, "cannot be verified: metadata is unsafe or unreadable");
+  return refusal(lockDir, error instanceof ProviderHomeLeaseRefusal ? error.reason : "cannot be verified: metadata is unsafe or unreadable");
 }
 
 function recordsHash(records: Array<{ name: string; hash: string }>): string {

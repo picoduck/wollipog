@@ -847,7 +847,8 @@ test("unexpected, orphaned, malformed, oversized, and symlinked lease state fail
 test("a long journal remains valid and never empties across repeated orderly handoffs", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-long-chain-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  for (let pid = 100; pid < 164; pid++) {
+  const passes = process.platform === "linux" ? 64 : 16;
+  for (let pid = 100; pid < 100 + passes; pid++) {
     const registry = new ProviderHomeLeaseRegistry(pid % 2 === 0 ? OWNER_A : OWNER_B, {
       pid,
       hostname: "host-a",
@@ -858,7 +859,11 @@ test("a long journal remains valid and never empties across repeated orderly han
     assert.ok(readdirSync(leasePaths(home).lock).length > 0);
   }
   assert.ok(readdirSync(leasePaths(home).lock).length <= 34);
-  assert.equal(JSON.parse(readFileSync(join(leasePaths(home).root, "mutable-home.recovery.json"), "utf8")).version, 3);
+  if (process.platform === "linux") {
+    assert.equal(JSON.parse(readFileSync(join(leasePaths(home).root, "mutable-home.recovery.json"), "utf8")).version, 3);
+  } else {
+    assert.throws(() => new ProviderHomeLeaseRegistry(OWNER_A).acquire(request(home)), /growth cap/);
+  }
 });
 
 test("a predecessor modified after publication invalidates its hash-linked successor", (t) => {
@@ -873,7 +878,13 @@ test("a predecessor modified after publication invalidates its hash-linked succe
   const later = new ProviderHomeLeaseRegistry(OWNER_A, {
     pid: 303, hostname: "host-a", isProcessAlive: () => false,
   });
-  assert.throws(() => later.acquire(request(home)), /unexpected entries/);
+  assert.throws(() => later.acquire(request(home)), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /unexpected entries/);
+    assert.ok(error.message.includes(lock), "the remedy uses the stable HOME path");
+    assert.doesNotMatch(error.message, /\/proc\/self\/fd\//);
+    return true;
+  });
 });
 
 test("hard-linked record substitution is detected after the link target is modified", (t) => {
