@@ -58,6 +58,15 @@ if (process.platform === "linux") {
   console.log("compiled Linux skill rename helper ->", linuxRenameHelper);
 }
 
+// The fixed lease-only I/O helper supplies descriptor fences and durable checkpoints on
+// native POSIX hosts. Compile the exact SEA asset even for bundle validation.
+const leaseIoHelper = join(buildDir, "provider-home-lease-io");
+if (process.platform === "linux" || process.platform === "darwin") {
+  execFileSync(process.platform === "darwin" ? "/usr/bin/clang" : "/usr/bin/cc",
+    ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", ...(process.platform === "linux" ? ["-static"] : []),
+      join(runner, "native", "provider-home-lease-io.c"), "-o", leaseIoHelper], { stdio: "inherit" });
+}
+
 // Stop here when only validating the bundle (CI / quick check).
 if (process.argv.includes("--bundle-only")) {
   console.log("bundle-only: skipping SEA packaging");
@@ -68,6 +77,7 @@ if (process.argv.includes("--bundle-only")) {
 const seaConfig = join(buildDir, "sea-config.json");
 const blob = join(buildDir, "runner.blob");
 const assets = {};
+if (process.platform === "linux" || process.platform === "darwin") assets["wollipog/provider-home-lease-io"] = leaseIoHelper;
 if (process.platform === "darwin") {
   const helper = join(buildDir, "macos-skill-snapshots");
   execFileSync("/usr/bin/clang", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror",

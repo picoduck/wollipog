@@ -1,95 +1,116 @@
-# Canonical Provider-HOME Lease Checkpoints
+# Bounded Provider-HOME Lease Checkpoints
 
-The canonical journal in `.agent-manager/provider-home-leases-v1` uses immutable
-hash-linked successors and an exclusively published successor pathname to elect a
-single writer. Version 3 adds bounded checkpoints shared by the native reader and
-the WSL helper. The containing directory name stays unchanged so old binaries see
-the incompatible format rather than initialize an independent ownership domain.
+The native runner and in-distro helper share a canonical immutable successor journal. A fresh
+canonical journal uses v2 records. After 16 transitions, the acquired owner negotiates a v4
+checkpoint and a permanent `mutable-home.lock/protocol-v4.json` fence. v2 and v3 readers refuse
+the incompatible guard/checkpoint. A checkpoint copies the exact active identity, commits to its
+previous canonical tip and anchor, and includes a digest and exact decimal device/inode identity
+for every piece of evidence it may retire. Retirement requires the registry's private acquired
+token; matching a disk PID, an empty mirror directory, or a missing mirror never supplies it.
 
-`apps/runner/src/provider-home-lease-checkpoint.ts` defines the fixed format limits
-used by both readers. Changing these is a protocol change, not a per-process
-environment setting. Compaction starts at 16 transitions. At 31 transitions new
-acquisitions refuse, reserving the 32nd transition for an already acquired owner's
-release. An unavailable checkpoint never enables an append-unbounded fallback.
-Existing v2 homes already at the acquisition cap also refuse; operators must
-preserve their evidence rather than reset them as a migration shortcut.
+## Negotiated Bounds
 
-Each metadata directory permits at most 256 entries, with a bounded enumeration
-that stops on entry 257. Acquisitions additionally reserve four root entry slots
-for publication and release. Ordinary records and publication litter have a
-4,096-byte limit; a checkpoint has a 65,536-byte limit. A checkpoint's retirement
-manifest permits 72 entries, and historical partial evidence permits 32 records.
-There are two fixed checkpoint staging slots and one selected checkpoint, with no
-historical checkpoint directories or recursively embedded checkpoint chain.
+| Resource | Limit |
+| --- | ---: |
+| Ordinary record / publication litter | 4 KiB |
+| Checkpoint / either candidate slot / Windows retirement alias | 2 MiB each |
+| Steady directory entries | 256 in each metadata directory |
+| Steady physical metadata bytes | 10 MiB |
+| Legacy migration directory entries | 4,096 in each metadata directory |
+| Legacy migration physical metadata bytes | 40 MiB |
+| Retirement manifest | 8,192 entries |
+| Retained partial evidence | 32 entries |
+| Candidate slots | 2 fixed names |
+| Windows retirement aliases | 1 fixed name |
+| Complete verification or compaction work | 131,072 record operations / 256 MiB read or hashed |
+| Native helper IPC | 64 MiB |
+| Mount inventory in the Linux helper | 1 MiB |
 
-Consequently, the root and mirror directory together admit at most 512 entries
-and a conservative 32 MiB of metadata bytes, including checkpoints, manifests,
-mirrors, interrupted candidates, retained evidence and publication litter.
-Successful homes without partial evidence normally remain below 36 records and
-100 KB. Unverified publication litter is preserved and charged against the entry
-and byte limits; repeated crashes cannot silently create an unlimited allowance.
+The limits are configured in `provider-home-lease-checkpoint.ts` and independently enforced by
+both native I/O backends. Nested verification shares the complete compaction budget. Native
+transactions receive its remaining allowance before doing I/O; exhausting it leaves the selected
+proof and all unretired evidence intact. Each acquisition/release uses a finite number of these
+bounded verification/publication transactions. Tests measure whole handoffs as well as storage.
 
-Each canonical verification and each complete checkpoint attempt separately has
-an 8,192-record and 8 MiB verification-work budget. Record payload reads and hashes,
-previous-tip hashes, manifest commitments and snapshot hash input are charged.
-Every read additionally has its individual byte limit; the native reader uses a
-fixed buffer rather than reading an expanding file to EOF. Acquisition invokes a
-fixed number of these bounded operations, and release invokes one checkpoint
-attempt and one verification. Retirement that reaches its work budget stops with
-the exact immutable proof still selected and resumes on a later acquired lease.
-Directory and manifest enumeration remain bounded even for refused input.
+Acquisition reserves four directory entries before electing a successor; publication reserves two.
+For a valid older v2 journal, one exclusive successor election is allowed before applying the
+transition cap. At 31 or more transitions that successor is a private migration reservation:
+provider launch and other HOME mutation are refused until catch-up succeeds. Only that same
+registry can retry its private token without appending another record. A killed helper's reservation
+is reclaimed through a new authenticated successor, subject to the same finite directory/byte
+admission bounds. An unproven or over-bound journal is left unchanged.
 
-Only the exact active lease acquired by the current registry/helper invocation
-may compact. A matching PID on disk never supplies that authority. Before any
-selection the writer publishes and fsyncs `protocol-v3.json` in the mirror
-directory. This permanent incompatible guard is included in the snapshot and its
-hash is bound by every selected v3 checkpoint. Directory-only rollback readers
-refuse it even if a crash interrupts migration or retirement. Version-2 canonical
-readers also refuse the guard or the selected version-3 root record.
+After v4 selection, new acquisitions stop before 32 transitions, reserving a release slot. Failed
+compaction never resets the journal or erases evidence. It produces a bounded, deduplicated
+`provider_home_checkpoint_unavailable` diagnostic explaining the helper/fence/durability/work
+requirements and the whole-directory quarantine remedy after proving the HOME unused. Legacy
+private migration failures can add bounded reservation/release evidence, but never grant HOME
+mutation past the cap. A migration checkpoint permits the larger inventory only while more than
+224 selected-manifest entries remain; once retirement reduces that inventory, ordinary limits
+apply even if its immutable migration flag is still set.
 
-A checkpoint copies the acquired active tip's identity unchanged and includes
-its exact bytes and hash, the previous anchor hash, a cumulative historical
-commitment, the guard hash and an exact retirement manifest. Manifest paths are
-restricted to known canonical records, optional mirrors and the two staging
-slots. Each entry names a digest, device and inode. A tip's future successor is
-never eligible for retirement. Optional late mirrors are authorized only as
-aliases of their already verified canonical inode and digest. Partial historical
-evidence remains outside the retirement manifest and retains its original digest.
+## Publication and Recovery
 
-The writer writes the candidate exclusively, fsyncs the file and directory,
-rechecks its acquired tip and full evidence snapshot, and checks the candidate's
-bytes. It atomically renames the candidate over `mutable-home.recovery.json`, then
-fsyncs the root directory. Only after durable selection does it retire manifest
-entries. Every remaining entry is checked before retirement and immediately
-before unlink, and the containing directory is fsynced after each removal. Linux
-native operations use pinned no-follow directory descriptors; the helper uses
-descriptor-relative operations throughout. Native platforms without this durable
-descriptor-relative publication path retain the valid chain and use the capped
-unavailable policy.
+All v4 readers take a shared kernel fence; successor writers, mirror publishers, and checkpoint
+publishers take its exclusive side. The fence inode is never replaced. Its digest, device/inode,
+and backend are committed in the checkpoint. Native helpers pin no-follow ancestry, files, and
+directory identities, independently correlate the held record to their actual parent lifecycle,
+compare the exact verified preimage under the fence, and recheck acquired authority before
+selection and every retirement operation. The Linux helper receives a parent-death signal;
+Windows additionally verifies that the parent's creation time predates the helper's creation.
 
-A killed writer leaves either the previous valid chain or a complete selected
-checkpoint. A new same-owner/same-host reader must prove the active PID dead and
-win a canonical successor before completing retirement. Missing files are
-authorized only by a selected manifest; an unproven empty historical directory
-cannot be cleaned. Re-created manifest pathnames must still match their original
-digest and inode. A staging name that remains in the selected manifest is not
-reused. An interrupted, complete candidate can itself be retired only when its
-previous active tip is proven by the still verified canonical history.
+The supported coherent local backends are Linux flock on ext4, tmpfs, btrfs, overlay, XFS, ZFS,
+and F2FS; native macOS flock on APFS/HFS; and native Windows LockFileEx on local NTFS. A guard
+names its fence backend. Incompatible/shared-network filesystems and incompatible reader versions
+refuse rather than pretending that their locks interoperate. POSIX native helpers ship as SEA
+assets; Windows uses the fixed privately compiled and digest-verified C# helper without elevation
+or persistent execution-policy changes.
 
-Malformed or incomplete candidates, exhausted staging slots, changed retained
-digests, incompatible formats, links, unexpected entries, foreign active owners,
-other hosts and live/unprobeable PIDs fail closed. Compaction failures preserve
-the last valid chain and produce a fixed, bounded diagnostic, deduplicated to at
-most 16 messages. Native diagnostics reach the runner log with a stable event and
-the lease ID; helper diagnostics use the existing bounded result collection.
-Check filesystem support, permissions, fsync failures, staging evidence and the
-verification budget. Never delete individual records or reset a journal. Manual
-quarantine of the entire lease directory requires independently proving that no
-provider or runner uses that HOME.
+A candidate is complete and synced before atomic selection. Selection is durable before any
+manifest source is retired. POSIX uses fsync, plus F_FULLFSYNC for macOS files, and syncs each
+retirement directory. Each source is reread and matched to its digest and exact inode immediately
+before unlink. Full-chain verification is not repeated for every retired entry.
 
-With `WOLLIPOG_LEASE_LONG_RUN=1`, the focused checkpoint suite measures 512 native
-passes, 512 helper passes and 1,024 mixed handoffs; CI uses 64 passes per mode.
-It checks storage and verification reads, real competing
-writers, SIGKILL at every guard/candidate/selection/retirement boundary,
-cross-reader recovery, work exhaustion, capped growth, retained digests, inode
-substitution, no-follow refusals, same-PID registries and malformed manifests.
+Windows retains a fixed `.mutable-home.retired` alias instead of treating DeleteFile or a
+read-only handle as a POSIX directory barrier. Under the fence it pins source and destination
+ancestry and handles, verifies selected-manifest authority, moves the source to this same-volume
+alias with MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH), and flushes the exact moved inode
+with GENERIC_WRITE. COPY_ALLOWED is never used. The last alias, and any surviving hard-linked
+mirror, remain selected-manifest evidence and are committed before the next anchor replaces
+their authorizing checkpoint. Windows byte-range fencing uses a range beyond the record's EOF,
+so ordinary reads of the guard do not conflict with its own lock. Microsoft documents
+[locking beyond EOF and conflicts through other handles](https://learn.microsoft.com/en-us/windows/win32/fileio/locking-and-unlocking-byte-ranges-in-files).
+
+This relies on the local NTFS rename and FlushFileBuffers metadata semantics. The documented
+MoveFileEx write-through guarantee explicitly discusses copy/delete moves; the implementation
+does not infer a general Windows directory-fsync guarantee from that wording. See the
+[MoveFileEx flags](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw),
+[write-through NTFS metadata semantics](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
+and [FlushFileBuffers access requirements](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers). Process-kill tests
+validate interruption recovery, not a physical power-loss experiment.
+
+After an interrupted completed candidate, the new owner first acquires successor Q. It may adopt
+candidate P only if P commits to the currently verified anchor and historical active tip, its full
+manifest remains proven, and hypothetical selection preserves the exact current Q. The checkpoint
+carries the historical tip hash bridge, so Q is preserved byte for byte. Adoption is synced and
+retired under Q's private token; a fresh Q checkpoint then frees the bounded publication slots.
+Partial, foreign, corrupt, or otherwise unproven candidates are preserved and cannot authorize
+cleanup. Two repeated completed-candidate crashes recover without exhausting the slots.
+
+## Validation
+
+Focused tests cover native/helper-only/mixed handoffs, real concurrent election, old reader refusal,
+retained evidence, unknown entries, foreign owner/host, live and unprobeable PID, corrupt digests,
+exact inode resurrection, symlinks/no-follow ancestry, unavailable compaction, maximum legacy
+admission and one above, and actual killed-parent publication boundaries. Platform Isolation runs
+the native regressions and portable publication-boundary tests on Linux, macOS, and both Windows
+images. Windows tests include interrupted retirement move and flush boundaries.
+
+A 64/64/128 native/helper/mixed handoff run measured at most 31/31/27 metadata records and
+19,325/19,697/17,857 bytes respectively. Native whole-handoff read instrumentation also counts
+trusted helper-binary integrity checks: its observed maximum was about 15.7 MiB; helper-only
+journal reads were about 333 KiB. These measurements do not replace the enforced limits.
+Maximum padded legacy migration (4,090 transitions) completed in approximately 53 seconds
+native and 52 seconds helper on the development filesystem, with a roughly 1.54 MiB selected
+checkpoint after subsequent cross-reader handoffs. Large-run and exact platform CI evidence are
+recorded in the implementation report.

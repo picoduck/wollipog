@@ -4,7 +4,9 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
+const previousMask = process.umask(0o077);
+after(() => process.umask(previousMask));
 import type { SkillFile } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
@@ -667,7 +669,7 @@ test("native and WSL helper leases hand off through one retained external canoni
     assert.equal(result.status, 0, result.stderr || result.stdout);
   }
   assert.deepEqual(compactionSiblings(home), []);
-  assert.equal(JSON.parse(readFileSync(join(leaseRoot, "mutable-home.recovery.json"), "utf8")).version, 3);
+  assert.equal(JSON.parse(readFileSync(join(leaseRoot, "mutable-home.recovery.json"), "utf8")).version, 4);
   assert.ok(readdirSync(leaseRoot).length <= 20);
   assert.equal(native.acquireHome(home), true);
   native.releaseAll();

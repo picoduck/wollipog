@@ -10,6 +10,7 @@ import fc from "fast-check";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS } from "./provider-home-lease-checkpoint.js";
+import { observeLeaseIoWorkForTest } from "./provider-home-lease-io.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
 
 const owner = "a".repeat(64);
@@ -27,7 +28,14 @@ function paths(home: string) {
 }
 function nativePass(home: string, options: ConstructorParameters<typeof ProviderHomeLeaseRegistry>[1] = {}) {
   const registry = new ProviderHomeLeaseRegistry(owner, options);
-  registry.acquireHome(home);
+  const deadline = performance.now() + 1_000;
+  for (;;) {
+    try { registry.acquireHome(home); break; }
+    catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("publication is in progress") || performance.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
   assert.equal(registry.releaseHome(home), true);
   return registry;
 }
@@ -39,9 +47,9 @@ function program(code: string, helper = WSL_SKILLS_HELPER): string {
   assert.ok(boundary > 0);
   return `${helper.slice(0, boundary)}\n${code}\n`;
 }
-function helperPass(home: string, code = "", helper = WSL_SKILLS_HELPER) {
+function helperPass(home: string, code = "", helper = WSL_SKILLS_HELPER, timeout = 10_000) {
   const result = spawnSync("python3", ["-c", program(`${code}\nhome_fd, _ = open_root(os.environ["HOME"])\nlease = acquire_lease(home_fd, "${owner}")\nrelease_lease(lease)\nos.close(home_fd)`, helper)],
-    { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 10_000 });
+    { env: { ...process.env, HOME: home }, encoding: "utf8", timeout });
   return result;
 }
 function evidence(home: string): Map<string, string> {
@@ -66,6 +74,8 @@ async function kill(child: ChildProcess) {
   const ended = new Promise<void>((resolve) => child.once("close", () => resolve()));
   child.kill("SIGKILL");
   await ended;
+  // The native helper observes the parent's lifecycle independently and releases its fence.
+  await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
 test("large native/helper/mixed handoffs bound records, bytes, and verification reads", { timeout: 300_000, skip: process.platform !== "linux" }, async (t) => {
@@ -78,7 +88,7 @@ test("large native/helper/mixed handoffs bound records, bytes, and verification 
       const result = spawnSync("python3", ["-c", program(`
 original = read_lease_record
 reads, read_bytes = 0, 0
-def measured(directory, name, max_links=2):
+def measured(directory, name, max_links=3):
     global reads, read_bytes
     reads += 1; read_bytes += os.stat(name, dir_fd=directory, follow_symlinks=False).st_size
     return original(directory, name, max_links)
@@ -109,6 +119,7 @@ print(json.dumps(maximum))`)], { env: { ...process.env, HOME: home }, encoding: 
         return count;
       }) as typeof fs.readSync;
       syncBuiltinESMExports();
+      observeLeaseIoWorkForTest((work) => { reads += work.records; readBytes += work.bytes; });
       try {
         for (let i = 0; i < passes; i++) {
           reads = 0; readBytes = 0;
@@ -124,17 +135,16 @@ print(json.dumps(maximum))`)], { env: { ...process.env, HOME: home }, encoding: 
             assert.equal(result.status, 0, String(result.stderr));
           }
         }
-      } finally { fs.readSync = original; syncBuiltinESMExports(); }
+      } finally { observeLeaseIoWorkForTest(); fs.readSync = original; syncBuiltinESMExports(); }
     }
-    assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 3);
+    assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 4);
     assert.ok(maxRecords <= 36, `${mode}: ${maxRecords} records`);
     assert.ok(maxBytes < 100_000, `${mode}: ${maxBytes} bytes`);
     assert.ok(maxReads < 10_000, `${mode}: ${maxReads} reads`);
-    assert.ok(maxReadBytes < 10_000_000, `${mode}: ${maxReadBytes} read bytes`);
+    assert.ok(maxReadBytes < LIMITS.verificationBytes, `${mode}: ${maxReadBytes} read bytes`);
     measurements.push({ mode, passes: mode === "mixed" ? passes * 2 : passes, maxRecords, maxBytes, maxReads, maxReadBytes });
     t.diagnostic(JSON.stringify(measurements.at(-1)));
   }
-  fs.writeFileSync("/tmp/issue2239-checkpoint-measurements.json", JSON.stringify(measurements, null, 2));
 });
 
 test("SIGKILL at every native/helper checkpoint boundary recovers across readers", { timeout: 180_000, skip: process.platform !== "linux" }, async (t) => {
@@ -145,7 +155,7 @@ test("SIGKILL at every native/helper checkpoint boundary recovers across readers
     let output = "";
     const hold = `if (stage === ${JSON.stringify(boundary)}) { writeFileSync(${JSON.stringify(marker)}, "ready"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); }`;
     const script = join(home, "writer.mts");
-    fs.writeFileSync(script, `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(nativeModule)};\nimport { writeFileSync } from "node:fs";\nconst registry = new ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { checkpointBoundaryForTest: (stage) => { ${hold} } });\nregistry.acquireHome(${JSON.stringify(home)});\nregistry.releaseAll();`);
+    fs.writeFileSync(script, `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(nativeModule)};\nimport { writeFileSync } from "node:fs";\nconst registry = new ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { nativeCheckpointBarrierForTest: { boundary: ${JSON.stringify(boundary)}, marker: ${JSON.stringify(marker)} } });\nregistry.acquireHome(${JSON.stringify(home)});\nregistry.releaseAll();`);
     const helper = program(`
 def checkpoint_boundary(stage):
     if stage == ${JSON.stringify(boundary)}:
@@ -177,6 +187,37 @@ os.close(home_fd)`);
   }
 });
 
+test("repeated killed candidate publishers recover without exhausting bounded staging", { timeout: 120_000, skip: process.platform !== "linux" }, async (t) => {
+  for (const sequence of [["native", "native"], ["helper", "helper"], ["native", "helper"], ["helper", "native"]]) {
+    const home = fixture(t);
+    seed(home);
+    for (const writer of sequence) {
+      const marker = join(home, "ready");
+      fs.rmSync(marker, { force: true });
+      let output = "";
+      const script = join(home, "writer.mts");
+      fs.writeFileSync(script, `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(nativeModule)};\nimport { writeFileSync } from "node:fs";\nnew ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { nativeCheckpointBarrierForTest: { boundary: "candidate-durable", marker: ${JSON.stringify(marker)} } }).acquireHome(${JSON.stringify(home)});`);
+      const helper = program(`
+def checkpoint_boundary(stage):
+    if stage == "candidate-durable":
+        with open(${JSON.stringify(marker)}, "w") as stream: stream.write("ready")
+        while True: time.sleep(1)
+home_fd, _ = open_root(os.environ["HOME"])
+acquire_lease(home_fd, "${owner}")`);
+      const child = writer === "native" ? spawn(process.execPath, ["--import", "tsx", script]) : spawn("python3", ["-c", helper], { env: { ...process.env, HOME: home } });
+      child.stdout?.on("data", (chunk) => { output += chunk; });
+      child.stderr?.on("data", (chunk) => { output += chunk; });
+      t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+      await ready(child, marker, () => output);
+      await kill(child);
+    }
+    assert.equal(nativePass(home).getDiagnostics().length, 0, `${sequence.join("/")} must recover completed candidates`);
+    for (let i = 0; i < 64; i++) nativePass(home);
+    assert.ok(storage(home).records <= 36);
+    assert.equal(fs.readdirSync(paths(home).root).filter((name) => name.includes("checkpoint.pending")).length, 0);
+  }
+});
+
 test("unavailable native/helper checkpoints cap growth and reserve release without changing old evidence", { skip: process.platform !== "linux" }, (t) => {
   for (const mode of ["native", "helper"] as const) {
     const home = fixture(t);
@@ -194,11 +235,15 @@ test("unavailable native/helper checkpoints cap growth and reserve release witho
       if (i === 0) before = evidence(home);
     }
     for (const [path, hash] of before) assert.equal(createHash("sha256").update(fs.readFileSync(path)).digest("hex"), hash);
+    const reservation = new ProviderHomeLeaseRegistry(owner, { disableCompactionForTest: true });
+    assert.throws(() => reservation.acquireHome(home), /bounded catch-up/);
+    // A legacy journal permits one bounded private reservation for migration. No HOME is
+    // granted until catch-up succeeds, and retrying that token appends no further records.
     const atCap = evidence(home);
-    assert.throws(() => new ProviderHomeLeaseRegistry(owner, { disableCompactionForTest: true }).acquireHome(home), /growth cap/);
+    assert.throws(() => reservation.acquireHome(home), /bounded catch-up/);
     assert.notEqual(helperPass(home, "", helper).status, 0);
     assert.deepEqual(evidence(home), atCap);
-    assert.equal(fs.readdirSync(paths(home).root).filter((name) => name.startsWith("next-")).length, 31);
+    assert.equal(fs.readdirSync(paths(home).root).filter((name) => name.startsWith("next-")).length, 32);
     if (mode === "native") assert.equal(messages, 16);
   }
 });
@@ -229,7 +274,7 @@ test("compaction preserves partial historical evidence and both readers refuse a
     previousLeaseId: previous, previousRecordHash: "b".repeat(64), pid: 999_999, hostname: hostname(), provider: "skills", createdAt: "2026-10-01" })}\n`, { mode: 0o600 });
   const bytes = fs.readFileSync(retained);
   seed(home, 24);
-  assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 3);
+  assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 4);
   assert.deepEqual(fs.readFileSync(retained), bytes);
   assert.equal(helperPass(home).status, 0);
   fs.appendFileSync(retained, " ");
@@ -245,12 +290,12 @@ test("selected checkpoints refuse damaged guards, proofs, resurrected identities
     seed(home, 9);
     const { root, lock, anchor } = paths(home);
     const value = JSON.parse(fs.readFileSync(anchor, "utf8"));
-    const guard = join(lock, "protocol-v3.json");
+    const guard = join(lock, "protocol-v4.json");
     if (mutation === "guard-bytes") fs.appendFileSync(guard, " ");
     if (mutation === "guard-missing") fs.unlinkSync(guard);
     if (mutation === "guard-link") { fs.renameSync(guard, join(home, "guard")); fs.symlinkSync(join(home, "guard"), guard); }
     if (mutation === "proof") { value.checkpoint.historyHash = "f".repeat(64); fs.writeFileSync(anchor, JSON.stringify(value)); }
-    if (mutation === "new-version") { value.version = 4; fs.writeFileSync(anchor, JSON.stringify(value)); }
+    if (mutation === "new-version") { value.version = 5; fs.writeFileSync(anchor, JSON.stringify(value)); }
     if (mutation === "retired-inode" || mutation === "retired-link") {
       const entry = value.checkpoint.retired.find((entry: { directory: string }) => entry.directory === "root");
       const path = join(root, entry.name);
@@ -329,7 +374,7 @@ os.close(home_fd)`);
   assert.equal(helperPass(home).status, 0);
 });
 
-test("verification work exhaustion preserves checkpoint evidence and resumes bounded retirement", { skip: process.platform !== "linux" }, (t) => {
+test("retained evidence stays within the complete checkpoint work budget", { skip: process.platform !== "linux" }, (t) => {
   const home = fixture(t);
   const { lock } = paths(home);
   fs.mkdirSync(lock, { recursive: true, mode: 0o700 });
@@ -342,9 +387,48 @@ test("verification work exhaustion preserves checkpoint evidence and resumes bou
   const retained = new Map(fs.readdirSync(lock).map((name) => [join(lock, name), fs.readFileSync(join(lock, name), "utf8")]));
   let diagnostics = 0;
   for (let i = 0; i < 12; i++) nativePass(home, { onDiagnostic: () => diagnostics++ });
-  assert.ok(diagnostics > 0, "the real verification byte budget interrupts expensive retirement");
+  assert.equal(diagnostics, 0, "retained evidence stays within the configured complete-attempt work budget");
   for (const [path, raw] of retained) assert.equal(fs.readFileSync(path, "utf8"), raw);
-  assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 3);
+  assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 4);
   assert.equal(helperPass(home).status, 0);
   assert.ok(storage(home).records < LIMITS.retainedEntries + 72);
+});
+
+function oldCanonicalJournal(home: string, transitions: number) {
+  const { root, lock, anchor } = paths(home);
+  fs.mkdirSync(lock, { recursive: true, mode: 0o700 });
+  let previous = { version: 2, state: "active", ownerHash: owner, leaseId: randomUUID(), previousLeaseId: null as string | null,
+    previousRecordHash: null as string | null, recoveredEntriesHash: createHash("sha256").update("[]").digest("hex") as string | undefined,
+    pid: 999999, hostname: hostname(), provider: "skills", createdAt: "2026-10-01", padding: "p".repeat(3300) };
+  let raw = `${JSON.stringify(previous)}\n`;
+  fs.writeFileSync(anchor, raw, { mode: 0o600 });
+  fs.linkSync(anchor, join(lock, "checkpoint.json")); fs.linkSync(anchor, join(lock, `lease-${previous.leaseId}.json`));
+  for (let index = 0; index < transitions; index++) {
+    const next = { ...previous, recoveredEntriesHash: undefined, state: index % 2 === 0 ? "released" : "active", leaseId: randomUUID(),
+      previousLeaseId: previous.leaseId, previousRecordHash: createHash("sha256").update(raw).digest("hex") };
+    raw = `${JSON.stringify(next)}\n`;
+    const name = `next-${previous.leaseId}.json`;
+    fs.writeFileSync(join(root, name), raw, { mode: 0o600 }); fs.linkSync(join(root, name), join(lock, name));
+    previous = next;
+  }
+}
+
+test("bounded migration catches up legacy journals at the admission bound and refuses one above unchanged", { timeout: 300_000, skip: process.platform !== "linux" }, (t) => {
+  for (const writer of ["native", "helper"] as const) for (const transitions of [64, 512, LIMITS.migrationEntries - 6]) {
+    const home = fixture(t); oldCanonicalJournal(home, transitions);
+    const started = performance.now();
+    if (writer === "native") assert.deepEqual(nativePass(home).getDiagnostics(), []);
+    else { const result = helperPass(home, "", WSL_SKILLS_HELPER, 120_000); assert.equal(result.status, 0, String(result.stderr)); }
+    assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 4);
+    assert.ok(storage(home).records <= 5);
+    assert.equal(helperPass(home).status, 0); nativePass(home);
+    t.diagnostic(JSON.stringify({ writer, legacyTransitions: transitions, durationMs: Math.round(performance.now() - started), ...storage(home) }));
+  }
+  for (const writer of ["native", "helper"] as const) {
+    const home = fixture(t); oldCanonicalJournal(home, LIMITS.migrationEntries - 5);
+    const before = evidence(home);
+    if (writer === "native") assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /storage cap/);
+    else assert.notEqual(helperPass(home).status, 0);
+    assert.deepEqual(evidence(home), before);
+  }
 });
