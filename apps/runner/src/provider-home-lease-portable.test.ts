@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -168,6 +168,29 @@ test("native POSIX and Windows checkpoints recover actual killed-parent publicat
     assert.ok(readdirSync(join(root, "mutable-home.lock")).length <= 36);
     t.diagnostic(`${process.platform}: ${boundary} recovered`);
   }
+});
+
+test("a published guard staging hard link is readable without another process or writer", (t) => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-lease-guard-alias-")));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const root = seed(home), registry = new ProviderHomeLeaseRegistry(owner);
+  registry.acquireHome(home);
+  const guard = join(root, "mutable-home.lock", "protocol-v4.json");
+  const staging = join(root, `.provider-home-lease-${randomUUID()}.tmp`);
+  linkSync(guard, staging);
+  const guardIdentity = lstatSync(guard, { bigint: true });
+  const stagingIdentity = lstatSync(staging, { bigint: true });
+  assert.equal(stagingIdentity.dev, guardIdentity.dev);
+  assert.equal(stagingIdentity.ino, guardIdentity.ino);
+  const before = leaseEvidence(root);
+  const snapshot = readLeaseIoSnapshot(root);
+  const namedGuard = snapshot.entries.find(entry => entry.directory === "lock" && entry.name === "protocol-v4.json")!;
+  const namedStaging = snapshot.entries.find(entry => entry.directory === "root" && entry.name === staging.slice(root.length + 1))!;
+  assert.equal(namedStaging.device, namedGuard.device);
+  assert.equal(namedStaging.inode, namedGuard.inode);
+  assert.deepEqual(namedStaging.raw, namedGuard.raw);
+  assert.deepEqual(leaseEvidence(root), before);
+  assert.equal(registry.releaseHome(home), true);
 });
 
 test("portable selected checkpoints preserve unsafe evidence and reject foreign or substituted authority", { timeout: 600_000 }, (t) => {

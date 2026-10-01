@@ -90,7 +90,7 @@ public static class WollipogProviderHomeLeaseIo {
     for(;;){handle=CreateFileW(path,access,sharing,IntPtr.Zero,3,REPARSE|(directory?BACKUP:0)|(write?WRITE_THROUGH:0),IntPtr.Zero);
       if(!handle.IsInvalid)break;int error=Marshal.GetLastWin32Error();handle.Dispose();
       if(error!=32&&error!=33)throw new Win32Exception(error);
-      Alive();if(elapsed.ElapsedMilliseconds>=fenceWaitMs)throw new Refusal(2,"provider HOME already in use: checkpoint publication is in progress; retry (Windows code "+error+")");Thread.Sleep(10);
+      Alive();if(elapsed.ElapsedMilliseconds>=fenceWaitMs)throw new Refusal(2,"provider HOME already in use: checkpoint publication is in progress; retry (Windows code "+error+", entry "+Path.GetFileName(path)+")");Thread.Sleep(10);
     }
     try{INFO info=Info(handle);Need((info.Attributes&REPARSE_ATTRIBUTE)==0&&((info.Attributes&DIRECTORY)!=0)==directory,"unsafe reparse or lease entry type");return handle;}catch{handle.Dispose();throw;}
   }
