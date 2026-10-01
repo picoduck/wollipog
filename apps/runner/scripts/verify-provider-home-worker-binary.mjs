@@ -182,11 +182,14 @@ try {
   assert.ok(active.length > 0, "the daemon worker published ownership using its parent PID");
   const before = evidence().map(({ path, hash }) => [path, hash]);
   const second = await start(join(root, "runner-b"));
-  await sync(second, "contended");
+  const contended = await sync(second, "contended");
+  assert.match(contended.error, /^Provider-home lease unavailable:/iu, "the exact contended request must report lease refusal");
+  await until(() => /lease unavailable|already in use/iu.test(output), "contended refusal log delivery");
   assert.match(output, /lease unavailable|already in use/iu);
   assert.deepEqual(evidence().map(({ path, hash }) => [path, hash]), before, "a second live runner cannot adopt private authority");
   await stop(first.child, "SIGKILL");
-  await sync(second, "recovery");
+  const recovered = await sync(second, "recovery");
+  assert.equal(recovered.error, undefined, output);
   assert.ok(evidence().some(item => item.record.state === "active" && item.record.pid === second.child.pid), "actual runner death enables proved recovery");
   const stopped = await stop(second.child, "SIGTERM"); assert.equal(stopped.code, 0, output);
   assert.ok(evidence().some(item => item.record.state === "released" && item.record.pid === second.child.pid), "graceful shutdown awaited exact release");
