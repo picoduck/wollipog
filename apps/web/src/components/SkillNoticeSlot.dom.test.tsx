@@ -75,6 +75,24 @@ test("the slot shows the most urgent item: an error, then an edited copy, then a
   assert.equal(item(skill(), undefined), null);
 });
 
+test("an edited copy that can be resolved now takes the slot before one behind an offline machine (CR-1.2)", () => {
+  const laptop = { ...studio, runnerId: "laptop", displayName: "Laptop" };
+  const pick = (runners: RunnerView[]) => {
+    const item = skillNoticeItem(skill(), runners, { studio: edited, laptop: edited }, []);
+    return item?.kind === "edited" ? item.runnerId : null;
+  };
+  assert.equal(pick([studio, laptop]), "studio", "Deployment order between machines that can both resolve it");
+  assert.equal(pick([{ ...studio, status: "offline" }, laptop]), "laptop", "an offline machine's copy waits");
+  assert.equal(pick([{ ...studio, protocolVersion: 1 }, laptop]), "laptop", "so does an older runner's");
+  assert.equal(pick([{ ...studio, status: "offline" }, { ...laptop, status: "offline" }]), "studio", "with none resolvable, the first shows");
+});
+
+test("a Manual Only error names no rule while the group's rules are unread", () => {
+  assert.equal(skillNoticeItem(skill(), [studio], { studio: manualEverywhere }, [manualRule], false)?.kind, "manual-only");
+  const item = skillNoticeItem(skill(), [studio], { studio: manualEverywhere }, [manualRule], false);
+  assert.equal(item?.kind === "manual-only" ? item.error.rule : undefined, null);
+});
+
 test("listText joins names and counts the rest", () => {
   assert.equal(listText([]), "");
   assert.equal(listText(["Codex"]), "Codex");

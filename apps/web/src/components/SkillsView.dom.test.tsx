@@ -2306,3 +2306,45 @@ test("Change Invocation… fixes the offending rule in one request each, and an 
   assertNoDomNode(view.slot());
   await view.unmount();
 });
+
+test("a grouped skill's Manual Only error offers no fix until the group's rules are read, then sends the person to Groups", async () => {
+  const agents = [
+    { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true },
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" as const, available: true },
+  ];
+  const machine = { ...runner, agents, providerAccounts: [] };
+  const skill = { id: "skill-1", name: "collect", groupId: "group-1", assignmentCount: 1, latestVersion: { id: "v1", digest: "d1", versionNumber: 1 } };
+  const patches: unknown[] = [];
+  let groupRead: "fail" | "ok" = "fail";
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [skill] }),
+    listSkillGroups: async () => ({ groups: [{ id: "group-1", name: "Platform", sortOrder: 0 }] }),
+    getSkill: async () => ({ skill, latestVersion: { ...skill.latestVersion, files: [] } }),
+    // The skill's own instance-wide rule; the group's runner-scoped rule outranks it on this machine.
+    listSkillAssignments: async () => ({ assignments: [{ id: "direct", skillId: "skill-1", scopeKind: "instance", agentSelector: { kind: "all" },
+      enabled: true, invocation: "manual" }] }),
+    listSkillGroupAssignments: async () => {
+      if (groupRead === "fail") throw new Error("HTTP 503");
+      return { assignments: [{ id: "group-rule", groupId: "group-1", scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "all" },
+        enabled: true, invocation: "manual" }] };
+    },
+    runnerSkills: async () => ({ desired: [{ name: "collect", versionDigest: "d1", targets: [
+      { agentId: "claude", invocation: "manual" }, { agentId: "codex", invocation: "manual" }] }], reported: null }),
+    updateSkillAssignment: async (...args: unknown[]) => { patches.push(args); return { assignment: {} }; },
+  } as unknown as ApiClient;
+  let view = await mountSkills(client, "skills-group-unread", [machine]);
+  await view.click(view.listItem("collect"));
+  assert.equal(view.slot()?.dataset.notice, "manual-only");
+  assert.deepEqual([...view.slot()!.querySelectorAll(".notice-actions > button")], [],
+    "the skill's own rule is never blamed while the group's could be the winner");
+  await view.unmount();
+
+  groupRead = "ok";
+  view = await mountSkills(client, "skills-group-read", [machine]);
+  await view.click(view.listItem("collect"));
+  assert.deepEqual([...view.slot()!.querySelectorAll(".notice-actions > button")].map((button) => button.textContent), ["Edit in Groups…"]);
+  assert.match(view.slot()!.textContent ?? "", /Switch the group's assignment to Agent Invocable/);
+  assert.deepEqual(patches, []);
+  await view.unmount();
+});

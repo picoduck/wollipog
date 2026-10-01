@@ -35,25 +35,34 @@ export type SkillNoticeItem<T extends SkillRule = SkillRule> =
   | { kind: "built-in-held"; release: string }
   | { kind: "recommended" };
 
+/** Whether this machine can resolve an edited copy from here now. */
+const resolvesEditedCopies = (runner: RunnerView) =>
+  runner.status === "online" && runnerSupportsProtocol(runner.protocolVersion, "skillDrift");
+
 /** Which notice the slot shows for this skill, or null when it needs nothing. Machines are read in
- * the order given, which is the Deployment order, so the same machine wins every time. */
+ * the order given, which is the Deployment order, so the same machine wins every time. `rulesComplete`
+ * is false while the skill's group's rules are unread, so no rule is blamed for a skipped agent. */
 export function skillNoticeItem<T extends SkillRule>(
   skill: SkillSummary,
   runners: ReadonlyArray<RunnerView>,
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
   rules: ReadonlyArray<T>,
+  rulesComplete = true,
 ): SkillNoticeItem<T> | null {
   // A rule that skips agents outranks a machine's own error: the page can name its fix.
-  const manualOnly = skillManualOnlyErrors(skill.name, runners, machineSkills, rules)[0];
+  const manualOnly = skillManualOnlyErrors(skill.name, runners, machineSkills, rules, rulesComplete)[0];
   if (manualOnly) return { kind: "manual-only", error: manualOnly };
   const [failed, ...others] = skillDeploymentErrors(skill.name, runners, machineSkills);
   if (failed) return { kind: "deployment-error", error: failed, more: others.length };
-  for (const runner of runners) {
+  // Deployment keeps no list of edited copies, so a copy that can be resolved now goes first: an
+  // offline machine's copy must not hide another machine's behind its disabled actions.
+  const edited = runners.flatMap((runner) => {
     const state = machineSkills[runner.runnerId];
-    if (!state || state.loadError) continue;
-    const entry = reportedSkillDrift(state.reported, skill.name)[0];
-    if (entry) return { kind: "edited", runnerId: runner.runnerId, entry };
-  }
+    return !state || state.loadError ? [] : reportedSkillDrift(state.reported, skill.name)
+      .map((entry) => ({ runner, entry }));
+  });
+  const copy = edited.find(({ runner }) => resolvesEditedCopies(runner)) ?? edited[0];
+  if (copy) return { kind: "edited", runnerId: copy.runner.runnerId, entry: copy.entry };
   const gitHeld = skill.gitAutoUpdate?.enabled ? skill.gitAutoUpdate.held : null;
   if (gitHeld) return { kind: "git-held", held: gitHeld };
   if (skill.builtIn?.heldUpdate) return { kind: "built-in-held", release: skill.builtIn.heldUpdate.release };
@@ -177,6 +186,8 @@ export interface SkillNoticeSlotProps<T extends SkillRule> {
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>;
   /** The skill's own assignments and its group's, which decide the rule behind a skipped agent. */
   rules: ReadonlyArray<T>;
+  /** False while a rule that could win is unread (the group's, loading or unreadable). */
+  rulesComplete?: boolean;
   busy: boolean;
   syncingRunnerId: string | null;
   onSwitchToAgentInvocable: (rule: T) => void;
@@ -196,7 +207,7 @@ export interface SkillNoticeSlotProps<T extends SkillRule> {
 export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps<T>) {
   const { skill, runners, machineLabels, machineSkills, rules, busy } = props;
   const reasonId = `skill-notice-reason-${useId().replace(/:/g, "")}`;
-  const item = skillNoticeItem(skill, runners, machineSkills, rules);
+  const item = skillNoticeItem(skill, runners, machineSkills, rules, props.rulesComplete ?? true);
   if (!item) return null;
   const machineName = (runnerId: string) => machineLabels.get(runnerId) ?? runnerId;
   const runnerOf = (runnerId: string) => runners.find((runner) => runner.runnerId === runnerId);

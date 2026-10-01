@@ -50,12 +50,16 @@ export interface SkillManualOnlyError<T extends SkillRule = SkillRule> {
 
 /** Every Manual Only rule that leaves agents unable to run this skill, one entry per rule, in the
  * order its first skipped agent appears. Read from what each machine is told to deploy, so it is
- * right before the machine reports, and it clears as soon as the rule changes. */
+ * right before the machine reports, and it clears as soon as the rule changes.
+ *
+ * `rulesComplete` is false while some rule that could win has not been read (the skill's group's,
+ * still loading or unreadable): a lower-ranked rule must never be blamed, so no rule is named. */
 export function skillManualOnlyErrors<T extends SkillRule>(
   skillName: string,
   runners: ReadonlyArray<Pick<RunnerView, "runnerId" | "agents">>,
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
   rules: ReadonlyArray<T>,
+  rulesComplete = true,
 ): SkillManualOnlyError<T>[] {
   const byRule = new Map<string, SkillManualOnlyError<T>>();
   for (const runner of runners) {
@@ -66,7 +70,7 @@ export function skillManualOnlyErrors<T extends SkillRule>(
       if (target.invocation !== "manual") continue;
       const agent = runner.agents.find((candidate) => candidate.id === target.agentId);
       if (!agent || agent.driver === "claude-code") continue;
-      const winner = winningSkillRule(rules, runner.runnerId, agent);
+      const winner = rulesComplete ? winningSkillRule(rules, runner.runnerId, agent) : undefined;
       // The rules this page read disagree with what the machine was told: say so without a fix.
       const rule = winner?.enabled && winner.invocation === "manual" ? winner : null;
       const key = rule ? `rule:${rule.id}` : "unknown";

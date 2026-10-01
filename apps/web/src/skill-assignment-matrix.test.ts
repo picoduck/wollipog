@@ -195,3 +195,15 @@ test("deployment errors are the machines that report an Error for an agent that 
   const skipped = state(); skipped.reported!.deployed![0]!.links[0] = { agentId: "codex", status: "unsupported", detail: "Manual-only invocation is not supported for this agent." };
   assert.deepEqual(skillDeploymentErrors("review", machines, { a: skipped }), []);
 });
+
+test("a group's rule that outranks the skill's own is the one blamed, and an unread group blames none (CR-1.1)", () => {
+  const direct = rule("direct");
+  const groupRunner = rule("group-runner", { groupId: "g", scopeKind: "runner", runnerId: "studio" });
+  const machines = { studio: told([["codex", "manual"]]) };
+  assert.equal(skillManualOnlyErrors("review", [studio], machines, [direct, groupRunner])[0]!.rule?.id, "group-runner",
+    "the group's runner-scoped rule outranks the skill's instance-wide one");
+  // The group's rules are still loading or could not be read: the direct rule might not be the winner.
+  assert.equal(skillManualOnlyErrors("review", [studio], machines, [direct], false)[0]!.rule, null);
+  assert.deepEqual(skillManualOnlyErrors("review", [studio], machines, [direct], false)[0]!.agents.map((agent) => agent.id), ["codex"],
+    "the error itself still shows");
+});

@@ -221,8 +221,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   // A detail loaded for an earlier selection is never shown under the current one.
   const detail = loadedDetail && loadedDetail.id === selectedId ? loadedDetail : null;
   const [assignments, setAssignments] = useState<SkillAssignmentView[]>([]);
-  /** The open skill's group's rules, which can be what deploys it; `revision` reloads them. */
-  const [groupRules, setGroupRules] = useState<{ groupId: string; rules: SkillGroupAssignmentView[] } | null>(null);
+  /** The open skill's group's rules, which can be what deploys it, as of a reload `revision`. */
+  const [groupRules, setGroupRules] = useState<{ groupId: string; revision: number; rules: SkillGroupAssignmentView[] } | null>(null);
   const [groupRulesRevision, setGroupRulesRevision] = useState(0);
   const [machineSkills, setMachineSkills] = useState<Record<string, RunnerSkillsResponse>>({});
   const [busy, setBusy] = useState(false);
@@ -369,7 +369,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     if (!detailGroupId) return;
     let active = true;
     api.listSkillGroupAssignments(detailGroupId)
-      .then((result) => { if (active) setGroupRules({ groupId: detailGroupId, rules: result.assignments }); })
+      .then((result) => { if (active) setGroupRules({ groupId: detailGroupId, revision: groupRulesRevision, rules: result.assignments }); })
       .catch(() => { if (active) setGroupRules(null); });
     return () => { active = false; };
   }, [api, detailGroupId, groupRulesRevision]);
@@ -585,10 +585,14 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   const gitSource = detail?.gitSource ?? latest?.gitSource;
   const heldUpdate = detail?.gitAutoUpdate?.enabled ? detail.gitAutoUpdate.held : null;
   const skillMd = latest?.files?.find((file) => file.path === "SKILL.md" && file.encoding === "utf8");
+  // Until the group's current rules are read, a rule of the skill's own could be blamed for what
+  // the group's rule does, so the notice offers no fix.
+  const groupRulesCurrent = Boolean(detailGroupId && groupRules?.groupId === detailGroupId &&
+    groupRules.revision === groupRulesRevision);
   const detailRules = useMemo<SkillRule[]>(() => [
     ...assignments,
-    ...(detailGroupId && groupRules?.groupId === detailGroupId ? groupRules.rules : []),
-  ], [assignments, detailGroupId, groupRules]);
+    ...(groupRulesCurrent ? groupRules!.rules : []),
+  ], [assignments, groupRulesCurrent, groupRules]);
 
   const howId = `skills-how-${useId().replace(/:/g, "")}`;
   const skillName = detail?.name ?? skills?.find((skill) => skill.id === selectedId)?.name;
@@ -775,6 +779,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 machineLabels={machineLabels}
                 machineSkills={machineSkills}
                 rules={detailRules}
+                rulesComplete={!detailGroupId || groupRulesCurrent}
                 busy={busy}
                 syncingRunnerId={syncingRunnerId}
                 onSwitchToAgentInvocable={(rule) => void updateRule(detail.id, rule, { invocation: "agent" })}
