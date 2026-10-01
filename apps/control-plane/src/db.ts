@@ -16367,6 +16367,15 @@ export class ControlPlaneDb {
       .run(JSON.stringify(result), occurrenceId);
   }
 
+  /** Consumption and its initial uncertainty are one durable write before dispatch. */
+  consumeGithubIssueClosure(occurrenceId: string, now: number): WorkflowDecisionView | null {
+    const result = this.stmt(`UPDATE workflow_decisions
+      SET status='consumed', consumed_at=?, issue_closure_result=?
+      WHERE occurrence_id=? AND category='issue_closure' AND status='approved'`)
+      .run(now, JSON.stringify({ outcome: "uncertain", completedAt: now }), occurrenceId);
+    return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
   consumeWorkflowDecision(occurrenceId: string, now: number): WorkflowDecisionView | null {
     const result = this.stmt(
       `UPDATE workflow_decisions SET status='consumed', consumed_at=?

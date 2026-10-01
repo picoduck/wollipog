@@ -2242,3 +2242,15 @@ test("issue closure tools require an Orchestrator, current protocol, and injecte
   assert.ok(names.includes("request_github_issue_closure"));
   assert.ok(names.includes("close_github_issue"));
 });
+
+test("a lost issue closure response tells the agent to inspect before renewed review", async () => {
+  const { deps } = makeDeps();
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  deps.fetch = async () => { throw new Error("response connection lost"); };
+  const result = await callTool(deps, "close_github_issue", { occurrenceId: "closure-1", resourceDigest: "a".repeat(64) });
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /may already have been applied/);
+  assert.match(resultText(result), /get_workflow_decision/);
+  assert.match(resultText(result), /Never replay/);
+});

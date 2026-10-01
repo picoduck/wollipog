@@ -17,5 +17,6 @@ for (const width of [1440, 390]) {
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([
       { requestId: "evidence-occurrence", optionId: "deny" },
     ]);
+    await expect(page.getByText("→ deny", { exact: true })).toBeVisible();
   });
 }

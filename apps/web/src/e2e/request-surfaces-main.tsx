@@ -544,7 +544,8 @@ function Fixture() {
     title: standaloneTemplate.title,
     options: standaloneTemplate.options,
     context: standaloneTemplate.context,
-    ...(session.pendingApproval ? {} : { resolvedOptionId: "trust", resolutionReason: "submitted" as const }),
+    ...(session.pendingApproval ? {} : { resolvedOptionId: scenario === "issue-closure"
+      ? (submissions.at(-1) as { optionId?: string } | undefined)?.optionId : "trust", resolutionReason: "submitted" as const }),
   }] : [];
   const artifactTimelineItems: TimelineItem[] = scenario === "artifact-timeline" ? [
     ...(artifactMode === "ready" ? Array.from({ length: 24 }, (_, index): TimelineItem =>

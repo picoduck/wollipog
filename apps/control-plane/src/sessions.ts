@@ -7103,7 +7103,7 @@ export class SessionsService {
         resourceSnapshot: { ...inspection, category: "issue_closure", reason: request.reason,
           explanation: request.explanation, evidence: request.evidence,
           ...(request.comment === undefined ? {} : { comment: request.comment }),
-          activeChildren: issueClosureActiveChildren(this.db, sessionId, request.issue) },
+          activeChildren: issueClosureActiveChildren(this.db, sessionId) },
       }, canAccess, { trustedIssueClosure: true });
       return created.ok ? ok({ decision: created.data }, created.status) : fail(created.error!, created.status);
     } catch {
@@ -7133,7 +7133,7 @@ export class SessionsService {
         this.db.resolvedCampaignSessionId(sessionId) !== sessionId ||
         decision.authority !== "human" || decision.policyRevision !== session.parentControlPolicy?.revision ||
         decision.resourceDigest !== resourceDigest || !decision.resolvedAt || now - decision.resolvedAt > 30 * 60_000 ||
-        auditDigest(issueClosureActiveChildren(this.db, sessionId, snapshot.issue)) !== auditDigest(snapshot.activeChildren)) {
+        auditDigest(issueClosureActiveChildren(this.db, sessionId)) !== auditDigest(snapshot.activeChildren)) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("issue-closure approval expired or its scope, payload, policy, or active child work changed; request renewed human review", 409);
     }
@@ -7141,21 +7141,20 @@ export class SessionsService {
     if (unsupported) return unsupported;
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
     // Guardrails and governance remain authoritative even though execution is provider-neutral.
-    if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).length ||
+    if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, now)) {
       return fail("resolve the session's pending requests and guardrails before executing issue closure", 409);
     }
-    const consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+    const consumed = this.db.consumeGithubIssueClosure(occurrenceId, now);
     if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
-    this.db.recordGithubIssueClosureResult(occurrenceId, { outcome: "uncertain", completedAt: now });
     this.hub.sessionChangedById(sessionId);
     let result: GithubIssueClosureResult = { outcome: "uncertain", completedAt: now };
     try {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       const response = await this.hub.requestFromRunner(session.runnerId, requestId, {
         type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot,
-      }, 90_000);
+      }, 150_000);
       if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok &&
           response.result && ["closed", "already_closed", "refused", "uncertain"].includes(response.result.outcome) &&
           Number.isSafeInteger(response.result.completedAt)) result = response.result;

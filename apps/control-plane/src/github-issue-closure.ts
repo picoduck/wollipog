@@ -39,18 +39,15 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     openPullRequests, activeChildren };
 }
 
-/** Conservatively include unverified live assignments that mention this issue. If assignment text
- * is unavailable, the child is included rather than being assumed unrelated. */
-export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string, issue: number) {
-  const mention = new RegExp(`(?:^|[^0-9])${issue}(?![0-9])`, "u");
+/** Any live campaign child can still hold related work. Include it conservatively: a task can
+ * move between issues in steering history, and a later "continue" prompt is not proof it is unrelated. */
+export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string) {
   return db.campaignDescendantIds(sessionId).flatMap((id) => {
     const child = db.getSession(id);
     if (!child || isTerminal(child.status) || child.archived) return [];
     const assignment = db.initialUserMessageText(id);
     const state = db.issueClosureAssignmentState(id);
     const prompts = [...(child.queued ?? []), ...(child.pendingPrompts ?? [])];
-    const texts = [assignment, state.latest?.text, state.command?.text, ...prompts.map((prompt) => prompt.text)];
-    if (assignment && texts.every((text) => !text || !mention.test(text))) return [];
     return [{ sessionId: id, title: child.title,
       assignmentDigest: createHash("sha256").update(JSON.stringify({
         assignment, state, prompts, parentSessionId: child.parentSessionId, worktreePath: child.worktreePath,

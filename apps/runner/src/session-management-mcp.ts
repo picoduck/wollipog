@@ -880,7 +880,7 @@ export const TOOLS: McpTool[] = [
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
       const compatibility = await issueClosureCompatibilityError(deps);
       if (compatibility) return compatibility;
-      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/github-issue-closures`, args);
+      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/github-issue-closures`, args, deps.requestTimeoutMs ?? 75_000);
       return result.ok ? textResult(result.data) : errorResult(result.message);
     },
   },
@@ -894,8 +894,10 @@ export const TOOLS: McpTool[] = [
       if (!deps.selfSessionId || typeof args?.occurrenceId !== "string") return errorResult("occurrenceId and a session identity are required");
       const compatibility = await issueClosureCompatibilityError(deps);
       if (compatibility) return compatibility;
-      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/github-issue-closures/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest });
-      return result.ok ? textResult({ decision: result.data }) : errorResult(result.message);
+      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/github-issue-closures/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest }, deps.requestTimeoutMs ?? 180_000);
+      return result.ok ? textResult({ decision: result.data }) : errorResult(result.status === undefined || result.status >= 500
+        ? `${result.message}. Closure may already have been applied; inspect get_workflow_decision and GitHub before requesting renewed human review. Never replay a mutation.`
+        : result.message);
     },
   },
 
