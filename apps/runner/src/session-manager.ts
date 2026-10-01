@@ -15,6 +15,7 @@
 
 import { buildConversationHandoff, handoffDestinationError, type ConversationHandoffDraft } from "@wollipog/protocol";
 import { transferClaudeAccountTranscript } from "./claude-account-transcript.js";
+import { transferCodexAccountTranscript } from "./codex-account-transcript.js";
 import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
 import { UnclassifiedRejectionJournal } from "./drivers/unclassified-rejection-journal.js";
 import type {
@@ -1189,7 +1190,11 @@ export class SessionManager {
      * durable metadata again, but cleanup must keep fencing the cwd already handed to launch(). */
     launchingWorktreePath?: string;
   }>();
-  private readonly transferAccountTranscript = transferClaudeAccountTranscript;
+  private readonly transferAccountTranscript = (
+    context: AgentContext, id: string, source: string, target: string, driver: AgentDriverKind,
+  ): Promise<void | boolean> => driver === "claude-code"
+    ? transferClaudeAccountTranscript(context, id, source, target)
+    : transferCodexAccountTranscript(context, id, source, target);
   /** Turn-boundary provider-account handoffs share the worktree handoff's replacement guarantees
    * but keep a distinct lane so neither operation can accidentally consume the other's target. */
   private readonly providerAccountSwitches = new Map<string, {
@@ -5535,6 +5540,7 @@ export class SessionManager {
       providerAccountProvider: providerAccount?.provider,
       providerCredentialHome: providerAccount?.credentialHome,
       providerConversationHome: priorResumeId ? prior?.providerConversationHome : undefined,
+      providerUnstartedThreadId: priorResumeId ? prior?.providerUnstartedThreadId : undefined,
       pendingProviderAccountId: prior?.pendingProviderAccountId,
       pendingProviderAccountLabel: prior?.pendingProviderAccountLabel,
       pendingProviderAccountProvider: prior?.pendingProviderAccountProvider,
@@ -7322,34 +7328,47 @@ export class SessionManager {
           meta.providerStateVersion !== (meta.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(meta, launchGeneration);
       }
-      // Credential homes also own Claude's projects store. A same-id resume cannot find its
+      // Credential homes also own provider transcript stores. A same-id resume cannot find its
       // conversation after an account switch until its exact history is in the new home. Bwrap
       // already mounts the same session-owned store across credential contexts.
-      if (meta.driver === "claude-code" && !resumeId && meta.providerCredentialHome) {
+      const accountHistoryDriver = meta.driver === "claude-code" || meta.driver === "codex" || meta.driver === "codex-app-server";
+      if (accountHistoryDriver && !resumeId && meta.providerCredentialHome) {
         // No provider history exists yet. Its first turn will write into the selected home,
         // including when the account was changed before Claude established a conversation id.
         meta.providerConversationHome = meta.providerCredentialHome;
         this.store.patchMeta(sessionId, { providerConversationHome: meta.providerConversationHome });
         this.store.flush(sessionId);
       }
-      if (meta.driver === "claude-code" && resumeId && meta.providerConversationHome &&
+      if (accountHistoryDriver && resumeId && meta.providerConversationHome &&
           meta.providerCredentialHome && meta.providerConversationHome !== meta.providerCredentialHome) {
-        if (this.executionIsolation.mode !== "bwrap") {
+        const unusedCodexThread = meta.driver === "codex-app-server" &&
+          meta.providerUnstartedThreadId === resumeId &&
+          this.store.readEvents(sessionId).every((event) =>
+            event.payload.kind === "provider_account_switched" || event.payload.kind === "stderr");
+        if (this.executionIsolation.mode !== "bwrap" && !unusedCodexThread) {
           try {
-            await this.transferAccountTranscript(
-              meta.context, resumeId, meta.providerConversationHome, meta.providerCredentialHome,
+            const transferred = await this.transferAccountTranscript(
+              meta.context, resumeId, meta.providerConversationHome, meta.providerCredentialHome, meta.driver,
             );
+            if (transferred === false) throw new Error("the saved Codex conversation is missing");
           } catch {
             if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
             this.emitEvent(sessionId, {
               kind: "error",
-              message: "could not transfer the saved Claude conversation to the selected account",
+              message: "could not transfer the saved provider conversation to the selected account",
             });
-            this.emitStatus(sessionId, "failed", "The saved Claude conversation could not be transferred to the selected account.");
+            this.emitStatus(sessionId, "failed", "The saved provider conversation could not be transferred to the selected account.");
             return false;
           }
         }
         if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+        if (unusedCodexThread) {
+          // App-server allocates an id before writing its first rollout. Recreate only a known
+          // unused allocation; attempted, imported, or forked conversations always keep their id.
+          resumeId = undefined;
+          meta.agentSessionId = null;
+          this.store.patchMeta(sessionId, { agentSessionId: null });
+        }
         meta.providerConversationHome = meta.providerCredentialHome;
         this.store.patchMeta(sessionId, { providerConversationHome: meta.providerConversationHome });
         this.store.flush(sessionId);
@@ -7694,6 +7713,10 @@ export class SessionManager {
       // resumability remains capability-derived from the handshake stored above.
       if (meta.driver === "codex-app-server" || meta.driver === "pi" || meta.driver === "acp") {
         this.captureAgentSessionId(sessionId, client);
+      }
+      if (meta.driver === "codex-app-server" && !resumeId && client.agentSessionId()) {
+        this.store.patchMeta(sessionId, { providerUnstartedThreadId: client.agentSessionId()! });
+        this.store.flush(sessionId);
       }
       if (meta.driver === "acp" && client.prepareCommand && client.invokeCommand) {
         const current = this.store.readMeta(sessionId);
@@ -15084,6 +15107,11 @@ export class SessionManager {
     payload: SessionEventPayload,
     durable?: DurableCommandLifecycle,
   ): ReturnType<SessionStore["appendEvent"]> | undefined {
+    if ((payload.kind === "user_message" || payload.kind === "agent_message" ||
+        payload.kind === "agent_thought" || payload.kind === "tool_call") &&
+        this.store.readMeta(sessionId)?.providerUnstartedThreadId) {
+      this.store.patchMeta(sessionId, { providerUnstartedThreadId: undefined });
+    }
     const entry = this.active.get(sessionId);
     if (entry?.historyIntegrityFailure) {
       durable?.failed(entry.historyIntegrityFailure, "INVALID_COMMAND");
@@ -17754,7 +17782,7 @@ export class SessionManager {
     if (payload.kind === "agent_message" && payload.text) {
       this.store.patchMeta(sessionId, { preview: payload.text.slice(0, 240) });
     } else if (payload.kind === "user_message") {
-      this.store.patchMeta(sessionId, { preview: null });
+      this.store.patchMeta(sessionId, { preview: null, providerUnstartedThreadId: undefined });
     } else if (payload.kind === "permission_request") {
       const prior = this.store.readMeta(sessionId)?.pendingApproval?.requestId;
       if (prior && prior !== payload.requestId && !payload.ownerToolUseId &&

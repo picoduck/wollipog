@@ -374,6 +374,21 @@ text and `cmd.exe` metacharacters out of the Windows command line.
   legacy failed switch, selecting an account that already owns the exact conversation can resume
   its existing history when the prior home has none. Configured home aliases and already shared
   projects stores continue to work without copying a store onto itself.
+  Codex exec and app-server follow the same account-handoff lifecycle: copy the exact saved
+  `rollout-…-<thread-id>.jsonl` from `sessions` or `archived_sessions`, plus descendant rollouts
+  identified by their session metadata. Codex credentials, SQLite indexes/memory state, and
+  `memories` files stay with their account. The selected CLI discovers the copied rollout under
+  its own home; the runner does not transplant another account's database. App-server allocates
+  an id before persisting its first rollout, so a durably marked, unused allocation can be
+  recreated under the selected account before its first prompt. Once provider-visible activity
+  exists, absent saved history fails safely and never becomes a fresh thread.
+  This transfer does not opt accounts into sharing additional saved memories: native Claude
+  project-memory directories and Codex memory files are not copied. Existing Bubblewrap storage
+  remains session-owned; its shared Claude projects mount also contains project auto-memory,
+  whereas Codex's memories remain outside the shared sessions mount. A future memory-sharing
+  option must define consistent scope and behavior across these isolation modes. Conversation
+  history still includes any memory already injected into it, and the selected provider can
+  learn from that continued conversation according to its own memory settings.
 - **stdio control protocol** (interactive modes): when claude needs permission for a tool it writes a
   `control_request` JSONL frame on stdout —
   `{"type":"control_request","request_id":"<id>","request":{"subtype":"can_use_tool","tool_name":"Bash","description":"…","input":{…}}}`.

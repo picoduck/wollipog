@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type {
   AgentDriverKind,
@@ -116,6 +116,9 @@ test("an idle Codex session switches credential homes, resumes the same thread, 
     assert.equal(await manager.start(spec), true);
     made.store.patchMeta(spec.sessionId, {
       agentSessionId: "codex-thread",
+      // This lifecycle fixture represents an already persisted thread. Dedicated filesystem
+      // cases below distinguish an unused allocation from attempted or imported history.
+      providerUnstartedThreadId: undefined,
       providerCredentialScopeId: "scope-work",
       providerCredentialIdentityId: "identity-work",
       providerCredentialIdentityEvidence: { version: 2, fields: { email: "digest-work" } },
@@ -680,109 +683,183 @@ test("an exhausted structured window schedules an automatic switch only after th
   }
 });
 
-for (const scenario of ["idle", "dormant", "interrupted transfer", "before first turn", "legacy missing history"] as const) {
-  test(`Claude account switching preserves the transcript for resume and switching back (${scenario})`, async () => {
-    const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-transcript-"));
-    const messages: RunnerToControlPlane[] = [];
-    const sessionId = "11111111-2222-4333-8444-555555555555";
-    const homes = { work: join(root, "work"), personal: join(root, "personal") };
-    for (const home of Object.values(homes)) mkdirSync(home, { recursive: true });
-    const project = root.replace(/[^a-zA-Z0-9]/g, "-");
-    const transcript = (home: string) => join(home, "projects", project, `${sessionId}.jsonl`);
-    const failures: string[] = [];
-    let completed = 0;
+for (const driver of ["claude-code", "codex", "codex-app-server"] as const) {
+  for (const scenario of ["idle", "dormant", "interrupted transfer", "before first turn", "legacy missing history"] as const) {
+    test(`${driver} account switching preserves the transcript for resume and switching back (${scenario})`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-transcript-"));
+      const messages: RunnerToControlPlane[] = [];
+      const sessionId = "11111111-2222-4333-8444-555555555555";
+      const homes = { work: join(root, "work"), personal: join(root, "personal") };
+      for (const home of Object.values(homes)) mkdirSync(home, { recursive: true });
+      const project = root.replace(/[^a-zA-Z0-9]/g, "-");
+      const transcript = (home: string) => driver === "claude-code"
+        ? join(home, "projects", project, `${sessionId}.jsonl`)
+        : join(home, "sessions", "2026", "09", "30", `rollout-2026-09-30T12-00-00-${sessionId}.jsonl`);
+      const failures: string[] = [];
+      let completed = 0;
+      let manager: SessionManager | undefined;
+      try {
+        const factory = (_driver: unknown, launch: { env: Record<string, string>; resumeId?: string }) => {
+          const home = (driver === "claude-code" ? launch.env.CLAUDE_CONFIG_DIR : launch.env.CODEX_HOME)!;
+          let established = Boolean(launch.resumeId);
+          return {
+            initialize: async () => {},
+            newSession: async () => sessionId,
+            prompt: async (text: string) => {
+              if (launch.resumeId && !existsSync(transcript(home))) {
+                failures.push("No conversation found with session ID");
+                return "refusal" as const;
+              }
+              mkdirSync(dirname(transcript(home)), { recursive: true });
+              const prior = existsSync(transcript(home)) ? readFileSync(transcript(home), "utf8") : "";
+              writeFileSync(transcript(home), prior + JSON.stringify({ type: "user", message: text, sessionId }) + "\n");
+              established = true;
+              completed++;
+              return "end_turn" as const;
+            },
+            cancel: () => {}, dispose: () => {}, setConfig: async () => {}, resolvePermission: () => false,
+            agentSessionId: () => established ? sessionId : null,
+          };
+        };
+        let made = makeManager(root, factory, messages, true);
+        manager = made.manager;
+        const resolveAccount: ProviderAccountResolver = (spec) => ({
+          id: spec.providerAccountId!, label: spec.providerAccountId!, provider: driver === "claude-code" ? "claude" : "codex", credentialHome: homes[spec.providerAccountId as keyof typeof homes],
+        });
+        (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
+        const spec = launchSpec(root, driver, "work");
+        assert.equal(await manager.start(spec), true);
+        if (scenario === "before first turn") {
+          assert.equal(made.store.readMeta(spec.sessionId)?.agentSessionId, null);
+          assert.equal(made.store.readMeta(spec.sessionId)?.seq, 0);
+          await manager.switchProviderAccount(spec.sessionId, "personal");
+        }
+        manager.prompt(spec.sessionId, "first turn");
+        await waitFor(() => made.store.readMeta(spec.sessionId)?.status === "idle" && completed === 1, "first turn did not settle");
+        if (scenario === "before first turn") {
+          await manager.switchProviderAccount(spec.sessionId, "work");
+          manager.prompt(spec.sessionId, "Continue, please.");
+          await waitFor(() => failures.length > 0 || (completed === 2 && made.store.readMeta(spec.sessionId)?.status === "idle"), "continued turn did not settle");
+          assert.deepEqual(failures, [], "a switch before the first turn must remember where that turn saved history");
+          return;
+        }
+        if (scenario === "legacy missing history") {
+          // An old runner changed the credential binding without copying history or persisting a
+          // source marker. Recovering by selecting the original account must still work.
+          manager.shutdownAll();
+          made.store.patchMeta(spec.sessionId, {
+            providerAccountId: "personal", providerAccountLabel: "personal", providerAccountProvider: driver === "claude-code" ? "claude" : "codex",
+            providerCredentialHome: homes.personal, providerConversationHome: undefined,
+          });
+          made.store.flush(spec.sessionId);
+          made = makeManager(root, factory, messages, true);
+          manager = made.manager;
+          (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
+          await manager.switchProviderAccount(spec.sessionId, "work");
+          manager.prompt(spec.sessionId, "Continue, please.");
+          await waitFor(() => failures.length > 0 || (completed === 2 && made.store.readMeta(spec.sessionId)?.status === "idle"), "legacy recovery did not settle");
+          assert.deepEqual(failures, []);
+          assert.equal(completed, 2);
+          return;
+        }
+        if (scenario === "dormant") {
+          manager.shutdownAll();
+          made = makeManager(root, factory, messages, true);
+          manager = made.manager;
+          (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
+        }
+        if (scenario === "interrupted transfer") renameSync(transcript(homes.work), `${transcript(homes.work)}.retained`);
+        await manager.switchProviderAccount(spec.sessionId, "personal");
+        if (scenario === "interrupted transfer") {
+          assert.ok(made.store.readMeta(spec.sessionId)?.providerAccountSwitchFailure);
+          assert.equal(made.store.readMeta(spec.sessionId)?.providerConversationHome, homes.work);
+          manager.shutdownAll();
+          renameSync(`${transcript(homes.work)}.retained`, transcript(homes.work));
+          made = makeManager(root, factory, messages, true);
+          manager = made.manager;
+          (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
+        }
+        manager.prompt(spec.sessionId, "Continue, please.");
+        await waitFor(() => failures.length > 0 || (completed === 2 && made.store.readMeta(spec.sessionId)?.status === "idle"), "continued turn did not settle");
+        assert.deepEqual(failures, [], "the selected account must find the same conversation on resume");
+        await manager.switchProviderAccount(spec.sessionId, "work");
+        manager.prompt(spec.sessionId, "continue back on work");
+        await waitFor(() => completed === 3 && made.store.readMeta(spec.sessionId)?.status === "idle", "switch-back turn did not settle");
+        assert.match(readFileSync(transcript(homes.work), "utf8"), /Continue, please/);
+      } finally {
+        manager?.shutdownAll();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const state of ["unused", "attempted", "imported"] as const) {
+  test(`Codex's unpersisted initial thread handles ${state} history without discarding a conversation`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-empty-account-switch-"));
     let manager: SessionManager | undefined;
     try {
-    const factory = (_driver: unknown, launch: { env: Record<string, string>; resumeId?: string }) => {
-      const home = launch.env.CLAUDE_CONFIG_DIR!;
-      let established = Boolean(launch.resumeId);
+      const homes = { work: join(root, "work"), personal: join(root, "personal") };
+      for (const home of Object.values(homes)) mkdirSync(home);
+      const launches: Array<{ home: string; resumeId?: string; id: string }> = [];
+      let completed = 0;
+      const transcript = (home: string, id: string) => join(home, "sessions", "2026", "09", "30", `rollout-2026-09-30T12-00-00-${id}.jsonl`);
+      const made = makeManager(root, (_driver: unknown, launch: { env: Record<string, string>; resumeId?: string }) => {
+        const current = { home: launch.env.CODEX_HOME!, resumeId: launch.resumeId,
+          id: launch.resumeId ?? `11111111-2222-4333-8444-55555555555${launches.length}` };
+        launches.push(current);
         return {
           initialize: async () => {},
-          newSession: async () => sessionId,
+          newSession: async () => {
+            if (current.resumeId && !existsSync(transcript(current.home, current.id))) throw new Error("no rollout found");
+          },
           prompt: async (text: string) => {
-            if (launch.resumeId && !existsSync(transcript(home))) {
-              failures.push("No conversation found with session ID");
-              return "refusal" as const;
-            }
-            mkdirSync(join(home, "projects", project), { recursive: true });
-            const prior = existsSync(transcript(home)) ? readFileSync(transcript(home), "utf8") : "";
-          writeFileSync(transcript(home), prior + JSON.stringify({ type: "user", message: text, sessionId }) + "\n");
-          established = true;
-            completed++;
+            const file = transcript(current.home, current.id);
+            mkdirSync(dirname(file), { recursive: true });
+            writeFileSync(file, text + "\n"); completed++;
             return "end_turn" as const;
           },
           cancel: () => {}, dispose: () => {}, setConfig: async () => {}, resolvePermission: () => false,
-          agentSessionId: () => established ? sessionId : null,
+          agentSessionId: () => current.id,
         };
-      };
-      let made = makeManager(root, factory, messages, true);
+      }, [], true);
       manager = made.manager;
-      const resolveAccount: ProviderAccountResolver = (spec) => ({
-        id: spec.providerAccountId!, label: spec.providerAccountId!, provider: "claude", credentialHome: homes[spec.providerAccountId as keyof typeof homes],
+      (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = (spec) => ({
+        id: spec.providerAccountId!, label: spec.providerAccountId!, provider: "codex",
+        credentialHome: homes[spec.providerAccountId as keyof typeof homes],
       });
-      (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
-      const spec = launchSpec(root, "claude-code", "work");
+      const spec = launchSpec(root, "codex-app-server", "work");
       assert.equal(await manager.start(spec), true);
-      if (scenario === "before first turn") {
-        assert.equal(made.store.readMeta(spec.sessionId)?.agentSessionId, null);
-        assert.equal(made.store.readMeta(spec.sessionId)?.seq, 0);
-        await manager.switchProviderAccount(spec.sessionId, "personal");
+      const originalId = made.store.readMeta(spec.sessionId)!.agentSessionId!;
+      assert.equal(existsSync(transcript(homes.work, originalId)), false);
+      if (state === "attempted") {
+        manager.prompt(spec.sessionId, "first user prompt");
+        await waitFor(() => completed === 1 && made.store.readMeta(spec.sessionId)?.status === "idle", "first prompt did not finish");
+        rmSync(transcript(homes.work, originalId));
       }
-      manager.prompt(spec.sessionId, "first turn");
-      await waitFor(() => made.store.readMeta(spec.sessionId)?.status === "idle" && completed === 1, "first turn did not settle");
-      if (scenario === "before first turn") {
-        await manager.switchProviderAccount(spec.sessionId, "work");
-        manager.prompt(spec.sessionId, "Continue, please.");
-        await waitFor(() => failures.length > 0 || (completed === 2 && made.store.readMeta(spec.sessionId)?.status === "idle"), "continued turn did not settle");
-        assert.deepEqual(failures, [], "a switch before the first turn must remember where that turn saved history");
-        return;
+      if (state === "imported") {
+        // Imported/forked history has no unused-allocation marker, even if its local event log
+        // is empty. Missing provider history must preserve that coordinate for recovery.
+        made.store.patchMeta(spec.sessionId, { providerUnstartedThreadId: undefined });
       }
-      if (scenario === "legacy missing history") {
-        // An old runner changed the credential binding without copying history or persisting a
-        // source marker. Recovering by selecting the original account must still work.
-        manager.shutdownAll();
-        made.store.patchMeta(spec.sessionId, {
-          providerAccountId: "personal", providerAccountLabel: "personal", providerAccountProvider: "claude",
-          providerCredentialHome: homes.personal, providerConversationHome: undefined,
-        });
-        made.store.flush(spec.sessionId);
-        made = makeManager(root, factory, messages, true);
-        manager = made.manager;
-        (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
-        await manager.switchProviderAccount(spec.sessionId, "work");
-        manager.prompt(spec.sessionId, "Continue, please.");
-        await waitFor(() => failures.length > 0 || (completed === 2 && made.store.readMeta(spec.sessionId)?.status === "idle"), "legacy recovery did not settle");
-        assert.deepEqual(failures, []);
-        assert.equal(completed, 2);
-        return;
+      if (state === "unused") {
+        made.store.appendEvent(spec.sessionId, { kind: "stderr", text: "startup diagnostic" });
       }
-      if (scenario === "dormant") {
-        manager.shutdownAll();
-        made = makeManager(root, factory, messages, true);
-        manager = made.manager;
-        (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
-      }
-      if (scenario === "interrupted transfer") renameSync(transcript(homes.work), `${transcript(homes.work)}.retained`);
       await manager.switchProviderAccount(spec.sessionId, "personal");
-      if (scenario === "interrupted transfer") {
+      if (state !== "unused") {
         assert.ok(made.store.readMeta(spec.sessionId)?.providerAccountSwitchFailure);
-        assert.equal(made.store.readMeta(spec.sessionId)?.providerConversationHome, homes.work);
-        manager.shutdownAll();
-        renameSync(`${transcript(homes.work)}.retained`, transcript(homes.work));
-        made = makeManager(root, factory, messages, true);
-        manager = made.manager;
-        (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount = resolveAccount;
+        assert.equal(made.store.readMeta(spec.sessionId)?.agentSessionId, originalId);
+        assert.equal(launches.length, 1, "missing attempted history must not launch a fresh thread");
+      } else {
+        assert.equal(launches.length, 2);
+        assert.equal(launches[1]!.resumeId, undefined);
+        assert.notEqual(made.store.readMeta(spec.sessionId)?.agentSessionId, originalId);
+        manager.prompt(spec.sessionId, "first turn on the selected account");
+        await waitFor(() => completed === 1 && made.store.readMeta(spec.sessionId)?.status === "idle", "selected account was not usable");
+        await manager.switchProviderAccount(spec.sessionId, "work");
+        assert.equal(launches[2]!.resumeId, launches[1]!.id, "a persisted conversation keeps its exact thread id");
+        assert.match(readFileSync(transcript(homes.work, launches[1]!.id), "utf8"), /selected account/);
       }
-      manager.prompt(spec.sessionId, "Continue, please.");
-      await waitFor(() => failures.length > 0 || (completed === 2 && made.store.readMeta(spec.sessionId)?.status === "idle"), "continued turn did not settle");
-      assert.deepEqual(failures, [], "the selected account must find the same conversation on resume");
-      await manager.switchProviderAccount(spec.sessionId, "work");
-      manager.prompt(spec.sessionId, "continue back on work");
-      await waitFor(() => completed === 3 && made.store.readMeta(spec.sessionId)?.status === "idle", "switch-back turn did not settle");
-      assert.match(readFileSync(transcript(homes.work), "utf8"), /Continue, please/);
-    } finally {
-      manager?.shutdownAll();
-      rmSync(root, { recursive: true, force: true });
-    }
+    } finally { manager?.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
   });
 }

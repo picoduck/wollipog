@@ -31,11 +31,15 @@ for (const implementation of ["native", "WSL shell"] as const) {
       writeFileSync(join(source, ".credentials.json"), "source credential");
       writeFileSync(join(target, ".credentials.json"), "target credential");
       writeFileSync(join(target, "projects", "project", "other.jsonl"), "other conversation");
+      for (const home of [source, target]) mkdirSync(join(home, "projects", "project", "memory"));
+      writeFileSync(join(source, "projects", "project", "memory", "MEMORY.md"), "source project memories");
+      writeFileSync(join(target, "projects", "project", "memory", "MEMORY.md"), "target project memories");
       await run(source, target);
       assert.equal(readFileSync(file(target), "utf8"), "conversation\n");
       assert.equal(readFileSync(child(target), "utf8"), "child conversation\n");
       assert.equal(readFileSync(join(target, ".credentials.json"), "utf8"), "target credential");
       assert.equal(readFileSync(join(target, "projects", "project", "other.jsonl"), "utf8"), "other conversation");
+      assert.equal(readFileSync(join(target, "projects", "project", "memory", "MEMORY.md"), "utf8"), "target project memories");
       writeFileSync(file(target), "conversation\nnew turn\n");
       await run(target, source);
       assert.equal(readFileSync(file(source), "utf8"), "conversation\nnew turn\n");
