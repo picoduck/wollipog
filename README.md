@@ -205,6 +205,21 @@ an agent's `defaultProviderAccountId`. Wollipog maps the selected directory to
 label, provider, and login state. Omitting `providerAccounts` preserves the provider's ordinary
 default home exactly.
 
+Native Claude and Codex accounts inherit user-installed marketplace plugins from the provider's
+default home (`~/.claude` or `~/.codex`) when signing in or launching a session or Native TUI.
+New installs, updates, disables, and removals take effect on the next launch. Account-specific
+installations, settings, and explicit CLI overrides take precedence. Claude gets its own cached
+plugin copies and user-scope install records; project/local installs are not promoted to user scope.
+Credentials, transcripts, plugin data, and remote catalog caches remain separate.
+Codex app-server sessions synchronize remote catalog installations before creating or resuming a
+thread and before each new turn, then refresh connected app tools. Installing a catalog plugin
+through `~/.codex` therefore reaches managed accounts signed in to the same Codex account without
+a second install. Different accounts still require their own catalog installation and app access.
+Older Codex versions without these refresh APIs retain their existing inventory. WSL, container,
+and cloud targets use their own local plugin installations.
+Claude's claude.ai-synced plugins use Claude Code's account-specific sync and organization policies;
+their remote installation state is not inherited from another account.
+
 Machine owners can also add and remove accounts from the Machine card. A sign-in to an account
 that is already on the Machine is discarded rather than recorded twice. Removing an account deletes
 the credential directory Wollipog created for it, unless a session on that Machine still uses it;

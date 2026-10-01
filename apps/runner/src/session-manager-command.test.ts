@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -26,6 +26,8 @@ import {
 } from "./session-manager.js";
 import { setGitRunnerForTests } from "./git-ops.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { inheritCodexPlugins } from "./codex-plugins.js";
+import { inheritProviderPlugins } from "./provider-plugins.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -139,6 +141,8 @@ function harness(options: {
   driverKind?: "claude-code" | "acp" | "codex-app-server";
   newSessionGate?: Promise<string>;
   agentTurnId?: string;
+  prepareCodexPlugins?: (meta: SessionMeta, root: string) => string[];
+  prepareClaudePlugins?: (meta: SessionMeta, root: string) => void;
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-command-"));
   const store = new SessionStore(root);
@@ -218,8 +222,12 @@ function harness(options: {
       if (options.driverKind === "acp") return undefined;
       meta.sessionSlashCommands = commands;
       if (options.driverKind === "codex-app-server") {
-        return { codexPrompts: commands.map((command) => ({ name: command.name, body: `Run ${command.name} on $1.` })) };
+        return {
+          codexPrompts: commands.map((command) => ({ name: command.name, body: `Run ${command.name} on $1.` })),
+          ...(options.prepareCodexPlugins ? { codexLaunchArgs: options.prepareCodexPlugins(meta, root) } : {}),
+        };
       }
+      options.prepareClaudePlugins?.(meta, root);
       return options.fresh === false
         ? undefined
         : {
@@ -368,6 +376,51 @@ test("fresh v75 commands use a durable, provenance-preserving provider boundary 
     });
     assert.equal(h.store.readMeta("command-session")?.title, "");
     assert.equal(h.store.readMeta("command-session")?.titleSource, "generated");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("Codex plugin defaults reach the driver without freezing into session metadata", async () => {
+  const h = harness({
+    driverKind: "codex-app-server",
+    prepareCodexPlugins: (meta, root) => {
+      meta.env = { HOME: root, CODEX_HOME: join(root, "account") };
+      return inheritCodexPlugins(meta);
+    },
+  });
+  try {
+    const plugin = join(h.root, ".codex/plugins/cache/local/review/local/.codex-plugin");
+    mkdirSync(plugin, { recursive: true });
+    writeFileSync(join(plugin, "plugin.json"), '{"name":"review"}');
+    writeFileSync(join(h.root, ".codex/config.toml"), '[plugins."review@local"]\nenabled = true\n');
+    assert.equal(await h.start(), true);
+    assert.ok(h.driverOptions()?.args.includes("plugins.review@local.enabled=true"));
+    assert.ok(existsSync(join(h.root, "account/plugins/cache/local/review/local/.codex-plugin/plugin.json")));
+    assert.deepEqual(h.store.readMeta("command-session")?.args, []);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("Claude plugins reach a managed session before its driver starts", async () => {
+  const h = harness({ prepareClaudePlugins: (meta, root) => {
+    meta.env = { HOME: root, CLAUDE_CONFIG_DIR: join(root, "account") };
+    inheritProviderPlugins(meta);
+  } });
+  try {
+    const plugin = join(h.root, ".claude/plugins/cache/local/review/1.0.0");
+    mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(plugin, ".claude-plugin/plugin.json"), '{"name":"review"}');
+    writeFileSync(join(h.root, ".claude/settings.json"), '{"enabledPlugins":{"review@local":true}}');
+    writeFileSync(join(h.root, ".claude/plugins/installed_plugins.json"), JSON.stringify({ version: 2,
+      plugins: { "review@local": [{ scope: "user", installPath: plugin, version: "1.0.0" }] } }));
+    assert.equal(await h.start(), true);
+    const account = h.driverOptions()?.env?.CLAUDE_CONFIG_DIR;
+    assert.equal(account, join(h.root, "account"));
+    const registry = JSON.parse(readFileSync(join(account!, "plugins/installed_plugins.json"), "utf8"));
+    assert.ok(existsSync(join(registry.plugins["review@local"][0].installPath, ".claude-plugin/plugin.json")));
+    assert.deepEqual(h.store.readMeta("command-session")?.args, []);
   } finally {
     h.cleanup();
   }

@@ -1033,6 +1033,147 @@ test("image validation failure is readable and never calls turn/start", async ()
   assert.match(error.message, /unsupported MIME.*image\/png.*image\/jpeg.*image\/webp/);
 });
 
+test("remote catalog installs become available before thread start and between turns", async () => {
+  const h = makeHarness();
+  let installed = false;
+  let materialized = false;
+  const calls: string[] = [];
+  (h.driver as any).peer = {
+    requestWithDeadline: async (method: string) => {
+      calls.push(method);
+      if (method === "plugin/reconcile") {
+        materialized = installed;
+        return { changedPlugins: [], failedRemotePluginIds: [], failedMaterializationRemotePluginIds: [] };
+      }
+      if (method === "skills/list") return { data: [{ skills: materialized
+        ? [{ name: "notion:search", path: "/account/plugins/cache/remote/notion/1/skills/search/SKILL.md", enabled: true }]
+        : [] }] };
+      if (method === "app/installed") return {};
+      throw new Error(`unexpected method ${method}`);
+    },
+    request: async (method: string) => {
+      calls.push(method);
+      if (method === "thread/start") {
+        assert.equal(materialized, true, "an account must receive existing catalog installs before starting its thread");
+        return { thread: { id: "plugin-thread" } };
+      }
+      assert.equal(method, "turn/start");
+      assert.equal(materialized, installed, "an external installation change must reach the next provider turn");
+      return { turn: { id: "plugin-turn" } };
+    },
+  };
+  installed = true; // Installed through ~/.codex, whose account is also signed in here.
+  await h.driver.newSession("/project");
+  await nextTask();
+  assert.ok(h.driver.sessionCommands().some((command) => command.name === "notion:search"));
+  installed = false; // Removed externally while this app-server remains running.
+  const turn = h.driver.prompt("continue");
+  await nextTask();
+  assert.ok(calls.includes("turn/start"));
+  (h.driver as any).settleTurn("end_turn");
+  assert.equal(await turn, "end_turn");
+  await nextTask();
+  assert.equal(h.driver.sessionCommands().some((command) => command.name === "notion:search"), false);
+});
+
+test("remote plugin app and MCP changes publish runtime tools before the next turn", async () => {
+  const h = makeHarness();
+  const calls: string[] = [];
+  let publish!: (value: unknown) => void;
+  (h.driver as any).threadId = "plugin-thread";
+  (h.driver as any).peer = {
+    requestWithDeadline: async (method: string, params: unknown, deadline: number) => {
+      calls.push(method);
+      assert.ok(deadline > Date.now() && deadline <= Date.now() + 30_000);
+      if (method === "plugin/reconcile") return { changedPlugins: [{ hasApps: true, hasMcps: true }], failedRemotePluginIds: [] };
+      if (method === "config/mcpServer/reload") { assert.equal(params, null); return {}; }
+      if (method === "app/installed") {
+        assert.deepEqual(params, { threadId: "plugin-thread", forceRefresh: true });
+        return new Promise((resolve) => { publish = resolve; });
+      }
+      return { data: [] };
+    },
+    request: async (method: string) => { calls.push(method); return { turn: { id: "plugin-turn" } }; },
+  };
+  const turn = h.driver.prompt("use Notion");
+  await nextTask();
+  assert.deepEqual(calls, ["plugin/reconcile", "config/mcpServer/reload", "app/installed"]);
+  publish({});
+  await nextTask();
+  assert.ok(calls.includes("turn/start"));
+  (h.driver as any).settleTurn("end_turn");
+  assert.equal(await turn, "end_turn");
+});
+
+test("unsupported plugin refresh methods are probed once and never block older servers", async () => {
+  const h = makeHarness();
+  const probes: string[] = [];
+  (h.driver as any).threadId = "old-thread";
+  (h.driver as any).peer = {
+    requestWithDeadline: async (method: string) => {
+      probes.push(method);
+      throw { code: -32600, message: `unknown variant ${method}: fixture-secret` };
+    },
+    request: async () => ({ turn: { id: "old-turn" } }),
+  };
+  for (let i = 0; i < 2; i++) {
+    const turn = h.driver.prompt("continue");
+    await nextTask();
+    (h.driver as any).settleTurn("end_turn");
+    assert.equal(await turn, "end_turn");
+  }
+  assert.deepEqual(probes, ["plugin/reconcile", "app/installed"]);
+  assert.equal(h.stderr.filter((line) => line.includes('"event":"codex_plugin_sync"')).length, 2);
+  assert.ok(h.stderr.every((line) => !line.includes("fixture-secret")));
+});
+
+test("plugin refresh network failures retry without losing the cached inventory", async () => {
+  const h = makeHarness();
+  let attempts = 0;
+  (h.driver as any).threadId = "cached-thread";
+  (h.driver as any).invocableSkills = [{ name: "cached", path: "/cached/SKILL.md" }];
+  (h.driver as any).peer = {
+    requestWithDeadline: async (method: string) => {
+      if (method === "plugin/reconcile") { attempts++; throw { code: -32002, message: "fixture-secret", requestTimeout: true }; }
+      return {};
+    },
+    request: async () => ({ turn: { id: "cached-turn" } }),
+  };
+  for (let i = 0; i < 2; i++) {
+    const turn = h.driver.prompt("continue");
+    await nextTask();
+    (h.driver as any).settleTurn("end_turn");
+    assert.equal(await turn, "end_turn");
+  }
+  assert.equal(attempts, 2);
+  assert.ok(h.driver.sessionCommands().some((command) => command.name === "cached"));
+  assert.equal(h.stderr.filter((line) => line.includes('"event":"codex_plugin_sync"')).length, 1);
+  assert.equal(h.stderr[0]!.includes("fixture-secret"), false);
+});
+
+test("cancel during remote reconciliation never refreshes runtime tools or starts a turn", async () => {
+  let cleaned = 0;
+  const h = makeHarness({}, async () => ({ paths: [], inputs: [], cleanup: async () => { cleaned++; } }));
+  let finish!: (value: unknown) => void;
+  const calls: string[] = [];
+  (h.driver as any).threadId = "cancel-thread";
+  (h.driver as any).peer = {
+    requestWithDeadline: (method: string) => {
+      calls.push(method);
+      return new Promise((resolve) => { finish = resolve; });
+    },
+    request: async (method: string) => { calls.push(method); },
+    notify: () => {},
+  };
+  const turn = h.driver.prompt("continue");
+  await nextTask();
+  h.driver.cancel();
+  finish({ changedPlugins: [{ hasApps: true }] });
+  assert.equal(await turn, "cancelled");
+  assert.deepEqual(calls, ["plugin/reconcile"]);
+  assert.equal(cleaned, 1);
+});
+
 test("newSession starts a fresh thread and requires the server's actual id", async () => {
   const h = makeHarness({ config: { model: "gpt-tiered", serviceTier: "fast" }, capabilities: serviceTierCapabilities });
   const calls: Array<{ method: string; params: unknown }> = [];
@@ -1048,6 +1189,7 @@ test("newSession starts a fresh thread and requires the server's actual id", asy
   };
   assert.equal(await h.driver.newSession("/fresh"), "fresh-1");
   assert.deepEqual(calls, [
+    { method: "plugin/reconcile", params: { reason: "wollipog_session_start" } },
     { method: "thread/start", params: { cwd: "/fresh", serviceTier: "fast" } },
     { method: "skills/list", params: { cwds: ["/fresh"] } },
   ]);
@@ -1078,6 +1220,7 @@ test("newSession validates then resumes the exact persisted thread without repla
   };
   assert.equal(await h.driver.newSession("/resume"), "thread-7");
   assert.deepEqual(calls, [
+    { method: "plugin/reconcile", params: { reason: "wollipog_session_start" } },
     { method: "thread/read", params: { threadId: "thread-7", includeTurns: false } },
     { method: "thread/resume", params: { threadId: "thread-7", serviceTier: "default" } },
     { method: "skills/list", params: { cwds: ["/resume"] } },

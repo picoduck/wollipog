@@ -294,6 +294,8 @@ export function preserveAcpOrchestratorSessionState(
 }
 
 export interface SessionLaunchPreparation {
+  /** Plugin defaults are launch-local, so subsequent launches re-read the default Codex home. */
+  codexLaunchArgs?: string[];
   /** True only when this launch performed a fresh, authoritative provider catalog read. */
   sessionCommandCatalogFresh?: boolean;
   /** Exact runner-local discovery boundary used to decide whether a live catalog may reuse IDs. */
@@ -7451,7 +7453,7 @@ export class SessionManager {
         meta.driver,
         {
           command: meta.command,
-          args: meta.args,
+          args: launchPreparation?.codexLaunchArgs ?? meta.args,
           cwd,
           env: meta.env,
           config: meta.config,

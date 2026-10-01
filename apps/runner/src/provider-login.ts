@@ -8,6 +8,7 @@ import { runContextCommand } from "./context-command.js";
 import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
 import { launchTargetStillMatches } from "./discovery/resolve.js";
 import { JsonRpcPeer, type RpcError } from "./jsonrpc.js";
+import { inheritProviderPlugins } from "./provider-plugins.js";
 import {
   agentForProviderAccount,
   providerAccountAgentContextCompatible,
@@ -409,18 +410,20 @@ export class ProviderLoginSupervisor {
     const structuredCodex = resolved.provider === "codex" && resolved.structuredCodex === true;
     let child: AgentProcess;
     try {
+      const args = structuredCodex ? appServerArgs(resolved) : loginArgs(resolved);
       child = this.spawn({
         command: resolved.command,
-        args: structuredCodex ? appServerArgs(resolved) : loginArgs(resolved),
+        args: inheritProviderPlugins({ ...resolved, args }, resolved.provider),
         cwd: resolved.directory,
         env: resolved.env,
         context: resolved.context,
         scrubInheritedEnv: [...PROVIDER_LOGIN_DESCRIPTORS[resolved.provider].scrubEnv],
         windowsShell: false,
       });
-    } catch {
+    } catch (error) {
       const released = this.options.releaseLease(resolved.directory);
       if (released && resolved.persistAccount) this.cleanupUnusedDirectory(resolved);
+      if (error instanceof Error && /^(?:Claude|Codex) plugin inheritance could not /u.test(error.message)) throw error;
       throw new Error("The provider sign-in command could not be started.");
     }
     const timer = setTimeout(() => {

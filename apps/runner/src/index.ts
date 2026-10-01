@@ -157,6 +157,7 @@ import {
   selectProviderAccount,
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
+import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plugins.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
   CLAUDE_GRACEFUL_STOP_BUDGET_MS,
@@ -876,6 +877,19 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
         credentialHome: meta.providerCredentialHome,
       }));
     }
+    const pluginProvider = pluginProviderForDriver(meta.driver);
+    if (pluginProvider) {
+      const accountHome = pluginProvider === "claude" ? meta.env.CLAUDE_CONFIG_DIR : meta.env.CODEX_HOME;
+      if (meta.context.kind === "native" && accountHome &&
+          (!meta.executionTarget || meta.executionTarget.adapter === "host")) {
+        sessions.acquireSkillReconciliationProviderHome(accountHome);
+      }
+      if (pluginProvider === "claude") {
+        inheritProviderPlugins(meta, pluginProvider);
+        log(JSON.stringify({ event: "provider_plugin_inheritance_prepared", entryPoint: "session_launch",
+          sessionId: meta.sessionId, provider: pluginProvider }));
+      }
+    }
     const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
     // A sandboxed native host launch cannot see the protections file, so its guard asks the
     // runner. No socket means no guard for that launch (and so mediation), never a file-mode guard
@@ -942,11 +956,17 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     // `stripOrchestratorLaunchArgs` on the Orchestrator preset path, which drops
     // `--dangerously-bypass-hook-trust` and then appends the preset's own arguments, so a guard
     // proved before it would be a proof about a different argv than the one that launches.
+    let codexLaunchArgs: string[] | undefined;
     if (CODEX_GUARD_DRIVERS.has(meta.driver)) {
+      // Prepare the exact plugin inventory before guard enumeration, without persisting default
+      // plugin flags into the session (which would freeze them across subsequent launches).
+      const inheritedPluginArgs = inheritProviderPlugins(meta, "codex");
+      log(JSON.stringify({ event: "provider_plugin_inheritance_prepared", entryPoint: "session_launch",
+        sessionId: meta.sessionId, provider: "codex" }));
       const codexGuardSocket = await memoryGuardSocket(
         meta, () => sessions.managedWorktreeGuardProtections(meta));
       const codexGuard = await provisionCodexGuard(
-        meta,
+        { ...meta, args: inheritedPluginArgs },
         {
           protections: sessions.managedWorktreeGuardProtections(meta),
           cwd: meta.worktreePath ?? meta.repoPath,
@@ -956,7 +976,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
         log,
         claudeHookHost,
       );
-      meta.args = codexGuard.args;
+      codexLaunchArgs = codexGuard.args;
       if (!codexGuard.guardActive) {
         log(`Codex managed worktree guard ${meta.sessionId}: not active for this session ` +
           `(${codexGuard.reason ?? "unknown"}); escalations stay with the user`);
@@ -978,6 +998,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       sessionCommandCatalogFresh:
         meta.driver === "claude-code" &&
         (commandPreparation.outcome === "updated" || commandPreparation.outcome === "cleared"),
+      ...(codexLaunchArgs ? { codexLaunchArgs } : {}),
       sessionCommandCatalogProvenance: JSON.stringify(meta.sessionSlashCommandProvenance ?? null),
       ...(codexPrompts.outcome !== "not_applicable" ? { codexPrompts: launchPrompts } : {}),
     };
@@ -3030,6 +3051,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         launchEpoch: (sessionId) => sessions.agentTuiLaunchEpoch(sessionId),
         resolveAgentTuiLaunch: (meta) => prepareAgentTuiLaunch(meta, {
           controlPlaneProtocolVersion,
+          acquireProviderHome: (prepared) => sessions.acquireAgentTuiProviderHome(prepared),
           executionIsolationMode: config.executionIsolation.mode,
           prepareScratch: (prepared) => sessions.prepareOrchestratorScratch(prepared),
           // Deletion arriving during that awaited scratch preparation must refuse the open before

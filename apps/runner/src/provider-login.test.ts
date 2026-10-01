@@ -152,6 +152,55 @@ function fixture(options: {
   };
 }
 
+test("new Codex accounts inherit plugins installed in the user's default Codex home", async () => {
+  const fx = fixture();
+  try {
+    const manifest = join(fx.root, ".codex/plugins/cache/local/review/local/.codex-plugin/plugin.json");
+    mkdirSync(join(manifest, ".."), { recursive: true });
+    writeFileSync(manifest, '{"name":"review"}');
+    writeFileSync(join(fx.root, ".codex/config.toml"), '[plugins."review@local"]\nenabled = true\n');
+    await fx.supervisor.startAccount({ provider: "codex", label: "Work" });
+    const accountHome = fx.spawns[0]!.env!.CODEX_HOME!;
+    assert.equal(existsSync(join(accountHome, "plugins/cache/local/review/local/.codex-plugin/plugin.json")), true);
+    assert.ok(fx.spawns[0]!.args.includes('plugins.review@local.enabled=true'));
+  } finally {
+    fx.supervisor.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    fx.cleanup();
+  }
+});
+
+test("new Claude accounts inherit user plugins without inheriting credentials or other settings", async () => {
+  const fx = fixture();
+  try {
+    const source = join(fx.root, ".claude");
+    const plugin = join(source, "plugins/cache/local/review/1.0.0");
+    mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(plugin, ".claude-plugin/plugin.json"), '{"name":"review"}');
+    writeFileSync(join(source, "settings.json"), JSON.stringify({
+      enabledPlugins: { "review@local": true }, env: { SECRET: "default-secret" },
+    }));
+    writeFileSync(join(source, ".credentials.json"), "default-credentials");
+    writeFileSync(join(source, "plugins/installed_plugins.json"), JSON.stringify({ version: 2, plugins: {
+      "review@local": [{ scope: "user", installPath: plugin, version: "1.0.0" }],
+    } }));
+    await fx.supervisor.startAccount({ provider: "claude", label: "Work" });
+    const accountHome = fx.spawns[0]!.env!.CLAUDE_CONFIG_DIR!;
+    assert.equal(existsSync(join(accountHome, "plugins/installed_plugins.json")), true,
+      "a managed Claude account must see the default home's installed plugins before sign-in");
+    const installed = JSON.parse(readFileSync(join(accountHome, "plugins/installed_plugins.json"), "utf8"));
+    assert.ok(existsSync(join(installed.plugins["review@local"][0].installPath, ".claude-plugin/plugin.json")));
+    const settings = JSON.parse(readFileSync(join(accountHome, "settings.json"), "utf8"));
+    assert.equal(settings.enabledPlugins["review@local"], true);
+    assert.equal(settings.env, undefined);
+    assert.equal(existsSync(join(accountHome, ".credentials.json")), false);
+  } finally {
+    fx.supervisor.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    fx.cleanup();
+  }
+});
+
 async function nextRequest(child: FakeLoginChild): Promise<{
   jsonrpc: "2.0";
   id: number;

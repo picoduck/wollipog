@@ -409,6 +409,7 @@ function resumeError(threadId: string, err: Json): CodexAppServerResumeError {
 
 /** A skill catalog is display metadata; an unanswered lookup must not stay pending indefinitely. */
 const SKILL_CATALOG_TIMEOUT_MS = 30_000;
+const PLUGIN_RECONCILE_TIMEOUT_MS = 30_000;
 
 export class CodexAppServerDriver implements Driver {
   private child: AgentProcess | null = null;
@@ -480,6 +481,8 @@ export class CodexAppServerDriver implements Driver {
   /** The peer with a `skills/list` lookup in flight; later invalidations coalesce into one rerun. */
   private skillCatalogPeer: JsonRpcPeer | null = null;
   private skillCatalogStale = false;
+  private readonly unsupportedPluginMethods = new Set<string>();
+  private readonly pluginSyncWarnings = new Set<string>();
   private serverIdentity = "unknown";
   private completedTurnId: string | null = null;
   /** A terminal notification can race ahead of both turn/started and the turn/start response.
@@ -868,6 +871,8 @@ export class CodexAppServerDriver implements Driver {
 
   async newSession(cwd: string): Promise<string> {
     this.cwd = cwd;
+    await this.reconcilePlugins("session_start");
+    if (this.disposed || !this.peer) throw new Error("codex app-server is not running");
     const resumeId = this.opts.resumeId;
     let res: Json;
     try {
@@ -1091,6 +1096,8 @@ export class CodexAppServerDriver implements Driver {
       this.cb.onEvent({ kind: "error", message: `image attachment rejected: ${(error as Error).message}` });
       return "refusal";
     }
+    await this.reconcilePlugins("turn_start", () =>
+      !this.cancelled && generation === this.promptGeneration);
     if (this.disposed || this.cancelled || generation !== this.promptGeneration || !this.peer) {
       await staged.cleanup();
       this.promptBusy = false;
@@ -2153,6 +2160,55 @@ export class CodexAppServerDriver implements Driver {
     const backend = this.opts.isolation?.backend;
     return this.opts.context?.kind === "native" &&
       (backend == null || backend === "bwrap" || backend === "seatbelt" || backend === "windows-job");
+  }
+
+  /** Remote installations belong to the signed-in account, rather than config.toml. Refresh
+   * through Codex so each isolated home downloads its own bundles and respects account policy.
+   * Older servers and network failures retain the previously available inventory. */
+  private async reconcilePlugins(
+    reason: "session_start" | "turn_start",
+    isCurrent: () => boolean = () => true,
+  ): Promise<void> {
+    const peer = this.peer;
+    if (!peer || this.disposed || !isCurrent()) return;
+    const request = async (method: string, params: Json): Promise<Json | null> => {
+      if (this.unsupportedPluginMethods.has(method) || this.peer !== peer || this.disposed || !isCurrent()) return null;
+      try {
+        return await peer.requestWithDeadline<Json>(method, params, Date.now() + PLUGIN_RECONCILE_TIMEOUT_MS);
+      } catch (error) {
+        if (this.peer !== peer || this.disposed || !isCurrent()) return null;
+        const code = (error as Json)?.code;
+        const unsupported = code === -32601 || (code === -32600 &&
+          /unknown variant|unknown method|method not found/iu.test(String((error as Json)?.message)));
+        if (unsupported) this.unsupportedPluginMethods.add(method);
+        const outcome = unsupported ? "unsupported" : "failed";
+        const warning = `${method}:${outcome}`;
+        if (!this.pluginSyncWarnings.has(warning)) {
+          this.pluginSyncWarnings.add(warning);
+          // Provider error messages can include endpoints and credentials. Record only shape.
+          this.cb.onStderr(JSON.stringify({ event: "codex_plugin_sync", method, outcome,
+            ...(typeof code === "number" ? { errorCode: code } : {}) }));
+        }
+        return null;
+      }
+    };
+    const result = await request("plugin/reconcile", { reason: `wollipog_${reason}` });
+    if (this.peer !== peer || this.disposed || !isCurrent()) return;
+    const changed = Array.isArray(result?.changedPlugins) ? result.changedPlugins : [];
+    const failedCount = Array.isArray(result?.failedRemotePluginIds) ? result.failedRemotePluginIds.length : 0;
+    if (changed.length || failedCount) {
+      this.cb.onStderr(JSON.stringify({ event: "codex_plugin_sync", method: "plugin/reconcile",
+        outcome: failedCount ? "partial" : "changed", changedPluginCount: changed.length, failedPluginCount: failedCount }));
+    }
+    if (this.threadId) {
+      // Reconciliation publishes bundles, but does not acknowledge runtime readiness. Explicitly
+      // invalidate MCP runtimes for affected plugins, then publish the connector tool snapshot.
+      if (changed.some((plugin: Json) => plugin?.hasMcps || plugin?.hasApps)) {
+        await request("config/mcpServer/reload", null);
+      }
+      await request("app/installed", { threadId: this.threadId, forceRefresh: true });
+      if (result) this.refreshSkillCatalog();
+    }
   }
 
   /** Best-effort: a failed, unsupported, or unanswered lookup keeps the previous catalog. At most

@@ -13,6 +13,7 @@ import {
   type OrchestratorIsolationMode,
 } from "./orchestrator-preset.js";
 import { windowsCmdInvocationSpec } from "./windows-cmd.js";
+import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plugins.js";
 
 import { decideCodexPermissionProfile } from "./codex-permission-profile.js";
 
@@ -25,6 +26,8 @@ export async function prepareAgentTuiLaunch(
   dependencies: {
     controlPlaneProtocolVersion: number | null;
     provision(meta: SessionMeta): Promise<void> | void;
+    /** Plugin reconciliation mutates the native account home before any guard or provider probe runs. */
+    acquireProviderHome?(meta: SessionMeta): void;
     /**
      * Refuse a session deleted while this launch was awaiting its preparation, BEFORE `provision`
      * writes a runner-owned credential file or registers a credential (#1379).
@@ -55,6 +58,10 @@ export async function prepareAgentTuiLaunch(
   },
 ): Promise<ShellProcessLaunch | null> {
   if (!isOrchestratorLaunch(meta)) {
+    if (pluginProviderForDriver(meta.driver)) {
+      dependencies.acquireProviderHome?.(meta);
+      meta = { ...meta, args: inheritProviderPlugins(meta) };
+    }
     const guarded = await withManagedWorktreeGuard(meta, dependencies);
     return withGuardState(
       agentTuiLaunch(await withCodexPermissionProfile(guarded.meta, dependencies)),
@@ -87,6 +94,10 @@ export async function prepareAgentTuiLaunch(
   dependencies.assertSessionNotDeleted(meta.sessionId);
   const prepared = { ...meta, args: [...meta.args], env: { ...meta.env } };
   await dependencies.provision(prepared);
+  if (pluginProviderForDriver(prepared.driver)) {
+    dependencies.acquireProviderHome?.(prepared);
+    prepared.args = inheritProviderPlugins(prepared);
+  }
   if (strictProjectIsolation) {
     prepared.env = {
       ...prepared.env,

@@ -16,6 +16,7 @@
     "@wollipog/protocol": "workspace:*",
     "node-pty": "1.1.0",
     "shell-quote": "1.9.0",
+    "smol-toml": "^1.9.0",
     "ws": "^8.21.3"
   },
   "devDependencies": {
