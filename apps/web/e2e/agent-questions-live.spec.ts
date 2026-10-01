@@ -689,6 +689,55 @@ for (const viewport of [
   });
 }
 
+test("an async answer refused by a full queue can be resubmitted safely", async ({ page }) => {
+  test.setTimeout(180_000);
+  const stack = await startLiveStack("codex", "async-question", false, "accepted");
+  let liveQueue: NonNullable<SessionView["queued"]> = [];
+  const socket = new WebSocket(`${stack.httpBase.replace("http:", "ws:")}/ui?token=${stack.ownerToken}`);
+  socket.addEventListener("message", (event) => {
+    const message = JSON.parse(String(event.data));
+    const session = message.type === "snapshot"
+      ? message.sessions.find((candidate: SessionView) => candidate.id === stack.sessionId)
+      : message.type === "session_upsert" ? message.session : null;
+    if (session?.id === stack.sessionId) liveQueue = session.queued ?? [];
+  });
+  try {
+    const occurrence = (await fetchSession(stack)).pendingApproval!.occurrenceId;
+    for (let index = 0; index < 100; index += 1) await queuePrompt(stack, `Queued work ${index}`);
+    await expect.poll(() => liveQueue.length).toBe(100);
+    const fragment = new URLSearchParams({ origin: stack.httpBase, token: stack.ownerToken,
+      sessionId: stack.sessionId, actualAsyncMessage: "1" });
+    await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "composer"));
+    await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await page.locator(".composer-answer-input").fill("1");
+    await page.getByRole("button", { name: "Submit Answers" }).click();
+    await expect.poll(async () => (await fetchSession(stack)).pendingPrompts
+      ?.find((prompt) => prompt.errorCode === "QUEUE_FULL")?.state).toBe("failed");
+    await expect.poll(async () => (await fetchSession(stack)).pendingApproval?.occurrenceId).toBe(occurrence);
+    expect(existsSync(stack.receiptPath)).toBe(false);
+    await page.reload();
+    await expect(page.locator(".composer-answer-input")).toBeVisible();
+    const queuedId = liveQueue.find((prompt) =>
+      prompt.durableDeliveryState !== "failed")!.id;
+    const cancelled = await fetch(`${stack.httpBase}/api/sessions/${stack.sessionId}/cancel-queued`, {
+      method: "POST", headers: { authorization: `Bearer ${stack.ownerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ promptId: queuedId }),
+    });
+    expect(cancelled.status).toBe(204);
+    await expect.poll(() => liveQueue.some((prompt) => prompt.id === queuedId &&
+      prompt.durableDeliveryState !== "failed")).toBe(false);
+    await page.locator(".composer-answer-input").fill("1");
+    await page.getByRole("button", { name: "Submit Answers" }).click();
+    await expect.poll(async () => existsSync(stack.receiptPath)).toBe(true);
+    expect(JSON.parse(await readFile(stack.receiptPath, "utf8"))).toMatchObject({ delivery: "steer", answer: "Patch" });
+    await expect.poll(async () => (await fetchSession(stack)).pendingApproval).toBeNull();
+    await page.reload();
+    await expect(page.locator(".composer-answer-input")).toHaveCount(0);
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stack.logs()}`);
+  } finally { socket.close(); await stack.stop(); }
+});
+
 for (const provider of ["claude", "codex"] as const) {
   for (const style of ["interactive", "composer"] as const) {
     for (const viewport of [

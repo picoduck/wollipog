@@ -8797,7 +8797,7 @@ export class SessionManager {
         ? operation.resolution
         : { ...base, applied: false, reason: "resolution_action_conflict" };
     }
-    if (!operation.settled || operation.result?.disposition !== "uncertain") {
+    if (operation.resolved || !operation.settled || operation.result?.disposition !== "uncertain") {
       return { ...base, applied: false, reason: "attempt_not_uncertain" };
     }
 
@@ -14656,20 +14656,38 @@ export class SessionManager {
         pendingQuestion,
       };
     }
+    let deliveryStarted = false;
+    let refused = false;
+    const answerLifecycle: DurableCommandLifecycle = recoveredQuestion.pendingQuestion.async ? {
+      commandId: durable.commandId,
+      queued: (error, code) => durable.queued(error, code),
+      ...(durable.beginSteering ? { beginSteering: () => durable.beginSteering!() } : {}),
+      ...(durable.steeringRejected ? { steeringRejected: () => durable.steeringRejected!() } : {}),
+      started: (seq) => { deliveryStarted = true; durable.started(seq); },
+      completed: () => durable.completed(),
+      uncertain: (error) => durable.uncertain(error),
+      failed: (error, code) => {
+        durable.failed(error, code);
+        if (!deliveryStarted) {
+          refused = true;
+          this.restoreUndeliveredAsyncQuestion(sessionId, recoveredQuestion, durable.commandId);
+        }
+      },
+    } : durable;
     const accepted = this.prompt(
       sessionId,
       retained?.text ?? recoveredQuestionContinuationText(requestId, recoveredQuestion.pendingQuestion, answers),
       retained?.images ?? [],
       retained?.slashCommand,
       retained?.config,
-      durable,
+      answerLifecycle,
       false,
       retained?.ordinal,
       true,
       undefined,
       recoveredQuestion,
     );
-    if (!accepted || !recoveredQuestion.pendingQuestion.async) return;
+    if (!accepted || refused || !recoveredQuestion.pendingQuestion.async) return;
     // "Submitted" resolves the user's input, not provider delivery. No commandId/startsTurn is
     // written here: only the later command-tagged delivery event proves provider submission.
     if (!this.emitEvent(sessionId, {
@@ -14691,6 +14709,34 @@ export class SessionManager {
         disposition: result.disposition, reason: result.reason,
       }));
     });
+  }
+
+  /** A known pre-provider failure permits a fresh durable retry of this occurrence. Re-emit the
+   * question only after its submission-only resolution, so history recovery sees it as pending. */
+  private restoreUndeliveredAsyncQuestion(
+    sessionId: string,
+    recovered: NonNullable<QueuedPrompt["recoveredQuestion"]>,
+    commandId: string,
+  ): void {
+    try {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || isTerminal(meta.status) || meta.providerHistoryBlock) return;
+      if (this.store.readEvents(sessionId).some((event) =>
+        (event.payload.kind === "question_resolved" || event.payload.kind === "user_message") &&
+        event.payload.commandId === commandId)) return;
+      const current = pendingRequests(meta.pendingApproval).find((request) => request.requestId === recovered.requestId);
+      if (current && current.occurrenceId !== recovered.recoveryId) return;
+      if (!current && !this.emitEvent(sessionId, {
+        kind: "question_request", async: true, requestId: recovered.requestId,
+        occurrenceId: recovered.recoveryId, questions: recovered.pendingQuestion.questions ?? [],
+        ...(recovered.pendingQuestion.ownerToolUseId ? { ownerToolUseId: recovered.pendingQuestion.ownerToolUseId } : {}),
+      }, undefined, true)) return;
+      this.store.flush(sessionId);
+      const updated = this.store.readMeta(sessionId);
+      if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    } catch (error) {
+      this.log(`undelivered async question restoration failed for ${sessionId}: ${errText(error)}`);
+    }
   }
 
   /** Stop refreshing and release a session's lock (idempotent). */
@@ -15235,6 +15281,7 @@ export class SessionManager {
     sessionId: string,
     payload: SessionEventPayload,
     durable?: DurableCommandLifecycle,
+    preserveAsyncQuestionOccurrence = false,
   ): ReturnType<SessionStore["appendEvent"]> | undefined {
     if ((payload.kind === "user_message" || payload.kind === "agent_message" ||
         payload.kind === "agent_thought" || payload.kind === "tool_call") &&
@@ -15265,7 +15312,9 @@ export class SessionManager {
       // so delegated Parent Control can compare-and-set the exact pending occurrence.
       const identifiedPayload: SessionEventPayload =
         payload.kind === "permission_request" || payload.kind === "question_request"
-          ? { ...payload, occurrenceId: `request_${randomUUID().replaceAll("-", "")}` }
+          ? { ...payload, occurrenceId: preserveAsyncQuestionOccurrence &&
+              payload.kind === "question_request" && payload.async && payload.occurrenceId
+              ? payload.occurrenceId : `request_${randomUUID().replaceAll("-", "")}` }
           : payload;
       // Persist to the box store (the source of truth) and stamp the runner-owned seq/ts onto the
       // live message so every dashboard's cache agrees. No lifecycle caller may observe a rejected
@@ -17210,6 +17259,10 @@ export class SessionManager {
     commandId: string,
     recoveredQuestion: NonNullable<QueuedPrompt["recoveredQuestion"]>,
   ): void {
+    if (recoveredQuestion.pendingQuestion.async) {
+      this.restoreUndeliveredAsyncQuestion(sessionId, recoveredQuestion, commandId);
+      return;
+    }
     try {
       const resolved = this.store.readEvents(sessionId).some((event) =>
         event.payload.kind === "question_resolved" &&

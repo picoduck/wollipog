@@ -3531,6 +3531,37 @@ test("accepted async answers suppress stale snapshots and hydration by exact occ
   db.close();
 });
 
+test("known-undelivered async answers remain retryable and scrubbed retries fence stale snapshots", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  const question: PendingApproval = {
+    requestId: "codex-async:failed", occurrenceId: "occurrence-failed", recoveryId: "occurrence-failed",
+    kind: "question", async: true, title: "Choose", options: [],
+    questions: [{ id: "0", question: "Choose", options: [] }],
+  };
+  const payloadJson = JSON.stringify({ type: "answer_recovered_question", sessionId: "sess-1",
+    requestId: question.requestId, recoveryId: question.occurrenceId, answers: { "0": "Patch" } });
+  const baseCommandId = `answer_${createHash("sha256")
+    .update(JSON.stringify(["sess-1", question.requestId, question.occurrenceId])).digest("hex")}`;
+  const input = { baseCommandId, sessionId: "sess-1", runnerId: "runner-1", payloadJson,
+    payloadSha256: createHash("sha256").update(payloadJson).digest("hex"), expiresAt: 100_000, now: 2_000 };
+  db.stageRetriableSessionPromptCommand(input);
+  db.recordSessionPromptCommandReceipt({ commandId: baseCommandId, sessionId: "sess-1",
+    runnerId: "runner-1", state: "failed", revision: 2, code: "QUEUE_FULL", now: 2_100 });
+  db.setPendingApproval("sess-1", question);
+  assert.equal(db.getSession("sess-1")?.pendingApproval?.occurrenceId, question.occurrenceId);
+  const retry = db.stageRetriableSessionPromptCommand({ ...input, now: 2_200 });
+  assert.equal(retry.disposition, "deliverable");
+  assert.equal(retry.command.commandId, baseCommandId + ".retry-1");
+  db.setPendingApproval("sess-1", question);
+  assert.equal(db.getSession("sess-1")?.pendingApproval, null);
+  db.recordSessionPromptCommandReceipt({ commandId: retry.command.commandId, sessionId: "sess-1",
+    runnerId: "runner-1", state: "completed", revision: 5, now: 2_300 });
+  db.setPendingApproval("sess-1", question);
+  assert.equal(db.getSession("sess-1")?.pendingApproval, null, "a scrubbed retry still proves delivery");
+  db.close();
+});
+
 test("async questions survive nonterminal status changes while blocking asks clear", () => {
   const db = withRunner();
   db.createSession(newSession());

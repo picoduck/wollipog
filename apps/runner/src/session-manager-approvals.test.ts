@@ -638,6 +638,13 @@ for (const outcome of ["accepted", "rejected", "uncertain"] as const) {
         }
       }
       assert.equal((sm as any).steerFences(entry).size, 0);
+      if (outcome === "uncertain") {
+        const resolution = sm.resolveSteeringAttempt({
+          sessionId: "s_perm", submissionId: "async_steer_command", action: "queue_again",
+        });
+        assert.equal(resolution.applied, false);
+        assert.equal(entry.queue.length, 0, "a terminal durable receipt must not create an empty retry prompt");
+      }
       sm.reconcileStore();
       assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
     } finally {
@@ -678,6 +685,48 @@ test("a durably queued async answer stops presenting its question while the turn
   } finally {
     cleanup();
   }
+});
+
+for (const replaced of [false, true]) test(`an async answer refused before delivery ${replaced ? "preserves a newer question" : "can be answered again"}`, () => {
+  const { sm, store, cleanup } = makeHarness(true);
+  try {
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex",
+      agentSessionId: "codex-thread", status: "running" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:failed",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = store.readMeta("s_perm")!.pendingApproval!.occurrenceId!;
+    const failures: string[] = [];
+    sm.answerRecoveredQuestion("s_perm", "codex-async:failed", occurrence, { "0": "Patch" }, {
+      commandId: "known_undelivered_answer",
+      queued: () => {}, started: () => {}, completed: () => {},
+      failed: (error) => { failures.push(error); }, uncertain: (error) => { assert.fail(error); },
+    });
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    if (replaced) (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:failed",
+      questions: [{ id: "0", question: "New question?", options: [] }],
+    });
+    const newer = store.readMeta("s_perm")?.pendingApproval?.occurrenceId;
+    const entry = (sm as any).active.get("s_perm");
+    const queued = entry.queue.shift();
+    (sm as any).failQueuedPrompt(queued, "queue refused before delivery", "QUEUE_FULL");
+    assert.deepEqual(failures, ["queue refused before delivery"]);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.occurrenceId, replaced ? newer : occurrence);
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.occurrenceId, replaced ? newer : occurrence);
+    if (!replaced) {
+      (sm as any).emitEvent("s_perm", {
+        kind: "user_message", text: "Delivered response", commandId: "known_undelivered_answer",
+      });
+      (sm as any).restoreQuestionAfterAuthenticationReplayRefusal(
+        "s_perm", "known_undelivered_answer", queued.recoveredQuestion,
+      );
+      assert.equal(store.readMeta("s_perm")?.pendingApproval, null,
+        "a recorded provider submission must fence authentication recovery");
+    }
+  } finally { cleanup(); }
 });
 
 test("an accepted async answer outruns older queued prompts and survives a later question", async () => {

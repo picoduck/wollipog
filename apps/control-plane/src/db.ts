@@ -16742,13 +16742,15 @@ export class ControlPlaneDb {
     let remaining = approval;
     for (const request of pendingRequests(approval)) {
       if (request.kind !== "question" || !request.async || !request.occurrenceId) continue;
+      const commandId = `answer_${createHash("sha256")
+        .update(JSON.stringify([sessionId, request.requestId, request.occurrenceId])).digest("hex")}`;
       const submitted = this.stmt(
         `SELECT 1 FROM session_prompt_commands
-         WHERE session_id=? AND (command_id=? OR (json_extract(payload_json,'$.type')='answer_recovered_question'
+         WHERE session_id=? AND (state!='failed' OR user_event_seq IS NOT NULL)
+           AND (command_id=? OR command_id GLOB ? OR (json_extract(payload_json,'$.type')='answer_recovered_question'
            AND json_extract(payload_json,'$.requestId')=?
            AND json_extract(payload_json,'$.recoveryId')=?)) LIMIT 1`,
-      ).get(sessionId, `answer_${createHash("sha256")
-        .update(JSON.stringify([sessionId, request.requestId, request.occurrenceId])).digest("hex")}`,
+      ).get(sessionId, commandId, `${commandId}.retry-*`,
         request.requestId, request.occurrenceId);
       if (submitted) remaining = removePendingRequest(remaining, request.requestId);
     }
