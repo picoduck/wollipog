@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 
 /** The Session Status control is whole on screen: inside the viewport and every clipping ancestor. */
@@ -35,6 +35,14 @@ async function expectUnclipped(badge: Locator) {
     }
     return contained && box.right <= innerWidth && box.left >= 0;
   })).toBe(true);
+}
+
+/** The Background Work panel through the Pinned Summary's delivery badge, for a status row whose
+ * action is a step rather than Open (#2275). */
+async function openBackgroundWorkFromPinnedSummary(page: Page) {
+  const pinned = page.getByRole("complementary", { name: "Pinned Summary" });
+  if (!await pinned.isVisible()) await page.getByRole("button", { name: "Pinned Summary", exact: true }).click();
+  await pinned.locator(".status[data-group='background-work']").click();
 }
 
 for (const width of [320, 390, 700, 1280]) {
@@ -185,7 +193,26 @@ for (const width of [320, 1280]) {
         await header.locator(".session-status-button").click();
       }
 
-      await row.getByRole("button", { name: "Open Background Work" }).click();
+      if (watchdogState === "accepted_without_result") {
+        // #2275: Result Missing needs the person, so it is the bar's status, and its row takes the step
+        // itself. On a phone that step is taken here; on desktop the panel's own button is checked.
+        const status = header.locator(".session-status-button");
+        await expect(status).toHaveAccessibleName("Session Status: Result Missing");
+        const step = row.getByRole("button", { name: "Acknowledge Missing Result" });
+        await expect(step).toBeVisible();
+        if (width === 320) {
+          await step.click();
+          await expect(statusDialog).toHaveCount(0);
+          await expect(status).toBeFocused();
+          await expect(page.getByText("Missing result acknowledged.")).toBeVisible();
+          await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt");
+          continue;
+        }
+        await page.keyboard.press("Escape");
+        await openBackgroundWorkFromPinnedSummary(page);
+      } else {
+        await row.getByRole("button", { name: "Open Background Work" }).click();
+      }
       const panel = page.getByRole("complementary", { name: "Background Work", exact: true });
       await expect(panel).toBeVisible();
       const highlighted = panel.locator(`[data-watchdog-state="${watchdogState}"]`);
@@ -249,12 +276,20 @@ for (const width of [320, 1280]) {
         }],
       });
     });
-    const openPanel = async () => {
+    // #2275: where Stop Job is available for the one running job, the status row offers it itself,
+    // so the panel is opened from the Pinned Summary instead.
+    const openPanel = async (rowAction: "Open Background Work" | "Stop Job…" = "Open Background Work") => {
       await page.locator(".session-bar .session-status-button").click();
       const row = page.getByRole("dialog", { name: "Session Status" }).locator(".session-status-row")
         .filter({ hasText: "Result Blocked" });
       await expect(row.locator(".status")).toHaveText("Result Blocked");
-      await row.getByRole("button", { name: "Open Background Work" }).click();
+      await expect(row.getByRole("button")).toHaveAccessibleName(rowAction);
+      if (rowAction === "Open Background Work") {
+        await row.getByRole("button", { name: "Open Background Work" }).click();
+      } else {
+        await page.keyboard.press("Escape");
+        await openBackgroundWorkFromPinnedSummary(page);
+      }
       const panel = page.getByRole("complementary", { name: "Background Work", exact: true });
       await expect(panel).toBeVisible();
       return panel;
@@ -276,7 +311,7 @@ for (const width of [320, 1280]) {
     // A v190 runner offers Stop Job, but its restart still discards the result (#1779).
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(190));
     await resultBlocked();
-    panel = await openPanel();
+    panel = await openPanel("Stop Job…");
     await expect(summary).toContainText("Restarting or stopping the session also ends it, but ends every other job and discards this result.");
     await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
 
@@ -284,7 +319,7 @@ for (const width of [320, 1280]) {
     // its restart reports the result to the new conversation instead of discarding it (#1779).
     await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
     await resultBlocked();
-    panel = await openPanel();
+    panel = await openPanel("Stop Job…");
     await expect(summary).toContainText("Use Stop Job on the unfinished job below: only that job ends");
     await expect(summary).toContainText("Stopping the session also ends it but discards this result; restarting the " +
       "session ends every job and reports this result to the new conversation instead.");
@@ -311,5 +346,58 @@ for (const width of [320, 1280]) {
     await expect(panel.locator(".background-work-job").filter({ hasText: "Agent Job" })).not.toContainText("Ended By");
     await expect(panel.locator(".background-work-job").filter({ hasText: "Agent Job" })).toContainText("Result Delivered");
     await expect(panel.getByRole("button", { name: "Stop Job", exact: true })).toHaveCount(0);
+  });
+}
+
+for (const width of [390, 1440]) {
+  test(`Result Blocked is the bar's status and its row stops the one running job behind a confirmation at ${width}px (#2275)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    const expand = page.getByRole("button", { name: "Expand Session" });
+    if (await expand.isVisible()) await expand.click();
+    await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
+    await page.evaluate(() => {
+      const now = Date.now();
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+        status: "idle",
+        driver: "claude-code",
+        backgroundWorkState: "running",
+        backgroundWorkTracking: "managed",
+        backgroundJobsAvailable: true,
+        backgroundJobs: [
+          {
+            id: "monitor-never-fires", parentTurnId: "blocked-parent", launchType: "monitor",
+            registeredAt: now - 50 * 60_000, lastObservedAt: now - 60_000, sourcePresent: true,
+          },
+          {
+            id: "review-subagent", parentTurnId: "blocked-parent", launchType: "agent",
+            registeredAt: now - 50 * 60_000, lastObservedAt: now - 20 * 60_000, sourcePresent: true,
+            terminalStatus: "completed", terminalObservedAt: now - 20 * 60_000, continuationRequired: true,
+          },
+        ],
+        backgroundDeliveries: [{
+          parentTurnId: "blocked-parent", jobCount: 2, terminalCount: 1,
+          watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
+        }],
+      });
+    });
+    const status = page.locator(".session-bar .session-status-button");
+    await expect(status).toHaveAccessibleName("Session Status: Result Blocked");
+    await expectButtonUnclipped(status);
+    await status.click();
+    const row = page.getByRole("dialog", { name: "Session Status" }).locator(".session-status-row")
+      .filter({ hasText: "Result Blocked" });
+    await expect(row.locator(".session-status-text")).toHaveText(
+      "A background job finished, but its result cannot be returned while another job from the same turn is still running.");
+    await row.getByRole("button", { name: "Stop Job…" }).click();
+
+    const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog", { name: "Stop Job" }));
+    await expect(confirmation).toContainText("Only this job ends, and it is recorded as killed.");
+    await expect(confirmation).toContainText("Monitor Job 1");
+    await confirmation.getByRole("button", { name: "Stop Job", exact: true }).click();
+    await expect(page.getByText("Monitor Job 1 was stopped.")).toBeVisible();
+    await expect(status).not.toHaveAccessibleName(/Result Blocked/);
+    await expect(status).toBeFocused();
   });
 }

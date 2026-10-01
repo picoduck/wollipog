@@ -7,6 +7,7 @@ import type { SessionReminderView } from "@wollipog/protocol";
 import { ApiError } from "./api.js";
 import { archiveAndStopMessage } from "./archive-actions.js";
 import { deleteSessionMessage, signOutOfAgentMessage, stopArchivedSessionMessage, stopSessionMessage } from "./session-confirmation-copy.js";
+import { STOP_JOB_OUTCOME } from "./background-job-stop.js";
 import { closeWarning } from "./components/DesktopCloseGuard.js";
 import { heldUpdateMessage } from "./desktop-updates.js";
 import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
@@ -807,7 +808,8 @@ const MAX_BODY_BRANCHES = 256;
  * sentence check below; a new unreadable body fails until it is listed here and tested.
  */
 const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^conflict\.message$/, /^closeWarning\(/, /^heldUpdateMessage\(/,
-  /^stopSessionMessage\(/, /^stopArchivedSessionMessage\(/, /^deleteSessionMessage\(/, /^signOutOfAgentMessage\(/];
+  /^stopSessionMessage\(/, /^stopArchivedSessionMessage\(/, /^deleteSessionMessage\(/, /^signOutOfAgentMessage\(/,
+  /^STOP_JOB_OUTCOME$/];
 
 /**
  * Every text a confirmation body can produce: conditions, template holes and `+` concatenation are
@@ -1019,8 +1021,9 @@ test("confirmation bodies built by a helper are one or two sentences too", () =>
       deleteSessionMessage(title),
     ]),
     ...["Studio Mac", null].map((machine) => signOutOfAgentMessage("Gemini CLI", machine)),
+    STOP_JOB_OUTCOME,
   ];
-  assert.equal(bodies.length, 38);
+  assert.equal(bodies.length, 39);
   for (const body of bodies) assert.ok(sentenceCount(body) <= 2, JSON.stringify(body));
 });
 

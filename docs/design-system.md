@@ -736,16 +736,23 @@ extending the settled one-bar session chrome app-wide.
   holding one status badge and, when other conditions need the person, a plain "+N". Its accessible
   name says both ("Session Status: Approval Required and 1 More"). `sessionStatusSummary()` in
   `status-meta.ts` chooses the badge, the first that applies: each attention kind in
-  `sessionAttentionBreakdown()` order, then human-owned campaign requests, then descendant requests;
+  `sessionAttentionBreakdown()` order, then human-owned campaign requests, then descendant requests,
+  then a background result that waits on the person (Result Blocked, Result Missing; #2275);
   Background Work Lost; Disconnected; Waiting on External Job while the session otherwise awaits its
   next prompt; the lifecycle, including Stop Pending and Stop Failed, and Archived for an archived
-  session that has stopped with no Stop pending or failed (`sessionArchivedAtRest()`). "+N" counts only the other
-  conditions that need the person, never passive states, so it is the same at every width. The
-  Sessions rows, the preview bar and the Board cards use the same function.
+  session that has stopped with no Stop pending or failed (`sessionArchivedAtRest()`). "+N" counts
+  only the other conditions that need the person, never passive states (Result Pending, Transcript
+  Delayed and Notification Pending are passive), so it is the same at every width. The Sessions rows,
+  the preview bar and the Board cards use the same function.
 - It opens the Session Status popover (§9.2, 340px; a bottom sheet on phones): the title, then one
   row per condition with its badge, one sentence and the action that resolves it where one exists
-  (Review Request, Answer, Sign In…, Open for Background Work, Open Agents, Open Requests). The
-  lifecycle is listed only when nothing needs the person. Queue reasons are rows, not badges.
+  (Review Request, Answer, Sign In…, Open for Background Work, Open Agents, Open Requests). Result
+  Blocked offers Stop Job… (the Background Work panel's danger confirmation) when Stop Job is
+  available and exactly one job of the blocked turn is still running, and Result Missing offers
+  Acknowledge Missing Result; otherwise either opens Background Work. The step closes the popover and
+  leaves focus on the Session Status control; reopened while its request runs, the row's button is
+  busy, and a failure is an error toast (#2275). The lifecycle is listed only when nothing needs the
+  person. Queue reasons are rows, not badges.
 
 ### 4.4 Bar Height: 48px
 

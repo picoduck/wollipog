@@ -161,7 +161,7 @@ test("passive conditions are popover rows after the badge, never counted in +N",
     status: "queued",
     capacityWait: { kind: "runner_capacity", description: "Waiting for a free runner slot." },
     orchestratorCampaign: { pendingRequests: { human: 0, orchestrator: 2 } },
-    backgroundDeliveries: [{ watchdogState: "accepted_without_result" }],
+    backgroundDeliveries: [{ watchdogState: "terminal_without_continuation" }],
   } as Partial<SessionStatusSource>);
   const summary = sessionStatusSummary(source, { activeWorkers: 2 });
   assert.equal(summary.primary.meta.label, "Queued");

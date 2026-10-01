@@ -1,4 +1,5 @@
-import type { BackgroundDeliveryWatchdogState } from "@wollipog/protocol";
+import type { BackgroundDeliveryView, BackgroundDeliveryWatchdogState } from "@wollipog/protocol";
+import type { ApiClient } from "./api.js";
 import type { BackgroundJobStopAvailability } from "./background-job-stop.js";
 
 /** `pending` progresses on its own; `blocked` and `missing` do not and ask for a step. */
@@ -69,6 +70,12 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
   },
 };
 
+/** A watchdog state that waits on the person rather than on Wollipog: Result Blocked and Result
+ * Missing (#2275). The Session Status ranking counts it with their requests. */
+export function backgroundDeliveryNeedsYou(state: BackgroundDeliveryWatchdogState): boolean {
+  return BACKGROUND_DELIVERY_STATUS[state].severity !== "pending";
+}
+
 /**
  * The step a watchdog state asks for, where the surface knows whether this runner can stop one job
  * (#1780). Result Blocked then offers Stop Job, or says why it is unavailable; every other state,
@@ -94,6 +101,29 @@ export function backgroundDeliveryAction(
         : "Restarting or stopping the session also ends it, but ends every other job and discards this result.");
   }
   return `Stop Job is unavailable: ${jobStop.reason} ${status.action}`;
+}
+
+/** The continuation a Result Missing delivery's Acknowledge Missing Result applies to, or `null` when
+ * there is nothing left to acknowledge (#2275). */
+export function missingResultContinuationId(
+  delivery: Pick<BackgroundDeliveryView, "watchdogState" | "continuationId" | "missingResultAt" |
+    "missingResultAcknowledgedAt" | "runnerResultPersistedAt">,
+): string | null {
+  if (delivery.watchdogState !== "accepted_without_result" || !delivery.continuationId) return null;
+  if (delivery.missingResultAcknowledgedAt != null || delivery.runnerResultPersistedAt != null) return null;
+  return delivery.continuationId;
+}
+
+/** Acknowledge Missing Result's one request, shared by the Background Work panel and the Session
+ * Status popover. It resolves to the failure's sentence, or `null` once acknowledged. */
+export function requestMissingResultAcknowledgement(
+  api: Pick<ApiClient, "acknowledgeBackgroundMissingResult">,
+  sessionId: string,
+  continuationId: string,
+): Promise<string | null> {
+  return api.acknowledgeBackgroundMissingResult(sessionId, continuationId)
+    .then(() => null)
+    .catch((error: unknown) => error instanceof Error ? error.message : "Missing-result acknowledgement failed.");
 }
 
 export function backgroundDeliveryAccessibleName(state: BackgroundDeliveryWatchdogState): string {

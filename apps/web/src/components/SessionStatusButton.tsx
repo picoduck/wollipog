@@ -4,6 +4,7 @@ import type { DismissiblePopoverController } from "./interactions.js";
 import { MenuSurface } from "./Menu.js";
 import { DETAIL_TITLE_READABLE_PX } from "./PageHeader.js";
 import { StatusBadge, StatusCount } from "./StatusBadge.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { useIsCompact } from "./useIsMobile.js";
 
 /** Where each condition's action leads. A condition whose place is not wired here has no action. */
@@ -14,6 +15,20 @@ export interface SessionStatusActions {
   onOpenDescendantRequests?: () => void;
   onOpenBackgroundWork?: () => void;
   onOpenWorkers?: () => void;
+  /** The step a background result that waits on the person takes from its row (#2275): Stop Job…
+   * for Result Blocked, Acknowledge Missing Result for Result Missing. Absent where this surface
+   * cannot take it, so the row opens Background Work instead. */
+  deliveryStep?: SessionStatusStep;
+}
+
+/** An action a row runs itself rather than opening a panel. */
+export interface SessionStatusStep {
+  label: string;
+  /** Sentence case, announced while the step's request runs. */
+  progress: string;
+  /** Its request is in flight: the button stays, busy, and refuses another press. */
+  busy: boolean;
+  run: () => void;
 }
 
 interface ConditionAction {
@@ -21,6 +36,9 @@ interface ConditionAction {
   /** Set where the visible label alone does not say what opens. */
   ariaLabel?: string;
   run: () => void;
+  /** Set for a step that runs a request, which draws the button busy while it runs. */
+  progress?: string;
+  busy?: boolean;
 }
 
 function conditionAction(condition: SessionCondition, actions: SessionStatusActions): ConditionAction | null {
@@ -38,8 +56,13 @@ function conditionAction(condition: SessionCondition, actions: SessionStatusActi
       return action("Open Requests", actions.onOpenCampaignRequests);
     case "descendant_requests":
       return action("Open Requests", actions.onOpenDescendantRequests);
-    case "background_work":
     case "background_delivery":
+      if (condition.needsYou && actions.deliveryStep) {
+        const step = actions.deliveryStep;
+        return { label: step.label, run: step.run, progress: step.progress, busy: step.busy };
+      }
+      return action("Open", actions.onOpenBackgroundWork, "Open Background Work");
+    case "background_work":
       return action("Open", actions.onOpenBackgroundWork, "Open Background Work");
     case "workers":
       return action("Open Agents", actions.onOpenWorkers);
@@ -230,12 +253,17 @@ export function SessionStatusButton({
                   {condition.fact
                     ? <span className="session-status-fact">{condition.meta.label}</span>
                     : <ConditionBadge condition={condition} />}
-                  {action && (
+                  {action && (action.progress === undefined ? (
                     <button type="button" className="btn sm session-status-action" aria-label={action.ariaLabel}
                       onClick={() => run(action)}>
                       {action.label}
                     </button>
-                  )}
+                  ) : (
+                    <BusyButton className="btn sm session-status-action" busy={action.busy ?? false}
+                      progress={action.progress} onClick={() => run(action)}>
+                      {action.label}
+                    </BusyButton>
+                  ))}
                   <p className="session-status-text">{condition.description}</p>
                 </li>
               );

@@ -17,12 +17,13 @@ import {
   sessionAttentionStatus,
   type ArchiveOperationView,
   type ArchiveStatus,
+  type BackgroundDeliveryView,
   type SessionAttentionKind,
   type SessionStatus,
   type SessionView,
   type StopOperationView,
 } from "@wollipog/protocol";
-import { BACKGROUND_DELIVERY_STATUS } from "./background-delivery-status.js";
+import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou } from "./background-delivery-status.js";
 
 export type StatusTone = "info" | "success" | "warning" | "danger" | "neutral";
 
@@ -363,6 +364,8 @@ export interface SessionCondition {
   count?: number;
   /** For an attention condition, which kind of request it is. */
   attentionKind?: SessionAttentionKind;
+  /** For a background delivery, the delivery whose watchdog state it shows. */
+  delivery?: BackgroundDeliveryView;
   /** A fact rather than a state (§11.2): listed as a plain row, never drawn as a badge. */
   fact?: boolean;
 }
@@ -446,7 +449,8 @@ export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>[
  *
  * The badge is the first of these that applies:
  * 1. What needs the person: each attention kind in `sessionAttentionBreakdown()` order (the Sessions
- *    list's priority), then human-owned campaign requests, then descendant requests.
+ *    list's priority), then human-owned campaign requests, then descendant requests, then a
+ *    background result that is blocked or missing (Result Blocked, Result Missing; #2275).
  * 2. Background Work Lost.
  * 3. Disconnected, when the session's machine is offline.
  * 4. Waiting on External Job (or Continuation Pending) while the session is otherwise awaiting its
@@ -456,7 +460,7 @@ export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>[
  *
  * `more` counts the other conditions in rule 1, never a passive state, so "+N" is the same at every
  * width. `conditions` lists everything in that order for the popover, followed by the passive rows
- * (background work while the agent is busy, a result still coming back, workers, Orchestrator
+ * (background work while the agent is busy, a result still on its way back, workers, Orchestrator
  * requests and queue reasons).
  */
 export function sessionStatusSummary(
@@ -504,6 +508,27 @@ export function sessionStatusSummary(
     });
   }
 
+  // A result that is blocked or missing does not progress on its own and asks the person for a step
+  // (#2275), so it ranks after their requests; a result still on its way back stays passive. Where a
+  // session has several, the one that needs the person is the one shown.
+  const deliveries = session.backgroundDeliveries ?? [];
+  const watched = deliveries.find((candidate) =>
+    candidate.watchdogState && backgroundDeliveryNeedsYou(candidate.watchdogState)) ??
+    deliveries.find((candidate) => candidate.watchdogState);
+  const deliveryState = watched?.watchdogState;
+  const delivery: SessionCondition | null = watched && deliveryState ? {
+    kind: "background_delivery",
+    meta: {
+      label: BACKGROUND_DELIVERY_STATUS[deliveryState].label,
+      tone: backgroundDeliveryNeedsYou(deliveryState) ? "warning" : "info",
+      pulse: false,
+    },
+    description: BACKGROUND_DELIVERY_STATUS[deliveryState].description,
+    needsYou: backgroundDeliveryNeedsYou(deliveryState),
+    delivery: watched,
+  } : null;
+  if (delivery?.needsYou) needs.push(delivery);
+
   const lifecycle = sessionArchivedAtRest(session) ? statusMeta("session", "archived") : sessionLifecycleMeta(session.status, {
     archiveStatus: session.archiveStatus,
     archiveOperation: session.archiveOperation,
@@ -540,16 +565,7 @@ export function sessionStatusSummary(
     conditions.push({ kind: "lifecycle", meta: lifecycle, description: lifecycleDescription(lifecycle), needsYou: false });
   }
   if (background && background !== lost && background !== waiting) conditions.push(background);
-  const delivery = session.backgroundDeliveries?.find((candidate) => candidate.watchdogState)?.watchdogState;
-  if (delivery) {
-    const copy = BACKGROUND_DELIVERY_STATUS[delivery];
-    conditions.push({
-      kind: "background_delivery",
-      meta: { label: copy.label, tone: copy.severity === "pending" ? "info" : "warning", pulse: false },
-      description: copy.description,
-      needsYou: false,
-    });
-  }
+  if (delivery && !delivery.needsYou) conditions.push(delivery);
   const workers = context.activeWorkers ?? 0;
   if (workers > 0) {
     conditions.push({

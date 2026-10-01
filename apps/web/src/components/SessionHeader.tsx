@@ -44,6 +44,7 @@ import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-c
 import { unarchiveSession } from "../session-unarchive.js";
 import { sessionStatusSummary } from "../status-meta.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
+import { useBackgroundDeliveryStep } from "./useBackgroundDeliveryStep.js";
 
 /** The second line of an item that waits on another session action already running. */
 const BUSY_REASON = "Available when the current action finishes.";
@@ -251,6 +252,13 @@ export function SessionHeader({
     runnerOnline,
     descendantRequests: descendantRequests?.count,
     activeWorkers: activeSubagents?.count,
+  });
+  const deliveryStep = useBackgroundDeliveryStep({
+    session,
+    condition: statusSummary.conditions.find((condition) => condition.kind === "background_delivery"),
+    runnerOnline,
+    runnerProtocolVersion,
+    returnFocusRef: statusPopover.triggerRef,
   });
   const closeMenu = (restoreFocus = false) => {
     menu.close(restoreFocus);
@@ -691,6 +699,7 @@ export function SessionHeader({
           onOpenDescendantRequests: descendantRequests?.onOpen,
           onOpenBackgroundWork,
           onOpenWorkers: activeSubagents?.onOpen,
+          deliveryStep,
         }}
       />
       {/* Background work changes are announced politely wherever the badge shows (#784). The region

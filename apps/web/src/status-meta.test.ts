@@ -3,7 +3,15 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { statusMeta, statusValues, type StatusDomain, type StatusTone } from "./status-meta.js";
+import type { BackgroundDeliveryView, PendingApproval } from "@wollipog/protocol";
+import {
+  sessionStatusSummary,
+  statusMeta,
+  statusValues,
+  type SessionStatusSource,
+  type StatusDomain,
+  type StatusTone,
+} from "./status-meta.js";
 
 type Row = [domain: StatusDomain, value: string, label: string, tone: StatusTone];
 
@@ -200,4 +208,89 @@ test("no visible string in the web client spells canceled the British way", () =
   };
   visit(root);
   assert.deepEqual(offenders, []);
+});
+
+/** #2275: a background result that waits on the person ranks with their requests. */
+function deliverySession(
+  watchdogState: NonNullable<BackgroundDeliveryView["watchdogState"]>,
+  overrides: Partial<SessionStatusSource> = {},
+): SessionStatusSource {
+  return {
+    status: "idle",
+    pendingApproval: null,
+    attentionOwners: undefined,
+    backgroundDeliveries: [{ parentTurnId: "turn-1", jobCount: 2, terminalCount: 1, watchdogState }],
+    ...overrides,
+  };
+}
+
+test("an idle session with a blocked result shows Result Blocked as its status (#2275)", () => {
+  const summary = sessionStatusSummary(deliverySession("continuation_blocked"));
+  assert.equal(summary.primary.kind, "background_delivery");
+  assert.equal(summary.primary.meta.label, "Result Blocked");
+  assert.equal(summary.primary.meta.tone, "warning");
+  assert.equal(summary.primary.needsYou, true);
+  assert.equal(summary.primary.delivery?.parentTurnId, "turn-1");
+  assert.equal(summary.more, 0);
+  // It needs the person, so the lifecycle is not listed after it.
+  assert.deepEqual(summary.conditions.map((condition) => condition.meta.label), ["Result Blocked"]);
+});
+
+test("an idle session with a missing result shows Result Missing as its status (#2275)", () => {
+  const summary = sessionStatusSummary(deliverySession("accepted_without_result"));
+  assert.equal(summary.primary.meta.label, "Result Missing");
+  assert.equal(summary.primary.needsYou, true);
+  assert.equal(summary.more, 0);
+});
+
+test("an approval leads a missing result, which counts as +1 (#2275)", () => {
+  const approval: PendingApproval = { requestId: "approval-1", title: "Run the tests", options: [], kind: "permission" };
+  const summary = sessionStatusSummary(deliverySession("accepted_without_result", {
+    status: "input_required",
+    pendingApproval: approval,
+  }));
+  assert.equal(summary.primary.meta.label, "Approval Required");
+  assert.equal(summary.more, 1);
+  assert.deepEqual(summary.conditions.map((condition) => condition.meta.label), ["Approval Required", "Result Missing"]);
+});
+
+test("a delivery that waits on the person ranks after requests and before Background Work Lost (#2275)", () => {
+  const summary = sessionStatusSummary(deliverySession("continuation_blocked", {
+    orchestratorCampaign: { pendingRequests: { human: 1, orchestrator: 0 } },
+    backgroundWorkState: "orphaned",
+  } as Partial<SessionStatusSource>), { descendantRequests: 2, runnerOnline: false });
+  assert.deepEqual(summary.conditions.map((condition) => condition.kind),
+    ["campaign_requests", "background_delivery", "background_work", "disconnected"]);
+  assert.equal(summary.more, 1);
+});
+
+test("a result still on its way back stays passive and leaves +N unchanged (#2275)", () => {
+  for (const [state, label] of [
+    ["terminal_without_continuation", "Result Pending"],
+    ["result_not_projected", "Transcript Delayed"],
+    ["dashboard_observation_pending", "Notification Pending"],
+  ] as const) {
+    const idle = sessionStatusSummary(deliverySession(state));
+    assert.equal(idle.primary.meta.label, "Awaiting Prompt", state);
+    assert.equal(idle.more, 0, state);
+    const row = idle.conditions.find((condition) => condition.kind === "background_delivery")!;
+    assert.equal(row.meta.label, label);
+    assert.equal(row.meta.tone, "info");
+    assert.equal(row.needsYou, false);
+    const approval: PendingApproval = { requestId: "approval-1", title: "Run the tests", options: [], kind: "permission" };
+    const asking = sessionStatusSummary(deliverySession(state, { status: "input_required", pendingApproval: approval }));
+    assert.equal(asking.primary.meta.label, "Approval Required", state);
+    assert.equal(asking.more, 0, state);
+  }
+});
+
+test("a delivery that waits on the person is the one shown, even after a passive one (#2275)", () => {
+  const summary = sessionStatusSummary(deliverySession("continuation_blocked", {
+    backgroundDeliveries: [
+      { continuationId: "c-1", parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, watchdogState: "dashboard_observation_pending" },
+      { parentTurnId: "turn-2", jobCount: 2, terminalCount: 1, watchdogState: "continuation_blocked" },
+    ],
+  }));
+  assert.equal(summary.primary.meta.label, "Result Blocked");
+  assert.equal(summary.conditions.filter((condition) => condition.kind === "background_delivery").length, 1);
 });
