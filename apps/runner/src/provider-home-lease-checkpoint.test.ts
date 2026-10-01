@@ -8,9 +8,9 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import fc from "fast-check";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { ProviderHomeLeaseRegistry, observeLeaseVerificationWorkForTest } from "./provider-home-lease.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS } from "./provider-home-lease-checkpoint.js";
-import { observeLeaseIoWorkForTest } from "./provider-home-lease-io.js";
+import { observeLeaseIoWorkForTest, readLeaseIoSnapshot } from "./provider-home-lease-io.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
 
 const owner = "a".repeat(64);
@@ -460,12 +460,29 @@ test("bounded migration catches up legacy journals at the admission bound and re
   for (const writer of ["native", "helper"] as const) for (const transitions of [64, 512, LIMITS.migrationEntries - 6]) {
     const home = fixture(t); oldCanonicalJournal(home, transitions);
     const started = performance.now();
-    if (writer === "native") assert.deepEqual(nativePass(home).getDiagnostics(), []);
-    else { const result = helperPass(home, "", WSL_SKILLS_HELPER, 120_000); assert.equal(result.status, 0, String(result.stderr)); }
+    const maximum = { records: 0, bytes: 0 };
+    if (writer === "native") {
+      observeLeaseVerificationWorkForTest((work) => { maximum.records = Math.max(maximum.records, work.records); maximum.bytes = Math.max(maximum.bytes, work.bytes); });
+      try { assert.deepEqual(nativePass(home, { onCheckpointFailureForTest: (error) => { throw error; } }).getDiagnostics(), []); } finally { observeLeaseVerificationWorkForTest(); }
+    } else {
+      const result = helperPass(home, `
+original_spend = spend_verification_work
+maximum = {"records": 0, "bytes": 0}
+def measured_spend(records, byte_count):
+    original_spend(records, byte_count)
+    if verification_work is not None:
+        for key in maximum: maximum[key] = max(maximum[key], verification_work[key])
+spend_verification_work = measured_spend
+import atexit
+atexit.register(lambda: print(json.dumps(maximum)))`, WSL_SKILLS_HELPER, 120_000);
+      assert.equal(result.status, 0, String(result.stderr)); Object.assign(maximum, JSON.parse(String(result.stdout)));
+    }
+    assert.ok(maximum.records > 0 && maximum.records <= LIMITS.verificationRecords);
+    assert.ok(maximum.bytes > 0 && maximum.bytes <= LIMITS.verificationBytes);
     assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 4);
     assert.ok(storage(home).records <= 5);
     assert.equal(helperPass(home).status, 0); nativePass(home);
-    t.diagnostic(JSON.stringify({ writer, legacyTransitions: transitions, durationMs: Math.round(performance.now() - started), ...storage(home) }));
+    t.diagnostic(JSON.stringify({ writer, legacyTransitions: transitions, durationMs: Math.round(performance.now() - started), verificationWork: maximum, ...storage(home) }));
   }
   for (const writer of ["native", "helper"] as const) {
     const home = fixture(t); oldCanonicalJournal(home, LIMITS.migrationEntries - 5);
@@ -474,4 +491,13 @@ test("bounded migration catches up legacy journals at the admission bound and re
     else assert.notEqual(helperPass(home).status, 0);
     assert.deepEqual(evidence(home), before);
   }
+});
+
+test("physical snapshot refuses an exhausted remaining budget without changing evidence", { skip: process.platform !== "linux" }, (t) => {
+  const home = fixture(t); seed(home, 9);
+  const before = evidence(home);
+  assert.throws(() => readLeaseIoSnapshot(paths(home).root, { records: 0, bytes: 0 }), /work limit/);
+  assert.deepEqual(evidence(home), before);
+  assert.throws(() => readLeaseIoSnapshot(paths(home).root, { records: LIMITS.verificationRecords, bytes: 0 }), /work limit/);
+  assert.deepEqual(evidence(home), before);
 });

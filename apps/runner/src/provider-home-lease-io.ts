@@ -129,7 +129,7 @@ export class LeaseIoError extends Error {
 }
 function run(input: Buffer): Reader {
   const command = process.platform === "win32" ? windowsLeaseIoCommand() : { command: nativeExecutable(), args: [] };
-  const result = spawnSync(command.command, command.args, { input, timeout: 60_000, killSignal: "SIGKILL", maxBuffer: IPC_BYTES, windowsHide: true });
+  const result = spawnSync(command.command, command.args, { input, timeout: 120_000, killSignal: "SIGKILL", maxBuffer: IPC_BYTES, windowsHide: true });
   if (result.error) throw new LeaseIoError("refusal", "provider-HOME lease I/O helper unavailable or timed out; preserve all evidence");
   const reader = new Reader(result.stdout ?? Buffer.alloc(0));
   const tag = reader.u8();

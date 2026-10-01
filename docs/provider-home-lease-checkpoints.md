@@ -24,6 +24,7 @@ token; matching a disk PID, an empty mirror directory, or a missing mirror never
 | Windows retirement aliases | 1 fixed name |
 | Complete verification or compaction work | 131,072 record operations / 256 MiB read or hashed |
 | Native helper IPC | 64 MiB |
+| Native I/O transaction timeout | 120 seconds |
 | Mount inventory in the Linux helper | 1 MiB |
 
 The limits are configured in `provider-home-lease-checkpoint.ts` and independently enforced by

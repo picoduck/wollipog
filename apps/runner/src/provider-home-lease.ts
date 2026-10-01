@@ -36,12 +36,14 @@ const RETIREMENT_ALIAS = ".mutable-home.retired";
 let physicalSnapshot: LeaseIoSnapshot | undefined;
 const CHECKPOINT_SLOTS = [CHECKPOINT_PENDING, `${CHECKPOINT_PENDING}-2`];
 let verificationWork: { records: number; bytes: number } | undefined;
+let verificationObserver: ((work: { records: number; bytes: number }) => void) | undefined;
+export function observeLeaseVerificationWorkForTest(observer?: typeof verificationObserver): void { verificationObserver = observer; }
 
 function withVerificationBudget<T>(action: () => T): T {
   const previous = verificationWork;
   if (previous) return action();
   verificationWork = { records: 0, bytes: 0 };
-  try { return action(); } finally { verificationWork = previous; }
+  try { return action(); } finally { const completed = verificationWork; verificationWork = previous; if (completed) verificationObserver?.(completed); }
 }
 
 function spendVerificationWork(records: number, bytes: number): void {

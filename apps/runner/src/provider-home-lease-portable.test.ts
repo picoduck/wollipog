@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -39,7 +39,7 @@ function seed(home: string): string {
 test("native POSIX and Windows checkpoints recover actual killed-parent publication boundaries", { timeout: 600_000 }, async (t) => {
   const boundaries = process.platform === "win32" ? [...commonBoundaries, "retirement-moved", "retirement-flushed"] : commonBoundaries;
   for (const boundary of boundaries) {
-    const home = mkdtempSync(join(tmpdir(), "wollipog-portable-lease-"));
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-portable-lease-")));
     t.after(() => rmSync(home, { recursive: true, force: true }));
     const root = seed(home); const marker = join(home, "ready"); const script = join(home, "writer.mts");
     // Keep fixed-source compiler errors visible in test evidence before public lease refusals
