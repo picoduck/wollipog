@@ -1211,6 +1211,9 @@ Helper text, one sentence.            ← or the error, which replaces it
   `--type-body` weight 400. Placeholder `--text-faint`, example-style ("e.g. staging-vpc"), never a
   label substitute.
 - Helper: `--type-small`, `--text-dim`, 4px below. One sentence.
+- Spacing: a `.field`'s parts stack `--space-2` apart, which puts the label 8px above the control;
+  the helper, the error that replaces it and a `.field-foot` pull up by `--space-1` to sit 4px
+  below it. A field warning pulls up by the same `--space-1`, 4px under the helper (§8.5).
 - Fields stack with 16px gap; related fields share a row on desktop with 12px gap
   (`.field-row`, collapses to one column in a container under 480px).
 - Fieldsets: `--type-section` legend, 24px above, no border.

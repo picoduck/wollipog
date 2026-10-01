@@ -9636,24 +9636,37 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex-direction: column;
   gap: 14px;
 }
+/* Field anatomy (§8.1): the parts stack 8px apart, which puts the label 8px above the control.
+   The helper sits 4px under the control: it, the error that replaces it (§8.5) and a
+   `.field-foot` pull up by --space-1 (rule below, with the other field parts). */
 .field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .field > span,
-.field-label,
-.new-session-field-label {
+.field-label {
   font-size: var(--text-sm);
   color: var(--text-dim);
   font-weight: 500;
 }
-/* .field-label and .input are rendered by the Rename Session / Rename Project dialogs and the
-   message-action form, but had no rules — the label sat inline against its input with no gap. */
+/* The field's label (§8.1) is --type-label in --text: a bare first span, a `.field-label` or
+   `.new-session-field-label`, or the first item of a `.field-head` row (below). Later spans in a
+   field keep the dim rule above. */
+.field > span:first-child,
+.field > .field-label,
+.new-session-field-label {
+  color: var(--text);
+  font: var(--type-label);
+}
+/* .field-label and .input are rendered by the Session Move dialogs and the message-action form,
+   but had no rules — the label sat inline against its input with no gap. Inside a `.field` the
+   field's gap spaces it instead. */
 .field-label {
   display: block;
   margin-bottom: 6px;
 }
+.field > .field-label { margin-bottom: 0; }
 .input {
   width: 100%;
   min-width: 0;
@@ -9714,14 +9727,18 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   min-width: 0;
 }
 .field-head > :is(label, span):first-child {
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-  font-weight: 500;
+  color: var(--text);
+  font: var(--type-label);
 }
 .field-helper {
   margin: 0;
   color: var(--text-dim);
   font: var(--type-small);
+}
+/* 4px under the control (§8.1): half the field's gap. A field warning (.field-warn) under the
+   helper pulls up by the same --space-1, so it sits 4px under the helper (§8.5). */
+.field > :is(.field-helper, .field-error, .field-foot) {
+  margin-top: calc(-1 * var(--space-1));
 }
 .field-foot {
   display: flex;

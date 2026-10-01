@@ -13,6 +13,9 @@ import "../styles.css";
  * sat (`.field-helper`).
  * A field warning (§8.5) and a failed save's bar (§8.6), whose tone icons follow their words in
  * forced colors (#2269).
+ * Field anatomy (#2270, §8.1): a `.field-head` label row with a control beside the label, and a field
+ * warning under a helper, so a spec can measure label to control, control to helper and helper to
+ * warning.
  * `?theme=light` switches theme.
  */
 
@@ -40,6 +43,30 @@ function NameField({ state }: { state: "helper" | "invalid" | "focused" }) {
   );
 }
 
+function HeadField() {
+  return (
+    <div className="field" data-state="head">
+      <div className="field-head">
+        <label htmlFor="head-input">Instructions</label>
+        <button type="button" className="btn sm">Upload Folder…</button>
+      </div>
+      <input id="head-input" className="input" defaultValue="Review the diff" aria-describedby="head-helper" />
+      <p className="field-helper" id="head-helper">{HELPER}</p>
+    </div>
+  );
+}
+
+function WarnField() {
+  return (
+    <label className="field" data-state="warn">
+      <span>Branch</span>
+      <input className="input" defaultValue="fix/rounding" aria-describedby="warn-helper warn-warning" />
+      <p className="field-helper" id="warn-helper">The branch the worktree checks out.</p>
+      <FieldWarning id="warn-warning">This branch already has a worktree.</FieldWarning>
+    </label>
+  );
+}
+
 function Harness() {
   document.documentElement.setAttribute("data-theme",
     new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark");
@@ -55,6 +82,8 @@ function Harness() {
           <input className="input" defaultValue="main" aria-describedby="branch-warning" />
           <FieldWarning id="branch-warning">Sessions on main commit straight to the default branch.</FieldWarning>
         </label>
+        <HeadField />
+        <WarnField />
         <SaveBar dirty error="Couldn't save the instructions." onDiscard={() => {}} onSave={() => {}} />
       </form>
     </div>

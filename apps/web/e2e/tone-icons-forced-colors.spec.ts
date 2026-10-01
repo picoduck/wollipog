@@ -66,7 +66,7 @@ for (const palette of ["dark", "light"] as const) {
       expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
       const canvasText = await computed(page, "CanvasText");
 
-      const warning = await pair(page.locator(".field-warn"), ".field-warn-icon", ":scope > span");
+      const warning = await pair(page.locator('.field[data-state="warning"] .field-warn'), ".field-warn-icon", ":scope > span");
       expect(warning.icon, "the warning icon follows the warning's words").toBe(warning.words);
       expect(warning.words).toBe(canvasText);
 
@@ -136,7 +136,7 @@ for (const theme of ["dark", "light"] as const) {
     test("the field warning and the Save bar error icons keep their tones", async ({ page }) => {
       await page.goto(`/primitives-e2e.html?theme=${theme}`);
       expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(false);
-      const warning = await pair(page.locator(".field-warn"), ".field-warn-icon", ":scope > span");
+      const warning = await pair(page.locator('.field[data-state="warning"] .field-warn'), ".field-warn-icon", ":scope > span");
       expect(warning).toEqual({ icon: await computed(page, "var(--amber)"), words: await computed(page, "var(--text-dim)") });
       const saveBar = await pair(page.locator(".save-bar.is-error"), ".save-bar-icon", ".save-bar-message");
       expect(saveBar).toEqual({ icon: await computed(page, "var(--red)"), words: await computed(page, "var(--text-dim)") });

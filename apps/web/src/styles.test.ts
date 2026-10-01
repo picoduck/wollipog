@@ -217,6 +217,27 @@ test("no focus ring anywhere is drawn in the accent colour", () => {
  * F6 zones (docs/design-system.md §16.1): no pane is framed on focus, and the zone F6 enters shows a
  * 2px --focus line on its top edge that fades out, without the fade under reduced motion.
  */
+/** The line under a field's control (§8.1): the helper, the error that replaces it, or a `.field-foot`. */
+const FIELD_LINE = ".field > :is(.field-helper, .field-error, .field-foot)";
+
+/**
+ * Field anatomy (docs/design-system.md §8.1, #2270): the parts stack --space-2 apart, so the label
+ * sits 8px above the control, and the line under the control pulls up by --space-1 to sit 4px under
+ * it. A field warning pulls up by the same --space-1, 4px under the helper (§8.5). Every form of the
+ * label is --type-label in --text. e2e/field-error.spec.ts measures the result in a browser.
+ */
+test("a field stacks 8px apart, its helper or error 4px under the control, and its label is --type-label in --text", () => {
+  assert.match(soleRuleBody(".field"), /gap: var\(--space-2\);/);
+  assert.equal(soleRuleBody(FIELD_LINE), "margin-top: calc(-1 * var(--space-1));",
+    "the helper and the error share one offset, so one replacing the other does not move the field");
+  assert.match(soleRuleBody(".field-warn"), /margin: calc\(-1 \* var\(--space-1\)\) 0 0;/);
+  for (const label of [".field > span:first-child,\n.field > .field-label,\n.new-session-field-label", ".field-head > :is(label, span):first-child"]) {
+    assert.match(soleRuleBody(label), /color: var\(--text\);/, `${label} is in --text`);
+    assert.match(soleRuleBody(label), /font: var\(--type-label\);/, `${label} is --type-label`);
+  }
+  assert.equal(soleRuleBody(".field > .field-label"), "margin-bottom: 0;", "the field's gap spaces a .field-label");
+});
+
 /**
  * The invalid field (docs/design-system.md §8.5): one `.field-error` recipe, and one rule that turns
  * the edge of any invalid control in a `.field` red. The rule sets only the edge, so the ring the
@@ -226,8 +247,8 @@ test("one field error rule, and invalid controls in a field draw a red edge unde
   const owners = (pattern: RegExp) => [...new Set(allDeclarations(css)
     .filter((declaration) => declaration.selectors.some((selector) => pattern.test(selector)))
     .map((declaration) => declaration.selector))];
-  assert.deepEqual(owners(/\.field-error\b/), [".field-error", ".field-error-icon"],
-    "the recipe is written once, beside .field-warn");
+  assert.deepEqual(owners(/\.field-error\b/), [FIELD_LINE, ".field-error", ".field-error-icon"],
+    "the recipe is written once, beside .field-warn; its place under the control is the helper's rule");
   assert.match(soleRuleBody(".field-error"), /color: var\(--danger-text\);/);
   assert.match(soleRuleBody(".field-error"), /font: var\(--type-small\);/);
   assert.match(soleRuleBody(".field-error"), /margin: 0;/, "it takes the helper's place, with no offset of its own");
