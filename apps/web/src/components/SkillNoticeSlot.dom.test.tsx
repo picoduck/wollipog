@@ -311,6 +311,27 @@ test("an edited copy names whose copy differs and offers Review Edit… and Rest
   await old.unmount();
 });
 
+test("an edited copy names the version it differs from by number: the latest, an older one, or its digest when none matches (#2291)", async () => {
+  const older = "a".repeat(64);
+  const unknown = "4f1c9b2e7d30".padEnd(64, "9");
+  const editedFrom = (from: string): RunnerSkillsResponse => ({
+    ...edited, reported: { ...edited.reported!, drift: [{ ...edited.reported!.drift![0]!, digest: from }] },
+  });
+  const versionsByDigest = new Map([[older, { id: "v2", digest: older, versionNumber: 2, createdAt: 1 }]]);
+  const cases: Array<[string, RunnerSkillsResponse, Map<string, { id: string; digest: string; versionNumber: number; createdAt: number }> | undefined, string]> = [
+    ["the latest version", edited, undefined, "v3"],
+    ["an older numbered version", editedFrom(older), versionsByDigest, "v2"],
+    ["an older version before its number is read", editedFrom(older), undefined, older.slice(0, 12)],
+    ["a digest no version matches", editedFrom(unknown), versionsByDigest, "4f1c9b2e7d30"],
+  ];
+  for (const [label, state, versions, name] of cases) {
+    const view = await mount({ machineSkills: { studio: state }, ...(versions ? { versionsByDigest: versions } : {}) });
+    assert.equal(view.body(), `Claude Code's copy differs from ${name}. Updates on that machine wait until you import the edit or restore ${name}.`,
+      `${label}: the body and the restore sentence`);
+    await view.unmount();
+  }
+});
+
 test("a held Git update names its commit and files and opens the review", async () => {
   const held = { commit: "c3d4e5f6a7b8".padEnd(40, "0"), reason: "scripts" as const, scriptPaths: ["scripts/collect.sh", "tool.py"], heldAt: 1 };
   const view = await mount({ skill: skill({ gitAutoUpdate: { enabled: true, held } }), machineSkills: {} });

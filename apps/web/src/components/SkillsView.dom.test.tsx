@@ -2369,6 +2369,66 @@ test("a manual-only skip, a conflict and an unsupported agent show in the list, 
   }
 });
 
+test("the edited-copy notice reads the versions to name an older one by number, and keeps the digest when none matches (#2291)", async () => {
+  const latest = "3".repeat(64);
+  const older = "2".repeat(64);
+  const unknown = "4f1c9b2e7d30".padEnd(64, "9");
+  const skillMd = "---\nname: code-review\n---\nReview.\n";
+  const clientFor = (copyDigest: string, listSkillVersions: (id: string, before?: string) => Promise<unknown>) => ({
+    ...api,
+    listSkills: async () => ({ skills: [{ id: "skill-1", name: "code-review", latestVersion: { id: "v3", digest: latest, versionNumber: 3 } }] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => ({ skill: { id: "skill-1", name: "code-review", latestVersion: { id: "v3", digest: latest, versionNumber: 3 } },
+      latestVersion: { id: "v3", digest: latest, versionNumber: 3, files: [{ path: "SKILL.md", content: skillMd, encoding: "utf8" as const }] } }),
+    listSkillAssignments: async () => ({ assignments: [] }),
+    listSkillVersions,
+    getMachineSkillVersionPolicy: async () => ({ policy: null }),
+    runnerSkills: async () => ({
+      desired: [{ name: "code-review", versionDigest: latest, targets: [{ agentId: "claude", invocation: "agent" as const }] }],
+      reported: {
+        deployed: [{ name: "code-review", digest: copyDigest, links: [{ agentId: "claude", status: "conflict" as const, detail: "held" }] }],
+        drift: [{ name: "code-review", digest: copyDigest, variant: "agent" as const, observedDigest: "e".repeat(64), held: true }],
+      },
+    }),
+  }) as unknown as ApiClient;
+  // Newest first, one version a page: the older version is on the second page.
+  const pages: Record<string, { versions: unknown[]; nextCursor: string | null }> = {
+    first: { versions: [{ id: "v3", digest: latest, versionNumber: 3 }], nextCursor: "after-v3" },
+    "after-v3": { versions: [{ id: "v2", digest: older, versionNumber: 2 }], nextCursor: "after-v2" },
+    "after-v2": { versions: [{ id: "v1", digest: "1".repeat(64), versionNumber: 1 }], nextCursor: null },
+  };
+  const requested: string[] = [];
+  const paged = async (_id: string, before?: string) => { requested.push(before ?? "first"); return pages[before ?? "first"]!; };
+  const body = (container: HTMLElement) => container.querySelector(".skill-notice-slot .notice-body > p")?.textContent;
+  const sentence = (name: string) =>
+    `Claude's copy differs from ${name}. Updates on that machine wait until you import the edit or restore ${name}.`;
+
+  const view = await mountRouted(clientFor(older, paged), "edited-older-version", { name: "skills", id: "skill-1" });
+  try {
+    assert.equal(body(view.container), sentence("v2"), "an older numbered version is named by its number");
+    assert.deepEqual(requested, ["first", "after-v3"], "the read stops once the digest turns up");
+  } finally {
+    await view.unmount();
+  }
+
+  requested.length = 0;
+  const missing = await mountRouted(clientFor(unknown, paged), "edited-unknown-version", { name: "skills", id: "skill-1" });
+  try {
+    assert.equal(body(missing.container), sentence("4f1c9b2e7d30"), "a digest no version matches keeps its short digest");
+    assert.deepEqual(requested, ["first", "after-v3", "after-v2"], "the whole list is read before falling back");
+  } finally {
+    await missing.unmount();
+  }
+
+  const failing = await mountRouted(clientFor(older, async () => { throw new Error("HTTP 503"); }), "edited-version-read-failed",
+    { name: "skills", id: "skill-1" });
+  try {
+    assert.equal(body(failing.container), sentence(older.slice(0, 12)), "a failed read keeps the short digest");
+  } finally {
+    await failing.unmount();
+  }
+});
+
 test("Recommended by Wollipog assigns from a menu or dismisses, and never counts as attention", async () => {
   const skills = [
     { id: "s-using", name: "using-wollipog", description: "Operate Wollipog sessions.", builtIn: { release: "0.29.0", heldUpdate: null },

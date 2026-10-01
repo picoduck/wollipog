@@ -123,6 +123,13 @@ test.describe("at 1440×900", () => {
     }
   });
 
+  test("an edited copy of an older version names that version by number (#2291)", async ({ page }) => {
+    await page.goto(`/command-inbox-projects-e2e.html?fullShell=1&history=1&skills=notices&olderCopy=1&path=${encodeURIComponent(skillPath("skill-n2"))}`);
+    await expect(notice(page).locator(".notice-title")).toHaveText("Studio Workstation Has an Edited Copy");
+    await expect(notice(page).locator(".notice-body")).toHaveText(
+      "Claude Code's copy differs from v2. Updates on that machine wait until you import the edit or restore v2.");
+  });
+
   test("the edited copy, held Git update and held built-in update say what is held and why", async ({ page }) => {
     await open(page, "skill-n2");
     await expect(notice(page).locator(".notice-body")).toHaveText(

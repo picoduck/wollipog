@@ -1344,9 +1344,11 @@ const detailGroupAssignments = detailGroupRules ? [
  * the rule is fixed; `lint-rules` an edited Claude Code copy; `fetch-docs` a held Git update;
  * `using-wollipog` a recommended built-in skill whose release update is held; `orchestrate-issues`
  * a recommendation; and `deploy-bot` a machine's own deployment error. Assignments, dismissals and
- * rule changes apply to the fixture, so each notice clears the way it would.
+ * rule changes apply to the fixture, so each notice clears the way it would. `&olderCopy=1` (#2291):
+ * `lint-rules`' edited copy is of v2, an older version than its latest v3.
  */
 const noticesMode = SHELL_SKILLS_MODE === "notices";
+const noticeOlderCopy = noticesMode && FIXTURE_QUERY.get("olderCopy") === "1";
 /** `&deployment=1` (#1981): the Studio also has six ACP agents that can't receive managed skills,
  * container and cloud targets, and `deploy-bot`'s error is a long one. */
 const deploymentExtras = noticesMode && FIXTURE_QUERY.has("deployment");
@@ -1426,7 +1428,8 @@ const noticeMachine = (runnerId: string) => {
             ? { agentId: target.agentId, status: "unsupported" as const, detail: "Manual-only invocation is not supported for this agent." }
             : { agentId: target.agentId, status: "linked" as const }) })),
       drift: studio ? [
-        { name: "lint-rules", digest: noticeSkills[1]!.latestVersion.digest, variant: "manual" as const, observedDigest: "e2".padEnd(64, "0"), held: true },
+        { name: "lint-rules", digest: noticeOlderCopy ? noticeLintRulesV2.digest : noticeSkills[1]!.latestVersion.digest,
+          variant: "manual" as const, observedDigest: "e2".padEnd(64, "0"), held: true },
         { name: "collect", digest: noticeSkills[0]!.latestVersion.digest, variant: "manual" as const, observedDigest: "e1".padEnd(64, "0"), held: true },
       ] : [],
       unmanaged: [],
@@ -1434,7 +1437,14 @@ const noticeMachine = (runnerId: string) => {
     },
   });
 };
+/** `lint-rules`' version 2, which `&olderCopy=1` deploys and edits. */
+const noticeLintRulesV2 = { id: "skillv_n2_2", digest: "0002".padEnd(64, "c"), createdAt: 1_699_000_000_000, versionNumber: 2 };
 const noticesApi = {
+  listSkillVersions: async (id: string) => {
+    const skill = noticeSkills.find((candidate) => candidate.id === id);
+    if (!skill) throw new Error("HTTP 404: skill not found");
+    return { versions: [structuredClone(skill.latestVersion), ...(id === "skill-n2" ? [{ ...noticeLintRulesV2 }] : [])], nextCursor: null };
+  },
   listSkills: async () => ({ skills: structuredClone(noticeSkills) }),
   listSkillGroups: async () => ({ groups: [] }),
   getSkill: async (id: string) => {

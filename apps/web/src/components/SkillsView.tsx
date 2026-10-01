@@ -43,6 +43,7 @@ import {
   skillFromPayload,
   skillGroupsFromPayload,
   skillOverviewAttention,
+  findSkillVersions,
   skillsFromPayload,
   type RunnerSkillsResponse,
   type SkillAgentSelector,
@@ -54,6 +55,7 @@ import {
   type SkillGroupAssignmentView,
   type SkillGroupView,
   type SkillSummary,
+  type SkillVersionSummary,
 } from "../skills.js";
 
 /**
@@ -565,6 +567,21 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   const noticeItem = detail
     ? skillNoticeItem(detail, runners, machineSkills, detailRules, !detailGroupId || groupRulesCurrent)
     : null;
+  // An edited copy of an older version is named by its number (#2291): read the versions until its
+  // digest turns up. The latest needs no read; a failed or bounded-out read leaves the digest.
+  const noticeSkillId = detail?.id ?? null;
+  const noticeLatestId = detail?.latestVersion?.id ?? null;
+  const editedDigest = noticeItem?.kind === "edited" && noticeItem.entry.digest !== detail?.latestVersion?.digest
+    ? noticeItem.entry.digest : null;
+  const noticeVersionsKey = noticeSkillId && editedDigest ? `${noticeSkillId}:${noticeLatestId ?? ""}:${editedDigest}` : null;
+  const [noticeVersions, setNoticeVersions] = useState<{ key: string; byDigest: ReadonlyMap<string, SkillVersionSummary> } | null>(null);
+  useEffect(() => {
+    if (!noticeSkillId || !editedDigest || !noticeVersionsKey) return;
+    let active = true;
+    findSkillVersions((before) => api.listSkillVersions(noticeSkillId, before), { digests: [editedDigest] })
+      .then((found) => { if (active) setNoticeVersions({ key: noticeVersionsKey, byDigest: found.byDigest }); }, () => {});
+    return () => { active = false; };
+  }, [api, noticeSkillId, editedDigest, noticeVersionsKey]);
 
   const howId = `skills-how-${useId().replace(/:/g, "")}`;
   const skillName = detail?.name ?? skills?.find((skill) => skill.id === selectedId)?.name;
@@ -762,6 +779,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 rules={detailRules}
                 rulesComplete={!detailGroupId || groupRulesCurrent}
                 item={noticeItem}
+                versionsByDigest={noticeVersions?.key === noticeVersionsKey ? noticeVersions.byDigest : undefined}
                 busy={busy}
                 syncingRunnerId={syncingRunnerId}
                 onSwitchToAgentInvocable={(rule) => void updateRule(detail.id, rule, { invocation: "agent" })}

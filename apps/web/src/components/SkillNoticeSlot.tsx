@@ -10,9 +10,11 @@ import {
   skillDeploymentErrorWords,
   skillRecommended,
   skillVersionLabel,
+  SHORT_DIGEST_LENGTH,
   type RunnerSkillsResponse,
   type SkillGitAutoUpdate,
   type SkillSummary,
+  type SkillVersionSummary,
 } from "../skills.js";
 import {
   skillDeploymentErrorSummary,
@@ -223,6 +225,9 @@ export interface SkillNoticeSlotProps<T extends SkillRule> {
   /** The item `skillNoticeItem` chose, when the caller already asked: Source reads the same answer
    * to leave out what the slot shows, so the two can never disagree. */
   item?: SkillNoticeItem<T> | null;
+  /** The skill's versions read so far, by digest, so an edited copy of an older version is named by
+   * its number (#2291). A digest it doesn't hold is named by its first 12 characters. */
+  versionsByDigest?: ReadonlyMap<string, SkillVersionSummary>;
   busy: boolean;
   syncingRunnerId: string | null;
   onSwitchToAgentInvocable: (rule: T) => void;
@@ -328,7 +333,8 @@ export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps
     const runner = runnerOf(runnerId)!;
     const machine = machineName(runnerId);
     const latest = skill.latestVersion;
-    const version = entry.digest === latest?.digest ? skillVersionLabel(latest)!.text : entry.digest.slice(0, 12);
+    const known = entry.digest === latest?.digest ? latest : props.versionsByDigest?.get(entry.digest);
+    const version = skillVersionLabel(known)?.text ?? entry.digest.slice(0, SHORT_DIGEST_LENGTH);
     const desired = machineSkills[runnerId]?.desired.find((candidate) => candidate.name === skill.name);
     const users = unique((desired?.targets ?? [])
       .filter((target) => target.invocation === entry.variant)

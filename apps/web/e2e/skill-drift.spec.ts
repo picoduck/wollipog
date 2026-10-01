@@ -90,7 +90,8 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     // The edited copy is the notice under the skill's header (#1972); Deployment keeps the badge.
     const notice = page.locator(".skill-notice-slot .notice");
     await expect(notice.locator(".notice-title")).toHaveText("Build Machine Has an Edited Copy");
-    await expect(notice).toContainText("Claude's copy differs from 4f1c00000000. Updates on that machine wait until you import the edit or restore 4f1c00000000.");
+    // The copy's digest is v3 in the version list, so the notice names it by number (#2291).
+    await expect(notice).toContainText("Claude's copy differs from v3. Updates on that machine wait until you import the edit or restore v3.");
     await expect(machine.getByRole("heading", { name: "Edited Copies" })).toHaveCount(0);
     await expect(machine).toContainText("Edited on this machine. Updates wait until you import or restore it.");
     await machine.scrollIntoViewIfNeeded();
