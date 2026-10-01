@@ -38,11 +38,12 @@ server.on("upgrade", (request, socket, head) => wss.handleUpgrade(request, socke
   const record = { peer, registered: false }; peers.push(record);
   peer.on("message", raw => {
     const message = JSON.parse(raw.toString());
-    if (message.type === "register") {
-      record.registered = true;
-      // An isolated HOME and empty PATH must leave every live harness unavailable.
+    if (message.type === "register" || message.type === "agents_updated") {
       assert.ok((message.agents ?? []).every(agent => agent.available === false),
         "fixture must not discover a live provider");
+    }
+    if (message.type === "register") {
+      record.registered = true;
       peer.send(JSON.stringify({ type: "registered", ok: true, serverTime: Date.now(), heartbeatIntervalMs: interval, protocolVersion: protocol }));
     } else if (message.type === "heartbeat" && record === peers[0] && measuring) {
       const now = performance.now(); delays.push(Math.max(0, now - lastHeartbeat - interval)); lastHeartbeat = now;
@@ -83,9 +84,17 @@ async function start(dataDir) {
   return { child, peer: peers[children.length - 1].peer, dataDir };
 }
 async function sync(runner, id) {
-  runner.peer.send(JSON.stringify({ type: "skills_sync", runnerId, requestId: id, skills: [] }));
-  await until(() => states.has(id), `skill sync ${id}`, maximal ? 300_000 : 60_000);
-  return states.get(id);
+  // Registration can precede startup discovery. A discovery change during cold acquisition must
+  // invalidate the old skill authorization; exercise a fresh authoritative request rather than
+  // disabling that production fence. Only this explicit supersession is retryable in the fixture.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const requestId = `${id}-${attempt}`;
+    runner.peer.send(JSON.stringify({ type: "skills_sync", runnerId, requestId, skills: [] }));
+    await until(() => states.has(requestId), `skill sync ${requestId}`, maximal ? 300_000 : 60_000);
+    const state = states.get(requestId);
+    if (state.error !== "Skill synchronization was superseded while waiting for provider-home ownership.") return state;
+  }
+  throw new Error("startup skill authorization kept changing beyond the finite fixture retry budget");
 }
 function evidence() {
   const lease = join(home, ".agent-manager/provider-home-leases-v1");
