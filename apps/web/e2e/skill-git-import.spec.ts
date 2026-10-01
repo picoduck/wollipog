@@ -9,7 +9,7 @@ test("Check for Updates preserves the source and previews the recorded skill dir
     await route.fulfill({ json: { previewId: "updates", candidates: [] } });
   });
   await page.goto("/skills-removals-e2e.html");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await expect(page.getByRole("heading", { name: "Git Source" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
   await page.screenshot({ path: info.outputPath("git-source-mobile-after.png"), fullPage: true });

@@ -40,7 +40,7 @@ async function openReview(page: Page, width: number) {
   } }));
   await page.route("**/api/skill-drift/review-1", (route) => route.fulfill({ status: 204, body: "" }));
   await page.goto("/skills-removals-e2e.html?drift=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await page.locator(".skills-machine").getByRole("button", { name: "Import Edit as New Version" }).click();
   const dialog = page.getByRole("dialog", { name: "Import Edit as New Version" });
   await expect(dialog.locator(".skill-diff-file")).toHaveCount(3);

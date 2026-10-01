@@ -33,7 +33,7 @@ test("Automatic Updates is off by default and opting in waits for the first chec
   await page.setViewportSize({ width: 1280, height: 900 });
   const state = await install(page, off);
   await page.goto("/skills-removals-e2e.html?groups=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   const toggle = page.getByRole("checkbox", { name: "Automatic Updates", exact: true });
   await expect(toggle).not.toBeChecked();
   await expect(page.getByText("Off. Use Check for Updates to review new commits.")).toBeVisible();
@@ -58,7 +58,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     });
     await page.goto("/skills-removals-e2e.html?groups=1");
     await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-    await page.getByRole("button", { name: /code-review/i }).click();
+    await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
     await expect(page.getByRole("status").filter({ hasText: "held for review" }))
       .toHaveText(`Update to commit ${"c".repeat(12)} is held for review because it adds or changes scripts: scripts/collect.sh, tool.py. Review it before it can deploy.`);
     await expect(page.getByText(`Last checked`, { exact: false })).toBeVisible();
@@ -79,7 +79,7 @@ test("a failed check is reported on the skill", async ({ page }, info) => {
   await install(page, { ...off, enabled: true, checkedAt: at, checkedCommit: "a".repeat(40),
     error: { message: "Could not read the Git source within its limits. Check the URL, ref, access, and repository size.", at } });
   await page.goto("/skills-removals-e2e.html?groups=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await expect(page.getByText("Could not read the Git source within its limits.", { exact: false })).toBeVisible();
   await expect(page.getByText("Existing versions and deployments are unchanged.", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "Check for Updates" })).toBeVisible();
@@ -91,7 +91,7 @@ test("an update over an import without recorded modes explains its one-time revi
   await install(page, { ...off, enabled: true, checkedAt: at, checkedCommit: "e".repeat(40),
     held: { commit: "e".repeat(40), reason: "untracked_modes", scriptPaths: ["SKILL.md", "tool"], heldAt: at } });
   await page.goto("/skills-removals-e2e.html?groups=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await expect(page.getByRole("status").filter({ hasText: "held for review" }))
     .toHaveText(`Update to commit ${"e".repeat(12)} is held for review because the last import predates executable-file tracking, so changed files need one review: SKILL.md, tool. Review it before it can deploy.`);
   await expect(page.getByRole("button", { name: "Review Held Update" })).toBeVisible();

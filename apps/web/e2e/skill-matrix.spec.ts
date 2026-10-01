@@ -3,7 +3,7 @@ import { installSkillMatrixFixture } from "./skill-matrix.fixture.js";
 test("direct assignment errors are visible inside the open dialog", async ({ page }) => {
   await page.route("**/api/skill-assignments", route => route.fulfill({ status: 409, json: { error: "Assignment ownership rejected" } }));
   await page.goto("/skills-removals-e2e.html");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await page.getByRole("button", { name: "Add Assignment…", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Add Assignment", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("alert")).toContainText("Assignment ownership rejected");
@@ -13,7 +13,7 @@ test("direct assignment errors are visible inside the open dialog", async ({ pag
 });
 test("version picker explains when no compatible machines exist", async ({ page }) => {
   await page.goto("/skills-removals-e2e.html?legacySkills=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
   await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
   await expect(page.getByText(/No compatible machines are available/)).toBeVisible();
@@ -23,7 +23,7 @@ test("version picker explains when no compatible machines exist", async ({ page 
 test("capable Windows machines offer WSL agents for direct assignment", async ({ page }) => {
   await installSkillMatrixFixture(page);
   await page.goto("/skills-removals-e2e.html?matrix=1&wslSkills=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
   await expect(matrix.getByRole("row", { name: /^WSL Codex / }).first())
     .toHaveAccessibleName(/^WSL Codex Not Assigned Not Reported/);
@@ -38,7 +38,7 @@ test("unsupported WSL reconciliation detail is visible in the assignment matrix"
   const detail = "this agent's WSL distribution name is invalid or unsafe";
   await installSkillMatrixFixture(page, { wslUnsupportedDetail: detail });
   await page.goto("/skills-removals-e2e.html?matrix=1&wslSkills=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   const row = page.getByRole("region", { name: "Machine × Agents", exact: true })
     .getByRole("row", { name: /^WSL Codex / }).first();
   await expect(row).toHaveAccessibleName(/^WSL Codex Agent Invocable Unsupported/);
@@ -50,7 +50,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/skills-removals-e2e.html?matrix=1");
     await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
-    await page.getByRole("button", { name: /code-review/i }).click();
+    await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
     const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
     await expect(matrix).toContainText("Pinned · v0");
     await expect(matrix).toContainText("Track Latest");
@@ -93,7 +93,7 @@ test("failed reads do not show unassigned or tracking defaults", async ({ page }
   await page.route("**/api/runners/*/skills", route => route.fulfill({ status: 503, json: { error: "Unavailable" } }));
   await page.route("**/api/skills/skill-1/machines/*/version-policy", route => route.fulfill({ status: 503, json: { error: "Unavailable" } }));
   await page.goto("/skills-removals-e2e.html?matrix=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
   await expect(matrix.getByRole("row", { name: /^Claude / }).first()).toHaveAccessibleName(/^Claude Unknown Unknown/);
   await expect(matrix).toContainText("Version policy: Unavailable");
@@ -108,7 +108,7 @@ test("manual sync preserves unknown desired state until authoritative refresh", 
   await installSkillMatrixFixture(page);
   await page.route("**/api/runners/*/skills", route => route.fulfill({ status: 503, json: { error: "Unavailable" } }));
   await page.goto("/skills-removals-e2e.html?matrix=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
   await expect(matrix).toContainText("Skills status could not be loaded");
   let started!: () => void; const refreshing = new Promise<void>(resolve => { started = resolve; });
@@ -125,7 +125,7 @@ test("older control planes use the authorized preview to initialize the saved pi
   await installSkillMatrixFixture(page);
   await page.route("**/api/skills/skill-1/machines/*/version-policy", route => route.fulfill({ status: 404, json: { error: "Route not found" } }));
   await page.goto("/skills-removals-e2e.html?matrix=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
   await page.getByRole("menuitem", { name: "Machine Version…", exact: true }).click();
   await expect(page.getByRole("button", { name: /^Version Policy: Pin v0/ })).toBeEnabled();
@@ -138,7 +138,7 @@ test("older control planes use the authorized preview to initialize the saved pi
 test("late policy response cannot overwrite a newly selected machine", async ({ page }) => {
   await installSkillMatrixFixture(page);
   await page.goto("/skills-removals-e2e.html?matrix=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
   await page.route("**/api/skills/skill-1/machines/runner-1/version-policy", async route => { await held; await route.fulfill({ json: { policy: { versionId: "v0", revision: "r1" } } }); });
   await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();

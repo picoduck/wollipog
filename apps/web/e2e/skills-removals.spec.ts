@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 async function openRemovalHistory(page: import("@playwright/test").Page, width: number) {
   await page.setViewportSize({ width, height: 900 });
   await page.goto("/skills-removals-e2e.html");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await expect(page.getByRole("heading", { name: "Recent Link Removals" })).toBeVisible();
 }
 
@@ -52,7 +52,7 @@ test("a healthy long-running manual sync remains visibly in progress", async ({ 
 test("account-scoped outcomes identify the credential home without exposing opaque ids or paths", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/skills-removals-e2e.html?accountScopes=1");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
 
   const machine = page.locator(".skills-machine");
   await expect(machine).toContainText("Personal Account: A local directory blocks this link.");

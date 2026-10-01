@@ -16,7 +16,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     });
     await page.goto("/skills-removals-e2e.html");
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
-    await page.getByRole("button", { name: /code-review/i }).click();
+    await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
     await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
     await page.getByRole("menuitem", { name: "Version History…", exact: true }).click();
     await expect(page.getByRole("button", { name: "Restore Version", exact: true })).toBeDisabled();
@@ -48,7 +48,7 @@ test("history paginates and stale restore invalidates acceptance; current versio
   await page.route("**/api/skills/skill-1/versions/v0", (route) => route.fulfill({ json: { version: historical, currentVersion: current } }));
   await page.route("**/api/skills/skill-1/restore", (route) => route.fulfill({ status: 409, json: { error: "The library changed after preview. Preview the version again." } }));
   await page.goto("/skills-removals-e2e.html");
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   await page.locator(".skill-detail-head, .detail-bar").getByRole("button", { name: "More Actions" }).click();
   await page.getByRole("menuitem", { name: "Version History…", exact: true }).click();
   await page.getByRole("button", { name: "Preview Version v1", exact: true }).click();

@@ -60,7 +60,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.getByRole("checkbox", { name: acceptance }).check();
     await page.getByRole("button", { name: "Enable Assignment" }).click();
     await page.getByRole("button", { name: "Close", exact: true }).last().click();
-    await page.getByRole("button", { name: /code-review/i }).click();
+    await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
     await expect(page.getByRole("region", { name: "Inherited Assignments" })).toContainText("Build Machine · Claude · Agent Invocable · Enabled");
     await page.screenshot({ path: info.outputPath(`inherited-${width}-${theme}.png`), fullPage: true });
     await page.getByRole("button", { name: "Manage Group Assignments", exact: true }).click();

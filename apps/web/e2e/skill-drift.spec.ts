@@ -52,7 +52,7 @@ async function openDrift(page: Page, width: number, theme: string, assignmentCou
   await page.goto("/skills-removals-e2e.html?drift=1");
   await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
   await expect(page.locator(".master-detail-list .row").getByText("Edited", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
   return { requests };
 }
 

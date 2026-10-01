@@ -14,7 +14,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/skills-removals-e2e.html?matrix=1&onlineMatrix=1&targets=1");
     await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
-    await page.getByRole("button", { name: /code-review/i }).click();
+    await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
     const matrix = page.getByRole("region", { name: "Machine × Agents", exact: true });
 
     const build = matrix.getByRole("article", { name: "Assignments on Build Machine", exact: true });
