@@ -1359,4 +1359,5 @@ contain injected memory and the provider can learn from continued history under 
 
 Runner logs include content-free `project_memory_policy_updated` and `project_memory_policy_applied`
 events keyed by session id and provider, with saved/effective policy. Launch failures name the
-unavailable capability. No saved memory contents, credential values, or memory paths are logged.
+unavailable capability. Policy audit events contain no saved memory contents, credential values, or memory paths.
+Operational filesystem failures may identify the failing path.

@@ -1,4 +1,4 @@
-import { supportsClaudeProjectMemory } from "@wollipog/protocol";
+import { agentContextKey, supportsClaudeProjectMemory, type AgentDefinition } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
 import { lstat, mkdir } from "node:fs/promises";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -150,4 +150,17 @@ export function effectiveProjectMemoryKey(meta: SessionMeta): string {
   if (!meta.projectMemory || meta.driver !== "claude-code" ||
       meta.projectMemory.sharing === "separate" && projectMemoryUnavailable(meta)) return "native";
   return projectMemoryKey(meta);
+}
+
+
+/** Adoption has no agent id. Match the recorded binary and context, including after managed
+ * hook arguments were appended; ambiguous discovery never invents a capability version. */
+export function projectMemoryAgentVersion(meta: Pick<SessionMeta, "agentId" | "adopted" | "command" | "driver" | "context">,
+  agents: readonly AgentDefinition[]): string | undefined {
+  if (meta.agentId) return agents.find(agent => agent.id === meta.agentId)?.version;
+  if (!meta.adopted) return undefined;
+  const matches = agents.filter(agent => agent.command === meta.command &&
+    (agent.driver ?? "acp") === meta.driver && agentContextKey(agent.context) === agentContextKey(meta.context));
+  const versions = new Set(matches.map(agent => agent.version));
+  return versions.size === 1 ? matches[0]?.version : undefined;
 }

@@ -10637,6 +10637,7 @@ export class SessionManager {
     });
     if (result.status === "launched") {
       if (!result.queuedWork) this.emitStatus(sessionId, "idle");
+      if (result.entry.pendingProviderAccountSwitch) setImmediate(() => this.scheduleDrain(sessionId));
     } else if (result.status !== "stopped" && result.status !== "superseded") {
       entry.projectMemoryFailureKey = projectMemoryKey(this.store.readMeta(sessionId) ?? {});
       this.log(JSON.stringify({ event: "project_memory_policy_failed", sessionId, reason: result.status }));
@@ -10860,7 +10861,7 @@ export class SessionManager {
         await this.rebindSelectedProviderAccount(sessionId, entry);
       } else if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
-      } else if (this.active.get(sessionId) === entry && this.projectMemoryChanged(sessionId, entry) &&
+      } else if (this.active.get(sessionId) === entry && !entry.authenticationBlocked && this.projectMemoryChanged(sessionId, entry) &&
           this.providerAccountSwitchCanProceed(sessionId, entry)) {
         await this.rebindProjectMemory(sessionId, entry);
       } else if (this.active.get(sessionId) === entry && entry.queue.length &&

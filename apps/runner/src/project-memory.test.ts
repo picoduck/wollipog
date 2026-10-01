@@ -5,7 +5,7 @@ import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { supportsClaudeProjectMemory } from "@wollipog/protocol";
-import { effectiveProjectMemoryKey, NativeProjectMemorySettings, prepareProjectMemory, withClaudeProjectMemory } from "./project-memory.js";
+import { projectMemoryAgentVersion, effectiveProjectMemoryKey, NativeProjectMemorySettings, prepareProjectMemory, withClaudeProjectMemory } from "./project-memory.js";
 import type { SessionMeta } from "./session-store.js";
 import { runContextCommand } from "./context-command.js";
 import { resolveExecutionIsolation, buildSeatbeltProfile } from "./execution-isolation.js";
@@ -160,4 +160,15 @@ test("strict Seatbelt canonicalizes the selected memory partition", { skip: proc
   }, state);
   assert.ok(isolation?.backend === "seatbelt");
   assert.ok(isolation.profile.includes('/private/var/runner/selected'));
+});
+
+
+test("adopted memory capabilities match the live recorded binary and context, not missing ids or old argv", () => {
+  const adopted = { ...meta(), adopted: true, agentId: null, command: "claude" };
+  const agents = [{ id: "native", name: "Claude", command: "claude", args: [], env: {},
+    driver: "claude-code" as const, context: { kind: "native" as const }, version: "2.1.284" }];
+  assert.equal(projectMemoryAgentVersion(adopted, agents), "2.1.284");
+  assert.equal(projectMemoryAgentVersion({ ...adopted, command: "old-claude" }, agents), undefined);
+  assert.equal(projectMemoryAgentVersion({ ...adopted, context: { kind: "wsl", distro: "other" } }, agents), undefined);
+  assert.equal(projectMemoryAgentVersion(adopted, [...agents, { ...agents[0]!, id: "ambiguous", version: "2.1.283" }]), undefined);
 });
