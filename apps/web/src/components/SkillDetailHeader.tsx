@@ -144,13 +144,14 @@ function SkillMeta({ skill, groupName }: { skill: SkillSummary; groupName?: stri
   );
 }
 
-/** An unboxed detail section (§4.5, §5.1): a title row, then its content. */
-export function SkillDetailSection({ title, children }: { title: string; children: ReactNode }) {
+/** An unboxed detail section (§4.5, §5.1): a title row with its actions at the end, then its content. */
+export function SkillDetailSection({ title, actions, children }: { title: string; actions?: ReactNode; children: ReactNode }) {
   const id = `skill-section-${useId().replace(/:/g, "")}`;
   return (
     <section className="section" aria-labelledby={id}>
       <div className="section-head">
         <h3 id={id} className="section-title">{title}</h3>
+        {actions && <div className="actions">{actions}</div>}
       </div>
       {children}
     </section>

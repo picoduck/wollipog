@@ -179,6 +179,36 @@ export function RecommendedNotice({ runners, machineLabels, busy, onAssign, onCh
   );
 }
 
+/** A held Git update and its review (#1972). The slot shows it when nothing outranks it; otherwise
+ * Source does, so it is one notice in one place. Review Update… opens Check for Updates on the
+ * tracked ref. */
+export function GitHeldNotice({ held, busy, onReview }: {
+  held: NonNullable<SkillGitAutoUpdate["held"]>;
+  busy: boolean;
+  onReview: () => void;
+}) {
+  const commit = held.commit.slice(0, 12);
+  const paths = listText(held.scriptPaths, 3);
+  return (
+    <Notice
+      as="section"
+      tone="warning"
+      title="Update Held for Review"
+      ariaLabel="Update Held for Review"
+      actions={<button type="button" className="btn sm" disabled={busy} onClick={onReview}>Review Update…</button>}
+    >
+      <p>
+        {held.reason === "scripts" && paths ? `Commit ${commit} adds or changes ${paths}.`
+          : held.reason === "untracked_modes" && paths
+            ? `Commit ${commit} changes ${paths}, which the last import didn't check for scripts.`
+            : held.reason === "local_changes" ? `Commit ${commit} would replace changes made here since the last Git import.`
+              : `Commit ${commit} needs a review.`}{" "}
+        Review it before it deploys.
+      </p>
+    </Notice>
+  );
+}
+
 export interface SkillNoticeSlotProps<T extends SkillRule> {
   skill: SkillSummary;
   runners: ReadonlyArray<RunnerView>;
@@ -188,6 +218,9 @@ export interface SkillNoticeSlotProps<T extends SkillRule> {
   rules: ReadonlyArray<T>;
   /** False while a rule that could win is unread (the group's, loading or unreadable). */
   rulesComplete?: boolean;
+  /** The item `skillNoticeItem` chose, when the caller already asked: Source reads the same answer
+   * to leave out what the slot shows, so the two can never disagree. */
+  item?: SkillNoticeItem<T> | null;
   busy: boolean;
   syncingRunnerId: string | null;
   onSwitchToAgentInvocable: (rule: T) => void;
@@ -207,7 +240,7 @@ export interface SkillNoticeSlotProps<T extends SkillRule> {
 export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps<T>) {
   const { skill, runners, machineLabels, machineSkills, rules, busy } = props;
   const reasonId = `skill-notice-reason-${useId().replace(/:/g, "")}`;
-  const item = skillNoticeItem(skill, runners, machineSkills, rules, props.rulesComplete ?? true);
+  const item = props.item !== undefined ? props.item : skillNoticeItem(skill, runners, machineSkills, rules, props.rulesComplete ?? true);
   if (!item) return null;
   const machineName = (runnerId: string) => machineLabels.get(runnerId) ?? runnerId;
   const runnerOf = (runnerId: string) => runners.find((runner) => runner.runnerId === runnerId);
@@ -346,27 +379,7 @@ export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps
       </Notice>
     );
   } else if (item.kind === "git-held") {
-    const { held } = item;
-    const commit = held.commit.slice(0, 12);
-    const paths = listText(held.scriptPaths, 3);
-    notice = (
-      <Notice
-        as="section"
-        tone="warning"
-        title="Update Held for Review"
-        ariaLabel="Update Held for Review"
-        actions={<button type="button" className="btn sm" disabled={busy} onClick={props.onReviewGitUpdate}>Review Update…</button>}
-      >
-        <p>
-          {held.reason === "scripts" && paths ? `Commit ${commit} adds or changes ${paths}.`
-            : held.reason === "untracked_modes" && paths
-              ? `Commit ${commit} changes ${paths}, which the last import didn't check for scripts.`
-              : held.reason === "local_changes" ? `Commit ${commit} would replace changes made here since the last Git import.`
-                : `Commit ${commit} needs a review.`}{" "}
-          Review it before it deploys.
-        </p>
-      </Notice>
-    );
+    notice = <GitHeldNotice held={item.held} busy={busy} onReview={props.onReviewGitUpdate} />;
   } else if (item.kind === "built-in-held") {
     notice = (
       <Notice

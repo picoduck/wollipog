@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse } from "postcss";
-import { NavRow, SegmentedRow, SelectRow, SwitchRow } from "./SettingsRows.js";
+import { NavRow, SegmentedRow, SelectRow, Switch, SwitchRow } from "./SettingsRows.js";
 import { SELECT_LIST_CHROME_PX, SELECT_LIST_MIN_WIDTH_PX, resetSelectPreviewRegistry } from "./ChoiceControls.js";
 import { AppearancePanel } from "../SettingsView.js";
 import { ThemeProvider, useTheme } from "../ThemeProvider.js";
@@ -1151,7 +1151,7 @@ test("each affordance has real geometry in the stylesheet, not just a class name
   // an accessible state indicator.
   // The travel is computed from the --switch-* tokens, so it is evaluated with each set of values
   // the stylesheet declares for them: the fine-pointer track and the coarse-pointer one.
-  const checkedKnob = ruleOf('.ui-row-switch[aria-checked="true"] .ui-switch::after');
+  const checkedKnob = ruleOf('.ui-switch-control[aria-checked="true"] > .ui-switch::after');
   const travel = /translateX\((.+)\)$/.exec(checkedKnob.get("transform") ?? "")?.[1] ?? "";
   const rootScopes: Map<string, string>[] = [];
   parse(sheet).walkRules((rule) => {
@@ -1229,6 +1229,135 @@ test("a busy switch keeps its confirmed value and says it is working", async () 
     assert.deepEqual(clicks, []);
   } finally {
     await cleanup();
+  }
+});
+
+/** The standalone switch's owner: it passes the confirmed value back, as every caller must. */
+function StandaloneOwner({ busy, disabled, onToggle }: { busy?: boolean; disabled?: boolean; onToggle?: (next: boolean) => void }) {
+  const [on, setOn] = React.useState(false);
+  return (
+    <>
+      <span id="auto-updates-label">Automatic Updates</span>
+      <Switch
+        labelledBy="auto-updates-label"
+        checked={on}
+        busy={busy}
+        disabled={disabled}
+        onChange={(next) => { onToggle?.(next); setOn(next); }}
+      />
+    </>
+  );
+}
+
+test("a standalone switch is a native button that Space and Enter reach, and each activation flips it", async () => {
+  const toggles: boolean[] = [];
+  const { container, cleanup } = await render(<StandaloneOwner onToggle={(next) => toggles.push(next)} />);
+  try {
+    const sw = container.querySelector('[role="switch"]') as unknown as HTMLButtonElement;
+    // Space and Enter activate a native <button type="button"> in every browser; happy-dom does not
+    // emulate that activation, so the test checks nothing stands in its way and then activates it.
+    // skill-git-auto-update.spec.ts presses the real keys.
+    assert.equal(sw.tagName, "BUTTON");
+    assert.equal(sw.getAttribute("type"), "button");
+    assert.equal(sw.getAttribute("tabindex"), null, "it is in the tab order");
+    sw.focus();
+    assert.equal(domWindow.document.activeElement, sw as never, "it takes focus");
+    for (const key of [" ", "Enter"]) {
+      const event = new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      sw.dispatchEvent(event as never);
+      assert.equal(event.defaultPrevented, false, "nothing swallows the activation key");
+      await act(async () => { sw.click(); });
+    }
+    assert.deepEqual(toggles, [true, false], "each activation asks for the opposite of the confirmed value");
+    assert.equal(sw.getAttribute("aria-checked"), "false");
+    await act(async () => { sw.click(); });
+    assert.equal(sw.getAttribute("aria-checked"), "true", "and the track follows the confirmed value");
+    assert.equal(sw.querySelector(".ui-switch")?.getAttribute("aria-hidden"), "true", "the track is drawing, not content");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a standalone switch is named by its label and never says On or Off", async () => {
+  const labelled = await render(<StandaloneOwner />);
+  const named = await render(<Switch label="Enabled" checked onChange={() => undefined} />);
+  try {
+    const byId = labelled.container.querySelector('[role="switch"]')!;
+    assert.equal(byId.getAttribute("aria-labelledby"), "auto-updates-label");
+    assert.equal(labelled.container.querySelector("#auto-updates-label")?.textContent, "Automatic Updates",
+      "aria-labelledby points at the visible label");
+    assert.equal(byId.getAttribute("aria-label"), null, "one name, not two");
+    const byLabel = named.container.querySelector('[role="switch"]')!;
+    assert.equal(byLabel.getAttribute("aria-label"), "Enabled");
+    for (const sw of [byId, byLabel]) {
+      assert.equal(sw.textContent, "", "the knob's position is the state; no On/Off text");
+      assert.ok(sw.classList.contains("ui-switch-standalone"));
+    }
+  } finally {
+    await labelled.cleanup();
+    await named.cleanup();
+  }
+});
+
+test("a standalone switch that is busy or disabled refuses activation and says which", async () => {
+  const toggles: boolean[] = [];
+  const busy = await render(<StandaloneOwner busy onToggle={(next) => toggles.push(next)} />);
+  const disabled = await render(<StandaloneOwner disabled onToggle={(next) => toggles.push(next)} />);
+  try {
+    const busySwitch = busy.container.querySelector('[role="switch"]') as unknown as HTMLButtonElement;
+    assert.equal(busySwitch.getAttribute("aria-busy"), "true");
+    assert.equal(busySwitch.disabled, true, "a second toggle mid-request would race the first");
+    assert.ok(busySwitch.classList.contains("is-busy"));
+    assert.ok(!busySwitch.classList.contains("is-disabled"), "busy keeps the live look, not the disabled one");
+    const disabledSwitch = disabled.container.querySelector('[role="switch"]') as unknown as HTMLButtonElement;
+    assert.equal(disabledSwitch.disabled, true);
+    assert.equal(disabledSwitch.getAttribute("aria-busy"), null);
+    assert.ok(disabledSwitch.classList.contains("is-disabled"));
+    await act(async () => { busySwitch.click(); disabledSwitch.click(); });
+    assert.deepEqual(toggles, []);
+  } finally {
+    await busy.cleanup();
+    await disabled.cleanup();
+  }
+});
+
+test("a switch row is the same switch: one control class, one track", async () => {
+  const { container, cleanup } = await render(
+    <>
+      <SwitchRow title="Desktop Alerts" checked={false} onClick={() => undefined} />
+      <Switch label="Enabled" checked={false} onChange={() => undefined} />
+    </>,
+  );
+  try {
+    const switches = [...container.querySelectorAll('[role="switch"]')];
+    assert.equal(switches.length, 2);
+    for (const sw of switches) {
+      assert.ok(sw.classList.contains("ui-switch-control"));
+      assert.equal(sw.querySelectorAll(".ui-switch").length, 1);
+    }
+    assert.ok(switches[0]!.classList.contains("ui-row-switch"));
+    assert.ok(!switches[0]!.classList.contains("ui-switch-standalone"), "the row is the switch, not a bare track");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a switch row shows Saved after a confirmed change, announced beside the row rather than inside it", async () => {
+  const shown = await render(<SwitchRow title="Automatic Updates" checked saved onClick={() => undefined} />);
+  const idle = await render(<SwitchRow title="Automatic Updates" checked saved={false} onClick={() => undefined} />);
+  const plain = await render(<SwitchRow title="Automatic Updates" checked onClick={() => undefined} />);
+  try {
+    const row = shown.container.querySelector('[role="switch"]')!;
+    assert.equal(row.querySelector(".ui-row-saved")?.textContent, "Saved");
+    assert.equal(row.querySelector(".ui-row-saved")?.getAttribute("aria-hidden"), "true", "not part of the switch's name");
+    assert.equal(shown.container.querySelector('[role="status"]')?.textContent, "Automatic Updates saved");
+    assertNoDomNode(idle.container.querySelector(".ui-row-saved"));
+    assert.equal(idle.container.querySelector('[role="status"]')?.textContent, "", "the live region waits, empty");
+    assertNoDomNode(plain.container.querySelector('[role="status"]'));
+  } finally {
+    await shown.cleanup();
+    await idle.cleanup();
+    await plain.cleanup();
   }
 });
 

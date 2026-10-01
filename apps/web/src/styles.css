@@ -8375,19 +8375,34 @@ button.file-head.source-path-link {
   padding: 1px 7px;
   color: var(--text-faint);
 }
+/* Meta chips (§11.3): a fact you can click or remove, never coloured. Neighbours sit 8px apart so a
+   chip's touch hit area (the coarse-pointer block) never overlaps the next one. A pressed chip is
+   the one chosen, in the selected-row fill. */
 .chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 7px;
+  gap: var(--space-2);
 }
 .chip {
-  font-size: 12.5px;
-  padding: 4px 11px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  color: var(--code-accent);
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  height: 20px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-dim);
+  font: var(--type-micro);
+  font-weight: var(--weight-normal);
+  white-space: nowrap;
 }
+button.chip { cursor: pointer; }
+button.chip:hover { color: var(--text); border-color: var(--border-strong); }
+/* The fill is its own rule: the scheme generator reads a colour and a fill in one rule as a text
+   pair and cannot resolve --surface-selected (as for .rail-item). --text clears it everywhere. */
+button.chip[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
+button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 
 /* --- Discovery: runner agent rows + rediscover --- */
 .runner-head-right {
@@ -14238,7 +14253,6 @@ body.shell-dock-dragging * {
   background: var(--bg-elev);
 }
 .skills-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.skills-doc { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elev-2); padding: 10px 12px; overflow: auto; max-height: 320px; }
 /* Skill review diff (#1948): one block per file, drawn with the Git diff's row classes so a change
    reads the same in both places. Component-local by #1805's rule: only skill reviews use it. */
 .skill-diff { display: grid; gap: var(--space-2); min-width: 0; }
@@ -14383,16 +14397,12 @@ body.shell-dock-dragging * {
 @media (max-width: 760px) {
   .modal-foot > .skill-machine-import-reason { flex-basis: 100%; }
 }
-.skills-git-source { min-width: 0; overflow-wrap: anywhere; }
 /* One machine after another in Machine × Agents, divided by hairlines rather than cards. */
 .skill-assignment-matrix > article + article {
   padding-top: var(--space-3);
   border-top: 1px solid var(--border);
 }
-.skills-git-auto-update { display: grid; gap: 4px; margin: 8px 0; }
 .skills-machine-import { min-width: 0; overflow-wrap: anywhere; }
-.skills-built-in { min-width: 0; overflow-wrap: anywhere; }
-.skills-built-in p { margin: 0; }
 /* The notice slot directly under the skill detail's header (§13.2, #1972): one notice, closer to the
    header than the 32px between sections. On a phone its actions stack at full width, the one
    exception to "buttons never stretch" (§3.1, §3.3). */
@@ -14403,6 +14413,70 @@ body.shell-dock-dragging * {
   /* A disclosure toggle keeps its own width, as in the session notice slot. */
   .skill-notice-slot .notice-actions > .notice-details-toggle { align-self: flex-start; }
 }
+/* A section's title-row actions (Copy, Check for Updates…) at the row's end. */
+.section-head > .actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+}
+/* Instructions (#1980): one Surface, the file chips over the file shown, which scrolls past 280px. */
+.skill-file-chips {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.skill-file-view {
+  max-height: 280px;
+  overflow: auto;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+}
+.skill-file-code {
+  margin: 0;
+  color: var(--text);
+  font: var(--type-small);
+  font-family: var(--font-mono);
+  white-space: pre;
+}
+/* Source (#1980): labeled facts, the Automatic Updates row and the source's notices on one Surface.
+   The notices are flush with it: square, edge to edge, with a hairline where they meet the facts. */
+.skill-source > .notice {
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  border-radius: unset;
+}
+.skill-source > .notice:first-child {
+  border-top-left-radius: var(--radius-md);
+  border-top-right-radius: var(--radius-md);
+}
+.skill-source-facts {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+}
+.skill-source .mono { font-family: var(--font-mono); }
+.skill-source-facts .mono { font-size: var(--text-sm); }
+.skill-source-hash, .skill-source-value-action {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+/* The setting row is a row of the Surface, not a card: square, with a hairline above it, and on the
+   §8.2 grid (no leading gutter), so its title lines up with the facts' labels. */
+.skill-source > .ui-row-switch {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: var(--space-3) var(--space-4);
+  border-radius: unset;
+  border-bottom-left-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
+  box-shadow: inset 0 1px 0 var(--border);
+}
+.skill-source > .ui-row-switch:has(> .ui-row-saved) { grid-template-columns: minmax(0, 1fr) auto auto; }
+.skill-source > .ui-row-switch > :first-child { display: none; }
+.skill-source > .ui-row-switch:first-child { box-shadow: none; }
+.skill-source > .ui-row-switch:hover:not(.is-disabled) { border-color: transparent; }
 .skill-groups-dialog .skills-section-heading { flex-wrap: wrap; }
 .skill-groups-dialog .btn { white-space: normal; overflow-wrap: anywhere; }
 .skill-assignment-matrix, .skill-assignment-matrix > article { min-width: 0; overflow-wrap: anywhere; }
@@ -14985,7 +15059,8 @@ body.shell-dock-dragging * {
 }
 
 /* role="switch" promises an on/off control, so draw one. Sized by the --switch-* tokens, which the
-   coarse-pointer block resizes; the thumb's travel follows. */
+   coarse-pointer block resizes; the thumb's travel follows. `.ui-switch-control` is the button that
+   carries the state (`Switch`): a whole settings row, or the bare track beside other controls. */
 .ui-switch {
   width: var(--switch-w);
   height: var(--switch-h);
@@ -15007,18 +15082,29 @@ body.shell-dock-dragging * {
   background: var(--text-dim);
   transition: transform var(--dur-base) var(--ease-spring), background-color var(--dur-base) var(--ease-out);
 }
-.ui-row-switch[aria-checked="true"] .ui-switch { background: var(--accent); border-color: var(--accent); }
+.ui-switch-control[aria-checked="true"] > .ui-switch { background: var(--accent); border-color: var(--accent); }
 /* Travel: the track's inner width less the thumb and its 2px inset on both sides. */
-.ui-row-switch[aria-checked="true"] .ui-switch::after {
+.ui-switch-control[aria-checked="true"] > .ui-switch::after {
   transform: translateX(calc(var(--switch-w) - 2px - var(--switch-thumb) - 4px));
   background: var(--on-accent);
 }
+/* The bare switch is exactly its track; the coarse-pointer block gives it a 44px hit area. */
+.ui-switch-standalone {
+  display: inline-flex;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  cursor: pointer;
+}
 /* A disabled switch keeps its size and reads in --text-faint rather than fading the whole row. */
-.ui-row-switch.is-disabled { opacity: 1; cursor: not-allowed; }
+.ui-switch-control.is-disabled { cursor: not-allowed; }
+.ui-row-switch.is-disabled { opacity: 1; }
 .ui-row-switch.is-disabled .ui-row-title { color: var(--text-faint); }
 /* On or off, a disabled track is the neutral off fill; the thumb's position still says which. */
-.ui-row-switch.is-disabled .ui-switch { border-color: var(--text-faint); background: var(--bg-elev-3); }
-.ui-row-switch.is-disabled .ui-switch::after { background: var(--text-faint); }
+.ui-switch-control.is-disabled > .ui-switch { border-color: var(--text-faint); background: var(--bg-elev-3); }
+.ui-switch-control.is-disabled > .ui-switch::after { background: var(--text-faint); }
 
 /* A toggle whose request is in flight keeps showing its last confirmed value; the pending state
    is carried by opacity plus aria-busy, never by moving the knob to a value that is not true yet.
@@ -15028,8 +15114,18 @@ body.shell-dock-dragging * {
    light against the modal surface, so the control became unreadable exactly when the row cannot be
    operated and its state is what the user is waiting on. 0.85 holds 3.54:1 and 3.25:1. The busy
    signal is carried by the row's own description, cursor: progress, and aria-busy besides. */
-.ui-row-switch.is-busy .ui-switch { opacity: 0.85; }
-.ui-row-switch.is-busy { cursor: progress; }
+.ui-switch-control.is-busy > .ui-switch { opacity: 0.85; }
+.ui-switch-control.is-busy { cursor: progress; }
+/* An instant setting's quiet "Saved" check (§8.6), at the row's right edge before the switch. */
+.ui-row-switch:has(> .ui-row-saved) { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+.ui-row-saved {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.ui-row-saved > svg { color: var(--positive-text); }
 
 /* Orchestrator defaults keep Behavior and Decision Delegation visibly separate while reusing the
    settings row controls and their keyboard contracts. */
@@ -16047,6 +16143,7 @@ body.shell-dock-dragging * {
      An absolutely positioned box is placed from its parent's PADDING edge, so a control with a
      1px border reaches one pixel further to borrow the same 4px past its visible edge. */
   :where(.btn.sm, .icon-btn.sm, button.chip) { position: relative; }
+  button.chip { height: var(--control-h-sm); }
   :is(.btn.sm, .icon-btn.sm, button.chip)::after {
     content: "";
     position: absolute;
@@ -16134,7 +16231,7 @@ body.shell-dock-dragging * {
   --code-bg: #161a20;
   --code-text: #e6edf3;
   --code-muted: #8d96a0;
-  --code-accent: #64a6f9;
+  --code-accent: #4896f8;
   --danger-text: #f88680;
   --positive-text: #3fb950;
   --agent-claude: #dc7b3e;
@@ -16206,7 +16303,7 @@ body.shell-dock-dragging * {
   --code-bg: #f4f4f4;
   --code-text: #1f2328;
   --code-muted: #59636e;
-  --code-accent: #0a58b6;
+  --code-accent: #0b62cb;
   --danger-text: #a71d27;
   --positive-text: #1a7536;
   --agent-claude: #ac4804;
@@ -16352,7 +16449,7 @@ body.shell-dock-dragging * {
   --code-bg: #f0f0f1;
   --code-text: #383a42;
   --code-muted: #5c5e69;
-  --code-accent: #375396;
+  --code-accent: #3d5ca6;
   --danger-text: #9d1238;
   --positive-text: #436748;
   --agent-claude: #7c5a14;
@@ -16426,7 +16523,7 @@ body.shell-dock-dragging * {
   --code-bg: #30323e;
   --code-text: #f8f8f2;
   --code-muted: #afb8d2;
-  --code-accent: #dac3fa;
+  --code-accent: #caaaf8;
   --danger-text: #fdc4c2;
   --positive-text: #50fa7b;
   --agent-claude: #ffb86c;
@@ -16498,7 +16595,7 @@ body.shell-dock-dragging * {
   --code-bg: #f4f0e1;
   --code-text: #1f1f1f;
   --code-muted: #635d52;
-  --code-accent: #5a42b4;
+  --code-accent: #644ac9;
   --danger-text: #952e22;
   --positive-text: #14700a;
   --agent-claude: #9c4a15;
@@ -16644,7 +16741,7 @@ body.shell-dock-dragging * {
   --code-bg: #f3f3ec;
   --code-text: #2c2c26;
   --code-muted: #5f5f52;
-  --code-accent: #0c6172;
+  --code-accent: #0d6c7e;
   --danger-text: #a0144c;
   --positive-text: #496c12;
   --agent-claude: #9d4d0c;

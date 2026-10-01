@@ -10,10 +10,11 @@ test("Check for Updates preserves the source and previews the recorded skill dir
   });
   await page.goto("/skills-removals-e2e.html");
   await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-  await expect(page.getByRole("heading", { name: "Git Source" })).toBeVisible();
+  const source = page.locator(".skill-detail > section.section").filter({ has: page.getByRole("heading", { name: "Source", exact: true }) });
+  await expect(source.locator(".facts dt")).toHaveText(["Repository", "Folder", "Branch or Tag", "Commit"]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
   await page.screenshot({ path: info.outputPath("git-source-mobile-after.png"), fullPage: true });
-  await page.getByRole("button", { name: "Check for Updates" }).click();
+  await source.getByRole("button", { name: "Check for Updates…" }).click();
   await expect(page.getByLabel("Git Repository", { exact: true })).toHaveValue("https://github.com/example/skills.git");
   await expect(page.getByLabel("Ref", { exact: true })).toHaveValue("stable");
   await expect(page.getByLabel("Repository Subdirectory")).toHaveValue("skills/code-review");

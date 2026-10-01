@@ -10,14 +10,12 @@ import { DetailSkeleton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { PlusIcon, SkillsIcon } from "./Icons.js";
-import { Markdown } from "./Markdown.js";
 import { Notice } from "./Notice.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
 import { Steps } from "./Steps.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { backLabel, destination, viewPath, type SkillsPane, type View } from "../navigation.js";
 import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
-import { SkillGitAutoUpdateControls } from "./SkillGitAutoUpdate.js";
 import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
 import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
 import { SkillMachineVersionDialog } from "./SkillMachineVersionDialog.js";
@@ -29,8 +27,10 @@ import { NewSkillDialog } from "./NewSkillDialog.js";
 import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
 import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
 import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
-import { SkillBuiltInSection } from "./SkillBuiltInSection.js";
-import { SkillNoticeSlot } from "./SkillNoticeSlot.js";
+import { SkillNoticeSlot, skillNoticeItem } from "./SkillNoticeSlot.js";
+import { SkillInstructions } from "./SkillInstructions.js";
+import { SkillSource } from "./SkillSource.js";
+import { SAVED_MS } from "./ui/SettingsRows.js";
 import type { SkillRule } from "../skill-assignment-matrix.js";
 import { SkillBuiltInReviewDialog } from "./SkillBuiltInReviewDialog.js";
 import { SkillList } from "./SkillList.js";
@@ -51,7 +51,6 @@ import {
   skillDeployBadge,
   skillFromPayload,
   skillGroupsFromPayload,
-  skillMarkdownBody,
   skillOverviewAttention,
   skillsFromPayload,
   type RunnerSkillsResponse,
@@ -319,14 +318,52 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     });
   };
 
-  /** The notice's close button leaves with the notice, so focus moves to the skill's heading first:
-   * the detail's title, or on a phone the detail bar's. */
-  const dismissRecommendation = (skillId: string) => {
+  /** The skill's heading: the detail's title, or on a phone the detail bar's. */
+  const focusSkillHeading = () => {
     const heading = isMobile
       ? document.getElementById("page-title")
       : detailRef.current?.querySelector<HTMLElement>(".skill-detail-title");
     heading?.focus({ preventScroll: true });
+  };
+
+  /** The notice's close button leaves with the notice, so focus moves to the skill's heading first. */
+  const dismissRecommendation = (skillId: string) => {
+    focusSkillHeading();
     void setRecommendationDismissed(skillId, true);
+  };
+
+  /** Source's Show Recommendation leaves too, and the restored notice sits right under the heading. */
+  const showRecommendation = (skillId: string) => {
+    focusSkillHeading();
+    void setRecommendationDismissed(skillId, false);
+  };
+
+  /** Automatic Updates applies on click (§8.6): its own request shows busy, and a confirmed change
+   * shows "Saved" for 2s. Kept per skill, so another skill never shows this one's state. */
+  const [autoUpdateSave, setAutoUpdateSave] = useState<{ skillId: string; state: "saving" | "saved" } | null>(null);
+  const savedTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (savedTimer.current !== null) window.clearTimeout(savedTimer.current); }, []);
+  const setGitAutoUpdate = async (skillId: string, enabled: boolean) => {
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+    setAutoUpdateSave({ skillId, state: "saving" });
+    let saved = false;
+    await mutate(async () => {
+      await api.setSkillGitAutoUpdate(skillId, enabled);
+      saved = true;
+    }, async () => {
+      // Disabling drops a held update, which the list shows as Update Held.
+      await refreshList();
+      await refreshDetail(skillId);
+    });
+    if (!saved) {
+      setAutoUpdateSave(null);
+      return;
+    }
+    setAutoUpdateSave({ skillId, state: "saved" });
+    savedTimer.current = window.setTimeout(() => {
+      savedTimer.current = null;
+      setAutoUpdateSave((current) => current?.skillId === skillId && current.state === "saved" ? null : current);
+    }, SAVED_MS);
   };
 
   /** One atomic change to the rule behind a deployment error. A control plane that predates
@@ -466,8 +503,6 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
 
   const latest = detail?.latestVersion ?? null;
   const gitSource = detail?.gitSource ?? latest?.gitSource;
-  const heldUpdate = detail?.gitAutoUpdate?.enabled ? detail.gitAutoUpdate.held : null;
-  const skillMd = latest?.files?.find((file) => file.path === "SKILL.md" && file.encoding === "utf8");
   // Until the group's current rules are read, a rule of the skill's own could be blamed for what
   // the group's rule does, so the notice offers no fix.
   const groupRulesCurrent = Boolean(detailGroupId && groupRules?.groupId === detailGroupId &&
@@ -476,6 +511,10 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     ...assignments,
     ...(groupRulesCurrent ? groupRules!.rules : []),
   ], [assignments, groupRulesCurrent, groupRules]);
+  // One answer for the slot and for Source, so a notice the slot shows is never repeated below.
+  const noticeItem = detail
+    ? skillNoticeItem(detail, runners, machineSkills, detailRules, !detailGroupId || groupRulesCurrent)
+    : null;
 
   const howId = `skills-how-${useId().replace(/:/g, "")}`;
   const skillName = detail?.name ?? skills?.find((skill) => skill.id === selectedId)?.name;
@@ -669,6 +708,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 machineSkills={machineSkills}
                 rules={detailRules}
                 rulesComplete={!detailGroupId || groupRulesCurrent}
+                item={noticeItem}
                 busy={busy}
                 syncingRunnerId={syncingRunnerId}
                 onSwitchToAgentInvocable={(rule) => void updateRule(detail.id, rule, { invocation: "agent" })}
@@ -686,15 +726,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 onChooseAgents={addAssignment.onClick}
                 onDismissRecommendation={() => dismissRecommendation(detail.id)}
               />
-              <SkillBuiltInSection
-                key={`built-in-${detail.id}`}
-                skill={detail}
-                busy={busy}
-                onDismiss={(dismissed) => void setRecommendationDismissed(detail.id, dismissed)}
-                onReview={() => setDialog("built-in-review")}
-              />
               {/* §5.1: unboxed sections, in the order Deployment, Assignments, Instructions, Source.
-                  #1981, #1982 and #1980 rebuild what each one holds. */}
+                  #1981 and #1982 rebuild what the first two hold. */}
               <SkillDetailSection title="Deployment">
                 <SkillAssignmentMatrix key={`matrix-${detail.id}`} skillId={detail.id} skillName={detail.name} runners={runners} machineLabels={machineLabels} machineSkills={machineSkills} onManageVersion={runnerId => { setVersionRunnerId(runnerId); setDialog("machine-versions"); }} />
                 {runners.length === 0 && <p className="skills-hint">Connect a machine to deploy this skill.</p>}
@@ -885,37 +918,22 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                   </div>
                 )}
               </SkillDetailSection>
-              {skillMd && (
-                <SkillDetailSection title="Instructions">
-                  <div className="skills-doc">
-                    <Markdown highlightEligible={false}>{skillMarkdownBody(skillMd.content)}</Markdown>
-                  </div>
-                </SkillDetailSection>
-              )}
-              {(gitSource || latest?.machineSource) && (
-                <SkillDetailSection title="Source">
-                  {gitSource && <div className="skills-section skills-git-source">
-                    <h4>Git Source</h4>
-                    <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
-                    <p className="skills-hint">Commit {gitSource.commit}</p>
-                    <SkillGitAutoUpdateControls status={detail.gitAutoUpdate} gitRef={gitSource.ref} busy={busy}
-                      onChange={(enabled) => void mutate(() => api.setSkillGitAutoUpdate(detail.id, enabled), async () => {
-                        // Disabling drops a held update, which the list shows as Update Held.
-                        await refreshList();
-                        await refreshDetail(detail.id);
-                      })} />
-                    <button className={`btn sm${heldUpdate ? " primary" : ""}`} type="button" onClick={() => setDialog("git-update")}>
-                      {heldUpdate ? "Review Held Update" : "Check for Updates"}
-                    </button>
-                  </div>}
-                  {latest?.machineSource && <div className="skills-section skills-machine-import">
-                    <h4>Machine Snapshot Source</h4>
-                    <p className="skills-hint">{machineLabels.get(latest.machineSource.runnerId) ?? latest.machineSource.runnerId} · {latest.machineSource.context?.kind === "wsl" ? `WSL: ${latest.machineSource.context.distro} · ` : ""}{latest.machineSource.sourceDirectory}/{latest.machineSource.name}</p>
-                    <p className="skills-hint">Digest: {latest.machineSource.digest}</p>
-                    <p className="skills-hint">Imported {formatTime(latest.machineSource.importedAt)}. This records a snapshot, not an adopted source directory.</p>
-                  </div>}
-                </SkillDetailSection>
-              )}
+              {latest?.files && latest.files.length > 0 && <SkillInstructions key={`instructions-${latest.id ?? detail.id}`} files={latest.files} />}
+              <SkillSource
+                key={`source-${detail.id}`}
+                skill={detail}
+                machineLabels={machineLabels}
+                busy={busy}
+                heldInSlot={noticeItem?.kind === "git-held"}
+                autoUpdate={{
+                  saving: autoUpdateSave?.skillId === detail.id && autoUpdateSave.state === "saving",
+                  saved: autoUpdateSave?.skillId === detail.id && autoUpdateSave.state === "saved",
+                }}
+                onCheckForUpdates={() => setDialog("git-update")}
+                onSetAutoUpdate={(enabled) => void setGitAutoUpdate(detail.id, enabled)}
+                onShowRecommendation={() => showRecommendation(detail.id)}
+                onReviewBuiltIn={() => setDialog("built-in-review")}
+              />
             </div>
           )}
         </div>

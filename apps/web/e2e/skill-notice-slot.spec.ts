@@ -126,7 +126,11 @@ test.describe("at 1440×900", () => {
     await open(page, "skill-n4");
     await expect(notice(page).locator(".notice-body")).toHaveText(
       "Wollipog 0.30.0 updates this skill, but the latest library version has changes made here, so it waits for your review.");
-    await expect(page.locator('[aria-label="Built-In Skill"]')).not.toContainText("Assign");
+    // The held update and the recommendation are the slot's; Source states facts only (#1980).
+    await expect(page.locator('[aria-label="Built-In Skill"]')).toHaveCount(0);
+    const source = page.locator(".skill-detail > section.section").filter({ has: page.getByRole("heading", { name: "Source", exact: true }) });
+    await expect(source.locator(".facts dt").first()).toHaveText("Source");
+    await expect(source).not.toContainText("Assign");
   });
 
   test("the recommendation assigns from a menu of machines and dismisses with its close button", async ({ page }) => {

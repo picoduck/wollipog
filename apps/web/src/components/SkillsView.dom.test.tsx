@@ -645,8 +645,14 @@ async function mountSkills(client: ApiClient, instanceId: string, runners: Runne
     .find((candidate) => candidate.querySelector(".menu-text")?.textContent === label);
   /** The notice slot under the skill detail's header, and which notice it shows. */
   const slot = () => container.querySelector<HTMLElement>(".skill-notice-slot");
+  /** A detail section, by its title. */
+  const section = (title: string) => [...container.querySelectorAll<HTMLElement>(".skill-detail > section.section")]
+    .find((candidate) => candidate.querySelector(".section-title")?.textContent === title);
+  /** One of Source's labeled facts, by its label. */
+  const fact = (label: string) => [...(section("Source")?.querySelectorAll(".facts dt") ?? [])]
+    .find((term) => term.textContent === label)?.nextElementSibling ?? undefined;
   return {
-    container, button, listItem, groupOf, menuItem, slot,
+    container, button, listItem, groupOf, menuItem, slot, section, fact,
     async click(target: HTMLElement | undefined) {
       assert.ok(target);
       await act(async () => { target.click(); });
@@ -703,12 +709,16 @@ test("SkillsView recommends a built-in skill in the notice slot, assigns it in o
   assert.equal(view.groupOf("using-wollipog"), "Recommended");
 
   await view.click(view.listItem("using-wollipog"));
-  const section = () => view.container.querySelector('[aria-label="Built-In Skill"]');
-  assert.match(section()?.textContent ?? "", /Ships with Wollipog 0\.28\.0/);
-  // The recommendation is the slot's notice, directly under the header, not part of the card.
+  const source = () => view.section("Source");
+  // Source says where it comes from in labeled facts, not prose.
+  assert.equal(view.fact("Source")?.textContent, "Built into Wollipog 0.28.0");
+  assert.equal(view.fact("Updates")?.textContent, "With each Wollipog release; pinned machines keep their version");
+  assert.equal(view.fact("Recommendation")?.textContent, "Shown until you assign or dismiss it");
+  assertNoDomNode(view.container.querySelector('[aria-label="Built-In Skill"]'), "no Built-In Skill card remains");
+  // The recommendation is the slot's notice, directly under the header, not part of Source.
   assert.equal(view.slot()?.dataset.notice, "recommended");
   assert.equal(view.slot()?.previousElementSibling?.className, "skill-detail-head");
-  assert.doesNotMatch(section()?.textContent ?? "", /Assign|recommends/);
+  assert.doesNotMatch(source()?.textContent ?? "", /Assign|recommends/);
   const notice = () => view.slot()!.querySelector<HTMLElement>(".notice")!;
   assert.equal(notice().querySelector(".notice-title")?.textContent, "Recommended by Wollipog");
   assert.match(notice().textContent ?? "", /It isn't on any machine until you assign it; assigning deploys it to every supported agent/);
@@ -725,6 +735,7 @@ test("SkillsView recommends a built-in skill in the notice slot, assigns it in o
   assert.equal(view.groupOf("using-wollipog"), "No Group", "an assigned built-in skill is no longer recommended");
   assert.deepEqual(badges(), ["Built-In"]);
   assertNoDomNode(view.slot(), "an assigned skill needs nothing");
+  assert.equal(view.fact("Recommendation"), undefined, "an assigned skill is no longer recommended, so Source says nothing of it");
 
   // Removing the assignment brings the recommendation back; Assign to Machine is a menu of machines.
   await view.click(view.button("Delete"));
@@ -756,9 +767,18 @@ test("SkillsView recommends a built-in skill in the notice slot, assigns it in o
   assert.equal(document.activeElement?.className, "skill-detail-title");
   assertNoDomNode(view.slot());
   assert.equal(view.groupOf("using-wollipog"), "No Group", "a dismissed recommendation is hidden and the library entry stays");
-  assert.match(section()?.textContent ?? "", /You dismissed this recommendation\./);
+  assert.equal(view.fact("Recommendation")?.textContent, "DismissedShow Recommendation");
+  assert.ok(view.button("Show Recommendation", view.fact("Recommendation")), "the way back sits beside Dismissed");
+
+  // Show Recommendation restores the slot's notice; it leaves with the button, so focus goes to the heading.
+  await view.click(view.button("Show Recommendation"));
+  assert.deepEqual(calls.at(-1), { id: "skill-builtin", dismissed: false });
+  assert.equal(document.activeElement?.className, "skill-detail-title");
+  assert.equal(view.slot()?.dataset.notice, "recommended");
+  assert.equal(view.fact("Recommendation")?.textContent, "Shown until you assign or dismiss it");
 
   // A held built-in update outranks the recommendation in the slot.
+  await view.click(view.slot()!.querySelector<HTMLButtonElement>(".notice-dismiss")!);
   skill.builtIn.heldUpdate = { release: "0.29.0", digest: "d2" };
   await view.click(view.button("Show Recommendation"));
   assert.deepEqual(calls.at(-1), { id: "skill-builtin", dismissed: false });
@@ -801,10 +821,12 @@ test("turning off Automatic Updates for a held Git skill clears its Update Held 
     const status = () => [...view.listItem("lint-rules")!.querySelectorAll(".status")].map((badge) => badge.textContent);
     assert.deepEqual(status(), ["Update Held"]);
     await view.click(view.listItem("lint-rules"));
-    const toggle = [...view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
-      .find((input) => input.closest("label")?.textContent?.includes("Automatic Updates"));
+    const toggle = view.section("Source")!.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    assert.equal(toggle.querySelector(".ui-row-title")?.textContent, "Automatic Updates");
+    assert.equal(toggle.getAttribute("aria-checked"), "true");
     await view.click(toggle);
     assert.equal(skill.gitAutoUpdate.enabled, false);
+    assert.equal(toggle.getAttribute("aria-checked"), "false");
     assert.deepEqual(status(), [], "the list reads the refreshed summary, not the one loaded before the change");
   } finally {
     await view.unmount();
@@ -874,7 +896,7 @@ test("a recommendation dismissed in the Skills view or the Inbox notice is dismi
   const badges = (name: string) => [...reopened.listItem(name)!.querySelectorAll(".status")].map((badge) => badge.textContent);
   assert.deepEqual(badges("orchestrate-issues"), ["Built-In"]);
   await reopened.click(reopened.listItem("orchestrate-issues"));
-  assert.match(reopened.container.querySelector('[aria-label="Built-In Skill"]')?.textContent ?? "", /You dismissed this recommendation\./);
+  assert.equal(reopened.fact("Recommendation")?.textContent, "DismissedShow Recommendation");
 
   // Show Recommendation in the Skills view brings it back to the notice.
   await reopened.click(reopened.button("Show Recommendation"));
@@ -921,11 +943,14 @@ test("SkillsView offers a same-name skill the built-in version and adopts it aft
     "a user-managed skill is not marked built-in",
   );
   await view.click(view.listItem("orchestrate-issues"));
-  const offer = view.container.querySelector('[aria-label="Built-In Version Available"]');
-  assert.match(offer?.textContent ?? "", /This library skill stays exactly as it is unless you review and accept the built-in version/);
+  const offer = view.container.querySelector<HTMLElement>('[aria-label="Built-In Version Available"]');
+  assert.equal(offer?.parentElement?.closest(".section"), view.section("Source"), "the offer is a notice inside Source");
+  assert.ok(offer?.classList.contains("t-info"), "an info notice");
+  assertNoDomNode(view.slot(), "an offer is not something the skill needs, so the slot stays empty");
+  assert.match(offer?.textContent ?? "", /Wollipog 0\.28\.0 includes a built-in skill with this name; this one stays as it is unless you accept that version\./);
   assert.match(offer?.textContent ?? "", /Accepting also turns off this skill's automatic Git updates\./);
 
-  await view.click(view.button("Review Built-In Version"));
+  await view.click(view.button("Review Built-In Version…"));
   const dialog = view.container.querySelector('[role="dialog"]')!;
   assert.match(dialog.textContent ?? "", /2 existing assignments and every machine pin stay as they are/);
   assert.match(dialog.textContent ?? "", /Accepting turns off this skill's automatic Git updates\./);
@@ -943,8 +968,309 @@ test("SkillsView offers a same-name skill the built-in version and adopts it aft
   assert.deepEqual(accepted, [{ id: "skill-mine", body: { digest: "r1", expectedLatestVersionId: "v1" } }]);
   assertNoDomNode(view.container.querySelector('[role="dialog"]'));
   assertNoDomNode(view.container.querySelector('[aria-label="Built-In Version Available"]'));
-  assert.ok(view.container.querySelector('[aria-label="Built-In Skill"]'));
+  assert.equal(view.fact("Source")?.textContent, "Built into Wollipog 0.28.0");
   await view.unmount();
+});
+
+/** Replace the clipboard for one test; returns what was written and a restore. */
+function fakeClipboard() {
+  const written: string[] = [];
+  const previous = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { written.push(text); } },
+  });
+  return {
+    written,
+    restore: () => {
+      if (previous) Object.defineProperty(domWindow.navigator, "clipboard", previous);
+      else delete (domWindow.navigator as unknown as Record<string, unknown>).clipboard;
+    },
+  };
+}
+
+/** A client for one skill whose latest version holds `files`, counting how often the skill is read. */
+function filesClient(skill: Record<string, unknown>, files: unknown[], overrides: Record<string, unknown> = {}) {
+  const reads = { count: 0 };
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [skill] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => {
+      reads.count += 1;
+      return { skill, latestVersion: { ...(skill.latestVersion as object), files } };
+    },
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => ({ desired: [], reported: null }),
+    ...overrides,
+  } as unknown as ApiClient;
+  return { client, reads };
+}
+
+test("Instructions shows every file, one at a time: chips choose it, Markdown renders, a script is text, and Copy copies it", async () => {
+  const skillMd = "---\nname: collect\n---\n\n# Collect\n\nRun **collect** first.\n";
+  const script = "#!/bin/sh\n<script>window.ran = true</script>\necho \"**not markdown**\"\n";
+  const files = [
+    { path: "scripts/collect.sh", content: script, encoding: "utf8" },
+    { path: "SKILL.md", content: skillMd, encoding: "utf8" },
+    { path: "references/guide.md", content: "## Guide\n\nRead this.\n", encoding: "utf8" },
+  ];
+  const skill = { id: "skill-files", name: "collect", latestVersion: { id: "v1", digest: "d1", createdAt: 1 } };
+  const { client, reads } = filesClient(skill, files);
+  const clipboard = fakeClipboard();
+  const view = await mountSkills(client, "skills-instructions-files");
+  try {
+    await view.click(view.listItem("collect"));
+    const section = view.section("Instructions")!;
+    const chips = () => [...section.querySelectorAll<HTMLButtonElement>(".chips > button.chip")];
+    assert.deepEqual(chips().map((chip) => chip.textContent), ["SKILL.md", "references/guide.md", "scripts/collect.sh"],
+      "SKILL.md first, then the rest in path order");
+    assert.equal(section.querySelector(".chips")?.getAttribute("aria-label"), "Files");
+    assert.deepEqual(chips().map((chip) => chip.getAttribute("aria-pressed")), ["true", "false", "false"]);
+    const shown = () => section.querySelector<HTMLElement>(".skill-file-view")!;
+    assert.equal(shown().getAttribute("aria-label"), "SKILL.md");
+    assert.equal(shown().getAttribute("tabindex"), "0", "it scrolls on its own, so the keyboard can reach it");
+    assert.equal(shown().querySelector("h1")?.textContent, "Collect", "Markdown renders");
+    assert.equal(shown().querySelector("strong")?.textContent, "collect");
+    assert.doesNotMatch(shown().textContent ?? "", /name: collect/, "frontmatter is metadata, not instructions");
+
+    // Copy, in the title row, copies the raw file on screen and says which.
+    const copy = view.button("Copy", section.querySelector(".section-head")!)!;
+    assert.ok(copy.classList.contains("ghost"));
+    assert.equal(domWindow.document.getElementById(copy.getAttribute("aria-describedby")!)?.textContent, "Copies SKILL.md");
+    await view.click(copy);
+    assert.deepEqual(clipboard.written, [skillMd]);
+
+    // A script is text in a code block, never markup and never run.
+    await view.click(chips()[2]);
+    assert.deepEqual(chips().map((chip) => chip.getAttribute("aria-pressed")), ["false", "false", "true"]);
+    assert.equal(shown().getAttribute("aria-label"), "scripts/collect.sh");
+    assert.equal(shown().querySelector("pre.skill-file-code > code")?.textContent, script);
+    assertNoDomNode(shown().querySelector("script"));
+    assertNoDomNode(shown().querySelector("strong"));
+    assert.equal((domWindow as unknown as { ran?: boolean }).ran, undefined);
+    const copyScript = view.button("Copy", section.querySelector(".section-head")!)!;
+    assert.equal(domWindow.document.getElementById(copyScript.getAttribute("aria-describedby")!)?.textContent, "Copies scripts/collect.sh");
+    await view.click(copyScript);
+    assert.deepEqual(clipboard.written, [skillMd, script]);
+
+    // Another Markdown file renders as Markdown too.
+    await view.click(chips()[1]);
+    assert.equal(shown().querySelector("h2")?.textContent, "Guide");
+    assert.equal(reads.count, 1, "choosing a file shows what the version returned; nothing more is fetched");
+  } finally {
+    clipboard.restore();
+    await view.unmount();
+  }
+});
+
+test("Instructions with only SKILL.md has no chips, and a binary file says so and can't be copied", async () => {
+  const only = { id: "skill-one", name: "one", latestVersion: { id: "v1", digest: "d1", createdAt: 1 } };
+  const single = await mountSkills(filesClient(only, [{ path: "SKILL.md", content: "Do one thing.\n", encoding: "utf8" }]).client, "skills-instructions-one");
+  try {
+    await single.click(single.listItem("one"));
+    assertNoDomNode(single.section("Instructions")!.querySelector(".chips"));
+    assert.match(single.section("Instructions")!.querySelector(".skill-file-view")?.textContent ?? "", /Do one thing\./);
+  } finally {
+    await single.unmount();
+  }
+
+  const withImage = { id: "skill-image", name: "image", latestVersion: { id: "v1", digest: "d1", createdAt: 1 } };
+  const view = await mountSkills(filesClient(withImage, [
+    { path: "SKILL.md", content: "Use the logo.\n", encoding: "utf8" },
+    { path: "assets/logo.png", content: "iVBORw0KGgo=", encoding: "base64" },
+  ]).client, "skills-instructions-binary");
+  try {
+    await view.click(view.listItem("image"));
+    const section = view.section("Instructions")!;
+    await view.click([...section.querySelectorAll<HTMLButtonElement>("button.chip")].find((chip) => chip.textContent === "assets/logo.png"));
+    const reason = section.querySelector(".skill-file-view p");
+    assert.equal(reason?.textContent, "This file isn't text, so it can't be shown or copied here.");
+    assertNoDomNode(section.querySelector(".skill-file-view pre"));
+    const copy = view.button("Copy", section.querySelector(".section-head")!)!;
+    assert.equal(copy.disabled, true);
+    assert.equal(copy.getAttribute("aria-describedby"), reason?.id, "the disabled Copy says why");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a Git skill's Source is labeled facts with a 12-character commit whose Copy copies all of it", async () => {
+  const commit = "c3d4e5f6a7b8c3d4e5f6a7b8c3d4e5f6a7b8c3d4";
+  const source = { url: "https://github.com/example/skills.git", ref: "main", subdirectory: "skills", path: "skills/code-review", commit };
+  const skill = { id: "skill-git", name: "code-review", gitSource: source, gitAutoUpdate: { enabled: false },
+    latestVersion: { id: "v1", digest: "d1", createdAt: 1, gitSource: source } };
+  const clipboard = fakeClipboard();
+  const view = await mountSkills(filesClient(skill, [{ path: "SKILL.md", content: "Review.\n", encoding: "utf8" }]).client, "skills-git-facts");
+  try {
+    await view.click(view.listItem("code-review"));
+    const facts = [...view.section("Source")!.querySelectorAll(".facts dt")].map((term) => [term.textContent, term.nextElementSibling?.textContent]);
+    assert.deepEqual(facts, [
+      ["Repository", "https://github.com/example/skills.git"],
+      ["Folder", "skills/code-review"],
+      ["Branch or Tag", "main"],
+      ["Commit", "c3d4e5f6a7b8"],
+    ]);
+    const copy = view.fact("Commit")!.querySelector<HTMLButtonElement>("button")!;
+    assert.equal(copy.getAttribute("aria-label"), "Copy Commit");
+    assert.ok(copy.classList.contains("icon-btn"), "an icon button");
+    await view.click(copy);
+    assert.deepEqual(clipboard.written, [commit]);
+    assert.doesNotMatch(view.container.querySelector(".skill-detail")!.outerHTML, new RegExp(commit),
+      "the full hash is behind Copy only");
+    // Check for Updates… sits in the title row, a quiet button, and opens the check on the tracked ref.
+    const check = view.button("Check for Updates…", view.section("Source")!.querySelector(".section-head")!)!;
+    assert.ok(check.classList.contains("ghost"));
+    await view.click(check);
+    assert.ok(view.container.querySelector('[role="dialog"]'));
+  } finally {
+    clipboard.restore();
+    await view.unmount();
+  }
+});
+
+test("a machine snapshot's Source shows a 12-character fingerprint and no 64-character digest anywhere", async () => {
+  const digest = "ab".repeat(32);
+  const skill = { id: "skill-machine", name: "notes", latestVersion: { id: "v1", digest, createdAt: 1, machineSource: {
+    runnerId: "runner-1", sourceDirectory: "~/.claude/skills", name: "notes", digest, importedAt: Date.UTC(2026, 8, 24, 15, 30),
+  } } };
+  const view = await mountSkills(filesClient(skill, [{ path: "SKILL.md", content: "Notes.\n", encoding: "utf8" }]).client, "skills-machine-facts");
+  try {
+    await view.click(view.listItem("notes"));
+    const source = view.section("Source")!;
+    assert.deepEqual([...source.querySelectorAll(".facts dt")].map((term) => term.textContent), ["Machine", "Folder", "Imported", "Fingerprint"]);
+    assert.equal(view.fact("Machine")?.textContent, "Build Machine");
+    assert.equal(view.fact("Folder")?.textContent, "~/.claude/skills/notes");
+    assert.equal(view.fact("Imported")?.querySelector("time")?.getAttribute("datetime"), "2026-09-24T15:30:00.000Z");
+    assert.equal(view.fact("Fingerprint")?.textContent, "abababababab");
+    assert.equal(view.fact("Fingerprint")?.querySelector("button")?.getAttribute("aria-label"), "Copy Fingerprint");
+    assert.match(source.textContent ?? "", /A copy of the folder was imported; the folder on the machine wasn't changed\./);
+    assert.doesNotMatch(view.container.querySelector(".skill-detail")!.outerHTML, /[0-9a-f]{64}/);
+    assert.equal(view.button("Check for Updates…", source), undefined, "a snapshot has no source to check");
+  } finally {
+    await view.unmount();
+  }
+});
+
+/** A held Git skill, and a machine whose deployment of it either failed or worked. */
+function heldClient(deployError: boolean) {
+  const source = { url: "https://example.test/skills.git", ref: "main", subdirectory: "", path: "", commit: "c1".repeat(20) };
+  const skill = {
+    id: "skill-held", name: "lint-rules", assignmentCount: 1, gitSource: source,
+    gitAutoUpdate: { enabled: true, intervalMs: 3_600_000, checkedAt: Date.now() - 2 * 3_600_000, checkedCommit: "c3d4e5f6a7b8".repeat(3) + "c3d4",
+      held: { commit: "0123456789abcdef", reason: "scripts", scriptPaths: ["fix.sh"], heldAt: 1 } },
+    latestVersion: { id: "v1", digest: "d1", createdAt: 1, gitSource: source },
+  };
+  const machine = {
+    desired: [{ name: "lint-rules", versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" }] }],
+    reported: { deployed: [{ name: "lint-rules", digest: "d1",
+      links: [{ agentId: "claude", status: deployError ? "error" : "linked", ...(deployError ? { detail: "Permission denied" } : {}) }] }], updatedAt: 1 },
+  };
+  return filesClient(skill, [{ path: "SKILL.md", content: "Lint.\n", encoding: "utf8" }], { runnerSkills: async () => machine }).client;
+}
+
+test("a held update the slot outranks is a notice in Source, and Review Update… opens Check for Updates", async () => {
+  const view = await mountSkills(heldClient(true), "skills-held-in-source");
+  try {
+    await view.click(view.listItem("lint-rules"));
+    assert.equal(view.slot()?.dataset.notice, "deployment-error", "the deployment error takes the slot");
+    const held = view.section("Source")!.querySelector<HTMLElement>('.skill-source > [aria-label="Update Held for Review"]');
+    assert.ok(held?.classList.contains("t-warning"));
+    assert.equal(held?.querySelector(".notice-title")?.textContent, "Update Held for Review");
+    assert.match(held?.textContent ?? "", /Commit 0123456789ab adds or changes fix\.sh\. Review it before it deploys\./);
+    assert.equal(view.container.querySelectorAll('[aria-label="Update Held for Review"]').length, 1);
+    const description = view.section("Source")!.querySelector('[role="switch"] .ui-row-desc')?.textContent ?? "";
+    assert.doesNotMatch(description, /held/, "the notice is right there, so the row doesn't repeat it");
+    await view.click(view.button("Review Update…", held!));
+    assert.ok(view.container.querySelector('[role="dialog"]'));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a held update the slot shows is not repeated in Source, whose Automatic Updates row still says one waits", async () => {
+  const view = await mountSkills(heldClient(false), "skills-held-in-slot");
+  try {
+    await view.click(view.listItem("lint-rules"));
+    assert.equal(view.slot()?.dataset.notice, "git-held");
+    assert.equal(view.container.querySelectorAll('[aria-label="Update Held for Review"]').length, 1, "one notice, in the slot");
+    assertNoDomNode(view.section("Source")!.querySelector(".notice"));
+    assert.equal(view.section("Source")!.querySelector('[role="switch"] .ui-row-desc')?.textContent,
+      "Checks main every hour. Last checked 2h ago at commit c3d4e5f6a7b8. An update is held for review.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a failed check is a danger notice in Source with Check for Updates… and the server's words behind Show Details", async () => {
+  const source = { url: "https://example.test/skills.git", ref: "main", subdirectory: "", path: "", commit: "c1".repeat(20) };
+  const skill = { id: "skill-failed", name: "lint-rules", gitSource: source,
+    gitAutoUpdate: { enabled: true, intervalMs: 3_600_000, checkedAt: Date.now() - 5 * 60_000, checkedCommit: null,
+      error: { message: "Could not read the Git source within its limits.", at: Date.now() - 5 * 60_000 }, held: null },
+    latestVersion: { id: "v1", digest: "d1", createdAt: 1, gitSource: source } };
+  const view = await mountSkills(filesClient(skill, [{ path: "SKILL.md", content: "Lint.\n", encoding: "utf8" }]).client, "skills-failed-check");
+  try {
+    await view.click(view.listItem("lint-rules"));
+    assertNoDomNode(view.slot(), "a failed check is not a slot item");
+    const failed = view.section("Source")!.querySelector<HTMLElement>('.skill-source > [aria-label="Couldn\'t Check for Updates"]')!;
+    assert.ok(failed.classList.contains("t-danger"));
+    assert.equal(failed.querySelector(".notice-title")?.textContent, "Couldn't Check for Updates");
+    assert.equal(failed.querySelector(".notice-body")?.textContent,
+      "The automatic check failed 5m ago. Existing versions and deployments are unchanged.");
+    assert.doesNotMatch(failed.textContent ?? "", /Could not read/, "the server's message waits behind Show Details");
+    await view.click(view.button("Show Details", failed));
+    assert.match(failed.textContent ?? "", /Could not read the Git source within its limits\./);
+    await view.click(view.button("Check for Updates…", failed));
+    assert.ok(view.container.querySelector('[role="dialog"]'));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Automatic Updates is a switch: one click applies it, it shows busy, then Saved, and its description follows", async () => {
+  const source = { url: "https://example.test/skills.git", ref: "main", subdirectory: "", path: "", commit: "c1".repeat(20) };
+  const skill = { id: "skill-auto", name: "lint-rules", gitSource: source,
+    gitAutoUpdate: { enabled: false, intervalMs: 3_600_000 } as Record<string, unknown>,
+    latestVersion: { id: "v1", digest: "d1", createdAt: 1, gitSource: source } };
+  const puts: boolean[] = [];
+  let release = () => {};
+  const { client } = filesClient(skill, [{ path: "SKILL.md", content: "Lint.\n", encoding: "utf8" }], {
+    setSkillGitAutoUpdate: async (_id: string, enabled: boolean) => {
+      puts.push(enabled);
+      await new Promise<void>((resolve) => { release = resolve; });
+      skill.gitAutoUpdate = { enabled, intervalMs: 3_600_000, checkedAt: null, checkedCommit: null, error: null, held: null };
+      return skill.gitAutoUpdate;
+    },
+  });
+  const view = await mountSkills(client, "skills-auto-switch");
+  try {
+    await view.click(view.listItem("lint-rules"));
+    const toggle = () => view.section("Source")!.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    const description = () => toggle().querySelector(".ui-row-desc")?.textContent;
+    assertNoDomNode(view.section("Source")!.querySelector('input[type="checkbox"]'), "no checkbox for an instant setting");
+    assert.equal(toggle().querySelector(".ui-row-title")?.textContent, "Automatic Updates");
+    const byId = (attribute: string) => domWindow.document.getElementById(toggle().getAttribute(attribute)!)?.textContent;
+    assert.equal(byId("aria-labelledby"), "Automatic Updates", "named by its title alone");
+    assert.equal(byId("aria-describedby"), "Off. Use Check for Updates to review new commits.", "and described by its state");
+    assert.equal(toggle().getAttribute("aria-checked"), "false");
+    assert.equal(description(), "Off. Use Check for Updates to review new commits.");
+    assert.doesNotMatch(toggle().textContent ?? "", /\b(On|Off)$/, "the knob is the state");
+
+    await view.click(toggle());
+    assert.deepEqual(puts, [true], "one click, one request");
+    assert.equal(toggle().getAttribute("aria-busy"), "true");
+    assert.equal(toggle().getAttribute("aria-checked"), "false", "the confirmed value until the server answers");
+
+    await act(async () => { release(); });
+    await act(settle);
+    assert.equal(toggle().getAttribute("aria-checked"), "true");
+    assert.equal(toggle().getAttribute("aria-busy"), null);
+    assert.equal(toggle().querySelector(".ui-row-saved")?.textContent, "Saved");
+    assert.equal(view.section("Source")!.querySelector('.skill-source > [role="status"]')?.textContent, "Automatic Updates saved");
+    assert.equal(description(), "Checks main every hour. Waiting for the first check.");
+  } finally {
+    await view.unmount();
+  }
 });
 
 test("SkillsView follows the route's selected skill, including back to no selection", async () => {
@@ -1740,7 +2066,8 @@ test("the detail sections are Deployment, Assignments, Instructions and Source, 
       assertNoDomNode(section.closest(".skills-section"), "no section sits in a card");
     }
     assert.match(sections[2]!.textContent ?? "", /Run the campaign\./);
-    assert.match(sections[3]!.textContent ?? "", /Git Source/);
+    assert.deepEqual([...sections[3]!.querySelectorAll(".facts dt")].map((term) => term.textContent),
+      ["Repository", "Folder", "Branch or Tag", "Commit"]);
   } finally {
     await view.unmount();
     layout.restore();

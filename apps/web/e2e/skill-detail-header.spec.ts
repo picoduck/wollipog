@@ -141,9 +141,17 @@ test.describe("at 1440×900", () => {
       };
     });
     expect(rhythm).toEqual({ toContent: [12, 12, 12, 12], between: [32, 32, 32] });
-    // A block's own heading inside a section (Git Source) keeps no browser margin either.
-    const gitHeading = page.locator(".skills-git-source h4");
-    expect(await gitHeading.evaluate((element) => getComputedStyle(element).marginBottom)).toBe("0px");
+    // Source is one Surface (§5.1), and nothing inside it is boxed again (#1980).
+    const surface = page.locator(".skill-detail > section.section").nth(3).locator(":scope > .surface");
+    await expect(surface).toHaveCount(1);
+    expect(await surface.evaluate((element) => [...element.querySelectorAll<HTMLElement>("*")]
+      .filter((child) => {
+        const style = getComputedStyle(child);
+        const edge = (side: "Left" | "Right" | "Top" | "Bottom") =>
+          style[`border${side}Width`] !== "0px" && style[`border${side}Color`] !== "rgba(0, 0, 0, 0)";
+        return edge("Left") && edge("Right") && edge("Top") && edge("Bottom") &&
+          child.getBoundingClientRect().width > element.getBoundingClientRect().width / 2;
+      }).map((child) => child.className))).toEqual([]);
   });
 });
 

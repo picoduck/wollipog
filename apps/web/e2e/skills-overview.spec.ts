@@ -123,7 +123,9 @@ test.describe("at 1440×900", () => {
     await page.getByRole("menu").getByRole("menuitem", { name: "Dismiss Recommendation" }).click();
     await expect(section(page, "Recommended by Wollipog")).toHaveCount(0);
     await page.locator(".master-detail-list .skill-row", { hasText: "using-wollipog" }).click();
-    await expect(page.locator(".master-detail-detail")).toContainText("You dismissed this recommendation.");
+    const recommendation = page.locator(".skill-detail .facts dt", { hasText: "Recommendation" }).locator("xpath=following-sibling::dd[1]");
+    await expect(recommendation).toHaveText("DismissedShow Recommendation");
+    await expect(recommendation.getByRole("button", { name: "Show Recommendation" })).toBeVisible();
   });
 
   test("Recently Changed shows five rows newest first, each opening its skill", async ({ page }) => {

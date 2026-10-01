@@ -1,5 +1,5 @@
 import React, { useId, type ReactNode, type Ref } from "react";
-import { ChevronRightIcon } from "../Icons.js";
+import { CheckIcon, ChevronRightIcon } from "../Icons.js";
 import { SegmentedControl, Select, type SelectOption } from "./ChoiceControls.js";
 
 /**
@@ -46,8 +46,10 @@ function rowClass(extra: string, disabled?: boolean): string {
   return `ui-row ${extra}${disabled ? " is-disabled" : ""}`;
 }
 
-function RowBody({ title, description, descriptionId, descriptionHidden }: {
+function RowBody({ title, titleId, description, descriptionId, descriptionHidden }: {
   title: string;
+  /** So a control can be named by the title alone. */
+  titleId?: string;
   description?: ReactNode;
   /** So a row whose control is a separate element can point at this sentence. */
   descriptionId?: string;
@@ -56,7 +58,7 @@ function RowBody({ title, description, descriptionId, descriptionHidden }: {
 }) {
   return (
     <span className="ui-row-body">
-      <span className="ui-row-title">{title}</span>
+      <span className="ui-row-title" id={titleId}>{title}</span>
       {description && (
         <span className="ui-row-desc" id={descriptionId} aria-hidden={descriptionHidden || undefined}>
           {description}
@@ -200,13 +202,63 @@ export function SelectRow({
   );
 }
 
+/** A switch is named one way: by its label said again, or by visible text it points at. */
+type SwitchName = { label: string; labelledBy?: never } | { labelledBy: string; label?: never };
+
+export type SwitchProps = SwitchName & {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  describedBy?: string;
+  disabled?: boolean;
+  busy?: boolean;
+  /** Replaces the standalone look; `SwitchRow` makes the whole row the switch. */
+  className?: string;
+  /** A settings row's text, drawn before the track (`SwitchRow`). Never "On" or "Off". */
+  children?: ReactNode;
+};
+
 /**
- * On/off. A real track and knob, which is what role="switch" promises.
+ * On/off (§8.4). A real track and knob, which is what role="switch" promises, and the app's only
+ * switch: `SwitchRow` renders this with the row's text inside it, and a switch that sits in a row
+ * beside other controls renders it alone.
+ *
+ * Standalone, it is named by `label` (the visible label it sits beside, said again) or by
+ * `labelledBy`; it never shows "On" or "Off", because the knob's position is the state.
  *
  * `busy` is for a toggle whose backing request is in flight. Callers must keep passing the last
  * CONFIRMED value as `checked` — reporting the pending value instead announces aria-checked="false"
  * while the thing being switched off is still live, and a slow or failed request leaves that lie
  * on screen until it snaps back.
+ */
+export function Switch({ checked, onChange, label, labelledBy, describedBy, disabled, busy, className, children }: SwitchProps) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      aria-labelledby={labelledBy}
+      aria-describedby={describedBy}
+      aria-busy={busy || undefined}
+      disabled={disabled || busy}
+      className={`ui-switch-control ${className ?? "ui-switch-standalone"}${busy ? " is-busy" : ""}${disabled ? " is-disabled" : ""}`}
+      onClick={() => onChange(!checked)}
+    >
+      {children}
+      <span className="ui-switch" aria-hidden="true" />
+    </button>
+  );
+}
+
+/** How long an instant setting's "Saved" check stays at the row's right edge (§8.6). */
+export const SAVED_MS = 2000;
+
+/**
+ * An on/off setting: the whole row is the switch.
+ *
+ * `saved` shows the quiet "Saved" check at the row's right edge (§8.6); the caller turns it on when
+ * the change is confirmed and off `SAVED_MS` later. It is announced through a polite region beside
+ * the row, because text inside the switch would become part of its name.
  */
 export function SwitchRow({
   title,
@@ -214,22 +266,32 @@ export function SwitchRow({
   checked,
   disabled,
   busy,
+  saved,
   onClick,
-}: RowShellProps & { checked: boolean; busy?: boolean }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-busy={busy || undefined}
-      disabled={disabled || busy}
-      className={rowClass(`ui-row-switch${busy ? " is-busy" : ""}`, disabled)}
-      onClick={onClick}
+}: RowShellProps & { checked: boolean; busy?: boolean; saved?: boolean }) {
+  // Named by its title and described by its sentence, so the name is the setting's and nothing more.
+  const id = useId();
+  const row = (
+    <Switch
+      labelledBy={`${id}-title`}
+      describedBy={description ? `${id}-desc` : undefined}
+      checked={checked}
+      disabled={disabled}
+      busy={busy}
+      className={rowClass("ui-row-switch")}
+      onChange={() => onClick?.()}
     >
       <span />
-      <RowBody title={title} description={description} />
-      <span className="ui-switch" aria-hidden="true" />
-    </button>
+      <RowBody title={title} titleId={`${id}-title`} description={description} descriptionId={`${id}-desc`} />
+      {saved && <span className="ui-row-saved" aria-hidden="true"><CheckIcon size={14} />Saved</span>}
+    </Switch>
+  );
+  if (saved === undefined) return row;
+  return (
+    <>
+      {row}
+      <span className="sr-only" role="status">{saved ? `${title} saved` : ""}</span>
+    </>
   );
 }
 
