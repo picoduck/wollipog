@@ -264,6 +264,41 @@ export function skillAgentEligible(runner: Pick<RunnerView, "os" | "protocolVers
     skillEligibleAgents([agent], contextKind === "wsl").length > 0;
 }
 
+/** Agents an enabled rule decides for that cannot get the skill from it (#1982). */
+export interface SkillRuleUnreachableAgents {
+  /** Agents the rule names, by agent or by type, that skill deployment can't reach. */
+  ineligible: Array<{ runnerId: string; agent: AgentDefinition }>;
+  /** Agents a Manual Only rule reaches that aren't Claude Code, which the runner skips. */
+  manualOnly: Array<{ runnerId: string; agent: AgentDefinition }>;
+}
+
+/**
+ * What `rule` aims at but cannot deploy to, on the machines it covers, counting only agents it wins
+ * among `rules` (a higher-ranked rule decides for the rest). An All Agents rule never names an agent
+ * deployment can't reach, so those agents are not held against it. A turned-off rule deploys
+ * nothing, so it reaches nobody.
+ */
+export function skillRuleUnreachableAgents<T extends SkillRule>(
+  rule: T,
+  rules: ReadonlyArray<T>,
+  runners: ReadonlyArray<Pick<RunnerView, "runnerId" | "os" | "protocolVersion" | "agents">>,
+): SkillRuleUnreachableAgents {
+  const result: SkillRuleUnreachableAgents = { ineligible: [], manualOnly: [] };
+  if (!rule.enabled) return result;
+  for (const runner of runners) {
+    if (rule.scopeKind === "runner" && rule.runnerId !== runner.runnerId) continue;
+    for (const agent of runner.agents) {
+      if (!selectorMatches(rule.agentSelector, agent) || winningSkillRule(rules, runner.runnerId, agent) !== rule) continue;
+      if (!skillAgentEligible(runner, agent)) {
+        if (rule.agentSelector.kind !== "all") result.ineligible.push({ runnerId: runner.runnerId, agent });
+      } else if (rule.invocation === "manual" && !supportsManualOnly(agent.driver)) {
+        result.manualOnly.push({ runnerId: runner.runnerId, agent });
+      }
+    }
+  }
+  return result;
+}
+
 /** Display configuration separately from the last reported link; a shared harness may expose a
  * skill even when this specific agent has no desired target. Never infer successful removal. */
 export function skillAgentMatrixCell(runner: RunnerView, agent: AgentDefinition, skillName: string, state?: RunnerSkillsResponse): { desired: string; reported: string; detail?: string } {

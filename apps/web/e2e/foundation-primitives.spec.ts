@@ -81,25 +81,29 @@ test.describe("at 1440px", () => {
   });
 });
 
-// A picker inside a table opens against its trigger and whole: the table wrapper is a size container
-// and a sideways scroller, and neither may become the fixed list's containing block or clip it.
+// A menu inside a size container opens whole: the assignment rows' Surface is a size container, and
+// it may neither become the menu's containing block nor clip it (#1982). On a desktop the menu opens
+// against its trigger; on a phone it is the bottom sheet every menu becomes (§9.1).
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
-  test(`an Invocation picker in the Skills assignments table opens beside its trigger at ${viewport.width}px`, async ({ page }) => {
+  test(`an Invocation menu in the Skills assignment rows opens whole at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/skills-removals-e2e.html?assignment=1");
     await page.getByRole("button", { name: /code-review/i }).first().click();
-    const trigger = page.locator(".skills-table").getByRole("button", { name: /^Invocation:/ });
+    const trigger = page.locator(".skill-assignments").getByRole("button", { name: /^Invocation:/ });
     await trigger.scrollIntoViewIfNeeded();
     await trigger.click();
-    const list = page.getByRole("listbox", { name: "Invocation" });
+    const list = page.getByRole("menu", { name: "Invocation" });
     await expect(list).toBeVisible();
+    // A phone's sheet slides in; measure where it comes to rest.
+    await page.waitForFunction(() => !document.getAnimations().some((animation) => animation.playState === "running"));
     const geometry = await list.evaluate((element) => {
-      const trigger = document.querySelector<HTMLElement>('.skills-table [aria-haspopup="listbox"]')!.getBoundingClientRect();
+      const trigger = document.querySelector<HTMLElement>('.skill-assignments [data-rule-control="invocation"]')!.getBoundingClientRect();
       const box = element.getBoundingClientRect();
-      const options = [...element.querySelectorAll<HTMLElement>('[role="option"]')];
+      const options = [...element.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
       return {
         gap: Math.min(Math.abs(box.top - trigger.bottom), Math.abs(trigger.top - box.bottom)),
         overlapsHorizontally: box.left < trigger.right && box.right > trigger.left,
+        inViewport: box.left >= 0 && box.top >= 0 && box.right <= window.innerWidth && box.bottom <= window.innerHeight,
         // Every option is where a pointer can reach it: the topmost element at its centre is it.
         reachable: options.every((option) => {
           const rect = option.getBoundingClientRect();
@@ -109,10 +113,13 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       };
     });
     expect(geometry.count).toBe(2);
-    expect(geometry.gap, "the list opens against its trigger").toBeLessThanOrEqual(8);
-    expect(geometry.overlapsHorizontally).toBe(true);
+    expect(geometry.inViewport, "the menu is whole").toBe(true);
+    if (viewport.width > 760) {
+      expect(geometry.gap, "the menu opens against its trigger").toBeLessThanOrEqual(8);
+      expect(geometry.overlapsHorizontally).toBe(true);
+    }
     expect(geometry.reachable, "no option is clipped or covered").toBe(true);
-    await list.getByRole("option", { name: /Manual/ }).click();
+    await list.getByRole("menuitemradio", { name: "Manual Only" }).click();
     await expect(list).toBeHidden();
   });
 }

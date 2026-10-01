@@ -185,12 +185,9 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.equal(container.querySelector(".skill-detail-meta .mono")?.textContent, "d1");
   assert.match(pageText(), /Always review the diff\./);
   assert.doesNotMatch(pageText(), /name: code-review/, "frontmatter stays out of the rendered content");
-  assert.match(pageText(), /All Machines/);
-  assert.match(pageText(), /All Agents/);
-  // In the narrow table the headers are off screen, so each assignment cell names itself (§14).
-  const assignmentLabels = [...container.querySelectorAll(".skills-table tbody tr:first-child .cell-label")]
-    .map((label) => label.textContent?.trim());
-  assert.deepEqual(assignmentLabels, ["Agents:", "Invocation", "Enabled"]);
+  // Each direct rule is one row titled as one phrase (#1982).
+  assert.deepEqual([...container.querySelectorAll(".skill-assignments .skill-assignment-title")].map((title) => title.textContent),
+    ["All Agents on All Machines"]);
   assert.match(pageText(), /Build Machine/);
   // A deployed copy is Linked in the shared skill-deployment vocabulary (docs/design-system.md §11.2).
   const deployment = container.querySelector("table.skill-deployment");
@@ -595,6 +592,12 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
 });
 
 /** Mount the Skills view against a client and deliver a one-runner snapshot. */
+/** ⋯ › Remove Assignment… on the first direct rule (#1982); `mountSkills` confirms every confirmation. */
+async function removeFirstAssignment(view: Awaited<ReturnType<typeof mountSkills>>) {
+  await view.click(view.section("Assignments")!.querySelector<HTMLButtonElement>('button[aria-label^="More Actions for"]')!);
+  await view.click(view.menuItem("Remove Assignment…"));
+}
+
 async function mountSkills(client: ApiClient, instanceId: string, runners: RunnerView[] = [runner]) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -729,7 +732,7 @@ test("SkillsView recommends a built-in skill in the notice slot, assigns it in o
   assert.equal(view.fact("Recommendation"), undefined, "an assigned skill is no longer recommended, so Source says nothing of it");
 
   // Removing the assignment brings the recommendation back; Assign to Machine is a menu of machines.
-  await view.click(view.button("Delete"));
+  await removeFirstAssignment(view);
   assert.equal(view.groupOf("using-wollipog"), "Recommended");
   const assignToMachine = view.button("Assign to Machine")!;
   assert.equal(assignToMachine.getAttribute("aria-haspopup"), "menu");
@@ -744,7 +747,7 @@ test("SkillsView recommends a built-in skill in the notice slot, assigns it in o
   });
 
   // Choose Agents… opens Add Assignment for anything narrower.
-  await view.click(view.button("Delete"));
+  await removeFirstAssignment(view);
   await view.click(view.button("Assign to Machine"));
   await view.click(view.menuItem("Choose Agents…"));
   const dialog = view.container.querySelector('[role="dialog"]');
@@ -2124,7 +2127,7 @@ test("Delete Skill… waits, and says why, while a change to the skill is still 
   }), "skills-header-busy", { name: "skills", id: "skill-1" });
   try {
     const { container } = view;
-    const enabled = container.querySelector<HTMLButtonElement>('.skills-table button[role="switch"]')!;
+    const enabled = container.querySelector<HTMLButtonElement>('.skill-assignments button[role="switch"]')!;
     await act(async () => enabled.click());
     const head = container.querySelector(".skill-detail-head")!;
     assert.equal(buttonNamed(head, "Add Assignment…")[0]!.disabled, true);
@@ -2692,4 +2695,250 @@ test("a grouped skill's Manual Only error offers no fix until the group's rules 
   assert.match(view.slot()!.textContent ?? "", /Switch the group's assignment to Agent Invocable/);
   assert.deepEqual(patches, []);
   await view.unmount();
+});
+
+/** A skill with two direct rules (one turned off) in a group whose rules include a turned-off one
+ * and a Manual Only rule that reaches Codex (#1982). */
+function assignmentsClient(options: { direct?: boolean; groupRules?: "ok" | "fail" | "legacy" } = {}) {
+  const agents = [
+    { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true },
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" as const, available: true },
+  ];
+  const machine: RunnerView = { ...runner, displayName: "Studio Workstation", agents, providerAccounts: [] };
+  const skill = { id: "skill-1", name: "collect", groupId: "group-1", assignmentCount: 2, latestVersion: { id: "v1", digest: "d1", versionNumber: 1 } };
+  const assignments = options.direct === false ? [] : [
+    { id: "a-all", skillId: "skill-1", scopeKind: "instance" as const, agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const },
+    { id: "a-codex", skillId: "skill-1", scopeKind: "runner" as const, runnerId: "runner-1",
+      agentSelector: { kind: "driver" as const, driver: "codex" }, enabled: false, invocation: "agent" as const },
+  ];
+  const calls: unknown[] = [];
+  let release: (() => void) | null = null;
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [skill] }),
+    listSkillGroups: async () => ({ groups: [{ id: "group-0", name: "Other", sortOrder: 0, scope: { organizationId: "org" , owner: { kind: "organization" } } },
+      { id: "group-1", name: "Platform", sortOrder: 1, ...(options.groupRules === "legacy" ? {} : { scope: { organizationId: "org", owner: { kind: "organization" } } }) }] }),
+    getSkill: async () => ({ skill, latestVersion: { ...skill.latestVersion, files: [] } }),
+    listSkillAssignments: async () => ({ assignments: structuredClone(assignments) }),
+    listSkillGroupAssignments: async (groupId: string) => {
+      if (options.groupRules === "fail") throw new Error("HTTP 503");
+      if (groupId !== "group-1" || options.groupRules === "legacy") return { assignments: [] };
+      return { assignments: [
+        { id: "g-manual", groupId: "group-1", scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "all" }, enabled: true, invocation: "manual" },
+        { id: "g-off", groupId: "group-1", scopeKind: "instance", agentSelector: { kind: "agent", agentId: "claude" }, enabled: false, invocation: "agent" },
+      ] };
+    },
+    runnerSkills: async () => ({ desired: [], reported: null }),
+    updateSkillAssignment: async (id: string, patch: Record<string, unknown>) => {
+      calls.push(["update", id, patch]);
+      if (release === null) await new Promise<void>((resolve) => { release = resolve; });
+      Object.assign(assignments.find((assignment) => assignment.id === id)!, patch);
+      return { assignment: assignments.find((assignment) => assignment.id === id) };
+    },
+    deleteSkillAssignment: async (id: string) => {
+      calls.push(["delete", id]);
+      assignments.splice(assignments.findIndex((assignment) => assignment.id === id), 1);
+    },
+  } as unknown as ApiClient;
+  return { client, machine, calls, release: () => { const next = release; release = () => {}; next?.(); } };
+}
+
+test("Assignments lists direct rules as rows with an invocation menu, a real Enabled switch and ⋯ › Remove Assignment…", async () => {
+  const fixture = assignmentsClient();
+  const confirmations: string[] = [];
+  const view = await mountRouted(fixture.client, "skills-assignments-rows", { name: "skills", id: "skill-1" }, false, {
+    confirm: async (options) => { confirmations.push(`${options.title}|${options.confirmLabel}`); return true; },
+  }, [fixture.machine]);
+  try {
+    const { container } = view;
+    const section = () => [...container.querySelectorAll<HTMLElement>(".skill-detail > section.section")]
+      .find((candidate) => candidate.querySelector(".section-title")?.textContent === "Assignments")!;
+    assert.equal(section().querySelector(".section-note")?.textContent,
+      "Rules that choose which agents get this skill. A direct rule wins over a group rule for the same agents.");
+    assertNoDomNode(container.querySelector("table.skills-table"), "no assignments table remains");
+    assert.doesNotMatch(container.textContent ?? "", /Inherited Assignments|Manage Group Assignments/);
+    assert.deepEqual(buttonNamed(section(), "Add Assignment…"), [], "the header's Add Assignment… is the one entry point");
+    const rows = () => [...section().querySelectorAll<HTMLElement>(".skill-assignment-list[aria-label='Direct Assignments'] > .skill-assignment")];
+    assert.deepEqual(rows().map((row) => row.querySelector(".skill-assignment-title")?.textContent),
+      ["All Agents on All Machines", "Codex (Command Line) on Studio Workstation"]);
+
+    // The turned-off rule is dimmed and says so; the switch is the knob, never On or Off text.
+    assert.equal(rows()[1]!.classList.contains("is-off"), true);
+    assert.equal(rows()[1]!.querySelector(".skill-assignment-desc")?.textContent, "Direct assignment, turned off");
+    assertNoDomNode(rows()[0]!.querySelector(".skill-assignment-desc"));
+    const toggle = (index: number) => rows()[index]!.querySelector<HTMLButtonElement>('button[role="switch"]')!;
+    assert.equal(toggle(0).getAttribute("aria-label"), "Enabled");
+    assert.equal(toggle(0).textContent, "Enabled");
+    assert.equal(toggle(0).getAttribute("aria-checked"), "true");
+    assert.equal(toggle(1).getAttribute("aria-checked"), "false");
+    assert.equal(domWindow.document.getElementById(toggle(0).getAttribute("aria-describedby")!)?.textContent, "All Agents on All Machines");
+    for (const row of rows()) assert.doesNotMatch(row.textContent ?? "", /\bOn\b|\bOff\b/, "no On or Off text");
+    assert.deepEqual([...section().querySelectorAll("button")].filter((button) => /Delete/.test(button.textContent ?? "")), [],
+      "no control says Delete");
+
+    // Enabled applies at once, with one request; the confirmed value shows until the server answers.
+    await act(async () => toggle(0).click());
+    assert.deepEqual(fixture.calls, [["update", "a-all", { enabled: false }]]);
+    assert.equal(toggle(0).getAttribute("aria-busy"), "true");
+    assert.equal(toggle(0).getAttribute("aria-checked"), "true");
+    await act(async () => fixture.release());
+    await act(settle);
+    assert.equal(toggle(0).getAttribute("aria-checked"), "false");
+    assert.equal(rows()[0]!.querySelector(".ui-row-saved")?.textContent, "Saved");
+    assert.equal(rows()[0]!.querySelector('[role="status"]')?.textContent, "All Agents on All Machines saved");
+    assert.equal(rows()[0]!.querySelector(".skill-assignment-desc")?.textContent, "Direct assignment, turned off");
+
+    // The invocation is a menu of two radio items with descriptions; the current one is checked.
+    const trigger = rows()[1]!.querySelector<HTMLButtonElement>('[data-rule-control="invocation"]')!;
+    assert.equal(trigger.getAttribute("aria-label"), "Invocation: Agent Invocable");
+    assert.equal(trigger.getAttribute("aria-haspopup"), "menu");
+    await act(async () => trigger.click());
+    const menu = container.querySelector('[role="menu"][aria-label="Invocation"]')!;
+    const items = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+    assert.deepEqual(items.map((item) => [item.querySelector(".menu-text")?.textContent, item.getAttribute("aria-checked"),
+      Boolean(item.querySelector(".menu-desc")?.textContent)]), [["Agent Invocable", "true", true], ["Manual Only", "false", true]]);
+    await act(async () => items[1]!.click());
+    await act(settle);
+    assert.deepEqual(fixture.calls.at(-1), ["update", "a-codex", { invocation: "manual" }]);
+    assert.equal(fixture.calls.length, 2, "one request");
+    assert.equal(rows()[1]!.querySelector<HTMLButtonElement>('[data-rule-control="invocation"]')!.textContent, "Manual Only");
+    assert.equal(rows()[1]!.querySelector(".ui-row-saved")?.textContent, "Saved");
+    assertNoDomNode(rows()[0]!.querySelector(".ui-row-saved"), "only the latest change shows Saved");
+
+    // Choosing the current invocation changes nothing.
+    await act(async () => rows()[1]!.querySelector<HTMLButtonElement>('[data-rule-control="invocation"]')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="menu"] [role="menuitemradio"][aria-checked="true"]')!.click());
+    await act(settle);
+    assert.equal(fixture.calls.length, 2);
+
+    // ⋯ holds Remove Assignment…, which confirms, then removes; focus moves to the next row's ⋯.
+    const more = rows()[0]!.querySelector<HTMLButtonElement>('[data-rule-control="more"]')!;
+    assert.equal(more.getAttribute("aria-label"), "More Actions for All Agents on All Machines");
+    await act(async () => more.click());
+    const remove = [...container.querySelectorAll<HTMLButtonElement>('[role="menu"] [role="menuitem"]')];
+    assert.deepEqual(remove.map((item) => [item.textContent, item.classList.contains("danger")]), [["Remove Assignment…", true]]);
+    await act(async () => remove[0]!.click());
+    await act(settle);
+    assert.deepEqual(confirmations, ["Remove Assignment|Remove Assignment"]);
+    assert.deepEqual(fixture.calls.at(-1), ["delete", "a-all"]);
+    assert.deepEqual(rows().map((row) => row.querySelector(".skill-assignment-title")?.textContent), ["Codex (Command Line) on Studio Workstation"]);
+    assert.ok(Object.is(domWindow.document.activeElement, rows()[0]!.querySelector('[data-rule-control="more"]')), "focus moves to the next row's ⋯");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("after a removal, focus waits for the refresh to re-enable the rows, then moves to the next row's ⋯", async () => {
+  const fixture = assignmentsClient();
+  fixture.release();
+  let hold: Promise<void> | null = null;
+  let releaseMachines = () => {};
+  const client = {
+    ...fixture.client,
+    // The machines' refresh is the last step of a removal; while it runs every control is disabled.
+    runnerSkills: async () => {
+      if (hold) await hold;
+      return { desired: [], reported: null };
+    },
+  } as unknown as ApiClient;
+  const view = await mountRouted(client, "skills-assignments-focus-busy", { name: "skills", id: "skill-1" }, false,
+    { confirm: async () => true }, [fixture.machine]);
+  try {
+    const { container } = view;
+    const rows = () => [...container.querySelectorAll<HTMLElement>(".skill-assignment-list[aria-label='Direct Assignments'] > .skill-assignment")];
+    hold = new Promise<void>((resolve) => { releaseMachines = resolve; });
+    await act(async () => rows()[0]!.querySelector<HTMLButtonElement>('[data-rule-control="more"]')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="menu"] [role="menuitem"]')!.click());
+    await act(settle);
+    assert.deepEqual(rows().map((row) => row.querySelector(".skill-assignment-title")?.textContent), ["Codex (Command Line) on Studio Workstation"]);
+    const next = () => rows()[0]!.querySelector<HTMLButtonElement>('[data-rule-control="more"]')!;
+    assert.equal(next().disabled, true, "the refresh is still running");
+    await act(async () => releaseMachines());
+    await act(settle);
+    assert.equal(next().disabled, false);
+    assert.ok(Object.is(domWindow.document.activeElement, next()), "focus reaches the next row's ⋯ once it can take it");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a declined Remove Assignment… changes nothing, and a failed change shows no Saved", async () => {
+  const fixture = assignmentsClient();
+  fixture.release();
+  const client = { ...fixture.client, updateSkillAssignment: async () => { throw new Error("Assignment could not be saved."); } } as unknown as ApiClient;
+  const view = await mountRouted(client, "skills-assignments-decline", { name: "skills", id: "skill-1" }, false,
+    { confirm: async () => false }, [fixture.machine]);
+  try {
+    const { container } = view;
+    const row = () => container.querySelector<HTMLElement>(".skill-assignment-list > .skill-assignment")!;
+    await act(async () => row().querySelector<HTMLButtonElement>('[data-rule-control="more"]')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="menu"] [role="menuitem"]')!.click());
+    await act(settle);
+    assert.deepEqual(fixture.calls, []);
+    assert.equal(row().querySelector(".skill-assignment-title")?.textContent, "All Agents on All Machines");
+
+    await act(async () => row().querySelector<HTMLButtonElement>('button[role="switch"]')!.click());
+    await act(settle);
+    assert.equal(row().querySelector('button[role="switch"]')!.getAttribute("aria-checked"), "true");
+    assertNoDomNode(row().querySelector(".ui-row-saved"));
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Assignment could not be saved\./);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a group's rules are read-only rows under From Groups, and Edit in Groups… opens Manage Groups at that group", async () => {
+  const fixture = assignmentsClient({ direct: false });
+  const view = await mountRouted(fixture.client, "skills-assignments-groups", { name: "skills", id: "skill-1" }, false,
+    { confirm: async () => true }, [fixture.machine]);
+  try {
+    const { container } = view;
+    const section = container.querySelector<HTMLElement>(".skill-assignments")!;
+    const direct = section.querySelector(".skill-assignment-list[aria-label='Direct Assignments']")!;
+    assert.equal(direct.textContent, "No direct assignments.");
+    const group = section.querySelector<HTMLElement>(".skill-assignments-group")!;
+    assert.equal(group.getAttribute("aria-label"), "From Groups: Platform");
+    assert.equal(group.querySelector(".skill-assignments-group-label")?.textContent, "From Groups");
+    assert.equal(group.querySelector(".skill-assignments-group-name")?.textContent, "Platform");
+    const rows = [...group.querySelectorAll<HTMLElement>(".skill-assignment")];
+    assert.deepEqual(rows.map((row) => [
+      row.querySelector(".skill-assignment-title")?.textContent,
+      [...row.querySelectorAll(".skill-assignment-facts > span")].map((fact) => fact.textContent),
+      row.querySelector(".skill-assignment-warning")?.textContent ?? null,
+      row.classList.contains("is-off"),
+    ]), [
+      ["All Agents on Studio Workstation", ["Manual Only"], "Codex on Studio Workstation can't run manual-only skills.", false],
+      ["Claude Code on All Machines", ["Agent Invocable", "Turned Off"], null, true],
+    ]);
+    assertNoDomNode(group.querySelector('button[role="switch"], [data-rule-control="invocation"], [data-rule-control="more"]'), "group rules are not edited here");
+
+    await act(async () => buttonNamed(group, "Edit in Groups…")[0]!.click());
+    await act(settle);
+    const dialog = container.querySelector('[role="dialog"]')!;
+    assert.match(dialog.textContent ?? "", /Manage Skill Groups/);
+    assert.equal(dialog.querySelector("h3")?.textContent, "Platform", "the group is already selected");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a legacy group keeps its one-sentence explanation, and unreadable group rules say so", async () => {
+  for (const [groupRules, expected] of [
+    ["legacy", "This legacy group is organizational metadata only and has no deployable assignments."],
+    ["fail", "Couldn't load this group's assignments. HTTP 503"],
+  ] as const) {
+    const fixture = assignmentsClient({ groupRules });
+    const view = await mountRouted(fixture.client, `skills-assignments-${groupRules}`, { name: "skills", id: "skill-1" }, false,
+      { confirm: async () => true }, [fixture.machine]);
+    try {
+      const group = view.container.querySelector<HTMLElement>(".skill-assignments-group")!;
+      assert.equal(group.querySelector(".skill-assignments-group-note")?.textContent, expected);
+      assertNoDomNode(group.querySelector(".skill-assignment"));
+      assert.equal(buttonNamed(group, "Edit in Groups…").length, 1);
+      assert.equal(view.container.querySelectorAll(".skill-assignment-list[aria-label='Direct Assignments'] > .skill-assignment").length, 2,
+        "the skill's own rules still list");
+    } finally {
+      await view.unmount();
+    }
+  }
 });

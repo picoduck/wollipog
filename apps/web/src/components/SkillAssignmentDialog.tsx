@@ -46,7 +46,7 @@ function selectorFromChoice(choice: string): SkillAgentSelector {
   return { kind: "all" };
 }
 
-const INVOCATION_HELP: Record<SkillInvocationPolicy, string> = {
+export const INVOCATION_HELP: Record<SkillInvocationPolicy, string> = {
   agent: "Agents use the skill on their own whenever a task calls for it.",
   manual: "Only a person can start the skill, and only Claude Code agents support it.",
 };

@@ -11,14 +11,17 @@ function ownership(scope: ResourceScope): string {
   return owner.kind === "organization" ? `Organization ${scope.organizationId}` : owner.kind === "user" ? `Private User ${owner.userId} · Organization ${scope.organizationId}` : `Team ${owner.teamId} · Organization ${scope.organizationId}`;
 }
 
-export function SkillGroupsDialog({ runners, machineLabels, onClose, onChanged }: {
-  runners: RunnerView[]; machineLabels: Map<string, string>; onClose: () => void; onChanged: () => Promise<void>;
+export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onClose, onChanged }: {
+  runners: RunnerView[]; machineLabels: Map<string, string>;
+  /** The group to open at: a skill's Edit in Groups… (#1982). */
+  initialGroupId?: string;
+  onClose: () => void; onChanged: () => Promise<void>;
 }) {
   const api = useApi();
   const [groups, setGroups] = useState<SkillGroupView[]>([]);
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [creationScope, setCreationScope] = useState<ResourceScope | null>(null);
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedId] = useState(initialGroupId ?? "");
   const [rules, setRules] = useState<SkillGroupAssignmentView[] | null>(null);
   const [name, setName] = useState("");
   const [memberId, setMemberId] = useState("");

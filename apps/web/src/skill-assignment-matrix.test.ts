@@ -9,6 +9,7 @@ import {
   skillDeploymentErrors,
   skillMachineDeployment,
   skillManualOnlyErrors,
+  skillRuleUnreachableAgents,
   winningSkillRule,
   type SkillRule,
 } from "./skill-assignment-matrix.js";
@@ -340,4 +341,28 @@ test("an agent with several provider accounts is Linked only once every account 
   assert.deepEqual([skillMachineDeployment(machine, "review", state).linked, skillMachineDeployment(machine, "review", state).total], [0, 1]);
   state.reported!.deployed!.push({ name: "review", digest: "digest", providerAccountId: "personal", links: [{ agentId: "claude", status: "linked" }] });
   assert.equal(skillAgentDeployment(machine, claude, "review", state).status, "linked", "another provider's account is not required");
+});
+
+test("a rule's unreachable agents: the ones it names that can't receive skills, and Manual Only's skipped agents, where it wins", () => {
+  const acp = { id: "gemini", name: "Gemini", driver: "acp" } as AgentDefinition;
+  const withAcp = { ...studio, agents: [claude, codex, acp] } as RunnerView;
+  const names = (result: ReturnType<typeof skillRuleUnreachableAgents>) => ({
+    ineligible: result.ineligible.map((entry) => `${entry.agent.id}@${entry.runnerId}`),
+    manualOnly: result.manualOnly.map((entry) => `${entry.agent.id}@${entry.runnerId}`),
+  });
+  // All Agents, Manual Only: every non-Claude agent it reaches is skipped; an ACP agent is never held against it.
+  const all = rule("all", { groupId: "g" });
+  assert.deepEqual(names(skillRuleUnreachableAgents(all, [all], [withAcp, laptop])),
+    { ineligible: [], manualOnly: ["codex@studio", "codex@laptop"] });
+  // A rule that names an agent deployment can't reach says so, whatever its invocation.
+  const named = rule("named", { groupId: "g", invocation: "agent", agentSelector: { kind: "driver", driver: "acp" } });
+  assert.deepEqual(names(skillRuleUnreachableAgents(named, [named], [withAcp])), { ineligible: ["gemini@studio"], manualOnly: [] });
+  // Only the machines it covers, and only agents it wins: the skill's own Codex rule decides Codex.
+  const studioOnly = rule("studio-only", { groupId: "g", scopeKind: "runner", runnerId: "studio" });
+  const ownCodex = rule("own-codex", { scopeKind: "runner", runnerId: "studio", invocation: "agent", agentSelector: { kind: "agent", agentId: "codex" } });
+  assert.deepEqual(names(skillRuleUnreachableAgents(studioOnly, [studioOnly, ownCodex], [studio, laptop])),
+    { ineligible: [], manualOnly: ["pi@studio"] });
+  // A turned-off rule deploys nothing, so nothing is unreachable.
+  const off = rule("off", { groupId: "g", enabled: false });
+  assert.deepEqual(names(skillRuleUnreachableAgents(off, [off], [studio])), { ineligible: [], manualOnly: [] });
 });

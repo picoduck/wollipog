@@ -123,6 +123,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // View Options (#1961) is §9.1's radio-like menu: MenuItem rows with the trailing check, one per
   // Show and Group By choice, which reset with the page. A view switch in a menu, not a form choice.
   ["components/SkillList.tsx", "raw-radiogroup", 2],
+  // An assignment rule's Invocation (#1982) is §9.1's radio-like menu: two MenuItem rows with
+  // descriptions and the trailing check, applied at once like the row's Enabled switch.
+  ["components/SkillAssignments.tsx", "raw-radiogroup", 1],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],

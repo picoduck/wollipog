@@ -61,17 +61,22 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.getByRole("button", { name: "Enable Assignment" }).click();
     await page.getByRole("button", { name: "Close", exact: true }).last().click();
     await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
-    await expect(page.getByRole("region", { name: "Inherited Assignments" })).toContainText("Build Machine · Claude · Agent Invocable · Enabled");
+    // The group's rule is a read-only row under From Groups (#1982).
+    const fromGroups = page.getByRole("region", { name: "From Groups: Review Team" });
+    await expect(fromGroups.locator(".skill-assignment-title")).toHaveText(["Claude on Build Machine"]);
+    await expect(fromGroups.locator(".skill-assignment-facts")).toHaveText(["Agent Invocable"]);
+    await expect(fromGroups.getByRole("switch")).toHaveCount(0);
     await page.screenshot({ path: info.outputPath(`inherited-${width}-${theme}.png`), fullPage: true });
-    await page.getByRole("button", { name: "Manage Group Assignments", exact: true }).click();
-    await page.getByRole("button", { name: /^Group:/ }).click();
-    await page.getByRole("option", { name: "Review Team", exact: true }).click();
+    // Edit in Groups… opens Manage Groups with the group already selected.
+    await fromGroups.getByRole("button", { name: "Edit in Groups…", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Review Team", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Group:/ })).toContainText("Review Team");
     await page.getByRole("checkbox", { name: acceptance }).check();
     await page.getByRole("button", { name: "Delete Group and Its Assignments" }).click();
     await expect(page.getByRole("heading", { name: "Review Team", exact: true })).toHaveCount(0);
     await expect(page.getByRole("alert")).toHaveCount(0);
     await page.getByRole("button", { name: "Close", exact: true }).last().click();
-    await expect(page.getByRole("region", { name: "Inherited Assignments" })).toHaveCount(0);
+    await expect(page.locator(".skill-assignments-group")).toHaveCount(0);
     // The skill stays open; on a phone it is its own screen, named in the detail bar (#1947, #1962).
     await expect(page.locator(".skill-detail-head, .detail-bar").getByRole("heading", { name: "code-review", exact: true })).toBeVisible();
   });

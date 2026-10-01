@@ -182,12 +182,21 @@ for (const [label, options] of [
   ["an 834px coarse-pointer tablet", { viewport: { width: 834, height: 1112 }, hasTouch: true, isMobile: true }],
   ["a 390px phone", { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }],
 ] as const) {
-  test(`on ${label} a skill whose assignments table is its widest child never widens the page`, async ({ browser }) => {
+  test(`on ${label} a skill's assignment rules wrap their controls under the title and never widen the page`, async ({ browser }) => {
     const context = await browser.newContext(options);
     const page = await context.newPage();
     try {
-      await open(page, SKILL_1);
-      await expect(page.locator(".skills-table")).toBeVisible();
+      await open(page, SKILL_1, "&skills=detail&groupRules=1");
+      const rows = page.locator(".skill-assignments .skill-assignment:not(.is-empty)");
+      await expect(rows).toHaveCount(6);
+      // Under a 560px container every rule's controls take the line below its title (#1982).
+      const layout = await rows.evaluateAll((elements) => elements.map((row) => {
+        const text = row.querySelector(".skill-assignment-text")!.getBoundingClientRect();
+        const controls = row.querySelector(".skill-assignment-controls")!.getBoundingClientRect();
+        const box = row.getBoundingClientRect();
+        return { below: controls.top >= text.bottom - 0.5, inside: controls.right <= box.right + 0.5 };
+      }));
+      expect(layout).toEqual(layout.map(() => ({ below: true, inside: true })));
       const widths = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, viewport: window.innerWidth }));
       expect(widths.scroll).toBe(widths.viewport);
       // A dialog opened from the detail is laid out against the viewport, not a widened page.

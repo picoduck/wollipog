@@ -6,7 +6,6 @@ import { useStoreActions, useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { DetailSkeleton } from "./common.js";
-import { Select } from "./ui/ChoiceControls.js";
 import { PlusIcon, SkillsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { DetailBar, PageHeader } from "./PageHeader.js";
@@ -23,7 +22,7 @@ import { canResolveOrphanedCopy, orphanedCopyDiscardable, SkillOrphanedCopies } 
 import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
 import { NewSkillDialog } from "./NewSkillDialog.js";
 import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
-import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
+import { SkillAssignments } from "./SkillAssignments.js";
 import { SkillDeployment } from "./SkillDeployment.js";
 import { SkillNoticeSlot, skillNoticeItem } from "./SkillNoticeSlot.js";
 import { SkillInstructions } from "./SkillInstructions.js";
@@ -35,9 +34,6 @@ import { SkillList } from "./SkillList.js";
 import { SkillDetailHeader, SkillDetailSection, skillDetailMenu } from "./SkillDetailHeader.js";
 import { SkillsOverview } from "./SkillsOverview.js";
 import {
-  describeAgentSelector,
-  describeAssignmentScope,
-  invocationLabel,
   normalizeRemovalReporting,
   omittedKeptAsideCopies,
   orphanedCopyKey,
@@ -59,6 +55,31 @@ import {
   type SkillGroupView,
   type SkillSummary,
 } from "../skills.js";
+
+/**
+ * An instant change's state (§8.6), by key: "saving" while `work` runs, then "saved" for `SAVED_MS`
+ * once it reports success. A newer change takes over; one that fails clears its own state only.
+ */
+function useInstantSave() {
+  const [state, setState] = useState<{ id: string; state: "saving" | "saved" } | null>(null);
+  const timer = useRef<number | null>(null);
+  useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
+  const run = useCallback(async (id: string, work: () => Promise<boolean>) => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+    setState({ id, state: "saving" });
+    if (!(await work())) {
+      setState((current) => current?.id === id ? null : current);
+      return;
+    }
+    setState({ id, state: "saved" });
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      setState((current) => current?.id === id && current.state === "saved" ? null : current);
+    }, SAVED_MS);
+  }, []);
+  return { state, run };
+}
 
 /** An Agent Skills route: a skill, a pane (Orphaned Copies, Library Overview), or the bare list. */
 export type SkillsRoute = Extract<View, { name: "skills" }>;
@@ -94,8 +115,11 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   // A detail loaded for an earlier selection is never shown under the current one.
   const detail = loadedDetail && loadedDetail.id === selectedId ? loadedDetail : null;
   const [assignments, setAssignments] = useState<SkillAssignmentView[]>([]);
-  /** The open skill's group's rules, which can be what deploys it, as of a reload `revision`. */
-  const [groupRules, setGroupRules] = useState<{ groupId: string; revision: number; rules: SkillGroupAssignmentView[] } | null>(null);
+  /** The open skill's group's rules, which can be what deploys it, as of a reload `revision`; null
+   * rules with the reason when they could not be read. */
+  const [groupRules, setGroupRules] = useState<{
+    groupId: string; revision: number; rules: SkillGroupAssignmentView[] | null; error?: string;
+  } | null>(null);
   const [groupRulesRevision, setGroupRulesRevision] = useState(0);
   const [machineSkills, setMachineSkills] = useState<Record<string, RunnerSkillsResponse>>({});
   const [busy, setBusy] = useState(false);
@@ -109,6 +133,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   const [listError, setListError] = useState<string | null>(null);
   /** The selected skill could not be read: its notice replaces the detail. */
   const [detailError, setDetailError] = useState<{ skillId: string; message: string } | null>(null);
+  /** The group Manage Groups opens at, from a group rule's Edit in Groups…. */
+  const [groupsDialogId, setGroupsDialogId] = useState<string | undefined>();
   const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | "built-in-review" | null>(null);
 
   /** The selection as of now, for async work that finishes after the user moved on. */
@@ -243,7 +269,9 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     let active = true;
     api.listSkillGroupAssignments(detailGroupId)
       .then((result) => { if (active) setGroupRules({ groupId: detailGroupId, revision: groupRulesRevision, rules: result.assignments }); })
-      .catch(() => { if (active) setGroupRules(null); });
+      .catch((cause: unknown) => {
+        if (active) setGroupRules({ groupId: detailGroupId, revision: groupRulesRevision, rules: null, error: (cause as Error).message });
+      });
     return () => { active = false; };
   }, [api, detailGroupId, groupRulesRevision]);
 
@@ -331,12 +359,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
 
   /** Automatic Updates applies on click (§8.6): its own request shows busy, and a confirmed change
    * shows "Saved" for 2s. Kept per skill, so another skill never shows this one's state. */
-  const [autoUpdateSave, setAutoUpdateSave] = useState<{ skillId: string; state: "saving" | "saved" } | null>(null);
-  const savedTimer = useRef<number | null>(null);
-  useEffect(() => () => { if (savedTimer.current !== null) window.clearTimeout(savedTimer.current); }, []);
-  const setGitAutoUpdate = async (skillId: string, enabled: boolean) => {
-    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
-    setAutoUpdateSave({ skillId, state: "saving" });
+  const autoUpdateSave = useInstantSave();
+  const setGitAutoUpdate = (skillId: string, enabled: boolean) => autoUpdateSave.run(skillId, async () => {
     let saved = false;
     await mutate(async () => {
       await api.setSkillGitAutoUpdate(skillId, enabled);
@@ -346,15 +370,40 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       await refreshList();
       await refreshDetail(skillId);
     });
-    if (!saved) {
-      setAutoUpdateSave(null);
-      return;
-    }
-    setAutoUpdateSave({ skillId, state: "saved" });
-    savedTimer.current = window.setTimeout(() => {
-      savedTimer.current = null;
-      setAutoUpdateSave((current) => current?.skillId === skillId && current.state === "saved" ? null : current);
-    }, SAVED_MS);
+    return saved;
+  });
+
+  /** A direct rule's Enabled and invocation apply the same way, one request each (#1982); the
+   * refresh then updates the list, the rules and Deployment. Kept per rule. */
+  const ruleSave = useInstantSave();
+  const updateAssignment = (skillId: string, assignmentId: string, patch: { enabled?: boolean; invocation?: SkillInvocationPolicy }) =>
+    ruleSave.run(assignmentId, async () => {
+      let saved = false;
+      await mutate(async () => {
+        await api.updateSkillAssignment(assignmentId, patch);
+        saved = true;
+      }, async () => {
+        // The library's lastAssignmentChangedAt feeds Recently Changed.
+        await refreshList();
+        await refreshDetail(skillId);
+        await refreshMachines();
+      });
+      return saved;
+    });
+
+  const removeAssignment = async (skillId: string, assignmentId: string) => {
+    const confirmed = await confirm({
+      title: "Remove Assignment",
+      message: "The next sync removes the skill from the machines this assignment covered.",
+      confirmLabel: "Remove Assignment",
+      tone: "danger",
+    });
+    if (!confirmed) return;
+    await mutate(() => api.deleteSkillAssignment(assignmentId), async () => {
+      await refreshList();
+      await refreshDetail(skillId);
+      await refreshMachines();
+    });
   };
 
   /** One atomic change to the rule behind a deployment error. A control plane that predates
@@ -505,10 +554,10 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   // Until the group's current rules are read, a rule of the skill's own could be blamed for what
   // the group's rule does, so the notice offers no fix.
   const groupRulesCurrent = Boolean(detailGroupId && groupRules?.groupId === detailGroupId &&
-    groupRules.revision === groupRulesRevision);
+    groupRules.revision === groupRulesRevision && groupRules.rules);
   const detailRules = useMemo<SkillRule[]>(() => [
     ...assignments,
-    ...(groupRulesCurrent ? groupRules!.rules : []),
+    ...(groupRulesCurrent ? groupRules!.rules! : []),
   ], [assignments, groupRulesCurrent, groupRules]);
   // One answer for the slot and for Source, so a notice the slot shows is never repeated below.
   const noticeItem = detail
@@ -714,7 +763,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 syncingRunnerId={syncingRunnerId}
                 onSwitchToAgentInvocable={(rule) => void updateRule(detail.id, rule, { invocation: "agent" })}
                 onLimitToClaudeCode={(rule) => void updateRule(detail.id, rule, { agentSelector: { kind: "driver", driver: "claude-code" } })}
-                onEditGroups={() => setDialog("groups")}
+                onEditGroups={() => { setGroupsDialogId(detail.groupId ?? undefined); setDialog("groups"); }}
                 onSync={(runnerId) => void syncMachine(runnerId)}
                 onReviewEdit={(runnerId, entry) => setDriftImport({
                   runnerId,
@@ -745,105 +794,26 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                   onManageVersion={(runnerId) => { setVersionRunnerId(runnerId); setDialog("machine-versions"); }}
                 />
               </SkillDetailSection>
-              <SkillDetailSection title="Assignments">
-                {detail.groupId && <SkillInheritedAssignments key={detail.id} groupId={detail.groupId} groups={groups} runners={runners} machineLabels={machineLabels} onManage={() => setDialog("groups")} />}
-                {assignments.length === 0 ? (
-                  <p className="skills-hint">No direct assignments. Group assignments may still deploy this skill.</p>
-                ) : (
-                  <div className="table-wrap">
-                    <table className="table skills-table">
-                      <thead>
-                        <tr>
-                          <th scope="col">Scope</th>
-                          <th scope="col" className="col-agents">Agents</th>
-                          <th scope="col" className="col-invocation">Invocation</th>
-                          <th scope="col" className="col-enabled">Enabled</th>
-                          <th scope="col" className="col-actions actions-cell"><span className="sr-only">Actions</span></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {assignments.map((assignment) => {
-                          const runner = assignment.runnerId ? runnersMap.get(assignment.runnerId) : undefined;
-                          return (
-                            <tr key={assignment.id}>
-                              <td>{describeAssignmentScope(assignment, (id) => machineLabels.get(id))}</td>
-                              <td className="cell-meta cell-fill cell-dim">
-                                <span className="cell-label" aria-hidden="true">Agents: </span>
-                                {describeAgentSelector(assignment.agentSelector, runner?.agents ?? [])}
-                              </td>
-                              <td className="cell-meta">
-                                <span className="cell-label" aria-hidden="true">Invocation</span>
-                                <Select<SkillInvocationPolicy>
-                                  label="Invocation"
-                                  value={assignment.invocation}
-                                  disabled={busy}
-                                  options={[
-                                    { value: "agent", label: invocationLabel("agent") },
-                                    { value: "manual", label: invocationLabel("manual") },
-                                  ]}
-                                  onChange={(value) => void mutate(
-                                    () => api.updateSkillAssignment(assignment.id, { invocation: value }),
-                                    async () => {
-                                      // The library's lastAssignmentChangedAt feeds Recently Changed.
-                                      await refreshList();
-                                      await refreshDetail(detail.id);
-                                      await refreshMachines();
-                                    },
-                                  )}
-                                />
-                              </td>
-                              <td className="cell-status">
-                                <span className="cell-label" aria-hidden="true">Enabled </span>
-                                <button
-                                  type="button"
-                                  role="switch"
-                                  aria-checked={assignment.enabled}
-                                  aria-label="Enabled"
-                                  className="btn sm"
-                                  disabled={busy}
-                                  onClick={() => void mutate(
-                                    () => api.updateSkillAssignment(assignment.id, { enabled: !assignment.enabled }),
-                                    async () => {
-                                      await refreshList();
-                                      await refreshDetail(detail.id);
-                                      await refreshMachines();
-                                    },
-                                  )}
-                                >
-                                  {assignment.enabled ? "On" : "Off"}
-                                </button>
-                              </td>
-                              <td className="actions-cell">
-                                <button
-                                  type="button"
-                                  className="btn ghost danger sm"
-                                  disabled={busy}
-                                  onClick={() => void (async () => {
-                                    const confirmed = await confirm({
-                                      title: "Remove Assignment",
-                                      message: "The next sync removes the skill from the machines this assignment covered.",
-                                      confirmLabel: "Remove Assignment",
-                                      tone: "danger",
-                                    });
-                                    if (!confirmed) return;
-                                    await mutate(() => api.deleteSkillAssignment(assignment.id), async () => {
-                                      await refreshList();
-                                      await refreshDetail(detail.id);
-                                      await refreshMachines();
-                                    });
-                                  })()}
-                                >
-                                  Delete
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </SkillDetailSection>
+              <SkillAssignments
+                key={`assignments-${detail.id}`}
+                assignments={assignments}
+                group={detailGroupId ? {
+                  id: detailGroupId,
+                  view: groups.find((group) => group.id === detailGroupId),
+                  // A reload's rules replace the last ones when they arrive; until then those stay.
+                  rules: groupRules?.groupId === detailGroupId ? groupRules.rules : null,
+                  error: groupRules?.groupId === detailGroupId ? groupRules.error : undefined,
+                } : null}
+                rules={detailRules}
+                runners={runners}
+                machineLabels={machineLabels}
+                busy={busy}
+                save={ruleSave.state}
+                onSetInvocation={(assignment, invocation) => void updateAssignment(detail.id, assignment.id, { invocation })}
+                onSetEnabled={(assignment, enabled) => void updateAssignment(detail.id, assignment.id, { enabled })}
+                onRemove={(assignment) => removeAssignment(detail.id, assignment.id)}
+                onEditInGroups={(groupId) => { setGroupsDialogId(groupId); setDialog("groups"); }}
+              />
               {latest?.files && latest.files.length > 0 && <SkillInstructions key={`instructions-${latest.id ?? detail.id}`} files={latest.files} />}
               <SkillSource
                 key={`source-${detail.id}`}
@@ -852,8 +822,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                 busy={busy}
                 heldInSlot={noticeItem?.kind === "git-held"}
                 autoUpdate={{
-                  saving: autoUpdateSave?.skillId === detail.id && autoUpdateSave.state === "saving",
-                  saved: autoUpdateSave?.skillId === detail.id && autoUpdateSave.state === "saved",
+                  saving: autoUpdateSave.state?.id === detail.id && autoUpdateSave.state.state === "saving",
+                  saved: autoUpdateSave.state?.id === detail.id && autoUpdateSave.state.state === "saved",
                 }}
                 onCheckForUpdates={() => setDialog("git-update")}
                 onSetAutoUpdate={(enabled) => void setGitAutoUpdate(detail.id, enabled)}
@@ -866,7 +836,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       </div>
       )}
 
-      {dialog === "groups" && <SkillGroupsDialog runners={runners} machineLabels={machineLabels} onClose={() => setDialog(null)} onChanged={async () => {
+      {dialog === "groups" && <SkillGroupsDialog runners={runners} machineLabels={machineLabels} initialGroupId={groupsDialogId}
+        onClose={() => { setDialog(null); setGroupsDialogId(undefined); }} onChanged={async () => {
         setGroupRulesRevision((revision) => revision + 1);
         await refreshList();
         if (selectedId) await refreshDetail(selectedId);

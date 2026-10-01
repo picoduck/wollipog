@@ -1231,6 +1231,24 @@ const secondSkillRunner: RunnerView = {
 };
 const detailMode = SHELL_SKILLS_MODE === "detail";
 /**
+ * `&groupRules=1` (#1982): Campaigns is an owned group with three rules: a Manual Only one for Codex
+ * on the fixture runner (which Codex can't run), one for every agent, and one turned off on Build Box.
+ * `release-planner` joins the group too, so one skill has only group rules.
+ */
+const detailGroupRules = detailMode && FIXTURE_QUERY.has("groupRules");
+if (detailGroupRules) Object.assign(detailSkills[1]!, { groupId: "group-1" });
+const detailGroup = {
+  id: "group-1", name: "Campaigns", sortOrder: 0,
+  ...(detailGroupRules ? { scope: { organizationId: "org_personal", owner: { kind: "organization" as const } } } : {}),
+};
+const detailGroupAssignments = detailGroupRules ? [
+  { id: "group-rule-1", groupId: "group-1", scopeKind: "runner" as const, runnerId: "runner-1",
+    agentSelector: { kind: "agent" as const, agentId: "codex" }, enabled: true, invocation: "manual" as const },
+  { id: "group-rule-2", groupId: "group-1", scopeKind: "instance" as const, agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const },
+  { id: "group-rule-3", groupId: "group-1", scopeKind: "runner" as const, runnerId: "runner-2",
+    agentSelector: { kind: "all" as const }, enabled: false, invocation: "agent" as const },
+] : [];
+/**
  * `?skills=notices` (#1972): one skill per notice the slot under the header can show. `collect` has a
  * Manual Only rule that Codex and Pi cannot run, and also an edited copy, which takes the slot once
  * the rule is fixed; `lint-rules` an edited Claude Code copy; `fetch-docs` a held Git update;
@@ -1362,7 +1380,7 @@ const shellSkillsApi = {
     if (SHELL_SKILLS_MODE === "error") throw new Error("HTTP 503: skill library unavailable (GET /api/skills)");
     return { skills: structuredClone(detailMode ? detailSkills : shellSkills) };
   },
-  listSkillGroups: async () => ({ groups: detailMode ? [{ id: "group-1", name: "Campaigns", sortOrder: 0 }]
+  listSkillGroups: async () => ({ groups: detailMode ? [structuredClone(detailGroup)]
     : SHELL_SKILLS_MODE === "list" ? [{ id: "group-platform", name: "Platform", sortOrder: 1 }]
     : SHELL_OVERVIEW ? SHELL_OVERVIEW_GROUPS : [] }),
   getSkill: async (id: string) => {
@@ -1380,7 +1398,7 @@ const shellSkillsApi = {
   },
   ...(detailMode ? {
     getMachineSkillVersionPolicy: async () => ({ policy: null }),
-    listSkillGroupAssignments: async () => ({ assignments: [] }),
+    listSkillGroupAssignments: async () => ({ assignments: structuredClone(detailGroupAssignments) }),
   } : {}),
   listSkillAssignments: async (skillId?: string) => ({ assignments: skillId !== "skill-1" ? [] : [
     { id: "assignment-1", skillId, scopeKind: "instance" as const, agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const },

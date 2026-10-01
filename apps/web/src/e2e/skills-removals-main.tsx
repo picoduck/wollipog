@@ -22,8 +22,8 @@ const drift = new URLSearchParams(location.search).has("drift");
 const orphans = new URLSearchParams(location.search).has("orphans");
 // #1714: Build Machine offers container and cloud targets; Other Machine stays host-only.
 const targets = new URLSearchParams(location.search).has("targets");
-// `?assignment=1` gives the skill one direct assignment, so its assignments table has a row with an
-// Invocation picker.
+// `?assignment=1` gives the skill one direct assignment, so Assignments has a row with an
+// Invocation menu.
 const assignment = new URLSearchParams(location.search).has("assignment");
 // `?builtIn=1` makes the skill a built-in one whose next release waits for review (#2129).
 const builtIn = new URLSearchParams(location.search).has("builtIn")

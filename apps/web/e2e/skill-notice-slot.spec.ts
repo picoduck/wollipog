@@ -14,6 +14,8 @@ async function open(page: Page, id: string) {
 const slot = (page: Page) => page.locator(".skill-notice-slot");
 const notice = (page: Page) => slot(page).locator(".notice");
 const actions = (page: Page) => notice(page).locator(".notice-actions > .btn");
+/** The skill's own rules, as Assignments lists them (#1982). */
+const directRows = (page: Page) => page.locator(".skill-assignment-list[aria-label='Direct Assignments'] .skill-assignment-title");
 
 /** Every shown button in the detail, against the width its own label and padding need. */
 const stretchedButtons = (page: Page) => page.locator(".master-detail-detail").evaluate((detail) => {
@@ -79,7 +81,7 @@ test.describe("at 1440×900", () => {
     await notice(page).getByRole("button", { name: "Change Invocation…" }).click();
     await page.getByRole("menuitem", { name: "Limit to Claude Code" }).click();
     await expect(notice(page).locator(".notice-title")).toHaveText("Studio Workstation Has an Edited Copy");
-    await expect(page.locator(".skills-table tbody tr")).toContainText(["Claude Code"]);
+    await expect(directRows(page)).toContainText(["Claude Code on All Machines"]);
   });
 
   test("every notice's actions sit under its body, left-aligned, and none is wider than its label", async ({ page }) => {
@@ -162,9 +164,7 @@ test.describe("at 1440×900", () => {
     await notice(page).getByRole("button", { name: "Assign to Machine" }).click();
     await page.getByRole("menuitem", { name: "Studio Workstation" }).click();
     await expect(slot(page)).toHaveCount(0);
-    await expect(page.locator(".skills-table tbody tr")).toHaveCount(1);
-    await expect(page.locator(".skills-table tbody tr")).toContainText("Studio Workstation");
-    await expect(page.locator(".skills-table tbody tr")).toContainText("All Agents");
+    await expect(directRows(page)).toHaveText(["All Agents on Studio Workstation"]);
   });
 });
 

@@ -969,6 +969,14 @@ targeting specificity, while machine-wide pins still choose the version. These a
 rules, not a claim that every target has successfully deployed; machine-reported state remains
 authoritative.
 
+The **Assignments** section (#1982) lists both on one surface. Each direct rule is one row named
+as a phrase ("All Agents on All Machines"), with its invocation (Agent Invocable or Manual Only),
+an Enabled switch and a ⋯ menu holding Remove Assignment…; invocation and Enabled apply at once
+and show Saved. The group's rules follow under From Groups as read-only rows, with Edit in
+Groups… opening Manage Groups at that group. A group rule that decides for agents that can't get
+the skill from it (a Manual Only rule reaching agents other than Claude Code, or a rule naming
+agents deployment can't reach) names them.
+
 The **Deployment** section (#1981) is one table for every machine, so each agent's row lines up
 from one machine to the next. A machine's row shows whether it is online, its version policy
 (Track Latest or Pinned to a numbered version), how many of its agents with a status are Linked,

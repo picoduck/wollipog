@@ -14190,7 +14190,6 @@ body.shell-dock-dragging * {
    stretches (§3.1). */
 .skills-section { display: grid; gap: 10px; }
 .skills-section h4, .skills-section h5 { margin: 0; }
-.skill-detail .skills-section > .btn { justify-self: start; }
 /* Dialogs keep the card until each is rebuilt; #1983 (Import from Git) and #1985 (Manage Groups)
    delete this rule. */
 .modal .skills-section {
@@ -14538,11 +14537,73 @@ body.shell-dock-dragging * {
 .skill-source > .ui-row-switch:hover:not(.is-disabled) { border-color: transparent; }
 .skill-groups-dialog .skills-section-heading { flex-wrap: wrap; }
 .skill-groups-dialog .btn { white-space: normal; overflow-wrap: anywhere; }
-/* The assignment tables are `.table`s; each declares its column widths (§14). */
-.skills-table .col-agents { width: 24%; }
-.skills-table .col-invocation { width: 170px; }
-.skills-table .col-enabled { width: 80px; }
-.skills-table .col-actions { width: 90px; }
+/* Assignments (#1982): the skill's own rules as rows on one Surface, then its group's under a
+   "From Groups" divider. A row is its title (one phrase) and its controls on one line; under a 560px
+   container the controls wrap below the title, so the row never widens the pane. */
+.skill-assignments { container-type: inline-size; }
+.skill-assignment-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.skill-assignment {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  min-height: var(--row-h);
+  padding: var(--space-2) var(--space-4);
+}
+.skill-assignment + .skill-assignment { border-top: 1px solid var(--border); }
+.skill-assignment.is-empty { color: var(--text-dim); }
+.skill-assignment-text {
+  display: grid;
+  flex: 1 1 auto;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.skill-assignment-title { overflow-wrap: anywhere; }
+.skill-assignment-desc { color: var(--text-dim); font: var(--type-small); }
+/* A turned-off rule is dimmed: its title steps down to the dim text, its controls stay readable. */
+.skill-assignment.is-off .skill-assignment-title { color: var(--text-dim); }
+.skill-assignment-warning { color: var(--amber); font: var(--type-small); }
+.skill-assignment-controls {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+.skill-assignment-facts { color: var(--text-dim); font: var(--type-small); }
+/* Enabled is the switch's visible label, inside the switch, so it is part of the target. */
+.skill-assignment-enabled {
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text);
+  font: var(--type-body);
+}
+.skill-assignments-group { border-top: 1px solid var(--border); }
+.skill-assignments-group > .skill-assignment-list { border-top: 1px solid var(--border); }
+.skill-assignments-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-height: var(--row-h);
+  padding: var(--space-1) var(--space-4);
+}
+.skill-assignments-group-label { color: var(--text-dim); font: var(--type-label); }
+.skill-assignments-group-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font: var(--type-body-strong); }
+.skill-assignments-group-note {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.skill-assignments-group-note.danger-text { color: var(--danger-text); }
+@container (max-width: 560px) {
+  .skill-assignment { flex-wrap: wrap; }
+  .skill-assignment-text { flex-basis: 100%; }
+}
 /* Deployment (#1981): one §14 table for every machine, so agent rows line up from one machine to
    the next. Each machine is a row group led by a full-width machine row; an agent's reason wraps
    under its name (the `.cell-note` rule). Under a 560px container the generic two-line rows apply
