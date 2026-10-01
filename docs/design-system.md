@@ -1139,8 +1139,9 @@ stacks on the first. Desktop keeps stacked dialogs as above.
   non-destructive alternative ("Show Sessions"). Choosing it closes the confirmation and runs the
   action; the confirmation resolves as not confirmed. It is not shown on a phone (§7.5), so a flow
   must still work without it.
-- Irreversible actions affecting many items ("Delete Group and Its Assignments") add a type-to-confirm
-  field only when more than one item is affected.
+- Irreversible actions affecting many items add a type-to-confirm field (`typeToConfirm`) only when
+  more than one item is affected. Delete Group always asks for the name: a group's rules reach every
+  current and future member, so its reach is never one item (#1985).
 - **Type-to-confirm dialogs focus the name field**, not Cancel: the user must type before
   anything else can happen, and the danger button stays disabled until the name matches, so focus
   there cannot confirm by accident.

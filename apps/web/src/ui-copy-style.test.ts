@@ -538,7 +538,8 @@ test("consent checkbox labels are sentences, and every other checkbox label is T
     if (!isSentenceCase(sentence)) failures.push(`ReviewConsent label is not a sentence: ${JSON.stringify(sentence)}`);
   }
   // Not vacuous: the scan found the consent labels in the Skills review dialogs and ordinary ones.
-  assert.ok(consents >= 8, `found ${consents} consent labels`);
+  // (Manage Groups' one consent checkbox became per-change confirmations in #1985.)
+  assert.ok(consents >= 7, `found ${consents} consent labels`);
   assert.ok(labels - consents >= 8, `found ${labels - consents} ordinary checkbox labels`);
   // An icon-only box's label is its accessible name, held to the same convention (#2044): the diff's
   // line selectors and the review findings' selectors.

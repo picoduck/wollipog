@@ -1758,9 +1758,10 @@ async function createGroupThroughDialog(container: HTMLElement) {
   await act(async () => [...container.querySelectorAll<HTMLButtonElement>(".page-header button")]
     .find((button) => button.textContent === "Manage Groups…")!.click());
   await act(settle);
-  const dialog = container.querySelector('[role="dialog"]')!;
-  const input = [...dialog.querySelectorAll<HTMLInputElement>("label.field")]
-    .find((field) => field.textContent?.includes("New Group Name"))!.querySelector("input")!;
+  const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+  await act(async () => [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "New Group")!.click());
+  const input = dialog.querySelector<HTMLInputElement>("#skill-groups-new-name")!;
   const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
   assert.ok(setter);
   // React's change plugin watches the focused input through keyup here, so type as a person would.
@@ -2785,7 +2786,7 @@ test("Assignments lists direct rules as rows with an invocation menu, a real Ena
     await act(settle);
     assert.equal(toggle(0).getAttribute("aria-checked"), "false");
     assert.equal(rows()[0]!.querySelector(".ui-row-saved")?.textContent, "Saved");
-    assert.equal(rows()[0]!.querySelector('[role="status"]')?.textContent, "All Agents on All Machines saved");
+    assert.equal(rows()[0]!.querySelector(':scope > [role="status"]')?.textContent, "All Agents on All Machines saved");
     assert.equal(rows()[0]!.querySelector(".skill-assignment-desc")?.textContent, "Direct assignment, turned off");
 
     // The invocation is a menu of two radio items with descriptions; the current one is checked.
@@ -2915,8 +2916,8 @@ test("a group's rules are read-only rows under From Groups, and Edit in Groups�
     await act(async () => buttonNamed(group, "Edit in Groups…")[0]!.click());
     await act(settle);
     const dialog = container.querySelector('[role="dialog"]')!;
-    assert.match(dialog.textContent ?? "", /Manage Skill Groups/);
-    assert.equal(dialog.querySelector("h3")?.textContent, "Platform", "the group is already selected");
+    assert.equal(dialog.querySelector(".modal-title")?.textContent, "Manage Groups");
+    assert.equal(dialog.querySelector(".skill-groups-name")?.textContent, "Platform", "the group is already selected");
   } finally {
     await view.unmount();
   }

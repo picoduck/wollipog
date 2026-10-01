@@ -15,7 +15,10 @@ health checklist.
 - **Exception: type-to-confirm dialogs focus the name field.** A dialog that makes the user type the
   affected resource's name (Delete Project) opens with focus in that field, not on Cancel. The user
   must type before anything else can happen, and the confirm button stays disabled until the name
-  matches, so focus there cannot confirm by accident (docs/design-system.md §7.4).
+  matches, so focus there cannot confirm by accident (docs/design-system.md §7.4). The shared
+  confirmation does this through `ConfirmationOptions.typeToConfirm` (#1985, first used by Delete
+  Group): the text is compared exactly, Enter in the field confirms only once it matches, and the
+  confirmation fingerprint includes it.
 - A confirmation's title is the action in Title Case with no question mark ("Stop Session"), its
   body says what happens to which named resource and whether it can be undone, and its required
   confirm label repeats the title's verb. There is no generic "Continue" default. Destructive

@@ -14156,19 +14156,6 @@ body.shell-dock-dragging * {
   min-width: 0;
 }
 .skill-detail-meta .mono { font-family: var(--font-mono); }
-/* Blocks inside a detail section keep their rhythm without a card of their own; no button in them
-   stretches (§3.1). */
-.skills-section { display: grid; gap: 10px; }
-.skills-section h4, .skills-section h5 { margin: 0; }
-/* Dialogs keep the card until each is rebuilt; #1983 (Import from Git) and #1985 (Manage Groups)
-   delete this rule. */
-.modal .skills-section {
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev);
-}
-.skills-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 /* Skill review diff (#1948): one block per file, drawn with the Git diff's row classes so a change
    reads the same in both places. Component-local by #1805's rule: only skill reviews use it. */
 .skill-diff { display: grid; gap: var(--space-2); min-width: 0; }
@@ -14366,7 +14353,6 @@ body.shell-dock-dragging * {
 @media (max-width: 760px) {
   .modal-foot > :is(.skill-machine-import-reason, .skill-version-reason) { flex-basis: 100%; }
 }
-.skills-machine-import { min-width: 0; overflow-wrap: anywhere; }
 /* Version History (#1984): Import from Machine's shape, a `.modal.lg` at full height whose body is two
    panes, the versions beside the selected one, each scrolling on its own so the body never does. On a
    phone sheet the body is one column and shows one step at a time (the dialog renders only that pane). */
@@ -14601,8 +14587,119 @@ body.shell-dock-dragging * {
 .skill-source > .ui-row-switch > :first-child { display: none; }
 .skill-source > .ui-row-switch:first-child { box-shadow: none; }
 .skill-source > .ui-row-switch:hover:not(.is-disabled) { border-color: transparent; }
-.skill-groups-dialog .skills-section-heading { flex-wrap: wrap; }
-.skill-groups-dialog .btn { white-space: normal; overflow-wrap: anywhere; }
+/* Manage Groups (#1985): Version History's shape, a `.modal.lg` at full height whose body is two
+   panes, a 248px list of groups beside the selected group, each scrolling on its own so the body
+   never does. A refused change's notice sits under both panes, above the footer. On a phone sheet
+   the body is one column and shows one step at a time (the dialog renders only that pane). */
+@media (min-width: 761px) {
+  .modal.lg:has(> .modal-panel-host > .skill-groups) { height: calc(100dvh - 48px); }
+  .skill-groups > .modal-body {
+    gap: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+  .skill-groups > .modal-body > .skill-groups-body {
+    flex: 1 1 auto;
+    gap: 0;
+    min-height: 0;
+  }
+  .skill-groups-body > .skill-groups-panes {
+    flex: 1 1 auto;
+    flex-direction: row;
+    gap: 0;
+    min-height: 0;
+  }
+  .skill-groups-pane {
+    min-height: 0;
+    padding: var(--space-5);
+    overflow-y: auto;
+  }
+  .skill-groups-pane.list {
+    flex: 0 0 248px;
+    border-right: 1px solid var(--border);
+  }
+  .skill-groups-pane.detail { flex: 1 1 auto; }
+  .skill-groups-body > :is(.skill-groups-loading, .skill-groups-empty, .notice:not(.skill-groups-error)) { margin: var(--space-5); }
+  .skill-groups-error { flex: none; margin: 0 var(--space-5) var(--space-4); }
+}
+.skill-groups-body,
+.skill-groups-panes,
+.skill-groups-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.skill-groups :is(h3, h4, p) { margin: 0; }
+.skill-groups-list-head,
+.skill-groups-section-head,
+.skill-groups-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.skill-groups-label {
+  color: var(--text-dim);
+  font: var(--type-label);
+}
+.skill-groups-list { display: flex; flex-direction: column; }
+.skill-groups-list > .row + .row,
+.skill-groups-members > .row + .row { border-top: 1px solid var(--border); }
+.skill-groups-members {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.skill-groups-members > .row > .btn { flex: none; }
+.skill-groups-empty-row { color: var(--text-dim); }
+.skill-groups-new {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.skill-groups-heading {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.skill-groups-name {
+  color: var(--text);
+  font: var(--type-section);
+  overflow-wrap: anywhere;
+}
+.skill-groups-owner,
+.skill-groups-note {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.skill-groups-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.skill-groups-section-head > h4 {
+  color: var(--text);
+  font: var(--type-body-strong);
+}
+.skill-groups-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 420px;
+}
+.skill-groups-empty > h3 {
+  color: var(--text);
+  font: var(--type-section);
+}
+.skill-groups-empty > p { color: var(--text-dim); }
+.skill-groups-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
 /* Assignments (#1982): the skill's own rules as rows on one Surface, then its group's under a
    "From Groups" divider. A row is its title (one phrase) and its controls on one line; under a 560px
    container the controls wrap below the title, so the row never widens the pane. */

@@ -67,6 +67,11 @@ export interface ConfirmationOptions {
   /** `danger` draws the danger confirm button and tone icon, and opens with focus on the cancel
    * button. Any other tone opens with focus on the confirm button (§7.4). */
   tone?: "default" | "danger";
+  /** The text the person must type before the confirm button enables, normally the affected
+   * object's name, for an irreversible action that affects many things (§7.4): Delete Group. The
+   * dialog shows a field for it, opens with focus there rather than on Cancel, and compares exactly
+   * (case and spaces included). */
+  typeToConfirm?: string;
   /** Durable element to restore focus to after settling. Needed when the invoking control is
    * a menu item that unmounts as the confirmation opens — the activeElement snapshot below
    * would then be disconnected by the time focus can be restored. */
@@ -104,6 +109,7 @@ function confirmationFingerprint(options: ConfirmationOptions): string {
     String(options.detailRowsOverflow ?? 0),
     options.cancelLabel ?? "",
     options.secondaryAction?.label ?? "",
+    options.typeToConfirm ?? "",
   ].join("\u0000");
 }
 
@@ -564,6 +570,11 @@ function ConfirmationDialog({ request, onSettle }: {
   ].filter(Boolean).join(" ");
   const [running, setRunning] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  const typeToConfirm = request.typeToConfirm;
+  const [typed, setTyped] = useState("");
+  const typedId = useId();
+  /** Until the typed text matches, the confirm button is disabled and confirming does nothing. */
+  const typedMismatch = typeToConfirm !== undefined && typed !== typeToConfirm;
   /** The running `onConfirm`, if any. Cleared before settling, so a finished action is never aborted
    * by the dialog unmounting after it. */
   const inFlight = useRef<AbortController | null>(null);
@@ -599,6 +610,7 @@ function ConfirmationDialog({ request, onSettle }: {
     if (active === null || active === document.body) cancelButton.current?.focus();
   }, [isPhone]);
   const confirm = async () => {
+    if (typedMismatch) return;
     if (!request.onConfirm) {
       onSettle(true);
       return;
@@ -641,12 +653,14 @@ function ConfirmationDialog({ request, onSettle }: {
               {request.secondaryAction.label}
             </button>
           )}
-          {/* A destructive confirmation opens on its safe choice; any other opens on its primary (§7.4). */}
-          <button ref={cancelButton} className="btn" type="button" autoFocus={danger} disabled={cancelLocked} onClick={cancel}>
+          {/* A destructive confirmation opens on its safe choice; any other opens on its primary (§7.4).
+              One that asks for typed text opens on its field instead. */}
+          <button ref={cancelButton} className="btn" type="button" autoFocus={danger && typeToConfirm === undefined}
+            disabled={cancelLocked} onClick={cancel}>
             {request.cancelLabel ?? "Cancel"}
           </button>
-          <BusyButton className={`btn ${danger ? "danger" : "primary"}`} autoFocus={!danger} busy={running}
-            progress={request.progress ?? "Working…"} onClick={() => void confirm()}>
+          <BusyButton className={`btn ${danger ? "danger" : "primary"}`} autoFocus={!danger && typeToConfirm === undefined}
+            busy={running} disabled={typedMismatch} progress={request.progress ?? "Working…"} onClick={() => void confirm()}>
             {request.confirmLabel}
           </BusyButton>
         </>
@@ -668,6 +682,19 @@ function ConfirmationDialog({ request, onSettle }: {
         </ul>
       )}
       {moreRows > 0 && <p className="confirmation-rows-more" id={moreId}>and {moreRows} more</p>}
+      {typeToConfirm !== undefined && (
+        <label className="field" htmlFor={typedId}>
+          <span>Type {typeToConfirm} to Confirm</span>
+          {/* Focused on open, on every pointer: nothing else can happen until the text is typed (§7.4). */}
+          <input id={typedId} autoFocus value={typed} autoComplete="off" spellCheck={false} readOnly={running}
+            onChange={(event) => setTyped(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+              event.preventDefault();
+              void confirm();
+            }} />
+        </label>
+      )}
       {failure && <Notice tone="danger" compact role="alert">{failure}</Notice>}
     </Modal>
   );

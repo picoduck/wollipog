@@ -956,12 +956,22 @@ Git backs the library as an **upstream source**, not as the distribution transpo
 
 ## Group Management Dashboard
 
-The Skills view's **Manage Groups** dialog creates ownership-scoped groups, explicitly converts
-legacy metadata groups, and manages membership and group deployment rules. It displays the
-server-computed creation/conversion ownership before acceptance. Conversion is permanent in this
-UI, may restrict visibility, and never changes member ownership. Membership changes, rule edits,
-and deletion require acknowledgment of their group-wide impact; adding a rule explicitly targets
-all current and future members. Library content, direct rules, and machine pins survive group
+The Skills view's **Manage Groups** dialog (#1985) lists the groups with their member counts on the
+left and shows the selected group on the right: its ownership in words ("Shared with your
+organization", "Shared with <team>", "Only you"), its **Members** with Remove… and an Add Skill
+menu of ungrouped skills, and its **Group Assignments** as the same rule rows as a skill's
+Assignments, with Add Assignment… stacking the Add Group Assignment dialog over it. New Group adds
+an inline name field that states the server-computed ownership a new group gets. A legacy group
+without an owner says so in a warning notice with Convert Group…. Conversion is permanent in this
+UI, may restrict visibility, and never changes member ownership. On a phone the list and the group
+are two steps of one sheet, with Back.
+
+Every change that deploys or removes skills asks first, in the shared confirmation, naming the
+group and the skills or assignments it affects: adding a skill, removing a skill, removing a rule,
+converting a legacy group, and deleting a group, which also asks for the group's name. A rule's
+Enabled switch and invocation apply at once and show Saved. A running change shows a spinner on the
+control that made it, and a server refusal (for example a member whose ownership differs) is a
+danger notice above the footer. Library content, direct rules, and machine pins survive group
 removal. Unowned legacy groups cannot have deployable assignments.
 
 Skill details distinguish inherited group rules from direct assignments. Direct rules win at equal

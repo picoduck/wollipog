@@ -1,65 +1,89 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { choosePageAction } from "./page-actions.js";
 import { installSkillGroupsFixture } from "./skill-groups.fixture.js";
-const acceptance = "Accept Group-Wide Deployment and Ownership Impact";
+
+const manageGroups = (page: Page) => page.getByRole("dialog", { name: "Manage Groups" });
+const confirmation = (page: Page, title: string) => page.getByRole("dialog", { name: title });
+
+async function createGroup(page: Page, name: string) {
+  await manageGroups(page).getByRole("button", { name: "New Group", exact: true }).click();
+  await manageGroups(page).getByLabel("Group Name", { exact: true }).fill(name);
+  await manageGroups(page).getByRole("button", { name: "Create Group", exact: true }).click();
+  await expect(manageGroups(page).locator(".skill-groups-name")).toHaveText(name);
+}
+
+async function addRule(page: Page, machine?: string, agent?: string) {
+  await manageGroups(page).getByRole("button", { name: "Add Assignment…", exact: true }).click();
+  const child = page.getByRole("dialog", { name: "Add Group Assignment" });
+  if (machine) {
+    await child.getByRole("button", { name: /^Machine:/ }).click();
+    await page.getByRole("option", { name: machine }).click();
+  }
+  if (agent) {
+    await child.getByRole("button", { name: /^Agents:/ }).click();
+    await page.getByRole("option", { name: agent, exact: true }).click();
+  }
+  await child.getByRole("button", { name: "Add Assignment", exact: true }).click();
+  await expect(child).toHaveCount(0);
+}
+
 test("creating another group cannot retain the previously selected group's rules", async ({ page }) => {
   await installSkillGroupsFixture(page);
   await page.goto("/skills-removals-e2e.html?groups=1");
   await choosePageAction(page, "Manage Groups…");
-  await page.getByLabel("New Group Name", { exact: true }).fill("First Group");
-  await page.getByRole("button", { name: "Create Group", exact: true }).click();
-  await page.getByRole("button", { name: "Add Group Assignment", exact: true }).click();
-  await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Disable Assignment" })).toBeVisible();
-  await page.getByLabel("New Group Name", { exact: true }).fill("Second Group");
-  await page.getByRole("button", { name: "Create Group", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Second Group", exact: true })).toBeVisible();
-  await expect(page.getByText("No group assignments.", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Disable Assignment" })).toHaveCount(0);
+  await createGroup(page, "First Group");
+  await addRule(page);
+  await expect(manageGroups(page).locator(".skill-assignment-title")).toHaveText(["All Agents on All Machines"]);
+  await createGroup(page, "Second Group");
+  await expect(manageGroups(page).getByText("No assignments. Add one to deploy this group's skills.", { exact: true })).toBeVisible();
+  await expect(manageGroups(page).locator(".skill-assignment-title")).toHaveCount(0);
 });
+
 test("assignment read failure does not masquerade as an empty group", async ({ page }) => {
   await installSkillGroupsFixture(page);
   await page.route("**/api/skill-groups/created/assignments", route => route.fulfill({ status: 503, json: { error: "Assignments temporarily unavailable" } }));
   await page.goto("/skills-removals-e2e.html?groups=1");
   await choosePageAction(page, "Manage Groups…");
-  await page.getByLabel("New Group Name", { exact: true }).fill("Read Failure");
-  await page.getByRole("button", { name: "Create Group", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("Assignments temporarily unavailable");
-  await expect(page.getByRole("button", { name: "Add Group Assignment", exact: true })).toBeDisabled();
-  await expect(page.getByText("No group assignments.", { exact: true })).toHaveCount(0);
+  await createGroup(page, "Read Failure");
+  const alert = manageGroups(page).getByRole("alert");
+  await expect(alert).toContainText("Couldn't Load the Group's Assignments");
+  await expect(alert).toContainText("Assignments temporarily unavailable");
+  await expect(manageGroups(page).getByRole("button", { name: "Add Assignment…", exact: true })).toBeDisabled();
+  await expect(manageGroups(page).getByText(/^No assignments/)).toHaveCount(0);
 });
-for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
+
+for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
   test(`group membership and inherited rules at ${width} in ${theme}`, async ({ page }, info) => {
     const fixture = await installSkillGroupsFixture(page);
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/skills-removals-e2e.html?groups=1");
     await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
     await choosePageAction(page, "Manage Groups…");
-    await page.getByLabel("New Group Name", { exact: true }).fill("Review Team");
-    await page.getByRole("button", { name: "Create Group", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Review Team", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: /^Skill to Add:/ }).click();
-    await page.getByRole("option", { name: "code-review", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Add Member", exact: true })).toBeDisabled();
-    await page.getByRole("checkbox", { name: acceptance }).check();
-    await page.getByRole("button", { name: "Add Member", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Remove code-review from Group" })).toBeVisible();
-    await page.getByRole("button", { name: "Add Group Assignment", exact: true }).click();
-    await page.getByRole("button", { name: /^Machine:/ }).click();
-    await page.getByRole("option", { name: "Build Machine" }).click();
-    await page.getByRole("button", { name: /^Agents:/ }).click();
-    await page.getByRole("option", { name: "Claude Claude Code", exact: true }).click();
-    await page.getByRole("button", { name: "Add Assignment", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Disable Assignment" })).toBeVisible();
+    await createGroup(page, "Review Team");
+    // Adding a skill asks first; Cancel changes nothing.
+    await manageGroups(page).getByRole("button", { name: "Add Skill", exact: true }).click();
+    await page.getByRole("menu", { name: "Add Skill" }).getByRole("menuitem", { name: "code-review", exact: true }).click();
+    const add = confirmation(page, "Add Skill to Group");
+    await expect(add).toContainText("“code-review” joins “Review Team”. The group has no assignments yet, so nothing deploys until it has one.");
+    await add.getByRole("button", { name: "Cancel", exact: true }).click();
+    expect(fixture.writes.filter(write => write.method === "PUT")).toEqual([]);
+    await manageGroups(page).getByRole("button", { name: "Add Skill", exact: true }).click();
+    await page.getByRole("menu", { name: "Add Skill" }).getByRole("menuitem", { name: "code-review", exact: true }).click();
+    await confirmation(page, "Add Skill to Group").getByRole("button", { name: "Add Skill", exact: true }).click();
+    await expect(manageGroups(page).locator(".skill-groups-members .row-title")).toHaveText(["code-review"]);
+    await addRule(page, "Build Machine", "Claude Claude Code");
+    await expect(manageGroups(page).locator(".skill-assignment-title")).toHaveText(["Claude on Build Machine"]);
     expect(fixture.writes.find(write => write.path.endsWith("/assignments"))?.body).toEqual({ scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "agent", agentId: "claude" }, invocation: "agent" });
+    await page.mouse.move(0, 0);
     await page.screenshot({ path: info.outputPath(`groups-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.getByRole("checkbox", { name: acceptance }).check();
-    await page.getByRole("button", { name: "Disable Assignment" }).click();
-    await expect(page.getByRole("button", { name: "Enable Assignment" })).toBeVisible();
-    await page.getByRole("checkbox", { name: acceptance }).check();
-    await page.getByRole("button", { name: "Enable Assignment" }).click();
-    await page.getByRole("button", { name: "Close", exact: true }).last().click();
+    // A rule's Enabled applies at once, with no confirmation.
+    const enabled = manageGroups(page).getByRole("switch", { name: "Enabled" });
+    await enabled.click();
+    await expect(enabled).toHaveAttribute("aria-checked", "false");
+    await enabled.click();
+    await expect(enabled).toHaveAttribute("aria-checked", "true");
+    await manageGroups(page).getByRole("button", { name: "Done", exact: true }).click();
     await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
     // The group's rule is a read-only row under From Groups (#1982).
     const fromGroups = page.getByRole("region", { name: "From Groups: Review Team" });
@@ -69,42 +93,118 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.screenshot({ path: info.outputPath(`inherited-${width}-${theme}.png`), fullPage: true });
     // Edit in Groups… opens Manage Groups with the group already selected.
     await fromGroups.getByRole("button", { name: "Edit in Groups…", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Review Team", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^Group:/ })).toContainText("Review Team");
-    await page.getByRole("checkbox", { name: acceptance }).check();
-    await page.getByRole("button", { name: "Delete Group and Its Assignments" }).click();
-    await expect(page.getByRole("heading", { name: "Review Team", exact: true })).toHaveCount(0);
-    await expect(page.getByRole("alert")).toHaveCount(0);
-    await page.getByRole("button", { name: "Close", exact: true }).last().click();
+    await expect(manageGroups(page).locator(".skill-groups-name")).toHaveText("Review Team");
+    await manageGroups(page).getByRole("button", { name: "More Actions for Review Team", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Delete Group…", exact: true }).click();
+    const remove = confirmation(page, "Delete Group");
+    const name = remove.getByLabel("Type Review Team to Confirm", { exact: true });
+    await expect(name).toBeFocused();
+    await expect(remove.getByRole("button", { name: "Delete Group", exact: true })).toBeDisabled();
+    await name.fill("Review Team");
+    await remove.getByRole("button", { name: "Delete Group", exact: true }).click();
+    // The next group takes its place; a phone returns to the list.
+    await expect(manageGroups(page).locator(".skill-groups-list > .row")).toHaveText([/^Legacy Tools/]);
+    await expect(manageGroups(page).getByRole("alert")).toHaveCount(0);
+    expect(fixture.writes.at(-1)).toMatchObject({ method: "DELETE", path: "/api/skill-groups/created" });
+    await manageGroups(page).getByRole("button", { name: "Done", exact: true }).click();
     await expect(page.locator(".skill-assignments-group")).toHaveCount(0);
     // The skill stays open; on a phone it is its own screen, named in the detail bar (#1947, #1962).
     await expect(page.locator(".skill-detail-head, .detail-bar").getByRole("heading", { name: "code-review", exact: true })).toBeVisible();
   });
 }
+
 test("legacy conversion is explicit and discloses permanent ownership", async ({ page }) => {
   const { writes } = await installSkillGroupsFixture(page);
   await page.goto("/skills-removals-e2e.html?groups=1");
   await choosePageAction(page, "Manage Groups…");
-  await page.getByRole("button", { name: /^Group:/ }).click();
-  await page.getByRole("option", { name: "Legacy Tools" }).click();
-  await expect(page.getByText(/Conversion permanently assigns ownership/)).toBeVisible();
-  await expect(page.getByText("Resulting ownership: Organization demo-org.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Convert Group", exact: true })).toBeDisabled();
+  await expect(manageGroups(page).locator(".skill-groups-name")).toHaveText("Legacy Tools");
+  const notice = manageGroups(page).locator(".notice");
+  await expect(notice).toContainText("This Group Has No Owner");
+  await expect(notice).toContainText("Converting makes it shared with your organization.");
+  await notice.getByRole("button", { name: "Convert Group…", exact: true }).click();
+  const convert = confirmation(page, "Convert Group");
+  await expect(convert).toContainText("“Legacy Tools” becomes shared with your organization for good");
+  await convert.getByRole("button", { name: "Cancel", exact: true }).click();
   expect(writes).toHaveLength(0);
-  await page.getByRole("checkbox", { name: acceptance }).check();
-  await page.getByRole("button", { name: "Convert Group", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Add Group Assignment", exact: true })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Convert Group", exact: true })).toHaveCount(0);
+  await notice.getByRole("button", { name: "Convert Group…", exact: true }).click();
+  await confirmation(page, "Convert Group").getByRole("button", { name: "Convert Group", exact: true }).click();
+  await expect(manageGroups(page).getByRole("button", { name: "Add Assignment…", exact: true })).toBeEnabled();
+  await expect(manageGroups(page).getByRole("button", { name: "Convert Group…", exact: true })).toHaveCount(0);
+  await expect(manageGroups(page).locator(".skill-groups-owner")).toHaveText("Shared with your organization");
 });
+
 test("failed conversion preserves the legacy group and surfaces the server error", async ({ page }) => {
   await installSkillGroupsFixture(page);
   await page.route("**/api/skill-groups/legacy/convert", route => route.fulfill({ status: 409, json: { error: "Members have different ownership. No changes saved." } }));
   await page.goto("/skills-removals-e2e.html?groups=1");
   await choosePageAction(page, "Manage Groups…");
-  await page.getByRole("button", { name: /^Group:/ }).click();
-  await page.getByRole("option", { name: "Legacy Tools" }).click();
-  await page.getByRole("checkbox", { name: acceptance }).check();
-  await page.getByRole("button", { name: "Convert Group", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("No changes saved");
-  await expect(page.getByRole("button", { name: "Add Group Assignment", exact: true })).toHaveCount(0);
+  await manageGroups(page).getByRole("button", { name: "Convert Group…", exact: true }).click();
+  await confirmation(page, "Convert Group").getByRole("button", { name: "Convert Group", exact: true }).click();
+  await expect(manageGroups(page).getByRole("alert")).toContainText("No changes saved");
+  await expect(manageGroups(page).getByRole("button", { name: "Add Assignment…", exact: true })).toHaveCount(0);
+  await expect(manageGroups(page).getByRole("button", { name: "Convert Group…", exact: true })).toBeVisible();
+});
+
+test("a change shows a spinner on its own control only, and the body keeps its height", async ({ page }) => {
+  await installSkillGroupsFixture(page, { library: "full" });
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/skills/skill-2", async route => {
+    if (route.request().method() === "PUT") await held;
+    await route.fallback();
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/skills-removals-e2e.html?groups=1");
+  await choosePageAction(page, "Manage Groups…");
+  const dialog = manageGroups(page);
+  // The first group is selected; ownership is words, never an id.
+  await expect(dialog.locator(".skill-groups-list > .row")).toHaveText([/^Review Team3 skills$/, /^Platform ToolsNo skills$/, /^My DraftsNo skills$/, /^Legacy ToolsNo owner$/]);
+  await expect(dialog.locator(".skill-groups-owner")).toHaveText("Shared with your organization");
+  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(dialog).not.toContainText("Accept Group-Wide Deployment and Ownership Impact");
+  await dialog.locator(".skill-groups-list > .row").nth(1).click();
+  await expect(dialog.locator(".skill-groups-owner")).toHaveText("Shared with Platform");
+  await dialog.locator(".skill-groups-list > .row").nth(2).click();
+  await expect(dialog.locator(".skill-groups-owner")).toHaveText("Only you");
+  await expect(dialog).not.toContainText(/demo-org|team-platform|user-1/);
+  await dialog.locator(".skill-groups-list > .row").first().click();
+
+  const body = dialog.locator(".modal-body");
+  const before = await body.evaluate(element => element.getBoundingClientRect().height);
+  const removeLint = dialog.locator(".skill-groups-members .row", { hasText: "lint-fix" }).getByRole("button", { name: "Remove…", exact: true });
+  await removeLint.click();
+  const remove = confirmation(page, "Remove Skill from Group");
+  await expect(remove).toContainText("“lint-fix” leaves “Review Team”");
+  await expect(remove.locator(".confirmation-rows .row-title")).toHaveText(["Claude on Build Machine", "All Agents on All Machines"]);
+  await remove.getByRole("button", { name: "Remove Skill", exact: true }).click();
+  await expect(removeLint).toHaveAttribute("aria-busy", "true");
+  await expect(dialog.locator("[aria-busy='true']")).toHaveCount(1);
+  await expect(dialog.locator(".spinner")).toHaveCount(1);
+  await expect(dialog.getByText(/Loading/)).toHaveCount(0);
+  expect(await body.evaluate(element => element.getBoundingClientRect().height)).toBe(before);
+  release();
+  await expect(dialog.locator(".skill-groups-members .row-title")).toHaveText(["docs-writer", "test-triage"]);
+  await expect(dialog.locator("[aria-busy='true']")).toHaveCount(0);
+  expect(await body.evaluate(element => element.getBoundingClientRect().height)).toBe(before);
+  await expect(dialog.locator(".skill-groups-members").getByRole("button", { name: "Remove…" }).first()).toBeFocused();
+});
+
+test("at 390px the list and the group are two steps of one sheet, with Back and one Done", async ({ page }) => {
+  await installSkillGroupsFixture(page, { library: "full" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/skills-removals-e2e.html?groups=1");
+  await choosePageAction(page, "Manage Groups…");
+  const dialog = manageGroups(page);
+  await expect(dialog.locator(".skill-groups-list > .row")).toHaveCount(4);
+  await expect(dialog.locator(".skill-groups-pane.detail")).toHaveCount(0);
+  await expect(dialog.locator(".modal-foot button")).toHaveText(["Done"]);
+  await dialog.locator(".skill-groups-list > .row").first().click();
+  await expect(dialog.locator(".skill-groups-pane.list")).toHaveCount(0);
+  await expect(dialog.locator(".skill-groups-name")).toHaveText("Review Team");
+  const back = dialog.getByRole("button", { name: "Back to Groups", exact: true });
+  await expect(back).toBeFocused();
+  await expect(dialog.locator(".modal-foot button")).toHaveText(["Done"]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await back.click();
+  await expect(dialog.locator(".skill-groups-list > .row")).toHaveCount(4);
 });

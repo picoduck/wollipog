@@ -12,6 +12,7 @@ import {
 import { CheckIcon, ChevronDownIcon, MoreHorizontalIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { SkillDetailSection } from "./SkillDetailHeader.js";
 import { INVOCATION_HELP } from "./SkillAssignmentDialog.js";
 import { listText } from "./SkillNoticeSlot.js";
@@ -33,11 +34,15 @@ export function assignmentRuleTitle(rule: RuleTarget, runners: ReadonlyArray<Run
 
 /** Agent Invocable or Manual Only, as a small select trigger over a §9.1 radio-like menu whose two
  * items say what each means. Choosing the current value changes nothing. */
-export function InvocationMenu({ value, describedBy, disabled, onChange }: {
+export function InvocationMenu({ value, describedBy, disabled, busy = false, inline, onChange }: {
   value: SkillInvocationPolicy;
   /** The rule's title, so each row's trigger says which rule it changes. */
   describedBy?: string;
   disabled?: boolean;
+  /** The change it made is saving: the trigger keeps its label beside a spinner (§3.1). */
+  busy?: boolean;
+  /** Inside a dialog the menu renders in place (`MenuSurface`'s `inline`). */
+  inline?: boolean;
   onChange: (invocation: SkillInvocationPolicy) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -48,9 +53,8 @@ export function InvocationMenu({ value, describedBy, disabled, onChange }: {
   };
   return (
     <>
-      <button
+      <BusyButton
         ref={menu.triggerRef}
-        type="button"
         className="btn sm"
         data-rule-control="invocation"
         aria-label={`Invocation: ${invocationLabel(value)}`}
@@ -58,13 +62,15 @@ export function InvocationMenu({ value, describedBy, disabled, onChange }: {
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menu.menuId : undefined}
-        disabled={disabled}
+        disabled={disabled && !busy}
+        busy={busy}
+        progress="Saving the invocation…"
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
       >
         {invocationLabel(value)}
         <ChevronDownIcon size={14} />
-      </button>
+      </BusyButton>
       {open && (
         <MenuSurface
           surfaceRef={menu.menuRef}
@@ -72,6 +78,7 @@ export function InvocationMenu({ value, describedBy, disabled, onChange }: {
           id={menu.menuId}
           label="Invocation"
           align="end"
+          inline={inline}
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
         >
@@ -92,15 +99,21 @@ export function InvocationMenu({ value, describedBy, disabled, onChange }: {
   );
 }
 
-/** A rule's ⋯, holding Remove Assignment…, which confirms before anything is removed. */
-function RuleActionsMenu({ title, disabled, onRemove }: { title: string; disabled?: boolean; onRemove: () => void }) {
+/** A rule's ⋯, holding Remove Assignment…, which confirms before anything is removed. While the
+ * removal runs, the ⋯ shows a spinner in place of its glyph (§3.1). */
+function RuleActionsMenu({ title, disabled, removing = false, inline, onRemove }: {
+  title: string;
+  disabled?: boolean;
+  removing?: boolean;
+  inline?: boolean;
+  onRemove: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "skill-assignment-menu");
   return (
     <>
-      <button
+      <BusyButton
         ref={menu.triggerRef}
-        type="button"
         className="icon-btn sm"
         data-rule-control="more"
         title="More Actions"
@@ -108,12 +121,15 @@ function RuleActionsMenu({ title, disabled, onRemove }: { title: string; disable
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menu.menuId : undefined}
-        disabled={disabled}
+        disabled={disabled && !removing}
+        busy={removing}
+        progress={`Removing ${title}…`}
+        icon={<MoreHorizontalIcon />}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
       >
-        <MoreHorizontalIcon />
-      </button>
+        {null}
+      </BusyButton>
       {open && (
         <MenuSurface
           surfaceRef={menu.menuRef}
@@ -121,6 +137,7 @@ function RuleActionsMenu({ title, disabled, onRemove }: { title: string; disable
           id={menu.menuId}
           label={title}
           align="end"
+          inline={inline}
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
         >
@@ -148,9 +165,16 @@ export interface AssignmentRuleRowProps {
   offDescription: string;
   /** Another change is saving, so this row waits. */
   busy: boolean;
-  /** This row's own change is in flight, and whether its "Saved" check shows (§8.6). */
+  /** This row's own change is in flight, and whether its "Saved" check shows (§8.6). The Enabled
+   * switch shows it unless `invocationSaving` says the invocation is what changed. */
   saving: boolean;
+  /** The change in flight is the invocation's: its menu trigger shows the spinner instead. */
+  invocationSaving?: boolean;
   saved: boolean;
+  /** This row's removal is in flight: its ⋯ shows a spinner. */
+  removing?: boolean;
+  /** Inside a dialog (Manage Groups), the row's menus render in place. */
+  inlineMenus?: boolean;
   onSetInvocation: (invocation: SkillInvocationPolicy) => void;
   onSetEnabled: (enabled: boolean) => void;
   onRemove: () => void;
@@ -162,7 +186,7 @@ export interface AssignmentRuleRowProps {
  * server confirms. A turned-off rule is dimmed and says so. Under a 560px container the controls
  * wrap below the title.
  */
-export function AssignmentRuleRow({ rule, title, offDescription, busy, saving, saved, onSetInvocation, onSetEnabled, onRemove }: AssignmentRuleRowProps) {
+export function AssignmentRuleRow({ rule, title, offDescription, busy, saving, saved, invocationSaving = false, removing, inlineMenus, onSetInvocation, onSetEnabled, onRemove }: AssignmentRuleRowProps) {
   const id = useId().replace(/:/g, "");
   const titleId = `${id}-title`;
   return (
@@ -172,20 +196,21 @@ export function AssignmentRuleRow({ rule, title, offDescription, busy, saving, s
         {!rule.enabled && <span className="skill-assignment-desc">{offDescription}</span>}
       </div>
       <div className="skill-assignment-controls">
-        <InvocationMenu value={rule.invocation} describedBy={titleId} disabled={busy} onChange={onSetInvocation} />
+        <InvocationMenu value={rule.invocation} describedBy={titleId} disabled={busy} busy={invocationSaving} inline={inlineMenus}
+          onChange={onSetInvocation} />
         <Switch
           label="Enabled"
           describedBy={titleId}
           checked={rule.enabled}
-          disabled={busy && !saving}
-          busy={saving}
+          disabled={busy && !(saving && !invocationSaving)}
+          busy={saving && !invocationSaving}
           className="ui-switch-standalone skill-assignment-enabled"
           onChange={onSetEnabled}
         >
           Enabled
         </Switch>
         {saved && <span className="ui-row-saved" aria-hidden="true"><CheckIcon size={14} />Saved</span>}
-        <RuleActionsMenu title={title} disabled={busy} onRemove={onRemove} />
+        <RuleActionsMenu title={title} disabled={busy} removing={removing} inline={inlineMenus} onRemove={onRemove} />
       </div>
       <span className="sr-only" role="status">{saved ? `${title} saved` : ""}</span>
     </li>

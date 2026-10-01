@@ -571,6 +571,7 @@ test("confirmations that differ only in rows, overflow or labels are not merged,
     { ...base, detailRowsOverflow: 1 },
     { ...base, cancelLabel: "Keep Running" },
     { ...base, secondaryAction: { label: "Show Sessions", run: () => undefined } },
+    { ...base, typeToConfirm: "Review Team" },
   ];
   await open(base);
   const duplicate = await open({ ...base, detailRows: [...base.detailRows!] });
@@ -583,6 +584,72 @@ test("confirmations that differ only in rows, overflow or labels are not merged,
   }
   for (const index of queued) assert.equal(outcomes[index], false);
   assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
+  await cleanup();
+});
+
+/** Types into a controlled field as a person would: React's change plugin watches the focused input. */
+async function typeInto(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
+  assert.ok(setter);
+  await act(async () => {
+    input.focus();
+    setter.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true, key: value.at(-1) ?? "" }) as unknown as Event);
+  });
+}
+
+test("a type-to-confirm confirmation focuses its field and keeps the danger button disabled until the text matches", async () => {
+  const { open, outcomes, footButtons, cleanup } = await renderConfirmationService();
+  const deleteGroup: ConfirmationOptions = {
+    title: "Delete Group",
+    message: "“Review Team” and its 2 assignments are deleted.",
+    confirmLabel: "Delete Group",
+    tone: "danger",
+    typeToConfirm: "Review Team",
+  };
+  const first = await open(deleteGroup);
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  const field = dialog.querySelector<HTMLInputElement>(".modal-body .field input")!;
+  assert.equal(dialog.querySelector(".modal-body .field > span")?.textContent, "Type Review Team to Confirm");
+  assert.ok(domWindow.document.activeElement === (field as unknown), "the name field has focus, not Cancel");
+  const confirmButton = () => footButtons().find((button) => button.textContent === "Delete Group")!;
+  assert.equal(confirmButton().disabled, true, "nothing is typed yet");
+  assert.ok(confirmButton().className.includes("danger"));
+
+  // Near misses keep it disabled: case and spaces count, and so does a missing letter.
+  for (const near of ["review team", "Review Tea", " Review Team", "Review Team "]) {
+    await typeInto(field, near);
+    assert.equal(confirmButton().disabled, true, JSON.stringify(near));
+    await act(async () => {
+      field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { bubbles: true, key: "Enter" }) as unknown as Event);
+      await tick();
+    });
+    assert.equal(outcomes[first], undefined, `Enter does not confirm ${JSON.stringify(near)}`);
+  }
+  await typeInto(field, "Review Team");
+  assert.equal(confirmButton().disabled, false);
+  await act(async () => { confirmButton().click(); await tick(); });
+  assert.equal(outcomes[first], true);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
+
+  // Cancel changes nothing, and Enter in the field confirms once the name matches.
+  const second = await open(deleteGroup);
+  await act(async () => { footButtons().find((button) => button.textContent === "Cancel")!.click(); await tick(); });
+  assert.equal(outcomes[second], false);
+  const third = await open(deleteGroup);
+  const again = document.querySelector<HTMLInputElement>('[role="dialog"] .modal-body .field input')!;
+  assert.equal(again.value, "", "a new confirmation starts empty");
+  await typeInto(again, "Review Team");
+  await act(async () => {
+    again.dispatchEvent(new domWindow.KeyboardEvent("keydown", { bubbles: true, key: "Enter" }) as unknown as Event);
+    await tick();
+  });
+  assert.equal(outcomes[third], true);
+
+  // Without typeToConfirm there is no field.
+  await open(INTERRUPT);
+  assertNoDomNode(document.querySelector('[role="dialog"] .modal-body input'));
   await cleanup();
 });
 
