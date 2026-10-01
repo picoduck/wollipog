@@ -54,9 +54,198 @@ function writeLegacyLease(home: string, overrides: Record<string, unknown> = {})
 
 function journalRecords(home: string): Array<Record<string, unknown>> {
   const { lock } = leasePaths(home);
-  return readdirSync(lock).sort().map((name) =>
+  return readdirSync(lock).sort().filter((name) => name !== "checkpoint.json").map((name) =>
     JSON.parse(readFileSync(join(lock, name), "utf8")) as Record<string, unknown>);
 }
+
+function writePartialJournal(home: string, shape: "lease" | "next" | "disconnected") {
+  const { lock } = leasePaths(home);
+  mkdirSync(lock, { recursive: true });
+  const genesis = {
+    version: 2, state: "active", ownerHash: OWNER_A, leaseId: LEGACY_ID,
+    previousLeaseId: null, previousRecordHash: null, pid: 101, hostname: "host-a",
+    provider: "skills", createdAt: "2026-08-19T00:00:00.000Z",
+  };
+  const bytes = `${JSON.stringify(genesis)}\n`;
+  if (shape !== "next") writeFileSync(join(lock, `lease-${LEGACY_ID}.json`), bytes);
+  if (shape !== "lease") {
+    const successor = {
+      ...genesis, leaseId: "22222222-2222-4222-8222-222222222222", previousLeaseId: LEGACY_ID,
+      previousRecordHash: createHash("sha256").update(bytes).digest("hex"), pid: 102,
+    };
+    writeFileSync(join(lock, `next-${LEGACY_ID}.json`), `${JSON.stringify(successor)}\n`);
+  }
+  if (shape === "disconnected") {
+    writeFileSync(join(lock, "next-33333333-3333-4333-8333-333333333333.json"), `${JSON.stringify({
+      ...genesis, leaseId: "44444444-4444-4444-8444-444444444444",
+      previousLeaseId: "33333333-3333-4333-8333-333333333333", previousRecordHash: "c".repeat(64), pid: 103,
+    })}\n`);
+  }
+  return lock;
+}
+
+test("abandoned lease-only, next-only, and disconnected journals recover without removing evidence", (t) => {
+  for (const shape of ["lease", "next", "disconnected"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-provider-partial-${shape}-`));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const lock = writePartialJournal(home, shape);
+    const evidence = readdirSync(lock).map((name) => ({ name, bytes: readFileSync(join(lock, name)) }));
+    const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+      pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+    });
+    registry.acquire(request(home));
+    for (const item of evidence) assert.deepEqual(readFileSync(join(lock, item.name)), item.bytes);
+    const competitor = new ProviderHomeLeaseRegistry(OWNER_A, {
+      pid: 303, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+    });
+    assert.throws(() => competitor.acquire(request(home)), /already in use by process 202/);
+    registry.releaseAll();
+    competitor.acquire(request(home));
+    competitor.releaseAll();
+  }
+});
+
+test("every retained partial-journal record must prove owner, host, and dead PID", (t) => {
+  for (const bad of [{ ownerHash: OWNER_B }, { hostname: "host-b" }, { pid: 303 }, { previousRecordHash: "d".repeat(64) }]) {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-provider-partial-refuse-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const lock = writePartialJournal(home, "disconnected");
+    const name = `next-${LEGACY_ID}.json`;
+    writeFileSync(join(lock, name), JSON.stringify({ ...JSON.parse(readFileSync(join(lock, name), "utf8")), ...bad }));
+    const before = readdirSync(lock).map((entry) => readFileSync(join(lock, entry), "utf8"));
+    const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+      pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 303,
+    });
+    assert.throws(() => registry.acquire(request(home)), /quarantine the entire.*do not remove individual records/);
+    assert.deepEqual(readdirSync(lock).map((entry) => readFileSync(join(lock, entry), "utf8")), before);
+    assert.equal(existsSync(join(leasePaths(home).root, "mutable-home.recovery.json")), false);
+  }
+});
+
+test("durable initialization recovers crashes before mkdir and with an empty lock", (t) => {
+  for (const directoryCreated of [false, true]) {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-provider-initialization-crash-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const crashed = new ProviderHomeLeaseRegistry(OWNER_A, {
+      pid: 101, hostname: "host-a",
+      afterInitializationPublishForTest: () => {
+        if (directoryCreated) mkdirSync(leasePaths(home).lock);
+        throw new Error("simulated runner termination");
+      },
+    });
+    assert.throws(() => crashed.acquire(request(home)), /simulated runner termination/);
+    const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+      pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+    });
+    registry.acquire(request(home));
+    assert.equal(existsSync(leasePaths(home).lock), true);
+    const competitor = new ProviderHomeLeaseRegistry(OWNER_A, {
+      pid: 303, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+    });
+    assert.throws(() => competitor.acquire(request(home)), /already in use by process 202/);
+    registry.releaseAll();
+    competitor.acquire(request(home));
+    competitor.releaseAll();
+  }
+});
+
+test("a new process reclaims a killed initializer or active holder without filesystem cleanup", async (t) => {
+  for (const phase of ["before-directory", "empty-directory", "active"] as const) {
+    const home = mkdtempSync(join(tmpdir(), `wollipog-provider-killed-${phase}-`));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const helper = join(home, "killed-holder.ts");
+    const ready = join(home, "ready");
+    writeFileSync(helper, `
+      import { mkdirSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      import { ProviderHomeLeaseRegistry } from ${JSON.stringify(new URL("./provider-home-lease.ts", import.meta.url).href)};
+      const home = ${JSON.stringify(home)};
+      const hold = () => {
+        writeFileSync(${JSON.stringify(ready)}, String(process.pid));
+        for (;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+      };
+      const registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, {
+        afterInitializationPublishForTest: () => {
+          if (${JSON.stringify(phase)} === "active") return;
+          if (${JSON.stringify(phase)} === "empty-directory") mkdirSync(join(home, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock"));
+          hold();
+        },
+      });
+      registry.acquireHome(home);
+      hold();
+    `);
+    const child = spawn(process.execPath, ["--import", "tsx", helper], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(ready) && child.exitCode === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const reported = existsSync(ready);
+    child.kill("SIGKILL");
+    await exited;
+    assert.ok(reported, stderr);
+    const replacement = new ProviderHomeLeaseRegistry(OWNER_A);
+    assert.equal(replacement.acquireHome(home), true);
+    assert.equal(replacement.releaseHome(home), true);
+  }
+});
+
+test("an empty or missing mirror directory cannot hide a live canonical successor", (t) => {
+  for (const removeDirectory of [false, true]) {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-provider-missing-mirrors-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const first = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a" });
+    first.acquire(request(home));
+    const live = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 202, hostname: "host-a", isProcessAlive: () => false });
+    live.acquire(request(home));
+    const { lock } = leasePaths(home);
+    for (const name of readdirSync(lock)) rmSync(join(lock, name));
+    if (removeDirectory) rmSync(lock, { recursive: true });
+    const contender = new ProviderHomeLeaseRegistry(OWNER_A, {
+      pid: 303, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+    });
+    assert.throws(() => contender.acquire(request(home)), /already in use by process 202/);
+    assert.equal(existsSync(lock), !removeDirectory, "refusal does not recreate an unowned directory");
+    live.releaseAll();
+    contender.acquire(request(home));
+    contender.releaseAll();
+  }
+});
+
+test("two partial-journal recoverers elect one fixed recovery checkpoint", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-partial-race-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writePartialJournal(home, "next");
+  const winner = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+  });
+  const loser = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 303, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+    beforeTransitionPublishForTest: () => winner.acquire(request(home)),
+  });
+  assert.throws(() => loser.acquire(request(home)), /lease changed during recovery/);
+  assert.equal(JSON.parse(readFileSync(join(leasePaths(home).root, "mutable-home.recovery.json"), "utf8")).pid, 202);
+  winner.releaseAll();
+});
+
+test("retained partial evidence and external canonical records are rechecked after recovery", (t) => {
+  for (const mutate of ["retained", "canonical"] as const) {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-provider-recovery-corruption-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const lock = writePartialJournal(home, "next");
+    const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 202, hostname: "host-a", isProcessAlive: () => false });
+    registry.acquire(request(home));
+    registry.releaseAll();
+    const root = leasePaths(home).root;
+    const path = mutate === "retained" ? join(lock, `next-${LEGACY_ID}.json`)
+      : join(root, "mutable-home.recovery.json");
+    writeFileSync(path, `${readFileSync(path, "utf8")} `);
+    const contender = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 303, hostname: "host-a", isProcessAlive: () => false });
+    assert.throws(() => contender.acquire(request(home)), /quarantine the entire/);
+  }
+});
 
 test("container and cloud launches never lease the host provider HOME", () => {
   const remote: SpawnIsolation[] = [
@@ -171,7 +360,9 @@ test("stale leases with a foreign owner or host and live leases all fail closed"
       scenario === "host" ? /leased by host host-b/ : /already in use by process 101/;
     assert.throws(() => registry.acquire(request(home)), (error) => {
       assert.match(String(error), expected);
-      assert.doesNotMatch(String(error), new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      assert.ok(String(error).includes(leasePaths(home).lock), "the operator can locate the refused state");
+      assert.match(String(error), /quarantine the entire.*do not remove individual records/);
+      assert.ok(!String(error).includes(OWNER_A) && !String(error).includes(OWNER_B));
       return true;
     });
     assert.deepEqual(readdirSync(leasePaths(home).lock), ["lease.json"]);
@@ -240,7 +431,7 @@ test("a released successor that rewrites the releasing lease's identity is rejec
     pid: 404, hostname: "host-c", isProcessAlive: () => true,
   });
   assert.throws(() => contender.acquire(request(home)), /unexpected entries/);
-  assert.equal(readdirSync(lock).length, 2, "the forged journal gains no successor");
+  assert.equal(readdirSync(lock).length, 3, "the forged journal gains no successor");
 });
 
 test("an active successor that rewrites owner or host over an unreleased record is rejected", (t) => {
@@ -279,7 +470,7 @@ test("an active successor that rewrites owner or host over an unreleased record 
       pid: 404, hostname: "host-c", isProcessAlive: () => true,
     });
     assert.throws(() => contender.acquire(request(home)), /unexpected entries/);
-    assert.equal(readdirSync(lock).length, 3, "the forged journal gains no successor");
+    assert.equal(readdirSync(lock).length, 4, "the forged journal gains no successor");
   }
 });
 
@@ -449,7 +640,7 @@ test("a long journal remains valid and never empties across repeated orderly han
     registry.releaseAll();
     assert.ok(readdirSync(leasePaths(home).lock).length > 0);
   }
-  assert.equal(readdirSync(leasePaths(home).lock).length, 128);
+  assert.equal(readdirSync(leasePaths(home).lock).length, 129);
 });
 
 test("a predecessor modified after publication invalidates its hash-linked successor", (t) => {
@@ -490,8 +681,8 @@ test("new-format artifacts make the legacy single-marker reader fail closed", (t
   const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a" });
   registry.acquire(request(home));
   const entries = readdirSync(leasePaths(home).lock);
-  assert.equal(entries.length, 1);
-  assert.notEqual(entries[0], "lease.json", "a rollback binary sees an unexpected marker and refuses recovery");
+  assert.equal(entries.length, 2);
+  assert.ok(entries.includes("checkpoint.json"), "a rollback journal reader sees an unexpected marker and refuses recovery");
   registry.releaseAll();
 });
 

@@ -10,7 +10,6 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
-  rmdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -26,6 +25,8 @@ const LEASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 const MAX_RECORD_BYTES = 4_096;
 const LEGACY_MARKER = "lease.json";
 const GENESIS_MARKER = /^lease-([0-9a-f-]+)\.json$/u;
+const RECOVERY_MARKER = "mutable-home.recovery.json";
+const NEXT_MARKER = /^next-([0-9a-f-]+)\.json$/u;
 
 interface ProviderHomeLeaseRecordV1 {
   version: 1;
@@ -44,6 +45,8 @@ interface ProviderHomeLeaseRecordV2 {
   leaseId: string;
   previousLeaseId: string | null;
   previousRecordHash: string | null;
+  /** Immutable digest of retained entries outside this record's successor chain. */
+  recoveredEntriesHash?: string;
   pid: number;
   hostname: string;
   provider: string;
@@ -60,6 +63,8 @@ interface ReadLeaseRecord {
 interface LeaseChain {
   entries: string[];
   tip: ReadLeaseRecord;
+  snapshotHash: string;
+  external: boolean;
 }
 
 export interface ProviderHomeLeaseOptions {
@@ -68,6 +73,7 @@ export interface ProviderHomeLeaseOptions {
   isProcessAlive?: (pid: number) => boolean;
   beforeMarkerWriteForTest?: () => void;
   beforeTransitionPublishForTest?: () => void;
+  afterInitializationPublishForTest?: () => void;
 }
 
 export interface ProviderHomeLeaseRequest {
@@ -111,6 +117,7 @@ function isBaseRecord(value: Record<string, unknown>): boolean {
 }
 
 function readRecord(path: string): ReadLeaseRecord {
+  if (lstatSync(path).isSymbolicLink()) throw new Error("provider-home lease metadata is unsafe");
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = fstatSync(fd);
@@ -135,7 +142,37 @@ function readRecord(path: string): ReadLeaseRecord {
 }
 
 function unexpectedEntries(lockDir: string): Error {
-  return new Error(`provider home lease directory ${lockDir} contains unexpected entries; refusing unsafe recovery`);
+  return refusal(lockDir, "contains unexpected entries; refusing unsafe recovery");
+}
+
+class ProviderHomeLeaseRefusal extends Error {}
+
+function refusal(lockDir: string, reason: string): Error {
+  return new ProviderHomeLeaseRefusal(`provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and retry; do not remove individual records`);
+}
+
+function verificationRefusal(lockDir: string, error: unknown): Error {
+  // Preserve the complete remedy once, and never put malformed record contents from a parser's
+  // exception into operator-visible output.
+  return error instanceof ProviderHomeLeaseRefusal ? error : refusal(lockDir, "cannot be verified: metadata is unsafe or unreadable");
+}
+
+function recordsHash(records: Array<{ name: string; hash: string }>): string {
+  return createHash("sha256").update(JSON.stringify(records.map(({ name, hash }) => ({ name, hash }))
+    .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0))).digest("hex");
+}
+
+function validateTransition(current: ReadLeaseRecord, next: ReadLeaseRecord, lockDir: string): void {
+  if (next.record.version !== 2 || next.record.previousLeaseId !== current.record.leaseId ||
+      next.record.previousRecordHash !== current.hash ||
+      (next.record.state === "released" &&
+        (current.record.version !== 2 || current.record.state !== "active" ||
+          next.record.ownerHash !== current.record.ownerHash || next.record.hostname !== current.record.hostname ||
+          next.record.pid !== current.record.pid || next.record.provider !== current.record.provider)) ||
+      (next.record.state === "active" && (current.record.version === 1 || current.record.state === "active") &&
+        (next.record.ownerHash !== current.record.ownerHash || next.record.hostname !== current.record.hostname))) {
+    throw unexpectedEntries(lockDir);
+  }
 }
 
 /**
@@ -143,19 +180,36 @@ function unexpectedEntries(lockDir: string): Error {
  * one process can publish the transition from a particular tip, and no record is ever removed.
  */
 function readChain(lockDir: string): LeaseChain {
-  const lockStat = lstatSync(lockDir);
-  if (!lockStat.isDirectory() || lockStat.isSymbolicLink()) throw unexpectedEntries(lockDir);
-  const entries = readdirSync(lockDir).sort();
-  if (entries.length === 0) {
-    throw new Error(
-      `provider home lease at ${lockDir} is incomplete; after proving no provider process uses this HOME, quarantine the empty directory and retry`,
-    );
+  const root = join(lockDir, "..");
+  let entries: string[] = [];
+  try {
+    const lockStat = lstatSync(lockDir);
+    if (!lockStat.isDirectory() || lockStat.isSymbolicLink()) throw unexpectedEntries(lockDir);
+    entries = readdirSync(lockDir).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-
   const entrySet = new Set(entries);
   let marker: string;
   let current: ReadLeaseRecord;
-  if (entrySet.has(LEGACY_MARKER)) {
+  let recovery: ReadLeaseRecord | undefined;
+  try {
+    recovery = readRecord(join(root, RECOVERY_MARKER));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (recovery) {
+    if (recovery.record.version !== 2 || recovery.record.state !== "active" ||
+        recovery.record.previousLeaseId !== null || recovery.record.previousRecordHash !== null ||
+        typeof recovery.record.recoveredEntriesHash !== "string" || !OWNER_HASH.test(recovery.record.recoveredEntriesHash)) {
+      throw unexpectedEntries(lockDir);
+    }
+    current = recovery;
+    marker = `lease-${current.record.leaseId}.json`;
+    if (entrySet.has(marker) && readRecord(join(lockDir, marker)).hash !== current.hash) throw unexpectedEntries(lockDir);
+  } else if (entries.length === 0) {
+    throw refusal(lockDir, "is incomplete and has no ownership proof");
+  } else if (entrySet.has(LEGACY_MARKER)) {
     marker = LEGACY_MARKER;
     current = readRecord(join(lockDir, marker));
     if (current.record.version !== 1) throw unexpectedEntries(lockDir);
@@ -174,17 +228,29 @@ function readChain(lockDir: string): LeaseChain {
     }
   }
 
-  const consumed = new Set([marker]);
+  const consumed = new Set(entrySet.has(marker) ? [marker] : []);
+  // Updated binaries publish the canonical chain outside the directory and leave in-lock
+  // mirrors for inspection. A rollback binary must refuse this marker instead of acquiring
+  // a lease while ignoring the canonical journal.
+  if (recovery && entrySet.has("checkpoint.json")) {
+    if (readRecord(join(lockDir, "checkpoint.json")).hash !== recovery.hash) throw unexpectedEntries(lockDir);
+    consumed.add("checkpoint.json");
+  }
+  const externalEntries = recovery ? readdirSync(root).filter((name) => NEXT_MARKER.test(name)).sort() : [];
+  const externalSet = new Set(externalEntries);
+  const externalConsumed = new Set<string>();
+  const canonicalRecords = recovery ? [{ name: RECOVERY_MARKER, hash: recovery.hash }] : [];
   const seenLeaseIds = new Set<string>();
   for (;;) {
     if (seenLeaseIds.has(current.record.leaseId)) throw unexpectedEntries(lockDir);
     seenLeaseIds.add(current.record.leaseId);
     const nextMarker = `next-${current.record.leaseId}.json`;
-    if (!entrySet.has(nextMarker)) break;
-    const next = readRecord(join(lockDir, nextMarker));
-    if (next.record.version !== 2 || next.record.previousLeaseId !== current.record.leaseId ||
-        next.record.previousRecordHash !== current.hash) {
-      throw unexpectedEntries(lockDir);
+    if (!(recovery ? externalSet : entrySet).has(nextMarker)) break;
+    const next = readRecord(join(recovery ? root : lockDir, nextMarker));
+    if (recovery) {
+      externalConsumed.add(nextMarker);
+      canonicalRecords.push({ name: nextMarker, hash: next.hash });
+      if (entrySet.has(nextMarker) && readRecord(join(lockDir, nextMarker)).hash !== next.hash) throw unexpectedEntries(lockDir);
     }
     // Only two transitions are ever published, and both constrain the successor: reclaim appends
     // an active record over an unreleased (v1 or active-v2) predecessor after proving the same
@@ -192,25 +258,20 @@ function readChain(lockDir: string): LeaseChain {
     // other link is fabricated or corrupted state; trusting it would let a "released" tip skip
     // every hostname/owner/liveness check. Only an authentic handoff (an active successor over a
     // released record) may change identity.
-    if (next.record.state === "released" &&
-        (current.record.version !== 2 || current.record.state !== "active" ||
-          next.record.ownerHash !== current.record.ownerHash ||
-          next.record.hostname !== current.record.hostname ||
-          next.record.pid !== current.record.pid ||
-          next.record.provider !== current.record.provider)) {
-      throw unexpectedEntries(lockDir);
-    }
-    if (next.record.state === "active" &&
-        (current.record.version === 1 || current.record.state === "active") &&
-        (next.record.ownerHash !== current.record.ownerHash ||
-          next.record.hostname !== current.record.hostname)) {
-      throw unexpectedEntries(lockDir);
-    }
-    consumed.add(nextMarker);
+    validateTransition(current, next, lockDir);
+    if (entrySet.has(nextMarker)) consumed.add(nextMarker);
     current = next;
   }
-  if (consumed.size !== entries.length) throw unexpectedEntries(lockDir);
-  return { entries, tip: current };
+  const retained = entries.filter((entry) => !consumed.has(entry))
+    .map((name) => ({ name, hash: readRecord(join(lockDir, name)).hash }));
+  if (recovery) {
+    if (externalConsumed.size !== externalEntries.length) throw unexpectedEntries(lockDir);
+    if (recordsHash(retained) !== (recovery.record as ProviderHomeLeaseRecordV2).recoveredEntriesHash) throw unexpectedEntries(lockDir);
+  } else if (retained.length) throw unexpectedEntries(lockDir);
+  return { entries, tip: current, snapshotHash: recordsHash([
+    ...entries.map((name) => ({ name, hash: readRecord(join(lockDir, name)).hash })),
+    ...canonicalRecords,
+  ]), external: recovery !== undefined };
 }
 
 function sameTip(left: ReadLeaseRecord, right: ReadLeaseRecord): boolean {
@@ -252,6 +313,7 @@ export class ProviderHomeLeaseRegistry {
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly beforeMarkerWriteForTest?: () => void;
   private readonly beforeTransitionPublishForTest?: () => void;
+  private readonly afterInitializationPublishForTest?: () => void;
 
   constructor(private readonly ownerHash: string, options: ProviderHomeLeaseOptions = {}) {
     if (!OWNER_HASH.test(ownerHash)) throw new Error("provider-home lease requires an attested owner hash");
@@ -260,6 +322,7 @@ export class ProviderHomeLeaseRegistry {
     this.isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
     this.beforeMarkerWriteForTest = options.beforeMarkerWriteForTest;
     this.beforeTransitionPublishForTest = options.beforeTransitionPublishForTest;
+    this.afterInitializationPublishForTest = options.afterInitializationPublishForTest;
   }
 
   acquire(request: ProviderHomeLeaseRequest): void {
@@ -307,22 +370,52 @@ export class ProviderHomeLeaseRegistry {
     }
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const record = this.activeRecord(provider, null, null);
-    try {
-      mkdirSync(lockDir, { mode: 0o700 });
+    let exists = true;
+    try { lstatSync(lockDir); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      exists = false;
+    }
+    if (!exists) {
+      // Publish the exclusive ownership proof BEFORE creating the directory. A crash at either
+      // subsequent instruction leaves a same-host/owner/dead-PID proof, never an unowned empty lock.
+      record.recoveredEntriesHash = recordsHash([]);
+      let initialized = false;
       try {
         this.beforeMarkerWriteForTest?.();
-        publishRecord(root, join(lockDir, `lease-${record.leaseId}.json`), record);
+        publishRecord(root, join(root, RECOVERY_MARKER), record);
+        initialized = true;
       } catch (error) {
-        try {
-          rmdirSync(lockDir);
-        } catch {
-          // Unexpected concurrent entries remain fail-closed and available for inspection.
-        }
-        throw error;
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (initialized) {
+        this.afterInitializationPublishForTest?.();
+        // Exclusive mkdir detects a competing legacy initializer instead of attributing its
+        // directory to our proof. Keep the proof and refuse; no ownership evidence is removed.
+        mkdirSync(lockDir, { mode: 0o700 });
+        linkSync(join(root, RECOVERY_MARKER), join(lockDir, "checkpoint.json"));
+        linkSync(join(root, RECOVERY_MARKER), join(lockDir, `lease-${record.leaseId}.json`));
+      } else {
+        // The winning initializer may have died before mkdir. Only its verified proof may
+        // authorize recreating that directory; never mkdir on a foreign or live reservation.
+        let initialization: LeaseChain;
+        try { initialization = readChain(lockDir); } catch (error) { throw verificationRefusal(lockDir, error); }
+        if (initialization.tip.record.version !== 2 || initialization.tip.record.state !== "released") {
+          this.assertAbandoned(initialization.tip.record, lockDir);
+        }
+        try { mkdirSync(lockDir, { mode: 0o700 }); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+        delete record.recoveredEntriesHash;
+        this.transitionExistingLease(root, lockDir, record);
+      }
+    } else {
       this.transitionExistingLease(root, lockDir, record);
+    }
+    // This fixed incompatible marker prevents a rollback binary from ignoring the external
+    // journal even when crash recovery recreated an empty directory.
+    if (readChain(lockDir).external) {
+      this.mirrorRecord(root, lockDir, RECOVERY_MARKER, "checkpoint.json", true);
+      readChain(lockDir);
     }
     this.held.set(key, { leaseId: record.leaseId, lockDir, root, references: 1 });
     return true;
@@ -348,33 +441,37 @@ export class ProviderHomeLeaseRegistry {
   }
 
   private transitionExistingLease(root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {
-    const existing = readChain(lockDir).tip;
+    let chain: LeaseChain;
+    try {
+      chain = readChain(lockDir);
+    } catch (error) {
+      // A published recovery checkpoint is authoritative. Corruption in it or its retained
+      // evidence must never trigger another recovery that could erase an ownership boundary.
+      try { lstatSync(join(root, RECOVERY_MARKER)); } catch (markerError) {
+        if ((markerError as NodeJS.ErrnoException).code === "ENOENT") {
+          this.recoverPartialJournal(root, lockDir, replacement);
+          return;
+        }
+      }
+      throw verificationRefusal(lockDir, error);
+    }
+    const existing = chain.tip;
     if (existing.record.version === 2 && existing.record.state === "released") {
       // An orderly release is an explicit handoff and may pass the HOME to a different owner.
     } else {
-      if (existing.record.hostname !== this.hostname) {
-        throw new Error(`provider home is leased by host ${existing.record.hostname}; use an isolated OS account`);
-      }
-      if (this.isProcessAlive(existing.record.pid)) {
-        throw new Error(
-          `provider home is already in use by process ${existing.record.pid}; use bwrap or an isolated OS account`,
-        );
-      }
-      if (existing.record.ownerHash !== this.ownerHash) {
-        throw new Error(
-          "provider home has a stale lease from another attested owner; after proving no provider process uses this HOME, manually quarantine the stale lease directory and retry",
-        );
-      }
+      this.assertAbandoned(existing.record, lockDir);
     }
 
     this.beforeTransitionPublishForTest?.();
-    const confirmed = readChain(lockDir).tip;
-    if (!sameTip(existing, confirmed)) {
+    const confirmedChain = readChain(lockDir);
+    const confirmed = confirmedChain.tip;
+    if (!sameTip(existing, confirmed) || chain.snapshotHash !== confirmedChain.snapshotHash) {
       throw new Error("provider home lease changed during recovery; retry");
     }
     replacement.previousLeaseId = confirmed.record.leaseId;
     replacement.previousRecordHash = confirmed.hash;
-    const target = join(lockDir, `next-${confirmed.record.leaseId}.json`);
+    const name = `next-${confirmed.record.leaseId}.json`;
+    const target = join(chain.external ? root : lockDir, name);
     try {
       publishRecord(root, target, replacement);
     } catch (error) {
@@ -383,10 +480,86 @@ export class ProviderHomeLeaseRegistry {
       }
       throw error;
     }
+    if (chain.external) this.mirrorRecord(root, lockDir, name);
     const published = readChain(lockDir).tip;
     if (published.record.version !== 2 || published.record.state !== "active" ||
         published.record.leaseId !== replacement.leaseId) {
       throw new Error("provider home lease changed during recovery; retry");
+    }
+  }
+
+  private assertAbandoned(record: ProviderHomeLeaseRecord, lockDir: string): void {
+    if (record.hostname !== this.hostname) throw refusal(lockDir, `is leased by host ${record.hostname}; use an isolated OS account`);
+    if (this.isProcessAlive(record.pid)) throw refusal(lockDir, `is already in use by process ${record.pid}; use bwrap or an isolated OS account`);
+    if (record.ownerHash !== this.ownerHash) throw refusal(lockDir, "has a stale lease from another attested owner");
+  }
+
+  private recoverPartialJournal(root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {
+    const snapshot = () => {
+      const stat = lstatSync(lockDir);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw unexpectedEntries(lockDir);
+      const entries = readdirSync(lockDir).sort();
+      if (!entries.length) throw refusal(lockDir, "is incomplete and has no ownership proof");
+      const byId = new Map<string, ReadLeaseRecord>();
+      const records = entries.map((name) => {
+        const value = readRecord(join(lockDir, name));
+        const record = value.record;
+        const genesis = GENESIS_MARKER.exec(name);
+        const next = NEXT_MARKER.exec(name);
+        const valid = name === LEGACY_MARKER ? record.version === 1 :
+          genesis ? record.version === 2 && record.state === "active" && genesis[1] === record.leaseId &&
+            record.previousLeaseId === null && record.previousRecordHash === null :
+          next ? record.version === 2 && next[1] === record.previousLeaseId &&
+            typeof record.previousRecordHash === "string" : false;
+        if (!valid || byId.has(record.leaseId) || (record.version === 2 && record.recoveredEntriesHash !== undefined)) throw unexpectedEntries(lockDir);
+        this.assertAbandoned(record, lockDir);
+        byId.set(record.leaseId, value);
+        return { name, ...value };
+      });
+      for (const value of records) {
+        const record = value.record;
+        if (record.version !== 2 || record.previousLeaseId === null) continue;
+        const previous = byId.get(record.previousLeaseId);
+        if (previous) validateTransition(previous, value, lockDir);
+        const seen = new Set([record.leaseId]);
+        let ancestor = previous;
+        while (ancestor) {
+          if (seen.has(ancestor.record.leaseId)) throw unexpectedEntries(lockDir);
+          seen.add(ancestor.record.leaseId);
+          ancestor = ancestor.record.version === 2 && ancestor.record.previousLeaseId
+            ? byId.get(ancestor.record.previousLeaseId) : undefined;
+        }
+      }
+      return recordsHash(records);
+    };
+    let hash: string;
+    try { hash = snapshot(); } catch (error) {
+      throw verificationRefusal(lockDir, error);
+    }
+    this.beforeTransitionPublishForTest?.();
+    try {
+      if (snapshot() !== hash) throw new Error("changed snapshot");
+    } catch {
+      throw new Error("provider home lease changed during recovery; retry");
+    }
+    replacement.recoveredEntriesHash = hash;
+    try { publishRecord(root, join(root, RECOVERY_MARKER), replacement); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("provider home lease changed during recovery; retry");
+      throw error;
+    }
+    this.mirrorRecord(root, lockDir, RECOVERY_MARKER, "checkpoint.json");
+    const published = readChain(lockDir).tip;
+    if (!sameTip(published, { record: replacement, hash: readRecord(join(root, RECOVERY_MARKER)).hash })) {
+      throw new Error("provider home lease changed during recovery; retry");
+    }
+  }
+
+  private mirrorRecord(root: string, lockDir: string, name: string, mirror = name, required = false): void {
+    try { linkSync(join(root, name), join(lockDir, mirror)); } catch (error) {
+      if (required && ((error as NodeJS.ErrnoException).code !== "EEXIST" ||
+          readRecord(join(root, name)).hash !== readRecord(join(lockDir, mirror)).hash)) throw error;
+      // The immutable external journal is authoritative. A missing mirror is recoverable;
+      // conflicting or changed mirror bytes are detected by readChain and remain fail-closed.
     }
   }
 
@@ -416,7 +589,8 @@ export class ProviderHomeLeaseRegistry {
 
   private releaseHeld({ leaseId, lockDir, root }: { leaseId: string; lockDir: string; root: string }): boolean {
     try {
-      const current = readChain(lockDir).tip;
+      const chain = readChain(lockDir);
+      const current = chain.tip;
       if (current.record.version !== 2 || current.record.state !== "active" ||
           current.record.leaseId !== leaseId) return false;
       const released: ProviderHomeLeaseRecordV2 = {
@@ -427,7 +601,9 @@ export class ProviderHomeLeaseRegistry {
         previousRecordHash: current.hash,
         createdAt: new Date().toISOString(),
       };
-      publishRecord(root, join(lockDir, `next-${current.record.leaseId}.json`), released);
+      const name = `next-${current.record.leaseId}.json`;
+      publishRecord(root, join(chain.external ? root : lockDir, name), released);
+      if (chain.external) this.mirrorRecord(root, lockDir, name);
       return true;
     } catch {
       // Never remove or supersede unreadable or replacement ownership evidence.

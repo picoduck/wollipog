@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import type { SkillFile } from "@wollipog/protocol";
@@ -285,6 +285,97 @@ test("the fixed WSL helper refuses a live provider-home owner", async (t) => {
   assert.notEqual(mutating.status, 0);
   assert.match(mutating.stdout, /already in use/u);
   registry.releaseAll();
+});
+
+test("native and WSL helper leases hand off through one retained external canonical journal", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-native-handoff-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(store);
+  const native = new ProviderHomeLeaseRegistry(owner);
+  native.acquireHome(home);
+  native.releaseAll();
+  const leaseRoot = join(home, ".agent-manager/provider-home-leases-v1");
+  const proof = readFileSync(join(leaseRoot, "mutable-home.recovery.json"));
+  const spec = { ownerHash: "b".repeat(64), distro: "Ubuntu", storeRoot: resolve(store), bindings: [],
+    skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true };
+  const helper = await invoke(home, spec);
+  assert.equal(helper.status, 0, helper.stderr || helper.stdout);
+  const successors = readdirSync(leaseRoot).filter((name) => name.startsWith("next-"));
+  assert.equal(successors.length, 3, "native release, helper acquire, and helper release share the canonical chain");
+  assert.deepEqual(readFileSync(join(leaseRoot, "mutable-home.recovery.json")), proof);
+  assert.equal(native.acquireHome(home), true, "the helper's explicit release hands back to native");
+  native.releaseAll();
+  // Exercise the helper past its legacy compaction threshold; external proof is never exchanged.
+  for (let pass = 0; pass < 9; pass++) {
+    const result = await invoke(home, spec);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  }
+  assert.deepEqual(compactionSiblings(home), []);
+  assert.deepEqual(readFileSync(join(leaseRoot, "mutable-home.recovery.json")), proof);
+  assert.equal(native.acquireHome(home), true);
+  native.releaseAll();
+});
+
+test("the helper refuses foreign, malformed, symlinked, or changed external lease proof", async (t) => {
+  for (const scenario of ["owner", "host", "malformed", "symlink", "retained"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `wollipog-wsl-external-${scenario}-`));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const store = join(root, "store");
+    const leaseRoot = join(home, ".agent-manager/provider-home-leases-v1");
+    const lock = join(leaseRoot, "mutable-home.lock");
+    mkdirSync(store);
+    if (scenario === "retained") {
+      mkdirSync(lock, { recursive: true });
+      writeFileSync(join(lock, "next-11111111-1111-4111-8111-111111111111.json"), JSON.stringify({
+        version: 2, state: "active", ownerHash: owner, leaseId: "22222222-2222-4222-8222-222222222222",
+        previousLeaseId: "11111111-1111-4111-8111-111111111111", previousRecordHash: "c".repeat(64),
+        pid: 2_147_483_647, hostname: hostname(), provider: "skills", createdAt: "2026-08-19T00:00:00.000Z",
+      }));
+    }
+    const registry = new ProviderHomeLeaseRegistry(owner, { pid: 2_147_483_647,
+      ...(scenario === "host" ? { hostname: "other-host" } : {}) });
+    registry.acquireHome(home);
+    const proof = join(leaseRoot, "mutable-home.recovery.json");
+    if (scenario === "malformed") writeFileSync(proof, "{}\n");
+    if (scenario === "symlink") {
+      renameSync(proof, join(root, "external-proof"));
+      symlinkSync(join(root, "external-proof"), proof);
+    }
+    if (scenario === "retained") {
+      registry.releaseAll();
+      const path = join(lock, "next-11111111-1111-4111-8111-111111111111.json");
+      writeFileSync(path, `${readFileSync(path, "utf8")} `);
+    }
+    const before = readdirSync(leaseRoot).sort();
+    const result = await invoke(home, { ownerHash: scenario === "owner" ? "b".repeat(64) : owner,
+      distro: "Ubuntu", storeRoot: resolve(store), bindings: [],
+      skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true });
+    assert.notEqual(result.status, 0, scenario);
+    assert.deepEqual(readdirSync(leaseRoot).sort(), before, "refusal retains every ownership record");
+  }
+});
+
+test("a missing mirror directory cannot hide a live native successor from the helper", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-missing-mirrors-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(store);
+  const initial = new ProviderHomeLeaseRegistry(owner, { pid: 2_147_483_647 });
+  initial.acquireHome(home);
+  const live = new ProviderHomeLeaseRegistry(owner);
+  live.acquireHome(home);
+  const lock = join(home, ".agent-manager/provider-home-leases-v1/mutable-home.lock");
+  rmSync(lock, { recursive: true });
+  const result = await invoke(home, { ownerHash: owner, distro: "Ubuntu", storeRoot: resolve(store),
+    bindings: [], skills: [{ name: "review", versionDigest: firstDigest, targets: [] }], allowRemovals: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /already in use/u);
+  assert.equal(existsSync(lock), false, "live-owner refusal does not recreate the directory");
+  live.releaseAll();
 });
 
 test("the fixed WSL helper prunes stale ownership instead of granting future removal authority", async (t) => {

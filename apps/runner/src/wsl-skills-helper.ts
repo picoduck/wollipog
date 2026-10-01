@@ -78,13 +78,13 @@ def lease_value(owner, state, previous=None):
 def lease_bytes(value):
     return json.dumps(value, separators=(",", ":")).encode() + b"\n"
 
-def read_lease_record(lock, name):
+def read_lease_record(lock, name, max_links=2):
     marker = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=lock)
     try:
         info = os.fstat(marker)
         # Native publication briefly gives the immutable record a second hard link while the
         # destination is made durable. More links would permit an unexpected mutable alias.
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink not in (1, 2) or info.st_size > 4096: fail("provider home lease is unsafe")
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink < 1 or info.st_nlink > max_links or info.st_size > 4096: fail("provider home lease is unsafe")
         raw = os.read(marker, info.st_size + 1)
         value = json.loads(raw.decode("utf-8"))
     finally: os.close(marker)
@@ -139,6 +139,64 @@ def read_lease_chain(lock, include_records=False):
         value, record_hash = successor, successor_hash
     if len(consumed) != len(entries): fail("provider home lease is incomplete or foreign")
     return (value, record_hash, records) if include_records else (value, record_hash)
+
+def external_lease(root):
+    try: os.stat("mutable-home.recovery.json", dir_fd=root, follow_symlinks=False); return True
+    except FileNotFoundError: return False
+
+def read_owned_lease_chain(root, lock):
+    if not external_lease(root): return read_lease_chain(lock)
+    # Native initialization has three known links: canonical proof, checkpoint, and genesis
+    # mirror. Other records retain the two-link bound. All reads remain descriptor-relative and
+    # no-follow; a missing mirror never overrides the canonical owner's PID.
+    value, record_hash = read_lease_record(root, "mutable-home.recovery.json", 3)
+    retained_hash = value.get("recoveredEntriesHash")
+    if (value.get("version") != 2 or value.get("state") != "active" or
+        value.get("previousLeaseId") is not None or value.get("previousRecordHash") is not None or
+        not isinstance(retained_hash, str) or not DIGEST.fullmatch(retained_hash)):
+        fail("provider home lease is incomplete or foreign")
+    entries = sorted(os.listdir(lock)) if lock is not None else []
+    consumed = set()
+    for name in ("checkpoint.json", "lease-%s.json" % value["leaseId"]):
+        if name in entries:
+            _, mirror_hash = read_lease_record(lock, name, 3)
+            if mirror_hash != record_hash: fail("provider home lease is incomplete or foreign")
+            consumed.add(name)
+    external_entries = {name for name in os.listdir(root) if re.fullmatch(r"next-([0-9a-f-]+)\.json", name)}
+    external_consumed, seen = set(), set()
+    while True:
+        if value["leaseId"] in seen: fail("provider home lease is incomplete or foreign")
+        seen.add(value["leaseId"])
+        name = "next-%s.json" % value["leaseId"]
+        if name not in external_entries: break
+        successor, successor_hash = read_lease_record(root, name)
+        if (successor.get("version") != 2 or successor.get("previousLeaseId") != value["leaseId"] or
+            successor.get("previousRecordHash") != record_hash): fail("provider home lease is incomplete or foreign")
+        if successor["state"] == "released" and (value.get("state") != "active" or
+            any(successor[key] != value[key] for key in ("ownerHash", "hostname", "pid", "provider"))):
+            fail("provider home lease is incomplete or foreign")
+        if successor["state"] == "active" and value.get("state") == "active" and (
+            successor["ownerHash"] != value["ownerHash"] or successor["hostname"] != value["hostname"]):
+            fail("provider home lease is incomplete or foreign")
+        if name in entries:
+            _, mirror_hash = read_lease_record(lock, name)
+            if mirror_hash != successor_hash: fail("provider home lease is incomplete or foreign")
+            consumed.add(name)
+        external_consumed.add(name)
+        value, record_hash = successor, successor_hash
+    retained = [{"name": name, "hash": read_lease_record(lock, name)[1]} for name in entries if name not in consumed]
+    digest = hashlib.sha256(json.dumps(retained, separators=(",", ":")).encode()).hexdigest()
+    if external_consumed != external_entries or digest != retained_hash: fail("provider home lease is incomplete or foreign")
+    return value, record_hash
+
+def mirror_external_lease(root, lock, name, mirror=None, required=False):
+    mirror = mirror or name
+    try: os.link(name, mirror, src_dir_fd=root, dst_dir_fd=lock, follow_symlinks=False)
+    except FileExistsError:
+        if required and read_lease_record(root, name, 3)[1] != read_lease_record(lock, mirror, 3)[1]:
+            fail("provider home lease is incomplete or foreign")
+    except OSError:
+        if required: raise
 
 def write_all(fd, value):
     sent = 0
@@ -363,6 +421,36 @@ def cleanup_compactions(root, lock):
 def acquire_lease(home_fd, owner):
     root = walk_dir(home_fd, ".agent-manager/provider-home-leases-v1", True)
     try:
+        if external_lease(root):
+            lock = None
+            try:
+                try: lock = child_dir(root, "mutable-home.lock")
+                except FileNotFoundError: pass
+                existing, existing_hash = read_owned_lease_chain(root, lock)
+                if existing.get("state") != "released":
+                    if existing["hostname"] != os.uname().nodename: fail("provider home is leased by another host")
+                    if process_alive(existing["pid"]): fail("provider home is already in use")
+                    if existing["ownerHash"] != owner: fail("provider home is leased by another runner owner")
+                if lock is None:
+                    try: os.mkdir("mutable-home.lock", 0o700, dir_fd=root)
+                    except FileExistsError: pass
+                    lock = child_dir(root, "mutable-home.lock")
+                confirmed, confirmed_hash = read_owned_lease_chain(root, lock)
+                if confirmed["leaseId"] != existing["leaseId"] or confirmed_hash != existing_hash:
+                    fail("provider home lease changed during recovery")
+                value = lease_value(owner, "active", (confirmed["leaseId"], confirmed_hash))
+                name = "next-%s.json" % confirmed["leaseId"]
+                try: publish_lease(root, root, name, value)
+                except FileExistsError: fail("provider home lease changed during recovery")
+                mirror_external_lease(root, lock, name)
+                mirror_external_lease(root, lock, "mutable-home.recovery.json", "checkpoint.json", True)
+                published, _ = read_owned_lease_chain(root, lock)
+                if published.get("state") != "active" or published["leaseId"] != value["leaseId"]:
+                    fail("provider home lease changed during recovery")
+                return root, lock, value["leaseId"]
+            except:
+                if lock is not None: os.close(lock)
+                raise
         try:
             os.mkdir("mutable-home.lock", 0o700, dir_fd=root)
             lock = child_dir(root, "mutable-home.lock")
@@ -450,16 +538,20 @@ def compact_lease(root, lock, current, current_hash):
 def release_lease(lease):
     root, lock, lease_id = lease
     try:
-        current, current_hash = read_lease_chain(lock)
+        current, current_hash = read_owned_lease_chain(root, lock)
         if current.get("version") != 2 or current.get("state") != "active" or current["leaseId"] != lease_id:
             fail("provider home lease changed before release")
-        lock = compact_lease(root, lock, current, current_hash)
-        current, current_hash = read_lease_chain(lock)
+        canonical = external_lease(root)
+        # Directory exchange cannot compact a journal whose authoritative chain lives outside it.
+        if not canonical: lock = compact_lease(root, lock, current, current_hash)
+        current, current_hash = read_owned_lease_chain(root, lock)
         released = dict(current)
         released.update({"state": "released", "leaseId": str(uuid.uuid4()), "previousLeaseId": current["leaseId"],
             "previousRecordHash": current_hash, "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat()})
-        try: publish_lease(root, lock, "next-%s.json" % current["leaseId"], released)
+        name = "next-%s.json" % current["leaseId"]
+        try: publish_lease(root, root if canonical else lock, name, released)
         except FileExistsError: fail("provider home lease changed before release")
+        if canonical: mirror_external_lease(root, lock, name)
     finally:
         os.close(lock); os.close(root)
 
