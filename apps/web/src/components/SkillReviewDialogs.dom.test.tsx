@@ -129,6 +129,7 @@ test("the edited-copy review: facts, the pin notice, Changes From v3 and Import 
   assertNoDomNode(dialog().querySelector(".skill-diff"));
   assert.equal(facts()["Result"], "Loading", "a fact still being read is a skeleton");
   assert.equal(buttonNamed("Restore Library Version…")?.disabled, true, "the alternative waits for the read like Cancel");
+  assert.equal(footer().querySelector<HTMLButtonElement>(".btn.primary")?.disabled, true, "nothing is imported before it is read");
 
   await act(async () => { resolve(driftPreview({ pinned: true })); });
   await settle();
@@ -376,6 +377,8 @@ test("the reviews read the version list only after the preview, so its names nev
     copy={{ kind: "kept_aside", id: "copy-1", name: "code-review", observedDigest, observedFingerprint: "c".repeat(64), skillId: "skill-1" }}
     onClose={() => undefined} onImported={async () => undefined} />);
   assert.deepEqual(orphanReads, []);
+  assert.equal(dialog().querySelector(".skill-review-loading")?.textContent, "Reading the copy…");
+  assert.equal(footer().querySelector<HTMLButtonElement>(".btn.primary")?.disabled, true, "nothing is imported before it is read");
   await act(async () => { resolveOrphan(); });
   await settle();
   assert.deepEqual(orphanReads, ["versions"]);
@@ -395,6 +398,7 @@ test("the built-in review is titled for what the skill offers before the review 
     <SkillBuiltInReviewDialog skillId="skill-1" skillName="code-review" kind="adopt" onClose={() => undefined} onAccepted={async () => undefined} />);
   assert.equal(dialog().querySelector(".modal-title")?.textContent, "Review Built-In Version");
   assert.equal(dialog().querySelector(".skill-review-loading")?.textContent, "Reading the built-in version…");
+  assert.equal(buttonNamed("Accept Built-In Version")?.disabled, true, "nothing is accepted before it is read");
   assert.deepEqual(facts(), { "Release": "Loading", "Library Version": "Loading", "Result": "Loading" });
   await unmount();
 });

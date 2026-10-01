@@ -216,6 +216,7 @@ test("while the edited copy is read, the review keeps the diff's place with a sk
   await expect(loading).toHaveAttribute("role", "status");
   expect(await loading.evaluate((block) => (block as HTMLElement).offsetHeight)).toBe(240);
   await expect(dialog.getByRole("button", { name: "Restore Library Version…" })).toBeDisabled();
+  await expect(dialog.locator(".modal-foot .btn.primary")).toBeDisabled();
   await page.screenshot({ path: info.outputPath("drift-review-loading-1440.png") });
   release();
   await expect(dialog.locator(".skill-diff-file")).toHaveCount(1);
