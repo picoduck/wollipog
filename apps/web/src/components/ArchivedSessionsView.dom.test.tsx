@@ -694,6 +694,21 @@ test("Stop Session counts only queued messages still waiting, not settled delive
   await fixture.unmount();
 });
 
+test("Stop Session counts the live queue the session header counts, even when the archive row has none (#2278)", async () => {
+  // A steer converted to a queued prompt exists only in the runner's queue: the REST row has no
+  // `queued`, and the live upsert that carries it keeps the same updatedAt, so the row is not replaced.
+  const row = session(9, { title: "Runner Queue", status: "running", updatedAt: 50 });
+  const fixture = await mount([row]);
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: { ...row, queued: [{ id: "steer-converted", text: "Converted steer" }] } });
+    await Promise.resolve();
+  });
+
+  const body = await confirmationBody(fixture.container, "Stop");
+  assert.equal(body, "“Runner Queue” stops now and its 1 queued message is discarded. It stays in Archived Sessions with its transcript.");
+  await fixture.unmount();
+});
+
 test("paged search failures expose a retryable load error", async () => {
   const archived = session(3, { title: "Metadata Match" });
   const fixture = await mount([archived], {

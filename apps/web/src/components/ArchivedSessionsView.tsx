@@ -412,9 +412,12 @@ export function ArchivedSessionsView() {
   };
 
   const stop = async (session: SessionView) => {
+    // The live copy carries the runner's queue, which the archive page's REST rows can lack (a steer
+    // converted to a queued prompt exists only on the runner), and it is what the session header counts.
+    const queued = (liveSessionsRef.current.get(session.id) ?? session).queued;
     const approved = await confirm({
       title: "Stop Session",
-      message: stopArchivedSessionMessage(session.title, pendingQueuedPromptCount(session.queued)),
+      message: stopArchivedSessionMessage(session.title, pendingQueuedPromptCount(queued)),
       confirmLabel: "Stop Session",
       tone: "danger",
     });
