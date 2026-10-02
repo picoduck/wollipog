@@ -717,12 +717,12 @@ test("pending migration still withholds HOME after checkpoint selection until ex
  * fixed-helper call. On a disk shared with other builds that fsync latency, not lease behavior,
  * decided whether the call fit its 120-second deadline (#2335). tmpfs keeps every lease rule and
  * makes the fsyncs free; the fallback stays correct, only slower. The fixtures peak near 45 MB
- * (both refusal journals stay until the test ends, one 4 KiB page per record), so a small
- * container /dev/shm falls back rather than failing with ENOSPC. */
+ * and 8,200 inodes (both refusal journals stay until the test ends, one 4 KiB page per record),
+ * so a small container /dev/shm falls back rather than failing with ENOSPC. */
 function memoryBackedParent(): string {
   try {
     const volume = fs.statfsSync("/dev/shm", { bigint: true });
-    if (volume.type === 0x01021994n && volume.bavail * volume.bsize >= 128n * 1024n * 1024n) {
+    if (volume.type === 0x01021994n && volume.bavail * volume.bsize >= 128n * 1024n * 1024n && volume.ffree >= 32_768n) {
       fs.accessSync("/dev/shm", fs.constants.W_OK | fs.constants.X_OK); return "/dev/shm";
     }
   } catch { /* fall back to the ordinary temporary directory */ }
