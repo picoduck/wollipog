@@ -1104,7 +1104,7 @@ export function validateSkillFiles(input: { name?: string; files: SkillFile[] })
   } else if (input.name !== undefined) {
     const frontmatterName = skillFileFrontmatter(skillMd).name;
     if (frontmatterName === undefined) {
-      errors.push(`SKILL.md needs a frontmatter name: a "name: ${input.name}" line between two "---" lines at its top.`);
+      errors.push(`SKILL.md has no frontmatter name. Put "name: ${input.name}" between two "---" lines at its top.`);
     } else if (frontmatterName !== input.name) {
       errors.push(`The SKILL.md frontmatter name "${frontmatterName}" must match the skill name "${input.name}".`);
     }

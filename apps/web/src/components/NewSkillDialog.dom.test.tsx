@@ -246,7 +246,7 @@ async function pickFolder(dialog: HTMLElement, files: Record<string, string>) {
 }
 
 test("an uploaded SKILL.md's name is read as the library reads it: no name or an unterminated block is reported before Create sends (#2377)", async () => {
-  const needsName = 'SKILL.md needs a frontmatter name: a "name: my-skill" line between two "---" lines at its top.';
+  const needsName = 'SKILL.md has no frontmatter name. Put "name: my-skill" between two "---" lines at its top.';
   for (const [label, skillMd] of [
     ["an unterminated frontmatter block", "---\nname: my-skill\nReview."],
     ["a frontmatter block without a name", "---\ndescription: Reviews.\n---\nReview."],

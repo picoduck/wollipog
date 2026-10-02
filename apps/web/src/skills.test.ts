@@ -628,7 +628,7 @@ test("draft validation mirrors the protocol validators and limits", () => {
     .some((error) => error.includes("must match the skill name")));
   // A SKILL.md the library reads no name from is reported, not skipped (#2377).
   const noName = (content: string): SkillFile => ({ path: "SKILL.md", content, encoding: "utf8" });
-  const needsName = 'SKILL.md needs a frontmatter name: a "name: code-review" line between two "---" lines at its top.';
+  const needsName = 'SKILL.md has no frontmatter name. Put "name: code-review" between two "---" lines at its top.';
   assert.deepEqual(validateSkillFiles({ name: "code-review", files: [noName("---\ndescription: x\n---\n")] }), [needsName]);
   assert.deepEqual(validateSkillFiles({ name: "code-review", files: [noName("---\nname: code-review\n")] }), [needsName]);
   assert.deepEqual(validateSkillFiles({ name: "code-review", files: [noName("# no frontmatter")] }), [needsName]);
