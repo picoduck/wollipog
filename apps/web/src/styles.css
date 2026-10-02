@@ -5667,12 +5667,16 @@ textarea {
   align-items: flex-start;
   gap: var(--space-1);
 }
-.new-workspace-folder {
+/* A folder field (New Workspace, New Session): the read-only mono path or the workspace picker,
+   with Browse… beside it stacking Choose Folder. */
+.folder-field-row {
   display: flex;
   gap: var(--space-2);
 }
-.new-workspace-folder > .btn { flex: none; }
-.new-workspace-folder-path { font-family: var(--font-mono); }
+.folder-field-row > .btn { flex: none; }
+.folder-field-path { font-family: var(--font-mono); }
+/* New Session's way back from a browsed folder to the workspace picker, under the field. */
+.new-session-use-workspace { align-self: flex-start; }
 .cctx-dot {
   width: 7px;
   height: 7px;
@@ -9766,40 +9770,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .field [aria-invalid="true"]:hover,
 .composer-answer-input[aria-invalid="true"] {
   border-color: var(--red);
-}
-/* Workspace: dropdown + Browse, or the chosen ad-hoc directory */
-.ws-select {
-  display: flex;
-  gap: 6px;
-}
-.ws-select select {
-  flex: 1;
-  min-width: 0;
-}
-.ws-select .btn {
-  flex: none;
-  white-space: nowrap;
-}
-.ws-chosen {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  padding: 6px 6px 6px 10px;
-}
-/* The chosen-directory chip's path. Distinct from the runner-card .ws-path — this block used
-   to shadow that one (same class, later in the file), accidentally tinting runner-card paths teal. */
-.ws-chosen-path {
-  flex: 1;
-  min-width: 0;
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
-  font-size: 12px;
-  color: var(--teal);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 /* Read-only pick shown when a field has exactly one possible value (e.g. one online runner). */
 .static-pick {

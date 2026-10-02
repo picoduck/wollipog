@@ -171,6 +171,11 @@ async function mountFixture(
     ...api,
     agentHarnessDefaults: defaults,
     orchestratorSettings: orchestratorDefaults,
+    listDirectory: async (_runnerId: string, path: string) => ({
+      path: path || "/repos",
+      parent: "/",
+      entries: [{ name: "scratch", path: "/repos/scratch", isDir: true }],
+    }),
     createSession: async (request: CreateSessionRequest) => {
       requests.push(structuredClone(request));
       if (createError) throw typeof createError === "string" ? new Error(createError) : createError;
@@ -1250,6 +1255,123 @@ test("Projects mode requires an explicit Project choice and No Project sends exa
       workspacePath: undefined,
       acpSessionContext: undefined,
     });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+function dialogTitled(container: HTMLDivElement, title: string): HTMLElement | undefined {
+  return [...container.querySelectorAll<HTMLElement>('[role="dialog"]')]
+    .find((candidate) => candidate.querySelector(".modal-title")?.textContent === title);
+}
+
+function buttonIn(scope: ParentNode, label: string): HTMLButtonElement | undefined {
+  return [...scope.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent?.trim() === label);
+}
+
+/** One click and the Modal's focus restore, which runs on a zero-delay timer after it unmounts. */
+async function pressAndSettle(button: HTMLButtonElement | undefined): Promise<void> {
+  assert.ok(button, "button exists");
+  await act(async () => {
+    fireDomEvent.click(button);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+}
+
+test("Browse… stacks Choose Folder, fills a read-only Folder field, and Use a Workspace goes back (#2271)", async () => {
+  const fixture = await mountFixture();
+  try {
+    await act(async () => { await selectProject(fixture.container, NO_PROJECT_SELECTION); });
+    const form = fixture.container.querySelector("form.form")!;
+    assert.ok(form.querySelector('[aria-label^="Workspace:"]'), "the workspace picker shows first");
+    const browse = buttonIn(form, "Browse…");
+    assert.ok(browse && !browse.disabled);
+    assert.equal(browse.getAttribute("aria-describedby"), null, "a supported Browse… has no reason to point at");
+    assert.equal(form.textContent?.includes("✕"), false);
+
+    await pressAndSettle(browse);
+    const chooser = dialogTitled(fixture.container, "Choose Folder");
+    assert.ok(chooser, "Browse… stacks Choose Folder");
+    assert.ok(dialogTitled(fixture.container, "New Session"), "New Session stays open under it");
+    assert.deepEqual(
+      [...chooser.querySelectorAll(".modal-foot button")].map((button) => button.textContent),
+      ["Cancel", "Use This Folder"],
+    );
+    await pressAndSettle(buttonIn(chooser, "scratch"));
+    await pressAndSettle(buttonIn(chooser, "Use This Folder"));
+    assertNoDomNode(dialogTitled(fixture.container, "Choose Folder") ?? null, "Use This Folder closes Choose Folder");
+
+    const folderLabel = [...form.querySelectorAll("label")].find((label) => label.textContent === "Folder");
+    assert.ok(folderLabel, "the field is now labelled Folder");
+    const folder = form.querySelector<HTMLInputElement>(`[id="${folderLabel.htmlFor}"]`);
+    assert.ok(folder);
+    assert.equal(folder.value, "/repos/scratch");
+    assert.equal(folder.readOnly, true);
+    assert.ok(folder.classList.contains("folder-field-path"), "the path uses the mono field style");
+    assertNoDomNode(form.querySelector('[aria-label^="Workspace:"]'), "the picker gives way to the Folder field");
+    assert.equal(buttonIn(form, "Browse…") === browse, true, "Browse… is the same control in both states");
+    assert.equal(fixture.container.ownerDocument.activeElement === browse, true, "focus returns to Browse…");
+
+    const useWorkspace = buttonIn(form, "Use a Workspace");
+    assert.ok(useWorkspace, "a labelled text control goes back to a workspace");
+    assert.equal(useWorkspace.getAttribute("aria-label"), null, "its name is its visible text");
+    await pressAndSettle(useWorkspace);
+    const trigger = form.querySelector<HTMLElement>('[aria-label^="Workspace:"]');
+    assert.ok(trigger, "Use a Workspace restores the workspace picker");
+    assertNoDomNode(form.querySelector(".folder-field-path"), "the Folder field is gone");
+    assertNoDomNode(buttonIn(form, "Use a Workspace") ?? null, "Use a Workspace goes with it");
+    assert.equal(fixture.container.ownerDocument.activeElement === trigger, true, "focus moves to the restored picker");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("creating a session from a browsed folder sends the folder as workspacePath (#2271)", async () => {
+  const fixture = await mountFixture();
+  try {
+    await act(async () => { await selectProject(fixture.container, NO_PROJECT_SELECTION); });
+    const form = fixture.container.querySelector("form.form")!;
+    await pressAndSettle(buttonIn(form, "Browse…"));
+    const chooser = dialogTitled(fixture.container, "Choose Folder")!;
+    await pressAndSettle(buttonIn(chooser, "scratch"));
+    await pressAndSettle(buttonIn(chooser, "Use This Folder"));
+
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.deepEqual(fixture.requests[0], {
+      runnerId: runner.runnerId,
+      workspaceId: "workspace-1",
+      projectId: null,
+      projectLocationId: null,
+      agentId: "claude",
+      useWorktree: false,
+      executionTargetId: undefined,
+      config: undefined,
+      workspacePath: "/repos/scratch",
+      acpSessionContext: undefined,
+    });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Browse… on a runner without directory browsing is disabled with its reason as visible text (#2271)", async () => {
+  const fixture = await mountFixture({ runners: [{ ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.directoryListing - 1 }] });
+  try {
+    await act(async () => { await selectProject(fixture.container, NO_PROJECT_SELECTION); });
+    const form = fixture.container.querySelector("form.form")!;
+    const browse = buttonIn(form, "Browse…");
+    assert.ok(browse);
+    assert.equal(browse.disabled, true);
+    assert.equal(browse.getAttribute("title"), null, "the reason is not only a tooltip");
+    const reasonId = browse.getAttribute("aria-describedby");
+    assert.ok(reasonId, "Browse… points at its reason");
+    const reason = form.querySelector(`[id="${reasonId}"]`);
+    assert.ok(reason, "the reason is rendered");
+    assert.ok(reason.classList.contains("field-helper"), "the reason is helper text under the field");
+    assert.match(reason.textContent ?? "", /Directory browsing/);
   } finally {
     await unmountFixture(fixture);
   }

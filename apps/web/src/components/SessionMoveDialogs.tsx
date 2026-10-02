@@ -16,7 +16,7 @@ import {
 } from "../session-project-assignment.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useAccessScopeIdentity } from "./AccessScopeControls.js";
-import { DirectoryPicker } from "./DirectoryPicker.js";
+import { ChooseFolderDialog } from "./ChooseFolderDialog.js";
 import { PlusIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
@@ -369,10 +369,10 @@ export function NewWorkspaceDialog({ session, onClose, onMoved, returnFocusRef }
           </div>
           <div className="field">
             <label className="field-label" htmlFor={`${ids}-folder`}>Folder</label>
-            <div className="new-workspace-folder">
+            <div className="folder-field-row">
               <input
                 id={`${ids}-folder`}
-                className="input new-workspace-folder-path"
+                className="input folder-field-path"
                 value={folder ?? ""}
                 title={folder ?? undefined}
                 readOnly
@@ -408,47 +408,5 @@ export function NewWorkspaceDialog({ session, onClose, onMoved, returnFocusRef }
         />
       )}
     </>
-  );
-}
-
-/** Choose Folder: the machine's folder browser in a dialog stacked over the form that asked. */
-function ChooseFolderDialog({ runnerId, protocolVersion, distro, onPick, onClose, returnFocusRef }: {
-  runnerId: string;
-  protocolVersion: number | null | undefined;
-  distro?: string;
-  onPick: (path: string) => void;
-  onClose: () => void;
-  returnFocusRef: FocusTarget;
-}) {
-  const [location, setLocation] = useState<string | null>(null);
-  return (
-    <Modal
-      title="Choose Folder"
-      onClose={onClose}
-      returnFocusRef={returnFocusRef}
-      footer={(
-        <>
-          <button className="btn" type="button" onClick={onClose}>Cancel</button>
-          <button
-            className="btn primary"
-            type="button"
-            disabled={location === null}
-            onClick={() => { if (location !== null) onPick(location); }}
-          >
-            Use This Folder
-          </button>
-        </>
-      )}
-    >
-      <DirectoryPicker
-        runnerId={runnerId}
-        protocolVersion={protocolVersion}
-        distro={distro}
-        hideActions
-        onLocationChange={setLocation}
-        onPick={onPick}
-        onCancel={onClose}
-      />
-    </Modal>
   );
 }

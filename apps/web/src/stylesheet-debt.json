@@ -257,7 +257,6 @@
     "|.workflow-node-head span|font-size|11",
     "|.workflow-node-outcome|font-size|12",
     "|.workflow-role-bindings label>span|font-size|12",
-    "|.ws-chosen-path|font-size|12",
     "|.ws-name|font-size|12.5",
     "|.ws-path|font-size|11.5"
   ],
@@ -879,9 +878,7 @@
     "|.workspace-reference-details|gap|14px",
     "|.workspace-reference-details|gap|8px",
     "|.workspace-reference-picker .ui-inline-listbox-option|gap|8px",
-    "|.workspace-reference-picker|gap|2px",
-    "|.ws-chosen|gap|6px",
-    "|.ws-select|gap|6px"
+    "|.workspace-reference-picker|gap|2px"
   ],
   "paddingLiterals": [
     "@container transcript-pane (max-width: 340px)|.transcript-status-cluster .follow-tail-chip|padding-inline|1px",
@@ -1463,10 +1460,6 @@
     "|.workspace-reference-remove|padding|5px",
     "|.workspace-reference-remove|padding|5px",
     "|.workspace-reference-remove|padding|8px",
-    "|.ws-chosen|padding|10px",
-    "|.ws-chosen|padding|6px",
-    "|.ws-chosen|padding|6px",
-    "|.ws-chosen|padding|6px",
     "|:not(pre)>code|padding|2px",
     "|:not(pre)>code|padding|7px"
   ],
@@ -1480,7 +1473,6 @@
     "|.file-head|font-family|\"Cascadia Code\", monospace",
     "|.slash-name|font-family|\"Cascadia Code\", monospace",
     "|.workflow-role-bindings label>span|font-family|ui-monospace, SFMono-Regular, Consolas, monospace",
-    "|.ws-chosen-path|font-family|\"Cascadia Code\", \"Consolas\", ui-monospace, monospace",
     "|.ws-path|font-family|\"Cascadia Code\", monospace"
   ],
   "flexEndOverflow": [],

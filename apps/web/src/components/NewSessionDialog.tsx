@@ -67,7 +67,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
 import { PersonalIdentifierRevealButton, usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
 import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
-import { DirectoryPicker } from "./DirectoryPicker.js";
+import { ChooseFolderDialog } from "./ChooseFolderDialog.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
@@ -315,7 +315,12 @@ export function NewSessionDialog({
   const registeredLocationSelected = !browsedPath && locations.some(
     (location) => location.runnerId === runnerId && location.workspaceId === workspaceId,
   );
-  const [browsing, setBrowsing] = useState(false);
+  // Browse… stacks Choose Folder over this dialog (#2271), and focus comes back to it.
+  const [choosingFolder, setChoosingFolder] = useState(false);
+  const browseButtonRef = useRef<HTMLButtonElement>(null);
+  const workspaceRowRef = useRef<HTMLDivElement>(null);
+  // Use a Workspace unmounts itself; once the commit shows the picker again, focus moves to it.
+  const workspacePickerRestoredRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -338,6 +343,8 @@ export function NewSessionDialog({
   const formId = `${generatedFormId}-new-session`;
   const projectInputId = `${generatedFormId}-project`;
   const agentInputId = `${generatedFormId}-agent`;
+  const folderInputId = `${generatedFormId}-folder`;
+  const browseReasonId = `${generatedFormId}-browse-reason`;
   const touchChoicePicker = useTapOnlyPicker();
   const initialProjectAutoFocusRef = useRef(projectsSupported && !touchChoicePicker);
   useLayoutEffect(() => {
@@ -864,7 +871,7 @@ export function NewSessionDialog({
     const selection = savedAgentSelection(options, agentDefaults[id]);
     setAgentId(selection.agentId);
     setBrowsedPath(null);
-    setBrowsing(false);
+    setChoosingFolder(false);
     setAdditionalDirectories([]);
     setExecutionTargetId("");
     setCloudBudgetUsd("");
@@ -883,7 +890,7 @@ export function NewSessionDialog({
     const selection = savedAgentSelection(options, agentDefaults[loc.runnerId]);
     setAgentId(selection.agentId);
     setBrowsedPath(null);
-    setBrowsing(false);
+    setChoosingFolder(false);
     setAdditionalDirectories([]);
     setExecutionTargetId("");
     setCloudBudgetUsd("");
@@ -903,7 +910,7 @@ export function NewSessionDialog({
     setProjectSelection(value);
     setProjectLocationId("");
     setBrowsedPath(null);
-    setBrowsing(false);
+    setChoosingFolder(false);
     setAdditionalDirectories([]);
     if (value === NO_PROJECT_SELECTION) {
       pickRunner(preset?.runnerId && online.some((candidate) => candidate.runnerId === preset.runnerId)
@@ -971,7 +978,7 @@ export function NewSessionDialog({
   // A browsed path may no longer apply once the agent's context (native/WSL) changes.
   useEffect(() => {
     setBrowsedPath(null);
-    setBrowsing(false);
+    setChoosingFolder(false);
     setAdditionalDirectories([]);
     setExecutionTargetId("");
     setCloudBudgetUsd("");
@@ -1226,6 +1233,12 @@ export function NewSessionDialog({
 
   const error = requestError ?? validationError;
 
+  useLayoutEffect(() => {
+    if (!workspacePickerRestoredRef.current || browsedPath) return;
+    workspacePickerRestoredRef.current = false;
+    (workspaceRowRef.current?.querySelector<HTMLElement>(".ui-select-trigger") ?? browseButtonRef.current)?.focus();
+  });
+
   return (
     <>
     <Modal
@@ -1442,49 +1455,53 @@ export function NewSessionDialog({
           </div>}
 
           {runner && <div className="field">
-            <span>Workspace</span>
-            {browsedPath ? (
-              <div className="ws-chosen">
-                <span className="ws-chosen-path" title={browsedPath}>
-                  {browsedPath}
-                </span>
-                <button type="button" className="icon-btn" aria-label="Clear Workspace Selection" title="Clear — use a workspace" onClick={() => setBrowsedPath(null)}>
-                  ✕
-                </button>
-              </div>
-            ) : (
-              <div className="ws-select">
+            {browsedPath
+              ? <label className="new-session-field-label" htmlFor={folderInputId}>Folder</label>
+              : <span>Workspace</span>}
+            {/* Browse… keeps its place in both states, so it is still there to take focus back
+                when Choose Folder closes after filling the Folder field. */}
+            <div className="folder-field-row" ref={workspaceRowRef}>
+              {browsedPath ? (
+                <input
+                  id={folderInputId}
+                  className="input folder-field-path"
+                  value={browsedPath}
+                  title={browsedPath}
+                  readOnly
+                />
+              ) : (
                 <Select<string>
                   label="Workspace"
                   value={workspaceId || null}
                   onChange={(value) => { setWorkspaceId(value); setAdditionalDirectories([]); }}
                   options={(runner?.workspaces ?? []).map((w) => ({ value: w.id, label: w.name }))}
                 />
-                <button
-                  type="button"
-                  className="btn ghost sm"
-                  onClick={() => setBrowsing((b) => !b)}
-                  disabled={!browseSupported}
-                  title={browseSupported ? "Browse the machine for a directory" : browseHint}
-                >
-                  {browsing ? "Close" : "Browse…"}
-                </button>
-              </div>
+              )}
+              <button
+                ref={browseButtonRef}
+                type="button"
+                className="btn"
+                onClick={() => setChoosingFolder(true)}
+                disabled={!browseSupported}
+                aria-describedby={browseSupported ? undefined : browseReasonId}
+              >
+                Browse…
+              </button>
+            </div>
+            {!browseSupported && <p className="field-helper" id={browseReasonId}>{browseHint}</p>}
+            {browsedPath && (
+              <button
+                type="button"
+                className="btn ghost sm new-session-use-workspace"
+                onClick={() => {
+                  workspacePickerRestoredRef.current = true;
+                  setBrowsedPath(null);
+                }}
+              >
+                Use a Workspace
+              </button>
             )}
           </div>}
-
-          {browsing && !browsedPath && runnerId && (
-            <DirectoryPicker
-              runnerId={runnerId}
-              protocolVersion={runner?.protocolVersion}
-              distro={browseDistro}
-              onPick={(p) => {
-                setBrowsedPath(p);
-                setBrowsing(false);
-              }}
-              onCancel={() => setBrowsing(false)}
-            />
-          )}
             </>
           )}
 
@@ -1999,6 +2016,19 @@ export function NewSessionDialog({
           </p>
         </form>
     </Modal>
+    {choosingFolder && runner && (
+      <ChooseFolderDialog
+        runnerId={runner.runnerId}
+        protocolVersion={runner.protocolVersion}
+        distro={browseDistro}
+        returnFocusRef={browseButtonRef}
+        onClose={() => setChoosingFolder(false)}
+        onPick={(path) => {
+          setBrowsedPath(path);
+          setChoosingFolder(false);
+        }}
+      />
+    )}
     {creatingProject && (
       <CreateProjectDialog
         accessScopeManagementSupported={accessScopeManagementSupported}

@@ -43,7 +43,6 @@ const CONNECTIONS = "Connections epic (not yet filed)";
 const PODS = "Pods epic (not yet filed)";
 const RUNS = "Runs epic (not yet filed)";
 const TERMINAL = "Terminal epic (not yet filed)";
-const NEW_SESSION = "New Session epic (not yet filed)";
 
 /** The inventory, exact: [file, glyph, the enclosing literal's text, the owning area epic]. */
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
@@ -83,7 +82,6 @@ const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/GitDiffViewer.tsx", "→", "→", REVIEW],
   ["components/GitDiffViewer.tsx", "✓", "Staged ✓", REVIEW],
   ["components/InboxRow.tsx", "←", "←", SESSIONS_LIST],
-  ["components/NewSessionDialog.tsx", "✕", "✕", NEW_SESSION],
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
   ["components/OnboardRunnerDialog.tsx", "△", "△", CONNECTIONS],
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
