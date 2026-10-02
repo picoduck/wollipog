@@ -130,6 +130,36 @@ test("choosing a machine lists its folders, and the selected folder is reviewed 
   await expect(dialog.getByText("Choose a folder to review it.")).toBeVisible();
 });
 
+test("the review pane beside the list offers Split only once the pane itself is wide enough (#2292)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await routeMachine(page, [codeReview, alpha], { opaque: previewOf(codeReview, "update", 2) });
+  await page.goto("/skills-removals-e2e.html");
+  const dialog = await openImport(page);
+  await dialog.getByRole("group", { name: "Skill Folders" }).getByRole("button", { name: /^code-review/u }).click();
+  const pane = dialog.locator(".skill-machine-import-pane.review");
+  const skill = pane.locator(".skill-diff-file", { hasText: "SKILL.md" });
+  await expect(skill.locator(".diff-line-add")).toHaveCount(1);
+  const layout = dialog.getByRole("radiogroup", { name: "Diff Layout" });
+  // The card is wide enough for Split, but the pane the diff is read in is not: Unified only.
+  const widths = () => pane.evaluate((element) => ({ card: element.closest<HTMLElement>(".modal")!.offsetWidth, pane: element.offsetWidth }));
+  const narrow = await widths();
+  expect(narrow.card).toBeGreaterThanOrEqual(800);
+  expect(narrow.pane).toBeLessThan(800);
+  await expect(layout).toHaveCount(0);
+  await expect(dialog.locator(".diff-split-row")).toHaveCount(0);
+
+  // A wider card gives the pane room for two columns, and Split is offered without a window resize.
+  const wider = await page.addStyleTag({ content: ".modal.lg { width: 1360px; }" });
+  await expect.poll(async () => (await widths()).pane).toBeGreaterThanOrEqual(800);
+  await layout.getByRole("radio", { name: "Split" }).click();
+  await expect(skill.locator(".diff-split-row").first()).toBeVisible();
+  // Narrowed again, the Split choice falls back to Unified.
+  await wider.evaluate((style) => style.remove());
+  await expect(layout).toHaveCount(0);
+  await expect(dialog.locator(".diff-split-row")).toHaveCount(0);
+  await expect(skill.locator(".diff-line-add")).toHaveCount(1);
+});
+
 test("a folder's read error blocks import", async ({ page }) => {
   await routeMachine(page, [alpha], {});
   await page.route("**/api/skill-machine/discovery/preview", (route) => route.fulfill({ status: 502, json: { error: "Source changed. Discover it again." } }));

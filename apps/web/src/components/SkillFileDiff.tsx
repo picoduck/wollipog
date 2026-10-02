@@ -17,11 +17,19 @@ import { ChevronRightIcon } from "./Icons.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 
 /**
- * Split is offered once the dialog card is this wide: a `.modal.lg` review dialog at full width
+ * Split is offered once the diff's container is this wide: a `.modal.lg` review dialog at full width
  * (#1948). The card, not the body, is measured: an 800px card's body is 798px, so a body rule would
  * never offer Split in the dialogs it exists for. Phone sheets and narrow windows stay Unified.
  */
 export const SKILL_DIFF_SPLIT_MIN_WIDTH_PX = 800;
+
+/**
+ * Marks the pane a diff is read in when it shares its dialog with another pane, such as a list
+ * beside the review (#2292). The diff measures that pane instead of the whole card, so Split is
+ * offered only when the pane itself is wide enough. Like the card, the pane is measured with its
+ * padding, so the same width leaves the diff about as much room in either.
+ */
+export const SKILL_DIFF_PANE_CLASS = "skill-diff-pane";
 
 type Layout = "unified" | "split";
 
@@ -40,23 +48,35 @@ const CHANGE_TONE: Record<SkillFileChange, string> = {
 
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
-/** Whether the enclosing dialog card (or, outside a dialog, this element) is wide enough for Split. */
+/**
+ * Whether the diff's container is wide enough for Split: its review pane in a two-pane dialog, else
+ * the enclosing dialog card, else (outside a dialog) this element.
+ */
 function useSplitAvailable(root: React.RefObject<HTMLElement | null>): boolean {
   const [wide, setWide] = useState(false);
   useLayoutEffect(() => {
     const element = root.current;
     if (!element) return;
+    // The container, never the diff itself: the diff's width follows its content's scrollbar and
+    // Split's own height, so measuring it could flip the layout back and forth.
+    let target: HTMLElement | null = null;
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(() => measure()) : null;
     const measure = () => {
       // Resolved on every measurement: a dialog's panel moves between its card and a phone sheet.
-      const target = element.closest<HTMLElement>(".modal") ?? element;
+      const next = element.closest<HTMLElement>(`.${SKILL_DIFF_PANE_CLASS}, .modal`) ?? element;
+      if (next !== target) {
+        if (target && target !== element) observer?.unobserve(target);
+        if (next !== element) observer?.observe(next);
+        target = next;
+      }
       // Layout width, not the painted box: the dialog opens scaled to 0.98, and a transform never
-      // reaches a ResizeObserver, so a transformed measurement would keep Split hidden.
+      // reaches a ResizeObserver, so a transformed measurement would keep Split hidden. It includes
+      // the container's scrollbar, so the diff growing or shrinking inside it never changes it.
       setWide(target.offsetWidth >= SKILL_DIFF_SPLIT_MIN_WIDTH_PX);
     };
     measure();
-    // The diff is fluid inside its card, so it resizes whenever the card does, including when it is
-    // first placed in one or moved to a sheet, which no window resize reports.
-    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    // The diff itself is observed too, only to learn when it is first placed in a container or moved
+    // to another one (a sheet), which neither the old container nor a window resize reports.
     observer?.observe(element);
     window.addEventListener("resize", measure);
     return () => {
@@ -82,7 +102,7 @@ function contextHunk(content: string): GitHunk | null {
 /**
  * Every file of a skill review as one highlighted diff (#1948): a collapsible block per file whose
  * header names the path, whether it is a script, its change and its `+N −M` counts, then its hunks
- * with three lines of context, in Unified or (on a wide dialog) Split layout.
+ * with three lines of context, in Unified or (in a wide dialog or pane) Split layout.
  *
  * Hunks are computed here from the whole-file contents the review APIs return, and drawn with the
  * Git diff's row builders and row classes, so a change reads the same in both places. Colour is

@@ -33,7 +33,7 @@ import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { deployToAssignmentsConsent, isDeploymentImpactConflict, ReviewConflict, ReviewConsent } from "./ReviewConsent.js";
 import { SkillAdoptionRecoveryDialog } from "./SkillAdoptionRecoveryDialog.js";
-import { SkillFileDiff } from "./SkillFileDiff.js";
+import { SKILL_DIFF_PANE_CLASS, SkillFileDiff } from "./SkillFileDiff.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { useAccessibleMenu } from "./interactions.js";
@@ -448,7 +448,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
             </div>
             {folderList}
           </div>}
-          {reviewStep && <div ref={paneRef} className="skill-machine-import-pane review">{review}</div>}
+          {reviewStep && <div ref={paneRef} className={`skill-machine-import-pane review ${SKILL_DIFF_PANE_CLASS}`}>{review}</div>}
         </>}
     </Modal>
     {confirmingAdoption && discovery && shown && runner && <AdoptionConfirmation discovery={discovery} preview={shown}

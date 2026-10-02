@@ -23,6 +23,7 @@ import { BranchIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { deployToAssignmentsConsent, isDeploymentImpactConflict, ReviewConflict, ReviewConsent } from "./ReviewConsent.js";
+import { SKILL_DIFF_PANE_CLASS } from "./SkillFileDiff.js";
 import { SkillReviewChanges, SkillReviewFacts, skillReviewSafetyNote } from "./SkillReviewParts.js";
 import { State } from "./State.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -425,7 +426,7 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
                   }}
                   show={{ value: shown, onShow: setShown, controls: diffId }} />
               </div>
-              <div className="skill-git-pane review" id={diffId}>
+              <div className={`skill-git-pane review ${SKILL_DIFF_PANE_CLASS}`} id={diffId}>
                 {shownCandidate
                   ? <SkillReviewChanges key={shownCandidate.path}
                     title={shownCandidate.disposition === "new" ? `Files in ${shownCandidate.name}` : `Changes in ${shownCandidate.name}`}

@@ -102,6 +102,21 @@ test("Check for Updates with a new commit checks the update and names it Import 
   await expect(dialog.locator(".skill-review-facts dd")).toHaveText([repository, "stable", "4f1c9b2e7a3d"]);
 });
 
+test("the review pane beside the skills found offers only Unified at 1440×900 (#2292)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await library(page);
+  await page.route("**/api/skill-git/preview", (route) => route.fulfill({ json: { previewId: "update", candidates: [codeReview] } }));
+  await page.goto("/skills-removals-e2e.html?groups=1");
+  await page.locator(".master-detail-list").getByRole("button", { name: /code-review/i }).click();
+  await page.locator(".skill-detail").getByRole("button", { name: "Check for Updates…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Check for Updates", exact: true });
+  const pane = dialog.locator(".skill-git-pane.review");
+  await expect(pane.locator(".skill-diff-file", { hasText: "SKILL.md" }).locator(".diff-line-add")).toHaveCount(1);
+  expect(await pane.evaluate((element) => element.offsetWidth)).toBeLessThan(800);
+  await expect(dialog.getByRole("radiogroup", { name: "Diff Layout" })).toHaveCount(0);
+  await expect(dialog.locator(".diff-split-row")).toHaveCount(0);
+});
+
 test("a refusal the server makes lands under its field, and step one stays", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.route("**/api/skill-git/preview", (route) => route.fulfill({ status: 400, json: { error: "Use a branch, tag, or commit for the Git ref." } }));
