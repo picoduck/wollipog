@@ -74,33 +74,32 @@ function functionName(node: ts.SignatureDeclaration): string | null {
   return null;
 }
 
-function enclosingParameter(identifier: ts.Identifier): { owner: string; index: number } | null {
+type Binding =
+  | { kind: "parameter"; owner: string | null; index: number }
+  | { kind: "constant"; initializer: ts.Expression };
+
+/** The declaration an identifier refers to, found by walking out through its enclosing scopes, so
+ * a `label` in one function never resolves to another function's `label`. */
+function binding(identifier: ts.Identifier): Binding | null {
+  const declares = (statement: ts.Statement) => ts.isVariableStatement(statement)
+    ? statement.declarationList.declarations.find((declaration) =>
+      ts.isIdentifier(declaration.name) && declaration.name.text === identifier.text)
+    : undefined;
   for (let node: ts.Node | undefined = identifier.parent; node; node = node.parent) {
-    if (!ts.isFunctionLike(node)) continue;
-    const index = node.parameters.findIndex((parameter) =>
-      ts.isIdentifier(parameter.name) && parameter.name.text === identifier.text);
-    if (index < 0) continue;
-    const owner = functionName(node);
-    return owner ? { owner, index } : null;
+    if (ts.isBlock(node) || ts.isSourceFile(node) || ts.isModuleBlock(node) || ts.isCaseOrDefaultClause(node)) {
+      for (const statement of node.statements) {
+        const declaration = declares(statement);
+        if (!declaration) continue;
+        return declaration.initializer ? { kind: "constant", initializer: declaration.initializer } : null;
+      }
+    }
+    if (ts.isFunctionLike(node)) {
+      const index = node.parameters.findIndex((parameter) =>
+        ts.isIdentifier(parameter.name) && parameter.name.text === identifier.text);
+      if (index >= 0) return { kind: "parameter", owner: functionName(node), index };
+    }
   }
   return null;
-}
-
-function localInitializer(identifier: ts.Identifier): ts.Expression | null {
-  const sourceFile = identifier.getSourceFile();
-  let found: ts.Expression | null = null;
-  const visit = (node: ts.Node): void => {
-    if (found) return;
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
-        node.name.text === identifier.text && node.initializer &&
-        node.getStart() < identifier.getStart()) {
-      found = node.initializer;
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return found;
 }
 
 /** Resolve a label expression to its literal text fragments, or report why it cannot be read. */
@@ -133,13 +132,13 @@ function labelTexts(
     return { texts, unresolved: null };
   }
   if (ts.isIdentifier(expression)) {
-    const parameter = enclosingParameter(expression);
-    if (parameter) {
-      wrappers.set(parameter.owner, parameter.index);
+    const bound = binding(expression);
+    if (bound?.kind === "constant") return labelTexts(bound.initializer, wrappers);
+    // A named function forwarding its parameter becomes a sink; its own callers are checked.
+    if (bound?.kind === "parameter" && bound.owner) {
+      wrappers.set(bound.owner, bound.index);
       return { texts: [], unresolved: null };
     }
-    const initializer = localInitializer(expression);
-    if (initializer) return labelTexts(initializer, wrappers);
   }
   // `{ capability, label }` requirement objects are checked where they are written.
   if (ts.isPropertyAccessExpression(expression) && expression.name.text === "label") {
@@ -231,6 +230,19 @@ test("the label scan follows wrappers, constants, conditionals and requirement o
     "labelFromSomewhere()",
     "spread arguments hide the label",
   ]);
+});
+
+test("the label scan resolves each constant in its own scope", () => {
+  const scan = scanRunnerCapabilityLabels([{
+    file: "fixture.ts",
+    text: `
+      function first() { const label = "directory browsing"; return runnerCapabilityRequirement(1, "x", label); }
+      function second() { const label = "Directory browsing"; return runnerCapabilityRequirement(1, "x", label); }
+      [1].map((label) => runnerCapabilityRequirement(1, "x", label));
+    `,
+  }]);
+  assert.deepEqual(scan.labels.map((site) => site.label), ["directory browsing", "Directory browsing"]);
+  assert.deepEqual(scan.unresolved.map((entry) => entry.replace(/^[^ ]+ /u, "")), ["label"]);
 });
 
 test("every runner capability label in the web app and control plane is a lowercase noun phrase", () => {

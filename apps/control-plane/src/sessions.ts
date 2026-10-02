@@ -1719,7 +1719,7 @@ export class SessionsService {
     const sent = this.prompt(session.id, prepared.data.text, prepared.data.images, undefined, undefined, undefined, "run");
     if (!sent.ok) {
       this.failWorkflowAttempt(claimed.attempt, "failed", sent.error ?? "runner rejected the prompt", Date.now(), { kind: "system", id: "dispatcher" });
-      return fail(`workflow dispatch failed: ${sent.error ?? "runner rejected the prompt"}`, sent.status);
+      return { ...failAs(sent), error: `workflow dispatch failed: ${sent.error ?? "runner rejected the prompt"}` };
     }
     const running = this.db.setWorkflowAttemptStatus(claimed.attempt.attemptId, ["dispatching"], "running") ?? claimed.attempt;
     this.broadcastWorkflowRun(instance.runId);

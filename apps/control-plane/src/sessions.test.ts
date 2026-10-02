@@ -19334,6 +19334,31 @@ test("workflow run preset creates idle role-bound workers and prompts only its o
   db.close();
 });
 
+test("a workflow dispatch refused by a runner capability gate keeps the runner versions (#2362)", () => {
+  const { db, svc } = makeHarness();
+  const runResult = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Dispatch" });
+  const session = runResult.data!.sessions[0]!;
+  db.updateSessionStatus(session.id, "idle", Date.now());
+  const definition = svc.createWorkflowDefinition({
+    name: "One node", maxTransitions: 3,
+    nodes: [{ nodeId: "work", kind: "agent", role: "worker", agentId: AGENT_ID, inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+    edges: [],
+  }).data!;
+  const instance = svc.createWorkflowInstance({ workflowId: definition.workflowId, runId: runResult.data!.run.id }).data!;
+  const refusal = {
+    ok: false as const,
+    status: 409,
+    error: "This machine needs a newer runner for prompt image attachments. Update and restart the runner.",
+    capabilityRequirement: { requiredRunnerProtocolVersion: 56, runnerProtocolVersion: 55 },
+  };
+  (svc as unknown as { prompt: () => typeof refusal }).prompt = () => refusal;
+  const dispatched = svc.dispatchWorkflowNode(instance.instanceId, "work", { dispatchKey: "refused:1" });
+  assert.equal(dispatched.status, 409);
+  assert.equal(dispatched.error, `workflow dispatch failed: ${refusal.error}`);
+  assert.deepEqual(dispatched.capabilityRequirement, refusal.capabilityRequirement);
+  db.close();
+});
+
 test("workflow retries, timeouts, and human gates are durable and bounded", () => {
   const { db, svc } = makeHarness();
   const runResult = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "Try safely" });
