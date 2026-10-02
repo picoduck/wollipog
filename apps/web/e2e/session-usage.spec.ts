@@ -40,6 +40,24 @@ const readBar = (page: Page) =>
     };
   });
 
+/** Every visible control in the composer card, checked pairwise for overlap. */
+const composerOverlaps = (page: Page) =>
+  page.locator(".composer-box").evaluate((card) => {
+    const rects = [...card.querySelectorAll(".composer-bar > * > *, .composer-usage-row > *, .composer-answer-actions > :not(.composer-answer-usage), .composer-answer-usage > *")]
+      .map((element) => ({ name: element.className, rect: element.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0);
+    const overlaps: string[] = [];
+    const box = card.getBoundingClientRect();
+    for (const [index, a] of rects.entries()) {
+      if (a.rect.left < box.left - 0.5 || a.rect.right > box.right + 0.5) overlaps.push(`${a.name} leaves the card`);
+      for (const b of rects.slice(index + 1)) {
+        if (a.rect.left < b.rect.right - 0.5 && b.rect.left < a.rect.right - 0.5
+          && a.rect.top < b.rect.bottom - 0.5 && b.rect.top < a.rect.bottom - 0.5) overlaps.push(`${a.name} × ${b.name}`);
+      }
+    }
+    return overlaps;
+  });
+
 test("desktop: Parent Control exposes five independent typed workflow authorities", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   await page.goto("/session-usage-e2e.html?width=1180&height=860&composer=orchestrator");
@@ -345,12 +363,15 @@ test.describe("Answer Mode ownership", () => {
   // Answer Mode replaces the composer bar, Model Settings included, so the figures come with it
   // (#2166): beside Submit in a wide column, on their own row above the buttons on a phone.
   for (const viewport of [
-    { name: "desktop", width: 1200, height: 820, frame: 1180, ownRow: false },
-    { name: "phone", width: 390, height: 844, frame: 390, ownRow: true },
+    { name: "desktop", width: 1200, height: 820, frame: 1180, ownRow: false, root: 16 },
+    { name: "phone", width: 390, height: 844, frame: 390, ownRow: true, root: 16 },
+    // 40rem, not 640px: twice the text in a column wide enough only at the default size.
+    { name: "enlarged-text", width: 1200, height: 820, frame: 642, ownRow: true, root: 32 },
   ] as const) {
     test(`${viewport.name}: context and cost stay in reach while answering`, async ({ page }) => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await page.goto(`/session-usage-e2e.html?width=${viewport.frame}&height=${viewport.height - 40}&approval=question&driver=claude-code`);
+      if (viewport.root !== 16) await page.addStyleTag({ content: `html { font-size: ${viewport.root}px; }` });
       await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
       await expect(page.locator(".composer-bar")).toHaveCount(0);
 
@@ -371,6 +392,7 @@ test.describe("Answer Mode ownership", () => {
         expect(usageBox!.x + usageBox!.width).toBeLessThanOrEqual(submitBox!.x);
         expect(Math.abs((usageBox!.y + usageBox!.height / 2) - (submitBox!.y + submitBox!.height / 2))).toBeLessThan(2);
       }
+      expect(await composerOverlaps(page)).toEqual([]);
       await page.locator(".composer-box").screenshot({ path: `${SHOT}/answer-mode-usage-${viewport.name}.png` });
 
       await cost.click();
@@ -534,14 +556,30 @@ test.describe("a composer column under 640px moves the figures into Model Settin
     await expect(menu).toHaveCount(0);
   });
 
-  test("an agent without Model Settings keeps the figures in the bar", async ({ page }) => {
+  test("an agent without Model Settings gives them their own row above the bar", async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 820 });
     await page.goto("/session-usage-e2e.html?width=600&height=780");
     await expect(page.getByRole("button", { name: /^Model Settings/ })).toHaveCount(0);
-    await expect(page.locator(".composer-bar").getByRole("button", { name: "Session Usage: $1.37" })).toBeVisible();
+    await expect(page.locator(".composer-bar :is(.context-control, .session-usage)")).toHaveCount(0);
+    const row = page.locator(".composer-usage-row");
+    await expect(row.getByRole("button", { name: "Session Usage: $1.37" })).toBeVisible();
+    const [rowBox, barBox] = await Promise.all([row.boundingBox(), page.locator(".composer-bar").boundingBox()]);
+    expect(rowBox!.y + rowBox!.height).toBeLessThanOrEqual(barBox!.y);
     const bar = await readBar(page);
     expect(bar.rows).toBe(1);
     expect(bar.overflow).toBeLessThanOrEqual(0);
+    expect(await composerOverlaps(page)).toEqual([]);
+  });
+
+  test("an enlarged text size moves them out of a column that fits them only by pixels", async ({ page }) => {
+    // 40rem, not 640px: at a 32px root a 900px column is narrow for text twice the size.
+    await page.setViewportSize({ width: 1200, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=900&height=780&driver=claude-code&cost=12345.67");
+    await expect(page.locator(".composer-bar .session-usage")).toHaveCount(1);
+    await page.addStyleTag({ content: "html { font-size: 32px; }" });
+    await expect(page.locator(".composer-bar :is(.context-control, .session-usage)")).toHaveCount(0);
+    await page.getByRole("button", { name: /^Model Settings/ }).click();
+    await expect(page.getByRole("menu", { name: "Model Settings" }).getByRole("group", { name: "Session Usage" })).toContainText("$12,345.67");
   });
 });
 
@@ -614,18 +652,23 @@ test("mobile: Model Settings opens with the Session Usage group, and the bar sta
   await expect(menu).toHaveCount(0);
 });
 
-test("mobile: without Model Settings the figures keep their bar seats, and cost opens Session Usage", async ({ page }) => {
+test("mobile: without Model Settings the figures take their own row, and cost opens Session Usage", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/session-usage-e2e.html?width=390&height=800");
 
-  const cost = page.locator(".composer-bar").getByRole("button", { name: "Session Usage: $1.37" });
+  // The collapsed pill hides the row, as it hides Model Settings; opening the composer shows it.
+  const row = page.locator(".composer-usage-row");
+  await expect(row).toBeHidden();
+  await page.getByRole("button", { name: /^Edit Message/ }).click();
+  const cost = row.getByRole("button", { name: "Session Usage: $1.37" });
   await expect(cost).toHaveText("$1.37");
   // The cost remains its own control rather than repeating the context meter (#781).
   await expect(cost).not.toContainText("context");
-  await expect(page.locator(".composer-bar").getByRole("button", { name: /^Context Window/ })).toBeVisible();
+  await expect(row.getByRole("button", { name: /^Context Window/ })).toBeVisible();
   const bar = await readBar(page);
   expect(bar.rows).toBe(1);
   expect(bar.overflow).toBeLessThanOrEqual(0);
+  expect(await composerOverlaps(page)).toEqual([]);
 
   await cost.click();
   const usage = page.locator(".session-usage-popover").first();
@@ -659,7 +702,8 @@ test.describe("with a touch pointer", () => {
   test("mobile: the pricing source link is a 44px touch target inside the popover", async ({ page }) => {
     // #1799: an inline link gets a 44px band centred on its line from the one coarse-pointer block.
     await page.goto("/session-usage-e2e.html?width=390&height=800");
-    await page.locator(".composer-bar").getByRole("button", { name: /^Session Usage: / }).click();
+    await page.getByRole("button", { name: /^Edit Message/ }).click();
+    await page.locator(".composer-usage-row").getByRole("button", { name: /^Session Usage: / }).click();
     const usage = page.locator(".session-usage-popover").first();
     const link = usage.getByRole("link", { name: "Estimated API Costs" });
     await expect(link).toBeVisible();
@@ -686,26 +730,34 @@ test.describe("with a touch pointer", () => {
   });
 });
 
-test("mobile: the widest figures stay inside a 320px composer bar", async ({ page }) => {
-  await page.setViewportSize({ width: 320, height: 844 });
-  await page.goto("/session-usage-e2e.html?width=320&height=800&cost=12345.67");
-  await pinWidestFace(page, page.locator(".composer-bar"));
-  const cost = page.locator(".composer-bar").getByRole("button", { name: "Session Usage: $12,345.67" });
-  await expect(cost).toBeVisible();
-  const legible = await cost.evaluate((button) => ({ visible: button.clientWidth, needed: button.scrollWidth }));
-  expect(legible.visible).toBeGreaterThanOrEqual(legible.needed);
-  const bar = await readBar(page);
-  expect(bar.rows).toBe(1);
-  expect(bar.overflow).toBeLessThanOrEqual(0);
-  expect(bar.meter!.left).toBeGreaterThanOrEqual(bar.box.left - 0.5);
-  expect(bar.cost!.right).toBeLessThanOrEqual(bar.box.right + 0.5);
-});
+for (const root of [16, 32]) {
+  test(`mobile: the widest figures stay inside a 320px composer at a ${root}px root`, async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 844 });
+    await page.goto("/session-usage-e2e.html?width=320&height=800&cost=12345.67");
+    if (root !== 16) await page.addStyleTag({ content: `html { font-size: ${root}px; }` });
+    await pinWidestFace(page, page.locator(".composer-box"));
+    // Collapsed, and then open: neither state may crowd or overlap a control.
+    await expect(page.locator(".composer-bar")).toBeVisible();
+    expect(await composerOverlaps(page)).toEqual([]);
+    expect((await readBar(page)).overflow).toBeLessThanOrEqual(0);
+    await page.getByRole("button", { name: /^Edit Message/ }).click();
+    const cost = page.locator(".composer-usage-row").getByRole("button", { name: "Session Usage: $12,345.67" });
+    await expect(cost).toBeVisible();
+    const legible = await cost.evaluate((button) => ({ visible: button.clientWidth, needed: button.scrollWidth }));
+    expect(legible.visible).toBeGreaterThanOrEqual(legible.needed);
+    const bar = await readBar(page);
+    expect(bar.rows).toBe(1);
+    expect(bar.overflow).toBeLessThanOrEqual(0);
+    expect(await composerOverlaps(page)).toEqual([]);
+  });
+}
 
 test("mobile light theme: the estimated cost source stays compact", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/session-usage-e2e.html?width=390&height=800");
   await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByRole("button", { name: /^Edit Message/ }).click();
   await page.getByRole("button", { name: "Session Usage: $1.37" }).click();
   const usage = page.locator(".session-usage-popover").first();
   await expect(usage.getByRole("link", { name: "Estimated API Costs" })).toBeVisible();

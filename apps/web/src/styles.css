@@ -6429,6 +6429,17 @@ textarea,
 /* In the composer bar both are borderless small ghost buttons in the small type (§3.1); an open
    popover keeps its trigger in the hover state. */
 .cbar-right > :is(.context-control, .session-usage) { flex: none; }
+/* Their own row above the bar, for a narrow column whose Model Settings cannot open (#2166). A
+   collapsed phone composer hides it, as it hides Model Settings, until the composer opens. */
+.composer-usage-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.composer-usage-row:empty,
+.composer-box.idle-collapsed > .composer-usage-row { display: none; }
+.composer-usage-row > :is(.context-control, .session-usage) { flex: none; }
 .btn.cbar-usage {
   font: var(--type-small);
   font-variant-numeric: tabular-nums;

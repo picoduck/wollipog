@@ -175,14 +175,12 @@ for (const width of [320, 390]) {
     // The reader extends to the composer: no strip sits between them (#2166).
     expect(frame.composer.top).toBeCloseTo(frame.reader.bottom, 0);
     expect(frame.hasHorizontalOverflow).toBe(false);
-    // This agent has no Model Settings to open, so the figures keep their seats in the bar, which
-    // still holds every control on one row.
+    // The collapsed phone composer keeps every bar control on one row. This agent has no Model
+    // Settings to open, so the figures take their own row, which the collapsed pill hides.
     expect(frame.barOverflow).toBeLessThanOrEqual(0);
     expect(frame.rows, "the bar's controls share one row").toBe(1);
-    for (const control of [frame.meter, frame.usage]) {
-      expect(control.left).toBeGreaterThanOrEqual(frame.bar.left - 0.5);
-      expect(control.right).toBeLessThanOrEqual(frame.bar.right + 0.5);
-    }
+    expect(frame.meter.width).toBe(0);
+    expect(frame.usage.width).toBe(0);
   });
 }
 

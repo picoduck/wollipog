@@ -52,7 +52,7 @@ import { useApi } from "../api-context.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
-import { COMPOSER_USAGE_MIN_COLUMN_PX, composerUsagePlacement, useNarrowerThan } from "../composer-usage-placement.js";
+import { COMPOSER_USAGE_MIN_COLUMN_REM, composerUsagePlacement, useNarrowerThanRem } from "../composer-usage-placement.js";
 import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { compareSessionNotices, SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
@@ -4217,15 +4217,15 @@ function SessionDetailLoaded({
   const configRefusalId = `config-refusal-${session.id}`;
   // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
   // bar has no room for them (#2166).
-  const [composerBoxRef, composerColumnNarrow] = useNarrowerThan<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_PX);
+  const [composerBoxRef, composerColumnNarrow] = useNarrowerThanRem<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_REM);
+  const composerUsageNarrow = isMobile || composerColumnNarrow;
   const modelSettingsAvailable = useModelSettingsAvailable(
     session,
     () => pendingConfig.current.model,
     () => pendingConfig.current.serviceTier,
   );
   const usagePlacement = composerUsagePlacement({
-    phone: isMobile,
-    narrowColumn: composerColumnNarrow,
+    narrow: composerUsageNarrow,
     modelSettingsOpenable: modelSettingsAvailable && configRefusal === null,
   });
   const applyConfig = useCallback(
@@ -5848,7 +5848,7 @@ function SessionDetailLoaded({
                     <ContextWindowMeter session={session} resolution={contextWindow} placement="bar" />
                     <SessionUsageControl session={session} placement="bar" />
                   </> : null}
-                  usageOwnRow={isMobile || composerColumnNarrow}
+                  usageOwnRow={composerUsageNarrow}
                 />
               )}
               {!composerAnswerActive && <>
@@ -5965,6 +5965,14 @@ function SessionDetailLoaded({
                 disabled={!canPrompt}
                 tabIndex={composerIdleCollapsed ? -1 : undefined}
               />
+              {usagePlacement === "row" && (
+                /* A narrow column whose Model Settings cannot open: the figures keep a row of their
+                   own rather than crowding the bar or becoming unreachable. */
+                <div className="composer-usage-row">
+                  <ContextWindowMeter session={session} resolution={contextWindow} placement="bar" />
+                  <SessionUsageControl session={session} placement="bar" />
+                </div>
+              )}
               <div className="composer-bar">
                 <div className="cbar-left">
                   <ComposerPlusMenu

@@ -22,6 +22,9 @@ for (const width of [390, 1440]) {
       const sessionHeading = page.getByRole("heading", { level: 1, name: "Alpha Session" });
       await expect(sessionHeading).toBeVisible();
       await expect(page.locator(".composer-box")).toHaveCount(1);
+      // A collapsed phone composer shows the figures once it opens (#2166).
+      const editMessage = page.getByRole("button", { name: /^Edit Message/ });
+      if (await editMessage.isVisible()) await editMessage.click();
 
       const trigger = page.locator(`${popover.trigger}:visible`);
       await trigger.click();
