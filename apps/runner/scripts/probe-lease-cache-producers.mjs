@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync,
+import { closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync,
   statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -199,8 +199,18 @@ async function main() {
       record("explicit-descriptor-link", { ...terminal(linked), bytes: fstatSync(output).size, diagnostics: linked.stderr });
       assert.equal(linked.status, 0, "native linker/descriptor incompatible; producer containment unresolved");
       const size = fstatSync(output).size; assert.ok(size > 0 && size <= BYTE_LIMIT);
-      const bytes = readFileSync(output), executable = join(path, "lease-io");
+      // /dev/fd may duplicate the inherited open file description and advance its offset.
+      // Capture the full bounded output with explicit positions on both native POSIX hosts.
+      const bytes = Buffer.alloc(size), executable = join(path, "lease-io");
+      let captured = 0;
+      while (captured < size) {
+        const count = readSync(output, bytes, captured, size - captured, captured);
+        assert.ok(count > 0, "descriptor output ended before its measured length"); captured += count;
+      }
+      assert.equal(fstatSync(output).size, size, "descriptor output changed during capture");
       writeFileSync(executable, bytes, { flag: "wx", mode: 0o700 });
+      record("fixed-output-capture", { descriptorBytes: size, publishedBytes: statSync(executable).size,
+        firstFourBytes: bytes.subarray(0, 4).toString("hex"), explicitReadOffset: true });
       const probe = await checked(executable, ["--probe"], { env: {}, deadlineMs: PROBE_MS });
       record("fixed-helper-probe", { ...terminal(probe), sha256: createHash("sha256").update(bytes).digest("hex") });
       const invalid = join(path, "invalid.c"); writeFileSync(invalid, "this is deliberately invalid C\n", { flag: "wx" });
