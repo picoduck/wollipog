@@ -88,3 +88,22 @@ export function textBefore(container: DomTextNode, node: DomTextNode): string {
   assert.ok(found, "the node is inside the container");
   return text.replace(/\s+/gu, " ").trim();
 }
+
+/** The parts of an element `ariaReferencedText` reads, typed structurally for the same reason. */
+interface DomReferencingElement {
+  getAttribute: (name: string) => string | null;
+  ownerDocument: { getElementById: (id: string) => { textContent: string | null } | null };
+}
+
+/**
+ * The text of the elements an `aria-labelledby` or `aria-describedby` names, joined with spaces as
+ * the accessible name computation joins them, or null when the attribute is absent (#2285, #2369).
+ */
+export function ariaReferencedText(
+  element: DomReferencingElement,
+  attribute: "aria-labelledby" | "aria-describedby",
+): string | null {
+  const ids = element.getAttribute(attribute);
+  if (!ids) return null;
+  return ids.split(/\s+/u).map((id) => element.ownerDocument.getElementById(id)?.textContent ?? "").join(" ");
+}

@@ -21,7 +21,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { NewSessionDialog, type NewSessionPreset } from "./NewSessionDialog.js";
-import { assertNoDomNode } from "../dom-test-assertions.js";
+import { ariaReferencedText, assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { fireDomEvent } from "./test-dom-events.js";
 
@@ -631,6 +631,52 @@ test("an unavailable Advanced Agent keeps its marker, search term, and refusal r
     assert.match(options[0]?.textContent ?? "", /Advanced Agent.*Needs setup.*Non-interactive via codex exec/);
     assert.equal(options[0]?.textContent?.match(/Non-interactive via codex exec/g)?.length, 1,
       "unavailable metadata is rendered once, in its actionable setup reason");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+/** Each option's accessible name and description, from the elements its aria-*by attributes name. */
+function optionNamesAndDescriptions(options: HTMLButtonElement[]) {
+  return options.map((option) => ({
+    name: ariaReferencedText(option, "aria-labelledby"),
+    description: ariaReferencedText(option, "aria-describedby"),
+  }));
+}
+
+test("Project and Agent options are named by their label and described by their second lines (#2369)", async () => {
+  const agentRunner: RunnerView = {
+    ...runner,
+    agents: [
+      ...runner.agents,
+      { id: "codex-exec", name: "Codex", command: "codex", args: ["exec"], env: {}, driver: "codex", available: false },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [agentRunner] });
+  try {
+    const projectInput = combobox(fixture.container, "Project");
+    await act(async () => { projectInput.focus(); });
+    const projectOptions = comboboxOptions(fixture.container, "Project");
+    assert.deepEqual(optionNamesAndDescriptions(projectOptions), [
+      { name: "Wollipog", description: "1 Project Location." },
+      { name: "No Project", description: "Run in the selected folder without adding this session to a Project." },
+    ]);
+    for (const option of projectOptions) assert.equal(option.getAttribute("aria-label"), null);
+    await act(async () => { projectOptions[0]!.click(); });
+
+    const agent = combobox(fixture.container, "Agent");
+    await act(async () => { agent.focus(); });
+    const agentOptions = comboboxOptions(fixture.container, "Agent");
+    // An unavailable Agent's reason follows its description, as Select's does.
+    assert.deepEqual(optionNamesAndDescriptions(agentOptions), [
+      { name: "Claude Code", description: "Runs on native host" },
+      {
+        name: "Codex — Non-Interactive (codex exec)",
+        description: "Advanced Agent Needs setup. Non-interactive via codex exec · approval settings are fixed before each turn · runs on native host",
+      },
+    ]);
+    assert.equal(agentOptions[1]?.getAttribute("aria-disabled"), "true");
+    for (const option of agentOptions) assert.equal(option.getAttribute("aria-label"), null);
   } finally {
     await unmountFixture(fixture);
   }

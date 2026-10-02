@@ -8,7 +8,7 @@ import type { SessionReminderView, SetSessionReminderRequest } from "@wollipog/p
 import { ApiError } from "../api.js";
 import { parseReminderExpression } from "../reminder-schedule.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
-import { assertNoDomNode } from "../dom-test-assertions.js";
+import { ariaReferencedText, assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
 for (const [name, value] of Object.entries({
@@ -927,6 +927,17 @@ test("schedule suggestions expose listbox semantics and keyboard selection submi
   assert.deepEqual(options.map((option) => option.textContent?.match(/^In 23 (?:Minutes|Hours|Days)/)?.[0]), [
     "In 23 Minutes", "In 23 Hours", "In 23 Days",
   ]);
+  // Each suggestion is named by its expression alone and described by the time it resolves to, the
+  // second line a sighted user reads under it (#2369).
+  assert.deepEqual(options.map((option) => ariaReferencedText(option, "aria-labelledby")), [
+    "In 23 Minutes", "In 23 Hours", "In 23 Days",
+  ]);
+  for (const option of options) {
+    const name = ariaReferencedText(option, "aria-labelledby");
+    const description = ariaReferencedText(option, "aria-describedby");
+    assert.ok(description, `${name} has an accessible description`);
+    assert.equal(option.textContent, `${name}${description}`, "the name and description are the option's whole text");
+  }
   assert.equal(options.every((option) => option.tabIndex === -1), true);
   assert.equal(expression.hasAttribute("aria-activedescendant"), false,
     "typing alone must not make Enter replace an already-valid expression with a different suggestion");
@@ -950,6 +961,27 @@ test("schedule suggestions expose listbox semantics and keyboard selection submi
 
   await act(async () => { root.unmount(); });
   mountPoint.remove();
+});
+
+test("a Someday suggestion is named by its expression and described as having no return time", async () => {
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
+  await act(async () => {
+    root.render(<SnoozeDialog supportsSomeday onClose={() => undefined} onSave={async () => undefined} />);
+  });
+  try {
+    const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+    await act(async () => { fireDomEvent.change(expression, { target: { value: "some" } }); });
+    const someday = [...container.querySelectorAll<HTMLElement>('[role="option"]')]
+      .find((option) => ariaReferencedText(option, "aria-labelledby") === "Someday");
+    assert.ok(someday, "Someday is suggested");
+    assert.equal(ariaReferencedText(someday, "aria-describedby"), "No automatic return time");
+  } finally {
+    await act(async () => { root.unmount(); });
+    mountPoint.remove();
+  }
 });
 
 test("Escape dismisses suggestions before the dialog and Tab leaves suggestion options out of traversal", async () => {

@@ -96,6 +96,34 @@ test("Snooze suggestions remain touch-sized and contained on mobile", async ({ p
   await pause(4_000);
 });
 
+// #2369: as for Select (#2285), a suggestion's name is its expression alone, and the time it
+// resolves to is its accessible description, as the browser computes them.
+test("each Snooze suggestion is named by its expression and described by its time", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openNewSnoozeDialog(page);
+  const expression = page.getByRole("combobox", { name: "Natural Language" });
+  const options = page.getByRole("listbox", { name: "Schedule Suggestions" }).getByRole("option");
+
+  await expression.fill("tomorrow at 3:30");
+  await expect(options).toHaveCount(2);
+  if (process.env.EVIDENCE_DIR) await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/snooze-suggestion-names.png` });
+  const rows = await options.evaluateAll((elements) => elements.map((element) => ({
+    label: element.querySelector(".ui-select-option-body > span")?.textContent ?? "",
+    time: element.querySelector(".ui-select-option-desc")?.textContent ?? "",
+  })));
+  for (const [index, row] of rows.entries()) {
+    expect(row.label, "the suggestion has an expression").not.toBe("");
+    expect(row.time, "the suggestion has a time").not.toBe("");
+    await expect(options.nth(index)).toHaveAccessibleName(row.label);
+    await expect(options.nth(index)).toHaveAccessibleDescription(row.time);
+  }
+
+  await expression.fill("some");
+  await expect(options).toHaveCount(1);
+  await expect(options).toHaveAccessibleName("Someday");
+  await expect(options).toHaveAccessibleDescription("No automatic return time");
+});
+
 test.describe("a short suggestions list on a phone", () => {
   // The dates below are fixed so their length is too: a Wednesday in September is the longest one.
   test.use({ locale: "en-US", timezoneId: "UTC" });

@@ -5,8 +5,8 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { fireDomEvent } from "../test-dom-events.js";
-import { assertNoDomNode } from "../../dom-test-assertions.js";
-import { SearchableCombobox, Select, type PickerCreateOption } from "./ChoiceControls.js";
+import { ariaReferencedText, assertNoDomNode } from "../../dom-test-assertions.js";
+import { InlineListbox, SearchableCombobox, Select, type PickerCreateOption } from "./ChoiceControls.js";
 
 const domWindow = new Window({ url: "http://localhost/choices" });
 for (const [name, value] of Object.entries({
@@ -518,14 +518,32 @@ test("a Select's leading icon renders inside its trigger, before the value", () 
 });
 
 /* ------------------------------------------------------------------------------------------------
- * A Select option's name and description (#2285)
+ * An option's name and description (#2285 for Select, #2369 for SearchableCombobox)
  * ---------------------------------------------------------------------------------------------- */
 
-/** The text of the elements an `aria-labelledby` or `aria-describedby` names, as the spec joins it. */
-function referencedText(element: Element, attribute: "aria-labelledby" | "aria-describedby"): string | null {
-  const ids = element.getAttribute(attribute);
-  if (!ids) return null;
-  return ids.split(/\s+/u).map((id) => document.getElementById(id)?.textContent ?? "").join(" ");
+/** OPTIONS rendered in a list: each is named by its label alone and described by its second lines. */
+function assertOptionsNamedByLabel(container: Element) {
+  const options = [...container.querySelectorAll<HTMLElement>('[role="option"]')];
+  // The name is exactly the label: a screen reader's first-letter navigation, which matches the
+  // name, reaches "Review Agent" with R rather than through its description.
+  assert.deepEqual(options.map((option) => ariaReferencedText(option, "aria-labelledby")),
+    ["Dashboard", "Review Agent", "Dashboard", "Legacy Agent"]);
+  assert.deepEqual(options.map((option) => option.getAttribute("aria-label")), [null, null, null, null]);
+  // The description, then any disabled reason, is the option's accessible description.
+  assert.deepEqual(options.map((option) => ariaReferencedText(option, "aria-describedby")), [
+    "Local · ~/dev/alpha",
+    "Advanced Agent Setup Required",
+    "Remote · /srv/beta",
+    "Runner Too Old",
+  ]);
+  // Both still render inside the option, where a sighted user reads them.
+  assert.ok(options[1]!.contains(document.getElementById(options[1]!.getAttribute("aria-describedby")!.split(" ")[1]!)));
+  // Ids are unique per option, so two options with the same label keep their own descriptions.
+  const ids = options.flatMap((option) => [
+    option.getAttribute("aria-labelledby"),
+    ...(option.getAttribute("aria-describedby")?.split(" ") ?? []),
+  ]);
+  assert.equal(new Set(ids).size, ids.length);
 }
 
 for (const searchable of [false, true]) {
@@ -544,30 +562,77 @@ for (const searchable of [false, true]) {
     ));
     try {
       act(() => fireDomEvent.click(host.querySelector(".ui-select-trigger")!));
-      const options = [...host.querySelectorAll<HTMLElement>('[role="option"]')];
-      // The name is exactly the label: a screen reader's first-letter navigation, which matches the
-      // name, reaches "Review Agent" with R rather than through its description.
-      assert.deepEqual(options.map((option) => referencedText(option, "aria-labelledby")),
-        ["Dashboard", "Review Agent", "Dashboard", "Legacy Agent"]);
-      assert.deepEqual(options.map((option) => option.getAttribute("aria-label")), [null, null, null, null]);
-      // The description, then any disabled reason, is the option's accessible description.
-      assert.deepEqual(options.map((option) => referencedText(option, "aria-describedby")), [
-        "Local · ~/dev/alpha",
-        "Advanced Agent Setup Required",
-        "Remote · /srv/beta",
-        "Runner Too Old",
-      ]);
-      // Both still render inside the option, where a sighted user reads them.
-      assert.ok(options[1]!.contains(document.getElementById(options[1]!.getAttribute("aria-describedby")!.split(" ")[1]!)));
-      // Ids are unique per option, so two options with the same label keep their own descriptions.
-      const ids = options.flatMap((option) => [
-        option.getAttribute("aria-labelledby"),
-        ...(option.getAttribute("aria-describedby")?.split(" ") ?? []),
-      ]);
-      assert.equal(new Set(ids).size, ids.length);
+      assertOptionsNamedByLabel(host);
     } finally {
       act(() => root.unmount());
       host.remove();
     }
   });
 }
+
+test("a SearchableCombobox option is named by its label and described by its second lines", () => {
+  const view = mount();
+  try {
+    act(() => view.input.focus());
+    assertOptionsNamedByLabel(view.host);
+    // A search keeps the pairing: the one result is still named and described by its own lines.
+    type(view.input, "runner too old");
+    const [legacy, ...rest] = [...view.host.querySelectorAll<HTMLElement>('[role="option"]')];
+    assert.equal(rest.length, 0);
+    assert.equal(ariaReferencedText(legacy!, "aria-labelledby"), "Legacy Agent");
+    assert.equal(ariaReferencedText(legacy!, "aria-describedby"), "Runner Too Old");
+    assert.equal(view.input.getAttribute("aria-activedescendant"), legacy!.id);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an available SearchableCombobox option keeps its disabledReason out of its description", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host as unknown as Element);
+  act(() => root.render(
+    <SearchableCombobox
+      label="Agent"
+      options={[{ value: "ready", label: "Ready Agent", description: "Local", disabledReason: "Stale Reason" }]}
+      value={null}
+      onChange={() => undefined}
+    />,
+  ));
+  try {
+    act(() => host.querySelector<HTMLInputElement>('[role="combobox"]')!.focus());
+    const option = host.querySelector<HTMLElement>('[role="option"]')!;
+    assert.equal(ariaReferencedText(option, "aria-labelledby"), "Ready Agent");
+    assert.equal(ariaReferencedText(option, "aria-describedby"), "Local");
+    assert.doesNotMatch(option.textContent ?? "", /Stale Reason/);
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+  }
+});
+
+test("an InlineListbox option rendered whole is named by its content, with no description", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host as unknown as Element);
+  act(() => root.render(
+    <InlineListbox
+      id="paths"
+      label="Workspace Paths"
+      options={["src/session.ts"]}
+      activeIndex={0}
+      getKey={(path) => path}
+      onSelect={() => undefined}
+      renderOption={(path) => <><span aria-hidden="true">📄</span><span>{path}</span></>}
+    />,
+  ));
+  try {
+    const option = host.querySelector<HTMLElement>('[role="option"]')!;
+    assert.equal(option.getAttribute("aria-labelledby"), null);
+    assert.equal(option.getAttribute("aria-describedby"), null);
+    assert.equal(option.textContent, "📄src/session.ts");
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+  }
+});

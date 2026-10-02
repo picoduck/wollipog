@@ -428,16 +428,12 @@ export function SnoozeDialog({
               onSelect={selectSuggestion}
               className="snooze-suggestions ui-searchable-combobox-list menu listbox"
               style={suggestionListStyle}
-              renderOption={(suggestion) => (
-                <span className="ui-select-option-body">
-                  <span>{suggestion.originalExpression}</span>
-                  <small className="ui-select-option-desc">
-                    {suggestion.scheduleKind === "someday"
-                      ? "No automatic return time"
-                      : formatReminderInstant(suggestion.scheduledFor, suggestion.timeZone)}
-                  </small>
-                </span>
-              )}
+              optionText={(suggestion) => ({
+                label: suggestion.originalExpression,
+                description: suggestion.scheduleKind === "someday"
+                  ? "No automatic return time"
+                  : formatReminderInstant(suggestion.scheduledFor, suggestion.timeZone),
+              })}
             />
           )}
         </div>

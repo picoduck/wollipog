@@ -789,6 +789,37 @@ test.describe("searchable pickers at 1440px (#1951)", () => {
     expect(selection[1], "the caret follows the value").toBe(selection[2]);
   });
 
+  // #2369: as for Select (#2285), an option's name is its label alone, and its description and any
+  // unavailable reason are its accessible description, as the browser computes them.
+  test("each Project and Agent option is named by its label and described by its second lines", async ({ page }) => {
+    await openDialog(page, "?agentUnavailable=1");
+    for (const field of ["Project", "Agent"]) {
+      await page.getByRole("combobox", { name: field }).focus();
+      const options = page.getByRole("listbox", { name: `${field} Options` }).getByRole("option");
+      await expect(options.first()).toBeVisible();
+      if (process.env.EVIDENCE_DIR) {
+        await page.mouse.move(0, 0);
+        await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/combobox-option-names-${field.toLowerCase()}.png` });
+      }
+      const rows = await options.evaluateAll((elements) => elements.map((element) => ({
+        label: element.querySelector(".ui-select-option-body > span")?.textContent ?? "",
+        lines: [...element.querySelectorAll(".ui-select-option-desc, .ui-select-option-reason")]
+          .map((line) => line.textContent ?? "").join(" "),
+        reason: element.querySelector(".ui-select-option-reason") !== null,
+      })));
+      expect(rows.every((row) => row.label !== "" && row.lines !== ""), "every option has a label and a second line").toBe(true);
+      if (field === "Agent") expect(rows.some((row) => row.reason), "an unavailable Agent shows its reason").toBe(true);
+      for (const [index, row] of rows.entries()) {
+        await expect(options.nth(index)).toHaveAccessibleName(row.label);
+        await expect(options.nth(index)).toHaveAccessibleDescription(row.lines);
+      }
+    }
+    // One concrete pair, so the comparison above cannot pass by reading the wrong elements.
+    await page.getByRole("combobox", { name: "Project" }).focus();
+    const noProject = page.getByRole("option", { name: "No Project", exact: true });
+    await expect(noProject).toHaveAccessibleDescription("Run in the selected folder without adding this session to a Project.");
+  });
+
   test("a Project search with no results says so in a sentence and offers Create Project", async ({ page }) => {
     await openDialog(page);
     const project = page.getByRole("combobox", { name: "Project" });

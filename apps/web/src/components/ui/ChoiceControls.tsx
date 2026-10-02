@@ -19,11 +19,45 @@ import {
 } from "../interactions.js";
 import { MOBILE_BREAKPOINT_PX } from "../useIsMobile.js";
 
+/** An option's label and the second lines under it: its description and, when unavailable, why. */
+interface ListboxOptionText {
+  label: string;
+  description?: string;
+  reason?: string;
+}
+
+/**
+ * The label alone names an option and its second lines describe it, as a menu item's do (§9.1):
+ * read together as one name, options were long, hard to tell apart and slow to reach with a
+ * screen reader's first-letter navigation, which matches the name. Returns the option's
+ * `aria-labelledby`/`aria-describedby` and the body that carries those ids, so Select and
+ * InlineListbox options are named and described the same way.
+ */
+function optionTextParts(id: string, { label, description, reason }: ListboxOptionText) {
+  const describedBy = [description ? `${id}-desc` : null, reason ? `${id}-reason` : null]
+    .filter(Boolean).join(" ");
+  return {
+    labelledBy: `${id}-label`,
+    describedBy: describedBy || undefined,
+    body: (
+      <span className="ui-select-option-body">
+        <span id={`${id}-label`}>{label}</span>
+        {description && <small className="ui-select-option-desc" id={`${id}-desc`}>{description}</small>}
+        {reason && <small className="ui-select-option-reason" id={`${id}-reason`}>{reason}</small>}
+      </span>
+    ),
+  };
+}
+
 /**
  * An always-open listbox owned by another control, such as an autocomplete textbox.
  *
  * The owner keeps DOM focus and drives the active index; this primitive only centralizes the
  * listbox/option semantics so data pickers do not grow their own incompatible choice markup.
+ *
+ * Options with a label and second lines pass `optionText`, which names each option by its label
+ * and describes it by the rest, as Select does. `renderOption` is for options whose whole content
+ * is their name, such as a file path behind a decorative icon.
  */
 export function InlineListbox<T>({
   id,
@@ -32,6 +66,7 @@ export function InlineListbox<T>({
   activeIndex,
   getKey,
   renderOption,
+  optionText,
   onSelect,
   onActiveChange,
   isOptionDisabled,
@@ -45,7 +80,6 @@ export function InlineListbox<T>({
   options: readonly T[];
   activeIndex: number;
   getKey: (option: T) => string;
-  renderOption: (option: T) => ReactNode;
   onSelect: (option: T) => void;
   onActiveChange?: (index: number) => void;
   isOptionDisabled?: (option: T) => boolean;
@@ -53,7 +87,10 @@ export function InlineListbox<T>({
   before?: ReactNode;
   after?: ReactNode;
   style?: CSSProperties;
-}) {
+} & (
+  | { optionText: (option: T) => ListboxOptionText; renderOption?: never }
+  | { renderOption: (option: T) => ReactNode; optionText?: never }
+)) {
   return (
     <div
       className={className}
@@ -66,13 +103,17 @@ export function InlineListbox<T>({
       {before}
       {options.map((option, index) => {
         const optionDisabled = isOptionDisabled?.(option) ?? false;
+        const optionId = `${id}-${index}`;
+        const text = optionText ? optionTextParts(optionId, optionText(option)) : null;
         return (
           <button
             type="button"
             role="option"
-            id={`${id}-${index}`}
+            id={optionId}
             aria-selected={index === activeIndex}
             aria-disabled={optionDisabled || undefined}
+            aria-labelledby={text?.labelledBy}
+            aria-describedby={text?.describedBy}
             tabIndex={-1}
             className={`ui-inline-listbox-option${index === activeIndex ? " is-active" : ""}`
               + `${optionDisabled ? " is-disabled" : ""}`}
@@ -81,7 +122,7 @@ export function InlineListbox<T>({
             onMouseMove={() => onActiveChange?.(index)}
             onClick={() => { if (!optionDisabled) onSelect(option); }}
           >
-            {renderOption(option)}
+            {text ? text.body : renderOption?.(option)}
           </button>
         );
       })}
@@ -991,15 +1032,11 @@ export function SearchableCombobox<T extends string>({
           after={showCreate && createOption
             ? <CreateOptionRow id={createId} label={createOption.label} active onSelect={create} />
             : undefined}
-          renderOption={(option) => (
-            <span className="ui-select-option-body">
-              <span>{option.label}</span>
-              {option.description && <small className="ui-select-option-desc">{option.description}</small>}
-              {option.disabled && option.disabledReason && (
-                <small className="ui-select-option-reason">{option.disabledReason}</small>
-              )}
-            </span>
-          )}
+          optionText={(option) => ({
+            label: option.label,
+            description: option.description,
+            reason: option.disabled ? option.disabledReason : undefined,
+          })}
         />
       )}
     </div>
@@ -1542,16 +1579,14 @@ export function Select<T extends string>({
     if (!searchable) popover.onPanelKeyDown(event as React.KeyboardEvent<HTMLDivElement>);
   };
 
-  /**
-   * The label alone names an option and its second lines describe it, as a menu item's do (§9.1):
-   * read together as one name, options were long, hard to tell apart and slow to reach with a
-   * screen reader's first-letter navigation, which matches the name.
-   */
+  // The label alone names an option and its second lines describe it (see optionTextParts).
   const renderOption = (option: SelectOption<T>, index: number) => {
     const id = optionId(index);
-    const reason = option.disabled ? option.disabledReason : undefined;
-    const describedBy = [option.description ? `${id}-desc` : null, reason ? `${id}-reason` : null]
-      .filter(Boolean).join(" ");
+    const text = optionTextParts(id, {
+      label: option.label,
+      description: option.description,
+      reason: option.disabled ? option.disabledReason : undefined,
+    });
     return (
       <button
         key={option.value}
@@ -1560,8 +1595,8 @@ export function Select<T extends string>({
         role="option"
         aria-selected={option.value === value}
         aria-disabled={option.disabled || undefined}
-        aria-labelledby={`${id}-label`}
-        aria-describedby={describedBy || undefined}
+        aria-labelledby={text.labelledBy}
+        aria-describedby={text.describedBy}
         tabIndex={-1}
         className={`ui-select-option${option.value === value ? " is-selected" : ""}`
           + `${index === activeIndex ? " is-active" : ""}${option.disabled ? " is-disabled" : ""}`}
@@ -1569,11 +1604,7 @@ export function Select<T extends string>({
         onClick={() => commit(option)}
       >
         {option.swatch}
-        <span className="ui-select-option-body">
-          <span id={`${id}-label`}>{option.label}</span>
-          {option.description && <small className="ui-select-option-desc" id={`${id}-desc`}>{option.description}</small>}
-          {reason && <small className="ui-select-option-reason" id={`${id}-reason`}>{reason}</small>}
-        </span>
+        {text.body}
         {option.value === value && <CheckIcon size={14} />}
       </button>
     );
