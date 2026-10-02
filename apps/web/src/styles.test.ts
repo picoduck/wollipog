@@ -589,7 +589,7 @@ test("the tail control floats from a zero-height anchor and never takes the read
   const control = soleRuleBody(".transcript-tail-anchor > .btn.transcript-tail-control");
   assert.match(control, /position:\s*absolute;/, "the control is an overlay, never a flow box");
   assert.match(control, /bottom:\s*var\(--space-3\);/);
-  assert.match(control, /right:\s*var\(--space-3\);[\s\S]*left:\s*var\(--space-3\);[\s\S]*width:\s*fit-content;[\s\S]*margin-inline:\s*auto;/,
+  assert.match(control, /right:\s*var\(--space-3\);[\s\S]*left:\s*var\(--space-3\);[\s\S]*width:\s*fit-content;[\s\S]*margin-right:\s*auto;[\s\S]*margin-left:\s*auto;/,
     "centered on the reading column, and never wider than the pane's gutters");
   assert.match(control, /border-radius:\s*var\(--radius-sm\);/, "an action, so a control radius, never a pill");
   assert.match(control, /box-shadow:\s*var\(--elev-2\);/);

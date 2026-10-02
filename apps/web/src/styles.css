@@ -15032,7 +15032,8 @@ body.shell-dock-dragging * {
   /* Centered by its margins inside the pane's gutters, so a long label wraps within the pane
      rather than at its middle. */
   width: fit-content;
-  margin-inline: auto;
+  margin-right: auto;
+  margin-left: auto;
   border-radius: var(--radius-sm);
   box-shadow: var(--elev-2);
 }
