@@ -15,6 +15,9 @@ import { fileURLToPath } from "node:url";
 const self = fileURLToPath(import.meta.url), repo = resolve(dirname(self), "../../..");
 const BYTE_LIMIT = 2 * 1024 * 1024, OUTPUT_LIMIT = 64 * 1024;
 const COMPILE_MS = 30_000, PROBE_MS = 10_000;
+// Darwin's /bin/sh reports file limits in 1024-byte units; Linux dash uses 512.
+// The real over-limit write below must verify the resulting kernel limit on each host.
+const SHELL_FILE_LIMIT = process.platform === "darwin" ? 2048 : 4096;
 const source = join(repo, "apps/runner/native/provider-home-lease-io.c");
 
 // Child modes are fixture-only; no engine entrypoint, configuration or public runner mode changes.
@@ -52,7 +55,9 @@ if (process.argv[2]?.startsWith("--child-")) {
 async function main() {
   const root = mkdtempSync(join(tmpdir(), "wollipog-lease-producer-probe-"));
   const live = new Set(), phases = [], blockers = [];
-  const cleanText = value => String(value).replaceAll(root, "<OwnedScratch>").replaceAll(repo, "<Repository>").slice(-2048);
+  const insensitive = value => new RegExp(value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "giu");
+  const cleanText = value => String(value).replace(insensitive(root), "<OwnedScratch>")
+    .replace(insensitive(repo), "<Repository>").slice(-2048);
   const record = (phase, evidence) => { const row = { phase, ...evidence }; phases.push(row); console.log(JSON.stringify(row)); };
   const fixture = name => { const path = join(root, name); mkdirSync(path, { mode: 0o700 }); return path; };
   const envFor = path => ({ ...process.env, TMPDIR: path, TMP: path, TEMP: path });
@@ -103,7 +108,7 @@ async function main() {
     overflow: result.overflow, nativeCloseObserved: result.nativeCloseObserved });
   const anonymous = (path, name) => { const named = join(path, name), fd = openSync(named, "wx+", 0o600); unlinkSync(named); return fd; };
   const limited = (command, args, descriptors, path) => start("/bin/sh",
-    ["-c", 'ulimit -f 4096 || exit 1; exec "$@"', "bounded-producer", command, ...args],
+    ["-c", `ulimit -f ${SHELL_FILE_LIMIT} || exit 1; exec "$@"`, "bounded-producer", command, ...args],
     { env: { PATH: "/usr/bin:/bin", LANG: "C", TMPDIR: path }, stdio: ["ignore", "pipe", "pipe", ...descriptors] });
   try {
     const admission = fixture("admission");
@@ -154,7 +159,8 @@ async function main() {
       const attempt = await limited(process.execPath, ["-e",
         "const fs=require('fs');for(let i=0;i<40;i++)fs.writeSync(3,Buffer.alloc(65536));"], [fd], cap).done;
       assert.equal(fstatSync(fd).size, BYTE_LIMIT); assert.notEqual(attempt.status, 0);
-      record("kernel-before-write-cap", { ...terminal(attempt), attemptedBytes: 2621440, actualBytes: fstatSync(fd).size });
+      record("kernel-before-write-cap", { ...terminal(attempt), shellFileLimit: SHELL_FILE_LIMIT,
+        attemptedBytes: 2621440, actualBytes: fstatSync(fd).size });
     } finally { closeSync(fd); }
     if (process.platform === "linux") await linuxDeath();
     const path = fixture("explicit-descriptors"), temporary = join(path, "temporary"); mkdirSync(temporary);

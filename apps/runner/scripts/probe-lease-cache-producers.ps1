@@ -14,7 +14,7 @@ function Describe-Files {
   return @($files | ForEach-Object { @{ name = $_.Name; bytes = $_.Length } })
 }
 function Safe-Message($exception) {
-  $text = $exception.Message.Replace($Root, '<OwnedScratch>')
+  $text = [regex]::Replace($exception.Message, [regex]::Escape($Root), '<OwnedScratch>', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
   return $text.Substring(0, [Math]::Min(2048, $text.Length))
 }
 if ($Mode -eq 'Describe') {
