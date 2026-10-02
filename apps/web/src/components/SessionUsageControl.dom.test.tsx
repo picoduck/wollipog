@@ -409,11 +409,11 @@ test("Codex App Server protocol details stay behind a compact info disclosure", 
   assert.equal(button.getAttribute("aria-label"), "About Codex App Server Usage");
   assert.equal(button.getAttribute("aria-expanded"), "false");
   assert.equal(button.getAttribute("aria-controls"), detail.id);
-  assert.match(
-    detail.textContent ?? "",
-    /before protocol v127 is incomplete because it includes only the final model response.*v127\+ counts every response/s,
+  assert.equal(
+    detail.textContent,
+    "Codex App Server usage recorded before the machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response.",
   );
-  assert.equal(view.popover()!.querySelector("p")?.textContent?.includes("protocol v127"), false);
+  assert.doesNotMatch(view.popover()!.textContent ?? "", /protocol|v\d/i);
   await view.cleanup();
 });
 

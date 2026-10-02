@@ -213,3 +213,26 @@ test("update-required copy names Wollipog, not the control plane", () => {
     assert.doesNotMatch(read(path).replace(/\s+/g, " "), retired, `${path}: docs/design-system.md §17.2 retires "control plane"`);
   }
 });
+
+/**
+ * §17.2 also retires runner protocol numbers from user copy. The notes about historical Codex App
+ * Server usage once told people that records "before protocol v127" were incomplete, which names an
+ * internal version gate instead of the effect on their numbers (#2412). Each note is pinned exactly,
+ * and neither file may render a protocol number or the gate constant again.
+ */
+const CODEX_USAGE_NOTES: ReadonlyArray<[string, string]> = [
+  ["./components/UsageView.tsx",
+    "Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response."],
+  ["./components/SessionUsageControl.tsx",
+    "Codex App Server usage recorded before the machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response."],
+];
+
+test("Codex App Server usage notes name the Wollipog update, not a runner protocol number", () => {
+  for (const [path, expected] of CODEX_USAGE_NOTES) {
+    const source = read(path).replace(/\s+/g, " ");
+    assert.ok(source.includes(expected), `${path} should carry ${JSON.stringify(expected)}`);
+    assert.doesNotMatch(expected, /protocol|v\d|control plane|durable/i);
+    assert.doesNotMatch(source, /protocol v\d|protocol v\{|Protocol v|CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL/,
+      `${path}: docs/design-system.md §17.2 retires runner protocol numbers`);
+  }
+});

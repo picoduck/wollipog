@@ -9,7 +9,6 @@ import type {
   UsageRetentionPolicy,
   UserCostWindows,
 } from "@wollipog/protocol";
-import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
@@ -621,7 +620,7 @@ export function UsageView() {
           </p>
           {includesCodexAppServer && (
             <p className="usage-coverage" role="note">
-              Codex App Server records written by runners before protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL} include only the final model response and are incomplete. Protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL}+ records complete turn usage.
+              Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response.
             </p>
           )}
           {notices.length > 0 && (

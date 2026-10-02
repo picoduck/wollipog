@@ -16,7 +16,7 @@ test("desktop: metric, chart interaction, and shared Hour, Day, and Week control
   const headline = page.locator(".usage-headline-value");
   await expect(headline).toContainText("$");
   await expect(page.locator(".usage-coverage", { hasText: "Codex App Server" })).toContainText(
-    "Codex App Server records written by runners before protocol v127 include only the final model response and are incomplete",
+    "Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response.",
   );
   await page.screenshot({ path: `${SHOT}/desktop-dark-cost.png`, fullPage: true });
   const breakdown = page.getByRole("radiogroup", { name: "Usage Breakdown" });

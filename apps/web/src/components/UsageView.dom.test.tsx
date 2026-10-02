@@ -967,10 +967,11 @@ test("an unsplit response from an older plane is shown honestly and the window c
   assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 7 days/);
   const codexCoverage = [...container.querySelectorAll(".usage-coverage")]
     .find((node) => node.textContent?.includes("Codex App Server"));
-  assert.match(
-    codexCoverage?.textContent ?? "",
-    /before protocol v127 include only the final model response and are incomplete.*v127\+ records complete turn usage/s,
+  assert.equal(
+    codexCoverage?.textContent,
+    "Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response.",
   );
+  assert.doesNotMatch(codexCoverage?.textContent ?? "", /protocol|v\d/i);
   assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /not split by driver/);
   assertNoDomNode(container.querySelector(".usage-legend"), "no legend claims a split that does not exist");
   const dayTable = container.querySelector(".usage-breakdown-section table")!;

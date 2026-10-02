@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL, type SessionUsageResponse, type SessionView } from "@wollipog/protocol";
+import type { SessionUsageResponse, SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatCost, formatTokens } from "../format.js";
 import { costProvenanceNote, estimatedCostSourceUrl, sessionCostLabel, sessionUsageTotals } from "../session-cost.js";
@@ -22,7 +22,7 @@ function ProtocolUsageInfo({ detailId }: { detailId: string }) {
         <InfoIcon size={14} />
       </button>
       <span className="session-usage-info-detail" id={detailId} role="note">
-        Historical Codex App Server usage written by runners before protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL} is incomplete because it includes only the final model response. Protocol v{CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL}+ counts every response in each turn.
+        Codex App Server usage recorded before the machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response.
       </span>
     </span>
   );

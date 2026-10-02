@@ -136,7 +136,7 @@ test("desktop: the cost control opens Session Usage with cumulative tokens and t
   await page.screenshot({ path: `${SHOT}/desktop-session-usage.png` });
   await protocolInfo.hover();
   await expect(protocolDetail).toBeVisible();
-  await expect(protocolDetail).toContainText("before protocol v127 is incomplete");
+  await expect(protocolDetail).toContainText("before the machine's Wollipog update includes only the final response");
 
   await page.keyboard.press("Escape");
   await expect(usage).toHaveCount(0);
@@ -692,7 +692,7 @@ test("mobile: context and cost sit beside Live Output, and cost opens Session Us
   await expect(protocolDetail).toBeHidden();
   await protocolInfo.click();
   await expect(protocolDetail).toBeVisible();
-  await expect(protocolDetail).toContainText("Protocol v127+ counts every response in each turn");
+  await expect(protocolDetail).toContainText("Usage recorded since then counts every response.");
   await page.screenshot({ path: `${SHOT}/mobile-session-usage-info.png` });
   await protocolInfo.click();
   await page.mouse.move(0, 0);
