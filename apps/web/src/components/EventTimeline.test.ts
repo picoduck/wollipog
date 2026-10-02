@@ -1296,6 +1296,29 @@ test("a continuation's usage report times the continuation, not the turn before 
   const { segments } = summarizeTimelineTurns(items, assistantForkTurns(items));
   assert.deepEqual(segments.slice(1).map((segment) => [segment.turn, segment.finishedAt]), [[1, 3_000], [2, 14_000]]);
   assert.equal(segments[1]!.durationMs, 3_000, "the prompt's duration is its own turn's");
+
+  // The file checkpoint is best effort; a continuation without one is timed the same way.
+  const withoutCheckpoint = deriveTimeline([
+    event(1, 0, { kind: "user_message", text: "Start it" }),
+    event(3, 2_000, { kind: "agent_message", text: "Started.", final: true }),
+    event(4, 3_000, { kind: "token_usage", inputTokens: 10, outputTokens: 2 }),
+    event(5, 3_001, { kind: "conversation_checkpoint", turn: 1 }),
+    event(6, 10_000, { kind: "stderr", text: "Runner resumed orphaned background work automatically." }),
+    event(8, 12_000, { kind: "agent_message", text: "Finished.", final: true }),
+    event(9, 14_000, { kind: "token_usage", inputTokens: 20, outputTokens: 4 }),
+    event(10, 14_001, { kind: "conversation_checkpoint", turn: 2 }),
+  ]);
+  const unanchored = summarizeTimelineTurns(withoutCheckpoint, assistantForkTurns(withoutCheckpoint)).segments;
+  assert.deepEqual(unanchored.slice(1).map((segment) => [segment.turn, segment.finishedAt]), [[1, 3_000], [2, 14_000]]);
+
+  // A terminal report landing just after the prompt's own conversation checkpoint is still its turn's.
+  const lateReport = deriveTimeline([
+    event(1, 0, { kind: "user_message", text: "Run it" }),
+    event(2, 2_000, { kind: "agent_message", text: "Done.", final: true }),
+    event(3, 2_001, { kind: "conversation_checkpoint", turn: 1 }),
+    event(4, 5_000, { kind: "token_usage", inputTokens: 10, outputTokens: 2 }),
+  ]);
+  assert.equal(summarizeTimelineTurns(lateReport, new Map()).segments[1]!.finishedAt, 5_000);
 });
 
 test("an empty terminal usage report settles a turn that produced nothing else", () => {

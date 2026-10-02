@@ -277,6 +277,7 @@ function latestActivityAt(item: TimelineItem): number | undefined {
       candidates = [item.createdAt, item.lastUsageAt];
       break;
     case "checkpoint":
+    case "conversation_checkpoint":
       candidates = [item.lastUsageAt];
       break;
     case "turn_interrupted":
@@ -342,6 +343,7 @@ export function summarizeTimelineTurns(
     segmentOf.set(item.id, segments.length - 1);
     if (item.kind === "conversation_checkpoint") {
       segment.conversationTurn = item.turn;
+      if (item.lastUsageAt != null) segment.usageReported = true;
     } else if (item.kind === "checkpoint") {
       segment.fileTurn ??= item.turn;
       if (item.lastUsageAt != null) segment.usageReported = true;

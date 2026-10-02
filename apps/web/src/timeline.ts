@@ -209,7 +209,13 @@ export type TimelineItem =
       lastUsageAt?: number;
     }
   | { kind: "checkpoint_restored"; id: number; turn: number }
-  | { kind: "conversation_checkpoint"; id: number; turn: number }
+  | {
+      kind: "conversation_checkpoint";
+      id: number;
+      turn: number;
+      /** An automatic continuation's latest usage-report time, when it has no file checkpoint. */
+      lastUsageAt?: number;
+    }
   | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
   | { kind: "provider_account_switched"; id: number; providerAccountId: string; providerAccountLabel: string; automatic?: boolean };
 
@@ -607,6 +613,12 @@ export class TimelineBuilder {
   /** The checkpoint opening an automatic continuation (resumed background work) that no prompt
    * started. Its usage timing belongs to it, not to the earlier prompt that still owns usage. */
   private continuationIndex: number | null = null;
+  /** Item count just after the active prompt's own conversation checkpoint: anything after it
+   * belongs to an automatic continuation, never to that completed turn. */
+  private completedTurnItemCount: number | null = null;
+  /** A continuation's usage time held for its conversation checkpoint when its best-effort file
+   * checkpoint is missing. */
+  private pendingContinuationUsageAt: number | null = null;
   // ID-less providers retain the historical contiguous-only behavior. Identified provider items
   // may interleave, so they use a separate bounded LRU set until completion or a real boundary.
   private lastText: { kind: string; index: number; parent?: string } | null = null;
@@ -833,6 +845,8 @@ export class TimelineBuilder {
           this.activeUserIndex = userIndex;
           this.pendingConversationUserIndex = userIndex;
           this.continuationIndex = null;
+          this.completedTurnItemCount = null;
+          this.pendingContinuationUsageAt = null;
         }
         this.markDirty(userIndex);
         break;
@@ -1004,11 +1018,17 @@ export class TimelineBuilder {
       case "token_usage": {
         if (!p.parentToolUseId) {
           const continuation = this.continuationIndex != null ? this.items[this.continuationIndex] : undefined;
-          const continued = continuation?.kind === "checkpoint";
-          if (continuation?.kind === "checkpoint" && Number.isFinite(ev.ts) &&
-              (continuation.lastUsageAt == null || ev.ts > continuation.lastUsageAt)) {
-            this.items[this.continuationIndex!] = { ...continuation, lastUsageAt: ev.ts };
-            this.markDirty(this.continuationIndex!);
+          const continued = continuation?.kind === "checkpoint" ||
+            (this.completedTurnItemCount != null && this.items.length > this.completedTurnItemCount);
+          if (continued && Number.isFinite(ev.ts)) {
+            if (continuation?.kind === "checkpoint") {
+              if (continuation.lastUsageAt == null || ev.ts > continuation.lastUsageAt) {
+                this.items[this.continuationIndex!] = { ...continuation, lastUsageAt: ev.ts };
+                this.markDirty(this.continuationIndex!);
+              }
+            } else {
+              this.pendingContinuationUsageAt = Math.max(this.pendingContinuationUsageAt ?? ev.ts, ev.ts);
+            }
           }
           if (this.activeUserIndex != null) {
             const item = this.items[this.activeUserIndex];
@@ -1207,8 +1227,9 @@ export class TimelineBuilder {
         this.breakText();
         this.markDirty(this.items.push({ kind: "checkpoint_restored", id: ev.seq, turn: p.turn }) - 1);
         break;
-      case "conversation_checkpoint":
+      case "conversation_checkpoint": {
         this.breakText();
+        const promptTurn = this.pendingConversationUserIndex != null;
         if (this.pendingConversationUserIndex != null) {
           const item = this.items[this.pendingConversationUserIndex];
           if (item?.kind === "user_message") {
@@ -1217,8 +1238,19 @@ export class TimelineBuilder {
           }
           this.pendingConversationUserIndex = null;
         }
-        this.markDirty(this.items.push({ kind: "conversation_checkpoint", id: ev.seq, turn: p.turn }) - 1);
+        const usageAt = promptTurn ? null : this.pendingContinuationUsageAt;
+        this.markDirty(this.items.push({
+          kind: "conversation_checkpoint", id: ev.seq, turn: p.turn, ...(usageAt != null ? { lastUsageAt: usageAt } : {}),
+        }) - 1);
+        if (promptTurn) {
+          this.completedTurnItemCount = this.items.length;
+        } else {
+          // A continuation's turn is complete; whatever follows is the next one.
+          this.continuationIndex = null;
+          this.pendingContinuationUsageAt = null;
+        }
         break;
+      }
       case "conversation_forked":
         this.breakText();
         this.markDirty(this.items.push({ kind: "conversation_forked", id: ev.seq, sourceSessionId: p.sourceSessionId, turn: p.turn, ...(p.handoff ? { handoff: p.handoff } : {}) }) - 1);
