@@ -5402,6 +5402,7 @@ function SessionDetailLoaded({
                       sessionActive={isTimelineSessionActive(session.status)}
                       onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                       onOpenSourceLocation={openSourceLocation}
+                      workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
                       scrollRef={scrollRef}
                       historyKey={timelineHistoryKey}
                       getInitialAnchor={followTail.getInitialAnchor}

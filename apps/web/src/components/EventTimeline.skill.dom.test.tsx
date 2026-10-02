@@ -21,7 +21,7 @@ for (const [name, value] of Object.entries({
 
 const { cleanup } = installDomTestCleanup(domWindow);
 
-test("skill rows show the skill name without expansion and are styled apart from generic tools", async () => {
+test("skill rows show the skill name without expansion and carry the Skills glyph, not a generic tool's", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -41,23 +41,26 @@ test("skill rows show the skill name without expansion and are styled apart from
     await act(async () => disclosure.click());
   }
 
-  const rows = [...container.querySelectorAll<HTMLElement>(".tl-tool")];
+  const rows = [...container.querySelectorAll<HTMLElement>(".tl-step")];
+  const glyph = (row: HTMLElement) => row.querySelector(".tl-step-icon svg")?.getAttribute("class") ?? "";
   assert.deepEqual(rows.map((row) => [
-    row.querySelector(".tool-title")?.textContent,
-    row.querySelector(".tool-kind")?.textContent,
-    row.classList.contains("tl-tool-skill"),
+    row.querySelector(".tl-step-title")?.textContent,
+    row.querySelector(".tl-step-object")?.textContent ?? null,
   ]), [
-    ["Skill: codex-review", "🧩", true],
-    ["Skill: deploy-check staging", "🧩", true],
-    ["Custom", "🔧", false],
+    ["Skill codex-review", "codex-review"],
+    ["Skill deploy-check staging", "deploy-check staging"],
+    ["Custom", null],
   ]);
+  assert.match(glyph(rows[0]!), /lucide-wand-sparkles/, "a skill uses the Skills glyph");
+  assert.equal(glyph(rows[1]!), glyph(rows[0]!));
+  assert.match(glyph(rows[2]!), /lucide-hammer/, "any other tool uses the generic tool glyph");
   const outputRow = rows[1]!;
   assert.equal(outputRow.tagName, "DETAILS", "a skill with output keeps the ordinary disclosure");
   assert.equal(outputRow.hasAttribute("open"), false, "the name is readable while the output stays collapsed");
   assert.equal(outputRow.querySelector("summary")?.getAttribute("aria-label"), "Skill: deploy-check staging · Completed");
 });
 
-test("tool rows carry the shared status badge: Running, Failed and Pending as badges, Completed inline", async () => {
+test("step statuses follow §11.2: Running, Failed and Pending inline, Completed a check with no label", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -78,18 +81,22 @@ test("tool rows carry the shared status badge: Running, Failed and Pending as ba
     await act(async () => disclosure.click());
   }
 
-  // docs/design-system.md §11.2 and §19.2: the uppercase tool pill is the one `.status` recipe.
-  const badges = [...container.querySelectorAll<HTMLElement>(".tl-tool .status")].map((badge) => [
+  // docs/design-system.md §11.2: a dense step row takes the inline status, never a pill.
+  const badges = [...container.querySelectorAll<HTMLElement>(".tl-step .status")].map((badge) => [
     badge.textContent,
     [...badge.classList].filter((name) => name.startsWith("t-")).join(" "),
     badge.classList.contains("inline"),
+    badge.classList.contains("pulse"),
   ]);
   assert.deepEqual(badges, [
-    ["Running", "t-info", false],
-    ["Failed", "t-danger", false],
-    ["Completed", "t-success", true],
-    ["Pending", "t-neutral", false],
+    ["Running", "t-info", true, true],
+    ["Failed", "t-danger", true, false],
+    ["Pending", "t-neutral", true, false],
   ]);
+  const done = container.querySelectorAll(".tl-step-done");
+  assert.equal(done.length, 1, "Completed is a check");
+  assert.ok(done[0]!.querySelector("svg.lucide-check"));
+  assert.equal(done[0]!.querySelector(".sr-only")?.textContent, "Completed", "its label is for assistive technology only");
   assertNoDomNode(container.querySelector(".tool-status"), "the retired pill recipe is gone");
-  assert.equal(container.querySelector('.tl-tool summary')?.getAttribute("aria-label"), "Build · Failed");
+  assert.equal(container.querySelector('.tl-step summary')?.getAttribute("aria-label"), "Build · Failed");
 });

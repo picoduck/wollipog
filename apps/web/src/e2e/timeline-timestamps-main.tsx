@@ -56,7 +56,7 @@ let layoutShift = 0;
 
 new MutationObserver((records) => {
   timestampMutations += records.filter((record) =>
-    record.type === "characterData" && record.target.parentElement?.closest(".tl-timestamp-meta")).length;
+    record.type === "characterData" && record.target.parentElement?.closest(".tl-step-trail")).length;
 }).observe(document.documentElement, { subtree: true, characterData: true });
 
 if ("PerformanceObserver" in window) {

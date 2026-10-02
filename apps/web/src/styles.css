@@ -4951,12 +4951,6 @@ textarea {
   color: var(--accent);
   text-decoration: underline;
 }
-.tool-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .approval-bar {
   display: flex;
   align-items: center;
@@ -6892,56 +6886,154 @@ textarea,
   font: var(--type-reading);
   padding: 0 2px;
 }
-.tl-thought {
-  font-size: 12.5px;
-  color: var(--text-dim);
-}
-.tl-thought summary {
-  cursor: pointer;
-  color: var(--text-faint);
-  display: grid;
-  gap: 2px;
-  list-style: none;
-}
-.tl-thought summary::-webkit-details-marker { display: none; }
-.thought-head-main { display: flex; align-items: center; gap: 7px; }
-.thought-caret {
-  display: inline-block;
-  transition: transform var(--dur-fast) var(--ease-out);
-  font-size: var(--text-xs);
-}
-.tl-thought[open] .thought-caret { transform: rotate(90deg); }
-.tl-thought-time { padding-left: 18px; }
-.thought-body {
-  margin-top: 6px;
-  padding: 8px 11px;
-  border-left: 2px solid var(--border-strong);
-  white-space: normal;
-  color: var(--text-dim);
-  font-size: 13px;
-}
-/* Codex-style collapsed "Worked…" block: reasoning + tool calls fold under a disclosure. */
-.tl-work {
-  border-left: 2px solid var(--border);
-  padding-left: 4px;
-}
-/* The Worked row keeps its compact transcript size on the shared disclosure trigger. */
+/* Work ledger (#2168, §5.5): a run of work collapses to one line, "Worked for 26s" and its counts
+   12px apart. The line never wraps; on a narrow screen its meta clips at the end. */
+.tl-work { min-width: 0; }
 .tl-work > .disclosure-trigger {
   display: flex;
   width: 100%;
-  min-height: 0;
-  padding: var(--space-0-5) 0;
+  min-width: 0;
   gap: var(--space-2);
   color: var(--text-faint);
   font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   user-select: none;
 }
-/* A subagent's work nested under its Task tool call — a visible left rule marks the nesting. */
-.tl-subagent {
-  margin: 6px 0 2px 10px;
-  border-left: 2px solid var(--accent);
-  padding-left: 8px;
+.tl-work-title { flex: none; color: var(--text-dim); }
+.tl-work-meta {
+  display: flex;
+  gap: var(--space-3);
+  min-width: 0;
+  overflow: hidden;
 }
+.tl-work-meta > span { flex: none; }
+.tl-work-failed {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--danger-text);
+}
+/* An open group's steps sit on one 1px rule under the ledger chevron's centre; a nested agent's
+   steps add a rule under that agent's chevron. The rows sit flush, so the rule never breaks. */
+.tl-work-rule {
+  min-width: 0;
+  margin-inline-start: calc(var(--space-1) + var(--icon-sm) / 2);
+  padding-inline-start: var(--space-2);
+  border-inline-start: 1px solid var(--border-strong);
+}
+.timeline > .tl-on-work-rule { margin-top: calc(-1 * var(--space-3)); }
+/* A step (#2168): chevron, 16px icon, verb and mono object, one trailing fact, status. No card and
+   no clipping ancestor, so the summary's focus ring paints outside the row (§16.1). */
+.tl-step { min-width: 0; }
+.tl-step > .tl-step-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-2) 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+.tl-step-chevron-space { flex: none; width: var(--icon-sm); }
+.tl-step-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-faint);
+}
+.tl-step-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-step-object {
+  color: var(--text);
+  font: var(--type-small);
+  font-family: var(--font-mono);
+}
+/* A minimum width, end-aligned, so a ticking duration never moves the status beside it. */
+.tl-step-trail {
+  position: relative;
+  flex: none;
+  min-inline-size: var(--space-12);
+  text-align: end;
+  color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* The trail's tooltip opens leftward from the row's end, so it never widens the reader. */
+.tl-step-trail > .tl-tooltip {
+  inset-inline-start: auto;
+  inset-inline-end: 0;
+}
+.tl-step-trail:hover > .tl-tooltip,
+.tl-step-head:focus-visible .tl-tooltip {
+  visibility: visible;
+  opacity: 1;
+}
+.tl-step-status { flex: none; }
+.tl-step-done {
+  display: inline-flex;
+  flex: none;
+  color: var(--positive-text);
+}
+/* The body starts where the title does: past the chevron, the icon and their two gaps. */
+.tl-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-1) 0 var(--space-2) calc(var(--space-1) + var(--icon-sm) + var(--icon) + 2 * var(--space-2));
+}
+.tl-step-prose {
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+/* A step's output: a neutral well (§11.7); only a failure's lines take the danger colour. */
+.tl-step-output {
+  max-height: 240px;
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tl-step-error { color: var(--danger-text); }
+.tl-step-attempts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tl-step-attempt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.tl-step-attempt-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.tl-step-link { align-self: flex-start; }
+/* A subagent's work nested under its Task tool call (#2183 restyles the row). */
 .tl-subagent > .subagent-head {
   display: flex;
   align-items: flex-start;
@@ -6956,7 +7048,7 @@ textarea,
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  padding: 2px 0;
+  padding: var(--space-0-5) 0 var(--space-0-5) var(--space-1);
   color: var(--text-faint);
   cursor: pointer;
   user-select: none;
@@ -6964,6 +7056,7 @@ textarea,
 .tl-subagent .subagent-toggle:hover {
   color: var(--text-dim);
 }
+.tl-subagent.open > .subagent-head .disclosure-chevron { transform: rotate(90deg); }
 .subagent-open {
   flex-shrink: 0;
   padding: 3px 7px;
@@ -6976,14 +7069,6 @@ textarea,
   cursor: pointer;
 }
 .subagent-open:hover { background: var(--bg-elev-2); color: var(--text); }
-.subagent-caret {
-  display: inline-block;
-  transition: transform var(--dur-fast) var(--ease-out);
-  font-size: 10px;
-}
-.tl-subagent.open > .subagent-head .subagent-caret {
-  transform: rotate(90deg);
-}
 .subagent-icon {
   opacity: 0.8;
 }
@@ -6997,85 +7082,6 @@ textarea,
 .tl-subagent-time {
   flex-basis: 100%;
   padding-left: 32px;
-}
-.tl-work-row,
-.tl-nested-row {
-  min-width: 0;
-}
-.tl-nested-row {
-  border-left: 2px solid var(--accent);
-  padding-left: 8px;
-}
-/* reasoning narration inside a work block — muted prose, no nested disclosure */
-.tl-reasoning {
-  color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.55;
-  border-left: 2px solid var(--border-strong);
-  padding-left: 10px;
-}
-.tl-tool {
-  min-width: 0;
-  max-width: 100%;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-  overflow: hidden;
-}
-.tool-head {
-  display: grid;
-  gap: 3px;
-  padding: 9px 12px;
-}
-.tool-head-main {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-}
-/* skill invocations read as a procedure the agent followed, not one more generic tool call */
-.tl-tool-skill {
-  box-shadow: inset 3px 0 0 var(--accent-2);
-}
-.tl-tool-time { padding-left: 19px; }
-/* tool output is collapsed by default — the header is the click target */
-.tl-tool > summary {
-  cursor: pointer;
-  list-style: none;
-}
-.tl-tool > summary::-webkit-details-marker {
-  display: none;
-}
-.tl-tool > summary:hover {
-  background: var(--bg-elev-3);
-}
-.tool-caret {
-  flex: none;
-  font-size: 10px;
-  color: var(--text-faint);
-  transition: transform var(--dur-fast) var(--ease-out);
-}
-.tl-tool[open] > summary .tool-caret {
-  transform: rotate(90deg);
-}
-.tool-title {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  font-size: 13px;
-  font-weight: 500;
-}
-.tool-body {
-  width: 100%;
-  max-width: 100%;
-  margin: 0;
-  padding: 9px 12px;
-  border-top: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-dim);
-  white-space: pre-wrap;
-  max-height: 220px;
-  overflow: auto;
 }
 .tl-plan {
   min-width: 0;
@@ -7119,25 +7125,6 @@ textarea,
 }
 .plan-in_progress .plan-check {
   color: var(--blue);
-}
-.tl-file {
-  min-width: 0;
-  max-width: 100%;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-.file-head {
-  padding: 8px 12px;
-  font-size: 12.5px;
-  background: var(--bg-elev);
-  color: var(--teal);
-  font-family: "Cascadia Code", monospace;
-  overflow-wrap: anywhere;
-}
-button.file-head.source-path-link {
-  display: block;
-  width: 100%;
 }
 .diff {
   width: 100%;
@@ -16742,7 +16729,7 @@ body.shell-dock-dragging * {
   --accent-deep-2: #084590;
   --on-accent-deep: #ffffff;
   --green: #1a7636;
-  --teal: #1b7077;
+  --teal: #1b7178;
   --red: #c6222e;
   --amber: #8a5e05;
   --blue: #0b63cc;
@@ -16888,7 +16875,7 @@ body.shell-dock-dragging * {
   --accent-deep-2: #2b4175;
   --on-accent-deep: #ffffff;
   --green: #436848;
-  --teal: #17668a;
+  --teal: #17668b;
   --red: #bc1643;
   --amber: #7c5a14;
   --blue: #3d5da7;
@@ -17034,7 +17021,7 @@ body.shell-dock-dragging * {
   --accent-deep-2: #47358f;
   --on-accent-deep: #ffffff;
   --green: #14710a;
-  --teal: #046792;
+  --teal: #046893;
   --red: #b13628;
   --amber: #9c4a15;
   --blue: #046893;
@@ -17180,7 +17167,7 @@ body.shell-dock-dragging * {
   --accent-deep-2: #094c59;
   --on-accent-deep: #ffffff;
   --green: #496d12;
-  --teal: #0d6c7e;
+  --teal: #0d6d7f;
   --red: #bf185a;
   --amber: #9d4d0c;
   --blue: #0d6d7f;

@@ -1,4 +1,4 @@
-import type { AgentDriverKind, ReviewRiskLevel, WorkflowArtifactView } from "@wollipog/protocol";
+import type { AgentDriverKind, WorkflowArtifactView } from "@wollipog/protocol";
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
@@ -24,8 +24,22 @@ import {
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
-import { ChevronRightIcon, EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
+import { ChevronRightIcon, EditIcon, FileEditIcon, FolderUpIcon, ShareIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { formatClock, formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
+import {
+  activitySpanDescription,
+  diffLineCounts,
+  foldRetries,
+  mergeWork,
+  retryIdentity,
+  retryNeighbours,
+  sameWork,
+  splitStepTitle,
+  summarizeWork,
+  workspaceRelativePath,
+  type WorkLedger,
+} from "../work-steps.js";
+import { StepOutput, StepStatus, ToolStep, toolIcon, WorkLedgerLine } from "./ToolStep.js";
 import { toolStatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { PromptImageView } from "./PromptImageView.js";
@@ -443,30 +457,34 @@ export function layoutTurns(
 }
 
 export type TimelineRenderRow =
-  | {
+  | ({
       kind: "work_summary";
       key: string;
       /** The group's first item, which places the summary in its turn. */
       firstItemId?: number;
-      tools: number;
-      edits: number;
-      thoughts: number;
-      autoApproved: number;
-      highestReviewRisk?: ReviewRiskLevel;
       open: boolean;
-    }
+    } & WorkLedger)
   | { kind: "subagent_summary"; key: string; tool: ToolItem; depth: number; open: boolean }
-  | { kind: "item"; key: string; item: TimelineItem; inWork: boolean; depth: number };
+  | {
+      kind: "item";
+      key: string;
+      /** A folded retry's latest attempt; its key stays the first attempt's. */
+      item: TimelineItem;
+      inWork: boolean;
+      depth: number;
+      /** Every attempt of a retried tool call, oldest first; absent for an ordinary row. */
+      attempts?: readonly ToolItem[];
+    };
 
 const timelineRowKey = (row: TimelineRenderRow) => row.key;
 export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionRequestId: string | null = null): number => {
-  if (row.kind === "work_summary") return 32;
+  if (row.kind === "work_summary") return 28;
   if (row.kind === "subagent_summary") return 52;
   switch (row.item.kind) {
     case "agent_message": return 100;
-    case "agent_thought": return 72;
+    case "agent_thought": return 28;
     case "user_message": return 72;
-    case "file_edit": return 120;
+    case "file_edit": return 28;
     case "question":
       if (row.item.answered !== undefined || row.item.requestId !== pendingQuestionRequestId) return 52;
       return 112 + row.item.questions.reduce(
@@ -475,7 +493,7 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
       );
     case "command_output":
     case "stderr": return 96;
-    case "tool_call": return 72;
+    case "tool_call": return 28;
     case "conversation_forked": return row.item.handoff ? 76 : 52;
     case "provider_account_switched": return 52;
     default: return 52;
@@ -514,6 +532,7 @@ export const EventTimeline = memo(function EventTimeline({
   onRevealHandled,
   questionContext,
   approvalContext,
+  workspaceRoot,
 }: {
   handoff?: { open: (turn: number) => void; reason?: string };
   items: TimelineItem[];
@@ -552,6 +571,8 @@ export const EventTimeline = memo(function EventTimeline({
   questionContext?: TimelineQuestionContext;
   /** Pending standalone approval that adds one review action to its canonical permission row. */
   approvalContext?: TimelineApprovalContext;
+  /** The session's root, so a step names a file by its workspace-relative path. */
+  workspaceRoot?: string;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
@@ -584,6 +605,7 @@ export const EventTimeline = memo(function EventTimeline({
       onRevealHandled={onRevealHandled}
       questionContext={questionContext}
       approvalContext={approvalContext}
+      workspaceRoot={workspaceRoot}
     />
     </TranscriptImageCacheProvider>
     </HandoffContext.Provider>
@@ -615,6 +637,7 @@ function EventTimelineBody({
   onRevealHandled,
   questionContext,
   approvalContext,
+  workspaceRoot,
 }: {
   items: TimelineItem[];
   onRewind?: (turn: number) => void;
@@ -641,6 +664,7 @@ function EventTimelineBody({
   onRevealHandled?: (requestId: number, outcome: VirtualRevealOutcome) => void;
   questionContext?: TimelineQuestionContext;
   approvalContext?: TimelineApprovalContext;
+  workspaceRoot?: string;
 }) {
   const projector = useRef<IncrementalTimelineRows | null>(null);
   if (!projector.current) projector.current = new IncrementalTimelineRows();
@@ -657,10 +681,18 @@ function EventTimelineBody({
     [rows, projection.revision, items, forkTurns, sessionActive],
   );
   // Read at call time: the projector extends `rows` in place, so the closure always sees the tail.
+  // An open group's steps sit flush on its rule, so the rule runs unbroken from the ledger line.
   const rowGap = useCallback(
-    (_row: TimelineRenderRow, index: number) =>
-      turnStarts.has(rows[index + 1]?.key ?? "") ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP,
+    (_row: TimelineRenderRow, index: number) => {
+      const next = rows[index + 1];
+      if (next && rowOnWorkRule(next)) return 0;
+      return turnStarts.has(next?.key ?? "") ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP;
+    },
     [rows, turnStarts],
+  );
+  const liveWorkKey = useMemo(
+    () => sessionActive ? liveWorkSummaryKey(rows) : null,
+    [rows, projection.revision, sessionActive],
   );
   const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
   let pinnedQuestionRow: TimelineRenderRow | undefined;
@@ -751,38 +783,35 @@ function EventTimelineBody({
   const renderRowContent = (row: TimelineRenderRow, state: VirtualRowState) => {
   if (row.kind === "work_summary") {
       return (
-        <WorkSummary
-          tools={row.tools}
-          edits={row.edits}
-          thoughts={row.thoughts}
-          autoApproved={row.autoApproved}
-          highestReviewRisk={row.highestReviewRisk}
+        <WorkLedgerLine
+          ledger={row}
+          live={row.key === liveWorkKey}
           open={row.open}
           onToggle={() => toggle(row.key, row.open)}
         />
       );
     }
     if (row.kind === "subagent_summary") {
-      return <SubagentSummary
-        tool={row.tool}
-        depth={row.depth}
-        open={row.open}
-        onToggle={() => toggle(row.key, row.open)}
-        onOpen={onOpenSubagent ? () => onOpenSubagent(row.tool.toolCallId) : undefined}
-      />;
+      return (
+        <WorkRule depth={1 + row.depth}>
+          <SubagentSummary
+            tool={row.tool}
+            open={row.open}
+            onToggle={() => toggle(row.key, row.open)}
+            onOpen={onOpenSubagent ? () => onOpenSubagent(row.tool.toolCallId) : undefined}
+          />
+        </WorkRule>
+      );
     }
     const item = row.item;
     const detailsKey = `row-details:${row.key}`;
     const detailsOpen = disclosure.get(detailsKey) ?? false;
     const userRewindTurn = item.kind === "user_message" ? rewindTurns.get(item.id) : undefined;
     return (
-      <div
-        className={row.depth > 0 ? "tl-nested-row" : row.inWork ? "tl-work-row" : undefined}
-        style={row.depth > 0 ? { marginLeft: Math.min(row.depth, 6) * 12 } : undefined}
-      >
+      <WorkRule depth={(row.inWork ? 1 : 0) + row.depth}>
         <TimelineRow
           item={item}
-          inWork={row.inWork}
+          attempts={row.attempts}
           highlightEligible={state.visible}
           disclosureOpen={detailsOpen}
           onDisclosureToggle={() => toggle(detailsKey, detailsOpen)}
@@ -800,7 +829,7 @@ function EventTimelineBody({
           approvalContext={item.kind === "permission" && item.resolvedOptionId === undefined &&
             item.requestId === approvalContext?.requestId ? approvalContext : undefined}
         />
-      </div>
+      </WorkRule>
     );
   };
   const timeline = scrollRef ? (
@@ -832,7 +861,7 @@ function EventTimelineBody({
       {rows.map((row, index) => (
         <div
           key={row.key}
-          className={turnStarts.has(row.key) ? "tl-turn-start" : undefined}
+          className={turnStarts.has(row.key) ? "tl-turn-start" : rowOnWorkRule(row) ? "tl-on-work-rule" : undefined}
           role="listitem"
           aria-posinset={index + 1}
           aria-setsize={rows.length}
@@ -844,9 +873,32 @@ function EventTimelineBody({
   );
   return (
     <TimelineClockProvider enabled={sessionActive} sessionActive={sessionActive} driver={driver}>
-      {timeline}
+      <WorkspaceRootContext.Provider value={workspaceRoot}>{timeline}</WorkspaceRootContext.Provider>
     </TimelineClockProvider>
   );
+}
+
+/** A row inside an open work group: a step, a subagent summary or a subagent's nested step. */
+const rowOnWorkRule = (row: TimelineRenderRow): boolean =>
+  row.kind === "subagent_summary" || (row.kind === "item" && (row.inWork || row.depth > 0));
+
+/** The run of work still in progress: the transcript's last work group, with nothing after it but
+ * its own steps. Every earlier group has settled. */
+export function liveWorkSummaryKey(rows: readonly TimelineRenderRow[]): string | null {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index]!;
+    if (row.kind === "work_summary") return row.key;
+    if (!rowOnWorkRule(row)) return null;
+  }
+  return null;
+}
+
+/** The 1px rule an open group's steps sit on, under the ledger chevron's centre (#2168). A nested
+ * agent's steps add one rule per level under that agent's chevron, never an inline margin. */
+function WorkRule({ depth, children }: { depth: number; children: ReactNode }) {
+  let content = children;
+  for (let level = Math.min(depth, 7); level > 0; level -= 1) content = <div className="tl-work-rule">{content}</div>;
+  return <>{content}</>;
 }
 
 const TimelineClockContext = createContext(Date.now());
@@ -860,6 +912,9 @@ export function timelineMediaSettled(item: TimelineItem, sessionActive: boolean)
 /** The session's driver, for driver-aware token arithmetic on the turn rows; provided once by the
  * timeline so the memoised rows need no extra prop. */
 const TimelineDriverContext = createContext<AgentDriverKind | undefined>(undefined);
+
+/** The session root that step titles and edit paths are shown relative to. */
+const WorkspaceRootContext = createContext<string | undefined>(undefined);
 
 function TimelineClockProvider({ enabled, sessionActive, driver, children }: {
   enabled: boolean;
@@ -884,16 +939,6 @@ export interface TimelineRowsProjection {
   processedItems: number;
   revision: number;
   keyDirtyFrom: number;
-}
-
-const reviewRiskRank: Record<ReviewRiskLevel, number> = { low: 1, medium: 2, high: 3 };
-
-function higherReviewRisk(
-  current: ReviewRiskLevel | undefined,
-  candidate: ReviewRiskLevel | undefined,
-): ReviewRiskLevel | undefined {
-  if (!candidate || (current && reviewRiskRank[current] >= reviewRiskRank[candidate])) return current;
-  return candidate;
 }
 
 const rendersSubagentSummary = (item: TimelineItem): boolean =>
@@ -1014,6 +1059,11 @@ export class IncrementalTimelineRows {
       const previousLastGroup = this.groups.at(-1)!;
       const firstNew = items[previousLength];
       const joinsLastWork = appended && previousLastGroup.kind === "work" && firstNew != null && isCollapsibleWorkItem(firstNew);
+      // A new attempt of the group's failed last call folds into that call's row, which only the
+      // full projector rebuilds.
+      const lastWorkItem = previousLastGroup.kind === "work" ? previousLastGroup.items.at(-1) : undefined;
+      const foldsIntoLast = joinsLastWork && lastWorkItem?.kind === "tool_call" && lastWorkItem.status === "failed" &&
+        retryIdentity(firstNew) !== null && retryIdentity(firstNew) === retryIdentity(lastWorkItem);
       const appendedItems = appended ? items.slice(previousLength) : [];
       const appendedToolIds = this.collectToolIds(appendedItems);
       const localToolIds = new Set<string>();
@@ -1025,34 +1075,14 @@ export class IncrementalTimelineRows {
       // A newly materialized root tool may claim an older orphan child. That changes earlier
       // topology, so only the full projector may handle it.
       const canAppendWithoutTopologyChange = !appendedToolIds.some((id) => this.unresolvedParentIds.has(id));
-      if (joinsLastWork && appendedItems.every(isCollapsibleWorkItem) && !hasToolCollision && canAppendWithoutTopologyChange) {
+      if (joinsLastWork && !foldsIntoLast && appendedItems.every(isCollapsibleWorkItem) && !hasToolCollision && canAppendWithoutTopologyChange) {
         const oldRowLength = this.rows.length;
         previousLastGroup.items.push(...appendedItems);
         const summaryIndex = this.rowIndexes.get(`work:${previousLastGroup.id}`);
         const summary = summaryIndex == null ? undefined : this.rows[summaryIndex];
         if (summary?.kind === "work_summary") {
-          let tools = 0;
-          let edits = 0;
-          let thoughts = 0;
-          let autoApproved = 0;
-          let highestReviewRisk = summary.highestReviewRisk;
-          for (const item of appendedItems) {
-            if (item.kind === "tool_call") tools += 1;
-            else if (item.kind === "file_edit") edits += 1;
-            else if (item.kind === "agent_thought") thoughts += 1;
-            else if (item.kind === "review_decision" && item.outcome === "allowed") {
-              autoApproved += 1;
-              highestReviewRisk = higherReviewRisk(highestReviewRisk, item.riskLevel);
-            }
-          }
-          this.rows[summaryIndex!] = {
-            ...summary,
-            tools: summary.tools + tools,
-            edits: summary.edits + edits,
-            thoughts: summary.thoughts + thoughts,
-            autoApproved: summary.autoApproved + autoApproved,
-            highestReviewRisk,
-          };
+          // The batch cannot fold into the group's last row (checked above), so its ledger adds.
+          this.rows[summaryIndex!] = workSummaryRow(summary, mergeWork(summary, summarizeWork(appendedItems)));
           if (summary.open) {
             for (const id of appendedToolIds) this.toolIdCounts.set(id, 1);
             const appendedRows = flattenTimelineItemRows(appendedItems, disclosure, true, 0, this.toolIdCounts);
@@ -1218,6 +1248,16 @@ export class IncrementalTimelineRows {
     // Changing whether a tool owns a subagent summary inserts or removes structural rows.
     // Leave that rare transition to the full defensive projector instead of patching payloads.
     if (rendersSubagentSummary(location.item) !== rendersSubagentSummary(projectedChanged)) return false;
+    // So does a change that can join or split a folded retry.
+    const container = location.parentId
+      ? this.toolNodes.get(location.parentId)?.children
+      : this.groups[location.groupIndex]?.kind === "work"
+        ? (this.groups[location.groupIndex] as Extract<TimelineGroup, { kind: "work" }>).items
+        : undefined;
+    const containerIndex = location.parentId ? location.childIndex : location.rootItemIndex;
+    if (container && retryNeighbours(container, containerIndex, retryIdentity(location.item), retryIdentity(projectedChanged))) {
+      return false;
+    }
     const visibleTools = new Map<string, ToolItem>();
     if (location.parentId) {
       const parent = this.toolNodes.get(location.parentId);
@@ -1249,6 +1289,7 @@ export class IncrementalTimelineRows {
     this.patchVisibleItem(location.item, projectedChanged);
     this.patchToolRows(visibleTools);
     this.itemLocations.set(changed.id, { ...location, item: projectedChanged });
+    if (!location.parentId) this.refreshWorkSummary(location.groupIndex);
     return true;
   }
 
@@ -1291,6 +1332,10 @@ export class IncrementalTimelineRows {
       ? { ...changed, children: rendered.children }
       : changed;
     if (rendersSubagentSummary(rendered) !== rendersSubagentSummary(projectedChanged)) return null;
+    if (group.kind === "work" &&
+        retryNeighbours(group.items, group.items.length - 1, retryIdentity(rendered), retryIdentity(projectedChanged))) {
+      return null;
+    }
     if (group.kind === "work") group.items[group.items.length - 1] = projectedChanged;
     else group.item = projectedChanged;
     const location = this.itemLocations.get(previous.id);
@@ -1303,6 +1348,7 @@ export class IncrementalTimelineRows {
     if (projectedChanged.kind === "tool_call") {
       this.patchToolRows(new Map([[projectedChanged.toolCallId, projectedChanged]]));
     }
+    this.refreshWorkSummary(this.groups.length - 1);
     this.items = items;
     this.disclosure = disclosure;
     this.revision += 1;
@@ -1352,6 +1398,13 @@ export class IncrementalTimelineRows {
           !(child?.kind === "tool_call" && changed.kind === "tool_call" && child.toolCallId === changed.toolCallId)) {
         return null;
       }
+    }
+
+    // A subagent's retried call folds with its previous attempt; the full projector rebuilds that.
+    if (previous
+      ? retryNeighbours(previousChildren, previousChildren.length - 1, retryIdentity(previousChildren.at(-1)), retryIdentity(projectedChanged))
+      : retryNeighbours(previousChildren, previousChildren.length, retryIdentity(projectedChanged))) {
+      return null;
     }
 
     // Validate the entire ancestor path and root location before touching any retained state.
@@ -1469,6 +1522,17 @@ export class IncrementalTimelineRows {
       revision: this.revision,
       keyDirtyFrom,
     };
+  }
+
+  /** Recount a work group's ledger line after one of its items changed in place. */
+  private refreshWorkSummary(groupIndex: number): void {
+    const group = this.groups[groupIndex];
+    if (group?.kind !== "work") return;
+    const index = this.rowIndexes.get(`work:${group.id}`);
+    const summary = index == null ? undefined : this.rows[index];
+    if (summary?.kind !== "work_summary") return;
+    const ledger = summarizeWork(group.items);
+    if (!sameWork(summary, ledger)) this.rows[index!] = workSummaryRow(summary, ledger);
   }
 
   private rebuildToolIndex(): void {
@@ -1675,7 +1739,10 @@ export class IncrementalTimelineRows {
       const row = this.rows[index]!;
       const key = row.key;
       this.rowIndexes.set(key, index);
-      if (row.kind === "item") this.revealRowKeys.set(row.item.id, key);
+      if (row.kind === "item") {
+        this.revealRowKeys.set(row.item.id, key);
+        for (const attempt of row.attempts ?? []) this.revealRowKeys.set(attempt.id, key);
+      }
       this.rowKeys[index] = key;
     }
   }
@@ -1776,6 +1843,14 @@ export function stabilizeTimelineRowKeys(
   });
 }
 
+/** A work summary row with a recounted ledger; the spread never keeps a stale optional field. */
+function workSummaryRow(
+  summary: Extract<TimelineRenderRow, { kind: "work_summary" }>,
+  ledger: WorkLedger,
+): Extract<TimelineRenderRow, { kind: "work_summary" }> {
+  return { kind: "work_summary", key: summary.key, firstItemId: summary.firstItemId, open: summary.open, ...ledger };
+}
+
 export function flattenTimelineRows(
   groups: ReturnType<typeof groupTimeline>,
   disclosure: ReadonlyMap<string, boolean>,
@@ -1798,23 +1873,7 @@ export function flattenTimelineRows(
     }
     const key = `work:${group.id}`;
     const open = disclosure.get(key) ?? false;
-    let tools = 0;
-    let edits = 0;
-    let thoughts = 0;
-    let autoApproved = 0;
-    let highestReviewRisk: ReviewRiskLevel | undefined;
-    for (const item of group.items) {
-      if (item.kind === "tool_call") tools += 1;
-      else if (item.kind === "file_edit") edits += 1;
-      else if (item.kind === "agent_thought") thoughts += 1;
-      else if (item.kind === "review_decision" && item.outcome === "allowed") {
-        autoApproved += 1;
-        highestReviewRisk = higherReviewRisk(highestReviewRisk, item.riskLevel);
-      }
-    }
-    rows.push({
-      kind: "work_summary", key, firstItemId: group.items[0]?.id, tools, edits, thoughts, autoApproved, highestReviewRisk, open,
-    });
+    rows.push({ kind: "work_summary", key, firstItemId: group.items[0]?.id, ...summarizeWork(group.items), open });
     if (open) rows.push(...flattenTimelineItemRows(group.items, disclosure, true, 0, toolIds));
   }
   return rows;
@@ -1828,69 +1887,35 @@ function flattenTimelineItemRows(
   toolIds: ReadonlyMap<string, number>,
 ): TimelineRenderRow[] {
   const rows: TimelineRenderRow[] = [];
-  const appendItem = (item: TimelineItem, nestedInWork: boolean, itemDepth: number) => {
-    if (!timelineItemRendersRow(item)) return;
-    const toolIdentity = item.kind === "tool_call" && (toolIds.get(item.toolCallId) ?? 0) === 1
-      ? item.toolCallId
-      : item.kind === "tool_call" ? `${item.toolCallId}:${item.id}` : null;
-    const itemKey = item.kind === "tool_call"
-      ? `item:tool:${toolIdentity}`
-      : `item:${item.kind}:${item.id}`;
-    rows.push({ kind: "item", key: itemKey, item, inWork: nestedInWork, depth: itemDepth });
-    if (item.kind !== "tool_call" || (item.toolKind !== "agent" && !item.children?.length)) return;
-    const key = `agent:${toolIdentity}`;
-    const childCount = item.children?.length ?? 0;
-    const open = disclosure.get(key) ?? automaticSubagentOpen(itemDepth, childCount);
-    rows.push({ kind: "subagent_summary", key, tool: item, depth: itemDepth, open });
-    if (open) for (const child of item.children ?? []) appendItem(child, true, itemDepth + 1);
+  const toolIdentity = (item: ToolItem) => (toolIds.get(item.toolCallId) ?? 0) === 1
+    ? item.toolCallId
+    : `${item.toolCallId}:${item.id}`;
+  const appendSteps = (container: readonly TimelineItem[], nestedInWork: boolean, itemDepth: number) => {
+    for (const { item, attempts } of foldRetries(container)) {
+      if (!timelineItemRendersRow(item)) continue;
+      // A folded retry keeps its first attempt's key, so a later attempt never remounts the row.
+      const keyed = attempts?.[0] ?? item;
+      const itemKey = keyed.kind === "tool_call" ? `item:tool:${toolIdentity(keyed)}` : `item:${keyed.kind}:${keyed.id}`;
+      rows.push(attempts
+        ? { kind: "item", key: itemKey, item, inWork: nestedInWork, depth: itemDepth, attempts }
+        : { kind: "item", key: itemKey, item, inWork: nestedInWork, depth: itemDepth });
+      if (item.kind !== "tool_call" || (item.toolKind !== "agent" && !item.children?.length)) continue;
+      const key = `agent:${toolIdentity(item)}`;
+      const childCount = item.children?.length ?? 0;
+      const open = disclosure.get(key) ?? automaticSubagentOpen(itemDepth, childCount);
+      rows.push({ kind: "subagent_summary", key, tool: item, depth: itemDepth, open });
+      if (open) appendSteps(item.children ?? [], true, itemDepth + 1);
+    }
   };
-  for (const item of items) appendItem(item, inWork, depth);
+  appendSteps(items, inWork, depth);
   return rows;
-}
-
-/** Codex-style collapsed "Worked…" disclosure folding a turn's reasoning + tool calls. */
-function WorkSummary({
-  tools,
-  edits,
-  thoughts,
-  autoApproved,
-  highestReviewRisk,
-  open,
-  onToggle,
-}: {
-  tools: number;
-  edits: number;
-  thoughts: number;
-  autoApproved: number;
-  highestReviewRisk?: ReviewRiskLevel;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const parts: string[] = [];
-  if (tools) parts.push(`${tools} Command${tools === 1 ? "" : "s"}`);
-  if (edits) parts.push(`${edits} Edit${edits === 1 ? "" : "s"}`);
-  if (!tools && !edits && thoughts) parts.push(`${thoughts} Reasoning Step${thoughts === 1 ? "" : "s"}`);
-  if (autoApproved) {
-    const risk = highestReviewRisk ? ` · ${titleCaseLabel(highestReviewRisk)} Risk` : "";
-    parts.push(`${autoApproved} Tool Call${autoApproved === 1 ? "" : "s"} Auto-Approved${risk}`);
-  }
-  const summary = parts.length ? `Worked · ${parts.join(", ")}` : "Worked";
-  return (
-    <div className={`tl-work${open ? " open" : ""}`}>
-      <button type="button" className="disclosure-trigger" aria-expanded={open} onClick={onToggle}>
-        <ChevronRightIcon className="disclosure-chevron" />
-        {summary}
-      </button>
-    </div>
-  );
 }
 
 /** A recursively nested agent's work. First-level, reasonably sized trees start open; deeper or
  * large trees mount lazily only after disclosure, preventing an event burst from rendering an
  * arbitrarily deep/large hidden subtree. Local state survives streamed child updates. */
-function SubagentSummary({ tool, depth, open, onToggle, onOpen }: {
+function SubagentSummary({ tool, open, onToggle, onOpen }: {
   tool: ToolItem;
-  depth: number;
   open: boolean;
   onToggle: () => void;
   onOpen?: () => void;
@@ -1904,7 +1929,7 @@ function SubagentSummary({ tool, depth, open, onToggle, onOpen }: {
   const hasTimingDescription = Number.isFinite(tool.startedAt) || Number.isFinite(tool.lastActivityAt)
     || (Number.isFinite(tool.completedAt) && Number.isFinite(rollup?.durationMs) && (rollup?.durationMs ?? -1) >= 0);
   return (
-    <div className={`tl-subagent${open ? " open" : ""}`} style={{ marginLeft: 10 + Math.min(depth, 6) * 12 }}>
+    <div className={`tl-subagent${open ? " open" : ""}`}>
       <div className="subagent-head">
         <button
           type="button"
@@ -1914,7 +1939,7 @@ function SubagentSummary({ tool, depth, open, onToggle, onOpen }: {
           aria-describedby={hasTimingDescription ? timingDescriptionId : undefined}
           onClick={onToggle}
         >
-          <span className="subagent-caret">▸</span>
+          <ChevronRightIcon size={14} className="disclosure-chevron" />
           <span className="subagent-icon">⑃</span>
           <span>Agent · {items.length} Step{items.length === 1 ? "" : "s"}</span>
           <StatusBadge meta={toolStatusMeta(tool.status)} inline={tool.status === "completed"} className="subagent-status" />
@@ -1963,7 +1988,7 @@ export function automaticSubagentOpenAfterChange(
  * changed re-renders on a streamed chunk — the rest of a long transcript is skipped entirely. */
 const TimelineRow = memo(function TimelineRow({
   item,
-  inWork = false,
+  attempts,
   onRewind,
   rewindTurn,
   rewindUnavailableReason,
@@ -1980,7 +2005,8 @@ const TimelineRow = memo(function TimelineRow({
   approvalContext,
 }: {
   item: TimelineItem;
-  inWork?: boolean;
+  /** A folded retry's attempts, oldest first, when `item` is its latest. */
+  attempts?: readonly ToolItem[];
   onRewind?: (turn: number) => void;
   rewindTurn?: number;
   rewindUnavailableReason?: string;
@@ -2118,136 +2144,28 @@ const TimelineRow = memo(function TimelineRow({
         </div>
       );
     case "agent_thought":
-      // Inside a "Worked" block, reasoning is a plain muted paragraph (no nested disclosure).
-      if (inWork) {
-        return (
-          <div className="tl-reasoning">
-            <ActivityTimestampMeta
-              className="tl-thought-time"
-              startedAt={item.createdAt}
-              lastActivityAt={item.lastActivityAt}
-              completedAt={item.completedAt}
-              pointWhenEqual
-            />
-            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
-          </div>
-        );
-      }
       return (
-        <details
-          className="tl-thought"
+        <ThoughtStep
+          item={item}
           open={disclosureOpen}
-          onToggle={(event) => {
-            if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
-          }}
-        >
-          <summary
-            aria-label="Thinking"
-            aria-describedby={Number.isFinite(item.createdAt) || Number.isFinite(item.lastActivityAt) ? timingDescriptionId : undefined}
-          >
-            <span className="thought-head-main">
-              <span className="thought-caret" aria-hidden="true">▸</span>
-              <span>💭 Thinking</span>
-            </span>
-            <ActivityTimestampMeta
-              id={Number.isFinite(item.createdAt) || Number.isFinite(item.lastActivityAt) ? timingDescriptionId : undefined}
-              className="tl-thought-time"
-              startedAt={item.createdAt}
-              lastActivityAt={item.lastActivityAt}
-              completedAt={item.completedAt}
-              pointWhenEqual
-            />
-          </summary>
-          <div className="thought-body">
-            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
-          </div>
-        </details>
+          onToggle={onDisclosureToggle}
+          highlightEligible={highlightEligible}
+          mediaSettled={mediaSettled}
+        />
       );
-    case "tool_call": {
-      const hasTimingDescription = Number.isFinite(item.startedAt) || Number.isFinite(item.lastActivityAt);
-      const head = (disclosure: boolean) => (
-        <>
-          <span className="tool-head-main">
-            {disclosure && <span className="tool-caret">▸</span>}
-            <span className="tool-kind">{toolIcon(item.toolKind)}</span>
-            <span className="tool-title">{item.title}</span>
-            {/* §11.2: a completed call reads inline, with no pill; running and failed stay badges. */}
-            <StatusBadge meta={toolStatusMeta(item.status)} inline={item.status === "completed"} />
-          </span>
-          <ActivityTimestampMeta
-            id={disclosure && hasTimingDescription ? timingDescriptionId : undefined}
-            className="tl-tool-time"
-            startedAt={item.startedAt}
-            lastActivityAt={item.lastActivityAt}
-            completedAt={item.completedAt}
-            pointWhenEqual
-            showDuration
-          />
-        </>
-      );
-      // Output is collapsed by default — only the command header shows; click to reveal it.
-      if (!item.text && !item.referencedText?.length) {
-        return (
-          <div className={`tl-tool status-${item.status}${item.toolKind === "skill" ? " tl-tool-skill" : ""}`}>
-            <div className="tool-head">{head(false)}</div>
-          </div>
-        );
-      }
-      return (
-        <details
-          className={`tl-tool status-${item.status}${item.toolKind === "skill" ? " tl-tool-skill" : ""}`}
-          open={disclosureOpen}
-          onToggle={(event) => {
-            if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
-          }}
-        >
-          <summary
-            className="tool-head"
-            aria-label={`${item.title} · ${toolStatusMeta(item.status).label}`}
-            aria-describedby={hasTimingDescription ? timingDescriptionId : undefined}
-          >
-            {head(true)}
-          </summary>
-          {item.text && <pre className="tool-body">{item.text}</pre>}
-          {item.referencedText?.map((fragment, index) => (
-            <EventPayloadContent
-              key={`${fragment.refs[0]?.artifactId ?? index}:${index}`}
-              preview=""
-              references={fragment.refs}
-              mimeType="text/plain"
-              label="Tool Content"
-              appendFull
-            >
-              {(text, full) => full ? <pre className="tool-body">{text}</pre> : null}
-            </EventPayloadContent>
-          ))}
-        </details>
-      );
-    }
+    case "tool_call":
+      return <ToolCallStep item={item} attempts={attempts} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "plan":
       return <PlanBlock entries={item.entries} />;
-    case "file_edit": {
-      const sourceLocation = timelineFileSourceLocation(item.path);
+    case "file_edit":
       return (
-        <div className="tl-file">
-          {sourceLocation && onOpenSourceLocation ? (
-            <button type="button" className="file-head source-path-link" onClick={() => onOpenSourceLocation(sourceLocation)}>✎ {item.path}</button>
-          ) : (
-            <div className="file-head">✎ {item.path}</div>
-          )}
-          {(item.diff || item.diffRefs?.length) && (
-            <EventPayloadContent
-              preview={item.diff ?? ""}
-              references={item.diffRefs}
-              mimeType="text/x-diff"
-              label="Diff"
-            >
-              {(text) => <DiffBlock diff={text} />}
-            </EventPayloadContent>
-          )}
-        </div>
+        <FileEditStep
+          item={item}
+          open={disclosureOpen}
+          onToggle={onDisclosureToggle}
+          onOpenSourceLocation={onOpenSourceLocation}
+        />
       );
-    }
     case "command_output":
       return (
         <div className="tl-output">
@@ -2442,6 +2360,178 @@ const TimelineRow = memo(function TimelineRow({
   }
 });
 
+const RUNNING_TOOL_STATUSES = new Set(["pending", "in_progress", "running"]);
+
+/** A step's span: its start, its finish when it has one, and the duration a running step has had
+ * so far by the timeline's shared clock. */
+function useStepSpan(startedAt: number | undefined, lastActivityAt: number | undefined, completedAt: number | undefined, running: boolean) {
+  const now = useContext(TimelineClockContext);
+  const sessionActive = useContext(TimelineActivityContext);
+  const start = Number.isFinite(startedAt) ? startedAt : undefined;
+  const finish = Number.isFinite(completedAt) ? completedAt : Number.isFinite(lastActivityAt) ? lastActivityAt : undefined;
+  const live = running && sessionActive;
+  const end = live ? Math.max(now, finish ?? now) : finish;
+  const durationMs = start !== undefined && end !== undefined ? Math.max(0, end - start) : undefined;
+  // One settled observation is a moment, not a zero-length span.
+  return {
+    durationMs,
+    description: live
+      ? activitySpanDescription(start, undefined)
+      : activitySpanDescription(finish === start ? undefined : start, finish),
+  };
+}
+
+function stepLabel(title: string, status: string, fact?: string): string {
+  return [title, fact, toolStatusMeta(status).label].filter(Boolean).join(" · ");
+}
+
+function ToolOutput({ item, failed }: { item: ToolItem; failed: boolean }) {
+  return (
+    <>
+      {item.text && <StepOutput text={item.text} failed={failed} />}
+      {item.referencedText?.map((fragment, index) => (
+        <EventPayloadContent
+          key={`${fragment.refs[0]?.artifactId ?? index}:${index}`}
+          preview=""
+          references={fragment.refs}
+          mimeType="text/plain"
+          label="Tool Content"
+          appendFull
+        >
+          {(text, full) => full ? <StepOutput text={text} failed={failed} /> : null}
+        </EventPayloadContent>
+      ))}
+    </>
+  );
+}
+
+const hasToolOutput = (item: ToolItem): boolean => Boolean(item.text || item.referencedText?.length);
+
+/** One tool call, or every attempt of a retried one folded into a single "3 Attempts" step. */
+function ToolCallStep({ item, attempts, open, onToggle }: {
+  item: ToolItem;
+  attempts?: readonly ToolItem[];
+  open: boolean;
+  onToggle?: () => void;
+}) {
+  const workspaceRoot = useContext(WorkspaceRootContext);
+  const { verb, object } = splitStepTitle(item.title, workspaceRoot);
+  const first = attempts?.[0] ?? item;
+  const span = useStepSpan(first.startedAt, item.lastActivityAt, item.completedAt, RUNNING_TOOL_STATUSES.has(item.status));
+  const failed = item.status === "failed";
+  const lineCount = item.text ? item.text.replace(/\n$/, "").split("\n").length : 0;
+  const fact = attempts
+    ? `${attempts.length} Attempts`
+    : span.durationMs ? formatDuration(span.durationMs) : lineCount ? `${lineCount} Line${lineCount === 1 ? "" : "s"}` : undefined;
+  const body = attempts ? (
+    <ol className="tl-step-attempts">
+      {attempts.map((attempt, index) => (
+        <li key={attempt.id} className="tl-step-attempt">
+          <span className="tl-step-attempt-head">
+            <span>Attempt {index + 1}</span>
+            <StepStatus status={attempt.status} />
+          </span>
+          <ToolOutput item={attempt} failed={attempt.status === "failed"} />
+        </li>
+      ))}
+    </ol>
+  ) : hasToolOutput(item) ? <ToolOutput item={item} failed={failed} /> : null;
+  return (
+    <ToolStep
+      icon={toolIcon(item.toolKind)}
+      verb={verb}
+      object={object}
+      trail={fact}
+      timing={span.description || undefined}
+      status={<StepStatus status={item.status} />}
+      label={stepLabel(item.title, item.status, attempts ? fact : undefined)}
+      open={open}
+      onToggle={onToggle}
+    >
+      {body}
+    </ToolStep>
+  );
+}
+
+/** Reasoning as a step: "Thought for 2s", its text aligned with the row's title when opened. */
+function ThoughtStep({ item, open, onToggle, highlightEligible, mediaSettled }: {
+  item: Extract<TimelineItem, { kind: "agent_thought" }>;
+  open: boolean;
+  onToggle?: () => void;
+  highlightEligible: boolean;
+  mediaSettled: boolean;
+}) {
+  const sessionActive = useContext(TimelineActivityContext);
+  const live = sessionActive && timelineItemIsStreaming(item);
+  const span = useStepSpan(item.createdAt, item.lastActivityAt, item.completedAt, live);
+  const title = live
+    ? "Thinking"
+    : span.durationMs !== undefined && span.durationMs >= 1_000 ? `Thought for ${formatDuration(span.durationMs)}` : "Thought";
+  return (
+    <ToolStep
+      icon={<ThoughtIcon size={16} />}
+      verb={title}
+      timing={span.description || undefined}
+      status={<StepStatus status={live ? "running" : "completed"} />}
+      label={`${title} · ${live ? "Running" : "Completed"}`}
+      open={open}
+      onToggle={onToggle}
+    >
+      {item.text && (
+        <div className="tl-step-prose">
+          <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
+        </div>
+      )}
+    </ToolStep>
+  );
+}
+
+/** A file edit names its workspace-relative path once; its diff is the step's body. */
+function FileEditStep({ item, open, onToggle, onOpenSourceLocation }: {
+  item: Extract<TimelineItem, { kind: "file_edit" }>;
+  open: boolean;
+  onToggle?: () => void;
+  onOpenSourceLocation?: (location: SourceLocation) => void;
+}) {
+  const workspaceRoot = useContext(WorkspaceRootContext);
+  const path = workspaceRelativePath(item.path, workspaceRoot);
+  const sourceLocation = timelineFileSourceLocation(path);
+  const counts = diffLineCounts(item.diff);
+  const fact = counts ? `+${counts.added} \u2212${counts.removed}` : undefined;
+  const openFile = sourceLocation && onOpenSourceLocation
+    ? () => onOpenSourceLocation(sourceLocation)
+    : undefined;
+  const hasDiff = Boolean(item.diff || item.diffRefs?.length);
+  return (
+    <ToolStep
+      icon={<FileEditIcon size={16} />}
+      verb="Edit"
+      object={path}
+      trail={fact}
+      status={<StepStatus status="completed" />}
+      label={`Edit ${path}${fact ? ` · ${fact}` : ""} · Completed`}
+      open={open}
+      onToggle={onToggle}
+    >
+      {(hasDiff || openFile) && (
+        <>
+          {openFile && <button type="button" className="link tl-step-link" onClick={openFile}>Open File</button>}
+          {hasDiff && (
+            <EventPayloadContent
+              preview={item.diff ?? ""}
+              references={item.diffRefs}
+              mimeType="text/x-diff"
+              label="Diff"
+            >
+              {(text) => <DiffBlock diff={text} />}
+            </EventPayloadContent>
+          )}
+        </>
+      )}
+    </ToolStep>
+  );
+}
+
 function TimelineTimestamp({ label, timestamp }: { label: "Recorded" | "Started" | "Last Activity"; timestamp?: number }) {
   const now = useContext(TimelineClockContext);
   const sessionActive = useContext(TimelineActivityContext);
@@ -2632,15 +2722,7 @@ function UserMessageActions({
 /** "Started 12:25:38 AM, finished 12:26:04 AM (26s)": the exact span behind the footer's clock. The
  * duration is always finish minus start, so the three figures never contradict one another. */
 export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt" | "finishedAt">): string {
-  const started = formatRecordedTimestamp(summary.startedAt)?.label;
-  const finished = formatRecordedTimestamp(summary.finishedAt)?.label;
-  const duration = summary.startedAt !== undefined && summary.finishedAt !== undefined
-    ? formatDuration(Math.max(0, summary.finishedAt - summary.startedAt))
-    : "";
-  const span = started && finished
-    ? `Started ${started}, finished ${finished}`
-    : finished ? `Finished ${finished}` : started ? `Started ${started}` : "";
-  return span && duration ? `${span} (${duration})` : span;
+  return activitySpanDescription(summary.startedAt, summary.finishedAt);
 }
 
 /** One footer per settled turn (§11.3): Turn N, its finishing clock time, tokens and cost, and the
@@ -2781,31 +2863,4 @@ function DiffBlock({ diff }: { diff: string }) {
       })}
     </pre>
   );
-}
-
-function toolIcon(kind?: string): string {
-  switch (kind) {
-    case "read":
-      return "📖";
-    case "edit":
-      return "✏️";
-    case "delete":
-      return "🗑️";
-    case "move":
-      return "📦";
-    case "search":
-      return "🔎";
-    case "execute":
-      return "⚡";
-    case "fetch":
-      return "🌐";
-    case "think":
-      return "💭";
-    case "agent":
-      return "⑃";
-    case "skill":
-      return "🧩";
-    default:
-      return "🔧";
-  }
 }

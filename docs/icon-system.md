@@ -49,7 +49,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
-| `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability. |
+| `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability; a skill step in the transcript. |
 | `RecommendedIcon` | Lucide | `Sparkles` | Something Wollipog recommends, such as a built-in skill. |
 | `ArchiveIcon` | Lucide | `Archive` | Archived Sessions destination, outline like every rail glyph. |
 | `UsageIcon` | Lucide | `ChartNoAxesColumn` | Usage metrics. |
@@ -73,14 +73,14 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `TeamIcon` | Lucide | `Users` | Team or access group. |
 | `EditIcon` | Lucide | `Pencil` | Generic edit action. |
 | `CopyIcon` | Lucide | `Copy` | Generic copy action. |
-| `CheckIcon` | Lucide | `Check` | Generic success state. |
+| `CheckIcon` | Lucide | `Check` | Generic success state; a completed transcript step. |
 | `WrapLinesIcon` | Lucide | `WrapText` | The Wrap Lines toggle in a markdown code block's header. |
 | `WarningIcon` | Lucide | `TriangleAlert` | Generic warning state. |
 | `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices; the session bar's Pinned Summary toggle, which opens the session's details column. |
 | `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step. |
 | `PlanPendingIcon` | Lucide | `Circle` | A plan step not started yet. |
 | `PlanInProgressIcon` | Lucide | `CircleDot` | The plan step in progress. |
-| `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices. |
+| `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts. |
 | `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |
@@ -91,7 +91,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PanelLeftOpenIcon` | Lucide | `PanelLeftOpen` | Expand Navigation: show names in the desktop rail. |
 | `PanelLeftCloseIcon` | Lucide | `PanelLeftClose` | Collapse Navigation: return the desktop rail to icons. |
 | `CommandLineIcon` | Lucide | `SquareTerminal` | Command-line destination; the session bar's Terminal toggle. |
-| `GlobeIcon` | Lucide | `Globe` | Remote host. |
+| `GlobeIcon` | Lucide | `Globe` | Remote host; a web fetch step in the transcript. |
 | `FolderIcon` | Lucide | `Folder` | Generic directory. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
 | `HelpIcon` | Lucide | `MessageCircleQuestion` | Contextual help. |
@@ -126,6 +126,15 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `UpdatedIcon` | Lucide | `History` | When something last changed, in a meta row. |
 | `FilesIcon` | Lucide | `Files` | A count of files, in a meta row. |
 | `SkillSourceIcon` | Lucide | `Package` | Where a skill's content comes from (Git, Machine, Built-In or Library). |
+| `ReadIcon` | Lucide | `BookOpen` | A read step in the transcript. |
+| `FileEditIcon` | Lucide | `FilePen` | A file edit step in the transcript. |
+| `DeleteIcon` | Lucide | `Trash2` | A delete step in the transcript. |
+| `MoveIcon` | Lucide | `FolderInput` | A move or rename step in the transcript. |
+| `FileSearchIcon` | Lucide | `FileSearch` | A search step in the transcript; distinct from the Search action's magnifier. |
+| `TerminalIcon` | Lucide | `Terminal` | A command step in the transcript; distinct from the Command Line destination's framed terminal. |
+| `ThoughtIcon` | Lucide | `Brain` | A thought step in the transcript. |
+| `BotIcon` | Lucide | `Bot` | An agent step in the transcript. |
+| `ToolIcon` | Lucide | `Hammer` | A tool step of any other kind; distinct from the project setup wrench. |
 
 The Visual Studio Code mark comes from Microsoft's
 [official SVG asset bundle](https://code.visualstudio.com/assets/branding/visual-studio-code-icons.zip)

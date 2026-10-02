@@ -23,6 +23,7 @@ import {
   permissionResolutionLabel,
   timelineFileSourceLocation,
   userRewindTurns,
+  type TimelineRenderRow,
 } from "./EventTimeline.js";
 import { reanchorAtLogicalIndex } from "./MeasuredVirtualList.js";
 import type { EditInForkAvailability } from "../session-actions.js";
@@ -31,7 +32,7 @@ import type { EditInForkAvailability } from "../session-actions.js";
 // expected by the repository's tsx test transform.
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
-test("timeline row estimates include timestamp header lines", () => {
+test("timeline row estimates match one quiet step row", () => {
   const tool = {
     kind: "tool_call" as const,
     id: 1,
@@ -41,8 +42,8 @@ test("timeline row estimates include timestamp header lines", () => {
     text: "",
   };
   const thought = { kind: "agent_thought" as const, id: 2, text: "Thinking" };
-  assert.equal(estimateTimelineRow({ kind: "item", key: "tool", item: tool, inWork: false, depth: 0 }), 72);
-  assert.equal(estimateTimelineRow({ kind: "item", key: "thought", item: thought, inWork: true, depth: 0 }), 72);
+  assert.equal(estimateTimelineRow({ kind: "item", key: "tool", item: tool, inWork: false, depth: 0 }), 28);
+  assert.equal(estimateTimelineRow({ kind: "item", key: "thought", item: thought, inWork: true, depth: 0 }), 28);
   assert.equal(estimateTimelineRow({ kind: "subagent_summary", key: "agent", tool, depth: 0, open: false }), 52);
   assert.equal(estimateTimelineRow({
     kind: "work_summary",
@@ -50,9 +51,10 @@ test("timeline row estimates include timestamp header lines", () => {
     tools: 1,
     edits: 0,
     thoughts: 0,
+    failed: 0,
     autoApproved: 0,
     open: false,
-  }), 32);
+  }), 28);
   const question = { kind: "question" as const, id: 3, requestId: "ask", questions: [{
     id: "choice", question: "Pick one", options: [{ label: "A" }, { label: "B" }],
   }] };
@@ -79,6 +81,7 @@ test("auto-approved reviews expose an exact count and highest risk while expande
     tools: 1,
     edits: 0,
     thoughts: 0,
+    failed: 0,
     autoApproved: 2,
     highestReviewRisk: "high",
     open: false,
@@ -1545,4 +1548,82 @@ test("only never-offered runner authentication outcomes get readable resolution 
     "auth:select-account", "a provider option that reuses a runner id is still shown raw");
   assert.equal(permissionResolutionLabel([], "toString"), "toString",
     "an id matching an inherited property is never replaced");
+});
+
+/** Every incremental projection must equal a from-scratch one: folding retries may only ever cost
+ * a full rebuild, never a stale row or ledger. */
+function assertMatchesFullProjection(projector: IncrementalTimelineRows, items: TimelineItem[], disclosure: Map<string, boolean>) {
+  const incremental = projector.project(items, disclosure);
+  const full = new IncrementalTimelineRows().project(items, disclosure);
+  assert.deepEqual(incremental.rows, full.rows);
+  return incremental;
+}
+
+test("streamed retries fold into one row while every incremental projection matches a full one", () => {
+  const builder = new TimelineBuilder();
+  let sequence = 0;
+  const push = (payload: SessionEventPayload) => {
+    sequence += 1;
+    builder.push({ id: sequence, sessionId: "retries", seq: sequence, ts: 1_000 * sequence, payload });
+  };
+  const projector = new IncrementalTimelineRows();
+  push({ kind: "user_message", text: "Ship it" });
+  push({ kind: "tool_call", toolCallId: "a1", title: "Bash: npm test", toolKind: "execute", status: "in_progress" });
+  const first = projector.project(builder.snapshot(), new Map());
+  const workKey = first.rows.find((row) => row.kind === "work_summary")!.key;
+  const disclosure = new Map([[workKey, true]]);
+  const ledger = (rows: readonly TimelineRenderRow[]) => {
+    const summary = rows.find((row) => row.kind === "work_summary");
+    return summary?.kind === "work_summary" ? [summary.tools, summary.failed] : null;
+  };
+  const steps = (rows: readonly TimelineRenderRow[]) => rows.flatMap((row) => row.kind === "item" && row.inWork
+    ? [[row.key, row.item.id, row.attempts?.map((attempt) => attempt.id) ?? null]]
+    : []);
+
+  assertMatchesFullProjection(projector, builder.snapshot(), disclosure);
+  push({ kind: "tool_call_update", toolCallId: "a1", status: "failed", text: "Exit code 1" });
+  let projection = assertMatchesFullProjection(projector, builder.snapshot(), disclosure);
+  assert.deepEqual(ledger(projection.rows), [1, 1], "a status change in place recounts the ledger");
+
+  push({ kind: "tool_call", toolCallId: "a2", title: "Bash: npm test", toolKind: "execute", status: "in_progress" });
+  projection = assertMatchesFullProjection(projector, builder.snapshot(), disclosure);
+  assert.deepEqual(steps(projection.rows), [["item:tool:a1", 4, [2, 4]]], "the second attempt folds under the first attempt's key");
+  assert.deepEqual(ledger(projection.rows), [1, 0], "a running retry is not a failure yet");
+
+  push({ kind: "tool_call_update", toolCallId: "a2", status: "failed", text: "Exit code 1" });
+  push({ kind: "tool_call", toolCallId: "a3", title: "Bash: npm test", toolKind: "execute", status: "in_progress" });
+  push({ kind: "tool_call_update", toolCallId: "a3", status: "failed", text: "Exit code 1" });
+  projection = assertMatchesFullProjection(projector, builder.snapshot(), disclosure);
+  assert.deepEqual(steps(projection.rows), [["item:tool:a1", 6, [2, 4, 6]]]);
+  assert.deepEqual(ledger(projection.rows), [1, 1]);
+
+  push({ kind: "tool_call", toolCallId: "lint", title: "Bash: npm run lint", toolKind: "execute", status: "completed" });
+  push({ kind: "agent_message", text: "Tests still fail.", final: true });
+  projection = assertMatchesFullProjection(projector, builder.snapshot(), disclosure);
+  assert.deepEqual(steps(projection.rows).map((step) => step[0]), ["item:tool:a1", "item:tool:lint"]);
+  assert.deepEqual(ledger(projection.rows), [2, 1]);
+  assert.equal(projector.resolveRevealTarget(4)?.rowKey, "item:tool:a1", "every attempt reveals its folded row");
+});
+
+test("a subagent's retried call folds under its agent too", () => {
+  const builder = new TimelineBuilder();
+  let sequence = 0;
+  const push = (payload: SessionEventPayload) => {
+    sequence += 1;
+    builder.push({ id: sequence, sessionId: "nested-retries", seq: sequence, ts: 1_000 * sequence, payload });
+  };
+  const projector = new IncrementalTimelineRows();
+  push({ kind: "tool_call", toolCallId: "task", title: "Task", toolKind: "agent", status: "in_progress" });
+  const workKey = projector.project(builder.snapshot(), new Map()).rows[0]!.key;
+  const disclosure = new Map([[workKey, true]]);
+  for (const id of ["c1", "c2"]) {
+    push({ kind: "tool_call", toolCallId: id, title: "Read: a.ts", toolKind: "read", status: "in_progress", parentToolUseId: "task" });
+    assertMatchesFullProjection(projector, builder.snapshot(), disclosure);
+    push({ kind: "tool_call_update", toolCallId: id, status: "failed", parentToolUseId: "task" });
+    assertMatchesFullProjection(projector, builder.snapshot(), disclosure);
+  }
+  const rows = projector.project(builder.snapshot(), disclosure).rows;
+  const nested = rows.filter((row) => row.kind === "item" && row.depth === 1);
+  assert.equal(nested.length, 1);
+  assert.deepEqual(nested[0]!.kind === "item" ? nested[0]!.attempts?.map((attempt) => attempt.toolCallId) : null, ["c1", "c2"]);
 });

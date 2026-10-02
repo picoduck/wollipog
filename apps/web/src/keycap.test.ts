@@ -61,6 +61,7 @@ const MONO_BOXES_THAT_ARE_NOT_KEYCAPS = new Map([
   [".workspace-reference-chip", "a file or folder reference chip"],
   [".dir-path-input", "a path text field"],
   [".onboard-recommended-skill-names > li", "skill identifiers in a list"],
+  [".tl-step-output", "a transcript step's command output in a neutral well"],
 ]);
 
 test("every bordered monospace box is a kbd keycap or a listed non-keycap", () => {

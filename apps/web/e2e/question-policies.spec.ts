@@ -50,7 +50,7 @@ test("question policy controls fit mobile and expose policy attribution", async 
 test("governance history pages older decisions and keeps the native decision after its tool request", async ({ page }) => {
   await page.goto("/question-policies-e2e.html");
   const timeline = page.getByRole("list", { name: "Native Governance Event" });
-  await timeline.getByRole("button", { name: /Worked · 1 Command/ }).click();
+  await timeline.getByRole("button", { name: /^Worked.*1 Command/ }).click();
   await expect(timeline.getByText("Run Shell Command", { exact: true })).toBeVisible();
   await expect(timeline.locator('[data-audit-id="hook-audit"]')).toBeVisible();
   const timelineText = await timeline.innerText();

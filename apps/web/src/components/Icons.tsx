@@ -3,6 +3,9 @@ import {
   Archive as LucideArchive,
   ArrowDown as LucideArrowDown,
   ArrowUp as LucideArrowUp,
+  BookOpen as LucideBookOpen,
+  Bot as LucideBot,
+  Brain as LucideBrain,
   ChartNoAxesColumn as LucideChartNoAxesColumn,
   Check as LucideCheck,
   CircleAlert as LucideCircleAlert,
@@ -26,10 +29,13 @@ import {
   Eye as LucideEye,
   EyeOff as LucideEyeOff,
   FileDiff as LucideFileDiff,
+  FilePen as LucideFilePen,
+  FileSearch as LucideFileSearch,
   FileText as LucideFileText,
   Files as LucideFiles,
   FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
+  FolderInput as LucideFolderInput,
   FolderKanban as LucideFolderKanban,
   Gauge as LucideGauge,
   GitBranch as LucideGitBranch,
@@ -38,6 +44,7 @@ import {
   GitPullRequest as LucideGitPullRequest,
   Globe as LucideGlobe,
   Grid2X2 as LucideGrid2X2,
+  Hammer as LucideHammer,
   History as LucideHistory,
   Image as LucideImage,
   ImageOff as LucideImageOff,
@@ -72,6 +79,8 @@ import {
   Square as LucideSquare,
   SquareTerminal as LucideSquareTerminal,
   Tag as LucideTag,
+  Terminal as LucideTerminal,
+  Trash2 as LucideTrash2,
   TriangleAlert as LucideTriangleAlert,
   Upload as LucideUpload,
   UserPlus as LucideUserPlus,
@@ -641,4 +650,41 @@ export function FilesIcon(props: IconProps) {
 
 export function SkillSourceIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePackage} {...props} />;
+}
+
+/** Transcript step kinds (#2168): one glyph per kind of work a tool call does. */
+export function ReadIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideBookOpen} {...props} />;
+}
+
+export function FileEditIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFilePen} {...props} />;
+}
+
+export function DeleteIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideTrash2} {...props} />;
+}
+
+export function MoveIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFolderInput} {...props} />;
+}
+
+export function FileSearchIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFileSearch} {...props} />;
+}
+
+export function TerminalIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideTerminal} {...props} />;
+}
+
+export function ThoughtIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideBrain} {...props} />;
+}
+
+export function BotIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideBot} {...props} />;
+}
+
+export function ToolIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideHammer} {...props} />;
 }

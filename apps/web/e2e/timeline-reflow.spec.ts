@@ -801,8 +801,11 @@ for (const width of [320, 390]) {
       await expectTranscriptWidthContained(page);
 
       await page.getByRole("button", { name: /Worked/ }).click();
-      await expect(page.locator(".tl-tool")).toBeVisible();
+      await expect(page.locator(".tl-step").first()).toBeVisible();
       await expect(page.getByText("Automated Review")).toHaveCount(3);
+      await expectTranscriptWidthContained(page);
+      // An edit's diff is its step's body; a long path clips in the row instead of widening it.
+      await page.locator("details.tl-step summary[aria-label^='Edit ']").click();
       await expectTranscriptWidthContained(page);
       const diff = page.locator(".diff");
       await expect(diff).toBeVisible();

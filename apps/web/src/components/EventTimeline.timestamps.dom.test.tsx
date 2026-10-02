@@ -36,6 +36,15 @@ after(() => {
 });
 
 const startedAt = Date.UTC(2026, 7, 4, 12, 0, 0);
+
+/** A step's visible trailing fact, without its tooltip. */
+const trailText = (step: Element | null | undefined): string | undefined => {
+  const trail = step?.querySelector(".tl-step-trail");
+  if (!trail) return undefined;
+  return [...trail.childNodes].filter((node) => node.nodeType === 3).map((node) => node.textContent).join("") || undefined;
+};
+const stepNamed = (container: Element, title: string): HTMLElement | undefined =>
+  [...container.querySelectorAll<HTMLElement>(".tl-step")].find((step) => step.querySelector(".tl-step-title")?.textContent === title);
 const items: TimelineItem[] = [
   {
     kind: "agent_message",
@@ -75,7 +84,7 @@ const items: TimelineItem[] = [
   },
 ];
 
-test("cards expose semantic relative timing while every mounted timeline shares one page clock", async () => {
+test("steps show one trailing duration with their exact span in its tooltip, and every timeline shares one page clock", async () => {
   let intervalStarts = 0;
   let intervalClears = 0;
   let visibilityAdds = 0;
@@ -123,33 +132,30 @@ test("cards expose semantic relative timing while every mounted timeline shares 
       await act(async () => disclosure.click());
     }
 
-    assert.equal(container.querySelectorAll(".tl-tool").length, 4);
-    assert.equal(container.querySelectorAll("details.tl-tool").length, 2, "details cards keep timing in the collapsed summary");
-    assert.equal(container.querySelectorAll(".tl-tool:not(details)").length, 2, "bare cards carry the same timing metadata");
-    assert.equal(container.querySelectorAll(".tl-tool .tool-head time").length, 8, "every tool shows Started and Last Activity");
-    assert.equal(container.querySelectorAll(".tl-reasoning time").length, 2, "bare thought rows expose their recorded time");
+    assert.equal(container.querySelectorAll(".tl-step").length, 6, "two tools and a thought in each timeline");
+    assert.equal(container.querySelectorAll("details.tl-step").length, 4, "the thought and the tool with output disclose");
+    assert.equal(container.querySelectorAll(".tl-step time, .tl-step .tl-timestamp-meta").length, 0,
+      "no step carries a Started, Last Activity or Recorded line");
     assert.equal(container.querySelectorAll(".tl-agent-msg time").length, 0, "message rows carry no timestamp");
 
-    const times = [...container.querySelectorAll<HTMLTimeElement>("time")];
-    assert.ok(times.length >= 10);
-    for (const time of times) {
-      assert.match(time.dateTime, /^2026-08-04T/);
-      assert.match(time.querySelector("[aria-hidden='true']")?.textContent ?? "", /^(just now|\d+[smhd] ago)$/);
-      assert.match(time.querySelector(".sr-only")?.textContent ?? "", /2026/);
-      assert.equal(time.hasAttribute("aria-label"), false);
-      assert.match(time.title, /^(Recorded|Started|Last Activity) /);
-    }
-    assert.match(container.textContent ?? "", /Started/);
-    assert.match(container.textContent ?? "", /Last Activity/);
-    assert.match(container.textContent ?? "", /Duration 10s/);
-
-    const toolSummary = container.querySelector<HTMLElement>("details.tl-tool summary");
+    const details = stepNamed(container, "Details Tool");
+    assert.ok(details);
+    assert.equal(trailText(details), "10s", "one trailing fact: the duration");
+    const toolSummary = details.querySelector<HTMLElement>("summary");
     assert.ok(toolSummary);
     assert.equal(toolSummary.getAttribute("aria-label"), "Details Tool · Completed");
-    assert.doesNotMatch(toolSummary.getAttribute("aria-label") ?? "", /Started|Last Activity|2026/);
     const toolDescription = toolSummary.getAttribute("aria-describedby");
     assert.ok(toolDescription);
-    assert.match(testDocument.getElementById(toolDescription)?.textContent ?? "", /Started.*Last Activity.*Duration/s);
+    const tooltip = testDocument.getElementById(toolDescription);
+    assert.equal(tooltip?.getAttribute("role"), "tooltip");
+    assert.match(tooltip?.textContent ?? "", /^Started .+, finished .+ \(10s\)$/, "the exact span lives in the trail's tooltip");
+    assert.ok(details.querySelector(".tl-step-trail")?.contains(tooltip!));
+
+    const thought = container.querySelector<HTMLElement>("details.tl-step summary[aria-label^='Thought']");
+    assert.ok(thought, "a thought is a step");
+    for (const head of container.querySelectorAll(".tl-step-head")) {
+      assert.doesNotMatch(head.textContent ?? "", /Recorded|Last Activity/);
+    }
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -341,10 +347,10 @@ test("live elapsed time never falls behind the latest observed activity", async 
     const disclosure = container.querySelector<HTMLButtonElement>(".tl-work > .disclosure-trigger");
     assert.ok(disclosure);
     await act(async () => disclosure.click());
-    assert.match(container.textContent ?? "", /Elapsed 10s/,
+    assert.equal(trailText(container.querySelector(".tl-step")), "10s",
       "elapsed is bounded below by the observed start-to-activity span even when the clock is behind");
     await act(async () => root.render(<EventTimeline items={observedTool} sessionActive={false} />));
-    assert.match(container.textContent ?? "", /Observed 10s/,
+    assert.equal(trailText(container.querySelector(".tl-step")), "10s",
       "the active-to-idle transition preserves the same defensible duration");
   } finally {
     await act(async () => root.unmount());
@@ -353,7 +359,7 @@ test("live elapsed time never falls behind the latest observed activity", async 
   }
 });
 
-test("a live one-observation tool remains Started until it becomes a stable record", async () => {
+test("a live one-observation tool counts its elapsed time until it becomes a stable record", async () => {
   const originalDateNow = Date.now;
   Object.defineProperty(Date, "now", { configurable: true, writable: true, value: () => startedAt + 10_000 });
   const container = document.createElement("div");
@@ -374,12 +380,12 @@ test("a live one-observation tool remains Started until it becomes a stable reco
     const disclosure = container.querySelector<HTMLButtonElement>(".tl-work > .disclosure-trigger");
     assert.ok(disclosure);
     await act(async () => disclosure.click());
-    assert.equal(container.querySelector(".tl-tool .tl-timestamp-label")?.textContent, "Started");
-    assert.match(container.textContent ?? "", /Elapsed 10s/);
+    assert.equal(trailText(container.querySelector(".tl-step")), "10s");
+    assert.match(container.querySelector(".tl-step-trail > span")?.textContent ?? "", /^Started /);
 
     await act(async () => root.render(<EventTimeline items={oneObservationTool} sessionActive={false} />));
-    assert.equal(container.querySelector(".tl-tool .tl-timestamp-label")?.textContent, "Recorded");
-    assert.doesNotMatch(container.textContent ?? "", /Elapsed/);
+    assert.equal(trailText(container.querySelector(".tl-step")), undefined, "one observation has no duration to show");
+    assert.match(container.querySelector(".tl-step-trail .sr-only")?.textContent ?? "", /^Finished [^(]+$/);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -431,18 +437,12 @@ test("inactive sessions show stable absolute times and bound dangling tools to o
     }
 
     assert.equal(intervalStarts, 0, "terminal sessions do not retain the live ticker");
-    const danglingTool = [...container.querySelectorAll<HTMLElement>(".tl-tool")]
-      .find((tool) => tool.textContent?.includes("Bare Tool"));
+    const danglingTool = stepNamed(container, "Bare Tool");
     assert.ok(danglingTool);
-    assert.match(danglingTool.textContent ?? "", /Observed 10s/);
-    assert.doesNotMatch(danglingTool.textContent ?? "", /Elapsed/);
+    assert.equal(trailText(danglingTool), "10s", "a dangling tool's duration ends at its last observed activity");
 
-    const times = [...container.querySelectorAll<HTMLTimeElement>("time")];
-    assert.ok(times.length > 0);
-    for (const time of times) {
-      assert.doesNotMatch(time.textContent ?? "", /ago|just now/i);
-      assert.equal(time.hasAttribute("aria-label"), false);
-      assert.match(time.querySelector(".sr-only")?.textContent ?? "", /2026/);
+    for (const trail of container.querySelectorAll(".tl-step-trail")) {
+      assert.doesNotMatch(trail.textContent ?? "", /ago|just now/i, "a settled step's span is absolute");
     }
 
     const subagentItems: TimelineItem[] = [
@@ -501,9 +501,9 @@ test("inactive sessions show stable absolute times and bound dangling tools to o
     await act(async () => root.render(<EventTimeline items={oneEventTool} sessionActive={false} />));
     assert.doesNotMatch(container.textContent ?? "", /Duration|0ms/,
       "one terminal observation does not fabricate a zero-duration measurement");
-    assert.equal(container.querySelectorAll(".tl-tool time").length, 1,
-      "one terminal tool observation renders one timestamp");
-    assert.equal(container.querySelector(".tl-tool .tl-timestamp-label")?.textContent, "Recorded");
+    assert.equal(trailText(container.querySelector(".tl-step")), undefined);
+    assert.match(container.querySelector(".tl-step-trail .sr-only")?.textContent ?? "", /^Finished /,
+      "one terminal tool observation is described by its one time");
 
     const oneEventSubagent: TimelineItem[] = [
       {

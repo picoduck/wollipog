@@ -192,6 +192,39 @@ const markdownItems: TimelineItem[] = [
     completedAt: Date.now() - 4_000,
   },
 ];
+// The work ledger scenario (#2168): two settled turns. The first ran a nested agent; the second ran
+// four commands, one of them failed and one retried twice before it passed, and one edit.
+const ledgerStart = Date.now() - 600_000;
+const ledgerTool = (
+  id: number, title: string, toolKind: string, status: string, startSeconds: number, seconds: number, text = "",
+  parentToolUseId?: string,
+): TimelineItem => ({
+  kind: "tool_call", id, toolCallId: `ledger-${id}`, title, toolKind, status, text,
+  startedAt: ledgerStart + startSeconds * 1_000,
+  lastActivityAt: ledgerStart + (startSeconds + seconds) * 1_000,
+  completedAt: ledgerStart + (startSeconds + seconds) * 1_000,
+  ...(parentToolUseId ? { parentToolUseId } : {}),
+});
+const validateFailure = "Exit code 1\n> app@1.4.0 validate\nChecking release manifest\nError: compatibility marker 1.3 does not match 1.4";
+const ledgerItems: TimelineItem[] = [
+  { kind: "user_message", id: 601, text: "Update the header copy.", createdAt: ledgerStart },
+  ledgerTool(602, "Read: /workspace/app/src/components/Header.tsx", "read", "completed", 1, 1, "export function Header() {"),
+  { kind: "file_edit", id: 603, path: "/workspace/app/src/components/Header.tsx", diff: "@@ -4 +4 @@\n-  <h1>Sessions</h1>\n+  <h1>Your Sessions</h1>" },
+  ledgerTool(604, "Task: audit header copy", "agent", "completed", 3, 6),
+  ledgerTool(605, "Grep: Sessions", "search", "completed", 4, 1, "src/components/Header.tsx:4", "ledger-604"),
+  ledgerTool(606, "Bash: npm test -- header", "execute", "completed", 10, 7, "PASS src/components/Header.test.tsx"),
+  { kind: "agent_message", id: 607, text: "Updated the header copy and its test.", createdAt: ledgerStart + 18_000 },
+  { kind: "user_message", id: 611, text: "Run the full suite and fix what fails.", createdAt: ledgerStart + 60_000 },
+  { kind: "agent_thought", id: 612, text: "Install first, then validate the release before the tests.", createdAt: ledgerStart + 61_000, completedAt: ledgerStart + 63_000 },
+  ledgerTool(613, "Bash: npm ci", "execute", "completed", 63, 4, "added 412 packages"),
+  ledgerTool(614, "Read: /workspace/app/src/release.ts", "read", "completed", 67, 1, "export const marker = \"1.3\";"),
+  { kind: "file_edit", id: 615, path: "/workspace/app/src/release.ts", diff: "@@ -1 +1 @@\n-export const marker = \"1.3\";\n+export const marker = \"1.4\";" },
+  ledgerTool(616, "Bash: npm run validate", "execute", "failed", 68, 3, validateFailure),
+  ledgerTool(617, "Bash: npm run validate", "execute", "failed", 72, 3, validateFailure),
+  ledgerTool(618, "Bash: npm run validate", "execute", "completed", 76, 3, "Release manifest valid"),
+  ledgerTool(619, "Bash: npm test", "execute", "failed", 80, 6, "Exit code 1\nPASS src/release.test.ts\nFAIL src/header.test.ts\nError: expected \"Your Sessions\" to be \"Sessions\""),
+  { kind: "agent_message", id: 620, text: "Validation passes after the marker fix; one header test still expects the old copy.", createdAt: ledgerStart + 87_000 },
+];
 type TranscriptItem = Extract<TimelineItem, { kind: "agent_message" | "user_message" }>;
 const baseItems: TranscriptItem[] = Array.from({ length: 30 }, (_, index) => index % 2 === 0
   ? { kind: "agent_message" as const, id: index + 1, text: `${index + 1}. ${sentence.repeat(30)}`, createdAt: Date.now() - index * 1_000 }
@@ -207,6 +240,7 @@ function Fixture() {
   const predecessorRerenderFixture = useMemo(() => new URLSearchParams(window.location.search).get("predecessor-rerender") === "1", []);
   const overflowFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("overflow") === "1", []);
   const markdownFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("markdown") === "1", []);
+  const ledgerFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("ledger") === "1", []);
   const questionHistoryFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("question-history") === "1", []);
   const [panelWidth, setPanelWidth] = useState(0);
   const [composerHeight, setComposerHeight] = useState(0);
@@ -240,6 +274,7 @@ function Fixture() {
   const items = useMemo(() => {
     if (overflowFixtureEnabled) return structuredItems;
     if (markdownFixtureEnabled) return markdownItems;
+    if (ledgerFixtureEnabled) return ledgerItems;
     const prefix = Array.from({ length: currentHistoryPrepend }, (_, index): TimelineItem => ({
       kind: "agent_message",
       id: -(index + 1),
@@ -292,7 +327,7 @@ function Fixture() {
     }] : [];
     const complete = [...prefix, ...historicalQuestions, ...current, ...liveReply, ...revealItems];
     return currentHistoryLimit == null ? complete : complete.slice(0, currentHistoryLimit);
-  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, liveReplyTicks, markdownFixtureEnabled, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
+  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, ledgerFixtureEnabled, liveReplyTicks, markdownFixtureEnabled, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
   const followTail = useFollowTail({
     scrollRef: followTailEnabled ? scrollRef : disabledFollowScrollRef,
     contentRevision: `${sessionId}:${currentHistoryPrepend}:${currentHistoryReplacement}:${currentHistoryLimit ?? "all"}:${headStreamTicks}:${tailStreamTicks}:${liveReplyTicks}`,
@@ -385,6 +420,7 @@ function Fixture() {
           <VirtualMeasurementCommitTestProvider deferred={deferredMeasurementFixture}>
             <EventTimeline
               items={items}
+              workspaceRoot={ledgerFixtureEnabled ? "/workspace/app" : undefined}
               ariaLabel={timelineAriaLabel}
               revealRequest={revealRequest}
               onRevealHandled={handleReveal}
