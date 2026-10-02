@@ -107,7 +107,7 @@ export interface SessionMeta {
   automaticProviderAccountCooldowns?: Record<string, number>;
   automaticProviderAccountLastSwitchAt?: number;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
-  /** Discovered adapter/CLI version; telemetry dimension only, never an auth source. */
+  /** Discovered adapter/CLI version, refreshed before launch for capability gates and telemetry; never an auth source. */
   agentVersion?: string;
   /** Discovery-verified optional CLI flags/modes, retained for restart and runner-side defense. */
   capabilities?: AgentCapabilities;
@@ -150,6 +150,7 @@ export interface SessionMeta {
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
+  projectMemory?: import("@wollipog/protocol").SessionProjectMemory;
   config: SessionConfig;
   /** Durable one-shot fence; never evicted, so old runner commands cannot replay mutations. */
   githubIssueClosureAttempts?: Record<string, string>;

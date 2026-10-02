@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 // The skill review diff (#1948), driven through the real Import Edit as New Version dialog.
 const digest = "4f1c".padEnd(64, "0");
@@ -122,6 +123,7 @@ test("the consent sits in the footer beside the disabled primary and unlocks it"
   const consent = footer.getByRole("checkbox", { name: "Deploy to 2 existing assignments", exact: true });
   const primary = footer.getByRole("button", { name: "Import as v4" });
   await expect(primary).toBeDisabled();
+  await dialogMotionSettled(page);
   const consentBox = await footer.locator(".review-consent").boundingBox();
   const primaryBox = await primary.boundingBox();
   expect(Math.abs((consentBox!.y + consentBox!.height / 2) - (primaryBox!.y + primaryBox!.height / 2))).toBeLessThanOrEqual(4);
@@ -134,6 +136,9 @@ test("the consent sits in the footer beside the disabled primary and unlocks it"
 test("on a phone sheet the consent is a full-width row above the two footer buttons", async ({ page }) => {
   const dialog = await openReview(page, 390);
   const footer = dialog.locator(".modal-foot");
+  // The sheet slides up as it opens, and the three boxes are read one after another, so each would
+  // be a different frame of that motion.
+  await dialogMotionSettled(page);
   const [consent, cancel, primary] = await Promise.all([
     footer.locator(".review-consent").boundingBox(),
     footer.getByRole("button", { name: "Cancel" }).boundingBox(),

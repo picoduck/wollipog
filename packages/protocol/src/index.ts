@@ -608,7 +608,24 @@
 //      proof: the exact head is on the default branch or a forge-verified merged pull request.
 //      Older runners keep archive cleanup pending rather than discarding pushed unmerged work.
 // 194: human-owned Orchestrator issue-closure decisions and runner-managed GitHub execution.
-export const PROTOCOL_VERSION = 194;
+// 195: authoritative per-project saved-memory policy; Claude directory selection is runner-owned.
+export const PROTOCOL_VERSION = 195;
+export const PROJECT_MEMORY_MIN_PROTOCOL = 195;
+/** Only Claude versions whose directory override we have verified are advertised as supported.
+ * Codex native memory combines projects in a database and cannot be shared project by project. */
+export function supportsClaudeProjectMemory(version: string | undefined): boolean {
+  const match = version?.match(/^(\d+)\.(\d+)\.(\d+)(?:$|[ +])/);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return major! > 2 || major === 2 && (minor! > 1 || minor === 1 && patch! >= 284);
+}
+
+export type ProjectMemorySharing = "separate" | "shared";
+export interface SessionProjectMemory {
+  projectId: string | null;
+  sharing: ProjectMemorySharing;
+}
+
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -2627,6 +2644,8 @@ export interface ProjectView {
   hidden: boolean;
   /** Finite fallback allowances for agent-created children of sessions in this Project. */
   childSessionDefaults?: ChildSessionDefaults | null;
+  /** Omitted by older control planes: the client must show policy unavailable. */
+  memorySharing?: ProjectMemorySharing;
   /** Ownership audience for user-facing sharing copy. Older control planes may omit it. */
   audience?: ResourceOwner["kind"];
   /** Exact ownership for explicit access controls. Older control planes may omit it. */
@@ -8080,6 +8099,7 @@ export interface RegisterRejectedMessage {
 
 /** Everything the runner needs to launch an agent session locally. */
 export interface SessionLaunchSpec {
+  projectMemory?: SessionProjectMemory;
   sessionId: string;
   /** Opaque identity used to prove that an ambiguous replacement start reached the runner. */
   controlPlaneLaunchId?: string;
@@ -8123,6 +8143,7 @@ export interface StartSessionMessage {
 }
 
 export interface PromptSessionMessage {
+  projectMemory?: SessionProjectMemory;
   type: "prompt_session";
   sessionId: string;
   text: string;
@@ -8245,6 +8266,8 @@ export type DurableSessionCommand =
  * while silently ignoring its receipt contract. `requestId` changes on every transport attempt;
  * `commandId` and `payloadDigest` remain stable across retries. */
 export interface DurableSessionCommandMessage {
+  /** Current policy outside the immutable command digest; refreshed on transport retry. */
+  projectMemory?: SessionProjectMemory;
   type: "durable_session_command";
   requestId: string;
   commandId: string;
@@ -9685,6 +9708,7 @@ export type ControlPlaneToRunner =
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage
   | AgentControlCredentialRegisteredMessage
+  | { type: "set_session_project_memory"; sessionId: string; projectMemory: SessionProjectMemory }
   | StartSessionMessage
   | PromptSessionMessage
   | SteerSessionMessage
@@ -10170,6 +10194,8 @@ export interface CreateProjectRequest {
 export interface UpdateProjectRequest {
   /** Human-managed defaults; null removes them so omitted child limits can remain unlimited. */
   childSessionDefaults?: ChildSessionDefaults | null;
+  /** Explicit human opt-in; omitted leaves the saved policy unchanged. */
+  memorySharing?: ProjectMemorySharing;
   name?: string;
   hidden?: boolean;
 }

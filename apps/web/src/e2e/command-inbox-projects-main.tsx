@@ -1352,6 +1352,9 @@ const noticeOlderCopy = noticesMode && FIXTURE_QUERY.get("olderCopy") === "1";
 /** `&deployment=1` (#1981): the Studio also has six ACP agents that can't receive managed skills,
  * container and cloud targets, and `deploy-bot`'s error is a long one. */
 const deploymentExtras = noticesMode && FIXTURE_QUERY.has("deployment");
+/** `&deployment=1&directRules=1` (#2287): `collect` also has a direct rule for the Studio's Gemini,
+ * which can't receive managed skills, and a Manual Only rule for Codex on the Travel Laptop. */
+const noticeDirectRules = deploymentExtras && FIXTURE_QUERY.has("directRules");
 const noticeAgent = (id: string, name: string, driver: "claude-code" | "codex" | "pi" | "acp") => ({
   id, name, command: id, args: [], env: {}, driver, context: { kind: "native" as const }, available: true,
 });
@@ -1377,7 +1380,8 @@ const noticeVersion = (index: number, number: number) => ({
 });
 const noticeGitSource = { url: "https://github.com/example/skills.git", ref: "main", subdirectory: "fetch-docs", path: "fetch-docs", commit: "a1b2".padEnd(40, "0") };
 const noticeSkills = [
-  { id: "skill-n1", name: "collect", description: "Collects build artifacts and uploads them for review.", latestVersion: noticeVersion(1, 4), assignmentCount: 1 },
+  { id: "skill-n1", name: "collect", description: "Collects build artifacts and uploads them for review.", latestVersion: noticeVersion(1, 4),
+    assignmentCount: noticeDirectRules ? 3 : 1 },
   { id: "skill-n2", name: "lint-rules", description: "Keeps the team's lint rules current.", latestVersion: noticeVersion(2, 3), assignmentCount: 1 },
   { id: "skill-n3", name: "fetch-docs", description: "Fetches vendor documentation into the workspace.", gitSource: noticeGitSource,
     gitAutoUpdate: { enabled: true, intervalMs: 3_600_000, checkedAt: 1_700_000_000_000, checkedCommit: "c3d4e5f6a7b8".padEnd(40, "9"),
@@ -1390,20 +1394,27 @@ const noticeSkills = [
     recommendation: { dismissed: false }, latestVersion: noticeVersion(5, 1), assignmentCount: 0 },
   { id: "skill-n6", name: "deploy-bot", description: "Ships signed builds.", latestVersion: noticeVersion(6, 9), assignmentCount: 1 },
 ].map((skill, index) => ({ ...skill, updatedAt: Date.now() - (index + 1) * 3_600_000 }));
-type NoticeRule = { id: string; skillId: string; scopeKind: "instance" | "runner"; runnerId?: string; agentSelector: { kind: string; driver?: string };
+type NoticeRule = { id: string; skillId: string; scopeKind: "instance" | "runner"; runnerId?: string; agentSelector: { kind: string; driver?: string; agentId?: string };
   enabled: boolean; invocation: "agent" | "manual"; updatedAt: number };
 const noticeRules: NoticeRule[] = [
   { id: "rule-collect", skillId: "skill-n1", scopeKind: "instance", agentSelector: { kind: "all" }, enabled: true, invocation: "manual", updatedAt: 1 },
   { id: "rule-lint", skillId: "skill-n2", scopeKind: "instance", agentSelector: { kind: "driver", driver: "claude-code" }, enabled: true, invocation: "manual", updatedAt: 1 },
   { id: "rule-fetch", skillId: "skill-n3", scopeKind: "instance", agentSelector: { kind: "all" }, enabled: true, invocation: "agent", updatedAt: 1 },
   { id: "rule-deploy", skillId: "skill-n6", scopeKind: "runner", runnerId: "runner-studio", agentSelector: { kind: "driver", driver: "codex" }, enabled: true, invocation: "agent", updatedAt: 1 },
+  ...(noticeDirectRules ? [
+    { id: "rule-collect-gemini", skillId: "skill-n1", scopeKind: "runner" as const, runnerId: "runner-studio", agentSelector: { kind: "agent", agentId: "gemini" },
+      enabled: true, invocation: "agent" as const, updatedAt: 1 },
+    { id: "rule-collect-laptop", skillId: "skill-n1", scopeKind: "runner" as const, runnerId: "runner-laptop", agentSelector: { kind: "driver", driver: "codex" },
+      enabled: true, invocation: "manual" as const, updatedAt: 1 },
+  ] : []),
 ];
 /** What a machine is told to deploy, from the fixture's rules, as the control plane resolves them. */
 const noticeDesired = (machine: RunnerView) => noticeSkills.flatMap((skill) => {
   const rules = noticeRules.filter((rule) => rule.skillId === skill.id && (rule.scopeKind === "instance" || rule.runnerId === machine.runnerId));
   // The control plane targets only agents that can receive managed skills.
   const targets = machine.agents.filter((agent) => agent.driver !== "acp").flatMap((agent) => {
-    const winner = rules.filter((rule) => rule.agentSelector.kind === "all" || rule.agentSelector.driver === agent.driver)
+    const winner = rules.filter((rule) => rule.agentSelector.kind === "all" || rule.agentSelector.driver === agent.driver ||
+      rule.agentSelector.agentId === agent.id)
       .sort((a, b) => Number(b.scopeKind === "runner") - Number(a.scopeKind === "runner") ||
         Number(b.agentSelector.kind !== "all") - Number(a.agentSelector.kind !== "all"))[0];
     return winner?.enabled ? [{ agentId: agent.id, invocation: winner.invocation }] : [];
@@ -2402,7 +2413,7 @@ declare global {
     __WOLLIPOG_TOASTS_E2E__?: { show(message: string, options?: Omit<ToastOptions, "action"> & { actionLabel?: string }): number };
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
       failNextProjectUpdate(message?: string): void;
-      updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults">>): void;
+      updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults" | "memorySharing">>): void;
       updateSession(
         id: string,
         patch: Partial<Pick<SessionView,
@@ -2445,6 +2456,7 @@ declare global {
       deferNextCancelTurn(): void;
       settleDeferredCancelTurn(): void;
       setRunnerProtocolVersion(version: number): void;
+      setProjectMemoryClaudeVersion(version: string): void;
       setRunnerStatus(status: RunnerView["status"]): void;
       /** The editors the fixture machine advertises; none by default, so Open is Open Folder. */
       setRunnerEditors(editors: NonNullable<RunnerView["editors"]>): void;
@@ -2683,6 +2695,13 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   settleDeferredCancelTurn() {
     if (!pendingCancelTurnSettlement) throw new Error("no cancel turn request is awaiting settlement");
     pendingCancelTurnSettlement();
+  },
+  setProjectMemoryClaudeVersion(version) {
+    runner.agents = [...runner.agents.filter((agent) => agent.id !== "memory-claude"), {
+      id: "memory-claude", name: "Claude", command: "claude", args: [], env: {},
+      driver: "claude-code", context: { kind: "native" }, version, available: true,
+    }];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
   },
   setRunnerProtocolVersion(version) {
     runner.protocolVersion = version;

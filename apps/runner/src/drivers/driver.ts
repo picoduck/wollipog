@@ -213,6 +213,7 @@ export interface DriverOptions {
   args: string[];
   cwd: string;
   env: Record<string, string>;
+  projectMemoryDirectory?: string;
   config: SessionConfig;
   orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[] };
   context: AgentContext;

@@ -559,6 +559,11 @@ CREATE TABLE IF NOT EXISTS projects (
   FOREIGN KEY (default_location_id) REFERENCES project_locations(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS project_memory_settings (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  sharing TEXT NOT NULL CHECK (sharing IN ('separate', 'shared'))
+);
+
 CREATE TABLE IF NOT EXISTS project_child_session_defaults (
   project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
   cost_budget_usd REAL NOT NULL CHECK (cost_budget_usd > 0),
@@ -6713,6 +6718,7 @@ export class ControlPlaneDb {
       name: row.name,
       hidden: row.hidden_at !== null,
       childSessionDefaults: this.projectChildSessionDefaults(row.id),
+      memorySharing: this.projectMemorySharing(row.id),
       audience: projectScope?.owner.kind,
       ...(projectScope ? { scope: projectScope } : {}),
       canManage: principal ? this.canManageProject(principal, row.id) : true,
@@ -6872,6 +6878,12 @@ export class ControlPlaneDb {
     return Number(changed) > 0 ? this.getProject(projectId) : null;
   }
 
+  projectMemorySharing(projectId: string): import("@wollipog/protocol").ProjectMemorySharing {
+    const row = this.stmt("SELECT sharing FROM project_memory_settings WHERE project_id=?")
+      .get(projectId) as { sharing: import("@wollipog/protocol").ProjectMemorySharing } | undefined;
+    return row?.sharing ?? "separate";
+  }
+
   projectChildSessionDefaults(projectId: string): import("@wollipog/protocol").ChildSessionDefaults | null {
     const row = this.stmt(`SELECT cost_budget_usd AS costBudgetUsd, max_tool_calls AS maxToolCalls
       FROM project_child_session_defaults WHERE project_id=?`).get(projectId) as
@@ -6881,7 +6893,7 @@ export class ControlPlaneDb {
 
   updateProject(
     projectId: string,
-    input: { name?: string; hidden?: boolean; childSessionDefaults?: import("@wollipog/protocol").ChildSessionDefaults | null },
+    input: { memorySharing?: import("@wollipog/protocol").ProjectMemorySharing; name?: string; hidden?: boolean; childSessionDefaults?: import("@wollipog/protocol").ChildSessionDefaults | null },
     now = Date.now(),
   ): ProjectView | null {
     const current = this.stmt(
@@ -6890,6 +6902,9 @@ export class ControlPlaneDb {
     if (!current) return null;
     const name = input.name?.trim();
     if (input.name !== undefined && !name) throw new Error("project name is required");
+    if (input.memorySharing !== undefined && input.memorySharing !== "shared" && input.memorySharing !== "separate") {
+      throw new Error("invalid project memory sharing policy");
+    }
     const defaults = input.childSessionDefaults;
     if (defaults !== undefined && defaults !== null &&
         (!Number.isFinite(defaults.costBudgetUsd) || defaults.costBudgetUsd <= 0 ||
@@ -6897,6 +6912,10 @@ export class ControlPlaneDb {
       throw new Error("invalid child session defaults");
     }
     this.atomic(() => {
+      if (input.memorySharing !== undefined) {
+        this.stmt(`INSERT INTO project_memory_settings (project_id, sharing) VALUES (?, ?)
+          ON CONFLICT(project_id) DO UPDATE SET sharing=excluded.sharing`).run(projectId, input.memorySharing);
+      }
       if (defaults === null) {
         this.stmt("DELETE FROM project_child_session_defaults WHERE project_id=?").run(projectId);
       } else if (defaults !== undefined) {

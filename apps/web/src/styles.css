@@ -1036,6 +1036,11 @@ kbd {
    text too. Scoped to the svg, the exemption is structurally true — a text node cannot inherit it.
    White on a saturated semantic fill is correct in both themes, so it stays a literal. */
 .voice-btn.voice-recording > svg { color: #fff; }
+/* In forced colors the glyph takes the button's ButtonText: an svg keeps an author colour it sets
+   itself, and white would vanish on a light ButtonFace. */
+@media (forced-colors: active) {
+  .voice-btn.voice-recording > svg { color: inherit; }
+}
 @keyframes voice-pulse {
   0%,
   100% {
@@ -1236,6 +1241,14 @@ kbd {
 }
 .agent-other {
   color: var(--text-faint);
+}
+/* In forced colors a provider's mark follows its words too: an svg keeps an author colour it sets
+   itself, and a brand colour is not a system colour. */
+@media (forced-colors: active) {
+  .agent-openai,
+  .agent-anthropic,
+  .agent-google,
+  .agent-other { color: inherit; }
 }
 /* People & devices access panel */
 .access-heading {
@@ -2658,6 +2671,10 @@ button.status { cursor: pointer; }
   height: var(--icon);
   color: var(--accent);
 }
+/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
+@media (forced-colors: active) {
+  .menu-check { color: inherit; }
+}
 .menu-item.danger,
 .menu-item.danger .menu-icon { color: var(--danger-text); }
 .menu-item.danger:disabled { color: var(--text-faint); }
@@ -2894,6 +2911,13 @@ button.status { cursor: pointer; }
   margin-top: 1px;
   color: var(--amber);
 }
+/* Chromium gives an svg `forced-color-adjust: preserve-parent-color`, so in forced colors an icon
+   that sets its own colour keeps it (amber here) while its words turn CanvasText. Inheriting
+   there lets the system's colour reach it. Every icon that sets its own colour does the same;
+   the tone stays outside forced colors. */
+@media (forced-colors: active) {
+  .field-warn-icon { color: inherit; }
+}
 
 /* --------------------------------- Save bar ---------------------------------
    SaveBar.tsx: the editor save bar (§8.6), sticky at the bottom of its region while there is
@@ -2922,6 +2946,10 @@ button.status { cursor: pointer; }
 .save-bar-icon {
   flex: none;
   color: var(--red);
+}
+/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
+@media (forced-colors: active) {
+  .save-bar-icon { color: inherit; }
 }
 /* In Settings the bar floats 16px above the panel's bottom edge. */
 .settings-panel > .save-bar { bottom: var(--space-4); }
@@ -3057,6 +3085,10 @@ button.status { cursor: pointer; }
   user-select: none;
 }
 :is(.pid-mask, .pid-shown) > .app-icon { color: var(--text-dim); }
+/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
+@media (forced-colors: active) {
+  :is(.pid-mask, .pid-shown) > .app-icon { color: inherit; }
+}
 .pid-value { min-width: 0; overflow-wrap: anywhere; }
 /* Inside a compact tag the chip drops its frame and the control keeps the tag's height, borrowing
    the rest of its hit area. */
@@ -4850,6 +4882,17 @@ textarea {
   margin-top: var(--space-0-5);
 }
 .ps-item.plan-in_progress .ps-item-icon { color: var(--blue); }
+/* In forced colors every Pinned Summary icon follows its row's words: an svg keeps an author
+   colour it sets itself. Each selector matches the weight of the rule it undoes. */
+@media (forced-colors: active) {
+  .ps-row > svg,
+  .ps-icon,
+  .ps-row > .ps-go,
+  .ps-row.is-warning > .ps-icon,
+  .ps-disclosure > .disclosure-trigger > .disclosure-chevron,
+  .ps-item-icon,
+  .ps-item.plan-in_progress .ps-item-icon { color: inherit; }
+}
 .ps-item.plan-completed { color: var(--text-faint); }
 .ps-item.plan-completed .ps-item-text { text-decoration: line-through; }
 .ps-item-text {
@@ -7713,6 +7756,10 @@ button.file-head.source-path-link {
   height: var(--icon);
   margin-top: 2px;
   color: var(--text-faint);
+}
+/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
+@media (forced-colors: active) {
+  .access-section-title > .app-icon { color: inherit; }
 }
 .access-section h3 {
   font-size: 14px;
@@ -13011,6 +13058,11 @@ body.shell-dock-dragging * {
 .copy-status-icon-failed {
   color: var(--danger-text);
 }
+/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
+@media (forced-colors: active) {
+  .copy-status-icon-copied,
+  .copy-status-icon-failed { color: inherit; }
+}
 .perm-context {
   margin: 6px 0 0 26px;
   font-size: 12px;
@@ -13104,6 +13156,10 @@ body.shell-dock-dragging * {
 .palette-bar-icon {
   flex: none;
   color: var(--text-faint);
+}
+/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
+@media (forced-colors: active) {
+  .palette-bar-icon { color: inherit; }
 }
 .palette-cancel {
   flex: none;
@@ -15506,6 +15562,10 @@ body.shell-dock-dragging * {
   font: var(--type-small);
 }
 .ui-row-saved > svg { color: var(--positive-text); }
+/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
+@media (forced-colors: active) {
+  .ui-row-saved > svg { color: inherit; }
+}
 
 /* Orchestrator defaults keep Behavior and Decision Delegation visibly separate while reusing the
    settings row controls and their keyboard contracts. */
@@ -16062,6 +16122,11 @@ body.shell-dock-dragging * {
   visibility: hidden;
 }
 .checkbox-check { color: var(--on-accent); stroke-width: 3; }
+/* Forced colors repaints the checked box's accent fill as Field, so --on-accent could vanish on
+   it; the check follows the label's words instead (an svg keeps an author colour it sets). */
+@media (forced-colors: active) {
+  .checkbox-check { color: inherit; }
+}
 .radio-dot {
   width: 8px;
   height: 8px;
@@ -16195,6 +16260,11 @@ body.shell-dock-dragging * {
   left: calc(var(--space-1) + var(--space-3));
   color: var(--text-dim);
   pointer-events: none;
+}
+/* In forced colors the icon follows its words: an svg keeps an author colour it sets itself. */
+@media (forced-colors: active) {
+  .ui-select-caret,
+  .ui-select-filter-icon { color: inherit; }
 }
 .ui-select-filter {
   width: 100%;

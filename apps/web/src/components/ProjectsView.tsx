@@ -10,6 +10,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { archiveProjectWithFeedback, projectArchiveMessage } from "../project-actions.js";
+import { ProjectMemorySharingSettings } from "./ProjectMemorySharing.js";
 import { ProjectChildDefaults } from "./ProjectChildDefaults.js";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
@@ -497,6 +498,13 @@ export function ProjectsView({
                   />
                 )}
               </section>
+              <ProjectMemorySharingSettings key={`memory:${selected.id}`} project={selected} runners={runners}
+                disabled={selected.canManage === false || busy !== null}
+                onSave={async (memorySharing) => {
+                  const result = await runProjectMutation("memory-sharing",
+                    async () => (await api.updateProject(selected.id, { memorySharing })).project, false);
+                  if (!result) throw new Error("Could not save the memory policy.");
+                }} />
               {selected.childSessionDefaults !== undefined && <ProjectChildDefaults
                 key={selected.id}
                 project={selected}

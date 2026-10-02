@@ -1,3 +1,4 @@
+import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { isTerminal } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
@@ -503,6 +504,8 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
+  projectMemoryKey?: string;
+  projectMemoryFailureKey?: string;
   sessionId: string;
   /** Exact launch generation that owns this provider process; fences callbacks from retirees. */
   launchGeneration: number;
@@ -5667,6 +5670,7 @@ export class SessionManager {
       title: spec.title ?? "",
       titleSource: spec.titleSource ?? "generated",
       config: spec.config ?? {},
+      projectMemory: spec.projectMemory ?? prior?.projectMemory,
       orchestrator: spec.orchestrator ?? prior?.orchestrator,
       acpSessionContext,
       acpSessionOverrides,
@@ -7343,6 +7347,8 @@ export class SessionManager {
     else this.forgetLaunchingWorktreePath(sessionId, launchGeneration);
 
     let isolation: SpawnIsolation | undefined;
+    let preparedProjectMemoryDirectory: string | undefined;
+    let preparedProjectMemoryArgs: string[] | undefined;
     let launchPreparation: void | SessionLaunchPreparation;
     try {
       // This must precede discovery, authentication, provider-state migration, and worktree-boundary
@@ -7405,6 +7411,7 @@ export class SessionManager {
         args: meta.args,
         config: meta.config,
         capabilities: meta.capabilities,
+        agentVersion: meta.agentVersion,
         sessionSlashCommands: meta.sessionSlashCommands,
         sessionSlashCommandProvenance: meta.sessionSlashCommandProvenance,
       });
@@ -7463,7 +7470,12 @@ export class SessionManager {
         this.store.patchMeta(sessionId, { providerConversationHome: meta.providerConversationHome });
         this.store.flush(sessionId);
       }
-      isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
+      const unavailableMemory = projectMemoryUnavailable(meta);
+      if (unavailableMemory && meta.projectMemory?.sharing === "separate") this.noticeSessionLaunch(sessionId, unavailableMemory);
+      const projectMemoryDirectory = await prepareProjectMemory(meta, this.stateDir, this.runnerOwnerHash);
+      isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration, projectMemoryDirectory);
+      preparedProjectMemoryDirectory = projectMemoryDirectory;
+      if (projectMemoryDirectory) preparedProjectMemoryArgs = await prepareProjectMemoryArgs(meta);
       await this.proveGuardInsideSandbox(meta, isolation, cwd);
       const runtimeSetupEnvironment = this.worktreeSetupRuntimeEnvironment(
         isolation,
@@ -7515,10 +7527,11 @@ export class SessionManager {
         meta.driver,
         {
           command: meta.command,
-          args: launchPreparation?.codexLaunchArgs ?? meta.args,
+          args: preparedProjectMemoryArgs ?? launchPreparation?.codexLaunchArgs ?? meta.args,
           cwd,
           env: meta.env,
           config: meta.config,
+          ...(preparedProjectMemoryDirectory ? { projectMemoryDirectory: preparedProjectMemoryDirectory } : {}),
           orchestrator: meta.orchestrator,
           context: meta.context,
           capabilities: meta.capabilities,
@@ -7721,6 +7734,7 @@ export class SessionManager {
     }
     const pendingProviderAccountSwitch = this.pendingProviderAccount(meta);
     const entry: ActiveSession = {
+      projectMemoryKey: effectiveProjectMemoryKey(meta),
       sessionId,
       launchGeneration,
       client,
@@ -7916,6 +7930,9 @@ export class SessionManager {
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver initialization failed", launchGeneration);
       return false;
     }
+    if (meta.projectMemory) this.log(JSON.stringify({ event: "project_memory_policy_applied", sessionId,
+      provider: meta.driver, sharing: meta.projectMemory.sharing,
+      effective: preparedProjectMemoryDirectory ? meta.projectMemory.sharing : "account_native" }));
     this.log(`session ${sessionId} ready (cwd=${cwd}${resumeId ? ", resumed" : ""})`);
     return true;
   }
@@ -7924,6 +7941,7 @@ export class SessionManager {
     meta: SessionMeta,
     cwd: string,
     launchGeneration?: number,
+    projectMemoryDirectory?: string,
   ): SpawnIsolation | undefined | Promise<SpawnIsolation | undefined> {
     if (meta.executionTarget?.adapter === "container") {
       if (!this.containerTargets || !meta.agentId) throw new Error("container execution target is not configured for this agent");
@@ -7955,12 +7973,14 @@ export class SessionManager {
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
+      ...(projectMemoryDirectory ? { projectMemoryDirectory } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
-      ...((additionalWritableRoots.length || meta.adoptedProviderState)
+      ...((additionalWritableRoots.length || meta.adoptedProviderState || projectMemoryDirectory)
         ? { additionalWritableRoots: [
             ...additionalWritableRoots,
+            ...(projectMemoryDirectory ? [projectMemoryDirectory] : []),
             ...(meta.adoptedProviderState ? [meta.adoptedProviderState.sessionDir] : []),
           ] }
         : {}),
@@ -10656,6 +10676,42 @@ export class SessionManager {
     }
   }
 
+  setProjectMemory(sessionId: string, policy: import("@wollipog/protocol").SessionProjectMemory): void {
+    if (!policy || !(policy.projectId === null || typeof policy.projectId === "string" && policy.projectId.length > 0) ||
+        policy.sharing !== "separate" && policy.sharing !== "shared") return;
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || projectMemoryKey(meta) === JSON.stringify(policy)) return;
+    this.store.patchMeta(sessionId, { projectMemory: { projectId: policy.projectId, sharing: policy.sharing } });
+    this.store.flush(sessionId);
+    this.log(JSON.stringify({ event: "project_memory_policy_updated", sessionId, sharing: policy.sharing }));
+    const entry = this.active.get(sessionId);
+    if (entry) entry.projectMemoryFailureKey = undefined;
+    if (entry && !entry.running) setImmediate(() => this.scheduleDrain(sessionId));
+  }
+
+  private projectMemoryChanged(sessionId: string, entry: ActiveSession): boolean {
+    const meta = this.store.readMeta(sessionId);
+    return Boolean(meta && meta.driver === "claude-code" && (entry.projectMemoryKey ?? "native") !== effectiveProjectMemoryKey(meta));
+  }
+
+  private async rebindProjectMemory(sessionId: string, entry: ActiveSession): Promise<void> {
+    const result = await this.replaceProviderProcess(sessionId, entry, {
+      replacementMeta: () => this.store.readMeta(sessionId) ?? undefined,
+      queueFailureReason: () => "provider could not resume after the project memory policy changed",
+    });
+    if (result.status === "launched") {
+      if (!result.queuedWork) this.emitStatus(sessionId, "idle");
+      if (result.entry.pendingProviderAccountSwitch) setImmediate(() => this.scheduleDrain(sessionId));
+    } else if (result.status !== "stopped" && result.status !== "superseded") {
+      entry.projectMemoryFailureKey = projectMemoryKey(this.store.readMeta(sessionId) ?? {});
+      this.log(JSON.stringify({ event: "project_memory_policy_failed", sessionId, reason: result.status }));
+      this.rejectQueued(entry.queue.splice(0), "Could not apply the project memory policy. Restart this session to retry.");
+      this.emitQueue(sessionId);
+      this.emitEvent(sessionId, { kind: "error", message: "Could not apply the project memory policy. Restart this session to retry." });
+      this.emitStatus(sessionId, "failed");
+    }
+  }
+
   /** Persist turn configuration without presenting a model resolved under an older alias. The
    * effective context window was observed for the previous model, so a model or context-window
    * change drops it until the next turn reports what the provider actually serves. */
@@ -10704,6 +10760,20 @@ export class SessionManager {
         this.syncQueueHold(sessionId);
         return;
       }
+    }
+    if (this.projectMemoryChanged(sessionId, entry)) {
+      if (entry.projectMemoryFailureKey === projectMemoryKey(this.store.readMeta(sessionId) ?? {})) {
+        this.rejectQueued(entry.queue.splice(0), "Could not apply the project memory policy. Restart this session to retry.");
+        this.emitQueue(sessionId);
+        this.emitStatus(sessionId, "failed");
+        return;
+      }
+      if (this.providerAccountSwitchCanProceed(sessionId, entry)) {
+        await this.rebindProjectMemory(sessionId, entry);
+        return;
+      }
+      // Existing background ownership may need its synthetic settlement before replacement.
+      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) return;
     }
     // Schedulers may race with cancellation or interruption and leave an empty generation. Do not
     // claim—or queue for—an active-work permit when there is no provider work to dispatch.
@@ -10812,7 +10882,7 @@ export class SessionManager {
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
         }
-        if (entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind) break;
+        if (entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind || this.projectMemoryChanged(sessionId, entry)) break;
         if (entry.authenticationBlocked || entry.historyQuarantined) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
@@ -10855,6 +10925,9 @@ export class SessionManager {
         await this.rebindSelectedProviderAccount(sessionId, entry);
       } else if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
+      } else if (this.active.get(sessionId) === entry && !entry.authenticationBlocked && this.projectMemoryChanged(sessionId, entry) &&
+          this.providerAccountSwitchCanProceed(sessionId, entry)) {
+        await this.rebindProjectMemory(sessionId, entry);
       } else if (this.active.get(sessionId) === entry && entry.queue.length &&
           !entry.authenticationBlocked && !entry.historyQuarantined && !entry.historyIntegrityFailure &&
           !entry.governanceTripped && !this.queueHeld(entry)) {
@@ -11635,7 +11708,7 @@ export class SessionManager {
 
   private resumeDeferredHandoff(sessionId: string): void {
     const entry = this.active.get(sessionId);
-    if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch) && !entry.running) {
+    if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch || entry && this.projectMemoryChanged(sessionId, entry)) && !entry.running) {
       setImmediate(() => this.scheduleDrain(sessionId));
     }
   }

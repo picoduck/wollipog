@@ -1225,6 +1225,7 @@ app.register(async (instance) => {
               })) ?? [] }
             : {}),
         });
+        hub.syncProjectMemory(undefined, runnerId);
         // Close/forget requests made while this runner was offline are durable. The registered
         // frame is ordered first, so the runner can safely process these immediately afterward.
         for (const shellId of shellRegistry.pendingCloseIds(runnerId)) {
@@ -2028,13 +2029,16 @@ app.patch("/api/projects/:id", async (req, reply) => {
   if (!principal) return reply.code(403).send({ error: "human identity is required" });
   if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
   const body = (req.body ?? {}) as UpdateProjectRequest;
-  if (body.name === undefined && body.hidden === undefined && body.childSessionDefaults === undefined) {
-    return reply.code(400).send({ error: "name, hidden, or childSessionDefaults is required" });
+  if (body.name === undefined && body.hidden === undefined && body.childSessionDefaults === undefined && body.memorySharing === undefined) {
+    return reply.code(400).send({ error: "name, hidden, childSessionDefaults, or memorySharing is required" });
   }
   const name = body.name === undefined ? undefined : projectName(body.name);
   if (body.name !== undefined && !name) return reply.code(400).send({ error: "name must be 1-120 characters" });
   if (body.hidden !== undefined && typeof body.hidden !== "boolean") {
     return reply.code(400).send({ error: "hidden must be a boolean" });
+  }
+  if (body.memorySharing !== undefined && body.memorySharing !== "separate" && body.memorySharing !== "shared") {
+    return reply.code(400).send({ error: "memorySharing must be separate or shared" });
   }
   if (body.childSessionDefaults !== undefined) {
     const error = childSessionDefaultsError(body.childSessionDefaults);
@@ -2044,8 +2048,10 @@ app.patch("/api/projects/:id", async (req, reply) => {
     ...(name ? { name } : {}),
     ...(body.hidden !== undefined ? { hidden: body.hidden } : {}),
     ...(body.childSessionDefaults !== undefined ? { childSessionDefaults: body.childSessionDefaults } : {}),
+    ...(body.memorySharing !== undefined ? { memorySharing: body.memorySharing } : {}),
   });
   const project = db.getProject(id)!;
+  if (body.memorySharing !== undefined) hub.syncProjectMemory(id);
   hub.projectChanged(project);
   return { project: db.getProjectForPrincipal(principal, id)! };
 });

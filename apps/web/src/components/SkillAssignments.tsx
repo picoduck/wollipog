@@ -175,6 +175,8 @@ export interface AssignmentRuleRowProps {
   removing?: boolean;
   /** Inside a dialog (Manage Groups), the row's menus render in place. */
   inlineMenus?: boolean;
+  /** Amber sentences naming the agents this rule can't deploy to (#2287), or null. */
+  warning?: string | null;
   onSetInvocation: (invocation: SkillInvocationPolicy) => void;
   onSetEnabled: (enabled: boolean) => void;
   onRemove: () => void;
@@ -186,7 +188,7 @@ export interface AssignmentRuleRowProps {
  * server confirms. A turned-off rule is dimmed and says so. Under a 560px container the controls
  * wrap below the title.
  */
-export function AssignmentRuleRow({ rule, title, offDescription, busy, saving, saved, invocationSaving = false, removing, inlineMenus, onSetInvocation, onSetEnabled, onRemove }: AssignmentRuleRowProps) {
+export function AssignmentRuleRow({ rule, title, offDescription, busy, saving, saved, invocationSaving = false, removing, inlineMenus, warning, onSetInvocation, onSetEnabled, onRemove }: AssignmentRuleRowProps) {
   const id = useId().replace(/:/g, "");
   const titleId = `${id}-title`;
   return (
@@ -194,6 +196,7 @@ export function AssignmentRuleRow({ rule, title, offDescription, busy, saving, s
       <div className="skill-assignment-text">
         <span className="skill-assignment-title" id={titleId}>{title}</span>
         {!rule.enabled && <span className="skill-assignment-desc">{offDescription}</span>}
+        {warning && <span className="skill-assignment-warning">{warning}</span>}
       </div>
       <div className="skill-assignment-controls">
         <InvocationMenu value={rule.invocation} describedBy={titleId} disabled={busy} busy={invocationSaving} inline={inlineMenus}
@@ -234,13 +237,15 @@ function agentsOnMachines(entries: ReadonlyArray<{ runnerId: string; agent: { id
   return listText(machines.flatMap(([runnerId, names]) => names.map((name) => `${name} on ${machine(runnerId)}`)), 3);
 }
 
-/** What a group rule cannot deploy to, as amber sentences naming the agents, or null. */
+/** What a rule cannot deploy to, as amber sentences naming the agents, or null. A Manual Only skip
+ * the notice slot already reports for this rule is left to the slot, which offers its fix (#2287). */
 function unreachableSentence(rule: SkillRule, rules: ReadonlyArray<SkillRule>, runners: ReadonlyArray<RunnerView>,
-  machineLabels: ReadonlyMap<string, string>): string | null {
+  machineLabels: ReadonlyMap<string, string>, manualOnlyInSlot: SkillRule | null): string | null {
   const { ineligible, manualOnly } = skillRuleUnreachableAgents(rule, rules, runners);
   const sentences = [
     ineligible.length ? `${agentsOnMachines(ineligible, machineLabels)} can't receive managed skills.` : null,
-    manualOnly.length ? `${agentsOnMachines(manualOnly, machineLabels)} can't run manual-only skills.` : null,
+    manualOnly.length && rule !== manualOnlyInSlot
+      ? `${agentsOnMachines(manualOnly, machineLabels)} can't run manual-only skills.` : null,
   ].filter(Boolean);
   return sentences.length ? sentences.join(" ") : null;
 }
@@ -276,6 +281,11 @@ export interface SkillAssignmentsProps {
   group: SkillAssignmentsGroup | null;
   /** The skill's own rules and its group's, when both are current: who wins for each agent. */
   rules: ReadonlyArray<SkillRule>;
+  /** False while a rule that could win is unread (the group's, loading or unreadable), so no direct
+   * rule is warned about agents another rule may decide. */
+  rulesComplete?: boolean;
+  /** The rule whose Manual Only skip the notice slot shows, which its row doesn't repeat. */
+  manualOnlyInSlot?: SkillRule | null;
   runners: ReadonlyArray<RunnerView>;
   machineLabels: ReadonlyMap<string, string>;
   busy: boolean;
@@ -293,7 +303,7 @@ export interface SkillAssignmentsProps {
  * Surface, then, under "From Groups", its group's rules as read-only rows with Edit in Groups….
  */
 export function SkillAssignments(props: SkillAssignmentsProps) {
-  const { assignments, group, rules, runners, machineLabels, busy, save } = props;
+  const { assignments, group, rules, runners, machineLabels, busy, save, rulesComplete = true, manualOnlyInSlot = null } = props;
   const listRef = useRef<HTMLUListElement>(null);
   // A removed rule's ⋯ goes with its row: focus moves to the row that took its place, or the one
   // above, or the list, rather than dropping to the page.
@@ -317,6 +327,7 @@ export function SkillAssignments(props: SkillAssignmentsProps) {
     (triggers[Math.min(removed.index, triggers.length - 1)] ?? list).focus();
   }, [assignments, busy]);
   const title = (rule: RuleTarget) => assignmentRuleTitle(rule, runners, machineLabels);
+  const warning = (rule: SkillRule) => unreachableSentence(rule, rules, runners, machineLabels, manualOnlyInSlot);
   const groupName = group?.view?.name ?? "Unavailable Group";
 
   return (
@@ -334,6 +345,7 @@ export function SkillAssignments(props: SkillAssignmentsProps) {
               rule={assignment}
               title={title(assignment)}
               offDescription="Direct assignment, turned off"
+              warning={rulesComplete ? warning(assignment) : null}
               busy={busy}
               saving={save?.id === assignment.id && save.state === "saving"}
               saved={save?.id === assignment.id && save.state === "saved"}
@@ -369,7 +381,7 @@ export function SkillAssignments(props: SkillAssignmentsProps) {
               <ul className="skill-assignment-list">
                 {group.rules.map((rule) => (
                   <GroupRuleRow key={rule.id} rule={rule} title={title(rule)}
-                    warning={rules.includes(rule) ? unreachableSentence(rule, rules, runners, machineLabels) : null} />
+                    warning={rules.includes(rule) ? warning(rule) : null} />
                 ))}
               </ul>
             )}

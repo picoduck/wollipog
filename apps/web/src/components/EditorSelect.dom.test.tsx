@@ -434,26 +434,123 @@ test("one destination is a single Open Folder button with no caret", async () =>
     assert.equal(button!.title, "Open Folder");
     assert.ok(button!.classList.contains("btn") && button!.classList.contains("ghost"));
     assert.equal(button!.getAttribute("aria-haspopup"), null);
+    assert.equal(button!.getAttribute("aria-expanded"), null);
+    assert.equal(button!.getAttribute("aria-controls"), null);
+    assert.equal(button!.getAttribute("aria-describedby"), null);
     assertNoDomNode(revealOnly.container.querySelector(".split"), "a single button is not a split");
     await act(async () => { button!.click(); });
     assert.deepEqual(calls, [{ kind: "reveal" }]);
+    assertNoDomNode(doc().querySelector('[role="menu"]'), "online, Open Folder opens the folder and no menu");
   } finally {
     await revealOnly.cleanup();
   }
   assert.equal(openDestinationLabel({ kind: "editor", name: "Zed" }, true), "Open in Zed");
   assert.equal(openDestinationLabel({ kind: "reveal", name: "Finder" }, false), "Open in Finder");
+});
 
-  const offlineOnly = await mountEditor(client, { ...runner, editors: [], status: "offline" });
+test("offline, a single Open Folder opens the Open In menu so its reason is visible (#2273)", async () => {
+  const calls: Parameters<ApiClient["hostAction"]>[1][] = [];
+  const client = {
+    ...api,
+    hostAction: async (_sessionId: string, action: Parameters<ApiClient["hostAction"]>[1]) => {
+      calls.push(structuredClone(action));
+      return { ok: true as const };
+    },
+  } as ApiClient;
+  const note = "runner-1 is offline. You can open the folder again when it reconnects.";
+  const offlineRunner: RunnerView = { ...runner, editors: [], status: "offline" };
+  const mounted = await mountEditor(client, offlineRunner);
+  const settle = () => act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
+  const escape = (target: Element) => act(async () => {
+    target.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event);
+  });
   try {
-    const button = offlineOnly.container.querySelector<HTMLButtonElement>('button[aria-label="Open Folder"]');
-    assert.ok(button);
-    assert.equal(button.getAttribute("aria-disabled"), "true");
-    const describedBy = button.getAttribute("aria-describedby");
-    assert.equal(doc().getElementById(describedBy ?? "")?.textContent,
-      "runner-1 is offline. You can open the folder again when it reconnects.",
-      "an unnamed machine is named by its runner id");
+    const buttons = [...mounted.container.querySelectorAll<HTMLButtonElement>("button")];
+    assert.equal(buttons.length, 1, "still one button, with no caret");
+    const folder = buttons[0]!;
+    assert.equal(folder.getAttribute("aria-label"), "Open Folder");
+    assert.equal(folder.title, "Open Folder", "the tooltip names the action, not a reason");
+    assert.equal(folder.disabled, false, "the disabled control stays focusable");
+    assert.equal(folder.getAttribute("aria-disabled"), "true");
+    assert.equal(folder.getAttribute("aria-haspopup"), "menu");
+    assert.equal(folder.getAttribute("aria-expanded"), "false");
+    const describedBy = folder.getAttribute("aria-describedby");
+    assert.ok(describedBy);
+    assert.equal(doc().getElementById(describedBy)?.textContent, note,
+      "closed, the description is the note's text, and an unnamed machine is named by its runner id");
+
+    folder.focus();
+    await act(async () => { folder.click(); });
+    const menu = doc().querySelector<HTMLElement>('[role="menu"]');
+    assert.ok(menu, "activating Open Folder opens the menu instead of the folder");
+    assert.deepEqual(calls, [], "and launches nothing");
+    assert.equal(menu.getAttribute("aria-label"), "Open In");
+    assert.equal(folder.getAttribute("aria-controls"), menu.id);
+    assert.equal(folder.getAttribute("aria-expanded"), "true");
+    assert.equal(menu.querySelector(".menu-label")?.textContent, "Open In");
+    const choices = menuRadios();
+    assert.deepEqual(choices.map((item) => item.textContent?.trim()), ["File Manager"]);
+    assert.equal(choices[0]!.getAttribute("aria-disabled"), "true", "the file manager is disabled");
+    assertNoDomNode(menu.querySelector('[role="separator"]'), "no editors, no separator");
+    const menuNote = menu.querySelector<HTMLElement>(".menu-note");
+    assert.ok(menuNote, "the note is in the menu");
+    assert.equal(menuNote.hidden, false, "as visible text");
+    assert.equal(menuNote.textContent, note);
+    assert.equal(menu.lastElementChild, menuNote, "at the bottom");
+    assert.equal(menuNote.id, describedBy, "Open Folder's description reaches the visible note");
+    assert.equal(doc().querySelectorAll(`[id="${describedBy}"]`).length, 1, "one note, never two with one id");
+    assert.ok(doc().activeElement === menu, "with nothing to choose, the menu itself takes focus");
+
+    await act(async () => { choices[0]!.click(); });
+    assert.deepEqual(calls, []);
+    assert.ok(doc().querySelector('[role="menu"]'), "the disabled file manager leaves the menu open on its note");
+
+    await escape(menu);
+    await settle();
+    assertNoDomNode(doc().querySelector('[role="menu"]'), "Escape closes the menu");
+    assert.ok(doc().activeElement === folder, "and returns focus to Open Folder");
+    assert.equal(folder.getAttribute("aria-expanded"), "false");
+    assert.equal(doc().getElementById(describedBy)?.textContent, note, "closed again, the description remains");
+
+    // Reconnecting takes away the menu's reason: it closes, and the focus it held goes to Open Folder.
+    await act(async () => { folder.click(); });
+    assert.ok(doc().activeElement === doc().querySelector('[role="menu"]'));
+    await mounted.pushRunner({ ...offlineRunner, status: "online" });
+    assertNoDomNode(doc().querySelector('[role="menu"]'), "a reconnect closes the menu");
+    assert.ok(doc().activeElement === folder, "focus lands on Open Folder");
+    assert.equal(folder.getAttribute("aria-disabled"), "false");
+    assert.equal(folder.getAttribute("aria-haspopup"), null, "online, it is one button with no menu");
+    assert.equal(folder.getAttribute("aria-describedby"), null);
+    await act(async () => { folder.click(); });
+    assert.deepEqual(calls, [{ kind: "reveal" }]);
+    assertNoDomNode(doc().querySelector('[role="menu"]'));
+
+    // An editor discovered while the menu is open makes the control a split: the menu goes, and
+    // focus moves to the split's Open.
+    await mounted.pushRunner(offlineRunner);
+    await act(async () => { folder.click(); });
+    assert.ok(doc().querySelector('[role="menu"]'));
+    await mounted.pushRunner({ ...offlineRunner, editors: [{ id: "code", name: "VS Code" }] });
+    assertNoDomNode(doc().querySelector('[role="menu"]'), "the menu goes with the single control");
+    const main = mounted.container.querySelector<HTMLButtonElement>('button[aria-label="Open in VS Code"]');
+    assert.ok(main);
+    assert.ok(doc().activeElement === main, "focus lands on the split's Open");
+    assert.equal(main.getAttribute("aria-haspopup"), null, "the split's Open has no menu of its own");
+    const choose = mounted.container.querySelector<HTMLButtonElement>(`button[aria-label="${CHOOSE_DESTINATION_LABEL}"]`);
+    assert.ok(choose);
+    assert.equal(choose.getAttribute("aria-expanded"), "false");
+    await act(async () => { main.click(); });
+    assertNoDomNode(doc().querySelector('[role="menu"]'), "the split's disabled Open opens nothing");
+
+    // The caret's menu still restores focus to the caret, not to the Open beside it.
+    await act(async () => { choose.click(); });
+    const splitMenu = doc().querySelector<HTMLElement>('[role="menu"]');
+    assert.ok(splitMenu);
+    await escape(splitMenu);
+    await settle();
+    assert.ok(doc().activeElement === choose, "Escape returns focus to the caret");
   } finally {
-    await offlineOnly.cleanup();
+    await mounted.cleanup();
   }
 });
 

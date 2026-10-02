@@ -69,6 +69,7 @@ function harness(
   homes: Record<string, HomeState>,
   failAuthenticationOn?: string,
   initializeGate: (home: string) => Promise<void> = async () => {},
+  onPrompt: (text: string) => void = () => {},
 ) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-auth-account-"));
   const store = new SessionStore(join(root, "sessions"));
@@ -116,6 +117,7 @@ function harness(
       prompt: async (text) => {
         prompts.push({ home, text, ...(options.resumeId ? { resumeId: options.resumeId } : {}) });
         callbacks.onPromptAccepted?.();
+        onPrompt(text);
         if (text === failAuthenticationOn) callbacks.onAuthenticationFailure?.();
         return "end_turn";
       },
@@ -429,4 +431,25 @@ test("a recheck during the selected-account handoff cannot start a second recove
     releasePersonal?.();
     h.cleanup();
   }
+});
+
+
+test("a policy change during an auth-failed turn preserves the provider and queued recovery work", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-work" }, { status: "unauthenticated" }] } },
+    "first", async () => {}, text => {
+      if (text !== "first") return;
+      h.manager.setProjectMemory(SESSION, { projectId: "project", sharing: "shared" });
+      assert.equal(h.manager.prompt(SESSION, "queued after first"), true);
+    });
+  try {
+    h.store.patchMeta(SESSION, { agentVersion: "2.1.284", projectMemory: { projectId: "project", sharing: "separate" } });
+    assert.equal(h.manager.prompt(SESSION, "first"), true);
+    await waitFor(() => h.store.readMeta(SESSION)?.pendingApproval?.kind === "authentication", "auth card missing");
+    const internals = h.manager as unknown as { active: Map<string, { running: boolean; queue: Array<{ text: string }> }> };
+    await waitFor(() => !internals.active.get(SESSION)?.running, "turn did not settle");
+    assert.deepEqual(h.disposedHomes, []);
+    assert.deepEqual(internals.active.get(SESSION)?.queue.map(item => item.text), ["queued after first"]);
+    assert.deepEqual(h.prompts.map(item => item.text), ["first"]);
+    assert.ok(h.store.readMeta(SESSION)?.providerAuthBlock);
+  } finally { h.cleanup(); }
 });

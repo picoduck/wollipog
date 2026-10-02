@@ -30,7 +30,12 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Typecheck, Unit Tests & Bundles
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    # Everything except the video decoder install took a median of 539 seconds and at most 771 over
+    # 615 successful jobs from 2026-09-28 to 2026-10-01 (Unit Tests alone at most 615). Both install
+    # attempts at their seven-minute bounds plus that slowest remainder is just under 27 minutes, so
+    # twenty-eight still leaves the unit tests their full run time after a stalled first attempt
+    # (#2328). The contract test keeps this budget above the two attempts plus that remainder.
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -54,8 +59,30 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
+      # FFmpeg brings 73 packages (46.7 MB) from the Ubuntu mirror. Across 615 successful jobs from
+      # 2026-09-28 to 2026-10-01 this took a median of 26 seconds and a p99 of 413, the slowest 607,
+      # but on 2026-10-01 a slow yet moving mirror (58-84 kB/s) stretched it to 9-20 minutes and the
+      # job budget cancelled Unit Tests in five merge groups with no test failing (#2328). Each
+      # attempt is bounded on its own. A step timeout signals only the step's shell, so a timed-out
+      # attempt's root apt processes keep running and holding the apt and dpkg locks; the retry kills
+      # them and finishes any interrupted dpkg run before installing again. apt keeps every package
+      # the first attempt finished downloading, so the two attempts' fetch time adds up: fourteen
+      # minutes covers 46.7 MB at about 60 kB/s. When the retry fails too, the job fails here with an
+      # error naming this install, not as a cancelled Unit Tests run.
       - name: Install Isolated Video Decoder for Unit Tests
+        id: video-decoder
+        continue-on-error: true
+        timeout-minutes: 7
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg
+      - name: Retry Install Isolated Video Decoder for Unit Tests
+        if: ${{ !cancelled() && steps.video-decoder.outcome == 'failure' }}
+        timeout-minutes: 7
+        run: |
+          trap 'echo "::error::Install Isolated Video Decoder for Unit Tests failed on both attempts, so the unit tests did not run"' ERR
+          sudo pkill -KILL -x 'apt-get|dpkg' || true
+          sudo dpkg --configure -a
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg
 

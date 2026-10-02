@@ -826,6 +826,8 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
                   error: groupRules?.groupId === detailGroupId ? groupRules.error : undefined,
                 } : null}
                 rules={detailRules}
+                rulesComplete={!detailGroupId || groupRulesCurrent}
+                manualOnlyInSlot={noticeItem?.kind === "manual-only" ? noticeItem.error.rule : null}
                 runners={runners}
                 machineLabels={machineLabels}
                 busy={busy}

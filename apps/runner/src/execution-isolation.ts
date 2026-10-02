@@ -142,6 +142,8 @@ export interface IsolationStateOptions {
   /** Session-private roots that may be populated after launch (for example an agent-requested
    * worktree). They are materialized before sandbox construction and never shared across sessions. */
   additionalWritableRoots?: string[];
+  /** Exact selected project-memory partition, including for scratch-only sessions. */
+  projectMemoryDirectory?: string;
   /** Keep the provider's writable filesystem to its private cwd and transcript state. */
   orchestratorScratchOnly?: boolean;
   /** Runner-owned administrative entries that sit inside an otherwise writable session root and
@@ -288,6 +290,7 @@ export function seatbeltWritableRoots(
   const paths = new Set(state.orchestratorScratchOnly
     ? [state.cwd]
     : [state.cwd, state.dataDir, nativeTmp, ...(state.additionalWritableRoots ?? [])]);
+  if (state.projectMemoryDirectory) paths.add(state.projectMemoryDirectory);
   if (mapping) paths.add(state.providerStatePath ?? providerTranscriptPath(state, home, "on macOS")!);
   return [...paths];
 }
@@ -670,6 +673,7 @@ export async function resolveExecutionIsolation(
     const canonicalState = {
       ...state,
       dataDir: await runtime.realpathNative(state.dataDir),
+      ...(state.projectMemoryDirectory ? { projectMemoryDirectory: await runtime.realpathNative(state.projectMemoryDirectory) } : {}),
       cwd: await runtime.realpathNative(state.cwd),
       env: { ...state.env, ...(state.env.HOME ? { HOME: home } : {}) },
       additionalWritableRoots,

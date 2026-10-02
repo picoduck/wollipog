@@ -8,7 +8,7 @@
  * The DB is the source of truth; the hub broadcasts deltas built from it.
  */
 
-import { isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
+import { PROJECT_MEMORY_MIN_PROTOCOL, isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
 import type {
   ControlPlaneToRunner,
   ControlPlaneToUi,
@@ -397,7 +397,25 @@ export class Hub {
     return this.runnerSockets.has(runnerId);
   }
 
+  private withProjectMemory(runnerId: string, msg: ControlPlaneToRunner): ControlPlaneToRunner {
+    const command = msg.type === "durable_session_command" ? msg.command : msg;
+    const sessionId = command.type === "start_session" ? command.spec.sessionId
+      : "sessionId" in command ? command.sessionId : undefined;
+    if (!sessionId || !(command.type === "start_session" || command.type === "prompt_session" ||
+        command.type === "answer_recovered_question")) return msg;
+    if ((this.db.getRunner?.(runnerId)?.protocolVersion ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return msg;
+    const session = this.db.getSession(sessionId);
+    if (!session || session.runnerId !== runnerId) return msg;
+    const projectMemory = { projectId: session.projectId ?? null,
+      sharing: session.projectId ? this.db.projectMemorySharing(session.projectId) : "separate" as const };
+    if (msg.type === "durable_session_command") return { ...msg, projectMemory };
+    if (msg.type === "start_session") return { ...msg, spec: { ...msg.spec, projectMemory } };
+    if (msg.type === "prompt_session") return { ...msg, projectMemory };
+    return msg;
+  }
+
   sendToRunner(runnerId: string, msg: ControlPlaneToRunner): boolean {
+    msg = this.withProjectMemory(runnerId, msg);
     const socket = this.runnerSockets.get(runnerId);
     if (!socket) return false;
     try {
@@ -433,7 +451,7 @@ export class Hub {
   ): Promise<boolean> {
     const socket = this.runnerSockets.get(runnerId);
     if (!socket) return Promise.resolve(false);
-    const data = JSON.stringify(msg);
+    const data = JSON.stringify(this.withProjectMemory(runnerId, msg));
     const bytes = Buffer.byteLength(data, "utf8");
     if ((socket.bufferedAmount ?? 0) + bytes > maxBufferedBytes) return Promise.resolve(false);
     // Narrow synchronous test doubles have no delivery callback. Preserve their established
@@ -925,6 +943,7 @@ export class Hub {
     }
     if (!refreshProject || previousState === nextState) return;
     const previousProjectId = previousState?.split("\u0000", 1)[0] || null;
+    if (previousProjectId !== session.projectId) this.syncSessionProjectMemory(session);
     if (previousProjectId && previousProjectId !== session.projectId) this.projectChangedById(previousProjectId);
     if (session.projectId) this.projectChangedById(session.projectId);
   }
@@ -941,6 +960,20 @@ export class Hub {
 
   projectChanged(project: ProjectView): void {
     this.broadcast({ type: "project_upsert", project });
+  }
+
+  private syncSessionProjectMemory(session: SessionView): void {
+    if ((this.db.getRunner?.(session.runnerId)?.protocolVersion ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return;
+    this.sendToRunner(session.runnerId, { type: "set_session_project_memory", sessionId: session.id,
+      projectMemory: { projectId: session.projectId ?? null,
+        sharing: session.projectId ? this.db.projectMemorySharing(session.projectId) : "separate" } });
+  }
+
+  syncProjectMemory(projectId?: string, runnerId?: string): void {
+    for (const session of this.db.listSessions({ includeArchived: true })) {
+      if (projectId && session.projectId !== projectId || runnerId && session.runnerId !== runnerId) continue;
+      this.syncSessionProjectMemory(session);
+    }
   }
 
   projectChangedById(projectId: string): void {

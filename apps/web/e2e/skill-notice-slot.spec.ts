@@ -187,6 +187,28 @@ test.describe("at 1440×900", () => {
     await expect(slot(page)).toHaveCount(0);
     await expect(directRows(page)).toHaveText(["All Agents on Studio Workstation"]);
   });
+
+  test("a direct rule names the agents it can't reach in amber, but not what the slot already says (#2287)", async ({ page }) => {
+    await page.goto(`/command-inbox-projects-e2e.html?fullShell=1&history=1&skills=notices&deployment=1&directRules=1&path=${
+      encodeURIComponent(skillPath("skill-n1"))}`);
+    await expect(notice(page).locator(".notice-title")).toHaveText("Codex and Pi Can't Run Manual-Only Skills");
+    const rows = page.locator(".skill-assignment-list[aria-label='Direct Assignments'] > .skill-assignment");
+    await expect(rows.locator(".skill-assignment-title")).toHaveText(
+      ["All Agents on All Machines", "Gemini on Studio Workstation", "Codex (Command Line) on Travel Laptop"]);
+    // All Agents isn't held to the Studio's ACP agents, and its Manual Only skip is the slot's to tell.
+    await expect(rows.nth(0).locator(".skill-assignment-warning")).toHaveCount(0);
+    await expect(rows.nth(1).locator(".skill-assignment-warning")).toHaveText("Gemini on Studio Workstation can't receive managed skills.");
+    await expect(rows.nth(2).locator(".skill-assignment-warning")).toHaveText("Codex on Travel Laptop can't run manual-only skills.");
+    const [color, amber] = await rows.nth(1).locator(".skill-assignment-warning").evaluate((warning) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--amber)";
+      warning.append(probe);
+      const colors = [getComputedStyle(warning).color, getComputedStyle(probe).color];
+      probe.remove();
+      return colors;
+    });
+    expect(color).toBe(amber);
+  });
 });
 
 test.describe("at 390px", () => {

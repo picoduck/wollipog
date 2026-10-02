@@ -1,3 +1,4 @@
+import { projectMemoryAgentVersion } from "./project-memory.js";
 /**
  * Runner daemon: connects outbound to the control plane, advertises this host's
  * workspaces + agents, sends heartbeats, reconnects automatically, and manages
@@ -898,6 +899,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       }
     }
     const localAgent = metadata.agents.find((candidate) => candidate.id === meta.agentId);
+    // Refresh the launch capability observation instead of trusting the session's creation-time version.
+    meta.agentVersion = projectMemoryAgentVersion(meta, metadata.agents);
     // A sandboxed native host launch cannot see the protections file, so its guard asks the
     // runner. No socket means no guard for that launch (and so mediation), never a file-mode guard
     // that would refuse every matched tool call.
@@ -2188,6 +2191,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`agent control ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
       break;
+    case "set_session_project_memory":
+      sessions.setProjectMemory(msg.sessionId, msg.projectMemory);
+      break;
     case "start_session":
       log(`start_session ${msg.spec.sessionId} (${msg.spec.agentId})`);
       if (!validatePromptImageInputs(msg.initialImages ?? []).ok) {
@@ -2225,6 +2231,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log("ignored prompt_session with malformed prompt images");
         break;
       }
+      if (msg.projectMemory) sessions.setProjectMemory(msg.sessionId, msg.projectMemory);
       sessions.prompt(msg.sessionId, msg.text, msg.images, msg.slashCommand, msg.config);
       break;
     case "steer_session": {
@@ -2308,6 +2315,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       sendUp(response);
       if (!("handle" in claim)) break;
       const lifecycle = durableLifecycle(claim.handle);
+      if (msg.projectMemory) {
+        if (msg.command.type === "start_session") msg.command.spec.projectMemory = msg.projectMemory;
+        else sessions.setProjectMemory(msg.command.sessionId, msg.projectMemory);
+      }
       if (msg.command.type === "start_session") {
         try {
           provisionClaudeHooks(
