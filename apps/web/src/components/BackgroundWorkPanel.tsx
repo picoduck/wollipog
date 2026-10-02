@@ -14,6 +14,7 @@ import {
   BACKGROUND_DELIVERY_STATUS,
   backgroundDeliveryAction,
   requestMissingResultAcknowledgement,
+  shownWatchdogDelivery,
 } from "../background-delivery-status.js";
 import {
   STOP_JOB_ALREADY_ENDED,
@@ -285,7 +286,7 @@ export function BackgroundWorkPanel({
     selectedJobId === undefined || jobs.some((job) => job.parentTurnId !== "unknown" && job.parentTurnId === delivery.parentTurnId)),
   [session.backgroundDeliveries, selectedJobId, jobs]);
   const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
-  const highlightedWatchdogDelivery = deliveries.find((delivery) => delivery.watchdogState);
+  const highlightedWatchdogDelivery = shownWatchdogDelivery(deliveries);
   // Every visible relative timestamp ages, including settled history left open for inspection.
   const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0);
   const aggregateState = session.backgroundWorkState === "resumed"
@@ -351,7 +352,7 @@ export function BackgroundWorkPanel({
             const shownDeliveredCount = group.jobs.filter((job) => job.assistantResultPersistedAt != null ||
               (job.terminalObservedAt != null && job.continuationRequired === false)).length;
             const groupDeliveries = group.deliveries;
-            const watchdogDelivery = groupDeliveries.find((delivery) => delivery.watchdogState);
+            const watchdogDelivery = shownWatchdogDelivery(groupDeliveries);
             const watchdogState = watchdogDelivery?.watchdogState;
             // With no watchdog anywhere both sides are undefined; that must not highlight every group.
             const watchdogHighlighted = watchdogDelivery !== undefined &&

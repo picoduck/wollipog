@@ -41,6 +41,7 @@ import {
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, Spinner } from "./common.js";
 import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { shownWatchdogDelivery } from "../background-delivery-status.js";
 import { effortLabel, relativeTime, resolvedModelLabel, shortenPath } from "../format.js";
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -181,7 +182,7 @@ export function PinnedSummary({
         ? statusMeta("background_work", "continuation_pending")
         : null;
   const backgroundWorkUntracked = !backgroundWorkMeta && session.backgroundWorkTracking === "untracked";
-  const watchdogState = session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState;
+  const watchdogState = shownWatchdogDelivery(session.backgroundDeliveries)?.watchdogState;
 
   return (
     <div className="ps-body">

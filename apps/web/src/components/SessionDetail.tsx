@@ -83,6 +83,7 @@ import {
 import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
 import { sessionArchivedAtRest, statusMeta } from "../status-meta.js";
+import { shownWatchdogDelivery } from "../background-delivery-status.js";
 import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest } from "./EventTimeline.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
@@ -2646,6 +2647,7 @@ function SessionDetailLoaded({
   const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
     ? undefined
     : session.backgroundWorkState;
+  const shownDelivery = shownWatchdogDelivery(session.backgroundDeliveries);
   const backgroundParentTurnEventIds = useMemo(() => new Map(items
     .filter((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
       item.kind === "user_message" && Boolean(item.turnId))
@@ -5157,9 +5159,9 @@ function SessionDetailLoaded({
                   onExpand?.();
                 }} />
               )}
-              {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
+              {shownDelivery && (
                 <BackgroundDeliveryBadge
-                  state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
+                  state={shownDelivery.watchdogState}
                   onOpen={() => {
                     rightPanel.show("background");
                     onExpand?.();

@@ -9,6 +9,7 @@ import {
   snoozedSessionAttentionReason,
   sortSessionsForReminders,
 } from "./session-reminders.js";
+import { sessionStatusSummary } from "./status-meta.js";
 
 function session(id: string, status: SessionView["status"] = "idle", overrides: Partial<SessionView> = {}): SessionView {
   return { id, status, archived: false, pendingApproval: null, ...overrides } as SessionView;
@@ -134,6 +135,18 @@ test("snoozed attention uses the shared delivery-watchdog presentation", () => {
     assert.match(reason?.accessibleName ?? "", new RegExp(`^Background Work: ${label}\\.`));
     assert.match(reason?.description ?? "", description);
   }
+});
+
+test("snoozed attention names the delivery the session bar names when there are several (#2329)", () => {
+  const pending = { parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, watchdogState: "dashboard_observation_pending" as const };
+  const blocked = { parentTurnId: "turn-2", jobCount: 2, terminalCount: 1, watchdogState: "continuation_blocked" as const };
+  const delayed = { parentTurnId: "turn-3", jobCount: 1, terminalCount: 1, watchdogState: "result_not_projected" as const };
+  const both = session("pending-then-blocked", "idle", { backgroundDeliveries: [pending, blocked] });
+  assert.equal(snoozedSessionAttentionReason(both)?.label, "Result Blocked");
+  assert.equal(snoozedSessionAttentionReason(both)?.severity, "blocked");
+  assert.equal(snoozedSessionAttentionReason(both)?.label, sessionStatusSummary(both).primary.meta.label);
+  const passive = session("pending-only", "idle", { backgroundDeliveries: [pending, delayed] });
+  assert.equal(snoozedSessionAttentionReason(passive)?.label, "Notification Pending", "the first, as before");
 });
 
 test("attention changes never reintroduce a pending snooze into Active", () => {

@@ -77,6 +77,22 @@ export function backgroundDeliveryNeedsYou(state: BackgroundDeliveryWatchdogStat
 }
 
 /**
+ * The background delivery a session shows when it has several (#2329): the first whose watchdog
+ * state waits on the person (Result Blocked or Result Missing), otherwise the first with any
+ * watchdog state. The Session Status ranking, the Pinned Summary and Sessions preview badges, the
+ * session reminder and the Background Work panel's highlight all take it from here, so every surface
+ * names the same delivery.
+ */
+export function shownWatchdogDelivery<T extends Pick<BackgroundDeliveryView, "watchdogState">>(
+  deliveries: readonly T[] | undefined,
+): (T & { watchdogState: BackgroundDeliveryWatchdogState }) | undefined {
+  const watched = (deliveries ?? []).filter((delivery): delivery is T & {
+    watchdogState: BackgroundDeliveryWatchdogState;
+  } => delivery.watchdogState != null);
+  return watched.find((delivery) => backgroundDeliveryNeedsYou(delivery.watchdogState)) ?? watched[0];
+}
+
+/**
  * The step a watchdog state asks for, where the surface knows whether this runner can stop one job
  * (#1780). Result Blocked then offers Stop Job, or says why it is unavailable; every other state,
  * and a surface that does not know, keeps the shared copy. `restartReportsResult` says the runner's

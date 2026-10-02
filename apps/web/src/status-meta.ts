@@ -23,7 +23,7 @@ import {
   type SessionView,
   type StopOperationView,
 } from "@wollipog/protocol";
-import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou } from "./background-delivery-status.js";
+import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou, shownWatchdogDelivery } from "./background-delivery-status.js";
 
 export type StatusTone = "info" | "success" | "warning" | "danger" | "neutral";
 
@@ -515,10 +515,7 @@ export function sessionStatusSummary(
   // A result that is blocked or missing does not progress on its own and asks the person for a step
   // (#2275), so it ranks after their requests; a result still on its way back stays passive. Where a
   // session has several, the one that needs the person is the one shown.
-  const deliveries = session.backgroundDeliveries ?? [];
-  const watched = deliveries.find((candidate) =>
-    candidate.watchdogState && backgroundDeliveryNeedsYou(candidate.watchdogState)) ??
-    deliveries.find((candidate) => candidate.watchdogState);
+  const watched = shownWatchdogDelivery(session.backgroundDeliveries);
   const deliveryState = watched?.watchdogState;
   const delivery: SessionCondition | null = watched && deliveryState ? {
     kind: "background_delivery",

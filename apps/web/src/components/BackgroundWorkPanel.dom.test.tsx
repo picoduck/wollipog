@@ -199,6 +199,57 @@ test("only the group holding the watchdog delivery is highlighted, and none with
       ariaCurrent: "true",
       watchdogState: "result_not_projected",
     }, unmarked], "only the group holding the watchdog delivery is highlighted");
+
+    // #2329: the control plane lists retained deliveries before Result Blocked ones, so a pending
+    // delivery can come first; the highlight follows the one that waits on the person.
+    const highlighted = (watchdogState: string) => ({
+      watchdogClass: true, watchdogHighlighted: "true", ariaCurrent: "true", watchdogState,
+    });
+    const passive = (watchdogState: string) => ({ ...unmarked, watchdogState });
+    await render([{
+      continuationId: "bgcont-pending",
+      parentTurnId: "turn-1",
+      jobCount: 1,
+      terminalCount: 1,
+      watchdogState: "dashboard_observation_pending",
+    }, {
+      parentTurnId: "turn-2",
+      jobCount: 2,
+      terminalCount: 1,
+      watchdogState: "continuation_blocked",
+    }]);
+    assert.deepEqual(markers(), [unmarked, highlighted("continuation_blocked"), passive("dashboard_observation_pending")],
+      "the blocked group is highlighted, not the pending one listed first");
+
+    await render([{
+      continuationId: "bgcont-pending",
+      parentTurnId: "turn-2",
+      jobCount: 1,
+      terminalCount: 1,
+      watchdogState: "dashboard_observation_pending",
+    }, {
+      parentTurnId: "turn-2",
+      jobCount: 2,
+      terminalCount: 1,
+      watchdogState: "continuation_blocked",
+    }]);
+    assert.deepEqual(markers(), [unmarked, highlighted("continuation_blocked"), unmarked],
+      "within one group, the group names the blocked delivery too");
+
+    await render([{
+      continuationId: "bgcont-pending",
+      parentTurnId: "turn-1",
+      jobCount: 1,
+      terminalCount: 1,
+      watchdogState: "dashboard_observation_pending",
+    }, {
+      parentTurnId: "turn-2",
+      jobCount: 1,
+      terminalCount: 1,
+      watchdogState: "result_not_projected",
+    }]);
+    assert.deepEqual(markers(), [unmarked, passive("result_not_projected"), highlighted("dashboard_observation_pending")],
+      "with only pending deliveries, the first listed stays highlighted");
   } finally {
     await act(async () => root.unmount());
     container.remove();

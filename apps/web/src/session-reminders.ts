@@ -10,6 +10,7 @@ import {
   BACKGROUND_DELIVERY_STATUS,
   backgroundDeliveryAccessibleName,
   backgroundDeliveryAttentionDescription,
+  shownWatchdogDelivery,
   type BackgroundDeliverySeverity,
 } from "./background-delivery-status.js";
 
@@ -60,7 +61,7 @@ export function snoozedSessionAttentionReason(session: SessionView): SnoozedAtte
       description: "Managed background work was lost and requires attention.",
     };
   }
-  const watchdogState = session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState;
+  const watchdogState = shownWatchdogDelivery(session.backgroundDeliveries)?.watchdogState;
   if (watchdogState) {
     const status = BACKGROUND_DELIVERY_STATUS[watchdogState];
     return {

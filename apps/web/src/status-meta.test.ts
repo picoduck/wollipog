@@ -294,3 +294,14 @@ test("a delivery that waits on the person is the one shown, even after a passive
   assert.equal(summary.primary.meta.label, "Result Blocked");
   assert.equal(summary.conditions.filter((condition) => condition.kind === "background_delivery").length, 1);
 });
+
+test("with only passive deliveries the first listed is shown (#2329)", () => {
+  const summary = sessionStatusSummary(deliverySession("dashboard_observation_pending", {
+    backgroundDeliveries: [
+      { continuationId: "c-1", parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, watchdogState: "dashboard_observation_pending" },
+      { parentTurnId: "turn-2", jobCount: 1, terminalCount: 1, watchdogState: "result_not_projected" },
+    ],
+  }));
+  const shown = summary.conditions.filter((condition) => condition.kind === "background_delivery");
+  assert.deepEqual(shown.map((condition) => condition.meta.label), ["Notification Pending"]);
+});
