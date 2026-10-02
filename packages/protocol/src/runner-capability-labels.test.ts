@@ -76,27 +76,38 @@ function functionName(node: ts.SignatureDeclaration): string | null {
 
 type Binding =
   | { kind: "parameter"; owner: string | null; index: number }
-  | { kind: "constant"; initializer: ts.Expression };
+  | { kind: "constant"; initializer: ts.Expression }
+  /** Bound by something this guard does not follow: `let`/`var`, destructuring, no initializer. */
+  | { kind: "opaque" };
+
+function bindsName(name: ts.BindingName, text: string): boolean {
+  if (ts.isIdentifier(name)) return name.text === text;
+  return name.elements.some((element) => !ts.isOmittedExpression(element) && bindsName(element.name, text));
+}
 
 /** The declaration an identifier refers to, found by walking out through its enclosing scopes, so
- * a `label` in one function never resolves to another function's `label`. */
+ * a `label` in one function never resolves to another function's `label`. Only a `const` bound
+ * directly to the name is followed; any other binding stops the lookup as opaque. */
 function binding(identifier: ts.Identifier): Binding | null {
-  const declares = (statement: ts.Statement) => ts.isVariableStatement(statement)
-    ? statement.declarationList.declarations.find((declaration) =>
-      ts.isIdentifier(declaration.name) && declaration.name.text === identifier.text)
-    : undefined;
   for (let node: ts.Node | undefined = identifier.parent; node; node = node.parent) {
     if (ts.isBlock(node) || ts.isSourceFile(node) || ts.isModuleBlock(node) || ts.isCaseOrDefaultClause(node)) {
       for (const statement of node.statements) {
-        const declaration = declares(statement);
+        if (!ts.isVariableStatement(statement)) continue;
+        const declaration = statement.declarationList.declarations.find((candidate) =>
+          bindsName(candidate.name, identifier.text));
         if (!declaration) continue;
-        return declaration.initializer ? { kind: "constant", initializer: declaration.initializer } : null;
+        const constant = (statement.declarationList.flags & ts.NodeFlags.Const) !== 0;
+        return constant && ts.isIdentifier(declaration.name) && declaration.initializer
+          ? { kind: "constant", initializer: declaration.initializer }
+          : { kind: "opaque" };
       }
     }
     if (ts.isFunctionLike(node)) {
-      const index = node.parameters.findIndex((parameter) =>
-        ts.isIdentifier(parameter.name) && parameter.name.text === identifier.text);
-      if (index >= 0) return { kind: "parameter", owner: functionName(node), index };
+      const index = node.parameters.findIndex((parameter) => bindsName(parameter.name, identifier.text));
+      if (index < 0) continue;
+      return ts.isIdentifier(node.parameters[index]!.name)
+        ? { kind: "parameter", owner: functionName(node), index }
+        : { kind: "opaque" };
     }
   }
   return null;
@@ -106,6 +117,7 @@ function binding(identifier: ts.Identifier): Binding | null {
 function labelTexts(
   expression: ts.Expression,
   wrappers: Map<string, number>,
+  capability?: ts.Expression,
 ): { texts: string[]; unresolved: string | null } {
   if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
     return { texts: [expression.text], unresolved: null };
@@ -140,8 +152,11 @@ function labelTexts(
       return { texts: [], unresolved: null };
     }
   }
-  // `{ capability, label }` requirement objects are checked where they are written.
-  if (ts.isPropertyAccessExpression(expression) && expression.name.text === "label") {
+  // `requirement.capability, requirement.label` reads a `{ capability, label }` requirement, which
+  // is checked where it is written (an object literal or class fields).
+  if (ts.isPropertyAccessExpression(expression) && expression.name.text === "label" &&
+      capability && ts.isPropertyAccessExpression(capability) && capability.name.text === "capability" &&
+      capability.expression.getText() === expression.expression.getText()) {
     return { texts: [], unresolved: null };
   }
   return { texts: [], unresolved: expression.getText() };
@@ -162,8 +177,8 @@ function scanRunnerCapabilityLabels(files: Array<{ file: string; text: string }>
     for (const sourceFile of sources) {
       const where = (node: ts.Node) =>
         `${path.relative(process.cwd(), sourceFile.fileName)}:${sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1}`;
-      const record = (node: ts.Node, expression: ts.Expression) => {
-        const resolved = labelTexts(expression, sinks);
+      const record = (node: ts.Node, expression: ts.Expression, capability?: ts.Expression) => {
+        const resolved = labelTexts(expression, sinks, capability);
         if (resolved.unresolved) unresolved.push(`${where(node)}: ${resolved.unresolved}`);
         for (const label of resolved.texts.filter(Boolean)) {
           labels.push({ file: sourceFile.fileName, line: sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1, label });
@@ -176,7 +191,7 @@ function scanRunnerCapabilityLabels(files: Array<{ file: string; text: string }>
           if (index !== undefined) {
             const spread = node.arguments.find(ts.isSpreadElement);
             if (spread) unresolved.push(`${where(node)}: spread arguments hide the label`);
-            else if (node.arguments[index]) record(node, node.arguments[index]);
+            else if (node.arguments[index]) record(node, node.arguments[index], node.arguments[index - 1]);
             else unresolved.push(`${where(node)}: missing label argument`);
           }
         }
@@ -185,6 +200,15 @@ function scanRunnerCapabilityLabels(files: Array<{ file: string; text: string }>
             ts.isPropertyAssignment(candidate) && ts.isIdentifier(candidate.name) && candidate.name.text === key);
           const label = property("label");
           if (property("capability") && label && ts.isPropertyAssignment(label)) record(label, label.initializer);
+        }
+        if (ts.isClassLike(node)) {
+          const field = (key: string) => node.members.find((member) =>
+            ts.isPropertyDeclaration(member) && ts.isIdentifier(member.name) && member.name.text === key);
+          const label = field("label");
+          if (field("capability") && label && ts.isPropertyDeclaration(label)) {
+            if (label.initializer) record(label, label.initializer);
+            else unresolved.push(`${where(label)}: requirement class label has no initializer`);
+          }
         }
         ts.forEachChild(node, visit);
       };
@@ -243,6 +267,28 @@ test("the label scan resolves each constant in its own scope", () => {
   }]);
   assert.deepEqual(scan.labels.map((site) => site.label), ["directory browsing", "Directory browsing"]);
   assert.deepEqual(scan.unresolved.map((entry) => entry.replace(/^[^ ]+ /u, "")), ["label"]);
+});
+
+test("the label scan refuses bindings and properties it cannot prove", () => {
+  const scan = scanRunnerCapabilityLabels([{
+    file: "fixture.ts",
+    text: `
+      function mutable() { let label = "directory browsing"; label = "Directory Browsing"; return runnerCapabilityRequirement(1, "x", label); }
+      const label = "directory browsing";
+      function destructured({ label }: { label: string }) { return runnerCapabilityRequirement(1, "x", label); }
+      class Labels { label = "Directory Browsing"; }
+      runnerCapabilityRequirement(1, "x", new Labels().label);
+      class Requirement { capability = "x"; label = "Requirement Label"; }
+      const requirement = new Requirement();
+      runnerCapabilityRequirement(1, requirement.capability, requirement.label);
+    `,
+  }]);
+  assert.deepEqual(scan.labels.map((site) => site.label), ["Requirement Label"]);
+  assert.deepEqual(scan.unresolved.map((entry) => entry.replace(/^[^ ]+ /u, "")), [
+    "label",
+    "label",
+    "new Labels().label",
+  ]);
 });
 
 test("every runner capability label in the web app and control plane is a lowercase noun phrase", () => {
