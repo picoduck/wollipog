@@ -6,8 +6,12 @@ import { EventTimeline } from "../components/EventTimeline.js";
 import { useTimeline } from "../components/useTimeline.js";
 import "../styles.css";
 
-const finalImageUrl = "https://evidence.example/session-review.png?X-Amz-Signature=redacted";
-const videoUrl = "https://evidence.example/session-walkthrough.webm?X-Amz-Signature=redacted";
+// `?expired=1` signs the links with a lifetime that ended in 2020, so a failed fetch reads as expired.
+const signature = new URLSearchParams(window.location.search).has("expired")
+  ? "X-Amz-Date=20200101T000000Z&X-Amz-Expires=3600&X-Amz-Signature=redacted"
+  : "X-Amz-Signature=redacted";
+const finalImageUrl = `https://evidence.example/session-review.png?${signature}`;
+const videoUrl = `https://evidence.example/session-walkthrough.webm?${signature}`;
 const streamedImageUrls = [
   "https://evidence.example/session-review.png?X-Amz-Signature=r",
   "https://evidence.example/session-review.png?X-Amz-Signature=re",
