@@ -68,7 +68,11 @@ the combined usage before assigning more work and leave unfinished criteria pend
 out.
 
 Keep a per-criterion assessment with its exact requirement, status, merged revision, evidence and
-reasoning. Every code criterion needs supported evidence: inspect the implementation and relevant
+reasoning. Persist partial and completed criterion assessments on their pending or reviewed audit
+entries, using the same atomic-update rule, and carry them forward with the backlog before prune.
+Before reusing an assessment, check for changes in its cited implementation and relevant callers
+since its recorded merged revision; re-investigate affected requirements. Every code criterion
+needs supported evidence: inspect the implementation and relevant
 call sites, and explain how their behavior satisfies or fails the requirement, using focused
 tests or other ground-truth checks where applicable. A script proving a cited line exists only
 checks the reference; it does not prove that code meets the criterion. A helper's `complete` flag
@@ -133,7 +137,8 @@ Two sections.
 **Delivery drift** — for each closed issue with unmet criteria: the issue number, the specific
 criterion, and the evidence it is unmet. For each open issue already fixed: the issue number and the
 commit or PR that fixed it. List unverified process evidence separately from unmet criteria,
-including which evidence source could not be inspected.
+including which evidence source could not be inspected. List verified approved deviations and
+deliberate later replacements separately, with their decision or merged-change evidence.
 
 **Hygiene** — the exact branch and worktree cleanup commands you would run, with a note on any
 worktree holding uncommitted changes. Present them for the human to run; do not run them.
