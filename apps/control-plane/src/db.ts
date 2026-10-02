@@ -15720,11 +15720,23 @@ export class ControlPlaneDb {
     }, policy.delegation.decisions.ui_evidence_approval));
     effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
     const total = rows.length;
-    const status = waitingHuman > 0 ? "waiting_human" as const
+    const childStatus = waitingHuman > 0 ? "waiting_human" as const
       : active > 0 || pendingOrchestrator.length > 0 || cleanupPending > 0 || total === 0 ? "active" as const
       : blocked > 0 ? "blocked" as const
       : fullyVerified === total ? "verified_complete" as const
       : "active" as const;
+    // The continuation reads the child-derived status (its `held` state depends on it), and the
+    // final status reads the continuation, so derive them in that order and never the reverse.
+    const continuation = resolvedCampaignId === campaignSessionId
+      ? this.campaignContinuationProjection(campaign, childStatus)
+      : {};
+    // A campaign whose own wake-up failed or lost its result is not progressing, however busy its
+    // children look; say so at the root so a consumer need not special-case `continuation` (#1352).
+    // Human attention and verified completion keep precedence; neither gate starves a retry.
+    const stalled = continuation.continuation?.state === "failed" ? "continuation_failed" as const
+      : continuation.continuation?.state === "missing_result" ? "continuation_missing_result" as const
+      : undefined;
+    const status = stalled && childStatus === "active" ? "blocked" as const : childStatus;
     const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
     const occupied = this.childSessionAllocations(resolvedCampaignId).liveCount;
     return {
@@ -15765,9 +15777,8 @@ export class ControlPlaneDb {
         unique: Number(followUps.unique_count ?? 0),
         duplicates: Number(followUps.duplicate_count ?? 0),
       },
-      ...(resolvedCampaignId === campaignSessionId
-        ? this.campaignContinuationProjection(campaign, status)
-        : {}),
+      ...(stalled ? { stalled } : {}),
+      ...continuation,
     };
   }
 

@@ -2904,6 +2904,66 @@ test("verified campaign children survive an event cache reset without a history 
   }
 });
 
+test("a failed or result-less campaign continuation is visible at the projection root (#1352)", () => {
+  const db = withRunner();
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    db.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" }, orchestratorPolicy: policy }));
+    db.createSession(newSession({ id: "child", parentSessionId: "campaign" }));
+    db.createSession(newSession({ id: "nested", parentSessionId: "campaign",
+      config: { permissionMode: "orchestrator" }, orchestratorPolicy: policy }));
+    db.updateSessionStatus("child", "running", 1_001);
+    db.updateSessionStatus("nested", "running", 1_001);
+    db.updateSessionStatus("campaign", "idle", 1_001);
+    db.recordCampaignContinuationEvent({
+      eventId: "child-ready:campaign:child", campaignSessionId: "campaign", kind: "child_ready", now: 1_002,
+    });
+    const [event] = db.campaignContinuationEvents("campaign", 2_000);
+    assert.ok(db.stageCampaignContinuation({
+      continuationId: "first", commandId: "cmd-first", campaignSessionId: "campaign", runnerId: "runner-1",
+      eventFromSeq: event!.seq, eventThroughSeq: event!.seq, payloadJson: "{}", payloadSha256: "a".repeat(64),
+      expiresAt: 61_003, attemptCount: 1, now: 1_003,
+    }));
+    assert.equal(db.campaignProjection("campaign")?.status, "active");
+    assert.equal(db.campaignProjection("campaign")?.stalled, undefined, "a pending continuation is not stalled");
+
+    db.updateCampaignContinuationForCommand("cmd-first", "failed", 1_004, "provider refused the turn");
+    let projection = db.campaignProjection("campaign")!;
+    assert.equal(projection.continuation?.state, "failed");
+    assert.equal(projection.children.active, 2, "the children alone would still read as active");
+    assert.equal(projection.status, "blocked", "a failed continuation no longer reports the campaign active");
+    assert.equal(projection.stalled, "continuation_failed");
+
+    db.updateCampaignContinuationForCommand("cmd-first", "missing_result", 1_005, "no terminal result");
+    projection = db.campaignProjection("campaign")!;
+    assert.equal(projection.status, "blocked");
+    assert.equal(projection.stalled, "continuation_missing_result");
+    assert.equal(db.campaignProjection("nested")?.stalled, undefined,
+      "like continuation, the stall belongs to the root campaign's own view");
+    assert.equal(db.campaignProjection("nested")?.status, "active");
+
+    assert.ok(db.createWorkflowDecision({
+      requestId: "human-merge", occurrenceId: "workflow-human-merge", sessionId: "child",
+      controllingSessionId: "campaign", category: "pr_merge", resourceKey: "repo#1",
+      resourceSnapshot: { marker: "human" } as unknown as WorkflowDecisionView["resourceSnapshot"],
+      resourceDigest: "b".repeat(64), policyRevision: 1, authority: "human", createdAt: 1_006,
+    }));
+    projection = db.campaignProjection("campaign")!;
+    assert.equal(projection.status, "waiting_human", "human attention keeps precedence over a stall");
+    assert.equal(projection.stalled, "continuation_missing_result", "the stall stays visible at the root");
+    assert.equal(projection.continuation?.state, "missing_result");
+
+    assert.ok(db.resolveWorkflowDecision("workflow-human-merge", "human", "denied", 1_007));
+    db.updateCampaignContinuationForCommand("cmd-first", "acknowledged", 1_008);
+    projection = db.campaignProjection("campaign")!;
+    assert.equal(projection.stalled, undefined, "acknowledgement clears the stall");
+    assert.equal(projection.status, "active");
+  } finally {
+    db.close();
+  }
+});
+
 test("campaign attestation rebinds to its report after CP sequences shift, and invalidations survive resets", () => {
   const db = withRunner();
   try {

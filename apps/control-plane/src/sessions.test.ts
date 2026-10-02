@@ -2301,6 +2301,9 @@ test("campaign continuation recovery holds for humans and never replays an ambig
       error: "provider accepted the turn but no terminal result was persisted",
     }), true);
     assert.equal(db.campaignProjection(root.id)?.continuation?.state, "missing_result");
+    assert.equal(svc.campaignProjection(root.id).data?.status, "blocked",
+      "get_campaign no longer reports an accepted-without-result campaign as active (#1352)");
+    assert.equal(svc.campaignProjection(root.id).data?.stalled, "continuation_missing_result");
     db.raw().prepare("UPDATE session_prompt_commands SET expires_at=0 WHERE command_id=?").run(first.commandId);
     svc.maintainPrompts(Date.now());
     assert.ok(db.getSessionPromptCommand(first.commandId),
@@ -2321,6 +2324,8 @@ test("campaign continuation recovery holds for humans and never replays an ambig
       "retrying dismissal heals the crash gap and acknowledges without replaying the accepted turn");
     assert.equal(db.campaignProjection(root.id)?.continuation, undefined,
       "acknowledgement advances the exact event range and clears the diagnostic");
+    assert.equal(db.campaignProjection(root.id)?.stalled, undefined);
+    assert.equal(db.campaignProjection(root.id)?.status, "active");
     assert.equal(restarted.retryDuePrompts(Date.now() + 180_000), 0);
     assert.equal(db.campaignProjection(root.id)?.continuation, undefined,
       "later recovery passes cannot resurrect an acknowledged ambiguous result");
@@ -2454,6 +2459,9 @@ test("campaign continuation failures back off finitely and stopped campaigns rej
       }), true);
       assert.equal(db.campaignProjection(root.id)?.continuation?.attemptCount, attempt);
       assert.equal(db.campaignProjection(root.id)?.continuation?.state, "failed");
+      // The next iteration's retry proves a blocked status does not starve the scheduler (#1352).
+      assert.equal(db.campaignProjection(root.id)?.status, "blocked");
+      assert.equal(db.campaignProjection(root.id)?.stalled, "continuation_failed");
       clock += 60_000;
     }
     assert.equal(svc.retryDuePrompts(clock), 0,
@@ -2471,6 +2479,8 @@ test("campaign continuation failures back off finitely and stopped campaigns rej
     assert.equal(hub.sentOfType("durable_session_command").length, sendsBeforeExplicitRetry + 1,
       "an explicit operator retry starts a fresh bounded attempt series");
     assert.equal(db.campaignProjection(root.id)?.continuation?.attemptCount, 1);
+    assert.equal(db.campaignProjection(root.id)?.stalled, undefined, "a retried continuation is no longer stalled");
+    assert.equal(db.campaignProjection(root.id)?.status, "active");
     assert.equal(svc.retryCampaignContinuation(root.id, exhausted!.commandId!, clock + 60_001).status, 409,
       "an older failed command cannot report a successful no-op retry");
 

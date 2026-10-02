@@ -2249,6 +2249,10 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   sources: OrchestratorPolicySources;
 }
 
+/** `blocked` means nothing is progressing without intervention: every unverified child failed,
+ * stopped, or is held, or the campaign's own continuation is stalled (see
+ * `OrchestratorCampaignProjection.stalled`). `waiting_human` and `verified_complete` take
+ * precedence over a stalled continuation. */
 export type OrchestratorCampaignStatus =
   | "waiting_human"
   | "active"
@@ -2350,6 +2354,11 @@ export interface OrchestratorCampaignProjection {
     orchestratorRequestTokens?: string[];
   };
   followUps: { unique: number; duplicates: number };
+  /** Present while the latest continuation is `failed` or `missing_result`, so a consumer sees the
+   * stall without reading `continuation` (#1352). A failed turn may still have an automatic retry
+   * scheduled; a missing result needs acknowledgement. Where `status` would otherwise be `active`
+   * it reports `blocked`. Projected, like `continuation`, only on the root campaign's own view. */
+  stalled?: "continuation_failed" | "continuation_missing_result";
   /** Durable synthetic-turn state. Omitted only when the campaign has never needed a wake-up. */
   continuation?: {
     state: "pending" | "running" | "held" | "failed" | "missing_result";
