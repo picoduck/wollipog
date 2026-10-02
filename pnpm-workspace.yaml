@@ -5,6 +5,10 @@ packages:
 # pnpm 11 reads engine enforcement here instead of .npmrc.
 engineStrict: true
 
+# concurrently pins the same shell parser; keep its runtime on the patched release too.
+overrides:
+  "concurrently@10.0.5>shell-quote": 1.11.0
+
 # esbuild's postinstall links the platform-native binary used by tsx and vite.
 # pnpm blocks dependency build scripts by default; this environment gates them
 # through the allowBuilds field.
