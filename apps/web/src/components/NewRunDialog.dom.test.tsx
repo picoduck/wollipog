@@ -281,6 +281,20 @@ test("run Project copy stays neutral before selection and fails closed when audi
   }
 });
 
+test("the Build + Review Workflow preset describes its outcome in user nouns", async () => {
+  const fixture = await mountFixture();
+  try {
+    const row = [...fixture.container.querySelectorAll<HTMLLabelElement>('[aria-label="Run Preset"] .choice-row')]
+      .find((candidate) => candidate.querySelector(".choice-row-title")?.textContent?.trim() === "Build + Review Workflow");
+    assert.ok(row, "Build + Review Workflow preset is rendered");
+    const description = row.querySelector(".choice-row-desc")?.textContent ?? "";
+    assert.equal(description, "Dispatch role-specific steps and converge through shared artifacts and gates.");
+    assert.doesNotMatch(description, RETIRED_PROJECT_TERMS);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("workflow creation discloses Project visibility and how ready roles advance", async () => {
   for (const audience of ["user", "team"] as const) {
     const fixture = await mountFixture({ projects: [{ ...project, audience }] });

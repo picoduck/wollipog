@@ -25,12 +25,17 @@ const AVAILABLE = {
 const reason = (overrides: Partial<typeof AVAILABLE>) =>
   nativeTuiUnavailableReason({ ...AVAILABLE, ...overrides });
 
+/** System nouns docs/design-system.md §17.2 retires from user copy. */
+const RETIRED_TERMS = /control plane|durable/iu;
+const NEWER_WOLLIPOG = /^Native TUI launch requires a newer version of Wollipog\. Update Wollipog to use it\.$/;
+
 test("a fully supported target says nothing", () => {
   assert.equal(nativeTuiUnavailableReason(AVAILABLE), undefined);
 });
 
 test("each cause names itself", () => {
-  assert.match(reason({ launchSupported: false }) ?? "", /newer control plane/);
+  assert.match(reason({ launchSupported: false }) ?? "", NEWER_WOLLIPOG);
+  assert.doesNotMatch(reason({ launchSupported: false }) ?? "", RETIRED_TERMS);
   assert.match(reason({ runnerSupported: false }) ?? "", /Windows or Linux runner/);
   assert.match(reason({ startFenceSupported: false }) ?? "", /newer runner/);
   assert.match(reason({ hostExecutionTarget: false }) ?? "", /host execution target/);
@@ -63,7 +68,7 @@ test("a supported runner is not asked about its start fence before its protocol"
     runnerSupported: false,
     startFenceSupported: false,
     hostExecutionTarget: false,
-  }) ?? "", /newer control plane/);
+  }) ?? "", NEWER_WOLLIPOG);
 
   assert.match(reason({
     agentReady: false,

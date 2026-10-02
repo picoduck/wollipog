@@ -297,7 +297,7 @@ export function NewSessionDialog({
           scope: instanceScope,
           view: null,
           error: caught instanceof ApiError && caught.status === 404
-            ? "This control plane does not support campaign policy. Update or restart it so it matches this dashboard."
+            ? "This version of Wollipog does not support campaign policy. Update or restart Wollipog so it matches this dashboard."
             : caught instanceof Error ? caught.message : "Could not load Orchestrator defaults.",
         });
       },
@@ -558,7 +558,7 @@ export function NewSessionDialog({
       label: "Automatic",
       description: harnessPolicyAvailable
         ? "Choose a compatible Agent Harness, model, and effort together at child creation."
-        : "Update the control plane to configure a fixed Child Harness.",
+        : "Update Wollipog to configure a fixed Child Harness.",
     },
     ...childHarnesses.map((harness) => ({
       value: agentHarnessIdentityKey(harness),
@@ -1714,7 +1714,7 @@ export function NewSessionDialog({
                         .add("behavior.childHarness").add("behavior.childModel").add("behavior.childEffort"));
                     }}
                   />
-                  {!harnessPolicyAvailable && <small className="muted">Update or restart the control plane to configure fixed Child Harness policy.</small>}
+                  {!harnessPolicyAvailable && <small className="muted">Update or restart Wollipog to configure fixed Child Harness policy.</small>}
                   {fixedChildHarness && !childHarnessPolicySupported && <small className="form-error">
                     Fixed Child Harness policy requires a protocol-v157 Orchestrator runner. Update the selected runner or choose Automatic.
                   </small>}

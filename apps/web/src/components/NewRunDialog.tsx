@@ -283,7 +283,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
                 {
                   value: "workflow",
                   title: "Build + Review Workflow",
-                  description: "Dispatch role-specific steps and converge through durable artifacts and gates.",
+                  description: "Dispatch role-specific steps and converge through shared artifacts and gates.",
                 },
               ]}
             />

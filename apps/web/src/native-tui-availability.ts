@@ -40,7 +40,7 @@ export function nativeTuiUnavailableReason(input: {
   orchestratorTuiRequirement: string;
   startFenceHint: string;
 }): string | undefined {
-  if (!input.launchSupported) return "Native TUI launch requires a newer control plane.";
+  if (!input.launchSupported) return "Native TUI launch requires a newer version of Wollipog. Update Wollipog to use it.";
   // Before the orchestrator branches: an agent that cannot start at all is the user's first
   // problem, and it is the condition that previously disabled the option with no sentence.
   if (!input.agentReady) return "This agent needs setup before it can launch a Native TUI session.";
