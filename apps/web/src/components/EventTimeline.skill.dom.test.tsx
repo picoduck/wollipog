@@ -57,7 +57,8 @@ test("skill rows show the skill name without expansion and carry the Skills glyp
   const outputRow = rows[1]!;
   assert.equal(outputRow.tagName, "DETAILS", "a skill with output keeps the ordinary disclosure");
   assert.equal(outputRow.hasAttribute("open"), false, "the name is readable while the output stays collapsed");
-  assert.equal(outputRow.querySelector("summary")?.getAttribute("aria-label"), "Skill: deploy-check staging · Completed");
+  assert.equal(outputRow.querySelector("summary")?.getAttribute("aria-label"), "Skill deploy-check staging · Completed",
+    "the accessible name starts with the visible title");
 });
 
 test("step statuses follow §11.2: Running, Failed and Pending inline, Completed a check with no label", async () => {

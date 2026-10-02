@@ -2381,6 +2381,8 @@ function useStepSpan(startedAt: number | undefined, lastActivityAt: number | und
   };
 }
 
+/** The accessible name starts with the visible title ("Run npm test"), never the provider's raw
+ * "Bash: npm test", so speech input can target what is on screen. */
 function stepLabel(title: string, status: string, fact?: string): string {
   return [title, fact, toolStatusMeta(status).label].filter(Boolean).join(" · ");
 }
@@ -2444,7 +2446,7 @@ function ToolCallStep({ item, attempts, open, onToggle }: {
       trail={fact}
       timing={span.description || undefined}
       status={<StepStatus status={item.status} />}
-      label={stepLabel(item.title, item.status, attempts ? fact : undefined)}
+      label={stepLabel(object ? `${verb} ${object}` : verb, item.status, attempts ? fact : undefined)}
       open={open}
       onToggle={onToggle}
     >

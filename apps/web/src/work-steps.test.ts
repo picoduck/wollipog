@@ -86,6 +86,11 @@ test("a provider title becomes a verb and a workspace-relative object", () => {
 
 test("a diff's line counts ignore its file headers", () => {
   assert.deepEqual(diffLineCounts("--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n-old\n+new\n+more\n ctx"), { added: 2, removed: 1 });
+  assert.deepEqual(diffLineCounts("--- a/x\n+++ b/x\n@@ -1 +1 @@\n---counter;\n+++counter;"), { added: 1, removed: 1 },
+    "a changed line that starts with -- or ++ is a change inside its hunk, not a file header");
+  assert.deepEqual(diffLineCounts("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -0,0 +1 @@\n+c"),
+    { added: 2, removed: 1 }, "each file's header is skipped");
+  assert.deepEqual(diffLineCounts("-old\n+new"), { added: 1, removed: 1 }, "a bare body without a hunk header still counts");
   assert.equal(diffLineCounts(undefined), null);
 });
 

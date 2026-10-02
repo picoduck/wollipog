@@ -153,7 +153,7 @@ test("a failed step's body shows its exit code and error lines in the danger col
   await act(async () => root.render(<EventTimeline items={settledTurn} />));
   await openWork(container);
   const failed = [...container.querySelectorAll<HTMLElement>("details.tl-step")].find((step) =>
-    step.querySelector("summary")?.getAttribute("aria-label") === "Bash: npm test · Failed")!;
+    step.querySelector("summary")?.getAttribute("aria-label") === "Run npm test · Failed")!;
   assert.ok(failed);
   await act(async () => failed.querySelector<HTMLElement>("summary")!.click());
   const well = failed.querySelector(".tl-step-body > pre.tl-step-output");
@@ -183,7 +183,7 @@ test("three failed attempts of one command fold into one row that lists each att
   assert.equal([...step.querySelector(".tl-step-trail")!.childNodes].filter((node) => node.nodeType === 3)
     .map((node) => node.textContent).join(""), "3 Attempts");
   assert.equal(step.querySelector(".tl-step-head > .status")?.textContent, "Failed");
-  assert.equal(step.querySelector("summary")?.getAttribute("aria-label"), "Bash: make validate · 3 Attempts · Failed");
+  assert.equal(step.querySelector("summary")?.getAttribute("aria-label"), "Run make validate · 3 Attempts · Failed");
   await act(async () => step.querySelector<HTMLElement>("summary")!.click());
   const attempts = [...step.querySelectorAll(".tl-step-attempt")];
   assert.deepEqual(attempts.map((attempt) => attempt.querySelector(".tl-step-attempt-head")?.textContent), [

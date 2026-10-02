@@ -212,11 +212,19 @@ export function workspaceRelativePath(path: string, workspaceRoot?: string): str
 /** "+12 −3" from a unified diff's body lines; headers are not changes. */
 export function diffLineCounts(diff: string | undefined): { added: number; removed: number } | null {
   if (!diff) return null;
+  const lines = diff.split("\n");
+  // Inside a hunk every +/- line is a change, even "+++counter;"; only a file's header, before its
+  // first "@@", carries ---/+++ paths. A bare body with no hunk header falls back to the prefixes.
+  const hunked = lines.some((line) => line.startsWith("@@"));
+  let inHunk = !hunked;
   let added = 0;
   let removed = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+") && !line.startsWith("+++")) added += 1;
-    else if (line.startsWith("-") && !line.startsWith("---")) removed += 1;
+  for (const line of lines) {
+    if (hunked && line.startsWith("diff ")) inHunk = false;
+    else if (hunked && line.startsWith("@@")) inHunk = true;
+    else if (!inHunk) continue;
+    else if (line.startsWith("+") && (hunked || !line.startsWith("+++"))) added += 1;
+    else if (line.startsWith("-") && (hunked || !line.startsWith("---"))) removed += 1;
   }
   return { added, removed };
 }
