@@ -39,6 +39,7 @@ import {
   recordSessionActivity,
   type SessionActivity,
 } from "./activity.js";
+import { snapshotSupportsCampaignWork } from "./campaign-work-contract.js";
 import { BrowserNavigation, sameView, viewFromNotificationMessage, type View, type ViewNavigation } from "./navigation.js";
 import {
   INBOX_SELECTION_STORAGE_KEY,
@@ -293,6 +294,8 @@ export interface State {
   /** True when reminder writes may omit a timer and use the explicit Someday schedule kind. */
   indefiniteSessionRemindersSupported: boolean;
   worktreeSetupConfigSupported: boolean;
+  /** True when the control plane reports the campaign work ledger (Campaign Status, #2417). */
+  campaignWorkSupported: boolean;
   /** True when session creation accepts a Session Role independent of the provider permission mode. */
   orchestratorRoleSupported: boolean;
   runners: Map<string, RunnerView>;
@@ -1093,6 +1096,7 @@ function reducer(state: State, action: Action): State {
             indefiniteSessionRemindersSupported: msg.capabilities?.indefiniteSessionReminders === true,
             worktreeSetupConfigSupported: msg.capabilities?.worktreeSetupConfig === true,
             orchestratorRoleSupported: msg.capabilities?.orchestratorRole === true,
+            campaignWorkSupported: snapshotSupportsCampaignWork(msg.capabilities),
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
             // `boxes` may be absent from an older control plane's snapshot — tolerate it.
             boxes: new Map((msg.boxes ?? []).map((b) => [b.boxId, b])),
@@ -1481,6 +1485,7 @@ function initialState(
     indefiniteSessionRemindersSupported: false,
     worktreeSetupConfigSupported: false,
     orchestratorRoleSupported: false,
+    campaignWorkSupported: false,
     runners: new Map(),
     boxes: new Map(),
     projects: new Map(),

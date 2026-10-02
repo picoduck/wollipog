@@ -4455,6 +4455,173 @@ textarea {
   font-weight: 400;
   color: var(--text-faint);
 }
+/* A launcher row whose unavailability reason is visible text (Campaign Status, #2417; #1261). */
+.rp-row-text {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.rp-row-reason {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.rp-row[aria-disabled="true"] {
+  cursor: default;
+}
+.rp-row[aria-disabled="true"] > .rp-row-icon,
+.rp-row[aria-disabled="true"] > .rp-row-text > :first-child {
+  opacity: 0.6;
+}
+/* Campaign Status (#2417): summary facts over a filterable work list; an item's details replace it. */
+.campaign-status {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.campaign-status-context,
+.campaign-status-offline {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.campaign-status-heading {
+  margin: 0 0 var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-label);
+}
+.campaign-status-summary,
+.campaign-work,
+.campaign-detail-section {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.campaign-status-meta {
+  display: block;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.campaign-cost > .campaign-status-meta {
+  display: inline;
+  margin-left: var(--space-2);
+}
+.campaign-status-note {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.campaign-status-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.campaign-status-counts strong {
+  font-variant-numeric: tabular-nums;
+}
+.campaign-work-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.campaign-work-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.campaign-work-row {
+  display: grid;
+  align-content: center;
+  gap: var(--space-1);
+  width: 100%;
+  min-height: var(--row-h-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.campaign-work-row.is-assignment {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.campaign-work-row-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.campaign-work-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.campaign-work-row-meta {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.campaign-work-row-meta > span:not(.campaign-work-row-trail) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.campaign-work-row-trail {
+  display: flex;
+  gap: var(--space-3);
+  margin-left: auto;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.campaign-work-more {
+  justify-self: start;
+}
+.campaign-detail-back {
+  justify-self: start;
+}
+.campaign-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.campaign-detail-title {
+  margin: 0;
+  font: var(--type-body);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.campaign-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.campaign-detail-attempts,
+.campaign-detail-dependencies {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+@media (hover: hover) {
+  .campaign-work-row:hover {
+    background: var(--bg-elev-2);
+  }
+}
+@media (max-width: 760px) {
+  .campaign-work-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 /* Review (Git/PR) hosted in the panel. */
 .review-panel {
   display: flex;

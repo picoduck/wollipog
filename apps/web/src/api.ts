@@ -164,6 +164,11 @@ import type {
   SkillListPayload,
 } from "./skills.js";
 import { CONTROL_PLANE_HTTP } from "./config.js";
+import type {
+  CampaignWorkItemDetail,
+  CampaignWorkItemPage,
+  CampaignWorkSummaryResponse,
+} from "./campaign-work-contract.js";
 import { deviceToken } from "./device-token.js";
 import { createBrowserApiTransport, type ApiTransport } from "./api-transport.js";
 
@@ -1063,6 +1068,16 @@ export function createApiClient(transport: ApiTransport) {
   descendantRequests: (id: string, signal?: AbortSignal) =>
     req<DescendantRequestsView>(
       `/api/sessions/${encodeURIComponent(id)}/descendant-requests`,
+      { signal },
+    ),
+  /** Campaign Status (#2417). `id` may be the campaign's Orchestrator session or any member. */
+  campaignSummary: (id: string, signal?: AbortSignal) =>
+    req<CampaignWorkSummaryResponse>(`/api/sessions/${encodeURIComponent(id)}/campaign/summary`, { signal }),
+  campaignWorkItems: (id: string, query: string, signal?: AbortSignal) =>
+    req<CampaignWorkItemPage>(`/api/sessions/${encodeURIComponent(id)}/campaign/work-items?${query}`, { signal }),
+  campaignWorkItem: (id: string, itemId: string, signal?: AbortSignal) =>
+    req<CampaignWorkItemDetail>(
+      `/api/sessions/${encodeURIComponent(id)}/campaign/work-items/${encodeURIComponent(itemId)}`,
       { signal },
     ),
   childSessions: (id: string, eventEpoch: number, after = 0, limit = 50) => {

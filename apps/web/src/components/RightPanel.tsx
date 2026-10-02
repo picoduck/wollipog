@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ChevronLeftIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, HelpIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { CampaignIcon, ChevronLeftIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, HelpIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -34,6 +34,8 @@ import { focusSessionRequest, standaloneApprovalForReview } from "./SessionAppro
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 import { SessionRequestPanel, type DescendantRequestStatus } from "./SessionRequestPanel.js";
+import { CampaignStatusPanel } from "./CampaignStatusPanel.js";
+import type { CampaignStatusAvailability } from "../campaign-status.js";
 
 /** Viewport-aware width ceiling: the panel may take at most ~40% of the window, so the
  * transcript + composer always keep a usable share on narrow/split-screen windows. */
@@ -43,6 +45,7 @@ function viewportPanelMax(): number {
 
 const EMPTY_PARENT_TURN_EVENTS: ReadonlyMap<string, number> = new Map();
 const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];
+const HIDDEN_CAMPAIGN: CampaignStatusAvailability = { kind: "hidden" };
 
 export function panelReturnFocusTarget(
   captured: HTMLElement | null,
@@ -169,6 +172,7 @@ export function useRightPanelState(): RightPanelState {
 const MODE_TITLES: Record<RightPanelMode, string> = {
   launcher: "Panel",
   requests: "Requests",
+  campaign: "Campaign Status",
   review: "Review",
   files: "Files",
   browser: "Browser",
@@ -216,6 +220,8 @@ export function RightPanel({
   onSessionUpdate,
   onDescendantsUpdate = () => undefined,
   onOpenChildRequest = () => undefined,
+  campaignAvailability = HIDDEN_CAMPAIGN,
+  onOpenSession = () => undefined,
 }: {
   state: RightPanelState;
   session: SessionView;
@@ -253,6 +259,10 @@ export function RightPanel({
   onSessionUpdate?: (session: SessionView) => void;
   onDescendantsUpdate?: () => void;
   onOpenChildRequest?: (request: DescendantRequestView) => void;
+  /** Whether this session belongs to an issue campaign whose status the panel can show (#2417). */
+  campaignAvailability?: CampaignStatusAvailability;
+  /** Opens another session from a panel link, keeping the panel and its mode. */
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -324,6 +334,14 @@ export function RightPanel({
     // The focus intent belongs to exactly one mounted session generation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id, sessionEventEpoch, state.subagentTarget]);
+
+  // Campaign Status belongs to campaign sessions. Arriving at an unrelated session returns the panel
+  // to the launcher, still open, rather than showing another campaign or an empty body.
+  const campaignHidden = campaignAvailability.kind === "hidden";
+  useLayoutEffect(() => {
+    if (campaignHidden && state.mode === "campaign") state.setMode("launcher");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [campaignHidden, state.mode]);
 
   if (!state.open) return null;
 
@@ -418,6 +436,15 @@ export function RightPanel({
             onOpenChild={onOpenChildRequest}
           />
         ) : null;
+      case "campaign":
+        return campaignAvailability.kind === "hidden" ? null : (
+          <CampaignStatusPanel
+            session={session}
+            availability={campaignAvailability}
+            onOpenSession={onOpenSession}
+            onOpenRequests={() => state.show("requests")}
+          />
+        );
       case "review":
         return (
           <ReviewPanel
@@ -555,6 +582,7 @@ export function RightPanel({
             governanceAvailable={governanceAvailable}
             requestsAvailable={descendantRequests.length > 0 ||
               standaloneApprovalForReview(session.pendingApproval) !== null}
+            campaignAvailability={campaignAvailability}
           />
         ) : (
           <div className="rp-body">{modeBody(state.mode)}</div>
@@ -589,6 +617,30 @@ function LauncherRow({
   );
 }
 
+/**
+ * The Campaign Status row. Unlike the older rows, its unavailability reason is visible text and the
+ * row's accessible description (the direction of #1261), and it stays focusable through
+ * `aria-disabled` so a keyboard user reaches the reason too.
+ */
+function CampaignStatusLauncherRow({ unavailableReason, onClick }: { unavailableReason: string | null; onClick: () => void }) {
+  const reasonId = useId();
+  return (
+    <button
+      type="button"
+      className="rp-row"
+      aria-disabled={unavailableReason ? "true" : undefined}
+      aria-describedby={unavailableReason ? reasonId : undefined}
+      onClick={unavailableReason ? undefined : onClick}
+    >
+      <span className="rp-row-icon"><CampaignIcon size={14} /></span>
+      <span className="rp-row-text">
+        <span>Campaign Status</span>
+        {unavailableReason && <span className="rp-row-reason" id={reasonId}>{unavailableReason}</span>}
+      </span>
+    </button>
+  );
+}
+
 function Launcher({
   onPick,
   onOpenTerminal,
@@ -599,6 +651,7 @@ function Launcher({
   backgroundAvailable,
   governanceAvailable,
   requestsAvailable,
+  campaignAvailability,
 }: {
   onPick: (mode: RightPanelMode) => void;
   onOpenTerminal: () => void;
@@ -609,6 +662,7 @@ function Launcher({
   backgroundAvailable: boolean;
   governanceAvailable: boolean;
   requestsAvailable: boolean;
+  campaignAvailability: CampaignStatusAvailability;
 }) {
   return (
     <div className="rp-launcher">
@@ -625,6 +679,12 @@ function Launcher({
         onClick={() => onPick("requests")}
         icon={<InboxIcon size={14} />}
       />
+      {campaignAvailability.kind !== "hidden" && (
+        <CampaignStatusLauncherRow
+          unavailableReason={campaignAvailability.kind === "unavailable" ? campaignAvailability.reason : null}
+          onClick={() => onPick("campaign")}
+        />
+      )}
       <LauncherRow
         label="Background Work"
         disabled={!backgroundAvailable}

@@ -216,6 +216,17 @@ const VOCABULARY = {
     running: info("Running", { pulse: true }),
     stopped: neutral("Stopped"),
   },
+  /** One work item in an issue campaign's ledger (Campaign Status, #2417). */
+  campaignWork: {
+    planned: neutral("Planned"),
+    queued: neutral("Queued"),
+    running: info("Running", { pulse: true }),
+    waiting: warning("Waiting"),
+    blocked: danger("Blocked"),
+    delivered: success("Delivered"),
+    cancelled: neutral("Canceled"),
+    removed: neutral("Scope Removed"),
+  },
   /** An organization member's account (People & Devices). */
   member: {
     active: success("Active"),

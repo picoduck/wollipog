@@ -19,7 +19,7 @@ export const RIGHT_PANEL_KEY_STEP = 16;
  * body in RightPanel.tsx; the terminal lives in the bottom dock, so there is deliberately no
  * "terminal" panel mode to restore into an empty column.
  */
-export const RIGHT_PANEL_MODES = ["launcher", "requests", "review", "files", "browser", "sidechat", "subagents", "background", "governance"] as const;
+export const RIGHT_PANEL_MODES = ["launcher", "requests", "campaign", "review", "files", "browser", "sidechat", "subagents", "background", "governance"] as const;
 export type RightPanelMode = (typeof RIGHT_PANEL_MODES)[number];
 
 /** Clamp a panel width. `max` lets callers pass a viewport-aware ceiling (e.g. 40% of the

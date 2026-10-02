@@ -89,6 +89,7 @@ import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest } from 
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
+import { useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
 import { ImageStrip, usePastedImages } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
@@ -906,6 +907,7 @@ function SessionDetailLoaded({
   // list and the count move together. Titles prefer the live session store and fall back to the
   // held descendants the request poll reports, then to the id (#1760).
   const heldChildren = session.orchestratorCampaign?.heldChildren ?? EMPTY_HELD_CHILDREN;
+  const campaignAvailability = useCampaignStatusAvailability(session);
   // Compared element-wise so an unrelated store update keeps the same array and skips a re-render.
   const heldChildStoreTitles = useStoreSelector(
     (s) => heldChildren.map((child) => s.sessions.get(child.sessionId)?.title ?? ""),
@@ -6175,6 +6177,8 @@ function SessionDetailLoaded({
           onLoadOlderGovernance={governanceAudit.loadOlder}
           descendantRequests={descendantRequests}
           descendantRequestStatus={descendantRequestStatus}
+          campaignAvailability={campaignAvailability}
+          onOpenSession={(id) => navigate({ name: "session", id })}
           selectedRequestKey={selectedRequestKey}
           onSelectedRequestKeyChange={setSelectedRequestKey}
           onSessionUpdate={loadSession}

@@ -47,6 +47,7 @@ import {
   Link as LucideLink,
   List as LucideList,
   ListChecks as LucideListChecks,
+  ChartGantt as LucideChartGantt,
   Lock as LucideLock,
   Mail as LucideMail,
   MessageCircleQuestion as LucideMessageCircleQuestion,
@@ -613,6 +614,11 @@ export function TranscriptHitIcon(props: IconProps) {
 
 export function JobsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideListChecks} {...props} />;
+}
+
+/** An issue campaign's work: Campaign Status in the right panel. */
+export function CampaignIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideChartGantt} {...props} />;
 }
 
 export function ExternalLinkIcon(props: IconProps) {
