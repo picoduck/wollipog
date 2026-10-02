@@ -41,7 +41,7 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
     await expect(section).toContainText("Saved Choice: Keep Account Memories Separate");
     await expect(section).toContainText("Turning sharing off retains shared files");
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { memorySharing: undefined }));
-    await expect(section).toContainText("Update the control plane");
+    await expect(section).toContainText("Memory policy is unavailable. Update Wollipog to configure it.");
     await expect(section.getByRole("radio")).toHaveCount(0);
   });
 }

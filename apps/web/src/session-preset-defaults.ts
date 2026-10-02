@@ -144,7 +144,7 @@ export function controlPlaneSupportsIntegrationIsolation(
 }
 
 export const INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED =
-  "Update the control plane to configure Integration Isolation.";
+  "Update Wollipog to configure Integration Isolation.";
 
 /** The account-level settings panel has no selected harness, so it states the differences compactly
  * rather than picking one harness's wording and being wrong about the other two. */

@@ -570,7 +570,7 @@ function agentHarnessLoadFailure(caught: unknown): AgentHarnessLoadFailure {
   if (endpointMissing) {
     return {
       endpointMissing: true,
-      message: "This control plane does not support Agent Harness defaults. Update or restart it so it matches this dashboard, then try again.",
+      message: "This version of Wollipog does not support Agent Harness defaults. Update or restart Wollipog so it matches this dashboard, then try again.",
     };
   }
   return {
@@ -711,7 +711,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
   const mutationRecoveryAnnouncement = mutationError && refreshFailure ? ` ${refreshFailure}` : null;
   const summary = !view
     ? loadError
-      ? loadError.endpointMissing ? "Control plane update required." : "Agent Harness defaults could not be loaded."
+      ? loadError.endpointMissing ? "Wollipog update required." : "Agent Harness defaults could not be loaded."
       : "Loading Agent Harness defaults…"
     : `${customized} Harness Default${customized === 1 ? "" : "s"} Configured`;
   const beginEdit = (option: AgentHarnessDefaultOption) => {
@@ -780,7 +780,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
       />
       {loadError && !view && (
         <StaticRow
-          title={loadError.endpointMissing ? "Control Plane Update Required" : "Load Failed"}
+          title={loadError.endpointMissing ? "Wollipog Update Required" : "Load Failed"}
           description={
             <>
               {loadError.endpointMissing ? loadError.message : "Agent Harness defaults could not be loaded."}{" "}

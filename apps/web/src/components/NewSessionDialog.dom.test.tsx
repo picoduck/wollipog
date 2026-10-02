@@ -2707,7 +2707,8 @@ test("an older control plane blocks Integration Isolation even when the runner s
     const trigger = fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Integration Isolation:"]');
     assert.ok(trigger, "the setting is still shown rather than hidden");
     assert.equal(trigger.getAttribute("aria-disabled"), "true");
-    assert.match(fixture.container.textContent!, /Update the control plane to configure Integration Isolation/);
+    assert.match(fixture.container.textContent!, /Update Wollipog to configure Integration Isolation\./);
+    assert.doesNotMatch(fixture.container.textContent!, /Update the control plane/);
     // An unrelated Orchestrator session must still be creatable, and the request must not carry a
     // key this control plane would reject as an unknown override.
     await act(async () => { createButton(fixture.container).click(); });

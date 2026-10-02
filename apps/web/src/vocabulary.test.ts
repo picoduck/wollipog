@@ -160,3 +160,56 @@ test("machine selectors render disambiguated Machine labels", () => {
       `${path}: a Machine option must not render a bare hostname`);
   }
 });
+
+/**
+ * docs/design-system.md §17.2 retires "control plane" from user copy in favour of "Wollipog". These
+ * are the update-required and unsupported-server sentences a person reads when the server is older
+ * than the dashboard (#2410). Each is pinned exactly, so the retired noun cannot return at any of
+ * them. Source whitespace is collapsed because JSX text wraps across lines.
+ *
+ * Deliberately a list, not a file-wide ban: comments and identifiers keep the term, UsageView's
+ * granularity mismatch is a thrown developer error, and the connection section of Settings uses it
+ * to name the server this window connects to.
+ */
+const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
+  ["./components/OrchestratorSettingsPanel.tsx",
+    "This version of Wollipog does not support Orchestrator settings. Update or restart Wollipog so it matches this dashboard, then try again."],
+  ["./components/OrchestratorSettingsPanel.tsx", "Update Wollipog to configure a fixed Child Harness."],
+  ["./components/OrchestratorSettingsPanel.tsx",
+    "Fixed Child Harness policy is unavailable on this version of Wollipog. Update or restart Wollipog to enable this control."],
+  ["./session-preset-defaults.ts", "Update Wollipog to configure Integration Isolation."],
+  ["./components/ProjectLocationDialog.tsx",
+    "This version of Wollipog does not support creating a Location from a new folder. Update or restart Wollipog so it matches this dashboard, then try again."],
+  ["./components/ProjectLocationDialog.tsx", "<strong>Wollipog Update Required</strong>"],
+  ["./components/ProjectLocationDialog.tsx",
+    "This version of Wollipog cannot register a new folder as a Location. Update or restart Wollipog so it matches this dashboard. Existing Locations can still be added below."],
+  ["./components/ProjectMemorySharing.tsx", "Memory policy is unavailable. Update Wollipog to configure it."],
+  ["./components/SettingsView.tsx",
+    "This version of Wollipog does not support Agent Harness defaults. Update or restart Wollipog so it matches this dashboard, then try again."],
+  ["./components/SettingsView.tsx", "\"Wollipog update required.\""],
+  ["./components/SettingsView.tsx", "\"Wollipog Update Required\""],
+  ["./runners.ts",
+    "This version of Wollipog does not support updating this Machine setting. Update or restart Wollipog so it matches this dashboard, then try again."],
+  ["./components/UsageView.tsx", "Checking whether this version of Wollipog supports weekly aggregation."],
+  ["./components/UsageView.tsx", "Weekly aggregation requires a newer version of Wollipog. Update Wollipog to use Week."],
+];
+
+const RETIRED_UPDATE_REQUIRED_COPY: ReadonlyArray<[string, RegExp]> = [
+  ["./components/OrchestratorSettingsPanel.tsx", /This control plane|Update the control plane|on this control plane/],
+  ["./session-preset-defaults.ts", /"Update the control plane/],
+  ["./components/ProjectLocationDialog.tsx", /This control plane|Control Plane Update Required|restart the control plane/],
+  ["./components/ProjectMemorySharing.tsx", /Update the control plane/],
+  ["./components/SettingsView.tsx", /This control plane does not support Agent Harness defaults|Control plane update required|Control Plane Update Required/],
+  ["./runners.ts", /This control plane does not support/],
+  ["./components/UsageView.tsx", /this control plane supports|newer control plane|Upgrade the control plane/],
+];
+
+test("update-required copy names Wollipog, not the control plane", () => {
+  for (const [path, expected] of UPDATE_REQUIRED_COPY) {
+    assert.ok(read(path).replace(/\s+/g, " ").includes(expected), `${path} should carry ${JSON.stringify(expected)}`);
+    assert.doesNotMatch(expected, /control plane/i);
+  }
+  for (const [path, retired] of RETIRED_UPDATE_REQUIRED_COPY) {
+    assert.doesNotMatch(read(path).replace(/\s+/g, " "), retired, `${path}: docs/design-system.md §17.2 retires "control plane"`);
+  }
+});

@@ -46,9 +46,9 @@ import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
 
 const RANGES = [7, 30, 90, 365] as const;
 const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
-const WEEK_CHECKING_REASON = "Checking whether this control plane supports weekly aggregation.";
+const WEEK_CHECKING_REASON = "Checking whether this version of Wollipog supports weekly aggregation.";
 const WEEK_CHECK_FAILED_REASON = "Weekly availability could not be checked. Retry by choosing a range.";
-const WEEK_UPGRADE_REASON = "Weekly aggregation requires a newer control plane. Upgrade the control plane to use Week.";
+const WEEK_UPGRADE_REASON = "Weekly aggregation requires a newer version of Wollipog. Update Wollipog to use Week.";
 const GRANULARITY_LABEL: Record<UsageAggregationGranularity, { noun: string; adjective: string }> = {
   hour: { noun: "Hour", adjective: "Hourly" },
   day: { noun: "Day", adjective: "Daily" },

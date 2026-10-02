@@ -32,7 +32,7 @@ const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
 
 function unavailableError(caught: unknown): string {
   return caught instanceof Error && "status" in caught && (caught as Error & { status?: unknown }).status === 404
-    ? "This control plane does not support Orchestrator settings. Update or restart it so it matches this dashboard, then try again."
+    ? "This version of Wollipog does not support Orchestrator settings. Update or restart Wollipog so it matches this dashboard, then try again."
     : caught instanceof Error ? caught.message : "Could not load Orchestrator settings.";
 }
 
@@ -131,7 +131,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       label: "Automatic",
       description: harnessPolicySupported
         ? "Choose one compatible Agent Harness with the selected model and effort at child creation."
-        : "Update the control plane to configure a fixed Child Harness.",
+        : "Update Wollipog to configure a fixed Child Harness.",
     }];
     for (const harness of harnesses) {
       options.push({
@@ -271,7 +271,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         title="Child Harness"
         description={harnessPolicySupported
           ? "Automatic or a fixed stable Agent Harness identity. Execution context is part of the identity."
-          : "Fixed Child Harness policy is unavailable on this control plane. Update or restart it to enable this control."}
+          : "Fixed Child Harness policy is unavailable on this version of Wollipog. Update or restart Wollipog to enable this control."}
         options={harnessOptions}
         value={selectedHarness ? agentHarnessIdentityKey(selectedHarness) : AUTO}
         disabled={!harnessPolicySupported}

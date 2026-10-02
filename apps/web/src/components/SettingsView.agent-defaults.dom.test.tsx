@@ -330,9 +330,11 @@ test("Agent Harness defaults explain a missing endpoint while retaining Retry", 
     },
   });
   try {
-    assert.match(fixture.container.textContent ?? "", /Control Plane Update Required/);
-    assert.match(fixture.container.textContent ?? "", /does not support Agent Harness defaults/);
-    assert.match(fixture.container.textContent ?? "", /Update or restart it so it matches this dashboard/);
+    assert.match(fixture.container.textContent ?? "", /Wollipog Update Required/);
+    assert.match(fixture.container.textContent ?? "", /Wollipog update required\./);
+    assert.match(fixture.container.textContent ?? "",
+      /This version of Wollipog does not support Agent Harness defaults\. Update or restart Wollipog so it matches this dashboard, then try again\./);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /control plane/i, "docs/design-system.md §17.2 retires the term");
     assert.doesNotMatch(fixture.container.textContent ?? "", /Load Failed/);
     assert.equal(buttonNamed(fixture.container, "Retry").disabled, false);
   } finally {

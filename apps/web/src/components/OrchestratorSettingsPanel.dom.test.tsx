@@ -1,5 +1,6 @@
 import "./test-dom-events.js";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -182,6 +183,59 @@ test("all-Automatic defaults remain saveable while no Child Harness installation
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+test("an older server's Orchestrator settings name Wollipog as the thing to update", async () => {
+  const render = async (transport: ApiTransport) => {
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    await act(async () => root.render(<ApiProvider client={createApiClient(transport)}><OrchestratorSettingsPanel /></ApiProvider>));
+    await settle();
+    return { container, root };
+  };
+
+  // A server without the settings route answers 404.
+  const missing = await render({
+    instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request() {
+      return new Response(JSON.stringify({ error: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } });
+    },
+  });
+  try {
+    assert.match(missing.container.textContent ?? "",
+      /This version of Wollipog does not support Orchestrator settings\. Update or restart Wollipog so it matches this dashboard, then try again\./);
+    assert.doesNotMatch(missing.container.textContent ?? "", /control plane/i, "docs/design-system.md §17.2 retires the term");
+  } finally {
+    await act(async () => missing.root.unmount());
+    missing.container.remove();
+  }
+
+  // A server that predates fixed Child Harness policy advertises no `harnesses`.
+  const current = settings();
+  delete (current.capabilities as Partial<typeof current.capabilities>).harnesses;
+  const older = await render({
+    instanceId: "test", publicOrigin: "http://localhost", close() {},
+    async request() {
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  try {
+    assert.match(older.container.textContent ?? "",
+      /Fixed Child Harness policy is unavailable on this version of Wollipog\. Update or restart Wollipog to enable this control\./);
+    assert.doesNotMatch(older.container.textContent ?? "", /control plane/i, "docs/design-system.md §17.2 retires the term");
+    // The Select is disabled here, so the Automatic option's description cannot be opened; pin it in
+    // source instead.
+    const trigger = older.container.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]');
+    assert.ok(trigger, "Child Harness select is rendered");
+    assert.equal(trigger.getAttribute("aria-disabled"), "true");
+    const source = readFileSync(new URL("./OrchestratorSettingsPanel.tsx", import.meta.url), "utf8");
+    assert.ok(source.includes(': "Update Wollipog to configure a fixed Child Harness.",'),
+      "the Automatic option names Wollipog when fixed Child Harness policy is unavailable");
+  } finally {
+    await act(async () => older.root.unmount());
+    older.container.remove();
   }
 });
 
@@ -392,7 +446,8 @@ test("an older control plane blocks Integration Isolation and still round-trips 
     for (const pill of row.querySelectorAll<HTMLButtonElement>('[role="radio"]')) {
       assert.equal(pill.getAttribute("aria-disabled"), "true");
     }
-    assert.match(container.textContent ?? "", /Update the control plane to configure Integration Isolation/);
+    assert.match(container.textContent ?? "", /Update Wollipog to configure Integration Isolation\./);
+    assert.doesNotMatch(container.textContent ?? "", /control plane/i, "docs/design-system.md §17.2 retires the term");
 
     // Changing an UNRELATED default must still save; otherwise this feature would break every
     // Orchestrator settings save against an older control plane.

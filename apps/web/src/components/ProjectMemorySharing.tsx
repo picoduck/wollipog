@@ -18,7 +18,7 @@ export function ProjectMemorySharingSettings({ project, runners, disabled, onSav
   return <section className="project-detail-section" aria-labelledby="memory-sharing-heading">
     <h3 id="memory-sharing-heading">Memory Sharing</h3>
     <p>Choose whether accounts share this Project’s additional saved memory. Conversation history follows the session when you switch accounts and may already contain memories. This choice cannot remove that information or prevent a provider from learning from the conversation under its own settings.</p>
-    {project.memorySharing === undefined ? <p role="status">Memory policy is unavailable. Update the control plane to configure it.</p> : <>
+    {project.memorySharing === undefined ? <p role="status">Memory policy is unavailable. Update Wollipog to configure it.</p> : <>
       <p><strong>Saved Choice: </strong>{project.memorySharing === "shared" ? "Share Project Memory" : "Keep Account Memories Separate"}</p>
       <form onSubmit={(event) => {
         event.preventDefault();

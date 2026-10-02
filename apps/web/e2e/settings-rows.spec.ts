@@ -1168,9 +1168,9 @@ test.describe("with a touch pointer", () => {
 
 test("Agent Harness defaults distinguish version skew and politely explain repaired drafts", async ({ page }) => {
   await useHarness(page, "light", { section: "behavior", defaults: "agent-missing" });
-  await expect(page.getByText("Control Plane Update Required", { exact: true })).toBeVisible();
-  await expect(page.getByText(/does not support Agent Harness defaults/)).toBeVisible();
-  await expect(page.getByText(/Update or restart it so it matches this dashboard/)).toBeVisible();
+  await expect(page.getByText("Wollipog Update Required", { exact: true })).toBeVisible();
+  await expect(page.getByText(/This version of Wollipog does not support Agent Harness defaults/)).toBeVisible();
+  await expect(page.getByText(/Update or restart Wollipog so it matches this dashboard/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(page.getByText("Load Failed", { exact: true })).toHaveCount(0);
 

@@ -6,9 +6,9 @@ import { projectLocationCreationError } from "./ProjectLocationDialog.js";
 test("a bare legacy 404 explains the control-plane version mismatch", () => {
   const message = projectLocationCreationError(new ApiError("not found", 404));
 
-  assert.match(message, /control plane/i);
-  assert.match(message, /update or restart/i);
-  assert.notEqual(message, "not found");
+  assert.equal(message,
+    "This version of Wollipog does not support creating a Location from a new folder. Update or restart Wollipog so it matches this dashboard, then try again.");
+  assert.doesNotMatch(message, /control plane/i, "docs/design-system.md §17.2 retires the term");
 });
 
 test("a contextual current-control-plane error is preserved", () => {

@@ -23,8 +23,10 @@ import {
 
 test("Machine setting errors explain old control-plane routes", () => {
   const legacyNotFound = Object.assign(new Error("Not Found"), { status: 404 });
-  assert.match(machineSettingsMutationError(legacyNotFound), /control plane/i);
-  assert.match(machineSettingsMutationError(legacyNotFound), /update or restart/i);
+  assert.equal(machineSettingsMutationError(legacyNotFound),
+    "This version of Wollipog does not support updating this Machine setting. Update or restart Wollipog so it matches this dashboard, then try again.");
+  assert.doesNotMatch(machineSettingsMutationError(legacyNotFound), /control plane/i,
+    "docs/design-system.md §17.2 retires the term");
   assert.equal(machineSettingsMutationError(new Error("runner is offline")), "runner is offline");
   assert.equal(machineSettingsMutationError(null), "The Machine setting could not be updated.");
 });

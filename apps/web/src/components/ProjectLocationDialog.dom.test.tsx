@@ -104,6 +104,43 @@ test("Add Location surfaces identity failures without leaving compatibility chec
   }
 });
 
+test("Add Location names Wollipog when the server cannot create a Location from a new folder", async () => {
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  const root = createRoot(mountPoint);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={{ ...api, getIdentity: async () => { throw new Error("offline"); } } as ApiClient}>
+          <ProjectLocationDialog
+            project={project}
+            projects={[project]}
+            runners={new Map([[runner.runnerId, runner]])}
+            boxes={new Map()}
+            canCreateLocation={false}
+            accessScopeManagementSupported
+            onClose={() => {}}
+            onAdd={async () => {}}
+            onCreate={async () => {}}
+            onManageConnections={() => {}}
+          />
+        </ApiProvider>,
+      );
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+    // Dialogs are portalled to <body>.
+    const notice = domWindow.document.body.querySelector(".project-location-compatibility");
+    assert.ok(notice, "the compatibility notice is shown");
+    assert.equal(notice.querySelector("strong")?.textContent, "Wollipog Update Required");
+    assert.equal(notice.querySelector("span")?.textContent?.replace(/\s+/g, " ").trim(),
+      "This version of Wollipog cannot register a new folder as a Location. Update or restart Wollipog so it matches this dashboard. Existing Locations can still be added below.");
+    assert.doesNotMatch(notice.textContent ?? "", /control plane/i, "docs/design-system.md §17.2 retires the term");
+  } finally {
+    await act(async () => { root.unmount(); });
+    mountPoint.remove();
+  }
+});
+
 test("New Project onboarding offers setup generation as an unchecked explicit choice", async () => {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);

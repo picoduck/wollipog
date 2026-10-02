@@ -344,11 +344,14 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
   assert.equal(week.getAttribute("aria-disabled"), "true");
   const weekDescription = week.getAttribute("aria-describedby");
   assert.ok(weekDescription);
-  assert.match(domWindow.document.getElementById(weekDescription!)?.textContent ?? "", /newer control plane/);
+  assert.equal(domWindow.document.getElementById(weekDescription!)?.textContent ?? "",
+    "Weekly aggregation requires a newer version of Wollipog. Update Wollipog to use Week.");
   const callCount = calls.length;
   await act(async () => { week.click(); await settleLoad(); });
   assert.equal(calls.length, callCount, "an older plane never receives an unsupported Week request");
-  assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /newer control plane/);
+  const note = container.querySelector(".usage-granularity-note")?.textContent ?? "";
+  assert.match(note, /Weekly aggregation requires a newer version of Wollipog\. Update Wollipog to use Week\./);
+  assert.doesNotMatch(note, /control plane/i, "docs/design-system.md §17.2 retires the term");
   assert.equal(
     container.querySelector('[aria-label="Usage Aggregation: Day"]')?.getAttribute("aria-describedby"),
     "usage-week-capability-note",
@@ -368,6 +371,34 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
   assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
   assertNoDomNode(container.querySelector('[role="alert"]'));
   assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("Week names Wollipog while its availability is still being checked", async () => {
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    // The first usage response is what reports the supported granularities, so it never arrives here.
+    usage: () => new Promise(() => {}),
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); });
+
+  const week = [...container.querySelectorAll('[role="radiogroup"][aria-label="Usage Aggregation"] [role="radio"]')]
+    .find((node) => node.textContent?.trim() === "Week") as HTMLButtonElement;
+  assert.equal(week.getAttribute("aria-disabled"), "true");
+  const descriptionId = week.getAttribute("aria-describedby");
+  assert.ok(descriptionId);
+  assert.equal(domWindow.document.getElementById(descriptionId!)?.textContent ?? "",
+    "Checking whether this version of Wollipog supports weekly aggregation.");
 
   await act(async () => root.unmount());
   container.remove();

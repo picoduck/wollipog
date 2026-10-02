@@ -41,7 +41,7 @@ interface NewProjectLocation {
 
 export function projectLocationCreationError(cause: unknown): string {
   if (cause instanceof ApiError && cause.status === 404 && cause.message.trim().toLocaleLowerCase() === "not found") {
-    return "This control plane does not support creating a Location from a new folder. Update or restart the control plane so it matches this dashboard, then try again.";
+    return "This version of Wollipog does not support creating a Location from a new folder. Update or restart Wollipog so it matches this dashboard, then try again.";
   }
   return cause instanceof Error && cause.message.trim()
     ? cause.message
@@ -241,10 +241,10 @@ export function ProjectLocationDialog({
           </button>
           {!canCreateLocation && (
             <div className="project-location-compatibility" role="status">
-              <strong>Control Plane Update Required</strong>
+              <strong>Wollipog Update Required</strong>
               <span>
-                This control plane cannot register a new folder as a Location. Update or restart it
-                so it matches this dashboard. Existing Locations can still be added below.
+                This version of Wollipog cannot register a new folder as a Location. Update or restart
+                Wollipog so it matches this dashboard. Existing Locations can still be added below.
               </span>
             </div>
           )}

@@ -19,7 +19,7 @@ export function machineSettingsMutationError(cause: unknown): string {
       "status" in cause &&
       (cause as Error & { status?: unknown }).status === 404 &&
       cause.message.trim().toLocaleLowerCase() === "not found") {
-    return "This control plane does not support updating this Machine setting. Update or restart it so it matches this dashboard, then try again.";
+    return "This version of Wollipog does not support updating this Machine setting. Update or restart Wollipog so it matches this dashboard, then try again.";
   }
   return cause instanceof Error && cause.message.trim()
     ? cause.message
