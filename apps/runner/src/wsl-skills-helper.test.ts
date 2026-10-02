@@ -249,6 +249,8 @@ test("real native and helper processes elect one winner while a release mirror f
     const home = mkdtempSync(join(tmpdir(), "wollipog-wsl-release-window-"));
     const released = join(home, "released");
     const finishMirror = join(home, "finish-mirror");
+    const markerWriting = join(home, "marker-writing");
+    const finishMarker = join(home, "finish-marker");
     const mirrored = join(home, "mirrored");
     const finishWinner = join(home, "finish-winner");
     const nativeReady = join(home, "native-ready");
@@ -285,10 +287,19 @@ test("real native and helper processes elect one winner while a release mirror f
     );
     launch("python3", ["-c", leaseProgram(`
 def hold_release(root, name):
-    with open(${JSON.stringify(released)}, "w") as stream: stream.write(name)
+    with open(${JSON.stringify(released + ".tmp")}, "w") as stream:
+        stream.write(name)
+        with open(${JSON.stringify(markerWriting)}, "w") as signal: signal.write("ready")
+        while not os.path.exists(${JSON.stringify(finishMarker)}): time.sleep(0.01)
+    os.replace(${JSON.stringify(released + ".tmp")}, ${JSON.stringify(released)})
     while not os.path.exists(${JSON.stringify(finishMirror)}): time.sleep(0.01)
 ${acquireAndRelease}
   `, publisher)]);
+    // Hold the buffered publisher before close: readiness must not expose an
+    // incomplete filename, even when the writer is descheduled at this point.
+    await waitFor(markerWriting);
+    assert.equal(existsSync(released), false, "release filename stays private until complete");
+    writeFileSync(finishMarker, "go");
     await waitFor(released);
     const root = join(home, ".agent-manager/provider-home-leases-v1");
     const releaseName = readFileSync(released, "utf8");

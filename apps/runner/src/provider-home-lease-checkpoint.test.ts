@@ -123,9 +123,11 @@ function storage(home: string) {
   const entries = [root, lock].flatMap((directory) => fs.readdirSync(directory).filter((name) => name !== "mutable-home.lock").map((name) => join(directory, name)));
   return { records: entries.length, bytes: entries.reduce((n, path) => n + fs.statSync(path).size, 0) };
 }
-async function ready(child: ChildProcess, path: string, output: () => string) {
+async function ready(child: ChildProcess, path: string, output: () => string, signal?: AbortSignal) {
   const deadline = Date.now() + 15_000;
   while (!fs.existsSync(path)) {
+    signal?.throwIfAborted();
+    assert.equal(child.signalCode, null, output());
     assert.equal(child.exitCode, null, output());
     assert.ok(Date.now() < deadline, `barrier timeout: ${output()}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -251,16 +253,79 @@ os.close(home_fd)`)], { env: { ...process.env, HOME: helperHome }, encoding: "ut
   }
 });
 
+// Keep the original aggregate budgets and give each named case a 45s budget
+// (normal cases measured 2-6s). Report the active phase on cancellation.
+function crashPhases(t: TestContext) {
+  let active: { name: string; started: number } | undefined;
+  t.after(() => {
+    if (active) t.diagnostic(`${t.name}: interrupted during ${active.name} after ${Math.round(performance.now() - active.started)}ms`);
+  });
+  return async <T>(name: string, run: () => T | Promise<T>): Promise<T> => {
+    t.signal.throwIfAborted();
+    active = { name, started: performance.now() };
+    try { return await run(); }
+    catch (cause) { throw new Error(`${t.name}: ${name} failed after ${Math.round(performance.now() - active.started)}ms`, { cause }); }
+    finally {
+      t.diagnostic(`${t.name}: ${name} ${Math.round(performance.now() - active.started)}ms`);
+      active = undefined;
+    }
+  };
+}
+
+function crashWriter(t: TestContext, home: string, command: string, args: string[]) {
+  const child = spawn(command, args, { env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  const capture = (chunk: Buffer) => { output = (output + String(chunk)).slice(-8192); };
+  child.stdout.on("data", capture); child.stderr.on("data", capture);
+  child.on("error", error => capture(Buffer.from(String(error))));
+  const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await closed;
+  });
+  return { child, output: () => output };
+}
+
+function recoveredHandoffs(home: string, passes: number) {
+  const before = fs.readFileSync(paths(home).anchor);
+  // Repeated native passes account for most fixture time. Exercise the same
+  // number of real handoffs in one Python process, then read/release natively.
+  // The separate long-run matrix still covers 64 native/helper/mixed passes.
+  const result = spawnSync("python3", ["-c", program(`
+home_fd, _ = open_root(os.environ["HOME"])
+try:
+    for _ in range(${passes - 1}):
+        lease = acquire_lease(home_fd, "${owner}")
+        release_lease(lease)
+finally: os.close(home_fd)
+print(${passes - 1})`)], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, String(result.stderr));
+  assert.equal(String(result.stdout).trim(), String(passes - 1), "every subsequent helper handoff completed");
+  assert.equal(nativePass(home).getDiagnostics().length, 0, "native reader accepts the recovered and compacted journal");
+  assert.notDeepEqual(fs.readFileSync(paths(home).anchor), before, "subsequent handoffs complete another checkpoint");
+}
+
+test("crash fixture teardown reaps an unfinished writer before returning", { skip: process.platform !== "linux" }, async (t) => {
+  const home = fixture(t);
+  let writer: ChildProcess | undefined;
+  await t.test("unfinished synthetic writer", (t) => {
+    writer = crashWriter(t, home, "python3", ["-c", "import time; time.sleep(60)"]).child;
+  });
+  assert.equal(writer!.signalCode, "SIGKILL");
+});
+
 test("SIGKILL at every native/helper checkpoint boundary recovers across readers", { timeout: 180_000, skip: process.platform !== "linux" }, async (t) => {
   for (const writer of ["native", "helper"] as const) for (const boundary of boundaries) {
+    // Parent teardown removes HOME only after the child's async teardown reaps its writer.
+    if (t.signal.aborted) return;
     const home = fixture(t);
-    seed(home);
-    const marker = join(home, "ready");
-    let output = "";
-    const hold = `if (stage === ${JSON.stringify(boundary)}) { writeFileSync(${JSON.stringify(marker)}, "ready"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); }`;
-    const script = join(home, "writer.mts");
-    fs.writeFileSync(script, `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(nativeModule)};\nimport { writeFileSync } from "node:fs";\nconst registry = new ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { nativeCheckpointBarrierForTest: { boundary: ${JSON.stringify(boundary)}, marker: ${JSON.stringify(marker)} } });\nregistry.acquireHome(${JSON.stringify(home)});\nregistry.releaseAll();`);
-    const helper = program(`
+    await t.test(`${writer}/${boundary}`, { timeout: 45_000 }, async (t) => {
+      const phase = crashPhases(t);
+      await phase("seed", () => seed(home));
+      const marker = join(home, "ready");
+      const script = join(home, "writer.mts");
+      fs.writeFileSync(script, `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(nativeModule)};\nimport { writeFileSync } from "node:fs";\nconst registry = new ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { nativeCheckpointBarrierForTest: { boundary: ${JSON.stringify(boundary)}, marker: ${JSON.stringify(marker)} } });\nregistry.acquireHome(${JSON.stringify(home)});\nregistry.releaseAll();`);
+      const helper = program(`
 def checkpoint_boundary(stage):
     if stage == ${JSON.stringify(boundary)}:
         with open(${JSON.stringify(marker)}, "w") as stream: stream.write("ready")
@@ -269,56 +334,65 @@ home_fd, _ = open_root(os.environ["HOME"])
 lease = acquire_lease(home_fd, "${owner}")
 release_lease(lease)
 os.close(home_fd)`);
-    const child = writer === "native" ? spawn(process.execPath, ["--import", "tsx", script]) :
-      spawn("python3", ["-c", helper], { env: { ...process.env, HOME: home } });
-    child.stdout?.on("data", (chunk) => { output += chunk; });
-    child.stderr?.on("data", (chunk) => { output += chunk; });
-    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
-    await ready(child, marker, () => output);
-    const before = evidence(home);
-    // While alive, the same owner and the other reader refuse; no implicit cleanup runs.
-    assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /already in use/);
-    assert.notEqual(helperPass(home).status, 0);
-    assert.deepEqual(evidence(home), before);
-    await kill(child);
-    if (writer === "native") {
-      const recovered = helperPass(home);
-      assert.equal(recovered.status, 0, `${writer}/${boundary}: ${String(recovered.stderr)}`);
-    } else nativePass(home);
-    for (let i = 0; i < 10; i++) nativePass(home);
-    assert.ok(storage(home).records <= 36, `${writer}/${boundary} did not return to bounded storage`);
-    assert.equal(fs.readdirSync(paths(home).root).filter((name) => name.includes("checkpoint.pending")).length, 0);
+      const { child, output } = crashWriter(t, home, writer === "native" ? process.execPath : "python3",
+        writer === "native" ? ["--import", "tsx", script] : ["-c", helper]);
+      await phase("writer barrier", () => ready(child, marker, output, t.signal));
+      await phase("live-owner refusal and evidence preservation", () => {
+        const before = evidence(home);
+        // While alive, the same owner and the other reader refuse; no implicit cleanup runs.
+        assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /already in use/);
+        assert.notEqual(helperPass(home).status, 0);
+        assert.deepEqual(evidence(home), before);
+      });
+      await phase("kill writer", () => kill(child));
+      await phase("cross-reader recovery", () => {
+        if (writer === "native") {
+          const recovered = helperPass(home);
+          assert.equal(recovered.status, 0, `${writer}/${boundary}: ${String(recovered.stderr)}`);
+        } else nativePass(home);
+      });
+      await phase("10 subsequent handoffs", () => recoveredHandoffs(home, 10));
+      await phase("bounded storage and staging cleanup", () => {
+        assert.ok(storage(home).records <= 36, `${writer}/${boundary} did not return to bounded storage`);
+        assert.equal(fs.readdirSync(paths(home).root).filter((name) => name.includes("checkpoint.pending")).length, 0);
+      });
+    });
   }
 });
 
 test("repeated killed candidate publishers recover without exhausting bounded staging", { timeout: 120_000, skip: process.platform !== "linux" }, async (t) => {
   for (const sequence of [["native", "native"], ["helper", "helper"], ["native", "helper"], ["helper", "native"]]) {
+    if (t.signal.aborted) return;
     const home = fixture(t);
-    seed(home);
-    for (const writer of sequence) {
-      const marker = join(home, "ready");
-      fs.rmSync(marker, { force: true });
-      let output = "";
-      const script = join(home, "writer.mts");
-      fs.writeFileSync(script, `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(nativeModule)};\nimport { writeFileSync } from "node:fs";\nnew ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { nativeCheckpointBarrierForTest: { boundary: "candidate-durable", marker: ${JSON.stringify(marker)} } }).acquireHome(${JSON.stringify(home)});`);
-      const helper = program(`
+    await t.test(sequence.join("/"), { timeout: 45_000 }, async (t) => {
+      const phase = crashPhases(t);
+      await phase("seed", () => seed(home));
+      for (const [index, writer] of sequence.entries()) {
+        const marker = join(home, "ready");
+        fs.rmSync(marker, { force: true });
+        const script = join(home, "writer.mts");
+        fs.writeFileSync(script, `import { ProviderHomeLeaseRegistry } from ${JSON.stringify(nativeModule)};\nimport { writeFileSync } from "node:fs";\nnew ProviderHomeLeaseRegistry(${JSON.stringify(owner)}, { nativeCheckpointBarrierForTest: { boundary: "candidate-durable", marker: ${JSON.stringify(marker)} } }).acquireHome(${JSON.stringify(home)});`);
+        const helper = program(`
 def checkpoint_boundary(stage):
     if stage == "candidate-durable":
         with open(${JSON.stringify(marker)}, "w") as stream: stream.write("ready")
         while True: time.sleep(1)
 home_fd, _ = open_root(os.environ["HOME"])
 acquire_lease(home_fd, "${owner}")`);
-      const child = writer === "native" ? spawn(process.execPath, ["--import", "tsx", script]) : spawn("python3", ["-c", helper], { env: { ...process.env, HOME: home } });
-      child.stdout?.on("data", (chunk) => { output += chunk; });
-      child.stderr?.on("data", (chunk) => { output += chunk; });
-      t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
-      await ready(child, marker, () => output);
-      await kill(child);
-    }
-    assert.equal(nativePass(home).getDiagnostics().length, 0, `${sequence.join("/")} must recover completed candidates`);
-    for (let i = 0; i < 64; i++) nativePass(home);
-    assert.ok(storage(home).records <= 36);
-    assert.equal(fs.readdirSync(paths(home).root).filter((name) => name.includes("checkpoint.pending")).length, 0);
+        const { child, output } = crashWriter(t, home, writer === "native" ? process.execPath : "python3",
+          writer === "native" ? ["--import", "tsx", script] : ["-c", helper]);
+        await phase(`writer ${index + 1} (${writer}) candidate-durable barrier`, () => ready(child, marker, output, t.signal));
+        await phase(`kill writer ${index + 1} (${writer})`, () => kill(child));
+      }
+      await phase("native recovery", () => {
+        assert.equal(nativePass(home).getDiagnostics().length, 0, `${sequence.join("/")} must recover completed candidates`);
+      });
+      await phase("64 subsequent handoffs", () => recoveredHandoffs(home, 64));
+      await phase("bounded storage and staging cleanup", () => {
+        assert.ok(storage(home).records <= 36);
+        assert.equal(fs.readdirSync(paths(home).root).filter((name) => name.includes("checkpoint.pending")).length, 0);
+      });
+    });
   }
 });
 

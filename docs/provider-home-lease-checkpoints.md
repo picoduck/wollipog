@@ -179,3 +179,42 @@ used 57,307 record operations / 221,215,834 read-or-hashed bytes native, and 73,
 166,524,777 helper, below both negotiated work ceilings. The selected checkpoint was roughly
 1.54 MiB after subsequent cross-reader handoffs. These are workload measurements, not latency
 guarantees. Large-run and exact platform CI evidence are recorded in the implementation report.
+
+
+### Crash-Fixture Budgets
+
+The Linux crash matrix retains all 15 checkpoint boundaries for both native and Python writers,
+live-owner refusal without evidence mutation, recovery through the other reader, bounded storage,
+and pending-record cleanup. The repeated-candidate matrix retains all four native/Python writer
+sequences. Each case reports its writer/boundary or sequence and elapsed time for setup, barrier
+waiting, kill, recovery, subsequent handoffs, and storage checks. A cancelled case reports the
+active phase. Teardown kills only its own unfinished writer, awaits close, and then removes its
+synthetic HOME; cancellation stops further fixture phases and case creation.
+
+| Fixture Budget | Limit |
+| --- | ---: |
+| Complete boundary matrix | 180 seconds |
+| Complete repeated-candidate matrix | 120 seconds |
+| Individual named crash case | 45 seconds |
+| Writer readiness barrier | 15 seconds |
+| Subsequent Python handoff batch | 30 seconds |
+
+The aggregate budgets are unchanged. The handoff batch performs nine or 63 real Python
+acquire/release pairs, followed by a native pair, preserving the original ten or 64 subsequent
+handoffs. It verifies the completed count, another selected checkpoint, native acceptance,
+bounded storage, and cleared staging. The separate long-run matrix continues to exercise 64
+native-only, Python-only, and mixed handoffs (512 with `WOLLIPOG_LEASE_LONG_RUN=1`). Production
+helper deadlines, proof verification, ownership checks, and lease limits are unchanged.
+
+On the same Linux development filesystem, phase profiling measured about 91.5 seconds in the
+original repeated native handoffs across both crash matrices. Batching reduced that phase total
+to about 34.8 seconds and the complete focused crash run from 138.4 to 77.8 seconds. These are
+fixture measurements, not latency guarantees. Concurrent-load validation should run this command
+five consecutive times with a documented bounded workload and also run the complete unit suite:
+
+```sh
+node --import tsx --test --test-concurrency=2 \
+  --test-name-pattern='SIGKILL at every|repeated killed candidate|crash fixture teardown|real native and helper processes elect one winner' \
+  apps/runner/src/provider-home-lease-checkpoint.test.ts \
+  apps/runner/src/wsl-skills-helper.test.ts
+```
