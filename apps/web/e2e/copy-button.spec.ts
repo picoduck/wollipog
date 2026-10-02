@@ -23,7 +23,7 @@ function expectSameBox(now: Box, before: Box, what: string) {
   expectGeometry(Math.abs(now.left - before.left), `${what}: the button does not move`).toBeLessThanOrEqual(0.61);
 }
 
-const VARIANTS = [["Default", "Copy"], ["Code Block", "Copy Code"], ["Secondary", "Copy Pairing Link"], ["Primary", "Copy Pairing Link"]] as const;
+const VARIANTS = [["Default", "Copy"], ["Secondary", "Copy Pairing Link"], ["Primary", "Copy Pairing Link"]] as const;
 const RESULTS = [
   ["copied", "Copied", "copy-status-icon-copied"],
   ["failed", "Copy Failed", "copy-status-icon-failed"],

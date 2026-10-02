@@ -163,6 +163,7 @@ import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
+import { Markdown } from "./Markdown.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
 import { resolveContextWindowCapacity } from "../context-window-capacity.js";
@@ -5402,7 +5403,7 @@ function SessionDetailLoaded({
                             ))}
                           </div>
                         )}
-                        {pending.text && <div className="bubble-text">{pending.text}</div>}
+                        {pending.text && <div className="bubble-text"><Markdown profile="inline">{pending.text}</Markdown></div>}
                       </div>
                     </div>
                   )}

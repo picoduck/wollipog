@@ -39,7 +39,7 @@ test("safe Markdown renders immediately without synchronous highlighting or acti
 
   assert.match(html, /<div class="md-code-block">/);
   assert.match(html, /<pre><code class="language-js">/);
-  assert.match(html, /aria-label="Copy Code Block"/);
+  assert.match(html, /aria-label="Copy Code"/);
   assert.doesNotMatch(html, / node=/);
   assert.doesNotMatch(html, /hljs/);
   assert.doesNotMatch(html, /<script|<img/i);
@@ -148,7 +148,7 @@ test("unsettled transcript media keeps its plain link without mounting a remote 
   const video = "https://evidence.example/review.webm?X-Amz-Signature=partial";
   const html = renderToStaticMarkup(React.createElement(Markdown, {
     inlineMedia: true,
-    mediaSettled: false,
+    settled: false,
     children: `${image}\n\n${video}`,
   }));
 
@@ -184,7 +184,7 @@ test("inline code stays action-free", () => {
   assert.doesNotMatch(html, /Copy Code/);
 });
 
-test("prose-oriented fences wrap by default with a No Wrap escape hatch", () => {
+test("prose-oriented fences wrap by default, shown as a pressed Wrap Lines toggle", () => {
   const longProse =
     "This fenced issue draft is one very long paragraph that would otherwise force horizontal scrolling in the transcript.";
   for (const fence of ["```", "```text", "```markdown"]) {
@@ -192,19 +192,91 @@ test("prose-oriented fences wrap by default with a No Wrap escape hatch", () => 
       children: [fence, longProse, "```"].join("\n"),
     }));
     assert.match(html, /<div class="md-code-block md-code-wrap">/, fence);
-    assert.match(html, />No Wrap</, fence);
-    assert.doesNotMatch(html, />Wrap Lines</, fence);
+    assert.match(html, /aria-label="Wrap Lines" aria-pressed="true"/, fence);
   }
 });
 
-test("source-code fences keep the non-wrapping default and offer Wrap Lines", () => {
+test("source-code fences keep the non-wrapping default with Wrap Lines not pressed", () => {
   const html = renderToStaticMarkup(React.createElement(Markdown, {
     children: ["```js", "const answer = veryLongExpression(1, 2, 3);", "```"].join("\n"),
   }));
   assert.match(html, /<div class="md-code-block">/);
   assert.doesNotMatch(html, /md-code-wrap"/);
-  assert.doesNotMatch(html, />No Wrap</);
-  assert.match(html, /<button type="button" class="copy-btn md-code-wrap-toggle">Wrap Lines<\/button>/);
+  assert.match(html, /<button type="button" class="icon-btn sm" title="Wrap Lines" aria-label="Wrap Lines" aria-pressed="false">/);
+});
+
+test("a fenced block has a header row with its language before the Wrap Lines and Copy Code buttons", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    children: ["```ts", "const a = 1;", "```"].join("\n"),
+  }));
+  const head = /<div class="md-code-head">([\s\S]*?)<\/div><\/div><pre>/.exec(html)?.[1] ?? "";
+  assert.match(head, /^<span class="md-code-lang">ts<\/span>/);
+  assert.ok(head.indexOf('aria-label="Wrap Lines"') < head.indexOf('aria-label="Copy Code"'));
+  assert.doesNotMatch(html, /Copy Code Block|No Wrap|copy-btn/);
+
+  const unknown = renderToStaticMarkup(React.createElement(Markdown, { children: ["```", "plain", "```"].join("\n") }));
+  assert.doesNotMatch(unknown, /md-code-lang/, "an unknown language shows no label");
+});
+
+test("a table scrolls inside its wrapper, aligned columns are figures, and cell paths break at separators", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    children: [
+      "| File | Lines | Share |",
+      "| --- | ---: | :---: |",
+      "| `apps/web/src/components/EventTimeline.tsx` | 120 | 4% |",
+    ].join("\n"),
+  }));
+  assert.match(html, /<div class="md-table-wrap"><table>/);
+  assert.match(html, /<th class="num">Lines<\/th><th class="num">Share<\/th>/);
+  assert.match(html, /<td class="num">120<\/td><td class="num">4%<\/td>/);
+  assert.doesNotMatch(html, /text-align/, "alignment comes from .num, not an inline style");
+  assert.match(html, /<code>apps\/<wbr\/>web\/<wbr\/>src\/<wbr\/>components\/<wbr\/>EventTimeline.<wbr\/>tsx<\/code>/);
+});
+
+test("inline code outside a table keeps its text without break hints", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, { children: "Open `apps/web/src/x_y.tsx` now." }));
+  assert.match(html, /<code>apps\/web\/src\/x_y.tsx<\/code>/);
+});
+
+test("task-list items are drawn boxes announced as Done or Not Done", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, { children: "- [x] Ship it\n- [ ] Review it" }));
+  assert.doesNotMatch(html, /<input/);
+  assert.match(html, /<span class="md-check" role="img" aria-label="Done" data-checked="true"><svg[^>]*md-check-mark/);
+  assert.match(html, /<span class="md-check" role="img" aria-label="Not Done"><\/span>/);
+});
+
+test("the inline profile renders code spans, emphasis, links and lists", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    profile: "inline",
+    children: "Run `pnpm test` with *care*, see https://example.test/docs\n\n- item one\n- item two",
+  }));
+  assert.match(html, /<code>pnpm test<\/code>/);
+  assert.match(html, /<em>care<\/em>/);
+  assert.match(html, /<a href="https:\/\/example.test\/docs"/);
+  assert.match(html, /<ul>\s*<li>item one<\/li>\s*<li>item two<\/li>\s*<\/ul>/);
+});
+
+test("the inline profile leaves headings, tables, quotes, images and raw HTML as typed text", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    profile: "inline",
+    inlineMedia: true,
+    children: [
+      "# Heading",
+      "",
+      "| a | b |",
+      "| --- | --- |",
+      "| 1 | 2 |",
+      "",
+      "> quoted",
+      "",
+      "![shot](https://evidence.example/shot.png) <b>bold</b>",
+    ].join("\n"),
+  }));
+  assert.doesNotMatch(html, /<h\d|<table|<blockquote|<img|<video|<b>|md-media-embed/);
+  assert.match(html, /<p># Heading<\/p>/);
+  assert.match(html, /\| a \| b \|/);
+  assert.match(html, /&gt; quoted/);
+  assert.match(html, /&lt;b&gt;bold&lt;\/b&gt;/);
 });
 
 test("fence language detection reads react-markdown and rehype-highlight class shapes", () => {

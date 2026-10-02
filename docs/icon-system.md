@@ -74,6 +74,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `EditIcon` | Lucide | `Pencil` | Generic edit action. |
 | `CopyIcon` | Lucide | `Copy` | Generic copy action. |
 | `CheckIcon` | Lucide | `Check` | Generic success state. |
+| `WrapLinesIcon` | Lucide | `WrapText` | The Wrap Lines toggle in a markdown code block's header. |
 | `WarningIcon` | Lucide | `TriangleAlert` | Generic warning state. |
 | `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices; the session bar's Pinned Summary toggle, which opens the session's details column. |
 | `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step. |

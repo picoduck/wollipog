@@ -54,13 +54,13 @@ test("at 1440px the docked summary covers neither the widest table nor any Copy 
   expect(Math.abs(asideBox.width - 280)).toBeLessThanOrEqual(0.5);
 
   const reader = await box(page.locator(".detail-scroll"));
-  const table = page.locator(".md table");
+  const table = page.locator(".md-table-wrap");
   await table.scrollIntoViewIfNeeded();
   const tableBox = await box(table);
   expect(tableBox.right, "the table ends before the summary begins").toBeLessThanOrEqual(asideBox.x + 0.5);
   expect(tableBox.right, "the table's last column is inside the reader").toBeLessThanOrEqual(reader.right + 0.5);
 
-  const copies = page.getByRole("button", { name: "Copy Code Block" });
+  const copies = page.getByRole("button", { name: "Copy Code", exact: true });
   expect(await copies.count()).toBe(2);
   for (const copy of await copies.all()) {
     await copy.scrollIntoViewIfNeeded();

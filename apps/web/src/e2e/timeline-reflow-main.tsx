@@ -142,6 +142,55 @@ const structuredItems: TimelineItem[] = [
   },
   { kind: "turn_interrupted", id: 209, createdAt: Date.now() - 1_000 },
 ];
+// The markdown scenario (#2152): one reply with every block the type-scale rules cover, and a user
+// message whose markdown renders inline.
+const markdownItems: TimelineItem[] = [
+  {
+    kind: "user_message",
+    id: 501,
+    text: [
+      "Please check `apps/web/src/components/Markdown.tsx` and:",
+      "- keep **tables** whole",
+      "- add a code header",
+      "",
+      "# Not a heading",
+    ].join("\n"),
+    createdAt: Date.now() - 6_000,
+  },
+  {
+    kind: "agent_message",
+    id: 502,
+    text: [
+      "# Review Notes",
+      "",
+      "The transcript markdown now sits on the type scale.",
+      "",
+      "## Summary",
+      "",
+      "| File | Lines | Added | Removed | Change |",
+      "| --- | ---: | ---: | ---: | --- |",
+      "| `apps/web/src/components/EventTimeline.tsx` | 124 | +24 | -3 | Renders user messages through the inline markdown profile |",
+      "| `apps/web/src/components/Markdown.tsx` | 318 | +201 | -96 | Adds the code header, table wrapper and task boxes |",
+      "| `apps/web/src/styles.css` | 162 | +118 | -64 | Moves the markdown rules onto tokens |",
+      "",
+      "### Code",
+      "",
+      "```typescript",
+      "export function separatorBreaks(text: string): string[] {",
+      "  return text.split(/(?<=[/._])/); // break after a slash, dot or underscore",
+      "}",
+      "```",
+      "",
+      "#### Checklist",
+      "",
+      "- [x] Headings on the type scale",
+      "- [x] Table cells kept whole",
+      "- [ ] Evidence reviewed",
+    ].join("\n"),
+    createdAt: Date.now() - 5_000,
+    completedAt: Date.now() - 4_000,
+  },
+];
 type TranscriptItem = Extract<TimelineItem, { kind: "agent_message" | "user_message" }>;
 const baseItems: TranscriptItem[] = Array.from({ length: 30 }, (_, index) => index % 2 === 0
   ? { kind: "agent_message" as const, id: index + 1, text: `${index + 1}. ${sentence.repeat(30)}`, createdAt: Date.now() - index * 1_000 }
@@ -156,6 +205,7 @@ function Fixture() {
   const deferredMeasurementFixture = useMemo(() => new URLSearchParams(window.location.search).get("defer") === "1", []);
   const predecessorRerenderFixture = useMemo(() => new URLSearchParams(window.location.search).get("predecessor-rerender") === "1", []);
   const overflowFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("overflow") === "1", []);
+  const markdownFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("markdown") === "1", []);
   const questionHistoryFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("question-history") === "1", []);
   const [panelWidth, setPanelWidth] = useState(0);
   const [composerHeight, setComposerHeight] = useState(0);
@@ -188,6 +238,7 @@ function Fixture() {
   const getFixtureInitialAnchor = useCallback(() => anchorRef.current, []);
   const items = useMemo(() => {
     if (overflowFixtureEnabled) return structuredItems;
+    if (markdownFixtureEnabled) return markdownItems;
     const prefix = Array.from({ length: currentHistoryPrepend }, (_, index): TimelineItem => ({
       kind: "agent_message",
       id: -(index + 1),
@@ -240,7 +291,7 @@ function Fixture() {
     }] : [];
     const complete = [...prefix, ...historicalQuestions, ...current, ...liveReply, ...revealItems];
     return currentHistoryLimit == null ? complete : complete.slice(0, currentHistoryLimit);
-  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, liveReplyTicks, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
+  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, liveReplyTicks, markdownFixtureEnabled, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
   const followTail = useFollowTail({
     scrollRef: followTailEnabled ? scrollRef : disabledFollowScrollRef,
     contentRevision: `${sessionId}:${currentHistoryPrepend}:${currentHistoryReplacement}:${currentHistoryLimit ?? "all"}:${headStreamTicks}:${tailStreamTicks}:${liveReplyTicks}`,
@@ -447,4 +498,6 @@ function Fixture() {
   );
 }
 
+const fixtureTheme = new URLSearchParams(window.location.search).get("theme");
+if (fixtureTheme === "light" || fixtureTheme === "dark") document.documentElement.setAttribute("data-theme", fixtureTheme);
 createRoot(document.getElementById("root")!).render(<Fixture />);

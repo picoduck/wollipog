@@ -59,7 +59,6 @@ test("no other rule sizes a keycap or sets its font, border or colours", () => {
 const MONO_BOXES_THAT_ARE_NOT_KEYCAPS = new Map([
   [".composer-answer-input", "a text field for a typed answer"],
   [".workspace-reference-chip", "a file or folder reference chip"],
-  [".md code", "inline code in rendered markdown"],
   [".dir-path-input", "a path text field"],
   [".onboard-recommended-skill-names > li", "skill identifiers in a list"],
 ]);

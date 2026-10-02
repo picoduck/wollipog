@@ -79,6 +79,7 @@ import {
   WandSparkles as LucideWandSparkles,
   Workflow as LucideWorkflow,
   Wrench as LucideWrench,
+  WrapText as LucideWrapText,
   X as LucideX,
   Zap as LucideZap,
   type LucideIcon,
@@ -298,6 +299,10 @@ export function CopyIcon(props: IconProps) {
 
 export function CheckIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCheck} {...props} />;
+}
+
+export function WrapLinesIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideWrapText} {...props} />;
 }
 
 export function WarningIcon(props: IconProps) {

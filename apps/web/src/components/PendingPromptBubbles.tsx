@@ -5,6 +5,7 @@ import type {
 } from "@wollipog/protocol";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { Markdown } from "./Markdown.js";
 
 const RECOVERY_BLOCKS_RETRY_REASON = "Recover the selected worktree before retrying this message.";
 
@@ -108,7 +109,7 @@ export function PendingPromptBubbles({
           </div>
           <div id={detailsId}>
             {prompt.hasImages && <div className="pending-prompt-attachment">Attachment</div>}
-            {prompt.text && <div className="bubble-text">{prompt.text}</div>}
+            {prompt.text && <div className="bubble-text"><Markdown profile="inline">{prompt.text}</Markdown></div>}
             {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
           </div>
           {prompt.canRetry && recoveryBlocksRetry && !refused && (

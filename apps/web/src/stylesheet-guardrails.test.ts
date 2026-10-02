@@ -2401,7 +2401,6 @@ const LIBRARY_CLASSES = new Map([
   ["function_", "rehype-highlight"],
   // remark-gfm's task lists.
   ["contains-task-list", "remark-gfm"],
-  ["task-list-item", "remark-gfm"],
 ]);
 
 const emittedByLibrary = (name: string) => LIBRARY_CLASSES.has(name);
@@ -2432,8 +2431,8 @@ test("the library exemption matches names, not namespaces", () => {
   assert.equal(emittedByLibrary("hljs-keyword"), true, "a token highlight.js really emits");
   assert.equal(emittedByLibrary("hljs-toolbar"), false, "not a highlight.js token, so not exempt");
   assert.equal(emittedByLibrary("hljs-"), false);
-  assert.equal(emittedByLibrary("task-list-item"), true);
-  assert.equal(emittedByLibrary("task-list-item-extra"), false);
+  assert.equal(emittedByLibrary("contains-task-list"), true);
+  assert.equal(emittedByLibrary("contains-task-list-extra"), false);
   assert.equal(emittedByLibrary("empty"), false, "an ordinary app class is never exempt");
 });
 

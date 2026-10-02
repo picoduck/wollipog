@@ -819,7 +819,7 @@ for (const width of [320, 390]) {
       }
 
       const codeBlock = page.locator(".md pre");
-      const table = page.locator(".md table");
+      const table = page.locator(".md-table-wrap");
       await expect(codeBlock).toBeVisible();
       await expect(table).toBeVisible();
       expect(await codeBlock.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);

@@ -99,6 +99,8 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/PodsView.tsx", "native-select", 8],
   ["components/ProjectLocationDialog.tsx", "native-select", 1],
   ["components/SessionApproval.tsx", "question-option", 2],
+  // A fenced block's Wrap Lines button (#2152): one on/off toggle per block, not one of N options.
+  ["components/Markdown.tsx", "aria-pressed", 1],
   ["components/SessionDetail.tsx", "aria-pressed", 1],
   ["components/SessionPanelToggles.tsx", "aria-pressed", 3],
   // Instructions' file chips (#1980): §11.3 meta chips (`button.chip` with `aria-pressed`, as the

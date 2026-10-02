@@ -525,7 +525,7 @@ function EventTimelineBody({
         <TimelineRow
           item={item}
           inWork={row.inWork}
-          highlightEligible={state.settledVisible}
+          highlightEligible={state.visible}
           disclosureOpen={detailsOpen}
           onDisclosureToggle={() => toggle(detailsKey, detailsOpen)}
           onRewind={onRewind}
@@ -575,7 +575,7 @@ function EventTimelineBody({
     <div className="timeline" role="list" aria-label={ariaLabel}>
       {rows.map((row, index) => (
         <div key={row.key} role="listitem" aria-posinset={index + 1} aria-setsize={rows.length}>
-          {renderRow(row, { index, visible: true, settledVisible: true })}
+          {renderRow(row, { index, visible: true })}
         </div>
       ))}
     </div>
@@ -1854,7 +1854,7 @@ const TimelineRow = memo(function TimelineRow({
                   ))}
                 </div>
               )}
-              {item.text && <div className="bubble-text">{item.text}</div>}
+              {item.text && <div className="bubble-text"><Markdown profile="inline" highlightEligible={highlightEligible}>{item.text}</Markdown></div>}
             </div>
             <MessageMeta
               createdAt={item.createdAt}
@@ -1878,7 +1878,7 @@ const TimelineRow = memo(function TimelineRow({
       // Codex-style: the model response is full-width document flow, not a chat bubble.
       return (
         <div className="tl-agent-msg">
-          <Markdown highlightEligible={highlightEligible} inlineMedia mediaSettled={mediaSettled}>{item.text}</Markdown>
+          <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
           {/* Meta trails the text it describes, matching the user-bubble arrangement. */}
           <MessageMeta
             createdAt={item.createdAt}
@@ -1905,7 +1905,7 @@ const TimelineRow = memo(function TimelineRow({
               completedAt={item.completedAt}
               pointWhenEqual
             />
-            <Markdown highlightEligible={highlightEligible} inlineMedia mediaSettled={mediaSettled}>{item.text}</Markdown>
+            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
           </div>
         );
       }
@@ -1935,7 +1935,7 @@ const TimelineRow = memo(function TimelineRow({
             />
           </summary>
           <div className="thought-body">
-            <Markdown highlightEligible={highlightEligible} inlineMedia mediaSettled={mediaSettled}>{item.text}</Markdown>
+            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
           </div>
         </details>
       );

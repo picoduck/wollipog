@@ -1,31 +1,34 @@
-import React, { createContext, isValidElement, memo, useContext, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import React, {
+  createContext,
+  isValidElement,
+  memo,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ComponentProps,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import {
-  browserTimerDriver,
-  CancelableIdleTaskQueue,
-  createBrowserIdleDriver,
+  highlightCodeBlock,
+  loadCodeHighlighter,
+  loadedCodeHighlighter,
   markdownHighlightEligible,
-  StableIdleTaskCoordinator,
+  subscribeCodeHighlighter,
+  type CodeHighlighter,
+  type HighlightNode,
 } from "../markdown-highlight.js";
 import { CopyButton } from "./common.js";
+import { CheckIcon, WrapLinesIcon } from "./Icons.js";
 
-type RehypePlugins = NonNullable<ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
 type MarkdownComponents = NonNullable<ComponentProps<typeof ReactMarkdown>["components"]>;
-
-const highlightQueue = new CancelableIdleTaskQueue(createBrowserIdleDriver());
-const highlightCoordinator = new StableIdleTaskCoordinator<symbol>(highlightQueue, browserTimerDriver);
-let highlightPluginsPromise: Promise<RehypePlugins> | null = null;
-
-function loadHighlightPlugins(): Promise<RehypePlugins> {
-  // Keep lowlight/highlight.js out of the initial Markdown chunk and load it only after a visible,
-  // stable fenced block reaches the global idle queue. The module promise is shared by all rows.
-  highlightPluginsPromise ??= import("rehype-highlight").then(
-    (module) => [[module.default, { detect: false }]] as RehypePlugins,
-  );
-  return highlightPluginsPromise;
-}
+type RemarkPlugins = NonNullable<ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>;
 
 function reactNodeText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -69,7 +72,39 @@ export function markdownCodeBlockContinues(
   return next.text.startsWith(seen.text) || seen.text.startsWith(next.text);
 }
 
+interface MarkdownRenderContext {
+  inlineMedia: boolean;
+  mediaSettled: boolean;
+  compactUrls: boolean;
+  /** The document is settled, in view and small enough to highlight its fenced blocks now. */
+  highlight: boolean;
+  highlighter: CodeHighlighter | null;
+}
+
+const MarkdownContext = createContext<MarkdownRenderContext>({
+  inlineMedia: false,
+  mediaSettled: true,
+  compactUrls: false,
+  highlight: false,
+  highlighter: null,
+});
+
+/** lowlight emits spans and text only; anything else still renders as a plain span, never markup. */
+function renderHighlightNodes(nodes: readonly HighlightNode[]): ReactNode[] {
+  return nodes.map((node, index) => {
+    if (node.type === "text") return node.value ?? "";
+    const classes = node.properties?.className;
+    return (
+      <span key={index} className={Array.isArray(classes) ? classes.join(" ") : undefined}>
+        {renderHighlightNodes(node.children ?? [])}
+      </span>
+    );
+  });
+}
+
 function CodeBlockPre({ children, node: _node, ...props }: ComponentProps<"pre"> & { node?: unknown }) {
+  const { highlight, highlighter } = useContext(MarkdownContext);
+  const source = reactNodeText(children);
   const text = markdownCodeText(children);
   const language = markdownCodeLanguage(children);
   const defaultWrap = markdownCodeWrapsByDefault(language);
@@ -86,18 +121,120 @@ function CodeBlockPre({ children, node: _node, ...props }: ComponentProps<"pre">
     setSeenBlock({ language, text });
   }
   const wrap = userWrap ?? defaultWrap;
+  // A settled block highlights in the render that first paints it, and from the cache when the same
+  // language and text were highlighted before (scrolling back), so it never flashes plain first.
+  const nodes = highlight && language ? highlightCodeBlock(language, source, highlighter) : undefined;
   // Wrapping is presentation-only: `text` always carries the original characters, so copying a
   // visually wrapped block still yields the exact fenced content.
   return (
     <div className={wrap ? "md-code-block md-code-wrap" : "md-code-block"}>
-      <div className="md-code-actions">
-        <button type="button" className="copy-btn md-code-wrap-toggle" onClick={() => setUserWrap(!wrap)}>
-          {wrap ? "No Wrap" : "Wrap Lines"}
-        </button>
-        <CopyButton text={text} label="Copy Code" ariaLabel="Copy Code Block" className="copy-btn md-code-copy" />
+      <div className="md-code-head">
+        {language && <span className="md-code-lang">{language}</span>}
+        <div className="md-code-actions">
+          <button
+            type="button"
+            className="icon-btn sm"
+            title="Wrap Lines"
+            aria-label="Wrap Lines"
+            aria-pressed={wrap}
+            onClick={() => setUserWrap(!wrap)}
+          >
+            <WrapLinesIcon size={16} />
+          </button>
+          <CopyButton text={text} iconOnly ariaLabel="Copy Code" className="icon-btn sm" />
+        </div>
       </div>
-      <pre {...props}>{children}</pre>
+      <pre {...props}>
+        {nodes ? <code>{renderHighlightNodes(nodes)}</code> : children}
+      </pre>
     </div>
+  );
+}
+
+/** Inline code inside a table cell keeps its words whole and breaks a path at its separators. */
+const TableCellContext = createContext(false);
+
+/** A break opportunity after every `/`, `.` and `_`, and nowhere else. */
+export function separatorBreaks(text: string): ReactNode[] {
+  return text.split(/(?<=[/._])/).flatMap((part, index) => (index === 0 ? [part] : [<wbr key={index} />, part]));
+}
+
+function MarkdownCode({ children, node: _node, ...props }: ComponentProps<"code"> & { node?: unknown }) {
+  const inCell = useContext(TableCellContext);
+  return <code {...props}>{inCell && typeof children === "string" ? separatorBreaks(children) : children}</code>;
+}
+
+function MarkdownTable({ children, node: _node, ...props }: ComponentProps<"table"> & { node?: unknown }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [scrollable, setScrollable] = useState(false);
+  const [fadeEnd, setFadeEnd] = useState(false);
+  useLayoutEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const update = () => {
+      const overflow = wrap.scrollWidth - wrap.clientWidth > 1;
+      setScrollable(overflow);
+      setFadeEnd(overflow && wrap.scrollLeft + wrap.clientWidth < wrap.scrollWidth - 1);
+    };
+    update();
+    wrap.addEventListener("scroll", update, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(wrap);
+    if (wrap.firstElementChild) observer?.observe(wrap.firstElementChild);
+    return () => {
+      wrap.removeEventListener("scroll", update);
+      observer?.disconnect();
+    };
+  }, []);
+  // A wide table scrolls sideways inside its bordered wrapper rather than squeezing its cells, and
+  // the trailing edge fades while columns lie beyond it. A scrolling wrapper takes focus so the
+  // keyboard can scroll it too.
+  return (
+    <div ref={wrapRef} className="md-table-wrap" data-fade-end={fadeEnd || undefined} tabIndex={scrollable ? 0 : undefined}>
+      <table {...props}>{children}</table>
+    </div>
+  );
+}
+
+type CellProps = ComponentProps<"td"> & { node?: { properties?: { align?: unknown } } };
+
+/**
+ * A column aligned right or center in the markdown holds figures, so its cells take `.num`
+ * (tabular, unwrapped, right-aligned) in place of react-markdown's inline text-align.
+ */
+function cellAttributes({ node, style, className }: CellProps): { className?: string; style?: CSSProperties } {
+  const align = node?.properties?.align ?? style?.textAlign;
+  if (align !== "right" && align !== "center") return { className, style };
+  const { textAlign: _textAlign, ...rest }: CSSProperties = style ?? {};
+  return {
+    className: className ? `${className} num` : "num",
+    style: Object.keys(rest).length > 0 ? rest : undefined,
+  };
+}
+
+function MarkdownHeaderCell({ children, node, style, className, ...props }: CellProps) {
+  return (
+    <TableCellContext.Provider value>
+      <th {...props} {...cellAttributes({ node, style, className })}>{children}</th>
+    </TableCellContext.Provider>
+  );
+}
+
+function MarkdownDataCell({ children, node, style, className, ...props }: CellProps) {
+  return (
+    <TableCellContext.Provider value>
+      <td {...props} {...cellAttributes({ node, style, className })}>{children}</td>
+    </TableCellContext.Provider>
+  );
+}
+
+/** A task-list box is read-only, so it is drawn with the checkbox recipe, not a disabled control. */
+function MarkdownInput({ type, checked, node: _node, ...props }: ComponentProps<"input"> & { node?: unknown }) {
+  if (type !== "checkbox") return <input type={type} checked={checked} {...props} />;
+  return (
+    <span className="md-check" role="img" aria-label={checked ? "Done" : "Not Done"} data-checked={checked || undefined}>
+      {checked && <CheckIcon size={14} className="md-check-mark" />}
+    </span>
   );
 }
 
@@ -254,10 +391,8 @@ function MarkdownLink({ href, children, inlineMedia, mediaSettled, compactUrls }
   );
 }
 
-const MarkdownMediaContext = createContext({ inlineMedia: false, mediaSettled: true, compactUrls: false });
-
 function MarkdownAnchor({ href, children }: ComponentProps<"a">) {
-  const { inlineMedia, mediaSettled, compactUrls } = useContext(MarkdownMediaContext);
+  const { inlineMedia, mediaSettled, compactUrls } = useContext(MarkdownContext);
   return (
     <MarkdownLink href={href} inlineMedia={inlineMedia} mediaSettled={mediaSettled} compactUrls={compactUrls}>
       {children}
@@ -266,7 +401,7 @@ function MarkdownAnchor({ href, children }: ComponentProps<"a">) {
 }
 
 function MarkdownImage({ src, alt }: ComponentProps<"img">) {
-  const { inlineMedia, mediaSettled } = useContext(MarkdownMediaContext);
+  const { inlineMedia, mediaSettled } = useContext(MarkdownContext);
   const href = typeof src === "string" ? src : undefined;
   const kind = inlineMedia ? transcriptMediaKind(href) : null;
   const label = kind && href ? transcriptMediaLabel(href, kind, alt) : alt || href || "image";
@@ -285,18 +420,53 @@ function MarkdownImage({ src, alt }: ComponentProps<"img">) {
 
 const MARKDOWN_COMPONENTS: MarkdownComponents = {
   pre: CodeBlockPre,
+  code: MarkdownCode,
+  table: MarkdownTable,
+  th: MarkdownHeaderCell,
+  td: MarkdownDataCell,
+  input: MarkdownInput,
   a: MarkdownAnchor,
   img: MarkdownImage,
 };
 
 /**
- * Markdown renderer for agent messages + reasoning. GFM (tables, task lists, strikethrough,
- * autolinks) plus syntax-highlighted code fences via rehype-highlight (adds `hljs-*` classes;
- * themed in styles.css). react-markdown does NOT render raw HTML by default, so adopted/agent
- * transcript content can't inject markup. Links open in a new tab.
+ * The micromark constructs a user message does not use. Its source then renders as the text the
+ * person typed: `# Heading` stays a line starting with `#`, a pipe table stays pipes, `![](…)`
+ * stays a link and fetches nothing, and `<b>` stays visible text.
+ */
+const INLINE_PROFILE_DISABLED_CONSTRUCTS = [
+  "headingAtx",
+  "setextUnderline",
+  "thematicBreak",
+  "blockQuote",
+  "codeIndented",
+  "htmlFlow",
+  "htmlText",
+  "labelStartImage",
+  "table",
+];
+
+function remarkInlineProfile(this: { data(): Record<string, unknown> }) {
+  const data = this.data() as { micromarkExtensions?: unknown[] };
+  (data.micromarkExtensions ??= []).push({ disable: { null: INLINE_PROFILE_DISABLED_CONSTRUCTS } });
+}
+
+const DOCUMENT_PLUGINS: RemarkPlugins = [remarkGfm, remarkBreaks];
+const INLINE_PLUGINS: RemarkPlugins = [remarkGfm, remarkBreaks, remarkInlineProfile as unknown as RemarkPlugins[number]];
+
+export type MarkdownProfile = "document" | "inline";
+
+/**
+ * Markdown renderer for agent messages, reasoning, user messages and markdown previews. GFM
+ * (tables, task lists, strikethrough, autolinks) plus syntax-highlighted code fences (lowlight's
+ * `hljs-*` classes, themed in styles.css). react-markdown does NOT render raw HTML by default, so
+ * adopted/agent transcript content can't inject markup. Links open in a new tab.
  *
  * `remark-breaks` keeps single newlines as line breaks, so line-oriented agent output (status
  * lines, pasted command output) doesn't collapse into one paragraph the way CommonMark would.
+ *
+ * The `inline` profile is for what a person typed: code spans, emphasis, links, lists and fenced
+ * code, with no headings, tables, quotes, images or media (INLINE_PROFILE_DISABLED_CONSTRUCTS).
  *
  * Security: transcript content is semi-untrusted. Callers must explicitly opt into inline media;
  * even then only HTTPS URLs with known image/video path extensions become `<img>`/`<video>` fetches.
@@ -307,73 +477,48 @@ const MARKDOWN_COMPONENTS: MarkdownComponents = {
  */
 export const Markdown = memo(function Markdown({
   children,
+  profile = "document",
   highlightEligible = true,
   inlineMedia = false,
-  mediaSettled = true,
+  settled = true,
   compactUrls = false,
 }: {
   children: string;
-  /** Timeline virtualization passes whether this settled row currently intersects the viewport. */
+  profile?: MarkdownProfile;
+  /** False opts out of highlighting; timeline virtualization passes whether the row is in view. */
   highlightEligible?: boolean;
   /** Transcript-only opt-in for HTTPS image and video URL embeds. */
   inlineMedia?: boolean;
-  /** False while a transcript row is still streaming; remote media mounts only after completion. */
-  mediaSettled?: boolean;
+  /**
+   * False while a transcript row is still streaming: its code highlights and its remote media
+   * mounts only once the row completes.
+   */
+  settled?: boolean;
   /** Replace generated absolute-URL text with a bounded, query-free label while retaining href. */
   compactUrls?: boolean;
 }) {
-  const key = useRef<symbol | null>(null);
-  key.current ??= Symbol("markdown-highlight");
-  const cancelApply = useRef<(() => void) | null>(null);
-  const [highlighted, setHighlighted] = useState<{ text: string; plugins: RehypePlugins } | null>(null);
+  const highlighter = useSyncExternalStore(subscribeCodeHighlighter, loadedCodeHighlighter, () => null);
   const eligible = markdownHighlightEligible(children, highlightEligible);
-
   useEffect(() => {
-    const taskKey = key.current!;
-    highlightCoordinator.cancel(taskKey);
-    cancelApply.current?.();
-    cancelApply.current = null;
-    // The current render already ignores a stale text/plugin pair. Clearing it here also prevents
-    // a later visibility episode from synchronously reusing an old highlighted rendering.
-    setHighlighted(null);
-    if (!eligible) return;
+    // The highlighter loads once, as soon as any document with a fence could use it, so a row is
+    // usually highlighted in its first paint. A failed load leaves safe, plain Markdown.
+    if (eligible && !highlighter) loadCodeHighlighter().catch(() => undefined);
+  }, [eligible, highlighter]);
 
-    let current = true;
-    highlightCoordinator.schedule(taskKey, () => {
-      void loadHighlightPlugins().then((plugins) => {
-        if (!current) return;
-        // The first idle turn starts the lazy import. Re-enter the queue after it resolves so a
-        // module/network delay cannot enable the synchronous plugin during a busy turn.
-        cancelApply.current = highlightQueue.enqueue(() => {
-          cancelApply.current = null;
-          if (current) setHighlighted({ text: children, plugins });
-        });
-      }).catch(() => {
-        // Highlighting is optional; a chunk-load or parser failure leaves safe Markdown intact.
-      });
-    });
-    return () => {
-      current = false;
-      highlightCoordinator.cancel(taskKey);
-      cancelApply.current?.();
-      cancelApply.current = null;
-    };
-  }, [children, eligible]);
-
-  const rehypePlugins = eligible && highlighted?.text === children ? highlighted.plugins : undefined;
+  const inline = profile === "inline";
   // Settlement is monotonic for one streamed document: a later session-active transition must not
   // hide or refetch media that already loaded. An unrelated replacement starts its own lifecycle.
-  const [mediaActivation, setMediaActivation] = useState({ text: children, enabled: mediaSettled });
+  const [mediaActivation, setMediaActivation] = useState({ text: children, enabled: settled });
   let activeMedia = mediaActivation;
   const previousMedia = mediaActivation;
   if (previousMedia.text !== children) {
     const continues = children.startsWith(previousMedia.text) || previousMedia.text.startsWith(children);
     activeMedia = {
       text: children,
-      enabled: mediaSettled || (continues && previousMedia.enabled),
+      enabled: settled || (continues && previousMedia.enabled),
     };
     setMediaActivation(activeMedia);
-  } else if (mediaSettled && !previousMedia.enabled) {
+  } else if (settled && !previousMedia.enabled) {
     activeMedia = { text: children, enabled: true };
     setMediaActivation(activeMedia);
   }
@@ -382,15 +527,17 @@ export const Markdown = memo(function Markdown({
   // instead of remounting, collapsing its row, and issuing another remote request.
   return (
     <div className="md">
-      <MarkdownMediaContext.Provider value={{ inlineMedia, mediaSettled: activeMedia.enabled, compactUrls }}>
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkBreaks]}
-          rehypePlugins={rehypePlugins}
-          components={MARKDOWN_COMPONENTS}
-        >
+      <MarkdownContext.Provider value={{
+        inlineMedia: inlineMedia && !inline,
+        mediaSettled: activeMedia.enabled,
+        compactUrls,
+        highlight: eligible && settled,
+        highlighter,
+      }}>
+        <ReactMarkdown remarkPlugins={inline ? INLINE_PLUGINS : DOCUMENT_PLUGINS} components={MARKDOWN_COMPONENTS}>
           {children}
         </ReactMarkdown>
-      </MarkdownMediaContext.Provider>
+      </MarkdownContext.Provider>
     </div>
   );
 });

@@ -75,8 +75,6 @@ export interface VirtualRowState {
   index: number;
   /** True only for the actual viewport, not overscan. */
   visible: boolean;
-  /** Visible and no longer in an active scroll gesture; safe for idle enhancement work. */
-  settledVisible: boolean;
 }
 
 export function pinnedRangeExtractor(range: Range, pinned: readonly number[]): number[] {
@@ -333,7 +331,7 @@ function StaticList<T>({
           data-virtual-target={revealRequest?.key === getKey(item) ? "true" : undefined}
           aria-current={revealRequest?.key === getKey(item) ? "location" : undefined}
         >
-          {renderItem(item, { index, visible: true, settledVisible: true })}
+          {renderItem(item, { index, visible: true })}
         </div>
       ))}
     </div>
@@ -1337,7 +1335,6 @@ function VirtualList<T>({
             {renderItem(item, {
               index: virtualRow.index,
               visible,
-              settledVisible: visible && !virtualizer.isScrolling,
             })}
           </div>
         );

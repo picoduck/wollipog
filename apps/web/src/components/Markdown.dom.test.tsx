@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import { Markdown } from "./Markdown.js";
+import { codeHighlighterRuns, loadCodeHighlighter } from "../markdown-highlight.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -27,7 +28,7 @@ async function renderMarkdown(
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      <Markdown highlightEligible={false} inlineMedia={inlineMedia} mediaSettled={mediaSettled}>{markdown}</Markdown>,
+      <Markdown highlightEligible={false} inlineMedia={inlineMedia} settled={mediaSettled}>{markdown}</Markdown>,
     );
   });
   return { container, root };
@@ -39,10 +40,12 @@ async function cleanup(container: HTMLDivElement, root: Root): Promise<void> {
 }
 
 function wrapToggle(container: HTMLDivElement): HTMLButtonElement {
-  const button = container.querySelector("button.md-code-wrap-toggle");
-  assert.ok(button, "code blocks render a wrap toggle");
+  const button = container.querySelector('.md-code-head button[aria-label="Wrap Lines"]');
+  assert.ok(button, "code blocks render a wrap toggle in their header");
   return button as HTMLButtonElement;
 }
+
+const pressed = (button: HTMLButtonElement) => button.getAttribute("aria-pressed");
 
 const LONG_CODE_LINE = "export const configuration = mergeDeep(baseConfiguration, overrides, { verbose: true });";
 
@@ -52,21 +55,23 @@ test("Wrap Lines toggles a source-code block on and off", async () => {
     const block = container.querySelector(".md-code-block")!;
     const toggle = wrapToggle(container);
     assert.equal(block.classList.contains("md-code-wrap"), false, "source code keeps the non-wrapping default");
-    assert.equal(toggle.textContent, "Wrap Lines");
+    assert.equal(pressed(toggle), "false");
 
     await act(async () => { toggle.click(); });
     assert.equal(block.classList.contains("md-code-wrap"), true);
-    assert.equal(toggle.textContent, "No Wrap");
+    assert.equal(pressed(toggle), "true");
+    assert.equal(toggle.getAttribute("aria-label"), "Wrap Lines", "the name stays the same in both states");
 
     await act(async () => { toggle.click(); });
     assert.equal(block.classList.contains("md-code-wrap"), false);
-    assert.equal(toggle.textContent, "Wrap Lines");
+    assert.equal(pressed(toggle), "false");
+    assert.equal(toggle.getAttribute("aria-label"), "Wrap Lines");
   } finally {
     await cleanup(container, root);
   }
 });
 
-test("the wrap toggle is a native focusable button whose accessible name is its visible label", async () => {
+test("the wrap toggle is a native focusable icon button whose name and tooltip match", async () => {
   const { container, root } = await renderMarkdown(["```text", "prose draft", "```"].join("\n"));
   try {
     const toggle = wrapToggle(container);
@@ -75,7 +80,9 @@ test("the wrap toggle is a native focusable button whose accessible name is its 
     assert.equal(toggle.tagName, "BUTTON");
     assert.equal(toggle.getAttribute("type"), "button");
     assert.equal(toggle.hasAttribute("tabindex"), false, "must keep its natural tab-order slot");
-    assert.equal(toggle.hasAttribute("aria-label"), false, "accessible name is the visible Title Case label");
+    assert.equal(toggle.getAttribute("aria-label"), "Wrap Lines");
+    assert.equal(toggle.getAttribute("title"), "Wrap Lines", "the tooltip repeats the accessible name");
+    assert.equal(toggle.classList.contains("icon-btn"), true);
     assert.equal(toggle.hasAttribute("aria-hidden"), false);
     toggle.focus();
     assert.equal(domWindow.document.activeElement, toggle as unknown as ReturnType<typeof domWindow.document.createElement>);
@@ -96,7 +103,7 @@ test("a reused block re-derives its wrap default when the fence language changes
     });
     const block = container.querySelector(".md-code-block")!;
     assert.equal(block.classList.contains("md-code-wrap"), true, "the prose default must follow the corrected language");
-    assert.equal(wrapToggle(container).textContent, "No Wrap");
+    assert.equal(pressed(wrapToggle(container)), "true");
 
     await act(async () => {
       root.render(<Markdown highlightEligible={false}>{["```typescript", "const x = 1;", "```"].join("\n")}</Markdown>);
@@ -121,7 +128,7 @@ test("a replacement block with the same boolean default still resets to its own 
     });
     const block = container.querySelector(".md-code-block")!;
     assert.equal(block.classList.contains("md-code-wrap"), false, "an unrelated block must not inherit the toggle");
-    assert.equal(wrapToggle(container).textContent, "Wrap Lines");
+    assert.equal(pressed(wrapToggle(container)), "false");
   } finally {
     await cleanup(container, root);
   }
@@ -138,7 +145,7 @@ test("a same-language document swap resets to the default", async () => {
     });
     const block = container.querySelector(".md-code-block")!;
     assert.equal(block.classList.contains("md-code-wrap"), true, "a replaced document returns to its prose default");
-    assert.equal(wrapToggle(container).textContent, "No Wrap");
+    assert.equal(pressed(wrapToggle(container)), "true");
   } finally {
     await cleanup(container, root);
   }
@@ -155,7 +162,7 @@ test("an explicit wrap choice survives body streaming while the language is stab
     });
     const block = container.querySelector(".md-code-block")!;
     assert.equal(block.classList.contains("md-code-wrap"), false, "streamed body text must not revert the user's choice");
-    assert.equal(wrapToggle(container).textContent, "Wrap Lines");
+    assert.equal(pressed(wrapToggle(container)), "false");
   } finally {
     await cleanup(container, root);
   }
@@ -176,7 +183,7 @@ test("copying a visually wrapped block yields the original fenced text", async (
   try {
     const block = container.querySelector(".md-code-block")!;
     assert.equal(block.classList.contains("md-code-wrap"), true, "markdown fences wrap by default");
-    const copyButton = container.querySelector("button.md-code-copy") as HTMLButtonElement;
+    const copyButton = container.querySelector('.md-code-head button[aria-label="Copy Code"]') as HTMLButtonElement;
     await act(async () => {
       copyButton.click();
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -189,6 +196,64 @@ test("copying a visually wrapped block yields the original fenced text", async (
     });
 
     assert.deepEqual(copied, [proseLines.join("\n"), proseLines.join("\n")], "wrapping never alters the copied bytes");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("a settled block is highlighted on first render and reuses its cached highlight when it returns", async () => {
+  await loadCodeHighlighter();
+  const fence = ["```ts", "const answer: number = 42; // settled", "```"].join("\n");
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    const before = codeHighlighterRuns();
+    await act(async () => { root.render(<Markdown>{fence}</Markdown>); });
+    assert.ok(container.querySelector("pre code .hljs-keyword"), "the first render already carries highlight classes");
+    assert.equal(codeHighlighterRuns(), before + 1);
+
+    // Scrolling away unmounts the virtual row, and scrolling back mounts a new one.
+    await act(async () => { root.render(<></>); });
+    assertNoDomNode(container.querySelector("pre"), "the row unmounted");
+    await act(async () => { root.render(<Markdown>{fence}</Markdown>); });
+    assert.ok(container.querySelector("pre code .hljs-keyword"), "the returning block is highlighted on its first render");
+    assert.equal(codeHighlighterRuns(), before + 1, "the highlighter does not run again for the same block");
+    assert.equal(
+      container.querySelector("pre code")!.textContent,
+      "const answer: number = 42; // settled\n",
+      "highlighting keeps the exact fenced text",
+    );
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("a streaming block stays plain until its row settles", async () => {
+  await loadCodeHighlighter();
+  const fence = ["```js", "let streamingValue = 1;", "```"].join("\n");
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    const before = codeHighlighterRuns();
+    await act(async () => { root.render(<Markdown settled={false}>{fence}</Markdown>); });
+    assertNoDomNode(container.querySelector("pre code [class^='hljs-']"), "no highlight classes");
+    assert.equal(codeHighlighterRuns(), before);
+    await act(async () => { root.render(<Markdown settled>{fence}</Markdown>); });
+    assert.ok(container.querySelector("pre code .hljs-keyword"));
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("a consumer that opts out of highlighting never shows highlight classes", async () => {
+  await loadCodeHighlighter();
+  const { container, root } = await renderMarkdown(["```ts", "const optedOut = true;", "```"].join("\n"));
+  try {
+    assertNoDomNode(container.querySelector("pre code [class^='hljs-']"), "no highlight classes");
   } finally {
     await cleanup(container, root);
   }
@@ -265,12 +330,12 @@ test("streaming URL changes mount no media until the final settled URL", async (
   try {
     assertNoDomNode(container.querySelector(".md-media-embed"));
     await act(async () => {
-      root.render(<Markdown highlightEligible={false} inlineMedia mediaSettled={false}>{second}</Markdown>);
+      root.render(<Markdown highlightEligible={false} inlineMedia settled={false}>{second}</Markdown>);
     });
     assertNoDomNode(container.querySelector(".md-media-embed"));
 
     await act(async () => {
-      root.render(<Markdown highlightEligible={false} inlineMedia mediaSettled>{final}</Markdown>);
+      root.render(<Markdown highlightEligible={false} inlineMedia settled>{final}</Markdown>);
     });
     assert.equal(container.querySelectorAll(".md-media-embed").length, 1);
     assert.equal(container.querySelector("img.md-media-image")?.getAttribute("src"), final);
@@ -311,7 +376,7 @@ test("settled transcript media never regresses when an existing session becomes 
     });
 
     await act(async () => {
-      root.render(<Markdown highlightEligible={false} inlineMedia mediaSettled={false}>{image}</Markdown>);
+      root.render(<Markdown highlightEligible={false} inlineMedia settled={false}>{image}</Markdown>);
     });
 
     assert.equal(container.querySelector("img.md-media-image") === loadedImage, true,

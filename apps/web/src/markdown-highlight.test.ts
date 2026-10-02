@@ -1,66 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CancelableIdleTaskQueue,
-  createTimerIdleDriver,
+  codeHighlighterRuns,
+  createCodeHighlighter,
   hasFencedCode,
+  highlightCodeBlock,
+  HighlightCache,
+  loadCodeHighlighter,
+  loadedCodeHighlighter,
+  markdownBlockHash,
   markdownHighlightEligible,
-  MARKDOWN_HIGHLIGHT_IDLE_TIMEOUT_MS,
   MARKDOWN_HIGHLIGHT_MAX_BYTES,
-  MARKDOWN_HIGHLIGHT_STABILITY_MS,
-  StableIdleTaskCoordinator,
-  type IdleDeadlineLike,
-  type IdleDriver,
-  type TimerDriver,
   utf8ByteLengthExceeds,
+  type CodeHighlighter,
 } from "./markdown-highlight.js";
-
-class FakeIdleDriver implements IdleDriver {
-  readonly requests: Array<{
-    callback: (deadline: IdleDeadlineLike) => void;
-    timeoutMs: number;
-    cancelled: boolean;
-  }> = [];
-
-  request(callback: (deadline: IdleDeadlineLike) => void, timeoutMs: number): unknown {
-    const request = { callback, timeoutMs, cancelled: false };
-    this.requests.push(request);
-    return request;
-  }
-
-  cancel(handle: unknown): void {
-    (handle as { cancelled: boolean }).cancelled = true;
-  }
-
-  fireNext(deadline: IdleDeadlineLike = { didTimeout: true, timeRemaining: () => 0 }): void {
-    const request = this.requests.find((candidate) => !candidate.cancelled);
-    if (!request) throw new Error("no pending idle request");
-    request.cancelled = true;
-    request.callback(deadline);
-  }
-}
-
-class FakeTimers implements TimerDriver {
-  private nextId = 1;
-  readonly timers = new Map<number, { callback: () => void; delayMs: number }>();
-
-  set(callback: () => void, delayMs: number): unknown {
-    const id = this.nextId++;
-    this.timers.set(id, { callback, delayMs });
-    return id;
-  }
-
-  clear(handle: unknown): void {
-    this.timers.delete(handle as number);
-  }
-
-  fire(id: number): void {
-    const timer = this.timers.get(id);
-    if (!timer) return;
-    this.timers.delete(id);
-    timer.callback();
-  }
-}
 
 test("highlight eligibility requires a visible fenced block within the exact UTF-8 ceiling", () => {
   assert.equal(hasFencedCode("inline ```js code```"), false);
@@ -79,80 +32,70 @@ test("highlight eligibility requires a visible fenced block within the exact UTF
   assert.equal(utf8ByteLengthExceeds("😀", 4), false);
 });
 
-test("global idle queue runs at most two live jobs per turn and cancels stale jobs", () => {
-  const idle = new FakeIdleDriver();
-  const queue = new CancelableIdleTaskQueue(idle);
-  const ran: number[] = [];
-  queue.enqueue(() => ran.push(1));
-  const cancelSecond = queue.enqueue(() => ran.push(2));
-  queue.enqueue(() => ran.push(3));
-  queue.enqueue(() => ran.push(4));
-  queue.enqueue(() => ran.push(5));
-  cancelSecond();
-
-  assert.equal(idle.requests.length, 1, "all rows share one scheduled idle turn");
-  assert.equal(idle.requests[0]!.timeoutMs, MARKDOWN_HIGHLIGHT_IDLE_TIMEOUT_MS);
-  idle.fireNext();
-  assert.deepEqual(ran, [1, 3]);
-  assert.equal(idle.requests.length, 2, "remaining work receives another turn");
-  idle.fireNext();
-  assert.deepEqual(ran, [1, 3, 4, 5]);
+test("a block's hash depends on both its language and its text", () => {
+  assert.equal(markdownBlockHash("ts", "const a = 1;"), markdownBlockHash("ts", "const a = 1;"));
+  assert.notEqual(markdownBlockHash("ts", "const a = 1;"), markdownBlockHash("js", "const a = 1;"));
+  assert.notEqual(markdownBlockHash("ts", "const a = 1;"), markdownBlockHash("ts", "const a = 2;"));
+  // The separator keeps a language/text split from colliding with another split of the same chars.
+  assert.notEqual(markdownBlockHash("t", "sx"), markdownBlockHash("ts", "x"));
 });
 
-test("a non-timeout callback with no idle budget defers every job", () => {
-  const idle = new FakeIdleDriver();
-  const queue = new CancelableIdleTaskQueue(idle);
-  let ran = false;
-  queue.enqueue(() => { ran = true; });
-  idle.fireNext({ didTimeout: false, timeRemaining: () => 0 });
-  assert.equal(ran, false);
-  assert.equal(idle.requests.length, 2);
-  idle.fireNext({ didTimeout: false, timeRemaining: () => 1 });
-  assert.equal(ran, true);
+test("the highlight cache is bounded, least-recently-used first, and verifies text on a hit", () => {
+  const cache = new HighlightCache(2);
+  const nodes = [{ type: "text", value: "a" }];
+  cache.set("ts", "a", nodes);
+  cache.set("ts", "b", null);
+  assert.equal(cache.get("ts", "a")?.nodes, nodes, "a hit returns the cached nodes and refreshes the entry");
+  cache.set("ts", "c", []);
+  assert.equal(cache.size, 2);
+  assert.equal(cache.get("ts", "b"), undefined, "the least recently used entry is evicted");
+  assert.ok(cache.get("ts", "a"));
+  assert.ok(cache.get("ts", "c"));
+  assert.equal(cache.get("js", "a"), undefined, "the same text in another language is a different block");
 });
 
-test("stable coordinator coalesces changing text and cancellation works before or after stability", () => {
-  const timers = new FakeTimers();
-  const idle = new FakeIdleDriver();
-  const queue = new CancelableIdleTaskQueue(idle);
-  const coordinator = new StableIdleTaskCoordinator<string>(queue, timers);
-  const ran: string[] = [];
-
-  coordinator.schedule("row", () => ran.push("old"));
-  const firstTimer = [...timers.timers.keys()][0]!;
-  assert.equal(timers.timers.get(firstTimer)!.delayMs, MARKDOWN_HIGHLIGHT_STABILITY_MS);
-  coordinator.schedule("row", () => ran.push("latest"));
-  assert.equal(timers.timers.has(firstTimer), false, "new text cancels the old stability timer");
-  const latestTimer = [...timers.timers.keys()][0]!;
-  timers.fire(latestTimer);
-  idle.fireNext();
-  assert.deepEqual(ran, ["latest"]);
-
-  coordinator.schedule("cancel-before-timer", () => ran.push("bad timer"));
-  coordinator.cancel("cancel-before-timer");
-  assert.equal(timers.timers.size, 0);
-
-  coordinator.schedule("cancel-after-timer", () => ran.push("bad idle"));
-  const timer = [...timers.timers.keys()][0]!;
-  timers.fire(timer);
-  coordinator.cancel("cancel-after-timer");
-  assert.throws(() => idle.fireNext(), /no pending idle request/);
-  assert.deepEqual(ran, ["latest"]);
+test("the block highlighter wraps rehype-highlight and reports unknown languages as null", async () => {
+  const highlighter = await loadCodeHighlighter();
+  const nodes = highlighter("ts", "const a = 1;\n");
+  assert.ok(nodes);
+  const keyword = nodes.find((node) => node.type === "element");
+  assert.deepEqual(keyword?.properties?.className, ["hljs-keyword"]);
+  const text = (list: readonly { value?: string; children?: unknown[] }[]): string =>
+    list.map((node) => node.value ?? text((node.children ?? []) as never)).join("");
+  assert.equal(text(nodes), "const a = 1;\n", "highlighting never changes the characters");
+  assert.equal(highlighter("not-a-language", "x"), null);
+  assert.equal(loadedCodeHighlighter(), highlighter);
 });
 
-test("timer fallback reports a timeout deadline and remains cancelable", () => {
-  const timers = new FakeTimers();
-  const fallback = createTimerIdleDriver(timers);
-  let deadline: IdleDeadlineLike | undefined;
-  const handle = fallback.request((value) => { deadline = value; }, 999);
-  const timer = [...timers.timers.keys()][0]!;
-  assert.equal(timers.timers.get(timer)!.delayMs, 0);
-  timers.fire(timer);
-  assert.equal(deadline?.didTimeout, true);
-  assert.equal(deadline?.timeRemaining(), 0);
+test("highlightCodeBlock runs the highlighter once per block and serves repeats from the cache", () => {
+  let calls = 0;
+  const fake: CodeHighlighter = (_language, text) => {
+    calls += 1;
+    return [{ type: "text", value: text }];
+  };
+  const text = `cache-test-${Date.now()}`;
+  assert.equal(highlightCodeBlock("ts", text, null), undefined, "without a highlighter an unseen block stays plain");
+  const runs = codeHighlighterRuns();
+  const first = highlightCodeBlock("ts", text, fake);
+  const second = highlightCodeBlock("ts", text, fake);
+  const withoutHighlighter = highlightCodeBlock("ts", text, null);
+  assert.equal(calls, 1);
+  assert.equal(codeHighlighterRuns(), runs + 1);
+  assert.equal(second, first);
+  assert.equal(withoutHighlighter, first, "a cached block needs no highlighter at all");
 
-  const cancelled = fallback.request(() => assert.fail("cancelled fallback ran"), 999);
-  fallback.cancel(cancelled);
-  assert.equal(timers.timers.size, 0);
-  assert.notEqual(handle, cancelled);
+  const throwing: CodeHighlighter = () => { throw new Error("parser failure"); };
+  assert.equal(highlightCodeBlock("ts", `${text}-throws`, throwing), null, "a parser failure leaves plain code");
+});
+
+test("createCodeHighlighter hands the transform a pre > code tree and returns the code's children", () => {
+  const highlighter = createCodeHighlighter((tree, file) => {
+    const code = tree.children![0]!.children![0]!;
+    assert.equal(code.tagName, "code");
+    assert.deepEqual(code.properties?.className, ["language-rust"]);
+    if (code.children![0]!.value === "unknown") file.message();
+    else code.children = [{ type: "element", tagName: "span", properties: { className: ["hljs-keyword"] }, children: [] }];
+  });
+  assert.equal(highlighter("rust", "fn")![0]!.tagName, "span");
+  assert.equal(highlighter("rust", "unknown"), null);
 });

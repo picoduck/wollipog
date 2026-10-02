@@ -24,7 +24,6 @@ if (fail) document.execCommand = () => false;
 
 const LABELED = [
   ["Default", "copy-btn", undefined],
-  ["Code Block", "copy-btn md-code-copy", "Copy Code"],
   ["Secondary", "btn", "Copy Pairing Link"],
   ["Primary", "btn primary", "Copy Pairing Link"],
 ] as const;
