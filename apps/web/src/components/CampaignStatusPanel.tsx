@@ -165,31 +165,40 @@ function AvailableCampaignStatus({
   const scrollRef = useRef<HTMLDivElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement | null>());
-  const returningToList = useRef(false);
+  // Putting the list back where it was waits for the rows that position needs: a remount restores
+  // the remembered scroll position, and Back restores it with focus on the row that was opened.
+  // It applies once that row renders, or once the list settles without it, and then lets go, so
+  // later scrolling and focus are the person's.
+  const pendingRestore = useRef<{ focus: boolean } | null>(memory.selectedItemId ? null : { focus: false });
 
   const openItem = (item: CampaignWorkItemSummary) => {
     // Captured on the way out, so Back puts the list exactly where it was.
     setMemory({ selectedItemId: item.id, focusItemId: item.id, scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop });
   };
   const closeItem = () => {
-    returningToList.current = true;
+    pendingRestore.current = { focus: true };
     setMemory({ selectedItemId: null });
   };
 
   useLayoutEffect(() => {
-    const scroller = scrollRef.current;
-    if (memory.selectedItemId) {
-      if (scroller) scroller.scrollTop = 0;
-      detailHeadingRef.current?.focus({ preventScroll: true });
-      return;
-    }
-    if (scroller) scroller.scrollTop = memory.scrollTop;
-    if (!returningToList.current) return;
-    returningToList.current = false;
-    if (memory.focusItemId) rowRefs.current.get(memory.focusItemId)?.focus({ preventScroll: true });
-  // Runs on the list/detail swap only; scroll and focus are then the person's.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (!memory.selectedItemId) return;
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    detailHeadingRef.current?.focus({ preventScroll: true });
   }, [memory.selectedItemId]);
+
+  const listSettled = data.list.status !== "loading" && !data.list.reloading;
+  const shownRows = data.list.items.length;
+  useLayoutEffect(() => {
+    const pending = pendingRestore.current;
+    if (!pending || memory.selectedItemId) return;
+    const row = memory.focusItemId ? rowRefs.current.get(memory.focusItemId) ?? null : null;
+    if (!row && !listSettled) return;
+    pendingRestore.current = null;
+    if (scrollRef.current) scrollRef.current.scrollTop = memory.scrollTop;
+    if (pending.focus && row) row.focus({ preventScroll: true });
+  // Reads the memory as it stood when the restore was requested; it reruns only as rows arrive.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memory.selectedItemId, shownRows, listSettled]);
 
   const heldChildren = data.summary.campaign?.heldChildren ?? [];
   return (

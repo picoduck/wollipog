@@ -448,17 +448,18 @@ export function RightPanel({
             findRequest={(target) => {
               // The request the blocker names, else one pending on the item's own child session.
               // Never another child's: an item with no listed request offers its child instead.
-              const descendant = (target.occurrenceId
-                ? descendantRequests.find((request) => request.occurrenceId === target.occurrenceId)
-                : undefined) ?? (target.sessionId
-                ? descendantRequests.find((request) => request.sessionId === target.sessionId)
-                : undefined);
-              if (descendant) return sessionRequestPanelKey(descendant.sessionId, descendant.occurrenceId);
+              // The named occurrence wins wherever it is listed; only then the child-session fallback.
               const own = standaloneApprovalForReview(session.pendingApproval);
               const ownOccurrence = own ? own.occurrenceId ?? own.requestId : null;
-              return ownOccurrence && (target.occurrenceId === ownOccurrence || target.sessionId === session.id)
-                ? sessionRequestPanelKey(session.id, ownOccurrence)
-                : null;
+              if (target.occurrenceId) {
+                if (target.occurrenceId === ownOccurrence) return sessionRequestPanelKey(session.id, ownOccurrence);
+                const named = descendantRequests.find((request) => request.occurrenceId === target.occurrenceId);
+                if (named) return sessionRequestPanelKey(named.sessionId, named.occurrenceId);
+              }
+              if (!target.sessionId) return null;
+              if (target.sessionId === session.id) return ownOccurrence ? sessionRequestPanelKey(session.id, ownOccurrence) : null;
+              const child = descendantRequests.find((request) => request.sessionId === target.sessionId);
+              return child ? sessionRequestPanelKey(child.sessionId, child.occurrenceId) : null;
             }}
             onOpenRequest={(requestKey) => {
               onSelectedRequestKeyChange(requestKey);

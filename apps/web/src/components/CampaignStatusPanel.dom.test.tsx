@@ -739,3 +739,66 @@ test("a member's summary that fails to refresh says so instead of passing off ol
     await panel.dispose();
   }
 });
+
+test("a blocker naming the Orchestrator's own request opens that request, not the child's", async () => {
+  harnessRequests.descendants = [pendingRequest("s_child", "occ_child")];
+  const blocked = item("cwi_5", {
+    primaryState: "blocked",
+    stateCauses: ["recorded_blocker"],
+    currentAttempt: { id: "catt_5", sessionId: "s_child", sessionTitle: "Child One" },
+    blocker: { reason: "Waiting on the Orchestrator's approval.", responsibleActor: "human", requestOccurrenceId: "occ_root", recordedAt: NOW, recordedBySessionId: "s_root" },
+  });
+  const { client } = fakeClient(() => ({ revision: 1, items: [blocked], nextCursor: null }), { cwi_5: detailOf(blocked) });
+  const awaiting = session({
+    orchestratorCampaign: campaign(workSummary()),
+    pendingApproval: { requestId: "occ_root", occurrenceId: "occ_root", title: "Run the merge command", options: [] },
+  });
+  const panel = await mount({ initial: awaiting, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Open Requests")!);
+    assert.equal(harnessRequests.selected[0], JSON.stringify(["s_root", "occ_root"]));
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Back before the remembered rows arrive still lands on the opened row once they do", async () => {
+  const all = Array.from({ length: 160 }, (_, index) => item(`cwi_${index + 1}`, { queuePosition: index + 1 }));
+  let hold: ReturnType<typeof deferred<void>> | null = null;
+  const client = {
+    ...fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), { cwi_120: detailOf(all[119]!) }).client,
+    campaignWorkItems: async (_id: string, query: string) => {
+      if (hold) await hold.promise;
+      const search = new URLSearchParams(query);
+      const offset = Number(search.get("cursor") ?? 0);
+      const limit = Number(search.get("limit"));
+      return { revision: 1, items: all.slice(offset, offset + limit), nextCursor: offset + limit < all.length ? String(offset + limit) : null, total: all.length };
+    },
+  } as ApiClient;
+  const panel = await mount({ initial: rootSession, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    for (let page = 0; page < 2; page += 1) {
+      await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent?.includes("Show More"))!);
+    }
+    await click(panel.container.querySelectorAll(".campaign-work-row")[119]!);
+    await act(async () => panel.state.setMode("launcher"));
+    // The remounted list waits on the server while the person goes Back.
+    hold = deferred<void>();
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Back to Work Items")!);
+    assert.notEqual(domWindow.document.activeElement?.classList.contains("campaign-work-row"), true);
+    await act(async () => { hold!.resolve(); });
+    await settle();
+    const rows = panel.container.querySelectorAll(".campaign-work-row");
+    assert.equal(rows.length, 150);
+    assert.equal(domWindow.document.activeElement, rows[119], "focus lands on the opened row once it renders");
+  } finally {
+    await panel.dispose();
+  }
+});
