@@ -1398,22 +1398,25 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (prop === null) return { props: new Set(), inside: new Set(writes.inside), insideAny: writes.insideAny, any: writes.any };
     return writes.any || writes.insideAny || writes.inside.has(prop) ? all() : none();
   };
-  /** On while `receivedWrites` reads which components a tag renders. */
+  /** On while `receivedWrites` reads which components a tag renders, and while `handed` reads functions. */
   let ignoringWrites = false;
+  /** On while a callee is read: what a parameter has written into it is not asked; a constant's still is. */
+  let ignoringParameterWrites = false;
+  const unasked = (declaration: Binding) => ignoringWrites || (ignoringParameterWrites && !isConstant(declaration));
   /** Whether a binding's value, or the value under one key of it, may have been replaced after it was bound. */
   const written = (declaration: Binding, prop?: string) => {
-    if (ignoringWrites) return false;
+    if (unasked(declaration)) return false;
     const writes = writesTo(declaration);
     return writes.any || writes.reassigned || (prop === undefined ? writes.props.size > 0 : writes.props.has(prop));
   };
   /** Whether, besides, something inside the object under that key may have been written. */
   const writtenInto = (declaration: Binding, prop: string) => {
-    if (ignoringWrites) return false;
+    if (unasked(declaration)) return false;
     const writes = writesTo(declaration);
     return written(declaration, prop) || writes.insideAny || writes.inside.has(prop);
   };
   /** Whether a binding is assigned again, so what it holds is not only what it was bound to. */
-  const reassigned = (declaration: ts.Node | "glyph" | undefined) => !ignoringWrites && isBinding(declaration) && writesTo(declaration).reassigned;
+  const reassigned = (declaration: ts.Node | "glyph" | undefined) => isBinding(declaration) && !unasked(declaration) && writesTo(declaration).reassigned;
   /** `obj.key` whose object has `key` written after it is bound. */
   const writtenMember = (node: ts.Node) => {
     if (!ts.isPropertyAccessExpression(node) || !ts.isIdentifier(node.expression)) return false;
@@ -2030,12 +2033,12 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     for (const call of viaValue) {
       const known = called.get(call) ?? new Set();
       called.set(call, known);
-      // Read without writes: a callee whose prop is replaced would read `unknown`, which only a computed
-      // callee reports, and a computed callee reads an object's values, not a prop. A component put in
-      // its place by assignment is used as a value, and reported as such.
-      readingCallee = functionsOnly = ignoringWrites = true;
+      // Read without asking what parameters have written: a callee whose prop is replaced would read
+      // `unknown`, which only a computed callee reports, and a computed callee reads an object's values,
+      // not a prop. What is written into a constant map is still asked (`M.b = pick()`; #2440 review).
+      readingCallee = functionsOnly = ignoringParameterWrites = true;
       let found: Rendered[];
-      try { found = componentsOf(call.expression); } finally { readingCallee = functionsOnly = ignoringWrites = false; }
+      try { found = componentsOf(call.expression); } finally { readingCallee = functionsOnly = ignoringParameterWrites = false; }
       for (const component of found) {
         if (known.has(component)) continue;
         known.add(component);
@@ -2134,8 +2137,28 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       }
     }
   }
-  /** The functions a value hands on: itself, or those it holds in an object or array, literal or constant. */
-  const handed = (input: ts.Node | undefined, seen = new Set<ts.Node>()): SourceFunction[] => {
+  /**
+   * Whether something is put into a constant's object after it is bound: a member assigned or
+   * deleted, a mutating method, or `Object.assign`. Handing the object on is not counted here; that
+   * is the use being judged.
+   */
+  const rewritten = (declaration: ts.VariableDeclaration): boolean => ts.isIdentifier(declaration.name) && usesOf(declaration.name)
+    .some((name) => {
+      if (name === declaration.name || declarationOf(name) !== declaration) return false;
+      let use: ts.Node = name;
+      while (isTransparent(use.parent)) use = use.parent;
+      const parent = use.parent;
+      if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === use) {
+        return isWrite(parent) || (ts.isPropertyAccessExpression(parent) && MUTATING_METHODS.has(parent.name.text)
+          && ts.isCallExpression(parent.parent) && parent.parent.expression === parent);
+      }
+      return ts.isCallExpression(parent) && parent.arguments[0] === use && parent.expression.getText() === "Object.assign";
+    });
+  /**
+   * The functions a value hands on: itself, or those it holds in an object or array, literal or
+   * constant; `unlisted` for a constant one written after it is bound, whose values cannot be listed.
+   */
+  const handed = (input: ts.Node | undefined, seen = new Set<ts.Node>()): (SourceFunction | "unlisted")[] => {
     const node = transparent(input);
     if (!node || seen.has(node)) return [];
     seen.add(node);
@@ -2145,7 +2168,9 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (ts.isIdentifier(node)) {
       const declaration = declarationOf(node);
       const value = declaration && declaration !== "glyph" && isConstant(declaration) ? transparent(declaration.initializer) : undefined;
-      if (value && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))) return handed(value, seen);
+      if (value && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))) {
+        return rewritten(declaration as ts.VariableDeclaration) ? ["unlisted"] : handed(value, seen);
+      }
     }
     // Read without writes: a replaced prop then yields what its callers pass, more to check, never less.
     functionsOnly = ignoringWrites = true;
@@ -2197,6 +2222,11 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
         : attribute.initializer && ts.isJsxExpression(attribute.initializer) ? [attribute.initializer.expression] : [];
       const label = ts.isJsxSpreadAttribute(attribute) ? `{...${attribute.expression.getText()}}` : attribute.name.getText();
       for (const fn of values.flatMap((value) => handed(value))) {
+        if (fn === "unlisted") {
+          unread.add(`${where(attribute)} <${element.tagName.getText()} ${label}> hands another package an object written after it is bound, `
+            + "so what it holds cannot be listed");
+          continue;
+        }
         if (!traced.has(fn)) continue;
         unread.add(`${where(attribute)} <${element.tagName.getText()} ${label}> hands ${declaredName(fn)?.text ?? "a function"} `
           + "to another package, so its arguments cannot be traced");
@@ -3765,6 +3795,23 @@ test("every route #2394 found that could hide an icon class is followed, reporte
   ].join("\n") }), {
     classes: ["called-only-icon", "member-icon", "seen-icon"],
     unread: ["Stored.tsx:4 Bare is used as a value, so its arguments cannot be traced", "Stored.tsx:6 Icon is used as a value, so its arguments cannot be traced"],
+  });
+  // A map written after it is bound cannot be listed, whether it is called through a computed key or
+  // handed to another package (#2440 review).
+  assert.deepEqual(scanOf({ "Rewritten.tsx": [
+    "import { Slot } from \"some-package\";",
+    "function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
+    "function Fixed() { return <svg className=\"fixed-icon\" />; }",
+    "function pick() { return Icon; }",
+    "const M: Record<string, typeof Icon> = { a: Fixed };",
+    "M.b = pick();",
+    "export const Uses = () => <><Icon className=\"seen-icon\" />{M[\"b\"]({ className: \"hidden-icon\" })}<Slot items={M} /></>;",
+  ].join("\n") }), {
+    classes: ["fixed-icon", "seen-icon"],
+    unread: [
+      "Rewritten.tsx:7 <Slot items> hands another package an object written after it is bound, so what it holds cannot be listed",
+      "Rewritten.tsx:7 M[\"b\"]() calls a value the scan cannot follow",
+    ],
   });
   // An object handed to a function in the sources is followed into it, which never calls the icon.
   assert.deepEqual(scanOf({ "Local.tsx": [
