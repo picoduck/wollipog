@@ -494,7 +494,7 @@ test("SessionDetail keeps a standalone request reachable through skeleton and em
     await flushAsyncWork();
 
     assert.ok(request(), "the standalone request remains reachable beside an authoritative empty state");
-    assert.match(fixture.scroller.textContent ?? "", /No Activity Yet/u);
+    assert.match(fixture.scroller.textContent ?? "", /Start the Conversation/u);
   } finally {
     await unmountFixture(fixture);
   }
@@ -549,7 +549,7 @@ test("recovery over a long cached transcript shows at the reader's lower edge wh
     // Neither the old band nor the chip render, and the top-of-reader notice stays away.
     assertNoDomNode(fixture.container.querySelector(".transcript-recovery-slot"));
     assertNoDomNode(fixture.container.querySelector(".follow-tail-chip"));
-    assertNoDomNode(fixture.container.querySelector(".transcript-load-notice"));
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -569,7 +569,7 @@ test("successful recovery leaves an idle tail with nothing below the last row an
       "the live region announces the check's completion");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
     assert.equal(followState(fixture), "following");
-    assertNoDomNode(fixture.container.querySelector(".transcript-load-notice"));
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -659,7 +659,7 @@ test("loading, empty and history-error transcripts render no follow control", as
       pages.releaseTail({ events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
     });
     await flushAsyncWork();
-    assert.ok(loading.container.textContent!.includes("No Activity Yet"), "the transcript is empty");
+    assert.ok(loading.container.textContent!.includes("Start the Conversation"), "the transcript is empty");
     assertNoDomNode(tailControl(loading), "an empty transcript has no tail");
   } finally {
     await unmountFixture(loading);
@@ -669,7 +669,7 @@ test("loading, empty and history-error transcripts render no follow control", as
   try {
     await act(async () => { pages.rejectTail(); });
     await flushAsyncWork();
-    assert.ok(failing.container.textContent!.includes("Activity Unavailable"), "history failed to load");
+    assert.ok(failing.container.textContent!.includes("Couldn't Load the Full Conversation"), "history failed to load");
     assertNoDomNode(tailControl(failing), "a history error has no tail");
     assertNoDomNode(failing.container.querySelector(".follow-tail-chip"));
   } finally {
@@ -772,9 +772,9 @@ test("recovery failure falls back to the existing error notice with its retry af
 
     assert.equal(recoveryActive(fixture), false, "the recovery pill yields to the failure state");
     assert.equal(recoveryStatusText(fixture), "");
-    const errorNotice = fixture.container.querySelector(".transcript-load-notice.error");
+    const errorNotice = fixture.container.querySelector(".transcript-history-notice[data-state='error']");
     assert.ok(errorNotice, "the failure keeps its explanatory notice");
-    const retry = errorNotice.querySelector("button");
+    const retry = errorNotice.querySelector(".notice-actions button");
     assert.ok(retry, "the failure keeps its retry affordance");
     assert.equal(retry.textContent, "Retry");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
@@ -804,14 +804,14 @@ test("an opening-window safety cut keeps one compact reach-back control", async 
     });
     await flushAsyncWork();
 
-    const control = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
+    const control = fixture.container.querySelector(".tl-earlier") as HTMLElement;
     assert.equal(
       control.textContent!.includes("A response near the beginning of the loaded activity may be incomplete."),
       false,
       "the capped fallback does not grow into a prose-and-button row",
     );
     const load = control.querySelector("button") as HTMLButtonElement;
-    assert.equal(load.getAttribute("aria-label"), "Load Earlier Activity");
+    assert.equal(load.firstChild?.textContent, "Load Earlier Activity");
     assert.equal(control.dataset.state, "idle");
     assert.equal(load.getAttribute("aria-describedby"), null,
       "the compact control has no missing visible description relationship");
@@ -830,7 +830,7 @@ test("an opening-window safety cut keeps one compact reach-back control", async 
       });
     });
     await flushAsyncWork();
-    assert.equal((fixture.container.querySelector(".transcript-earlier-activity button") as HTMLButtonElement)
+    assert.equal((fixture.container.querySelector(".tl-earlier button") as HTMLButtonElement)
       .getAttribute("aria-describedby"), null);
   } finally {
     await unmountFixture(fixture);
@@ -860,7 +860,7 @@ test("an underfilled partial opening automatically reaches a complete scrollable
       "opening recovery prepends without waiting for reader navigation");
     assert.deepEqual(pages.tailCalls.map((call) => call.alignToTurn), [true, true],
       "both the initial window and automatic opening fill request a semantic turn boundary");
-    assertNoDomNode(fixture.container.querySelector(".transcript-earlier-activity"),
+    assertNoDomNode(fixture.container.querySelector(".tl-earlier"),
       "the manual fallback stays out of the underfilled opening while recovery is active");
     const announcement = fixture.container.querySelector(
       "[data-earlier-activity-announcement]",
@@ -883,10 +883,10 @@ test("an underfilled partial opening automatically reaches a complete scrollable
     await flushAsyncWork(10);
 
     assert.equal(pages.tailCalls.length, 2, "a complete scrollable window stops automatic paging");
-    const fallback = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
+    const fallback = fixture.container.querySelector(".tl-earlier") as HTMLElement;
     assert.ok(fallback, "older history remains reachable after bounded opening recovery");
     assert.equal(fallback.dataset.state, "idle");
-    assert.equal(fallback.querySelector("button")?.getAttribute("aria-label"), "Load Earlier Activity");
+    assert.equal(fallback.querySelector("button")?.firstChild?.textContent, "Load Earlier Activity");
     assert.equal(announcement.textContent, "",
       "completing opening recovery stays silent until the reader requests history");
   } finally {
@@ -915,7 +915,7 @@ test("a desktop preview fills its opening window once and expansion preserves it
       "an underfilled preview prepends history without waiting for expansion");
     assert.equal(pages.tailCalls[1]!.alignToTurn, true,
       "preview fill recovers a semantic turn boundary");
-    assertNoDomNode(fixture.container.querySelector(".transcript-earlier-activity"),
+    assertNoDomNode(fixture.container.querySelector(".tl-earlier"),
       "the underfilled manual control stays hidden while preview fill runs");
 
     const earlierPage = fixture.events.slice(-15, -7);
@@ -977,7 +977,7 @@ test("expansion rechecks taller geometry without repeating the preview cursor", 
     });
     await flushAsyncWork(10);
     assert.equal(pages.tailCalls.length, 2, "the filled preview settles at its own height");
-    assert.ok(fixture.container.querySelector(".transcript-earlier-activity"));
+    assert.ok(fixture.container.querySelector(".tl-earlier"));
 
     setScrollerMetrics(fixture.scroller, { clientHeight: 700, scrollHeight: 600, scrollTop: 600 });
     await fixture.renderMode("expanded");
@@ -1037,8 +1037,8 @@ test("opening fill stops at its absolute page cap without duplicate requests", a
     await flushAsyncWork(20);
     assert.equal(pages.tailCalls.length, 11, "settling cannot issue a duplicate capped request");
     assert.equal(
-      (fixture.container.querySelector(".transcript-earlier-activity button") as HTMLButtonElement)
-        .getAttribute("aria-label"),
+      (fixture.container.querySelector(".tl-earlier button") as HTMLButtonElement)
+        .firstChild?.textContent,
       "Load Earlier Activity",
       "the pathological turn retains one compact manual fallback",
     );
@@ -1513,11 +1513,11 @@ test("an automatic load failure keeps an understandable manual retry path", asyn
       "[data-earlier-activity-announcement]",
     ) as HTMLElement;
     assert.equal(announcement.textContent, "Loading earlier activity.");
-    assert.equal(fixture.container.querySelector(".transcript-earlier-activity")?.getAttribute("data-state"), "loading");
+    assert.equal(fixture.container.querySelector(".tl-earlier")?.getAttribute("data-state"), "loading");
     await act(async () => pages.rejectTail());
     await flushAsyncWork();
 
-    const control = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
+    const control = fixture.container.querySelector(".tl-earlier") as HTMLElement;
     assert.equal(control.dataset.state, "error");
     assert.ok(control.textContent!.includes("Could not load earlier activity."));
     assert.equal(announcement.textContent, "Could not load earlier activity. Retry is available.");
@@ -1526,7 +1526,7 @@ test("an automatic load failure keeps an understandable manual retry path", asyn
     await act(async () => retry.click());
     assert.equal(pages.tailCalls.length, 3, "the fallback control retries the failed page");
     assert.equal(announcement.textContent, "Loading earlier activity.");
-    assert.equal(fixture.container.querySelector(".transcript-earlier-activity")?.getAttribute("data-state"), "loading");
+    assert.equal(fixture.container.querySelector(".tl-earlier")?.getAttribute("data-state"), "loading");
 
     const earlierPage = fixture.events.slice(-16, -8);
     await act(async () => {

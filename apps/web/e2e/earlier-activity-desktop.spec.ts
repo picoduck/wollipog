@@ -62,7 +62,7 @@ async function expectDesktopPrependAnchor(page: Page, navigate: (reader: Locator
     const viewport = row.closest<HTMLElement>(".detail-scroll")!.getBoundingClientRect();
     return Math.abs(row.getBoundingClientRect().top - viewport.top - Number(offset));
   }, before.offset)).toBeLessThan(1);
-  await expect(page.locator(".transcript-earlier-activity")).not.toBeInViewport();
+  await expect(page.locator(".tl-earlier")).not.toBeInViewport();
   await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
   expect(consoleErrors.filter((message) => message.includes("same key"))).toEqual([]);
 }
@@ -73,7 +73,7 @@ test("an event-heavy desktop opening fills itself before exposing earlier activi
   );
 
   const reader = page.locator(".detail-scroll");
-  const control = page.locator(".transcript-earlier-activity");
+  const control = page.locator(".tl-earlier");
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
   await expect.poll(() => reader.evaluate((element) => element.scrollHeight - element.clientHeight))
     .toBeGreaterThan(160);
@@ -82,7 +82,9 @@ test("an event-heavy desktop opening fills itself before exposing earlier activi
   await expect(control).toHaveAttribute("data-state", "idle");
   const fallback = control.getByRole("button", { name: "Load Earlier Activity" });
   await expect(fallback).toHaveCount(1);
-  expect(await fallback.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThanOrEqual(28);
+  // A quiet ghost button that says what it does (#2172), on the row's hairline rather than a prose row.
+  await expect(fallback).toHaveClass(/\bghost\b/u);
+  await expect(fallback).toHaveAccessibleName(/^Load Earlier Activity \(\d+ Earlier Events\)$/u);
   await expect(page.getByText("A response near the beginning of the loaded activity may be incomplete."))
     .toHaveCount(0);
   await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "following");
@@ -160,7 +162,7 @@ test("upward wheel input at the head loads the next page without a scroll event"
   await page.goto("/recovery-notice-e2e.html?pagination=resolve&pagination-delay=300&height=800&width=1000");
   const reader = page.locator(".detail-scroll");
   await positionPausedReader(page, reader, 0);
-  await expect(page.locator(".transcript-earlier-activity")).toBeInViewport();
+  await expect(page.locator(".tl-earlier")).toBeInViewport();
   const before = await renderedAnchor(reader);
 
   await reader.hover();
@@ -178,7 +180,7 @@ test("upward wheel input at the head loads the next page without a scroll event"
     const viewport = row.closest<HTMLElement>(".detail-scroll")!.getBoundingClientRect();
     return Math.abs(row.getBoundingClientRect().top - viewport.top - Number(offset));
   }, before.offset)).toBeLessThan(1);
-  await expect(page.locator(".transcript-earlier-activity")).not.toBeInViewport();
+  await expect(page.locator(".tl-earlier")).not.toBeInViewport();
   await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
 });
 
@@ -201,7 +203,7 @@ test("a failed automatic load exposes Retry and a successful retry restores the 
     "/recovery-notice-e2e.html?pagination=retry&pagination-delay=300&height=800&width=1000",
   );
   const reader = page.locator(".detail-scroll");
-  const control = page.locator(".transcript-earlier-activity");
+  const control = page.locator(".tl-earlier");
   const announcement = page.locator("[data-earlier-activity-announcement]");
   await positionPausedReader(page, reader, 0);
 
@@ -235,7 +237,7 @@ test("keyboard fallback activation keeps focus through loading and history exhau
     "/recovery-notice-e2e.html?pagination=resolve&one-earlier-page=1&pagination-delay=300&height=800&width=1000",
   );
   const reader = page.locator(".detail-scroll");
-  const control = page.locator(".transcript-earlier-activity");
+  const control = page.locator(".tl-earlier");
   await positionPausedReader(page, reader, 0);
 
   const fallback = control.getByRole("button", { name: "Load Earlier Activity" });
@@ -253,7 +255,7 @@ test("pointer fallback activation does not force focus through pagination", asyn
     "/recovery-notice-e2e.html?pagination=resolve&pagination-delay=300&height=800&width=1000",
   );
   const reader = page.locator(".detail-scroll");
-  const control = page.locator(".transcript-earlier-activity");
+  const control = page.locator(".tl-earlier");
   await positionPausedReader(page, reader, 0);
 
   await control.getByRole("button", { name: "Load Earlier Activity" }).click();
@@ -269,7 +271,7 @@ test("exhausting earlier history removes the fallback and ignores further head i
     "/recovery-notice-e2e.html?pagination=resolve&one-earlier-page=1&pagination-delay=150&height=800&width=1000",
   );
   const reader = page.locator(".detail-scroll");
-  const control = page.locator(".transcript-earlier-activity");
+  const control = page.locator(".tl-earlier");
   const announcement = page.locator("[data-earlier-activity-announcement]");
   await positionPausedReader(page, reader, 0);
 

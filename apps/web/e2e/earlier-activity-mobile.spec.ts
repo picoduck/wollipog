@@ -15,7 +15,7 @@ test("the first native mobile touch traversal loads earlier activity", async ({ 
   await page.goto("/recovery-notice-e2e.html?pagination=1&height=720&width=412");
 
   const reader = page.locator(".detail-scroll");
-  const control = page.locator(".transcript-earlier-activity");
+  const control = page.locator(".tl-earlier");
   await expect(control).toBeVisible();
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
   await expect.poll(() => reader.evaluate((element) => element.scrollHeight - element.clientHeight))
@@ -58,7 +58,7 @@ test("an event-heavy mobile opening fills itself before exposing earlier activit
   );
 
   const reader = page.locator(".detail-scroll");
-  const control = page.locator(".transcript-earlier-activity");
+  const control = page.locator(".tl-earlier");
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
   await expect.poll(() => reader.evaluate((element) => element.scrollHeight - element.clientHeight))
     .toBeGreaterThan(160);
@@ -79,7 +79,7 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
   await page.goto("/recovery-notice-e2e.html?pagination=resolve&live=1&height=720&width=412");
 
   const reader = page.locator(".detail-scroll");
-  const control = page.locator(".transcript-earlier-activity");
+  const control = page.locator(".tl-earlier");
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
   await reader.dispatchEvent("wheel", { deltaY: -40 });
   await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
@@ -199,7 +199,7 @@ test("a downward finger drag at the head loads the next page without a scroll ev
   await page.goto("/recovery-notice-e2e.html?pagination=resolve&pagination-delay=300&height=720&width=412");
 
   const reader = page.locator(".detail-scroll");
-  const control = page.locator(".transcript-earlier-activity");
+  const control = page.locator(".tl-earlier");
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
   await reader.dispatchEvent("wheel", { deltaY: -40 });
   await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");

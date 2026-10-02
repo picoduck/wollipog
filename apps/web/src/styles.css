@@ -2097,7 +2097,8 @@ button.status { cursor: pointer; }
 /* Session-level notices sit in the session column under its bar. */
 .session-detail > .notice { margin: var(--space-2) var(--space-3); }
 /* A missing session's state sits on the page gutter, under the bar's Back (#2202). */
-.session-detail > .state { padding-right: var(--page-gutter); padding-left: var(--page-gutter); }
+.session-detail > .state,
+.session-detail > .transcript-skeleton { padding-right: var(--page-gutter); padding-left: var(--page-gutter); }
 .session-detail > .notice.state-error { margin-right: var(--page-gutter); margin-left: var(--page-gutter); }
 .notice-actions {
   display: flex;
@@ -15055,14 +15056,34 @@ body.shell-dock-dragging * {
   .outbound-event-kinds { grid-template-columns: minmax(0, 1fr); }
 }
 
-.transcript-load-notice {
-  position: sticky; top: 8px; z-index: 3; display: flex; align-items: center;
-  justify-content: center; gap: 8px; width: fit-content; max-width: calc(100% - 24px);
-  margin: 8px auto; padding: 5px 9px; border: 1px solid var(--border); border-radius: 999px;
-  color: var(--text-dim); background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
-  box-shadow: var(--shadow); font-size: 12px;
+/* The reading column's one history notice (#2172; docs/design-system.md §12.4, §13.2). It is the
+   first thing in the reader and sticks to its top, so a failed or partial load stays in view while
+   the reader is at the tail. */
+.notice.transcript-history-notice {
+  /* Its title, body and actions wrap onto several lines in a narrow reader, so the tone icon is
+     pinned to the first line, which is as tall as the Retry button beside it. */
+  align-items: start;
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  margin-bottom: var(--space-3);
+  box-shadow: var(--elev-1);
 }
-.transcript-load-notice.error { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+/* It sticks below the reader's top padding; this strip of the page background covers that padding,
+   so rows scrolling past never show above the notice. */
+.notice.transcript-history-notice::before {
+  content: "";
+  position: absolute;
+  right: -1px;
+  bottom: 100%;
+  left: -1px;
+  height: var(--space-6);
+  background: var(--bg);
+}
+.notice.transcript-history-notice .notice-icon,
+.notice.transcript-history-notice .notice-head { min-height: var(--control-h-sm); }
+.notice.transcript-history-notice .notice-head { align-items: center; }
+.transcript-history-error { font: var(--type-small); font-family: var(--font-mono); overflow-wrap: anywhere; }
 
 /* The floating tail control (#2153; docs/design-system.md §3.1, §13.2): one .btn.sm at the reader's
    lower edge, where people watching the newest activity look (#56). Its anchor is a zero-height
@@ -15111,32 +15132,56 @@ body.shell-dock-dragging * {
   margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--text-dim); background: var(--bg-elev); font-size: var(--text-sm);
 }
-.transcript-earlier-activity {
-  display: flex; align-items: center; justify-content: center; gap: 8px;
-  min-height: 30px; padding: 2px 12px 0; color: var(--text-dim); font-size: var(--text-sm);
+/* The head of a bounded window (#2172): one row in every state, a hairline, centered content and a
+   hairline. The content is Load Earlier Activity, a loading line or a compact danger notice. */
+.tl-earlier {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-block: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
 }
-.transcript-earlier-activity[data-state="idle"] {
-  justify-content: flex-start;
+.tl-earlier::before,
+.tl-earlier::after {
+  content: "";
+  flex: 1 1 var(--space-4);
+  min-width: var(--space-4);
+  border-top: 1px solid var(--border);
 }
-.transcript-earlier-activity-fallback {
-  width: 28px; height: 28px; padding: 0;
+.tl-earlier-content { flex: 0 1 auto; min-width: 0; }
+/* The failed row's notice keeps its sentence and Retry on one line while the hairlines have room. */
+.tl-earlier .notice.compact .notice-body { flex-basis: auto; }
+.tl-earlier[data-state="loading"] .tl-earlier-content {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
 }
-.transcript-earlier-activity.error {
-  color: var(--red);
-}
-.transcript-skeleton { display: grid; gap: 20px; padding: 28px 20px; }
-.transcript-skeleton-row { display: grid; gap: 8px; width: min(68%, 620px); }
-.transcript-skeleton-row.user { justify-self: end; width: min(54%, 480px); }
-.transcript-skeleton-row.short { width: min(45%, 400px); }
-.transcript-skeleton-row span {
-  display: block; height: 12px; border-radius: 999px;
+/* The transcript skeleton (§12.3): two turns, each a right-aligned bubble, a work bar and three
+   prose lines, at the reader's own measure. */
+.transcript-skeleton { display: grid; gap: var(--space-8); padding-block: var(--space-6); }
+.transcript-skeleton-turn { display: grid; gap: var(--space-4); }
+.transcript-skeleton-bubble,
+.transcript-skeleton-work,
+.transcript-skeleton-prose > span {
+  display: block;
   background: linear-gradient(90deg, var(--bg-elev-2) 25%, color-mix(in srgb, var(--border) 70%, var(--bg-elev-2)) 50%, var(--bg-elev-2) 75%);
-  background-size: 200% 100%; animation: transcript-shimmer 1.4s ease-in-out infinite;
+  background-size: 200% 100%;
+  animation: transcript-shimmer 1.4s ease-in-out infinite;
 }
-.transcript-skeleton-row span:last-child { width: 62%; }
+.transcript-skeleton-bubble { justify-self: end; width: min(60%, 420px); height: var(--space-10); border-radius: var(--radius-lg); }
+.transcript-skeleton-work { width: min(40%, 200px); height: var(--space-5); border-radius: var(--radius-sm); }
+.transcript-skeleton-prose { display: grid; gap: var(--space-2); }
+.transcript-skeleton-prose > span { height: var(--space-3); border-radius: var(--radius-xs); }
+.transcript-skeleton-prose > span:nth-child(2) { width: 88%; }
+.transcript-skeleton-prose > span:nth-child(3) { width: 56%; }
+.transcript-skeleton-sentence { margin: 0; color: var(--text-dim); font: var(--type-body); }
 @keyframes transcript-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .transcript-skeleton-row span { animation: none; }
+  .transcript-skeleton-bubble,
+  .transcript-skeleton-work,
+  .transcript-skeleton-prose > span { animation: none; }
 }
 
 /* Usage accounting ------------------------------------------------------- */

@@ -674,7 +674,7 @@ test("real Inbox reading hints and resume keys match preview and expanded follow
   await expect(follow).toHaveAttribute("data-follow-tail-state", "paused");
   // This session has no activity yet: an empty transcript has no tail, so the reading keys still
   // drive the follow state but nothing offers to jump to it.
-  await expect(page.getByText("No Activity Yet")).toBeVisible();
+  await expect(page.getByText("Start the Conversation")).toBeVisible();
   await expect(jump).toHaveCount(0);
   // The idle composer below the reader offers R, and still no strip sits between them (#2166).
   await expect(page.locator(".composer-reply-hint kbd")).toHaveText("R");

@@ -97,10 +97,10 @@ function stateCallSites(): { file: string; props: string }[] {
 /**
  * TERMINAL states only. A loading, offline, error or no-results state is a transient answer rather
  * than an empty screen, and decorating it would be claiming the app has nothing when it simply does
- * not know yet. `State` names those with its `variant`; a variant computed from a placeholder is
- * transient too, and the "No Activity Yet" wait is recognised by its content.
+ * not know yet. `State` names those with its `variant`, and a variant computed from a placeholder is
+ * transient too.
  */
-const transient = (props: string) => /variant=|Waiting/.test(props);
+const transient = (props: string) => /variant=/.test(props);
 
 test("the empty states a user actually sees have an icon", () => {
   // The first version of this checked that the PROPS EXIST on the component. They did, and not one

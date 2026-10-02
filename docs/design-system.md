@@ -1716,6 +1716,24 @@ The page has one heading. On desktop the session bar keeps only Back and the sta
 (`#page-title`; Loading's is visually hidden). On phones the top bar shows the state's title, the
 state leaves its own out, and the bar has no panel toggles.
 
+**A session's reading column** (#2172) shows one state at a time, at its top left, with no follow
+control in any of them:
+
+| State | Presentation |
+| --- | --- |
+| Loading | Two turn-shaped skeleton placeholders (a right-aligned bubble, a work bar, three prose lines). After 3s: "Loading a long conversation ({count} events)…" when the snapshot has a count, otherwise "Loading the conversation…". |
+| Awaiting the first prompt | Compact `State` "Start the Conversation", "{Agent} is ready in {project} on {machine}." and **Browse Files** (opens the Files tab). |
+| Starting | Compact `State` "Starting {Agent}" with a spinner tile. |
+| Ended before any activity | Compact `State` "No Messages", "This session ended before anything was sent." No action: the session notice slot offers the way back. |
+| History failed or partial | One compact danger `Notice`, sticky at the top: "Couldn't Load the Full Conversation", how much loaded and from which machine, **Retry** and Show Details (the raw error). It replaces the unavailable state when nothing loaded. |
+| Cached while disconnected | One neutral compact `Notice`: "Showing cached activity while disconnected." |
+
+The head of a bounded window is one `.tl-earlier` row in every state: a hairline, centered content, a
+hairline. Idle is a `.btn.sm.ghost` "Load Earlier Activity" with a `.count` of older events when
+known; loading is a spinner and "Loading earlier activity…"; failed is a compact danger notice with
+Retry. Scrolling to the top still loads automatically; the row is the fallback for people who cannot
+scroll to trigger it (#313).
+
 ---
 
 ## 13. Toasts and Notices

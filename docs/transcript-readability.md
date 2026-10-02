@@ -114,11 +114,17 @@ Presentation is deterministic:
 
 | Cache/recovery state | Presentation |
 | --- | --- |
-| Empty, never complete, connected | Bounded loading skeleton |
-| Empty, completed | “No Activity Yet,” even while a reconnect refresh runs |
+| Empty, never complete, connected | Two turn-shaped skeleton placeholders; after 3 seconds, “Loading a long conversation ({count} events)…” or “Loading the conversation…” |
+| Empty, completed | A compact state for the session, even while a reconnect refresh runs: “Start the Conversation” (awaiting the first prompt, with Browse Files), “Starting {Agent}”, or “No Messages” (stopped, failed or archived) |
 | Content present | Timeline remains mounted during refresh, failure, or disconnect |
 | Never complete and offline/unauthorized | Reconnect or pairing-specific unavailable state |
-| GET failure | Safe history-recovery Retry; no prompt replay |
+| GET failure, with or without content | One danger notice at the top of the reading column, “Couldn't Load the Full Conversation”: how much loaded and from which machine, a safe history-recovery Retry (no prompt replay), and the raw error behind Show Details |
+| Content present, disconnected | One neutral notice, “Showing cached activity while disconnected.” |
+
+The head of a bounded window is one `.tl-earlier` row in every state: a hairline, centered content and
+a hairline. It holds Load Earlier Activity (with the count of older events when known), a loading
+line, or a compact danger notice with Retry. Scrolling to the top still loads automatically; the row
+is the fallback for people who cannot scroll to trigger it.
 
 Run and pod member columns use the same per-session state. Fleet recovery reports each member's start
 and failure independently, preserves its concurrency ceiling and fair rotation, and retries transient

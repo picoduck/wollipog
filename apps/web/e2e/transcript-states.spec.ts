@@ -1,0 +1,109 @@
+import { expect, test, type Page } from "@playwright/test";
+
+/** The reading column's load, empty and history-error states in a real browser (#2172). */
+
+test.use({ reducedMotion: "reduce" });
+
+async function open(page: Page, query: string) {
+  await page.goto(`/transcript-states-e2e.html?${query}`);
+  await expect(page.locator(".detail-scroll")).toBeVisible();
+}
+
+/** The reader's content box: where a row in the reading column starts and ends. */
+async function readingColumn(page: Page) {
+  return page.locator(".detail-scroll").evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {
+      left: box.left + Number.parseFloat(style.paddingLeft),
+      right: box.right - Number.parseFloat(style.paddingRight),
+      top: box.top + Number.parseFloat(style.paddingTop),
+    };
+  });
+}
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test.describe(`at ${viewport.width}px`, () => {
+    test.use({ viewport });
+
+    test("an empty session's state sits at the top left of the reading column", async ({ page }) => {
+      await open(page, "state=awaiting");
+      const title = page.getByText("Start the Conversation");
+      await expect(title).toBeVisible();
+      await expect(page.getByText("Claude Code is ready in Wollipog on Build Box.")).toBeVisible();
+      const column = await readingColumn(page);
+      const box = (await page.locator(".detail-scroll .state").boundingBox())!;
+      expect(Math.abs(box.x - column.left)).toBeLessThanOrEqual(1);
+      expect(box.y - column.top).toBeLessThanOrEqual(32);
+      await page.getByRole("button", { name: "Browse Files" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-right-panel-mode", "files");
+      await expect(page.locator(".transcript-tail-control")).toHaveCount(0);
+    });
+
+    test("a history failure is one notice that stays at the top of the reading column", async ({ page }) => {
+      await open(page, "state=history-partial");
+      const notice = page.locator(".detail-scroll .notice");
+      await expect(notice).toHaveCount(1);
+      await expect(notice).toContainText("Couldn't Load the Full Conversation");
+      await expect(notice).toContainText("Loaded 9 of 60 events from Build Box.");
+      await expect(page.getByText("Activity Unavailable")).toHaveCount(0);
+      await expect(page.getByText(/502 Bad Gateway|Could not load complete/u)).toHaveCount(0);
+      const column = await readingColumn(page);
+      const box = (await notice.boundingBox())!;
+      expect(Math.abs(box.x - column.left)).toBeLessThanOrEqual(1);
+      expect(Math.abs(box.x + box.width - column.right)).toBeLessThanOrEqual(1);
+      // The reader opens at the tail; the notice is still in view.
+      await expect(notice).toBeInViewport();
+      await notice.getByRole("button", { name: "Show Details" }).click();
+      await expect(notice.locator(".notice-details-body")).toHaveText("Could not load complete session activity.");
+    });
+
+    test("the earlier-activity row centers its action between two hairlines", async ({ page }) => {
+      await open(page, "state=earlier&older=hold");
+      await page.locator("[data-virtual-row]").first().waitFor();
+      const reader = page.locator(".detail-scroll");
+      await reader.evaluate((element) => { element.scrollTop = 0; });
+      const row = page.locator(".tl-earlier");
+      await expect(row).toHaveAttribute("data-state", "idle");
+      const load = row.getByRole("button", { name: /^Load Earlier Activity/u });
+      await expect(load).toBeVisible();
+      const geometry = await row.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const before = getComputedStyle(element, "::before");
+        const after = getComputedStyle(element, "::after");
+        const action = element.querySelector("button")!.getBoundingClientRect();
+        return {
+          rowCenter: box.left + box.width / 2,
+          actionCenter: action.left + action.width / 2,
+          hairlines: [before.borderTopWidth, after.borderTopWidth],
+        };
+      });
+      expect(Math.abs(geometry.rowCenter - geometry.actionCenter)).toBeLessThanOrEqual(1);
+      expect(geometry.hairlines).toEqual(["1px", "1px"]);
+      await load.click();
+      await expect(row).toHaveAttribute("data-state", "loading");
+      await expect(row).toHaveText("Loading earlier activity…");
+    });
+  });
+}
+
+test("a failed earlier load is a compact danger notice with Retry in the row", async ({ page }) => {
+  await open(page, "state=earlier&older=fail");
+  await page.locator("[data-virtual-row]").first().waitFor();
+  await page.locator(".detail-scroll").evaluate((element) => { element.scrollTop = 0; });
+  await page.locator(".tl-earlier").getByRole("button", { name: /^Load Earlier Activity/u }).click();
+  const row = page.locator(".tl-earlier");
+  await expect(row).toHaveAttribute("data-state", "error");
+  const notice = row.locator(".notice.compact.t-danger");
+  await expect(notice).toContainText("Could not load earlier activity.");
+  await expect(notice.getByRole("button", { name: "Retry" })).toBeVisible();
+});
+
+test("a slow load says what it is waiting for after 3 seconds", async ({ page }) => {
+  await page.clock.install();
+  await open(page, "state=loading&count=1240");
+  await expect(page.locator(".transcript-skeleton-turn")).toHaveCount(2);
+  await expect(page.locator(".transcript-skeleton-sentence")).toHaveCount(0);
+  await page.clock.runFor(3_000);
+  await expect(page.locator(".transcript-skeleton-sentence")).toHaveText("Loading a long conversation (1,240 events)…");
+});

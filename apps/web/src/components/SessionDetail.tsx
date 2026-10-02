@@ -60,7 +60,8 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { SessionPlaceholder } from "./SessionPlaceholder.js";
 import { sessionUnarchiveRestarts } from "../archive-actions.js";
 import { unarchiveSession } from "../session-unarchive.js";
-import { TranscriptSkeleton } from "./TranscriptSkeleton.js";
+import { TranscriptSkeleton, transcriptLoadingSentence } from "./TranscriptSkeleton.js";
+import { TranscriptEmptyState, TranscriptHistoryNotice, transcriptEmptyKind } from "./TranscriptReadingStates.js";
 import { clearRoutedSessionLookup, setRoutedSessionLookup, useRoutedSessionLookup } from "../routed-session-lookup.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
@@ -4016,10 +4017,14 @@ function SessionDetailLoaded({
   const lastItem = items[items.length - 1];
   const workingLabel =
     lastItem && lastItem.kind === "tool_call" && lastItem.status !== "completed" ? lastItem.title : undefined;
+  // A session that is starting with nothing to show yet is an empty transcript that says so
+  // ("Starting Claude Code", #2172), not a lone Working row.
+  const startingWithoutActivity = session.status === "starting" && items.length === 0 && !showOptimistic &&
+    activeTurnProgress === null && (session.pendingPrompts?.length ?? 0) === 0;
   const transcript = transcriptPresentation({
     itemCount: items.length,
     hasOptimistic: showOptimistic,
-    working: activeTurnVisible,
+    working: activeTurnVisible && !startingWithoutActivity,
     history: eventHistory,
     conn,
   });
@@ -5351,9 +5356,12 @@ function SessionDetailLoaded({
               }}
             >
               {(transcript.notice === "stale" || transcript.notice === "error") && (
-                <TranscriptLoadNotice
+                <TranscriptHistoryNotice
                   kind={transcript.notice}
                   error={transcript.error}
+                  loaded={evs?.length ?? 0}
+                  total={session.messageCount > 0 ? session.messageCount : undefined}
+                  machine={runnerDisp.name || undefined}
                   canRetry={conn === "online" && !transcript.busy}
                   onRetry={() => setHistoryRetry((value) => value + 1)}
                 />
@@ -5372,6 +5380,9 @@ function SessionDetailLoaded({
                   available={eventWindow?.hasOlder === true}
                   loading={eventWindow?.loadingOlder === true}
                   error={eventWindow?.error ?? null}
+                  // Seqs count from 1 without gaps within an epoch, so the loaded window's base
+                  // says how many events sit above it.
+                  olderCount={eventWindow ? eventWindow.baseSeq - 1 : undefined}
                   onLoad={loadEarlierFromControl}
                   fallbackFocusRef={scrollRef}
                 />
@@ -5383,16 +5394,25 @@ function SessionDetailLoaded({
                 ready={openingHistoryFillSettled}
               />
               {transcript.body === "skeleton" ? (
-                <TranscriptSkeleton />
+                <TranscriptSkeleton sentence={transcriptLoadingSentence(session.messageCount)} />
               ) : transcript.body === "unavailable" ? (
-                <State
-                  variant={transcript.error ? "error" : "offline"}
-                  title={conn === "unauthorized" ? "Pair to Load Activity" : "Activity Unavailable"}
-                >
-                  {transcript.error ?? (conn === "offline" ? "Reconnect to load this transcript." : "This device needs access to the control plane.")}
-                </State>
+                // A failed load is the history notice above, alone (#2172); only a disconnected or
+                // unpaired device with nothing cached still needs a state here.
+                !transcript.error && (
+                  <State variant="offline" title={conn === "unauthorized" ? "Pair to Load Activity" : "Activity Unavailable"}>
+                    {conn === "offline" ? "Reconnect to load this transcript." : "This device needs access to the control plane."}
+                  </State>
+                )
               ) : transcript.body === "empty" && (session.pendingPrompts?.length ?? 0) === 0 ? (
-                <State compact title="No Activity Yet">Waiting for the agent…</State>
+                <TranscriptEmptyState
+                  kind={transcriptEmptyKind(session)}
+                  agent={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
+                  project={currentProjectName ?? undefined}
+                  machine={runnerDisp.name || undefined}
+                  onBrowseFiles={mode === "expanded" && runnerSupportsProtocol(runner?.protocolVersion, "sessionFiles")
+                    ? () => rightPanel.show("files")
+                    : undefined}
+                />
               ) : (
                 <>
                   {items.length > 0 && (
@@ -7153,18 +7173,23 @@ function GuardrailHelp({ label, hint }: { label: string; hint: string }) {
   );
 }
 
-/** Head of a bounded window: the transcript continues above, but only on request. Rendering it as a
- * real button keeps the reach-back available without a pointer scroll. */
+/** Head of a bounded window: the transcript continues above, but only on request. Scrolling to the
+ * top loads it automatically; this row is the fallback for people who cannot scroll to trigger that
+ * (#313). It is one `.tl-earlier` row in every state (#2172): a hairline, centered content and a
+ * hairline, holding Load Earlier Activity, a loading line or a compact danger notice with Retry. */
 export function EarlierActivityControl({
   available,
   loading,
   error,
+  olderCount,
   onLoad,
   fallbackFocusRef,
 }: {
   available: boolean;
   loading: boolean;
   error: string | null;
+  /** Events above the loaded window, when known. */
+  olderCount?: number;
   onLoad: () => boolean;
   fallbackFocusRef: { current: HTMLElement | null };
 }) {
@@ -7244,16 +7269,9 @@ export function EarlierActivityControl({
   // surface and remains inert for sessions that opened with no earlier history.
   if (loading) {
     return (
-      <div
-        ref={rootRef}
-        className="transcript-earlier-activity"
-        data-state="loading"
-        tabIndex={-1}
-        role="group"
-        aria-label="Loading Earlier Activity"
-      >
-        <Spinner decorative />
-        <span>Loading earlier activity…</span>
+      <div ref={rootRef} className="tl-earlier" data-state="loading" tabIndex={-1} role="group"
+        aria-label="Loading Earlier Activity">
+        <span className="tl-earlier-content"><Spinner decorative />Loading earlier activity…</span>
       </div>
     );
   }
@@ -7264,24 +7282,26 @@ export function EarlierActivityControl({
 
   if (error) {
     return (
-      <div ref={rootRef} className="transcript-earlier-activity error" data-state="error" tabIndex={-1}>
-        <span>{error}</span>
-        <button ref={actionRef} className="btn ghost sm" type="button" onClick={load}>Retry</button>
+      <div ref={rootRef} className="tl-earlier" data-state="error" tabIndex={-1}>
+        <Notice compact tone="danger" className="tl-earlier-content"
+          actions={<button ref={actionRef} className="btn sm" type="button" onClick={load}>Retry</button>}>
+          {error}
+        </Notice>
       </div>
     );
   }
 
+  const count = olderCount !== undefined && olderCount > 0 ? olderCount : undefined;
   return (
-    <div ref={rootRef} className="transcript-earlier-activity" data-state="idle" tabIndex={-1}>
-      <button
-        ref={actionRef}
-        className="icon-btn transcript-earlier-activity-fallback"
-        type="button"
-        onClick={load}
-        aria-label="Load Earlier Activity"
-        title="Load Earlier Activity"
-      >
-        <ArrowUpIcon size={14} />
+    <div ref={rootRef} className="tl-earlier" data-state="idle" tabIndex={-1}>
+      <button ref={actionRef} className="btn sm ghost tl-earlier-content" type="button" onClick={load}>
+        Load Earlier Activity
+        {count !== undefined && (
+          <>
+            <span className="count" aria-hidden="true">{count.toLocaleString("en-US")}</span>
+            <span className="sr-only"> ({count.toLocaleString("en-US")} Earlier {count === 1 ? "Event" : "Events"})</span>
+          </>
+        )}
       </button>
     </div>
   );
@@ -7306,28 +7326,4 @@ function providerHistoryRejection(items: readonly TimelineItem[]): string | unde
     if (item.kind === "error" && item.message.startsWith(PROVIDER_HISTORY_REJECTION)) return item.message;
   }
   return undefined;
-}
-
-function TranscriptLoadNotice({
-  kind,
-  error,
-  canRetry,
-  onRetry,
-}: {
-  kind: "stale" | "error";
-  error: string | null;
-  canRetry: boolean;
-  onRetry: () => void;
-}) {
-  const message = kind === "stale"
-    ? "Showing cached activity while disconnected."
-    : `Could not refresh activity${error ? `: ${error}` : "."}`;
-  return (
-    <div className={`transcript-load-notice ${kind}`} role="status">
-      <span>{message}</span>
-      {kind === "error" && (
-        <button className="btn ghost sm" type="button" disabled={!canRetry} onClick={onRetry}>Retry</button>
-      )}
-    </div>
-  );
 }
