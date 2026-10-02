@@ -111,6 +111,30 @@ test("a failed earlier load is a compact danger notice with Retry in the row", a
   await expect(notice.getByRole("button", { name: "Retry" })).toBeVisible();
 });
 
+test.describe("in a short Inbox preview", () => {
+  test.use({ viewport: { width: 390, height: 260 } });
+
+  test("the history notice keeps at most half the reader and its details stay reachable", async ({ page }) => {
+    await open(page, "state=history-error&mode=preview");
+    const band = page.locator(".transcript-history-band");
+    const notice = band.locator(".notice");
+    await expect(notice).toContainText("Couldn't Load the Full Conversation");
+    await notice.getByRole("button", { name: "Show Details" }).click();
+    const details = notice.locator(".notice-details-body");
+    await expect(details).toHaveText("Could not load complete session activity.");
+    const sizes = await page.evaluate(() => ({
+      band: document.querySelector<HTMLElement>(".transcript-history-band")!.getBoundingClientRect().height,
+      reader: document.querySelector<HTMLElement>(".detail-reader")!.getBoundingClientRect().height,
+    }));
+    expect(sizes.band).toBeLessThanOrEqual(sizes.reader / 2 + 1);
+    // Whatever does not fit scrolls inside the band rather than being clipped by the reader.
+    await details.scrollIntoViewIfNeeded();
+    await expect(details).toBeInViewport();
+    await notice.getByRole("button", { name: "Retry" }).scrollIntoViewIfNeeded();
+    await expect(notice.getByRole("button", { name: "Retry" })).toBeInViewport();
+  });
+});
+
 test("a slow load says what it is waiting for after 3 seconds", async ({ page }) => {
   await page.clock.install();
   await open(page, "state=loading&count=1240");

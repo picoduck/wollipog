@@ -2750,7 +2750,7 @@ button.status { cursor: pointer; }
   font: inherit;
   min-width: 0;
   max-width: none;
-  max-height: none;
+  max-height: 50%;
   padding: var(--space-1);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -4107,7 +4107,7 @@ textarea {
   cursor: pointer;
 }
 .approval-review-details .approval-context {
-  max-height: none;
+  max-height: 50%;
   margin: 10px 0 0;
 }
 .approval-review-actions {
@@ -4472,7 +4472,7 @@ textarea {
   gap: 12px;
 }
 .files-browser .files-list {
-  max-height: none;
+  max-height: 50%;
   flex: 1;
 }
 
@@ -12834,7 +12834,7 @@ body.shell-dock-dragging * {
 .timeline .question-bar {
   max-width: none;
   min-height: auto;
-  max-height: none;
+  max-height: 50%;
   margin-top: 0;
   overflow: visible;
 }
@@ -15059,9 +15059,12 @@ body.shell-dock-dragging * {
 /* The reading column's one history notice (#2172; docs/design-system.md §12.4, §13.2), in a band
    above the scroller rather than inside it, so it takes its own height and no row ever sits under
    it. The band's inline padding is the scroller's: both resolve against the reader's width, so the
-   notice spans the reading column. */
+   notice spans the reading column. In a short pane (an Inbox preview, opened details) it keeps at
+   most half the reader and scrolls, since the reader clips and the transcript keeps the rest. */
 .transcript-history-band {
   flex: none;
+  max-height: 50%;
+  overflow-y: auto;
   padding-top: var(--space-3);
   padding-inline: max(var(--tl-gutter), calc((100% - var(--chat-max)) / 2));
 }
