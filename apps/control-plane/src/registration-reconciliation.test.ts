@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type SessionSnapshot } from "@wollipog/protocol";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
@@ -7,8 +11,8 @@ import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { pushDecision } from "./push-decision.js";
 
-function fixture(children = 1000) {
-  const db = ControlPlaneDb.open(":memory:");
+function fixture(children = 1000, file = ":memory:") {
+  const db = ControlPlaneDb.open(file);
   db.registerRunner({ runnerId: "runner", hostname: "synthetic", os: "linux", version: "test",
     workspaces: [], agents: [] }, 1, PROTOCOL_VERSION);
   const hub = new Hub(db);
@@ -28,6 +32,216 @@ function fixture(children = 1000) {
       pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 });
   }
   return { db, hub, svc, snapshots, logs };
+}
+
+const question = (requestId: string) => ({ requestId, kind: "question" as const,
+  title: "Private synthetic question", options: [],
+  questions: [{ id: "choice", question: "Private synthetic question", header: "Choice", options: [{ label: "Yes" }] }],
+});
+
+test("overlapping batches report each new human occurrence once even while a push is in flight", async () => {
+  const { db, hub, snapshots } = fixture(30);
+  const inFlight: string[] = [];
+  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, (before, after) => {
+    const decision = pushDecision(before, after);
+    // Deliberately retain every decision as in-flight, with no queue coalescing or completion.
+    if (decision?.sessionId === "campaign-0" && decision.urgency === "high") inFlight.push(decision.title);
+  });
+  try {
+    const first = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, preview: "Deferred" }, first);
+    const overlapping = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[20]!, preview: "Overlapping" }, overlapping);
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[10]!, pendingApproval: question("first") });
+    assert.equal(inFlight.length, 1);
+    await svc.flushRunnerAttention("runner", () => false);
+    assert.equal(inFlight.length, 1, "cancelled socket cannot consume or repeat the alert");
+    svc.beginRunnerAttentionBatch("runner"); // replacement inherits the before-view and notification identity
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(inFlight.length, 1, "flush cannot repeat an already in-flight occurrence");
+    const next = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, preview: "Another batch" }, next);
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[10]!, pendingApproval: question("replacement") });
+    assert.equal(inFlight.length, 2, "a same-count new occurrence still notifies");
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(inFlight.length, 2);
+  } finally { db.close(); }
+});
+
+test("a reported new sibling occurrence does not consume an older unreported deferred question", async () => {
+  const { db, hub, snapshots } = fixture(20);
+  const messages: string[] = [];
+  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, (before, after) => {
+    const decision = pushDecision(before, after);
+    if (decision?.sessionId === "campaign-0" && decision.urgency === "high") messages.push(decision.title);
+  });
+  try {
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: question("deferred") }, batch);
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[10]!, pendingApproval: question("immediate") });
+    assert.equal(messages.length, 1);
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(messages.length, 2, "the older unreported question still notifies separately");
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(messages.length, 2);
+  } finally { db.close(); }
+});
+
+test("reported occurrence identities survive until every overlapping runner batch retires", async () => {
+  const { db, hub, snapshots } = fixture(20);
+  db.registerRunner({ runnerId: "other", hostname: "synthetic", os: "linux", version: "test",
+    agents: [], workspaces: [] }, 1, PROTOCOL_VERSION);
+  db.raw().prepare("UPDATE sessions SET runner_id='other' WHERE id='child-10'").run();
+  let urgent = 0;
+  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, (before, after) => {
+    if (pushDecision(before, after)?.sessionId === "campaign-0" && pushDecision(before, after)?.urgency === "high") urgent++;
+  });
+  try {
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, preview: "First" }, svc.beginRunnerAttentionBatch("runner"));
+    svc.applySessionRuntimeUpdate("other", { ...snapshots[10]!, preview: "Second" }, svc.beginRunnerAttentionBatch("other"));
+    svc.applySessionRuntimeUpdate("other", { ...snapshots[10]!, pendingApproval: question("new") });
+    assert.equal(urgent, 1);
+    await svc.flushRunnerAttention("runner", () => true);
+    await svc.flushRunnerAttention("other", () => false);
+    svc.beginRunnerAttentionBatch("other"); // replacement of the second socket
+    await svc.flushRunnerAttention("other", () => true);
+    assert.equal(urgent, 1);
+    assert.equal(db.deferredCampaignAttentionIds("runner").length, 0);
+    assert.equal(db.deferredCampaignAttentionIds("other").length, 0);
+  } finally { db.close(); }
+});
+
+test("a failed write-ahead checkpoint cannot commit an unprotected deferred runtime mutation", () => {
+  const { db, svc, snapshots } = fixture(10);
+  try {
+    db.setPendingApproval("child-0", question("protected"));
+    db.retainCampaignAttentionCheckpoint = () => { throw new Error("Synthetic checkpoint failure"); };
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    assert.throws(() => svc.applySessionRuntimeUpdate("runner", snapshots[0]!, batch), /checkpoint failure/);
+    assert.equal(db.getSession("child-0")?.pendingApproval?.requestId, "protected");
+  } finally { db.close(); }
+});
+
+for (const crashPoint of ["after_session_commit", "during_publication", "after_human_event"] as const) {
+  test(`SIGKILL ${crashPoint} preserves owed campaign wakeups across database reopen and replay`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "campaign-attention-crash-"));
+    const file = join(root, "control-plane.db");
+    let db: ControlPlaneDb | undefined;
+    try {
+      // Real process loss: no close(), finally block, or graceful service shutdown runs. All
+      // mutation/checkpoint/publication code below is the same service used by registration.
+      const script = `
+        import { ControlPlaneDb, RUNNER_REPORTED_STOP } from ${JSON.stringify(new URL("./db.ts", import.meta.url).href)};
+        import { Hub } from ${JSON.stringify(new URL("./hub.ts", import.meta.url).href)};
+        import { SessionsService } from ${JSON.stringify(new URL("./sessions.ts", import.meta.url).href)};
+        import { resolveOrchestratorCampaignPolicy } from ${JSON.stringify(new URL("./orchestrator-settings.ts", import.meta.url).href)};
+        import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION } from ${JSON.stringify(new URL("../../../packages/protocol/src/index.ts", import.meta.url).href)};
+        const __name = value => value; // tsx may annotate names in the stringified fixture
+        ${fixture.toString()}
+        const { db, svc, snapshots } = fixture(70, ${JSON.stringify(file)});
+        db.updateSessionStatus('campaign-0', 'idle', 3);
+        db.raw().prepare("UPDATE sessions SET parent_session_id='campaign-0' WHERE id LIKE 'child-%'").run();
+        db.raw().prepare("UPDATE sessions SET parent_control='questions_and_approvals' WHERE id='campaign-0'").run();
+        const ask = ${question.toString()};
+        for (const snap of snapshots) db.setPendingApproval(snap.id, ask('ask-' + snap.id));
+        db.setPendingApproval('child-0', { requestId: 'auth-human', kind: 'authentication', title: 'Private auth', options: [] });
+        const before = db.getSession('campaign-0').orchestratorCampaign.pendingRequests;
+        if (before.human !== 1 || before.orchestrator !== 69) throw new Error(JSON.stringify(before));
+        const batch = svc.beginRunnerAttentionBatch('runner');
+        for (const snap of snapshots) svc.applySessionRuntimeUpdate('runner', snap, batch);
+        const crash = () => process.kill(process.pid, 'SIGKILL');
+        if (${JSON.stringify(crashPoint)} === 'after_session_commit') crash();
+        const record = db.recordCampaignContinuationEvent.bind(db);
+        let writes = 0;
+        db.recordCampaignContinuationEvent = input => {
+          if (${JSON.stringify(crashPoint)} === 'during_publication' && ++writes === 33) crash();
+          const result = record(input);
+          return result;
+        };
+        if (${JSON.stringify(crashPoint)} === 'after_human_event') {
+          const notify = db.recordCampaignContinuationEvents.bind(db);
+          db.recordCampaignContinuationEvents = inputs => { notify(inputs); crash(); };
+        }
+        await svc.flushRunnerAttention('runner', () => true);
+        throw new Error('crash point was not reached');
+      `;
+      const killed = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script],
+        { encoding: "utf8" });
+      assert.equal(killed.signal, "SIGKILL", killed.stderr);
+      db = ControlPlaneDb.open(file);
+      db.settleStartupState();
+      assert.equal(db.getSession("child-0")?.pendingApproval, null, "authoritative mutation survived");
+      const pending = db.campaignAttentionCheckpoint?.("runner", "campaign-0");
+      const events = () => db!.raw().prepare(`SELECT kind,COUNT(*) AS n FROM orchestrator_campaign_events
+        WHERE campaign_session_id='campaign-0' GROUP BY kind ORDER BY kind`).all();
+      if (crashPoint === "during_publication") assert.equal(
+        db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events").get()?.n, 32,
+        "earlier event chunk committed; interrupted next chunk rolled back");
+      const hub = new Hub(db);
+      const logs: string[] = [];
+      const svc = new SessionsService(db, hub, { info: s => logs.push(s), warn() {}, error() {} });
+      svc.beginRunnerAttentionBatch("runner");
+      await svc.flushRunnerAttention("runner", () => true);
+      assert.deepEqual(events().map(row => [row.kind, row.n]), [
+        ["child_ready", 70], ["human_blockers_cleared", 1], ["request_resolved", 69],
+      ]);
+      assert.ok(pending, "checkpoint survives abrupt process loss");
+      assert.equal(pending.pendingRequests.human, crashPoint === "after_human_event" ? 0 : 1);
+      assert.doesNotMatch(JSON.stringify(pending), /Private|ask-child|auth-human/, "checkpoint retains only hashes and counts");
+      assert.equal(db.deferredCampaignAttentionIds("runner").length, 0);
+      const sequence = db.raw().prepare("SELECT seq FROM sqlite_sequence WHERE name='orchestrator_campaign_events'").get()?.seq;
+      svc.beginRunnerAttentionBatch("runner");
+      await svc.flushRunnerAttention("runner", () => true);
+      assert.equal(db.raw().prepare("SELECT seq FROM sqlite_sequence WHERE name='orchestrator_campaign_events'").get()?.seq, sequence);
+      assert.match(logs.join("\n"), /campaign_attention_checkpoints_recovered/);
+      assert.doesNotMatch(logs.join("\n"), /Private|ask-child|auth-human/);
+    } finally { db?.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const boundary of ["active", "stopped", "archived", "deleted", "reparented", "new_human_question"] as const) {
+  test(`recovered attention respects ${boundary} campaign authority and continuation admission`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "campaign-attention-boundary-"));
+    const file = join(root, "control-plane.db");
+    let db: ControlPlaneDb | undefined;
+    try {
+      const initial = fixture(10, file);
+      db = initial.db;
+      db.updateSessionStatus("campaign-0", "idle", 3);
+      db.setPendingApproval("child-0", question("old-human"));
+      const batch = initial.svc.beginRunnerAttentionBatch("runner");
+      initial.svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, batch);
+      if (boundary === "stopped") assert.ok(initial.svc.stop("campaign-0").ok);
+      if (boundary === "archived") db.raw().prepare("UPDATE sessions SET archived=1 WHERE id='campaign-0'").run();
+      if (boundary === "deleted") assert.ok(initial.svc.delete("campaign-0").ok);
+      if (boundary === "reparented") db.raw().prepare("UPDATE sessions SET parent_session_id='campaign-1' WHERE id='campaign-0'").run();
+      if (boundary === "new_human_question") db.setPendingApproval("child-0", question("new-human"));
+      db.close();
+      db = ControlPlaneDb.open(file);
+      db.settleStartupState();
+      db.registerRunner({ runnerId: "runner", hostname: "synthetic", os: "linux", version: "test",
+        agents: [], workspaces: [] }, Date.now(), PROTOCOL_VERSION);
+      const hub = new Hub(db);
+      let sent = 0;
+      hub.isRunnerOnline = () => true;
+      hub.sendToRunner = () => { sent++; return true; };
+      const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+      svc.beginRunnerAttentionBatch("runner");
+      await svc.flushRunnerAttention("runner", () => true);
+      assert.equal(db.deferredCampaignAttentionIds("runner").length, 0, "completed or stale checkpoints retire");
+      // An explicit Stop stays stopped; other sessions regain the runner's idle state normally.
+      if (boundary !== "stopped" && boundary !== "deleted") db.updateSessionStatus("campaign-0", "idle", Date.now());
+      svc.retryDuePrompts(Date.now() + 3_000);
+      if (boundary === "active") {
+        assert.equal(sent, 1, "owed event resumes an exited idle parent without user prompting");
+        svc.retryDuePrompts(Date.now() + 3_001);
+        assert.equal(sent, 1, "existing single-flight continuation admission remains authoritative");
+      } else {
+        assert.equal(sent, 0, "recovery is not permission to bypass the current campaign boundary");
+        if (boundary === "new_human_question") assert.equal(db.getSession("child-0")?.pendingApproval?.requestId, "new-human");
+      }
+    } finally { db?.close(); rmSync(root, { recursive: true, force: true }); }
+  });
 }
 
 test("a campaign's own runtime transition does not repeat its notification at batch flush", async () => {
@@ -154,14 +368,36 @@ test("registration attention scans scale with campaigns, not retained children",
   const { db, svc, snapshots } = fixture();
   try {
     let scans = 0;
+    let checkpoints = 0;
+    const retain = db.retainCampaignAttentionCheckpoint.bind(db);
+    db.retainCampaignAttentionCheckpoint = (...args) => { checkpoints++; retain(...args); };
     const original = svc.descendantRequests.bind(svc);
     svc.descendantRequests = (...args) => { scans++; return original(...args); };
     svc.hydrateRunnerSessions("runner", snapshots);
     assert.equal(scans, 20, "each of ten campaigns needs one human and one orchestrator scan");
+    assert.equal(checkpoints, 10, "write-ahead checkpoints scale with campaigns, never children");
     // Replays may inspect durable identities, but must not grow continuation storage.
     const before = db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events").get();
     svc.hydrateRunnerSessions("runner", snapshots);
     assert.deepEqual(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events").get(), before);
+  } finally { db.close(); }
+});
+
+test("cleared-human event and checkpoint consumption roll back together on a write failure", () => {
+  const { db } = fixture(10);
+  try {
+    db.setPendingApproval("child-0", question("human"));
+    db.retainCampaignAttentionCheckpoint("runner", db.getSession("campaign-0")!);
+    db.raw().exec(`CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON orchestrator_campaign_attention_checkpoints
+      BEGIN SELECT RAISE(ABORT,'Synthetic checkpoint write failure'); END`);
+    const event = { eventId: "cleared-atomic", campaignSessionId: "campaign-0", kind: "human_blockers_cleared" as const, now: 3 };
+    assert.throws(() => db.recordCampaignContinuationEvent(event), /checkpoint write failure/);
+    assert.equal(db.hasPendingCampaignContinuationEvents("campaign-0"), false);
+    assert.equal(db.campaignAttentionCheckpoint("runner", "campaign-0")?.pendingRequests.human, 1);
+    db.raw().exec("DROP TRIGGER fail_checkpoint");
+    assert.equal(db.recordCampaignContinuationEvent(event), true);
+    assert.equal(db.campaignAttentionCheckpoint("runner", "campaign-0")?.pendingRequests.human, 0);
+    assert.equal(db.recordCampaignContinuationEvent(event), false, "replaying the event is read-only");
   } finally { db.close(); }
 });
 

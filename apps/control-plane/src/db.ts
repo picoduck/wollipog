@@ -906,6 +906,20 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_events (
 CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_events_pending
   ON orchestrator_campaign_events(campaign_session_id, seq);
 
+-- Write-ahead attention checkpoints contain only hashed request identities, never request text.
+-- Commit before accepting a deferred runner mutation; remove only after publication succeeds.
+CREATE TABLE IF NOT EXISTS orchestrator_campaign_attention_checkpoints (
+  runner_id           TEXT NOT NULL,
+  campaign_session_id TEXT NOT NULL,
+  pending_requests    TEXT NOT NULL,
+  captured_at         INTEGER NOT NULL,
+  PRIMARY KEY (runner_id, campaign_session_id),
+  FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE,
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_attention_checkpoint_campaign
+  ON orchestrator_campaign_attention_checkpoints(campaign_session_id);
+
 -- The consumed cursor outlives prompt-command receipt retention. Completed and explicitly
 -- acknowledged ranges advance it transactionally; retained event identities keep re-projection
 -- idempotent after the transport and continuation rows are pruned.
@@ -15080,15 +15094,57 @@ export class ControlPlaneDb {
     // Reconnect replay is read-only for identities already recorded. The insert remains guarded
     // for callers sharing the database; no asynchronous gap exists between this read and insert.
     if (this.stmt("SELECT 1 FROM orchestrator_campaign_events WHERE event_id=?").get(input.eventId)) return false;
-    const result = this.stmt(
-      `INSERT OR IGNORE INTO orchestrator_campaign_events
-       (event_id,campaign_session_id,kind,subject_session_id,occurrence_id,subject_status,created_at)
-       VALUES (?,?,?,?,?,?,?)`,
-    ).run(
-      input.eventId, input.campaignSessionId, input.kind, input.subjectSessionId ?? null,
-      input.occurrenceId ?? null, input.subjectStatus ?? null, input.now,
-    );
-    return Number(result.changes) === 1;
+    return this.atomic(() => {
+      const result = this.stmt(
+        `INSERT OR IGNORE INTO orchestrator_campaign_events
+         (event_id,campaign_session_id,kind,subject_session_id,occurrence_id,subject_status,created_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      ).run(
+        input.eventId, input.campaignSessionId, input.kind, input.subjectSessionId ?? null,
+        input.occurrenceId ?? null, input.subjectStatus ?? null, input.now,
+      );
+      // Clearing a human baseline must be atomic with its event. Otherwise a crash between the
+      // two can produce a second event from an older, overlapping batch's different token set.
+      if (Number(result.changes) === 1 && input.kind === "human_blockers_cleared") {
+        this.stmt(`UPDATE orchestrator_campaign_attention_checkpoints
+          SET pending_requests=json_set(pending_requests,'$.human',0,'$.humanRequestTokens',json('[]'))
+          WHERE campaign_session_id=? AND json_extract(pending_requests,'$.human')>0`)
+          .run(input.campaignSessionId);
+      }
+      return Number(result.changes) === 1;
+    });
+  }
+
+  /** A write-ahead checkpoint is committed BEFORE any deferred session change. It may survive
+   * an unapplied mutation (harmless comparison on replay), but never an unprotected commit.
+   * One write per affected campaign, not per child; immutable first-before identity wins. */
+  retainCampaignAttentionCheckpoint(runnerId: string, before: SessionView): void {
+    if (this.campaignAttentionCheckpoint(runnerId, before.id)) return;
+    const pending = before.orchestratorCampaign?.pendingRequests;
+    this.stmt(`INSERT OR IGNORE INTO orchestrator_campaign_attention_checkpoints
+      (runner_id,campaign_session_id,pending_requests,captured_at) VALUES (?,?,?,?)`)
+      .run(runnerId, before.id, JSON.stringify(pending ?? {
+        human: 0, orchestrator: 0, humanRequestTokens: [], orchestratorRequestTokens: [],
+      }), before.updatedAt);
+  }
+
+  campaignAttentionCheckpoint(runnerId: string, campaignId: string): {
+    pendingRequests: NonNullable<OrchestratorCampaignProjection["pendingRequests"]>; capturedAt: number;
+  } | null {
+    const row = this.stmt(`SELECT pending_requests,captured_at FROM orchestrator_campaign_attention_checkpoints
+      WHERE runner_id=? AND campaign_session_id=?`).get(runnerId, campaignId) as
+      { pending_requests: string; captured_at: number } | undefined;
+    return row ? { pendingRequests: JSON.parse(row.pending_requests), capturedAt: row.captured_at } : null;
+  }
+
+  deferredCampaignAttentionIds(runnerId: string): string[] {
+    return (this.stmt(`SELECT campaign_session_id AS id FROM orchestrator_campaign_attention_checkpoints
+      WHERE runner_id=? ORDER BY campaign_session_id`).all(runnerId) as { id: string }[]).map(row => row.id);
+  }
+
+  discardCampaignAttentionCheckpoint(runnerId: string, campaignId: string): void {
+    this.stmt(`DELETE FROM orchestrator_campaign_attention_checkpoints WHERE runner_id=? AND campaign_session_id=?`)
+      .run(runnerId, campaignId);
   }
 
   /** One retained campaign can publish hundreds of fresh child-ready events. Bound each commit

@@ -8,7 +8,7 @@ import type { GithubIssueClosureRequest, GithubIssueClosureResult } from "@wolli
 import { createHash, randomUUID } from "node:crypto";
 import { posix, win32 } from "node:path";
 import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
-  addPendingRequest, removePendingRequest, pendingRequests, parentControlRequestEligible,
+  addPendingRequest, removePendingRequest, pendingRequests, parentControlRequestEligible, campaignHumanAttentionAdded,
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
   MAX_SESSION_VIDEO_BYTES,
@@ -1456,6 +1456,8 @@ export class SessionsService {
   /** Notification progress is separate from durable request-token before-views. */
   private readonly registrationNotificationViews = new Map<string,
     Pick<SessionView, "status" | "pendingApproval" | "backgroundDeliveries">>();
+  /** Only occurrences actually newly reported by a notifier, never all currently visible asks. */
+  private readonly registrationNotifiedHumanTokens = new Map<string, Set<string>>();
   private readonly promptOutbox: SessionPromptOutbox;
   /** Process-local epochs fence late initial/manual results. Durable title/source checks provide
    * the cross-restart fence, so an abandoned request can never overwrite newer state. */
@@ -1512,6 +1514,14 @@ export class SessionsService {
       view = this.db.getSession(sessionId);
     }
     if (view) {
+      const campaign = prev.orchestratorCampaign;
+      const reported = this.registrationNotifiedHumanTokens.get(sessionId);
+      if (campaign?.pendingRequests && reported?.size) {
+        const tokens = [...new Set([...(campaign.pendingRequests.humanRequestTokens ?? []), ...reported])];
+        prev = { ...prev, orchestratorCampaign: { ...campaign,
+          pendingRequests: { ...campaign.pendingRequests, human: tokens.length, humanRequestTokens: tokens },
+        } };
+      }
       this.notify(prev, view);
       // An own-session/HTTP transition may notify while a child batch holds an older campaign
       // before-view. Consume the notification only; durable request-resolved/cleared events must
@@ -1521,6 +1531,17 @@ export class SessionsService {
           this.registrationNotificationViews.set(sessionId, {
             status: view.status, pendingApproval: view.pendingApproval, backgroundDeliveries: view.backgroundDeliveries,
           });
+          // A direct publication may report a new sibling ask while an earlier deferred ask
+          // remains unreported. Consume just the delta that this invocation could report.
+          if (campaignHumanAttentionAdded(prev.orchestratorCampaign?.pendingRequests,
+              view.orchestratorCampaign?.pendingRequests)) {
+            const previous = new Set(prev.orchestratorCampaign?.pendingRequests?.humanRequestTokens ?? []);
+            const consumed = reported ?? new Set<string>();
+            for (const token of view.orchestratorCampaign?.pendingRequests?.humanRequestTokens ?? []) {
+              if (!previous.has(token)) consumed.add(token);
+            }
+            this.registrationNotifiedHumanTokens.set(sessionId, consumed);
+          }
           break;
         }
       }
@@ -12621,14 +12642,13 @@ export class SessionsService {
   /** Used only by a synchronous frame application, never a process-global deferral. HTTP and
    * correlated reply handlers that run during a yield retain their normal publication semantics. */
   beginRunnerAttentionBatch(runnerId: string): RunnerAttentionBatch {
-    let campaigns = this.registrationAttention.get(runnerId);
-    if (!campaigns) {
-      campaigns = new Map<string, SessionView>();
-      this.registrationAttention.set(runnerId, campaigns);
-    }
+    const campaigns = this.runnerAttentionBeforeViews(runnerId);
     const parents = new Map<string, SessionView | null>();
     const defer = (before: SessionView | null) => {
-      if (before && !campaigns.has(before.id)) campaigns.set(before.id, before);
+      if (before && !campaigns.has(before.id)) {
+        this.db.retainCampaignAttentionCheckpoint(runnerId, before);
+        campaigns.set(before.id, before);
+      }
     };
     return { defer, capture: (session) => {
       if (!session?.parentSessionId) return null;
@@ -12647,18 +12667,42 @@ export class SessionsService {
     if (!campaigns) return;
     for (const before of campaigns.values()) {
       if (!isCurrent()) return; // replacement inherits before-views for partially committed frames
-      this.publishCampaignAttentionTransition(before);
-      this.discardCampaignAttentionBefore(campaigns, before.id);
+      this.publishCampaignAttentionTransition(this.checkpointBeforeView(runnerId, before));
+      this.discardCampaignAttentionBefore(runnerId, campaigns, before.id);
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     if (this.registrationAttention.get(runnerId) === campaigns && campaigns.size === 0)
       this.registrationAttention.delete(runnerId);
   }
 
-  private discardCampaignAttentionBefore(campaigns: Map<string, SessionView>, campaignId: string): void {
+  private checkpointBeforeView(runnerId: string, before: SessionView): SessionView {
+    const checkpoint = this.db.campaignAttentionCheckpoint(runnerId, before.id);
+    return checkpoint && before.orchestratorCampaign ? { ...before, updatedAt: checkpoint.capturedAt,
+      orchestratorCampaign: { ...before.orchestratorCampaign, pendingRequests: checkpoint.pendingRequests },
+    } : before;
+  }
+
+  private runnerAttentionBeforeViews(runnerId: string): Map<string, SessionView> {
+    const existing = this.registrationAttention.get(runnerId);
+    if (existing) return existing;
+    const campaigns = new Map<string, SessionView>();
+    for (const id of this.db.deferredCampaignAttentionIds(runnerId)) {
+      const current = this.db.getSession(id);
+      if (current) campaigns.set(id, this.checkpointBeforeView(runnerId, current));
+    }
+    this.registrationAttention.set(runnerId, campaigns);
+    if (campaigns.size) this.log.info(JSON.stringify({ event: "campaign_attention_checkpoints_recovered",
+      entryPoint: "runner_reconciliation", runnerId, recoveryId: randomUUID(), campaignCount: campaigns.size,
+    }));
+    return campaigns;
+  }
+
+  private discardCampaignAttentionBefore(runnerId: string, campaigns: Map<string, SessionView>, campaignId: string): void {
+    this.db.discardCampaignAttentionCheckpoint(runnerId, campaignId);
     campaigns.delete(campaignId);
     for (const pending of this.registrationAttention.values()) if (pending.has(campaignId)) return;
     this.registrationNotificationViews.delete(campaignId);
+    this.registrationNotifiedHumanTokens.delete(campaignId);
   }
 
   /** Socket registration uses this bounded drain; a superseded connection cannot finish an
@@ -12724,11 +12768,7 @@ export class SessionsService {
     }
     // Capture the first before-view once per campaign. Publishing after every retained child
     // rescans the entire campaign and retries the same durable events quadratically (#2125).
-    let campaigns = this.registrationAttention.get(runnerId);
-    if (!campaigns) {
-      campaigns = new Map<string, SessionView>();
-      this.registrationAttention.set(runnerId, campaigns);
-    }
+    const campaigns = this.runnerAttentionBeforeViews(runnerId);
     const parents = new Map<string, SessionView | null>();
     const campaignBefore = (session: SessionView | null): SessionView | null => {
       if (!session?.parentSessionId) return null;
@@ -12737,7 +12777,10 @@ export class SessionsService {
         controller = this.campaignAttentionController(session);
         parents.set(session.parentSessionId, controller);
       }
-      if (controller && !campaigns.has(controller.id)) campaigns.set(controller.id, controller);
+      if (controller && !campaigns.has(controller.id)) {
+        this.db.retainCampaignAttentionCheckpoint(runnerId, controller);
+        campaigns.set(controller.id, controller);
+      }
       onCampaignCount?.(campaigns.size);
       return controller;
     };
@@ -12889,8 +12932,8 @@ export class SessionsService {
       yield;
       // An immediate publication during this yield may have consumed the human transition.
       const before = campaigns.get(campaignId);
-      if (before) this.publishCampaignAttentionTransition(before);
-      this.discardCampaignAttentionBefore(campaigns, campaignId);
+      if (before) this.publishCampaignAttentionTransition(this.checkpointBeforeView(runnerId, before));
+      this.discardCampaignAttentionBefore(runnerId, campaigns, campaignId);
     }
     this.registrationAttention.delete(runnerId);
     // The box no longer reports these ordinary user-delete tombstones -> the delete took. Fork
