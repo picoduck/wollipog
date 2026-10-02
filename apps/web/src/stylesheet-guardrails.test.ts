@@ -911,6 +911,9 @@ const DROPPED = "\u0002";
 const FUNCTION_WRAPPERS = new Set(["memo", "forwardRef", "useCallback"]);
 /** Another package's calls that create components which are not icons: a context (for its Provider), a lazy route. */
 const COMPONENT_FACTORIES = new Set(["createContext", "lazy"]);
+/** Calls that read the object they are given and never write it. */
+const READING_CALLS = new Set(["Object.hasOwn", "Object.keys", "Object.values", "Object.entries", "Object.freeze",
+  "Object.getOwnPropertyNames", "Array.isArray", "JSON.stringify"]);
 /** Methods that change an array or collection in place. */
 const MUTATING_METHODS = new Set(["push", "unshift", "splice", "fill", "copyWithin", "set", "add", "delete", "clear"]);
 /** Past this many alternatives a value is read as all of them at once: more classes, never fewer. */
@@ -1067,6 +1070,13 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (!ts.isIdentifier(root)) return null;
     return checker.getSymbolAtLocation(root)?.declarations?.map(moduleOf).find((name) => name !== null) ?? null;
   };
+  /** The name a callee has where it is defined: `createElement` for `h` in `import { createElement as h }`. */
+  const importedName = (callee: ts.Node): string => {
+    if (ts.isPropertyAccessExpression(callee)) return callee.name.text;
+    if (!ts.isIdentifier(callee)) return "";
+    const specifier = checker.getSymbolAtLocation(callee)?.declarations?.find(ts.isImportSpecifier);
+    return specifier ? (specifier.propertyName ?? specifier.name).text : callee.text;
+  };
   for (const file of files.values()) {
     const visit = (node: ts.Node): void => {
       if (ts.isIdentifier(node)) identifiers.set(node.text, [...(identifiers.get(node.text) ?? []), node]);
@@ -1074,7 +1084,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if (ts.isCallExpression(node)) {
         const fn = functionOf(declarationOf(node.expression));
         if (fn) callSites.set(fn, [...(callSites.get(fn) ?? []), node]);
-        const callee = ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : node.expression.getText();
+        const callee = importedName(node.expression);
         if (((callee === "createElement" || callee === "cloneElement") && importedFrom(node.expression) === "react")
           || callee === "createElementNS") bypasses.push(node);
       }
@@ -1109,8 +1119,17 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if (ts.isPropertyAccessExpression(parent) && parent.expression === use) {
         if (isWrite(parent)) writes.props.add(parent.name.text);
         else if (MUTATING_METHODS.has(parent.name.text) && ts.isCallExpression(parent.parent) && parent.parent.expression === parent) writes.any = true;
-      } else if (ts.isElementAccessExpression(parent) && parent.expression === use && isWrite(parent)) writes.any = true;
-      else if (ts.isCallExpression(parent) && parent.arguments[0] === use && parent.expression.getText() === "Object.assign") writes.any = true;
+      } else if (ts.isElementAccessExpression(parent) && parent.expression === use) {
+        if (isWrite(parent)) writes.any = true;
+      } else if (!(ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent) || ts.isJsxSpreadAttribute(parent)
+        || ts.isTypeQueryNode(parent) || ts.isTypeOfExpression(parent) || ts.isExportSpecifier(parent)
+        || ts.isImportSpecifier(parent) || ts.isImportClause(parent)
+        || (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InKeyword && parent.right === use)
+        || (ts.isCallExpression(parent) && READING_CALLS.has(parent.expression.getText())))) {
+        // Handed on whole — aliased, passed to a function, stored, returned — the value can be
+        // written through a name this scan does not follow.
+        writes.any = true;
+      }
     }
     return writes;
   };
@@ -1302,9 +1321,8 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
           }
         }
       }
-      // An object of a known type, no member of which has the prop, cannot pass it.
-      const values = propertyLiterals(checker.getTypeAtLocation(node), prop, node);
-      return values && values.length === 0 ? [] : ["unknown"];
+      // An object type is open, so one that does not name the prop may still carry it.
+      return ["unknown"];
     };
     const fromElements = index !== 0 ? [] : (jsxSites.get(fn) ?? []).flatMap((site) => site.attributes.properties.flatMap((attribute) => {
       if (ts.isJsxSpreadAttribute(attribute)) return fromObject(attribute.expression);
@@ -1312,16 +1330,26 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if (ts.isStringLiteral(attribute.initializer)) return [attribute.initializer];
       return ts.isJsxExpression(attribute.initializer) && attribute.initializer.expression ? [attribute.initializer.expression] : ["unknown" as const];
     }));
-    return [...fromElements, ...(callSites.get(fn) ?? []).flatMap((call) => {
-      const argument = argumentAt(call, fn, index);
-      return argument === "unknown" ? [argument] : fromObject(argument);
-    })];
+    return [...fromElements, ...(callSites.get(fn) ?? []).flatMap((call) =>
+      argumentsAt(call, fn, index).flatMap((argument) => argument === "unknown" ? [argument] : fromObject(argument)))];
   };
-  /** The argument a call passes at a position, or the parameter's default when it passes none. */
-  const argumentAt = (call: ts.CallExpression, fn: SourceFunction, index: number): ts.Node | undefined | "unknown" => {
+  /**
+   * What a call passes for a parameter: every argument from its position on for a rest parameter,
+   * and the parameter's default wherever the argument is missing or may be undefined.
+   */
+  const argumentsAt = (call: ts.CallExpression, fn: SourceFunction, index: number): (ts.Node | "unknown")[] => {
+    const parameter = fn.parameters[index];
+    const given = parameter?.dotDotDotToken ? call.arguments.slice(index) : call.arguments.slice(index, index + 1);
     // After a spread, positions are no longer known.
-    if (call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return "unknown";
-    return call.arguments[index] ?? fn.parameters[index]?.initializer;
+    if ([...call.arguments.slice(0, index), ...given].some(ts.isSpreadElement)) return ["unknown"];
+    if (parameter?.dotDotDotToken) return [...given];
+    const fallback = parameter?.initializer;
+    const argument = given[0];
+    if (!argument) return fallback ? [fallback] : [];
+    const type = checker.getTypeAtLocation(argument);
+    const mayBeUndefined = [type, ...(type.isUnion() ? type.types : [])]
+      .some((member) => member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Any | ts.TypeFlags.Unknown));
+    return fallback && mayBeUndefined ? [argument, fallback] : [argument];
   };
   /** Every value an object can hold, for an access whose key is not known, or null when the object cannot be read. */
   const objectValues = (input: ts.Node): ts.Node[] | null => {
@@ -1391,9 +1419,11 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if (ts.isPropertyAccessExpression(callee) && name === "join") return joined(callee.expression, node.arguments[0]);
       if (ts.isPropertyAccessExpression(callee) && RELAY_METHODS.has(name)) return strings(callee.expression);
       if (ts.isPropertyAccessExpression(callee) && MAPPING_METHODS.has(name)) return results(node.arguments[0]);
-      if (CLASS_HELPERS.has(name)) return [node.arguments.map((argument) => strings(argument).join(" ")).join(" ")];
+      // A helper defined in the sources is read; only a package's clsx-style helper is assumed to
+      // render its arguments and nothing else.
       const fn = functionOf(declarationOf(callee));
       if (fn) return results(fn);
+      if (CLASS_HELPERS.has(name) && fromLibrary(callee)) return [node.arguments.map((argument) => strings(argument).join(" ")).join(" ")];
       return typed(node) ?? [UNREAD];
     }
     if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) return reference(node);
@@ -1512,6 +1542,14 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       const fn = functionOf(declarationOf(node.expression));
       if (fn) return returnedNodes(fn).flatMap((value) => objectProp(value, prop));
     }
+    if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) {
+      // `function Mark({ attrs }) { return <svg {...attrs} />; }`: whatever objects the call sites pass.
+      const passed = propRead(node);
+      if (passed) {
+        return [...passedValues(passed.fn, passed.index, passed.prop).flatMap((value) => value === "unknown" ? [UNREAD] : objectProp(value, prop)),
+          ...(passed.fallback ? objectProp(passed.fallback, prop) : [])];
+      }
+    }
     if (ts.isIdentifier(node)) {
       const declaration = declarationOf(node);
       if (declaration && declaration !== "glyph") {
@@ -1530,8 +1568,14 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
         if (parameter && parameter.prop === null && isNamed(parameter.fn)) return forward(parameter.fn, parameter.index, prop);
       }
     }
-    // An object whose type is known carries no class when no member of the type has the prop.
-    return propertyLiterals(checker.getTypeAtLocation(node), prop, node) ?? [UNREAD];
+    // A type that names the prop bounds its values. One that does not proves nothing: TypeScript's
+    // object types are open, so `{ width: number }` may hold a className at run time.
+    const type = checker.getTypeAtLocation(node);
+    const values = propertyLiterals(type, prop, node);
+    if (values && values.length > 0) return values;
+    // Only `undefined` or `null` itself certainly holds nothing.
+    const nullish = (type.isUnion() ? type.types : [type]).every((member) => member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null));
+    return nullish ? [] : [UNREAD];
   };
   /** The values a prop takes at one element: its attribute, and what each spread object holds for it. */
   const elementProp = (element: ts.JsxOpeningLikeElement, prop: string): string[] =>
@@ -1584,20 +1628,34 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (components.has("icon")) collect(elementProp(element, "className"), element);
   }
   /**
-   * Where a function that is not a component is used other than by calling it: passed to `map()`,
-   * stored in an object, aliased. Its call sites are then not all the values its parameters take.
-   * A component's other uses are followed to where they render instead (`componentsOf`).
+   * Where a function is used other than by calling it or rendering it: passed to `map()`, handed to
+   * another package, aliased. Its call sites are then not all the values its parameters take. A
+   * component may also travel to a tag — through a constant, an object of components, a prop or a
+   * return — because `componentsOf` follows those to where it renders.
    */
   const escapes = (fn: SourceFunction): ts.Identifier | undefined => {
     const name = declaredName(fn);
-    if (!name || jsxSites.has(fn)) return undefined;
+    if (!name) return undefined;
+    const component = jsxSites.has(fn);
     return (identifiers.get(name.text) ?? []).find((use) => {
       if (use === name || functionOf(declarationOf(use)) !== fn) return false;
-      const parent = use.parent;
-      if (ts.isCallExpression(parent) && parent.expression === use) return false;
-      if (isFunctionWrapper(parent) && parent.arguments[0] === use) return false;
-      return !(ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isExportSpecifier(parent)
-        || ts.isExportAssignment(parent) || ts.isTypeQueryNode(parent));
+      let node: ts.Node = use;
+      while (isTransparent(node.parent)) node = node.parent;
+      const parent = node.parent;
+      if (ts.isCallExpression(parent) && parent.expression === node) return false;
+      if (isFunctionWrapper(parent) && parent.arguments[0] === node) return false;
+      if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isExportSpecifier(parent)
+        || ts.isExportAssignment(parent) || ts.isTypeQueryNode(parent)) return false;
+      if ((ts.isJsxOpeningElement(parent) || ts.isJsxSelfClosingElement(parent) || ts.isJsxClosingElement(parent)) && parent.tagName === node) return false;
+      if (!component) return true;
+      const toTag = (isConstant(parent) && parent.initializer === node)
+        || (ts.isPropertyAssignment(parent) && parent.initializer === node) || ts.isShorthandPropertyAssignment(parent)
+        || (ts.isConditionalExpression(parent) && parent.condition !== node)
+        || (ts.isBinaryExpression(parent) && [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken,
+          ts.SyntaxKind.AmpersandAmpersandToken].includes(parent.operatorToken.kind))
+        || (ts.isJsxExpression(parent) && ts.isJsxAttribute(parent.parent))
+        || ts.isReturnStatement(parent) || (ts.isArrowFunction(parent) && parent.body === node);
+      return !toTag;
     });
   };
   while (pending.length > 0) {
@@ -1606,9 +1664,10 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (escape) unread.add(`${where(escape)} ${escape.text} is used as a value, so its arguments cannot be traced`);
     if (index === 0 && prop !== null) for (const site of jsxSites.get(fn) ?? []) collect(elementProp(site, prop), site);
     for (const call of callSites.get(fn) ?? []) {
-      const argument = argumentAt(call, fn, index);
-      if (argument === "unknown") collect([UNREAD], call);
-      else if (argument) collect(prop === null ? strings(argument) : objectProp(argument, prop), argument);
+      for (const argument of argumentsAt(call, fn, index)) {
+        if (argument === "unknown") collect([UNREAD], call);
+        else collect(prop === null ? strings(argument) : objectProp(argument, prop), argument);
+      }
     }
   }
   return { classes, unread: [...unread].sort() };
@@ -3044,6 +3103,36 @@ test("icon classes are read from every way a class reaches an icon, and an unrea
   ].join("\n") }), {
     classes: ["chart-segment"],
     unread: ["Shapes.tsx:4 cloneElement() bypasses JSX", "Shapes.tsx:4 createElement() bypasses JSX"],
+  });
+
+  // Every argument a rest parameter takes; a default for an argument passed as undefined; an object
+  // prop handed down whose declared type does not name className; a source helper that shadows a
+  // clsx-style name.
+  assert.deepEqual(scanOf({ "Arguments.tsx": [
+    "function classes(...tokens: string[]) { return tokens.filter(Boolean).join(\" \"); }",
+    "function cls({ className }: { className?: string } = { className: \"default-icon\" }) { return className; }",
+    "function Mark({ attrs }: { attrs: { width: number } }) { return <svg {...attrs} />; }",
+    "function cn(extra: string) { return \"status-icon \" + extra; }",
+    "export function Uses() {",
+    "  return <><svg className={classes(\"base\", \"rest-icon\")} /><svg className={cls(undefined)} /><Mark attrs={{ width: 16, className: \"open-type-icon\" }} /><svg className={cn(\"cn-arg\")} /></>;",
+    "}",
+  ].join("\n") }), { classes: ["base", "cn-arg", "default-icon", "open-type-icon", "rest-icon", "status-icon"], unread: [] });
+
+  // A constant written through an alias, React's createElement under another name, and a component
+  // also invoked by map() are reported rather than read from their declarations alone.
+  assert.deepEqual(scanOf({ "Aliases.tsx": [
+    "import { createElement as h } from \"react\";",
+    "function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
+    "export function Uses() {",
+    "  const common = { className: \"base\" };",
+    "  const alias = common;",
+    "  alias.className += \" aliased-icon\";",
+    "  const extra = [{ className: \"mapped-icon\" }].map(Icon);",
+    "  return <><svg {...common} /><Icon className=\"rendered\" />{h(\"svg\", { className: \"factory-icon\" })}</>;",
+    "}",
+  ].join("\n") }), {
+    classes: ["rendered"],
+    unread: ["Aliases.tsx:7 Icon is used as a value, so its arguments cannot be traced", "Aliases.tsx:8 ${…}", "Aliases.tsx:8 h() bypasses JSX"],
   });
 
   // A value the scan cannot follow is reported, alone or inside a composed name.
