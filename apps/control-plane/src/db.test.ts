@@ -8554,3 +8554,65 @@ test("the campaign event table admits child_blocked without reusing a sequence a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("follow-up recommendations survive their origin child's deletion after the table rebuild (#2417)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-campaign-follow-ups-"));
+  const path = join(dir, "control-plane.db");
+  try {
+    const setup = ControlPlaneDb.open(path);
+    setup.registerRunner({ runnerId: "runner", hostname: "fixture", os: "linux", version: "fixture",
+      agents: [], workspaces: [{ id: "workspace", name: "Fixture", path: "/fixture" }] }, 500);
+    for (const id of ["campaign", "child"]) {
+      setup.createSession({ id, runnerId: "runner", workspaceId: "workspace", agentId: "fixture", title: id,
+        useWorktree: false, driver: "acp", config: {}, now: 900, ...(id === "child" ? { parentSessionId: "campaign" } : {}) });
+    }
+    setup.close();
+    // The table as it was before the work ledger: the origin cascaded on delete.
+    const legacy = new DatabaseSync(path);
+    legacy.exec("PRAGMA foreign_keys=OFF");
+    legacy.exec(`
+      DROP TABLE orchestrator_campaign_follow_ups;
+      CREATE TABLE orchestrator_campaign_follow_ups (
+        id                  TEXT PRIMARY KEY,
+        campaign_session_id TEXT NOT NULL,
+        origin_session_id   TEXT NOT NULL,
+        repository          TEXT NOT NULL,
+        title               TEXT NOT NULL,
+        recommendation_key  TEXT,
+        normalized_key      TEXT NOT NULL,
+        duplicate_of        TEXT,
+        created_at          INTEGER NOT NULL,
+        FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (origin_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (duplicate_of) REFERENCES orchestrator_campaign_follow_ups(id) ON DELETE CASCADE
+      );
+      INSERT INTO orchestrator_campaign_follow_ups VALUES
+        ('followup_a', 'campaign', 'child', 'o/r', 'A', 'key-a', 'o/r a', NULL, 1),
+        ('followup_b', 'campaign', 'child', 'o/r', 'a', NULL, 'o/r a', 'followup_a', 2);
+    `);
+    legacy.close();
+
+    const migrated = ControlPlaneDb.open(path);
+    const rows = () => migrated.raw().prepare(
+      "SELECT id, origin_session_id, duplicate_of, recommendation_key FROM orchestrator_campaign_follow_ups ORDER BY id",
+    ).all().map((row) => ({ ...row }));
+    assert.deepEqual(rows(), [
+      { id: "followup_a", origin_session_id: "child", duplicate_of: null, recommendation_key: "key-a" },
+      { id: "followup_b", origin_session_id: "child", duplicate_of: "followup_a", recommendation_key: null },
+    ], "every row, id, and duplicate link is preserved");
+    assert.deepEqual(migrated.raw().prepare("PRAGMA foreign_key_check").all(), []);
+    migrated.deleteSession("child");
+    assert.deepEqual(rows().map((row) => row.origin_session_id), [null, null],
+      "deleting the origin child keeps its recommendations");
+    migrated.close();
+    // A second open finds the new definition and leaves the table alone.
+    const reopened = ControlPlaneDb.open(path);
+    assert.equal(reopened.raw().prepare("SELECT COUNT(*) AS count FROM orchestrator_campaign_follow_ups").get()?.count, 2);
+    reopened.deleteSession("campaign");
+    assert.equal(reopened.raw().prepare("SELECT COUNT(*) AS count FROM orchestrator_campaign_follow_ups").get()?.count, 0,
+      "deleting the campaign still removes its recommendations");
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

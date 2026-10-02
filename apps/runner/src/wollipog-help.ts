@@ -26,6 +26,7 @@ export function rootHelp(): string {
     "  artifact            Attach an image file to a session without passing its bytes through the model",
     "  decision            Request, read, consume, and reconcile typed workflow decisions for this session",
     "  issue-closure       Request human approval and execute one campaign issue closure",
+    "  campaign            Record and read an Orchestrator campaign's work ledger",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -49,7 +50,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision",
+    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision, campaign",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -128,6 +129,30 @@ Tools: request_github_issue_closure, close_github_issue; recover with decision g
 `;
 }
 
+export function campaignHelp(): string {
+  return `Usage: wollipog campaign <command> [--json]
+
+Commands:
+  plan --input '<json>'                          Upsert work items by key: {items[], planComplete}
+  update-item <work-item-id> --input '<json>'    Update fields, commitment, stage, blocker, or endAttempt
+  assign <work-item-id> <child-session-id>       Record that a descendant now works on the item
+  adjudicate <recommendation-id> --input '<json>'
+                                                 Record {disposition, reason, resultingWorkItemKey?,
+                                                 resultingIssue?, publicationRequired?}
+  work-items [--item <id>] [--state <state>] [--origin original|follow_up]
+             [--sort queue|activity|elapsed|cost] [--limit <n>] [--cursor <cursor>]
+             [--recommendations]                 Read the summary and one page or one item
+
+Only an injected Orchestrator session with control plane protocol v196+ may use these. Every
+record lands in the root campaign's ledger. Records grant no authority: they never dispatch,
+publish, merge, or resolve a decision. Record delivery with verify_campaign_child and its
+workItem; a reported merged stage does not mark an item delivered.
+
+Tools: record_campaign_plan, update_campaign_work_item, assign_campaign_work_item,
+adjudicate_campaign_recommendation, get_campaign_work_items.
+`;
+}
+
 export function decisionHelp(): string {
   return [
     "Usage: wollipog decision <command> [options]",
@@ -200,6 +225,8 @@ function helpForTopic(topic: string): string | null {
       return artifactHelp();
     case "issue-closure":
       return issueClosureHelp();
+    case "campaign":
+      return campaignHelp();
     case "decision":
     case "decisions":
     case "workflow-decision":

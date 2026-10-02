@@ -36,6 +36,7 @@ import {
   PROTOCOL_VERSION,
   SPAWN_APPROVAL_ABANDONMENT_MS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
+  CAMPAIGN_WORK_LEDGER_LIMITS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
@@ -1453,7 +1454,7 @@ test("approved UI evidence and implementation-question decisions do not block ca
 });
 
 /** A Stop and Archive campaign whose children the tests stop, report from, and verify. */
-function stopAndArchiveCampaignFixture() {
+function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive" = "stop_and_archive") {
   const { db, svc, hub } = makeHarness();
   const meta = runnerMeta();
   const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
@@ -1472,7 +1473,7 @@ function stopAndArchiveCampaignFixture() {
   const created = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
     config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issue 1440.",
-    orchestrator: { behavior: { completion: "stop_and_archive" } },
+    orchestrator: { behavior: { completion } },
   }, undefined, undefined, false, false, false, {
     defaultOwnerUserId: "owner",
     orchestratorDefaults: {
@@ -1480,7 +1481,7 @@ function stopAndArchiveCampaignFixture() {
       defaults: {
         behavior: {
           childHarness: null, childModel: null, childEffort: null,
-          maximumConcurrentChildren: 4, followUps: "recommend_only", completion: "stop_and_archive",
+          maximumConcurrentChildren: 4, followUps: "recommend_only", completion,
         },
         delegation: { parentControl: "questions", decisions: { ...decisions } },
         execution: { strictProjectIsolation: false, integrationIsolation: false },
@@ -23928,5 +23929,324 @@ test("issue closure requires an exact human decision and executes one durable ac
         assert.equal(executions, 0);
       }
     } finally { db.close(); }
+  }
+});
+
+/* ------------------------- Campaign work ledger (#2417) ------------------------- */
+
+function ledgerItem(svc: SessionsService, campaignId: string, key: string) {
+  const page = svc.campaignWorkItems(campaignId, { state: "all", limit: 100 });
+  assert.ok(page.ok && page.data?.page, page.error);
+  const summary = page.data.page.items.find((item) => item.key === key);
+  assert.ok(summary, `work item ${key} exists`);
+  const detail = svc.campaignWorkItems(campaignId, { workItemId: summary.id });
+  assert.ok(detail.ok && detail.data?.item, detail.error);
+  return detail.data.item;
+}
+
+test("campaign work ledger records plans, attempts, and delivery that survive reassignment and child deletion (#2417)", () => {
+  const { db, svc, hub, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, {
+      items: [
+        { key: "picoduck/wollipog#1", title: "First", issue: { repository: "picoduck/wollipog", number: 1 }, dispatchState: "queued", queuePosition: 0 },
+        { key: "plan:second", title: "Second", dispatchState: "queued", queuePosition: 1, dependsOnKeys: ["picoduck/wollipog#1"] },
+      ],
+      planComplete: false,
+    });
+    assert.ok(plan.ok && plan.data, plan.error);
+    assert.equal(plan.data.planState, "partial");
+    assert.equal(plan.data.revision, 1, "one plan call is one ledger revision");
+    assert.ok(hub.sessionChangedByIdCalls.includes(parent.id), "a ledger write refreshes the root campaign view");
+    const repeat = svc.recordCampaignPlan(parent.id, { items: [{ key: "plan:second", title: "Second" }], planComplete: false });
+    assert.equal(repeat.data?.revision, 1, "an identical repeat is a no-op and keeps the revision");
+    assert.equal(repeat.data?.items[0]?.created, false);
+    const complete = svc.recordCampaignPlan(parent.id, { items: [], planComplete: true });
+    assert.equal(complete.data?.planState, "recorded");
+    assert.equal(complete.data?.revision, 2);
+
+    let first = ledgerItem(svc, parent.id, "picoduck/wollipog#1");
+    let second = ledgerItem(svc, parent.id, "plan:second");
+    assert.equal(first.primaryState, "queued");
+    assert.deepEqual(second.stateCauses, ["dependency_unfinished"]);
+    assert.equal(svc.campaignWorkItems(parent.id, {}).data?.summary.revision, 2, "reads never change the revision");
+
+    const child = spawn(parent.id, "Deliver issue 1");
+    const assigned = svc.assignCampaignWorkItem(parent.id, { workItemId: first.id, childSessionId: child });
+    assert.ok(assigned.ok && assigned.data, assigned.error);
+    assert.equal(assigned.data.created, true);
+    assert.equal(assigned.data.attempt.ordinal, 1);
+    assert.equal(svc.assignCampaignWorkItem(parent.id, { workItemId: first.id, childSessionId: child }).data?.created, false,
+      "repeating an open assignment creates nothing");
+    assert.equal(ledgerItem(svc, parent.id, "picoduck/wollipog#1").primaryState, "running");
+
+    // Idleness is not delivery: the item waits for its verification.
+    svc.onSessionStatus(child, "idle");
+    first = ledgerItem(svc, parent.id, "picoduck/wollipog#1");
+    assert.deepEqual([first.primaryState, first.stateCauses], ["waiting", ["attempt_awaiting_verification"]]);
+    const firstReport = report(child, "Issue 1 delivered");
+    // A reported merged stage is a claim and never marks the item delivered.
+    assert.ok(svc.updateCampaignWorkItem(parent.id, {
+      workItemId: first.id, stage: { stage: "merged", pullRequests: [{ repository: "picoduck/wollipog", number: 9 }] },
+    }).ok);
+    assert.equal(ledgerItem(svc, parent.id, "picoduck/wollipog#1").primaryState, "waiting");
+    const stagedRevision = svc.campaignWorkItems(parent.id, {}).data!.summary.revision;
+    assert.equal(svc.updateCampaignWorkItem(parent.id, {
+      workItemId: first.id, stage: { stage: "merged", pullRequests: [{ repository: "picoduck/wollipog", number: 9 }] },
+    }).data?.revision, stagedRevision, "re-reporting the identical stage is a no-op");
+    // Verification without a work item records only the session-level proof.
+    assert.ok(svc.verifyCampaignChild(parent.id, { childSessionId: child, reportEventSeq: firstReport, followUpsAccounted: true }).ok);
+    assert.equal(ledgerItem(svc, parent.id, "picoduck/wollipog#1").primaryState, "waiting");
+    const verified = svc.verifyCampaignChild(parent.id, {
+      childSessionId: child, reportEventSeq: firstReport, followUpsAccounted: true,
+      workItem: { id: first.id, outcome: "delivered" },
+    });
+    assert.ok(verified.ok && verified.data, verified.error);
+    const verification = (verified.data as { workItem?: { verification: { attemptId: string; report: { seq: number } } } }).workItem;
+    assert.equal(verification?.verification.attemptId, assigned.data.attempt.id);
+    assert.equal(verification?.verification.report.seq, firstReport);
+    first = ledgerItem(svc, parent.id, "picoduck/wollipog#1");
+    assert.equal(first.primaryState, "delivered");
+    assert.equal(first.attempts[0]?.endReason, "delivered");
+    second = ledgerItem(svc, parent.id, "plan:second");
+    assert.deepEqual([second.primaryState, second.stateCauses], ["queued", []], "a delivered dependency no longer waits");
+
+    // Reuse the same child for the second item. A later execution of the child does not
+    // invalidate the first item's verification.
+    db.appendEvent(child, { kind: "user_message", text: "Now deliver the second item" }, Date.now());
+    svc.onSessionStatus(child, "running");
+    const reassigned = svc.assignCampaignWorkItem(parent.id, { workItemId: second.id, childSessionId: child });
+    assert.ok(reassigned.ok && reassigned.data, reassigned.error);
+    assert.deepEqual(reassigned.data.closedAttempts, [], "a delivered attempt is already closed");
+    assert.equal(ledgerItem(svc, parent.id, "picoduck/wollipog#1").primaryState, "delivered");
+    assert.equal(ledgerItem(svc, parent.id, "plan:second").primaryState, "running");
+
+    // Moving the second item to another child supersedes the first child's attempt.
+    const other = spawn(parent.id, "Take over the second item");
+    const superseding = svc.assignCampaignWorkItem(parent.id, { workItemId: second.id, childSessionId: other });
+    assert.deepEqual(superseding.data?.closedAttempts.map((attempt) => attempt.endReason), ["superseded"]);
+    second = ledgerItem(svc, parent.id, "plan:second");
+    assert.deepEqual(second.attempts.map((attempt) => [attempt.ordinal, attempt.endReason]), [[1, "superseded"], [2, null]]);
+
+    // Deleting the delivering child keeps the item's history, verification, and snapshot.
+    db.deleteSession(child);
+    first = ledgerItem(svc, parent.id, "picoduck/wollipog#1");
+    assert.equal(first.primaryState, "delivered");
+    assert.equal(first.attempts[0]?.sessionId, null);
+    assert.equal(first.attempts[0]?.session.title, assigned.data.attempt.session.title);
+    assert.equal(first.verifications[0]?.childSessionId, null);
+    assert.equal(first.verifications[0]?.outcome, "delivered");
+
+    // Deleting the root deletes its ledger.
+    db.deleteSession(parent.id);
+    assert.equal(Number((db.raw().prepare("SELECT COUNT(*) AS count FROM campaign_work_items").get() as { count: number }).count), 0);
+    assert.equal(Number((db.raw().prepare("SELECT COUNT(*) AS count FROM campaign_work_attempts").get() as { count: number }).count), 0);
+  } finally {
+    db.close();
+  }
+});
+
+test("work-item delivery requires an open attempt and leaves session verification untouched when refused (#2417)", () => {
+  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b" }], planComplete: true });
+    const [a, b] = plan.data!.items;
+    const child = spawn(parent.id, "Deliver a");
+    svc.onSessionStatus(child, "idle");
+    const seq = report(child, "Done");
+    const unassigned = svc.verifyCampaignChild(parent.id, {
+      childSessionId: child, reportEventSeq: seq, followUpsAccounted: true, workItem: { id: a!.workItemId, outcome: "delivered" },
+    });
+    assert.equal(unassigned.status, 409);
+    assert.equal(db.campaignChildReportVerified(parent.id, child), false,
+      "a refused work item does not record the session-level verification either");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: a!.workItemId, childSessionId: child }).ok);
+    assert.equal(svc.verifyCampaignChild(parent.id, {
+      childSessionId: child, reportEventSeq: seq, followUpsAccounted: true, workItem: { id: b!.workItemId, outcome: "delivered" },
+    }).status, 409, "the child's open attempt is on a different item");
+    const incomplete = svc.verifyCampaignChild(parent.id, {
+      childSessionId: child, reportEventSeq: seq, followUpsAccounted: true, workItem: { id: a!.workItemId, outcome: "incomplete" },
+    });
+    assert.ok(incomplete.ok, incomplete.error);
+    const item = ledgerItem(svc, parent.id, "a");
+    assert.notEqual(item.primaryState, "delivered");
+    assert.equal(item.currentAttempt?.sessionId, child, "an incomplete verification keeps the attempt open");
+    assert.equal(item.verifications[0]?.outcome, "incomplete");
+
+    // Cancelling closes the open attempt as abandoned and stops counting the item.
+    const cancelled = svc.updateCampaignWorkItem(parent.id, { workItemId: a!.workItemId, commitment: { state: "cancelled", reason: "Superseded by #5" } });
+    assert.ok(cancelled.ok, cancelled.error);
+    assert.equal(cancelled.data?.item.primaryState, "cancelled");
+    assert.equal(cancelled.data?.item.attempts[0]?.endReason, "abandoned");
+    assert.equal(svc.updateCampaignWorkItem(parent.id, { workItemId: a!.workItemId, commitment: { state: "scope_removed" } }).status, 400,
+      "removing scope requires a reason");
+    assert.equal(svc.assignCampaignWorkItem(parent.id, { workItemId: a!.workItemId, childSessionId: child }).status, 409);
+    const summary = svc.campaignWorkItems(parent.id, {}).data!.summary;
+    assert.deepEqual([summary.counts.committed, summary.counts.cancelled, summary.counts.delivered], [1, 1, 0]);
+    assert.equal(summary.counts.byState.cancelled, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("recommendations record origins and dispositions without inflating committed work (#2417)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "origin" }], planComplete: true });
+    const originId = plan.data!.items[0]!.workItemId;
+    const child = spawn(parent.id, "Implement origin");
+    assert.equal(svc.recordCampaignFollowUp(parent.id, {
+      originSessionId: child, repository: "picoduck/wollipog", title: "Unknown origin", originWorkItemIds: ["cwi_missing"],
+    }).status, 404);
+    const accepted = svc.recordCampaignFollowUp(parent.id, {
+      originSessionId: child, repository: "picoduck/wollipog", title: "Bounded Follow-Up", originWorkItemIds: [originId],
+    });
+    assert.deepEqual([accepted.data?.originWorkItemIds, accepted.data?.disposition], [[originId], "awaiting_adjudication"]);
+    const duplicate = svc.recordCampaignFollowUp(parent.id, {
+      originSessionId: child, repository: "picoduck/wollipog", title: "bounded follow-up",
+    });
+    assert.equal(duplicate.data?.disposition, "duplicate");
+    const rejected = svc.recordCampaignFollowUp(parent.id, {
+      originSessionId: child, repository: "picoduck/wollipog", title: "Speculative Idea",
+    });
+    let summary = svc.campaignWorkItems(parent.id, {}).data!.summary;
+    assert.equal(summary.recommendations.awaiting_adjudication, 2);
+    assert.equal(summary.recommendations.duplicate, 1);
+    assert.equal(summary.obligations.adjudication, 2);
+
+    assert.equal(svc.adjudicateCampaignRecommendation(parent.id, {
+      recommendationId: duplicate.data!.id, disposition: "accepted", reason: "Same as another",
+    }).status, 409, "a server-deduplicated recommendation cannot be accepted separately");
+    const rejection = svc.adjudicateCampaignRecommendation(parent.id, {
+      recommendationId: rejected.data!.id, disposition: "rejected", reason: "Out of scope",
+    });
+    assert.ok(rejection.ok, rejection.error);
+    assert.equal(rejection.data?.workItem, null);
+    summary = svc.campaignWorkItems(parent.id, {}).data!.summary;
+    assert.equal(summary.counts.committed, 1, "a rejected recommendation adds no committed work");
+
+    const acceptance = svc.adjudicateCampaignRecommendation(parent.id, {
+      recommendationId: accepted.data!.id, disposition: "accepted", reason: "Needed", resultingWorkItemKey: "followup:bounded",
+    });
+    assert.ok(acceptance.ok && acceptance.data, acceptance.error);
+    assert.equal(acceptance.data.recommendation.publication, "awaiting_publication");
+    assert.deepEqual([acceptance.data.workItem?.origin, acceptance.data.workItem?.generation], ["follow_up", 1]);
+    summary = svc.campaignWorkItems(parent.id, {}).data!.summary;
+    assert.deepEqual([summary.counts.committed, summary.counts.followUp, summary.obligations.publication], [2, 1, 1]);
+    // Publishing is recorded through the resulting item's issue; it never publishes anything.
+    assert.ok(svc.updateCampaignWorkItem(parent.id, {
+      workItemId: acceptance.data.workItem!.id, issue: { repository: "picoduck/wollipog", number: 77 },
+    }).ok);
+    const item = ledgerItem(svc, parent.id, "followup:bounded");
+    assert.equal(item.sourceRecommendation?.publication, "published");
+    assert.deepEqual(ledgerItem(svc, parent.id, "origin").recommendations.map((recommendation) => recommendation.id),
+      [accepted.data!.id]);
+    const page = svc.campaignWorkItems(parent.id, { includeRecommendations: true });
+    assert.equal(page.data?.recommendations?.length, 3);
+
+    // A child's deletion keeps its recommendations.
+    db.deleteSession(child);
+    const kept = svc.campaignWorkItems(parent.id, { includeRecommendations: true }).data!.recommendations!;
+    assert.equal(kept.length, 3);
+    assert.ok(kept.every((recommendation) => recommendation.originSessionId === null));
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign work ledger writes grant no dispatch, publication, merge, or decision authority (#2417)", () => {
+  const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const child = spawn(parent.id, "Implement");
+    const mergeSnapshot = {
+      category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 2417, headSha: "c".repeat(40),
+      reviewResult: "merge" as const,
+      requiredChecks: { headSha: "c".repeat(40), status: "passed" as const, checkedAt: 10,
+        checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+    };
+    const decision = svc.createWorkflowDecision(child, {
+      requestId: "ledger-no-authority", resourceKey: "picoduck/wollipog#2417", resourceSnapshot: mergeSnapshot,
+    });
+    assert.ok(decision.ok && decision.data, decision.error);
+    const before = {
+      sent: hub.sentToRunner.length,
+      decision: db.workflowDecisionByOccurrence(decision.data.occurrenceId),
+      policy: db.getSession(parent.id)!.orchestratorPolicy,
+      parentControl: db.getSession(parent.id)!.parentControlPolicy,
+      sessions: db.listSessions({}).length,
+    };
+    const plan = svc.recordCampaignPlan(parent.id, {
+      items: [{ key: "picoduck/wollipog#2417", issue: { repository: "picoduck/wollipog", number: 2417 }, dispatchState: "queued" }],
+      planComplete: true,
+    });
+    const itemId = plan.data!.items[0]!.workItemId;
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: itemId, childSessionId: child }).ok);
+    assert.ok(svc.updateCampaignWorkItem(parent.id, {
+      workItemId: itemId, stage: { stage: "merge_queued" }, blocker: { reason: "Awaiting merge", responsibleActor: "orchestrator",
+        requestOccurrenceId: decision.data.occurrenceId },
+    }).ok);
+    const followUp = svc.recordCampaignFollowUp(parent.id, {
+      originSessionId: child, repository: "picoduck/wollipog", title: "Publish Me", originWorkItemIds: [itemId],
+    });
+    assert.ok(svc.adjudicateCampaignRecommendation(parent.id, {
+      recommendationId: followUp.data!.id, disposition: "accepted", reason: "Accepted",
+    }).ok);
+    assert.equal(hub.sentToRunner.length, before.sent, "no ledger write sends a runner command");
+    assert.deepEqual(db.workflowDecisionByOccurrence(decision.data.occurrenceId), before.decision,
+      "the typed merge gate is unchanged");
+    assert.deepEqual(db.getSession(parent.id)!.orchestratorPolicy, before.policy);
+    assert.deepEqual(db.getSession(parent.id)!.parentControlPolicy, before.parentControl);
+    assert.equal(db.listSessions({}).length, before.sessions, "no ledger write creates a session");
+    assert.equal(followUp.data?.executionDisposition, "recommend_only_stop",
+      "the follow-up execution disposition still follows campaign policy");
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign work ledger operations are Orchestrator-only, root-keyed, and bounded (#2417)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const child = spawn(parent.id, "Ordinary child");
+    assert.equal(svc.recordCampaignPlan(child, { items: [{ key: "x" }], planComplete: true }).status, 404,
+      "an ordinary child cannot write the ledger");
+    assert.equal(svc.recordCampaignPlan(parent.id, { items: [{ key: "x" }], planComplete: true }, () => false).status, 404);
+    assert.equal(svc.recordCampaignPlan(parent.id, {
+      items: Array.from({ length: CAMPAIGN_WORK_LEDGER_LIMITS.planItemsPerCall + 1 }, (_, index) => ({ key: `k${index}` })),
+      planComplete: false,
+    }).status, 400, "oversized plans are refused, not truncated");
+    assert.equal(svc.recordCampaignPlan(parent.id, {
+      items: [{ key: "a", dependsOnKeys: ["b"] }, { key: "b", dependsOnKeys: ["a"] }], planComplete: false,
+    }).status, 409, "a dependency cycle is refused");
+    assert.equal(svc.campaignWorkItems(parent.id, { state: "all" }).data?.page?.total, 0,
+      "a refused plan writes nothing");
+
+    // A nested Orchestrator records into the root campaign's ledger.
+    const nested = db.createSession({
+      id: "nested-orchestrator", parentSessionId: parent.id, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+      agentId: "test-orchestrator", title: "Nested", useWorktree: false, driver: "claude-code", config: {},
+      role: "orchestrator", orchestratorPolicy: db.getSession(parent.id)!.orchestratorPolicy!, now: Date.now(),
+    });
+    const nestedPlan = svc.recordCampaignPlan(nested.id, { items: [{ key: "nested:item" }], planComplete: false });
+    assert.ok(nestedPlan.ok, nestedPlan.error);
+    assert.equal(svc.campaignWorkItems(parent.id, { state: "all" }).data?.page?.items[0]?.key, "nested:item");
+    assert.equal(svc.assignCampaignWorkItem(nested.id, { workItemId: nestedPlan.data!.items[0]!.workItemId, childSessionId: child }).status,
+      404, "a nested Orchestrator assigns only its own descendants");
+
+    // Cursors are bound to the revision; a write invalidates them, a read does not.
+    svc.recordCampaignPlan(parent.id, { items: Array.from({ length: 5 }, (_, index) => ({ key: `p${index}` })), planComplete: true });
+    const first = svc.campaignWorkItems(parent.id, { limit: 2 });
+    assert.equal(first.data?.page?.items.length, 2);
+    assert.equal(first.data?.page?.total, 6);
+    const cursor = first.data!.page!.nextCursor!;
+    svc.campaignWorkItems(nested.id, {});
+    assert.ok(svc.campaignWorkItems(parent.id, { limit: 2, cursor }).ok, "an intervening read keeps the cursor valid");
+    assert.equal(svc.campaignWorkItems(parent.id, { limit: 2, cursor, state: "all" }).status, 400,
+      "a cursor is bound to its filter");
+    svc.updateCampaignWorkItem(parent.id, { workItemId: nestedPlan.data!.items[0]!.workItemId, nextAction: "Dispatch" });
+    const stale = svc.campaignWorkItems(parent.id, { limit: 2, cursor });
+    assert.equal(stale.status, 409, "a write invalidates older cursors");
+  } finally {
+    db.close();
   }
 });

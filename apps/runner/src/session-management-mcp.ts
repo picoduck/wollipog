@@ -226,6 +226,30 @@ async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult
     ? null : errorResult("Human-approved issue closure requires control plane protocol v194; update Wollipog");
 }
 
+/** A pre-v196 control plane has no campaign work ledger. It would ignore an unknown `workItem` or
+ * `originWorkItemIds` field, silently recording nothing, so refuse by name instead. */
+async function campaignWorkLedgerCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!compatibility.ok) {
+      return errorResult(`The campaign work ledger requires control plane protocol v${required}, but compatibility could not be verified: ${compatibility.message}`);
+    }
+    actual = compatibility.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : errorResult(`The campaign work ledger requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog.`);
+}
+
+const CAMPAIGN_ISSUE_SCHEMA = {
+  type: "object",
+  properties: { repository: { type: "string", maxLength: 256 }, number: { type: "integer", minimum: 1 } },
+  required: ["repository", "number"],
+  additionalProperties: false,
+} as const;
+
 async function explicitEffortCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort;
   if (Number.isInteger(deps.controlPlaneProtocolVersion)) {
@@ -850,8 +874,10 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
 /* Tool table (tool ids as claude sees them: mcp__manager__<name>)             */
 /* -------------------------------------------------------------------------- */
 
+const CAMPAIGN_WORK_LEDGER_TOOLS = ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
+  "adjudicate_campaign_recommendation", "get_campaign_work_items"];
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
-  "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
+  "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "request_github_issue_closure", "close_github_issue",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
@@ -860,7 +886,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree"]);
 const PARENT_CONTROL_TOOLS = new Set(["request_github_issue_closure", "close_github_issue",
-  "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
+  "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
   "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
 ]);
@@ -1114,7 +1140,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "record_campaign_follow_up",
-    description: "Record and deduplicate one child recommendation before any follow-up execution. The disposition either stops or says typed gates are still required; it never grants blanket execution approval.",
+    description: "Record and deduplicate one child recommendation before any follow-up execution. The disposition either stops or says typed gates are still required; it never grants blanket execution approval. originWorkItemIds names the campaign work items it came from.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1122,12 +1148,17 @@ export const TOOLS: McpTool[] = [
         repository: { type: "string" },
         title: { type: "string" },
         recommendationKey: { type: "string" },
+        originWorkItemIds: { type: "array", maxItems: 32, items: { type: "string" } },
       },
       required: ["originSessionId", "repository", "title"],
       additionalProperties: false,
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      if (args?.originWorkItemIds !== undefined) {
+        const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+        if (incompatible) return incompatible;
+      }
       const r = await cpFetch(
         deps,
         "POST",
@@ -1137,6 +1168,7 @@ export const TOOLS: McpTool[] = [
           repository: args?.repository,
           title: args?.title,
           ...(typeof args?.recommendationKey === "string" ? { recommendationKey: args.recommendationKey } : {}),
+          ...(args?.originWorkItemIds !== undefined ? { originWorkItemIds: args.originWorkItemIds } : {}),
         },
       );
       return r.ok ? textResult({ followUp: r.data }) : errorResult(r.message);
@@ -1144,19 +1176,29 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "verify_campaign_child",
-    description: "Verify one campaign child's exact completed report after all reported follow-ups are recorded. Retain leaves it inspectable; Stop and Archive starts durable stop/archive and managed retirement of its clean worktrees. Unsafe worktrees remain on disk with a per-child refusal reason; pending provider-owned retirements finish after provider exit.",
+    description: "Verify one campaign child's exact completed report after all reported follow-ups are recorded. Retain leaves it inspectable; Stop and Archive starts durable stop/archive and managed retirement of its clean worktrees. Unsafe worktrees remain on disk with a per-child refusal reason; pending provider-owned retirements finish after provider exit. Pass workItem to record work-item delivery for the child's open attempt on that item; without it no work item is marked delivered.",
     inputSchema: {
       type: "object",
       properties: {
         childSessionId: { type: "string" },
         reportEventSeq: { type: "integer", minimum: 1 },
         followUpsAccounted: { const: true },
+        workItem: {
+          type: "object",
+          properties: { id: { type: "string" }, outcome: { type: "string", enum: ["delivered", "incomplete"] } },
+          required: ["id", "outcome"],
+          additionalProperties: false,
+        },
       },
       required: ["childSessionId", "reportEventSeq", "followUpsAccounted"],
       additionalProperties: false,
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      if (args?.workItem !== undefined) {
+        const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+        if (incompatible) return incompatible;
+      }
       const r = await cpFetch(
         deps,
         "POST",
@@ -1165,8 +1207,197 @@ export const TOOLS: McpTool[] = [
           childSessionId: args?.childSessionId,
           reportEventSeq: args?.reportEventSeq,
           followUpsAccounted: args?.followUpsAccounted,
+          ...(args?.workItem !== undefined ? { workItem: args.workItem } : {}),
         },
       );
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "record_campaign_plan",
+    description: "Record this campaign's planned work items in its root work ledger: an idempotent upsert by key (at most 100 items per call), with optional issue, title, dispatch state (planned or queued), queue position, and dependencies by key. Set planComplete when the ledger lists the whole original scope. Recording a plan grants no authority: it does not dispatch, publish, merge, or resolve any decision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        items: {
+          type: "array",
+          maxItems: 100,
+          items: {
+            type: "object",
+            properties: {
+              key: { type: "string", maxLength: 256 },
+              title: { type: "string", maxLength: 240 },
+              issue: { anyOf: [CAMPAIGN_ISSUE_SCHEMA, { type: "null" }] },
+              origin: { type: "string", enum: ["original", "follow_up"] },
+              dispatchState: { type: "string", enum: ["planned", "queued"] },
+              queuePosition: { anyOf: [{ type: "integer", minimum: 0 }, { type: "null" }] },
+              dependsOnKeys: { type: "array", maxItems: 64, items: { type: "string" } },
+            },
+            required: ["key"],
+            additionalProperties: false,
+          },
+        },
+        planComplete: { type: "boolean" },
+      },
+      required: ["items", "planComplete"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/plan`,
+        { items: args?.items, planComplete: args?.planComplete });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "update_campaign_work_item",
+    description: "Update one work item in the campaign ledger: title, issue, dispatch state, queue position, dependencies (work item ids), commitment (committed, cancelled, or scope_removed with a reason), reported stage, blocker, next action, or endAttempt (abandoned or failed). null clears a field. Reported stages are claims, not observations: merged does not mark the item delivered. Grants no authority.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workItemId: { type: "string" },
+        title: { type: ["string", "null"], maxLength: 240 },
+        issue: { anyOf: [CAMPAIGN_ISSUE_SCHEMA, { type: "null" }] },
+        dispatchState: { type: "string", enum: ["planned", "queued"] },
+        queuePosition: { anyOf: [{ type: "integer", minimum: 0 }, { type: "null" }] },
+        dependsOn: { type: "array", maxItems: 64, items: { type: "string" } },
+        commitment: {
+          type: "object",
+          properties: {
+            state: { type: "string", enum: ["committed", "cancelled", "scope_removed"] },
+            reason: { type: "string", maxLength: 1000 },
+          },
+          required: ["state"],
+          additionalProperties: false,
+        },
+        stage: {
+          anyOf: [{
+            type: "object",
+            properties: {
+              stage: { type: "string", enum: ["implementing", "in_review", "awaiting_checks", "awaiting_approval", "merge_queued", "merged", "cleanup"] },
+              note: { type: "string", maxLength: 1000 },
+              pullRequests: { type: "array", maxItems: 16, items: CAMPAIGN_ISSUE_SCHEMA },
+            },
+            required: ["stage"],
+            additionalProperties: false,
+          }, { type: "null" }],
+        },
+        blocker: {
+          anyOf: [{
+            type: "object",
+            properties: {
+              reason: { type: "string", maxLength: 1000 },
+              responsibleActor: { type: "string", enum: ["human", "orchestrator", "child", "external"] },
+              requestOccurrenceId: { type: "string" },
+            },
+            required: ["reason", "responsibleActor"],
+            additionalProperties: false,
+          }, { type: "null" }],
+        },
+        nextAction: { type: ["string", "null"], maxLength: 1000 },
+        endAttempt: {
+          type: "object",
+          properties: { reason: { type: "string", enum: ["abandoned", "failed"] }, note: { type: "string", maxLength: 1000 } },
+          required: ["reason"],
+          additionalProperties: false,
+        },
+      },
+      required: ["workItemId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      if (typeof args?.workItemId !== "string" || !args.workItemId) return errorResult("workItemId is required");
+      const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const { workItemId, ...fields } = args as Record<string, unknown>;
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/work-items/${encodeURIComponent(workItemId as string)}`,
+        fields);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "assign_campaign_work_item",
+    description: "Record that one of this Orchestrator's descendant sessions now works on a campaign work item. Opens a new attempt; the child's open attempt on another item closes as reassigned and the item's open attempt with another child closes as superseded, keeping earlier verification and accounting. Repeating an open assignment is a no-op. It records only: create_session and prompt_session still dispatch work.",
+    inputSchema: {
+      type: "object",
+      properties: { workItemId: { type: "string" }, childSessionId: { type: "string" } },
+      required: ["workItemId", "childSessionId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      if (typeof args?.workItemId !== "string" || !args.workItemId) return errorResult("workItemId is required");
+      const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/work-items/${encodeURIComponent(args.workItemId)}/assign`,
+        { childSessionId: args?.childSessionId });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "adjudicate_campaign_recommendation",
+    description: "Record a disposition for one recorded follow-up recommendation: accepted (creates or links a follow_up work item by resultingWorkItemKey, optionally with resultingIssue), rejected, deferred, or duplicate (optionally of the existing item resultingWorkItemKey), with a reason. Accepting is not approval: publishing an issue and starting work still need their typed decisions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recommendationId: { type: "string" },
+        disposition: { type: "string", enum: ["accepted", "rejected", "deferred", "duplicate"] },
+        reason: { type: "string", maxLength: 1000 },
+        resultingWorkItemKey: { type: "string", maxLength: 256 },
+        resultingIssue: CAMPAIGN_ISSUE_SCHEMA,
+        publicationRequired: { type: "boolean" },
+      },
+      required: ["recommendationId", "disposition", "reason"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      if (typeof args?.recommendationId !== "string" || !args.recommendationId) return errorResult("recommendationId is required");
+      const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const { recommendationId, ...fields } = args as Record<string, unknown>;
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/recommendations/${encodeURIComponent(recommendationId as string)}/adjudicate`,
+        fields);
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "get_campaign_work_items",
+    description: "Read this campaign's work ledger: a summary plus one page of work items (default unfinished, by queue order) or one item's detail with attempts, verifications, and recommendations. Pass the returned nextCursor for the next page; a cursor from an older ledger revision is refused, so restart from the first page. includeRecommendations adds recorded recommendations, awaiting adjudication first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workItemId: { type: "string" },
+        cursor: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 100 },
+        origin: { type: "string", enum: ["original", "follow_up"] },
+        state: { type: "string", enum: ["unfinished", "finished", "all", "planned", "queued", "running", "waiting", "blocked", "delivered", "cancelled", "removed"] },
+        sort: { type: "string", enum: ["queue", "activity", "elapsed", "cost"] },
+        includeRecommendations: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
+      const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const base = `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/work-items`;
+      if (typeof args?.workItemId === "string" && args.workItemId) {
+        const r = await cpFetch(deps, "GET", `${base}/${encodeURIComponent(args.workItemId)}`);
+        return r.ok ? textResult(r.data) : errorResult(r.message);
+      }
+      const query = new URLSearchParams();
+      for (const name of ["cursor", "limit", "origin", "state", "sort", "includeRecommendations"]) {
+        if (args?.[name] !== undefined) query.set(name, String(args[name]));
+      }
+      const r = await cpFetch(deps, "GET", query.size ? `${base}?${query.toString()}` : base);
       return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },

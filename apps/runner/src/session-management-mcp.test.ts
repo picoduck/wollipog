@@ -2255,3 +2255,64 @@ test("a lost issue closure response tells the agent to inspect before renewed re
   assert.match(resultText(result), /get_workflow_decision/);
   assert.match(resultText(result), /Never replay/);
 });
+
+test("campaign work ledger tools require an Orchestrator and a v196 control plane (#2417)", async () => {
+  const ledgerTools = ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
+    "adjudicate_campaign_recommendation", "get_campaign_work_items"];
+  const ordinary = makeDeps();
+  const ordinaryList = await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }, ordinary.deps);
+  const ordinaryNames = ordinaryList!.result.tools.map((tool: { name: string }) => tool.name);
+  for (const name of ledgerTools) {
+    assert.equal(ordinaryNames.includes(name), false, `${name} is hidden from ordinary sessions`);
+    assert.equal((await callTool(ordinary.deps, name, { workItemId: "cwi_1", recommendationId: "followup_1" })).isError, true);
+  }
+  assert.equal(ordinary.calls.length, 0);
+
+  const older = makeDeps();
+  older.deps.orchestrator = true;
+  older.deps.controlPlaneProtocolVersion = 195;
+  assert.equal((await callTool(older.deps, "record_campaign_plan", { items: [], planComplete: true })).isError, true);
+  // An older control plane would ignore an unknown workItem and record no delivery.
+  assert.equal((await callTool(older.deps, "verify_campaign_child", {
+    childSessionId: "child", reportEventSeq: 3, followUpsAccounted: true, workItem: { id: "cwi_1", outcome: "delivered" },
+  })).isError, true);
+  assert.equal((await callTool(older.deps, "record_campaign_follow_up", {
+    originSessionId: "child", repository: "o/r", title: "T", originWorkItemIds: ["cwi_1"],
+  })).isError, true);
+  assert.equal(older.calls.length, 0);
+  assert.equal((await callTool(older.deps, "verify_campaign_child", {
+    childSessionId: "child", reportEventSeq: 3, followUpsAccounted: true,
+  })).isError, undefined, "verification without a work item still works against an older control plane");
+
+  const current = makeDeps();
+  current.deps.orchestrator = true;
+  current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const listed = await dispatch({ jsonrpc: "2.0", id: 2, method: "tools/list" }, current.deps);
+  const names = listed!.result.tools.map((tool: { name: string }) => tool.name);
+  for (const name of ledgerTools) assert.ok(names.includes(name), `${name} is listed for an Orchestrator`);
+  const plan = { items: [{ key: "picoduck/wollipog#1", issue: { repository: "picoduck/wollipog", number: 1 } }], planComplete: false };
+  await callTool(current.deps, "record_campaign_plan", plan);
+  assert.equal(current.calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/plan`);
+  assert.deepEqual(current.calls.at(-1)?.body, plan);
+  await callTool(current.deps, "update_campaign_work_item", { workItemId: "cwi_1", stage: { stage: "in_review" } });
+  assert.equal(current.calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/work-items/cwi_1`);
+  assert.deepEqual(current.calls.at(-1)?.body, { stage: { stage: "in_review" } });
+  await callTool(current.deps, "assign_campaign_work_item", { workItemId: "cwi_1", childSessionId: "child" });
+  assert.equal(current.calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/work-items/cwi_1/assign`);
+  assert.deepEqual(current.calls.at(-1)?.body, { childSessionId: "child" });
+  await callTool(current.deps, "adjudicate_campaign_recommendation", { recommendationId: "followup_1", disposition: "rejected", reason: "No" });
+  assert.equal(current.calls.at(-1)?.url,
+    `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/recommendations/followup_1/adjudicate`);
+  assert.deepEqual(current.calls.at(-1)?.body, { disposition: "rejected", reason: "No" });
+  await callTool(current.deps, "get_campaign_work_items", { state: "all", limit: 10, includeRecommendations: true });
+  assert.equal(current.calls.at(-1)?.url,
+    `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/work-items?limit=10&state=all&includeRecommendations=true`);
+  await callTool(current.deps, "get_campaign_work_items", { workItemId: "cwi_1" });
+  assert.equal(current.calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/orchestrator-campaign/work-items/cwi_1`);
+  await callTool(current.deps, "verify_campaign_child", {
+    childSessionId: "child", reportEventSeq: 3, followUpsAccounted: true, workItem: { id: "cwi_1", outcome: "delivered" },
+  });
+  assert.deepEqual(current.calls.at(-1)?.body, {
+    childSessionId: "child", reportEventSeq: 3, followUpsAccounted: true, workItem: { id: "cwi_1", outcome: "delivered" },
+  });
+});

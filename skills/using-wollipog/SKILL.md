@@ -96,6 +96,23 @@ child's enqueue produces no permission receipt in auto or Full Access mode, so c
 forge reports the PR merged; its proof is that merged approved head. Treat any unavailable or
 mismatched proof as a blocker rather than requesting a replacement approval or replaying the action.
 
+Keep the campaign work ledger current (control plane protocol v196+; `wollipog campaign …` from the
+CLI). Every record lands in the root campaign, including from a nested Orchestrator:
+
+- `record_campaign_plan` upserts work items by a stable key (issue or planned slice) with dispatch
+  state, queue position, and dependencies; set `planComplete` once the original scope is listed.
+- `assign_campaign_work_item` records which descendant works on an item. Reusing a child for another
+  item or moving an item to another child opens a new attempt; earlier attempts keep their
+  verification and accounting.
+- `update_campaign_work_item` records reported stages, blockers, next actions, cancellations, and
+  scope removals. A reported stage is a claim: `merged` does not mark the item delivered.
+- `adjudicate_campaign_recommendation` records accepted, rejected, deferred, or duplicate for a
+  recorded follow-up; pass `originWorkItemIds` when recording it.
+- `get_campaign_work_items` reads the summary and a page or one item. Restart from the first page
+  when a cursor is refused because the ledger changed.
+
+These records grant no authority: they never dispatch, publish, merge, or resolve a decision.
+
 Record each proposed follow-up with `record_campaign_follow_up` before starting it. Server-side
 repository/title normalization deduplicates recommendations across children. `Recommend Only`
 returns `recommend_only_stop` and ends at reporting. `Execute Approved` returns
@@ -106,7 +123,9 @@ enqueued pull request remains unfinished until merge-group CI passes and the for
 `MERGED` state; continue supervising unrelated children while any one child waits for a human gate.
 
 Once a child is Idle or Completed, use its exact completed report event sequence with
-`verify_campaign_child` and attest that follow-ups were recorded. `Retain` keeps it visible.
+`verify_campaign_child` and attest that follow-ups were recorded. Pass `workItem` (`delivered` or
+`incomplete`) to record delivery of the child's assigned work item; idleness, a closed issue, or an
+enqueued merge never does. `Retain` keeps it visible.
 `Stop and Archive` starts the durable stop/archive operation and automatically requests managed
 retirement of each clean, fully delivered runner-owned child worktree when the runner supports it.
 Check `get_campaign.cleanupWorktrees`: pending, provider-deferred, and safety-refused paths all

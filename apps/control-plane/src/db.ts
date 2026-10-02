@@ -149,6 +149,7 @@ import {
   type OrchestratorCampaignPolicy,
   type OrchestratorCampaignProjection,
   type OrchestratorFollowUpRecord,
+  type CampaignAttemptBoundary,
   type OrchestratorDefaults,
   type WorkflowDecisionAuthority,
   type WorkflowDecisionStatus,
@@ -286,6 +287,8 @@ import {
 } from "./archive-session-page.js";
 import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } from "./web-push.js";
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
+import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
+import type { CampaignAttemptSessionObservation } from "./campaign-work-state.js";
 import {
   executionTargetsForHost,
   executionTargetsForRunner,
@@ -865,10 +868,12 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_worktree_cleanup (
 
 -- Recommendation content is bounded and credential-free. The normalized repository/title key is
 -- authoritative across children so caller-supplied ids cannot defeat campaign deduplication.
+-- Deleting the origin child keeps the recommendation (campaign work ledger history, #2417); only
+-- deleting the campaign removes it.
 CREATE TABLE IF NOT EXISTS orchestrator_campaign_follow_ups (
   id                  TEXT PRIMARY KEY,
   campaign_session_id TEXT NOT NULL,
-  origin_session_id   TEXT NOT NULL,
+  origin_session_id   TEXT,
   repository          TEXT NOT NULL,
   title               TEXT NOT NULL,
   recommendation_key  TEXT,
@@ -876,7 +881,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_follow_ups (
   duplicate_of        TEXT,
   created_at          INTEGER NOT NULL,
   FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-  FOREIGN KEY (origin_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (origin_session_id) REFERENCES sessions(id) ON DELETE SET NULL,
   FOREIGN KEY (duplicate_of) REFERENCES orchestrator_campaign_follow_ups(id) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_follow_up_unique
@@ -884,6 +889,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_follow_up_unique
   WHERE duplicate_of IS NULL;
 CREATE INDEX IF NOT EXISTS idx_orchestrator_follow_up_campaign
   ON orchestrator_campaign_follow_ups(campaign_session_id, created_at, id);
+${CAMPAIGN_WORK_LEDGER_SCHEMA}
 
 -- Descendant transitions are durable before a synthetic parent turn is admitted. Stable event
 -- identities make repeated projection/reconnect passes harmless, while the continuation range is
@@ -4571,6 +4577,58 @@ function admitChildBlockedCampaignEvents(db: DatabaseSync): void {
   }
 }
 
+/**
+ * Keep campaign recommendations when their origin child is deleted (#2417). Rows written before
+ * the campaign work ledger cascaded on the origin session; SQLite cannot alter a foreign key, so an
+ * older table is rebuilt with a nullable origin that is set to NULL instead. Every row, id, and
+ * duplicate link is preserved.
+ */
+function preserveCampaignFollowUpOrigins(db: DatabaseSync): void {
+  const schema = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='orchestrator_campaign_follow_ups'",
+  ).get() as { sql?: string } | undefined;
+  if (!schema?.sql || !/origin_session_id\s+TEXT NOT NULL/u.test(schema.sql)) return;
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    db.exec("BEGIN;");
+    db.exec(`
+      CREATE TABLE orchestrator_campaign_follow_ups_v2 (
+        id                  TEXT PRIMARY KEY,
+        campaign_session_id TEXT NOT NULL,
+        origin_session_id   TEXT,
+        repository          TEXT NOT NULL,
+        title               TEXT NOT NULL,
+        recommendation_key  TEXT,
+        normalized_key      TEXT NOT NULL,
+        duplicate_of        TEXT,
+        created_at          INTEGER NOT NULL,
+        FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (origin_session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+        FOREIGN KEY (duplicate_of) REFERENCES orchestrator_campaign_follow_ups(id) ON DELETE CASCADE
+      );
+      INSERT INTO orchestrator_campaign_follow_ups_v2
+        (id, campaign_session_id, origin_session_id, repository, title, recommendation_key, normalized_key,
+         duplicate_of, created_at)
+        SELECT id, campaign_session_id, origin_session_id, repository, title, recommendation_key, normalized_key,
+          duplicate_of, created_at
+        FROM orchestrator_campaign_follow_ups;
+      DROP TABLE orchestrator_campaign_follow_ups;
+      ALTER TABLE orchestrator_campaign_follow_ups_v2 RENAME TO orchestrator_campaign_follow_ups;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_follow_up_unique
+        ON orchestrator_campaign_follow_ups(campaign_session_id, normalized_key)
+        WHERE duplicate_of IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_orchestrator_follow_up_campaign
+        ON orchestrator_campaign_follow_ups(campaign_session_id, created_at, id);
+    `);
+    db.exec("COMMIT;");
+  } catch (error) {
+    try { db.exec("ROLLBACK;"); } catch { /* no active transaction */ }
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 export class ControlPlaneDb {
   private constructor(
     private readonly db: DatabaseSync,
@@ -4602,6 +4660,54 @@ export class ControlPlaneDb {
       this.stmts.set(sql, s);
     }
     return s;
+  }
+
+  private campaignWorkLedgerStore: CampaignWorkLedgerStore | null = null;
+
+  /** The root-keyed campaign work ledger (#2417). Callers resolve the root campaign first. */
+  get campaignWorkLedger(): CampaignWorkLedgerStore {
+    this.campaignWorkLedgerStore ??= new CampaignWorkLedgerStore(this.db, {
+      observeSession: (sessionId) => this.campaignAttemptSessionObservation(sessionId),
+      boundary: (sessionId) => this.campaignAttemptBoundary(sessionId),
+      atomic: (work) => this.atomic(work),
+    });
+    return this.campaignWorkLedgerStore;
+  }
+
+  /** Read from the raw row: a SessionView embeds the campaign projection, which would recurse. */
+  private campaignAttemptSessionObservation(sessionId: string): CampaignAttemptSessionObservation | null {
+    const row = this.stmt(
+      "SELECT status, archived, pending_approval, worktree_recovery, queue_hold FROM sessions WHERE id=?",
+    ).get(sessionId) as {
+      status: SessionStatus; archived: number; pending_approval: string | null;
+      worktree_recovery: string | null; queue_hold: string | null;
+    } | undefined;
+    if (!row) return null;
+    const typed = Number((this.stmt(
+      "SELECT COUNT(*) AS count FROM workflow_decisions WHERE session_id=? AND status='pending'",
+    ).get(sessionId) as { count: number }).count);
+    const generic = pendingRequests(parseJson<PendingApproval>(row.pending_approval))
+      .filter((request) => request.kind !== "workflow_decision").length;
+    return {
+      status: row.status,
+      archived: row.archived === 1,
+      held: !isTerminal(row.status) &&
+        this.sessionHoldsFor(sessionId, row.worktree_recovery, row.queue_hold).length > 0,
+      pendingRequests: typed + generic,
+    };
+  }
+
+  private campaignAttemptBoundary(sessionId: string): CampaignAttemptBoundary {
+    const row = this.stmt(
+      `SELECT event_epoch, runner_history_epoch,
+         (SELECT MAX(seq) FROM session_events WHERE session_id=sessions.id) AS seq
+       FROM sessions WHERE id=?`,
+    ).get(sessionId) as { event_epoch: number; runner_history_epoch: number | null; seq: number | null } | undefined;
+    return {
+      eventEpoch: row?.event_epoch ?? null,
+      runnerHistoryEpoch: row?.runner_history_epoch ?? null,
+      seq: row?.seq ?? null,
+    };
   }
 
   private atomic<T>(work: () => T): T {
@@ -5354,6 +5460,7 @@ export class ControlPlaneDb {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resume_command
       ON workflow_decisions(resume_command_id) WHERE resume_state='delivering'`);
     admitChildBlockedCampaignEvents(db);
+    preserveCampaignFollowUpOrigins(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
     // narrower and permits multiple distinct invocations in one provider turn.
     db.exec("DROP INDEX IF EXISTS idx_workflow_decisions_provider_turn_action");
@@ -14943,10 +15050,7 @@ export class ControlPlaneDb {
     reportEventSeq: number,
     now: number,
   ): void {
-    const report = this.stmt(
-      `SELECT event.ts, event.payload, session.event_epoch FROM session_events event
-       JOIN sessions session ON session.id=event.session_id WHERE event.session_id=? AND event.seq=?`,
-    ).get(childSessionId, reportEventSeq) as { ts: number; payload: string; event_epoch: number } | undefined;
+    const report = this.campaignReportIdentity(childSessionId, reportEventSeq);
     this.stmt(
       `INSERT INTO orchestrator_campaign_child_reports
        (campaign_session_id, child_session_id, report_event_seq, verified_at, report_event_epoch, report_ts, report_digest)
@@ -14955,8 +15059,23 @@ export class ControlPlaneDb {
          report_event_seq=excluded.report_event_seq, verified_at=excluded.verified_at,
          report_event_epoch=excluded.report_event_epoch, report_ts=excluded.report_ts,
          report_digest=excluded.report_digest`,
-    ).run(campaignSessionId, childSessionId, reportEventSeq, now, report?.event_epoch ?? null,
-      report?.ts ?? null, report ? this.campaignReportDigest(JSON.parse(report.payload) as SessionEventPayload) : null);
+    ).run(campaignSessionId, childSessionId, reportEventSeq, now, report.eventEpoch, report.ts, report.digest);
+  }
+
+  /** The exact identity of one report event, as session and work-item verification record it. */
+  campaignReportIdentity(childSessionId: string, reportEventSeq: number): {
+    seq: number; eventEpoch: number | null; ts: number | null; digest: string | null;
+  } {
+    const report = this.stmt(
+      `SELECT event.ts, event.payload, session.event_epoch FROM session_events event
+       JOIN sessions session ON session.id=event.session_id WHERE event.session_id=? AND event.seq=?`,
+    ).get(childSessionId, reportEventSeq) as { ts: number; payload: string; event_epoch: number } | undefined;
+    return {
+      seq: reportEventSeq,
+      eventEpoch: report?.event_epoch ?? null,
+      ts: report?.ts ?? null,
+      digest: report ? this.campaignReportDigest(JSON.parse(report.payload) as SessionEventPayload) : null,
+    };
   }
 
   private campaignReportDigest(payload: SessionEventPayload): string | null {
@@ -15516,9 +15635,15 @@ export class ControlPlaneDb {
     repository: string;
     title: string;
     recommendationKey?: string;
+    /** Work items in the same campaign; the caller has verified they exist. */
+    originWorkItemIds?: readonly string[];
     followUpsMode: OrchestratorCampaignPolicy["behavior"]["followUps"];
     now: number;
   }): OrchestratorFollowUpRecord {
+    return this.atomic(() => this.recordCampaignFollowUpRow(input));
+  }
+
+  private recordCampaignFollowUpRow(input: Parameters<ControlPlaneDb["recordCampaignFollowUp"]>[0]): OrchestratorFollowUpRecord {
     const normalizedKey = `${input.repository.trim().toLowerCase()}\n${input.title.trim().replace(/\s+/gu, " ").toLowerCase()}`;
     const existing = this.stmt(
       `SELECT id FROM orchestrator_campaign_follow_ups
@@ -15534,6 +15659,8 @@ export class ControlPlaneDb {
       id, input.campaignSessionId, input.originSessionId, input.repository.trim(), input.title.trim(),
       input.recommendationKey ?? null, normalizedKey, existing?.id ?? null, input.now,
     );
+    // A recommendation is part of the campaign work ledger, so recording one is a ledger write.
+    this.campaignWorkLedger.recordRecommendationOrigins(input.campaignSessionId, id, input.originWorkItemIds ?? [], input.now);
     return {
       id,
       campaignSessionId: input.campaignSessionId,
@@ -15546,6 +15673,8 @@ export class ControlPlaneDb {
         : input.followUpsMode === "recommend_only" ? "recommend_only_stop"
         : "requires_typed_gates",
       createdAt: input.now,
+      originWorkItemIds: this.campaignWorkLedger.recommendationOrigins(id),
+      disposition: existing ? "duplicate" : "awaiting_adjudication",
     };
   }
 

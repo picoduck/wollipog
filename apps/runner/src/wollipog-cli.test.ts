@@ -150,6 +150,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["session", ["session list", "session capabilities", "session create", "session wait", "session guardrails", "--effort"]],
     ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
     ["issue-closure", ["request --proposal", "execute <occurrence-id>", "protocol v194+", "uncertain"]],
+    ["campaign", ["plan --input", "update-item <work-item-id>", "assign <work-item-id>", "adjudicate <recommendation-id>", "work-items", "protocol v196+", "grant no authority"]],
     ["decision", ["decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision", "--snapshot"]],
     ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
   ];
@@ -1124,5 +1125,45 @@ test("CLI issue closure preserves the exact proposal and refuses other sessions 
   assert.equal(calls.length, 0);
   version = 193;
   assert.equal(await invoke(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+});
+
+test("CLI campaign ledger commands map to their tools and refuse other sessions or old control planes (#2417)", async () => {
+  const calls: Array<{ url: string; method?: string; body?: string }> = [];
+  let version = PROTOCOL_VERSION;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, method: init?.method, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { revision: 1 }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token",
+    WOLLIPOG_SESSION_ID: "parent", WOLLIPOG_PERMISSION_PRESET: "orchestrator" };
+  const io = { stdout: () => {}, stderr: () => {} };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args], env, io, fetch);
+  const last = () => calls.filter((call) => !call.url.endsWith("/api/compatibility")).at(-1)!;
+  const plan = { items: [{ key: "plan:a" }], planComplete: true };
+  assert.equal(await invoke(["campaign", "plan", "--input", JSON.stringify(plan), "--json"]), 0);
+  assert.equal(last().url, "http://cp/api/sessions/parent/orchestrator-campaign/plan");
+  assert.deepEqual(JSON.parse(last().body!), plan);
+  assert.equal(await invoke(["campaign", "update-item", "cwi_1", "--input", JSON.stringify({ nextAction: "Dispatch" }), "--json"]), 0);
+  assert.equal(last().url, "http://cp/api/sessions/parent/orchestrator-campaign/work-items/cwi_1");
+  assert.deepEqual(JSON.parse(last().body!), { nextAction: "Dispatch" });
+  assert.equal(await invoke(["campaign", "assign", "cwi_1", "child", "--json"]), 0);
+  assert.equal(last().url, "http://cp/api/sessions/parent/orchestrator-campaign/work-items/cwi_1/assign");
+  assert.deepEqual(JSON.parse(last().body!), { childSessionId: "child" });
+  assert.equal(await invoke(["campaign", "adjudicate", "followup_1", "--input",
+    JSON.stringify({ disposition: "deferred", reason: "Later" }), "--json"]), 0);
+  assert.equal(last().url, "http://cp/api/sessions/parent/orchestrator-campaign/recommendations/followup_1/adjudicate");
+  assert.equal(await invoke(["campaign", "work-items", "--state", "all", "--limit", "5", "--recommendations", "--json"]), 0);
+  assert.equal(last().url,
+    "http://cp/api/sessions/parent/orchestrator-campaign/work-items?limit=5&state=all&includeRecommendations=true");
+  assert.equal(await invoke(["campaign", "work-items", "--item", "cwi_1", "--json"]), 0);
+  assert.equal(last().url, "http://cp/api/sessions/parent/orchestrator-campaign/work-items/cwi_1");
+  calls.length = 0;
+  assert.equal(await invoke(["campaign", "assign", "cwi_1", "child", "--session", "other", "--json"]), 2);
+  assert.equal(await invoke(["campaign", "plan", "--json"]), 2, "plan requires --input");
+  assert.equal(calls.length, 0);
+  version = 195;
+  assert.equal(await invoke(["campaign", "plan", "--input", JSON.stringify(plan), "--json"]), 1);
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
 });

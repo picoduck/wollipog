@@ -172,6 +172,53 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
     }
     return { error: "use issue-closure request --proposal <json> or issue-closure execute <occurrence-id> --digest <digest>" };
   }
+  if (words[0] === "campaign") {
+    if (optionPresent(args, "--session")) {
+      return { error: "campaign commands act only on the injected Orchestrator session and do not accept --session" };
+    }
+    const groupIndex = args.indexOf("campaign");
+    const verb = args[groupIndex + 1];
+    const operand = (offset: number) => {
+      const value = args[groupIndex + offset];
+      return value && !value.startsWith("--") ? value : undefined;
+    };
+    const input = () => jsonObjectOption(args, "--input");
+    if (verb === "plan") {
+      const body = input();
+      return "error" in body ? body : { tool: "record_campaign_plan", input: body.value };
+    }
+    if (verb === "update-item" && operand(2)) {
+      const body = input();
+      return "error" in body ? body : { tool: "update_campaign_work_item", input: { ...body.value, workItemId: operand(2) } };
+    }
+    if (verb === "assign" && operand(2) && operand(3)) {
+      return { tool: "assign_campaign_work_item", input: { workItemId: operand(2), childSessionId: operand(3) } };
+    }
+    if (verb === "adjudicate" && operand(2)) {
+      const body = input();
+      return "error" in body ? body : {
+        tool: "adjudicate_campaign_recommendation",
+        input: { ...body.value, recommendationId: operand(2) },
+      };
+    }
+    if (verb === "work-items") {
+      const query: Record<string, unknown> = {};
+      for (const [name, key] of [["--item", "workItemId"], ["--cursor", "cursor"], ["--origin", "origin"],
+        ["--state", "state"], ["--sort", "sort"]] as const) {
+        const value = option(args, name);
+        if (optionPresent(args, name) && (value === undefined || value.startsWith("--"))) return { error: `${name} requires a value` };
+        if (value !== undefined) query[key] = value;
+      }
+      if (optionPresent(args, "--limit")) {
+        const limit = numeric(option(args, "--limit"));
+        if (limit === undefined) return { error: "--limit requires a number" };
+        query.limit = limit;
+      }
+      if (flag(args, "--recommendations")) query.includeRecommendations = true;
+      return { tool: "get_campaign_work_items", input: query };
+    }
+    return { error: "use campaign plan, update-item, assign, adjudicate, or work-items; see wollipog help campaign" };
+  }
   // Like artifact, this group reads only its fixed leading words. Keeping its JSON value options
   // out of the shared positional-option set ensures an unrelated command cannot become valid just
   // because it happens to include --snapshot or --action.
@@ -567,6 +614,9 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
+    : ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
+      "adjudicate_campaign_recommendation", "get_campaign_work_items"].includes(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger
     : workflowDecisionTools.has(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation
     : worktreeTools.has(parsed.tool)

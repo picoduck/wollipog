@@ -78,6 +78,10 @@ import {
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
   type RecordOrchestratorFollowUpRequest,
+  type AdjudicateCampaignRecommendationRequest,
+  type GetCampaignWorkItemsRequest,
+  type RecordCampaignPlanRequest,
+  type UpdateCampaignWorkItemRequest,
   type VerifyOrchestratorChildRequest,
   type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
@@ -3803,6 +3807,78 @@ app.post("/api/sessions/:id/orchestrator-campaign/verify-child", async (req, rep
     req.body as VerifyOrchestratorChildRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
+});
+
+/** The campaign work ledger operations (#2417): only the matching Orchestrator credential. None of
+ * them grants publication, dispatch, merge, or decision authority. */
+function campaignLedgerPrincipal(req: FastifyRequest, reply: FastifyReply, id: string) {
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
+    void reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
+    return null;
+  }
+  return principal;
+}
+
+app.post("/api/sessions/:id/orchestrator-campaign/plan", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.recordCampaignPlan(id, req.body as RecordCampaignPlanRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.get("/api/sessions/:id/orchestrator-campaign/work-items", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  const query = req.query as Record<string, unknown>;
+  const text = (name: string) => typeof query[name] === "string" ? query[name] as string : undefined;
+  const limit = text("limit");
+  return respond(reply, svc.campaignWorkItems(id, {
+    ...(text("cursor") !== undefined ? { cursor: text("cursor") } : {}),
+    ...(limit !== undefined ? { limit: /^\d{1,4}$/u.test(limit) ? Number(limit) : Number.NaN } : {}),
+    ...(text("origin") !== undefined ? { origin: text("origin") as GetCampaignWorkItemsRequest["origin"] } : {}),
+    ...(text("state") !== undefined ? { state: text("state") as GetCampaignWorkItemsRequest["state"] } : {}),
+    ...(text("sort") !== undefined ? { sort: text("sort") as GetCampaignWorkItemsRequest["sort"] } : {}),
+    ...(text("includeRecommendations") === "true" ? { includeRecommendations: true } : {}),
+  }, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.get("/api/sessions/:id/orchestrator-campaign/work-items/:itemId", async (req, reply) => {
+  const { id, itemId } = req.params as { id: string; itemId: string };
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.campaignWorkItems(id, { workItemId: itemId },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/work-items/:itemId", async (req, reply) => {
+  const { id, itemId } = req.params as { id: string; itemId: string };
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.updateCampaignWorkItem(id,
+    { ...(req.body as Omit<UpdateCampaignWorkItemRequest, "workItemId">), workItemId: itemId },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/work-items/:itemId/assign", async (req, reply) => {
+  const { id, itemId } = req.params as { id: string; itemId: string };
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  const childSessionId = (req.body as { childSessionId?: unknown } | null)?.childSessionId;
+  return respond(reply, svc.assignCampaignWorkItem(id,
+    { workItemId: itemId, childSessionId: childSessionId as string },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendationId/adjudicate", async (req, reply) => {
+  const { id, recommendationId } = req.params as { id: string; recommendationId: string };
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.adjudicateCampaignRecommendation(id,
+    { ...(req.body as Omit<AdjudicateCampaignRecommendationRequest, "recommendationId">), recommendationId },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.post("/api/sessions/:id/github-issue-closures", async (req, reply) => {

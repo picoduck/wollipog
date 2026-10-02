@@ -157,7 +157,7 @@ refused, not truncated.
 | --- | --- |
 | `record_campaign_plan {items[], planComplete}` | Idempotent upsert by `key`, at most 100 items per call. Supplied fields replace; omitted fields are unchanged. Dependencies are named by key, within the call or already recorded. It never changes commitment, attempts, or verification. |
 | `update_campaign_work_item {workItemId, …}` | Title, issue, dispatch state, queue position, dependencies, commitment, stage, blocker, next action, and `endAttempt {reason: abandoned \| failed}`. `null` clears. |
-| `assign_campaign_work_item {workItemId, childSessionId}` | Opens an attempt; closes earlier open attempts as described above. The child must be a campaign descendant visible to the caller. |
+| `assign_campaign_work_item {workItemId, childSessionId}` | Opens an attempt; closes earlier open attempts as described above. The child must be a descendant of the calling Orchestrator (the same scope `verify_campaign_child` uses) and visible to it. Cancelled or removed items cannot be assigned until recommitted. |
 | `verify_campaign_child {…, workItem?: {id, outcome}}` | Existing verification, plus a work-item verification for the child's open attempt on that item. Without `workItem`, no item becomes delivered. |
 | `record_campaign_follow_up {…, originWorkItemIds?}` | Existing deduplicated recording, plus origin items. |
 | `adjudicate_campaign_recommendation {recommendationId, disposition, reason, resultingWorkItemKey?, resultingIssue?, publicationRequired?}` | Records a disposition. `accepted` creates or links a `follow_up` work item. `duplicate` may link the existing item it duplicates. Re-adjudication replaces the previous disposition; it does not cancel a previously created item, which the Orchestrator does explicitly. |
@@ -167,6 +167,32 @@ None of these operations admits a child, sends a prompt, publishes or closes an 
 deletes a branch, approves or consumes a workflow decision, or changes a policy, owner, budget,
 guardrail, or issue scope. Tests assert that typed gates behave identically with and without
 ledger records.
+
+### Storage
+
+The storage slice adds `campaign_work_ledgers` (revision and plan state), `campaign_work_items`,
+`campaign_work_item_dependencies`, `campaign_work_attempts`, `campaign_work_verifications`,
+`campaign_recommendation_origins`, and `campaign_recommendation_dispositions`
+(`apps/control-plane/src/campaign-work-ledger-store.ts`). Partial unique indexes enforce one open
+attempt per item and per session. Dependency cycles are refused at write time; the derivation still
+treats a cycle or a missing dependency as blocking. The derived-state function lives in
+`apps/control-plane/src/campaign-work-state.ts` for the Read API to reuse.
+
+Orchestrator routes, all limited to the matching Orchestrator credential and listed in
+`ORCHESTRATOR_API_ROUTES`:
+
+- `POST /api/sessions/:id/orchestrator-campaign/plan`
+- `GET /api/sessions/:id/orchestrator-campaign/work-items[?cursor&limit&origin&state&sort&includeRecommendations]`
+- `GET /api/sessions/:id/orchestrator-campaign/work-items/:itemId`
+- `POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId` (update)
+- `POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/assign`
+- `POST /api/sessions/:id/orchestrator-campaign/recommendations/:recommendationId/adjudicate`
+
+The `wollipog campaign plan|update-item|assign|adjudicate|work-items` commands call the same tools.
+Recording a follow-up and recording a work-item verification are ledger writes and increment the
+revision. Observed session-status changes do not increment it yet; the Read API slice decides how
+observed changes invalidate cached pages. Until cost attribution lands, the `cost` sort falls back
+to queue order.
 
 ## Read API
 
@@ -313,3 +339,7 @@ starting contract. This document refines it as follows:
     state, the storage slice bumps the version again and moves the capability to it.
 12. **Additions requested at contract review**: an item-level `observed.cleanup` fact, a browser
     `campaign/recommendations` page, and per-item work-item intervals as the Queue Time source.
+13. **Assignment scope** is the calling Orchestrator's own descendants, matching verification,
+    rather than any descendant of the root campaign.
+14. **A server-deduplicated recommendation** can only be adjudicated as `duplicate`; the canonical
+    recommendation it duplicates carries the decision.

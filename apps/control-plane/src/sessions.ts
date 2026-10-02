@@ -89,6 +89,18 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type OrchestratorCampaignProjection,
   type OrchestratorFollowUpRecord,
   type RecordOrchestratorFollowUpRequest,
+  type AdjudicateCampaignRecommendationRequest,
+  type AdjudicateCampaignRecommendationResponse,
+  type AssignCampaignWorkItemRequest,
+  type AssignCampaignWorkItemResponse,
+  type CampaignWorkItemMutationResponse,
+  type GetCampaignWorkItemsRequest,
+  type GetCampaignWorkItemsResponse,
+  type RecordCampaignPlanRequest,
+  type RecordCampaignPlanResponse,
+  type UpdateCampaignWorkItemRequest,
+  type VerifyOrchestratorChildWorkItemResult,
+  CAMPAIGN_WORK_LEDGER_LIMITS,
   type VerifyOrchestratorChildRequest,
   type OrchestratorSettingsView,
   type PolicyHookEvaluationRequest,
@@ -6588,6 +6600,12 @@ export class SessionsService {
         (request.recommendationKey !== undefined && !boundedDecisionString(request.recommendationKey, 256))) {
       return fail("originSessionId, repository, title, and recommendationKey must be bounded", 400);
     }
+    const originWorkItemIds = request.originWorkItemIds;
+    if (originWorkItemIds !== undefined && (!Array.isArray(originWorkItemIds) ||
+        originWorkItemIds.length > CAMPAIGN_WORK_LEDGER_LIMITS.originWorkItemIds ||
+        !originWorkItemIds.every((id) => boundedDecisionString(id, 256)))) {
+      return fail(`originWorkItemIds must list at most ${CAMPAIGN_WORK_LEDGER_LIMITS.originWorkItemIds} work item ids`, 400);
+    }
     if (!this.db.isSessionDescendant(campaignSessionId, request.originSessionId) ||
         !canAccess(campaignSessionId) || !canAccess(request.originSessionId)) {
       return fail("follow-up origin is not a visible campaign child", 404);
@@ -6598,12 +6616,17 @@ export class SessionsService {
     const rootId = this.db.resolvedCampaignSessionId(campaignSessionId);
     const root = rootId ? this.db.getSession(rootId) : null;
     if (!root?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
+    const missingOrigins = this.db.campaignWorkLedger.missingItemIds(root.id, originWorkItemIds ?? []);
+    if (missingOrigins.length) {
+      return fail(`origin work items not found in this campaign: ${missingOrigins.slice(0, 8).join(", ")}`, 404);
+    }
     const followUp = this.db.recordCampaignFollowUp({
       campaignSessionId: root.id,
       originSessionId: request.originSessionId,
       repository: request.repository,
       title: request.title,
       ...(request.recommendationKey ? { recommendationKey: request.recommendationKey } : {}),
+      ...(originWorkItemIds?.length ? { originWorkItemIds } : {}),
       followUpsMode: root.orchestratorPolicy.behavior.followUps,
       now: Date.now(),
     });
@@ -6654,6 +6677,12 @@ export class SessionsService {
     if (!boundedDecisionString(request?.childSessionId, 256) || request.followUpsAccounted !== true ||
         !Number.isSafeInteger(request.reportEventSeq) || request.reportEventSeq < 1) {
       return fail("childSessionId, an exact reportEventSeq, and followUpsAccounted=true are required", 400);
+    }
+    const workItem = request.workItem;
+    if (workItem !== undefined && (typeof workItem !== "object" || workItem === null ||
+        !boundedDecisionString(workItem.id, 256) ||
+        (workItem.outcome !== "delivered" && workItem.outcome !== "incomplete"))) {
+      return fail("workItem requires id and outcome (delivered or incomplete)", 400);
     }
     const child = this.db.getSession(request.childSessionId);
     if (!child || !this.db.isSessionDescendant(campaignSessionId, child.id) ||
@@ -6727,6 +6756,13 @@ export class SessionsService {
     if (unfinishedDescendantId) {
       return fail(`campaign child still has unfinished descendant ${unfinishedDescendantId}`, 409);
     }
+    // Work-item delivery is checked before anything is recorded, so a refused item leaves the
+    // session-level verification untouched too.
+    // The ledger lives under the same resolved root as the session-level report (#1462).
+    if (workItem) {
+      const target = this.db.campaignWorkLedger.verificationTarget(root.id, workItem.id, child.id);
+      if (!target.ok) return fail(target.error, target.status);
+    }
     // Settle the spent approvals now, so a later stop or archive does not audit them as revoked.
     const now = Date.now();
     for (const decision of spentApprovals) {
@@ -6737,6 +6773,18 @@ export class SessionsService {
     }
     if (spentApprovals.length > 0) this.hub.sessionChangedById(child.id);
     this.db.verifyCampaignChildReport(root.id, child.id, request.reportEventSeq, now);
+    let workItemResult: VerifyOrchestratorChildWorkItemResult | undefined;
+    if (workItem) {
+      const recorded = this.db.campaignWorkLedger.recordVerification(root.id, {
+        workItemId: workItem.id,
+        childSessionId: child.id,
+        outcome: workItem.outcome,
+        report: this.db.campaignReportIdentity(child.id, request.reportEventSeq),
+        verifiedBySessionId: campaignSessionId,
+      }, now);
+      if (!recorded.ok) return fail(recorded.error, recorded.status);
+      workItemResult = recorded.data;
+    }
     let updated = this.db.getSession(child.id)!;
     if (completion === "stop_and_archive") {
       const archived = this.setArchived(child.id, true);
@@ -6745,8 +6793,161 @@ export class SessionsService {
       if (updated.archived) this.queueCampaignWorktreeRetirement(child.id);
     }
     const projection = this.db.campaignProjection(campaignSessionId)!;
+    // Refreshes the root and every nested Orchestrator above the child, including the caller.
     this.campaignViewsChanged(root.id, child.id);
-    return ok({ campaign: projection, child: updated }, updated.archiveStatus ? 202 : 200);
+    return ok({ campaign: projection, child: updated, ...(workItemResult ? { workItem: workItemResult } : {}) },
+      updated.archiveStatus ? 202 : 200);
+  }
+
+  /* ------------------------- Campaign work ledger (#2417) ------------------------- */
+
+  /** Resolve the root campaign a ledger operation acts on. Only an Orchestrator with a campaign
+   * policy may use the ledger, and it always reads and writes the root's ledger (#1462). */
+  private campaignLedgerScope(
+    callerSessionId: string,
+    canAccess: (sessionId: string) => boolean,
+  ): ServiceResult<{ caller: SessionView; root: SessionView }> {
+    const caller = this.db.getSession(callerSessionId);
+    if (!caller?.orchestratorPolicy || sessionRole(caller) !== "orchestrator" || !canAccess(caller.id)) {
+      return fail("Orchestrator campaign not found", 404);
+    }
+    const rootId = this.db.resolvedCampaignSessionId(caller.id);
+    const root = rootId ? this.db.getSession(rootId) : null;
+    if (!root?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
+    return ok({ caller, root });
+  }
+
+  /** Every Orchestrator view from the caller up to the root embeds the root-derived campaign
+   * state, so all of them changed (the same refresh set #1462 uses). */
+  private campaignLedgerChanged(rootId: string, callerId: string): void {
+    this.campaignViewsChanged(rootId, callerId);
+    if (callerId !== rootId) this.hub.sessionChangedById(callerId);
+  }
+
+  private ledgerWrite<T extends { revision: number }>(
+    scope: { caller: SessionView; root: SessionView },
+    write: () => { ok: true; data: T } | { ok: false; status: number; error: string },
+  ): ServiceResult<T> {
+    const before = this.db.campaignWorkLedger.revision(scope.root.id);
+    const result = write();
+    if (!result.ok) return fail(result.error, result.status);
+    if (result.data.revision !== before) this.campaignLedgerChanged(scope.root.id, scope.caller.id);
+    return ok(result.data);
+  }
+
+  recordCampaignPlan(
+    callerSessionId: string,
+    request: RecordCampaignPlanRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): ServiceResult<RecordCampaignPlanResponse> {
+    const scope = this.campaignLedgerScope(callerSessionId, canAccess);
+    if (!scope.ok || !scope.data) return failAs(scope);
+    return this.ledgerWrite(scope.data, () =>
+      this.db.campaignWorkLedger.recordPlan(scope.data!.root.id, callerSessionId, request, Date.now()));
+  }
+
+  updateCampaignWorkItem(
+    callerSessionId: string,
+    request: UpdateCampaignWorkItemRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): ServiceResult<CampaignWorkItemMutationResponse> {
+    const scope = this.campaignLedgerScope(callerSessionId, canAccess);
+    if (!scope.ok || !scope.data) return failAs(scope);
+    const now = Date.now();
+    const updated = this.ledgerWrite(scope.data, () =>
+      this.db.campaignWorkLedger.updateItem(scope.data!.root.id, callerSessionId, request, now));
+    if (!updated.ok || !updated.data) return failAs(updated);
+    const item = this.db.campaignWorkLedger.detail(scope.data.root.id, updated.data.itemId, now)!;
+    return ok({ revision: updated.data.revision, item });
+  }
+
+  assignCampaignWorkItem(
+    callerSessionId: string,
+    request: AssignCampaignWorkItemRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): ServiceResult<AssignCampaignWorkItemResponse> {
+    const scope = this.campaignLedgerScope(callerSessionId, canAccess);
+    if (!scope.ok || !scope.data) return failAs(scope);
+    if (!boundedDecisionString(request?.workItemId, 256) || !boundedDecisionString(request?.childSessionId, 256)) {
+      return fail("workItemId and childSessionId are required", 400);
+    }
+    // Same scope as verification: the assigning Orchestrator's own descendants. Recording an
+    // assignment starts nothing; dispatch stays with create_session and prompt_session.
+    const child = this.db.getSession(request.childSessionId);
+    if (!child || !this.db.isSessionDescendant(callerSessionId, child.id) || !canAccess(child.id)) {
+      return fail("campaign child not found", 404);
+    }
+    const agent = child.agentId
+      ? this.db.getRunner(child.runnerId)?.agents.find((candidate) => candidate.id === child.agentId)
+      : undefined;
+    return this.ledgerWrite(scope.data, () => this.db.campaignWorkLedger.assign(
+      scope.data!.root.id, callerSessionId, request.workItemId, child.id, {
+        title: child.title || null,
+        harness: child.agentId
+          ? { agentId: child.agentId, driver: child.driver, context: agent?.context ?? { kind: "native" } }
+          : null,
+        agentName: child.agentName,
+        model: child.model,
+        effort: child.effort,
+      }, Date.now()));
+  }
+
+  adjudicateCampaignRecommendation(
+    callerSessionId: string,
+    request: AdjudicateCampaignRecommendationRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): ServiceResult<AdjudicateCampaignRecommendationResponse> {
+    const scope = this.campaignLedgerScope(callerSessionId, canAccess);
+    if (!scope.ok || !scope.data) return failAs(scope);
+    const rootId = scope.data.root.id;
+    const now = Date.now();
+    const result = this.ledgerWrite(scope.data, () =>
+      this.db.campaignWorkLedger.adjudicate(rootId, callerSessionId, request, now));
+    if (!result.ok || !result.data) return failAs(result);
+    return ok({
+      revision: result.data.revision,
+      recommendation: this.db.campaignWorkLedger.recommendation(rootId, result.data.recommendationId)!,
+      workItem: result.data.workItemId ? this.db.campaignWorkLedger.detail(rootId, result.data.workItemId, now) : null,
+    });
+  }
+
+  /** `get_campaign_work_items`: the Orchestrator's own read. Never writes. */
+  campaignWorkItems(
+    callerSessionId: string,
+    request: GetCampaignWorkItemsRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): ServiceResult<GetCampaignWorkItemsResponse> {
+    const scope = this.campaignLedgerScope(callerSessionId, canAccess);
+    if (!scope.ok || !scope.data) return failAs(scope);
+    const root = scope.data.root;
+    const ledger = this.db.campaignWorkLedger;
+    const now = Date.now();
+    const projection = this.db.campaignProjection(root.id);
+    const summary = ledger.summary(root.id, {
+      campaignCreatedAt: root.createdAt,
+      complete: projection?.status === "verified_complete",
+      childSessionIds: this.db.campaignDescendantIds(root.id),
+      cleanupPending: projection?.children.cleanupPending ?? 0,
+    });
+    const response: GetCampaignWorkItemsResponse = { summary };
+    if (request?.workItemId !== undefined) {
+      if (!boundedDecisionString(request.workItemId, 256)) return fail("workItemId must be bounded", 400);
+      const item = ledger.detail(root.id, request.workItemId, now);
+      if (!item) return fail("work item not found in this campaign", 404);
+      response.item = item;
+    } else {
+      const page = ledger.page(root.id, request ?? {}, now);
+      if (!page.ok) return { ok: false, status: page.status, error: page.error };
+      response.page = page.data;
+    }
+    if (request?.includeRecommendations === true) {
+      const recommendations = ledger.recommendationsPage(root.id, {
+        ...(request.limit !== undefined ? { limit: request.limit } : {}),
+      });
+      if (!recommendations.ok) return { ok: false, status: recommendations.status, error: recommendations.error };
+      response.recommendations = recommendations.data.items;
+    }
+    return ok(response);
   }
 
   /** Refresh the root campaign and every nested Orchestrator between it and `sessionId`: each one's
