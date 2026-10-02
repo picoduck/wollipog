@@ -199,9 +199,13 @@ synthetic HOME; cancellation stops further fixture phases and case creation.
 | Writer readiness barrier | 15 seconds |
 | Subsequent Python handoff batch | 30 seconds |
 
+Node test timers run between event-loop turns; they cannot interrupt synchronous native
+transactions. The existing production helper deadline bounds those calls. The per-case and
+aggregate values above are test budgets, while subprocess deadlines are enforced at the call.
+
 The aggregate budgets are unchanged. The handoff batch performs nine or 63 real Python
 acquire/release pairs, followed by a native pair, preserving the original ten or 64 subsequent
-handoffs. It verifies the completed count, another selected checkpoint, native acceptance,
+handoffs. It verifies the completed count, no helper compaction diagnostics, another selected checkpoint, native acceptance,
 bounded storage, and cleared staging. The separate long-run matrix continues to exercise 64
 native-only, Python-only, and mixed handoffs (512 with `WOLLIPOG_LEASE_LONG_RUN=1`). Production
 helper deadlines, proof verification, ownership checks, and lease limits are unchanged.

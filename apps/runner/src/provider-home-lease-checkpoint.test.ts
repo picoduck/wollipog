@@ -276,7 +276,8 @@ function crashPhases(t: TestContext) {
   };
 }
 
-function crashWriter(t: TestContext, home: string, command: string, args: string[]) {
+function crashWriter(t: Pick<TestContext, "signal" | "after">, home: string, command: string, args: string[]) {
+  t.signal.throwIfAborted();
   const child = spawn(command, args, { env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   const capture = (chunk: Buffer) => { output = (output + String(chunk)).slice(-8192); };
@@ -301,6 +302,7 @@ try:
     for _ in range(${passes - 1}):
         lease = acquire_lease(home_fd, "${owner}")
         release_lease(lease)
+        assert not diagnostics, diagnostics
 finally: os.close(home_fd)
 print(${passes - 1})`)], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 30_000 });
   assert.equal(result.status, 0, String(result.stderr));
@@ -308,6 +310,18 @@ print(${passes - 1})`)], { env: { ...process.env, HOME: home }, encoding: "utf8"
   assert.equal(nativePass(home).getDiagnostics().length, 0, "native reader accepts the recovered and compacted journal");
   assert.notDeepEqual(fs.readFileSync(paths(home).anchor), before, "subsequent handoffs complete another checkpoint");
 }
+
+test("crash fixture refuses a writer after cancellation between phases", { skip: process.platform !== "linux" }, (t) => {
+  const home = fixture(t);
+  const cancelled = new AbortController();
+  const reason = new Error("fixture cancelled between writers");
+  cancelled.abort(reason);
+  // Model the same late call after an awaited kill phase. Keep real teardown
+  // registered on the parent so a reverted spawn guard cannot leak the probe.
+  const context = { signal: cancelled.signal, after: t.after.bind(t) };
+  assert.throws(() => crashWriter(context, home, process.execPath,
+    ["-e", "setInterval(() => {}, 1000)"]), error => error === reason);
+});
 
 test("crash fixture teardown reaps an unfinished writer before returning", { skip: process.platform !== "linux" }, async (t) => {
   const home = fixture(t);
@@ -372,6 +386,7 @@ test("repeated killed candidate publishers recover without exhausting bounded st
       const phase = crashPhases(t);
       await phase("seed", () => seed(home));
       for (const [index, writer] of sequence.entries()) {
+        t.signal.throwIfAborted();
         const marker = join(home, "ready");
         fs.rmSync(marker, { force: true });
         const script = join(home, "writer.mts");
