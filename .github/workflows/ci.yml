@@ -32,10 +32,12 @@ jobs:
     runs-on: ubuntu-22.04
     # Everything except the video decoder install took a median of 539 seconds and at most 771 over
     # 615 successful jobs from 2026-09-28 to 2026-10-01 (Unit Tests alone at most 615). Both install
-    # attempts at their seven-minute bounds plus that slowest remainder is just under 27 minutes, so
-    # twenty-eight still leaves the unit tests their full run time after a stalled first attempt
-    # (#2328). The contract test keeps this budget above the two attempts plus that remainder.
-    timeout-minutes: 28
+    # attempts at their seven-minute bounds plus that slowest remainder is just under 27 minutes
+    # (#2328), and the package cache's resolve, restore, verify, collect and save steps add at most
+    # eight more (#2345), so thirty-five still leaves the unit tests their full run time when every
+    # one of those steps runs to its bound. The contract test keeps this budget above the bounds of
+    # all of the decoder steps plus that remainder.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -69,13 +71,56 @@ jobs:
       # the first attempt finished downloading, so the two attempts' fetch time adds up: fourteen
       # minutes covers 46.7 MB at about 60 kB/s. When the retry fails too, the job fails here with an
       # error naming this install, not as a cancelled Unit Tests run.
+      #
+      # A mirror that stayed under that rate for hours still failed both attempts, so the packages
+      # are cached (#2345). After an index update (8.6 seconds even on the slow day), apt prints the
+      # exact archives the install would fetch on this image. The key hashes their names, versions,
+      # sizes and checksums with the runner image, so a new image or any new package version misses
+      # and is fetched and cached again. On a hit the first attempt installs with --no-download,
+      # which fails rather than touch the mirror if anything is missing, and the retry then fetches
+      # as before. The cache steps cannot fail the job: each continues on error, and a resolve or
+      # restore that fails, times out or misses falls back to the two bounded attempts. A resolve
+      # that timed out leaves its root apt-get holding the lists lock, so a miss clears it first.
+      # Main saves what pull requests and merge groups restore, right after the install so a later
+      # test failure or a cancelled main run still keeps it. The Playwright installs in the browser
+      # job are not cached: Playwright owns their package list, and their 18.4 MB of archives fits
+      # both six-minute attempts down to about 26 kB/s.
+      - name: Resolve Isolated Video Decoder Packages
+        id: video-decoder-packages
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          : "${ImageOS:?}" "${ImageVersion:?}"
+          sudo apt-get update -qq
+          archives="$(sudo apt-get install -qq --print-uris --no-install-recommends bubblewrap ffmpeg)"
+          test -n "$archives"
+          printf '%s\n' "$archives" > "$RUNNER_TEMP/video-decoder-packages.txt"
+          digest="$(cut -d ' ' -f 2- "$RUNNER_TEMP/video-decoder-packages.txt" | sort | sha256sum | cut -c 1-64)"
+          echo "key=video-decoder-$ImageOS-$ImageVersion-$digest" >> "$GITHUB_OUTPUT"
+      - name: Restore Isolated Video Decoder Packages
+        id: video-decoder-cache
+        if: steps.video-decoder-packages.outputs.key != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/video-decoder-packages
+          key: ${{ steps.video-decoder-packages.outputs.key }}
       - name: Install Isolated Video Decoder for Unit Tests
         id: video-decoder
         continue-on-error: true
         timeout-minutes: 7
+        env:
+          CACHE_HIT: ${{ steps.video-decoder-cache.outputs.cache-hit }}
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg
+          if [ "$CACHE_HIT" = true ]; then
+            sudo cp ~/.cache/video-decoder-packages/*.deb /var/cache/apt/archives/
+            sudo apt-get install -y --no-install-recommends --no-download bubblewrap ffmpeg
+          else
+            sudo pkill -KILL -x apt-get || true
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg
+          fi
       - name: Retry Install Isolated Video Decoder for Unit Tests
         if: ${{ !cancelled() && steps.video-decoder.outcome == 'failure' }}
         timeout-minutes: 7
@@ -85,6 +130,31 @@ jobs:
           sudo dpkg --configure -a
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg
+      - name: Verify Isolated Video Decoder for Unit Tests
+        timeout-minutes: 1
+        run: |
+          bwrap --version
+          ffmpeg -hide_banner -version
+      # Only the archives the key was computed from, so a hit restores exactly that set.
+      - name: Collect Isolated Video Decoder Packages
+        id: video-decoder-collect
+        if: steps.video-decoder-packages.outputs.key != '' && steps.video-decoder-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        run: |
+          rm -rf ~/.cache/video-decoder-packages
+          mkdir -p ~/.cache/video-decoder-packages
+          while read -r _ archive _; do
+            cp "/var/cache/apt/archives/$archive" ~/.cache/video-decoder-packages/
+          done < "$RUNNER_TEMP/video-decoder-packages.txt"
+      - name: Save Isolated Video Decoder Packages
+        if: steps.video-decoder-collect.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/video-decoder-packages
+          key: ${{ steps.video-decoder-packages.outputs.key }}
 
       - name: Provision Engine Boundary Package Managers
         shell: bash

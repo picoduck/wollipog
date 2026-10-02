@@ -503,31 +503,93 @@ test("both Playwright installs time out and retry once after clearing the stalle
   }
 });
 
-test("the unit-test job's video decoder install retries once and both attempts fit its budget", () => {
+test("the unit-test job's video decoder install is cached, retries once, and every step fits its budget", () => {
   // A slow apt mirror once held this install for 9-20 minutes, and the job's 20-minute budget then
   // cancelled Unit Tests with no test failing, which dropped five merge groups in one day (#2328).
-  // The install and its retry are compared whole, like the Playwright installs above: a dropped
-  // timeout, a retry that no longer follows its attempt, a retry that swallows its own failure or
-  // skips clearing the first attempt's processes, or a lost error naming the install all fail here.
+  // A mirror that stayed slow for hours then failed both bounded attempts, so the packages are
+  // cached (#2345). Every decoder step is compared whole, like the Playwright installs above: a
+  // dropped timeout, a cache step that can fail the job, a key that no longer follows the runner
+  // image or the resolved package versions, a hit that can still reach the mirror, a retry that no
+  // longer follows its attempt, swallows its own failure or skips clearing the first attempt's
+  // processes, or a lost error naming the install all fail here.
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8").replace(/\r\n/g, "\n");
   const job = ci.slice(ci.indexOf("\n  checks:\n"), ci.indexOf("\n  browser:\n"));
   const steps = job.split(/^      - name: /m).slice(1)
     .map((step) => step.replace(/(?:\n *(?:#[^\n]*)?)+$/, ""));
   const name = "Install Isolated Video Decoder for Unit Tests";
-  const index = steps.findIndex((step) => step.startsWith(`${name}\n`));
-  assert.notEqual(index, -1, `${name}: step is missing from the unit-test job`);
+  const names = [
+    "Resolve Isolated Video Decoder Packages",
+    "Restore Isolated Video Decoder Packages",
+    name,
+    `Retry ${name}`,
+    "Verify Isolated Video Decoder for Unit Tests",
+    "Collect Isolated Video Decoder Packages",
+    "Save Isolated Video Decoder Packages",
+  ];
+  const first = steps.findIndex((step) => step.startsWith(`${names[0]}\n`));
+  assert.notEqual(first, -1, `${names[0]}: step is missing from the unit-test job`);
+  const decoder = steps.slice(first, first + names.length);
+  assert.deepEqual(decoder.map((step) => step.split("\n")[0]), names,
+    "the video decoder steps must run together and in this order");
+  const index = first + names.indexOf(name);
+  assert.ok(first + names.length <= steps.findIndex((step) => step.startsWith("Unit Tests\n")),
+    `${name}: the install must be verified before Unit Tests, which need bubblewrap and FFmpeg`);
 
-  const attempts = [steps[index], steps[index + 1]].map((step) => Number(step?.match(/^        timeout-minutes: (\d+)$/m)?.[1]));
-  assert.ok(attempts.every((minutes) => minutes > 0), `${name}: both attempts need their own timeout-minutes`);
+  const bounds = decoder.map((step) => Number(step.match(/^        timeout-minutes: (\d+)$/m)?.[1]));
+  bounds.forEach((minutes, position) => assert.ok(minutes > 0, `${names[position]}: needs its own timeout-minutes`));
+  const [resolveStep, restoreStep, , , verifyStep, collectStep, saveStep] = decoder;
+  const [resolveBound, restoreBound, , , verifyBound, collectBound, saveBound] = bounds;
+  const attempts = [bounds[2], bounds[3]];
+  const cacheAction = restoreStep.match(/^        uses: actions\/cache\/restore@([0-9a-f]{40}) # (v[\d.]+)$/m);
+  assert.ok(cacheAction, `${names[1]}: must use actions/cache/restore pinned to a full commit SHA`);
+  const path = "~/.cache/video-decoder-packages";
+  const list = '"$RUNNER_TEMP/video-decoder-packages.txt"';
+  const key = "${{ steps.video-decoder-packages.outputs.key }}";
+
+  // The key covers the runner image and the exact archives apt would fetch for this install: their
+  // file names carry package and version, and each line also carries the size and checksum.
+  assert.equal(resolveStep, [
+    names[0],
+    "        id: video-decoder-packages",
+    "        continue-on-error: true",
+    `        timeout-minutes: ${resolveBound}`,
+    "        run: |",
+    '          : "${ImageOS:?}" "${ImageVersion:?}"',
+    "          sudo apt-get update -qq",
+    '          archives="$(sudo apt-get install -qq --print-uris --no-install-recommends bubblewrap ffmpeg)"',
+    '          test -n "$archives"',
+    `          printf '%s\\n' "$archives" > ${list}`,
+    `          digest="$(cut -d ' ' -f 2- ${list} | sort | sha256sum | cut -c 1-64)"`,
+    '          echo "key=video-decoder-$ImageOS-$ImageVersion-$digest" >> "$GITHUB_OUTPUT"',
+  ].join("\n"), `${names[0]}: the key must hash the runner image and the resolved archives, and resolving must not fail the job`);
+  assert.equal(restoreStep, [
+    names[1],
+    "        id: video-decoder-cache",
+    "        if: steps.video-decoder-packages.outputs.key != ''",
+    "        continue-on-error: true",
+    `        timeout-minutes: ${restoreBound}`,
+    `        uses: actions/cache/restore@${cacheAction[1]} # ${cacheAction[2]}`,
+    "        with:",
+    `          path: ${path}`,
+    `          key: ${key}`,
+  ].join("\n"), `${names[1]}: must restore only an exact key match and never fail the job`);
   assert.equal(steps[index], [
     name,
     "        id: video-decoder",
     "        continue-on-error: true",
     `        timeout-minutes: ${attempts[0]}`,
+    "        env:",
+    "          CACHE_HIT: ${{ steps.video-decoder-cache.outputs.cache-hit }}",
     "        run: |",
-    "          sudo apt-get update -qq",
-    "          sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg",
-  ].join("\n"), `${name}: first attempt must be bounded and allow one retry`);
+    '          if [ "$CACHE_HIT" = true ]; then',
+    `            sudo cp ${path}/*.deb /var/cache/apt/archives/`,
+    "            sudo apt-get install -y --no-install-recommends --no-download bubblewrap ffmpeg",
+    "          else",
+    "            sudo pkill -KILL -x apt-get || true",
+    "            sudo apt-get update -qq",
+    "            sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg",
+    "          fi",
+  ].join("\n"), `${name}: first attempt must be bounded, install a hit without the mirror, and allow one retry`);
   assert.equal(steps[index + 1], [
     `Retry ${name}`,
     "        if: ${{ !cancelled() && steps.video-decoder.outcome == 'failure' }}",
@@ -539,16 +601,46 @@ test("the unit-test job's video decoder install retries once and both attempts f
     "          sudo apt-get update -qq",
     "          sudo apt-get install -y --no-install-recommends bubblewrap ffmpeg",
   ].join("\n"), `${name}: retry must immediately follow, clear the stalled attempt, and fail the job naming the install`);
-  assert.ok(index < steps.findIndex((step) => step.startsWith("Unit Tests\n")),
-    `${name}: the install must finish before Unit Tests, which need bubblewrap and FFmpeg`);
+  assert.equal(verifyStep, [
+    names[4],
+    `        timeout-minutes: ${verifyBound}`,
+    "        run: |",
+    "          bwrap --version",
+    "          ffmpeg -hide_banner -version",
+  ].join("\n"), `${names[4]}: bubblewrap and FFmpeg must be executable before Unit Tests, whichever path installed them`);
+  assert.equal(collectStep, [
+    names[5],
+    "        id: video-decoder-collect",
+    "        if: steps.video-decoder-packages.outputs.key != '' && steps.video-decoder-cache.outputs.cache-hit != 'true'",
+    "        continue-on-error: true",
+    `        timeout-minutes: ${collectBound}`,
+    "        run: |",
+    `          rm -rf ${path}`,
+    `          mkdir -p ${path}`,
+    "          while read -r _ archive _; do",
+    `            cp "/var/cache/apt/archives/$archive" ${path}/`,
+    `          done < ${list}`,
+  ].join("\n"), `${names[5]}: a miss must cache exactly the archives its key was computed from, and never fail the job`);
+  assert.equal(saveStep, [
+    names[6],
+    "        if: steps.video-decoder-collect.outcome == 'success'",
+    "        continue-on-error: true",
+    `        timeout-minutes: ${saveBound}`,
+    `        uses: actions/cache/save@${cacheAction[1]} # ${cacheAction[2]}`,
+    "        with:",
+    `          path: ${path}`,
+    `          key: ${key}`,
+  ].join("\n"), `${names[6]}: must save only a complete collection under the restored key, and never fail the job`);
 
   // Everything else in the job took at most 771 seconds over 615 successful jobs (2026-09-28 to
-  // 2026-10-01). Two attempts that both run to their bounds must still leave that much, or a stall
-  // the retry recovers from cancels the unit tests anyway, which is the failure #2328 removed.
+  // 2026-10-01). Every decoder step running to its bound, including both install attempts, must
+  // still leave that much, or a stall the retry recovers from cancels the unit tests anyway, which
+  // is the failure #2328 removed.
   const SLOWEST_REMAINDER_SECONDS = 771;
   const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
-  assert.ok((budget - attempts[0] - attempts[1]) * 60 >= SLOWEST_REMAINDER_SECONDS,
-    `checks: timeout-minutes ${budget} must cover both ${attempts.join(" + ")}-minute install attempts ` +
+  const decoderMinutes = bounds.reduce((sum, minutes) => sum + minutes, 0);
+  assert.ok((budget - decoderMinutes) * 60 >= SLOWEST_REMAINDER_SECONDS,
+    `checks: timeout-minutes ${budget} must cover every video decoder step at its bound (${bounds.join(" + ")} minutes) ` +
     `plus the slowest measured remainder of the job (${SLOWEST_REMAINDER_SECONDS} seconds)`);
 });
 
