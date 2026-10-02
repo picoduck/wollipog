@@ -111,7 +111,12 @@ export interface CodexPluginLaunch {
   executionTarget?: { adapter: string };
 }
 
-const codexPackage = /^@openai\/codex(?:@[^/:\s]+)?$/u;
+function isCodexPackage(arg: string): boolean {
+  const match = /^@openai\/codex(?:@([^/\\:\s]+))?$/u.exec(arg);
+  const spec = match?.[1];
+  // npm also interprets dot-prefixed names and bare archive names as local payloads.
+  return !!match && (!spec || (!spec.startsWith(".") && !/\.(?:tgz|tar(?:\.gz)?)$/iu.test(spec)));
+}
 
 /** Recognize an argv grammar, never search arbitrary wrapper arguments for a package name. */
 function providerBoundary(command: string, args: string[], allowEnv = true): number | undefined {
@@ -161,13 +166,13 @@ function providerBoundary(command: string, args: string[], allowEnv = true): num
     let pkg: string | undefined;
     if (arg === "--package" || (arg === "-p" && ["npx", "yarn", "bun", "bunx"].includes(name))) pkg = args[i++];
     else if (arg.startsWith("--package=")) pkg = arg.slice("--package=".length);
-    if (!pkg || !codexPackage.test(pkg)) return undefined;
+    if (!pkg || !isCodexPackage(pkg)) return undefined;
     explicitPackage = true;
   }
   // npm exec continues parsing options after positional arguments without this separator.
   if (name === "npm" && args[i] !== "--") return undefined;
   if (args[i] === "--") i++;
-  return (explicitPackage ? args[i] === "codex" : codexPackage.test(args[i] ?? ""))
+  return (explicitPackage ? args[i] === "codex" : isCodexPackage(args[i] ?? ""))
     ? i + 1 : undefined;
 }
 
