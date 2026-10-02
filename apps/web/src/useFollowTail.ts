@@ -56,6 +56,8 @@ export interface UseFollowTailOptions {
   persistenceScope?: string;
   /** The transcript's rows, for counting the ones that arrive while the reader is away. */
   rows?: readonly FollowTailRow[];
+  /** The rows' id space (the session's event epoch). A new one restarts the count from its rows. */
+  rowGeneration?: unknown;
 }
 
 export interface FollowTailApi {
@@ -159,6 +161,7 @@ export function useFollowTail({
   sessionId,
   persistenceScope = "default",
   rows,
+  rowGeneration,
 }: UseFollowTailOptions): FollowTailApi {
   const initialKey = snapshotKey(persistenceScope, sessionId);
   const initialSnapshotRef = useRef<FollowTailSnapshot | undefined>(undefined);
@@ -171,6 +174,13 @@ export function useFollowTail({
   rowsRef.current = rows ?? [];
   /** The newest row id when the reader left the tail; null while following or not yet known. */
   const detachBaselineRef = useRef<number | null>(null);
+  const rowGenerationRef = useRef(rowGeneration);
+  if (!Object.is(rowGenerationRef.current, rowGeneration)) {
+    // A reset history numbers its rows afresh, so the old detach point means nothing in it. The
+    // reader keeps their state; the count restarts from the rows the reset delivered.
+    rowGenerationRef.current = rowGeneration;
+    detachBaselineRef.current = null;
+  }
   const previousSessionIdRef = useRef(sessionId);
   const followFrameRef = useRef<number | null>(null);
   const followFramesRemainingRef = useRef(0);

@@ -180,6 +180,31 @@ for (const width of [320, 390]) {
   });
 }
 
+test("enlarged text wraps the recovery sentence inside a 320px pane instead of overflowing it", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto("/recovery-notice-e2e.html?mode=expanded&height=640&width=320");
+  await page.addStyleTag({ content: "html { font-size: 32px; }" });
+  const recovery = control(page);
+  await expect(recovery).toHaveText("Checking for missed activity…");
+  const geometry = await recovery.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const label = element.querySelector("span:last-child") as HTMLElement;
+    const reader = document.querySelector(".detail-reader")!.getBoundingClientRect();
+    return {
+      left: box.left, right: box.right, bottom: box.bottom,
+      readerBottom: reader.bottom,
+      labelOverflow: label.scrollWidth - label.clientWidth,
+      contentOverflow: element.scrollWidth - element.clientWidth,
+    };
+  });
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(320.5);
+  expect(geometry.labelOverflow, "the whole sentence is shown, not clipped").toBeLessThanOrEqual(0.5);
+  expect(geometry.contentOverflow).toBeLessThanOrEqual(0.5);
+  expect(geometry.readerBottom - geometry.bottom, "it still sits --space-3 above the reader's edge")
+    .toBeCloseTo(12, 0);
+});
+
 test("a short preview pane keeps the floating control inside the pane", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto("/recovery-notice-e2e.html?mode=preview&height=150");

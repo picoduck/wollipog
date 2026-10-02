@@ -369,6 +369,7 @@ function Fixture() {
             shortcut="End"
             onJump={followTail.follow}
             onShowNotSent={() => {}}
+            onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}
           />
         )}
         {/* Stands in for the auto-growing composer: a sibling below the reader in the same flex

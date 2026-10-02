@@ -15026,18 +15026,28 @@ body.shell-dock-dragging * {
 }
 .transcript-tail-anchor > .btn.transcript-tail-control {
   position: absolute;
+  right: var(--space-3);
   bottom: var(--space-3);
-  left: 50%;
-  max-width: calc(100% - var(--space-3) * 2);
+  left: var(--space-3);
+  /* Centered by its margins inside the pane's gutters, so a long label wraps within the pane
+     rather than at its middle. */
+  width: fit-content;
+  margin-inline: auto;
   border-radius: var(--radius-sm);
   box-shadow: var(--elev-2);
-  transform: translateX(-50%);
 }
 .transcript-tail-anchor > .btn.transcript-tail-control.is-not-sent { color: var(--danger-text); }
-/* Recovery is a status, not an action: it keeps the control's look but never reacts to a pointer. */
+/* Recovery is a status, not an action: it keeps the control's look but never reacts to a pointer.
+   It is a sentence, so where enlarged text cannot fit it on one line it wraps, upward from the
+   anchor, instead of running out of the pane. */
 .transcript-tail-anchor > .btn.transcript-tail-control.is-recovering {
-  cursor: default;
+  height: auto;
+  min-height: var(--control-h-sm);
+  padding-block: var(--space-1);
   font-weight: 400;
+  text-align: center;
+  white-space: normal;
+  cursor: default;
 }
 .transcript-tail-anchor > .btn.transcript-tail-control.is-recovering:active { background: var(--bg-elev-2); }
 @media (hover: hover) {

@@ -596,8 +596,7 @@ test("an event-heavy Inbox preview fills its opening viewport before expansion",
 
 test("real Inbox preview paging preserves ownership with reduced motion", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
-  const reader = page.getByRole("region", { name: "Session Preview Activity" });
+  await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");  const reader = page.getByRole("region", { name: "Session Preview Activity" });
   const follow = page.locator(".detail-scroll[data-follow-tail-state]");
   await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
   await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
@@ -608,6 +607,10 @@ test("real Inbox preview paging preserves ownership with reduced motion", async 
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
   await expect.poll(async () => (await previewScrollMetrics(page)).scrollTop)
     .toBeLessThan(before.scrollTop - before.clientHeight * 0.35);
+  // Rows mounted by the page measure in the frames after it lands; the property under test is that
+  // the STREAM leaves the viewport alone, so read the anchor once paging has settled. (Without the
+  // reserved strip the preview is taller, and that first measurement moved the anchor past 12px.)
+  await settlePreviewLayout(page);
   const anchor = await previewVisibleAnchor(page);
   expect(anchor).not.toBeNull();
   await page.evaluate(() => {

@@ -3102,6 +3102,7 @@ function SessionDetailLoaded({
     sessionId,
     persistenceScope: instanceScope,
     rows: items,
+    rowGeneration: session.eventEpoch ?? 0,
   });
 
   // A 200-event opening window is a transport budget, not a visual one: hundreds of streamed
@@ -4036,12 +4037,8 @@ function SessionDetailLoaded({
     following: followTail.isFollowing,
     newRows: followTail.newRowCount,
   });
-  const jumpToLatest = useCallback((event: { currentTarget: HTMLElement }) => {
-    const control = event.currentTarget;
-    followTail.follow();
-    // The control leaves with the tail; keep keyboard focus in the reader rather than on the page.
-    if (control.ownerDocument.activeElement === control) scrollRef.current?.focus({ preventScroll: true });
-  }, [followTail.follow]);
+  // The control leaves with the tail, or yields to recovery; keep focus in the reader, not the page.
+  const keepFocusInReader = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
   const showFirstUndelivered = useCallback(() => {
     const scroller = scrollRef.current;
     const id = offscreenUndeliveredIds[0];
@@ -5463,8 +5460,9 @@ function SessionDetailLoaded({
               shortcut={isMobile
                 ? null
                 : shortcutDisplay(mode === "preview" ? "inbox-follow-latest-end" : "session-reading-latest-end")}
-              onJump={jumpToLatest}
+              onJump={followTail.follow}
               onShowNotSent={showFirstUndelivered}
+              onFocusLost={keepFocusInReader}
             />
             {/* The one polite live region for recovery, whatever the control is showing. */}
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>

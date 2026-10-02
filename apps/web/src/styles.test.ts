@@ -589,15 +589,15 @@ test("the tail control floats from a zero-height anchor and never takes the read
   const control = soleRuleBody(".transcript-tail-anchor > .btn.transcript-tail-control");
   assert.match(control, /position:\s*absolute;/, "the control is an overlay, never a flow box");
   assert.match(control, /bottom:\s*var\(--space-3\);/);
-  assert.match(control, /left:\s*50%;[\s\S]*transform:\s*translateX\(-50%\);/, "centered on the reading column");
+  assert.match(control, /right:\s*var\(--space-3\);[\s\S]*left:\s*var\(--space-3\);[\s\S]*width:\s*fit-content;[\s\S]*margin-inline:\s*auto;/,
+    "centered on the reading column, and never wider than the pane's gutters");
   assert.match(control, /border-radius:\s*var\(--radius-sm\);/, "an action, so a control radius, never a pill");
   assert.match(control, /box-shadow:\s*var\(--elev-2\);/);
 
-  // Its states restyle only paint: none may set a layout property.
+  // No state may take the control out of its absolute layer.
   for (const declaration of allDeclarations(css)) {
-    if (!declaration.selectors.some((selector) => /transcript-tail-control\.is-/.test(selector))) continue;
-    assert.ok(["color", "cursor", "font-weight", "background"].includes(declaration.prop),
-      `${declaration.selectors.join(", ")} sets ${declaration.prop}`);
+    if (!declaration.selectors.some((selector) => selector.includes("transcript-tail-control"))) continue;
+    if (declaration.prop === "position") assert.equal(declaration.value, "absolute", declaration.selector);
   }
 
   // The band and the chip are gone, with every rule that reserved or echoed them.

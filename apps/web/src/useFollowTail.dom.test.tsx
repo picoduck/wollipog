@@ -71,12 +71,15 @@ interface HarnessProps {
   mode: "preview" | "expanded";
   scope?: string;
   rows?: readonly { id: number }[];
+  generation?: number;
   onApi?: (api: FollowTailApi) => void;
 }
 
-function Harness({ sessionId, revision, mode, scope = "test", rows, onApi }: HarnessProps) {
+function Harness({ sessionId, revision, mode, scope = "test", rows, generation, onApi }: HarnessProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  const followTail = useFollowTail({ scrollRef, contentRevision: revision, sessionId, persistenceScope: scope, rows });
+  const followTail = useFollowTail({
+    scrollRef, contentRevision: revision, sessionId, persistenceScope: scope, rows, rowGeneration: generation,
+  });
   const initialAnchor = followTail.getInitialAnchor();
   React.useLayoutEffect(() => onApi?.(followTail));
   return (
@@ -230,6 +233,34 @@ test("rows appended while the reader is away are counted until the reader return
   });
   await render(4, [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
   assert.equal(transcript.dataset.new, "1", "a second detach counts from its own point");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a history reset restarts the new-row count in its own id space without resuming", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (revision: number, generation: number, ids: number[]) => act(async () => {
+    root.render(<Harness sessionId="reset-rows" scope="reset-rows" revision={revision} mode="expanded"
+      generation={generation} rows={ids.map((id) => ({ id }))} />);
+  });
+  await render(0, 0, [98, 99, 100]);
+  const transcript = container.firstElementChild as HTMLElement;
+  setScrollMetrics(transcript, { scrollTop: 800, scrollHeight: 1_000, clientHeight: 200 });
+  transcript.scrollTo = (() => {}) as typeof transcript.scrollTo;
+  await act(async () => {
+    transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: -12, bubbles: true }) as never);
+  });
+  await render(1, 0, [98, 99, 100, 101]);
+  assert.equal(transcript.dataset.new, "1");
+
+  await render(2, 1, [1, 2, 3, 4, 5]);
+  assert.equal(transcript.dataset.state, "paused", "a reset does not move the reader back to the tail");
+  assert.equal(transcript.dataset.new, "0", "the reset's own rows are not new");
+  await render(3, 1, [1, 2, 3, 4, 5, 6]);
+  assert.equal(transcript.dataset.new, "1", "a row appended after the reset counts");
 
   await act(async () => { root.unmount(); });
   container.remove();

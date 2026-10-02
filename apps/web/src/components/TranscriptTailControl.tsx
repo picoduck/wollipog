@@ -111,15 +111,40 @@ export function TranscriptTailControl({
   shortcut,
   onJump,
   onShowNotSent,
+  onFocusLost,
 }: {
   view: TranscriptTailView;
   /** The resume chord, when the reading keys are active on this surface. */
   shortcut: string | null;
-  onJump: (event: { currentTarget: HTMLElement }) => void;
+  onJump: () => void;
   onShowNotSent: () => void;
+  /** The focused control went away (jumped, or replaced by a status): keep focus in the reader. */
+  onFocusLost: () => void;
 }) {
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const heldFocusRef = useRef(false);
+  // Runs after every commit. If the control held focus at the last commit and this one removed or
+  // replaced it, focus has fallen to the page; hand it to the reader. Focus the person moved
+  // elsewhere themselves is left alone.
+  useLayoutEffect(() => {
+    const anchor = anchorRef.current;
+    if (!anchor) return;
+    const active = anchor.ownerDocument.activeElement;
+    if (heldFocusRef.current && !anchor.contains(active) &&
+        (active === null || active === anchor.ownerDocument.body)) {
+      onFocusLost();
+    }
+    heldFocusRef.current = anchor.contains(anchor.ownerDocument.activeElement);
+  });
   return (
-    <div className="transcript-tail-anchor" data-tail-control={view?.kind}>
+    <div
+      ref={anchorRef}
+      className="transcript-tail-anchor"
+      data-tail-control={view?.kind}
+      onFocus={() => { heldFocusRef.current = true; }}
+      // Leaving on purpose (Tab, a click elsewhere) blurs; a removed element does not.
+      onBlur={() => { heldFocusRef.current = false; }}
+    >
       {view?.kind === "not-sent" ? (
         <button type="button" className="btn sm transcript-tail-control is-not-sent" onClick={onShowNotSent}>
           {notSentLabel(view.count)}
