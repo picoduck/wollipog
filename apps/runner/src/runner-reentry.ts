@@ -6,7 +6,9 @@
  * daemon whose stdout would corrupt their protocol.
  */
 
+import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface RunnerReentryHost {
@@ -26,12 +28,33 @@ export function detectRunnerSea(): boolean {
 }
 
 export function defaultRunnerReentryHost(): RunnerReentryHost {
+  const isSea = detectRunnerSea();
+  const scriptPath = isSea ? process.argv[1] : defaultRunnerEntry(process.argv[1]);
   return {
-    isSea: detectRunnerSea(),
+    isSea,
     execPath: process.execPath,
     execArgv: process.execArgv,
-    scriptPath: process.argv[1],
+    scriptPath,
   };
+}
+
+/** Validate before callers can write launch state; explicit custom hosts remain caller-owned. */
+function defaultRunnerEntry(scriptPath: string | undefined): string {
+  const modulePath = fileURLToPath(import.meta.url);
+  const directory = dirname(modulePath);
+  const extension = extname(modulePath);
+  try {
+    const entry = realpathSync(scriptPath ?? "");
+    const cli = realpathSync(join(directory, `cli${extension}`));
+    // Always return the absolute dispatcher, even for a symlink or the legacy daemon entry.
+    for (const name of ["cli", "index"]) {
+      if (entry === realpathSync(join(directory, `${name}${extension}`))) return cli;
+    }
+  } catch {
+    // Missing, unreadable, or unrelated entries cannot establish a safe default dispatcher.
+  }
+  throw new Error(`Cannot use default runner re-entry host for scriptPath ${JSON.stringify(scriptPath ?? "<missing>")}: ` +
+    "expected the runner CLI entry. Pass an explicit host when provisioning from a custom script.");
 }
 
 function rewriteToCliEntry(scriptPath: string): string {
