@@ -2030,9 +2030,12 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     for (const call of viaValue) {
       const known = called.get(call) ?? new Set();
       called.set(call, known);
-      readingCallee = functionsOnly = true;
+      // Read without writes: a callee whose prop is replaced would read `unknown`, which only a computed
+      // callee reports, and a computed callee reads an object's values, not a prop. A component put in
+      // its place by assignment is used as a value, and reported as such.
+      readingCallee = functionsOnly = ignoringWrites = true;
       let found: Rendered[];
-      try { found = componentsOf(call.expression); } finally { readingCallee = functionsOnly = false; }
+      try { found = componentsOf(call.expression); } finally { readingCallee = functionsOnly = ignoringWrites = false; }
       for (const component of found) {
         if (known.has(component)) continue;
         known.add(component);
@@ -2144,10 +2147,11 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       const value = declaration && declaration !== "glyph" && isConstant(declaration) ? transparent(declaration.initializer) : undefined;
       if (value && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))) return handed(value, seen);
     }
-    functionsOnly = true;
+    // Read without writes: a replaced prop then yields what its callers pass, more to check, never less.
+    functionsOnly = ignoringWrites = true;
     try {
       return componentsOf(node).filter((component): component is SourceFunction => typeof component !== "string");
-    } finally { functionsOnly = false; }
+    } finally { functionsOnly = ignoringWrites = false; }
   };
   /**
    * The values a spread of props hands on: an object's, or, for a function's own props (`{...rest}`),
