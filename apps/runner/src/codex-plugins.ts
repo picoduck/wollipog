@@ -111,6 +111,66 @@ export interface CodexPluginLaunch {
   executionTarget?: { adapter: string };
 }
 
+const codexPackage = /^@openai\/codex(?:@[^/\s]+)?$/u;
+
+/** Recognize an argv grammar, never search arbitrary wrapper arguments for a package name. */
+function providerBoundary(command: string, args: string[], allowEnv = true): number | undefined {
+  const name = command.split(/[\\/]/u).at(-1)!.replace(/\.(?:exe|cmd)$/iu, "").toLowerCase();
+  if (name === "codex") return 0;
+  if (name === "node") {
+    let i = 0;
+    while (["--no-warnings", "--enable-source-maps"].includes(args[i] ?? "")) i++;
+    if (args[i] === "--") i++;
+    return args[i] && !args[i]!.startsWith("-") ? i + 1 : undefined;
+  }
+  if (name === "env" && allowEnv) {
+    let i = 0;
+    while (args[i] === "-u" || args[i] === "--unset") {
+      const variable = args[++i];
+      // Account identity must be resolved from the same environment Codex will receive.
+      if (!variable || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(variable) ||
+          ["HOME", "USERPROFILE", "CODEX_HOME"].includes(variable)) return undefined;
+      i++;
+    }
+    if (args[i] === "--") i++;
+    if (!args[i] || args[i]!.startsWith("-") || args[i]!.includes("=")) return undefined;
+    const nested = providerBoundary(args[i]!, args.slice(i + 1), false);
+    return nested === undefined ? undefined : i + 1 + nested;
+  }
+  const options: Record<string, string[]> = {
+    npx: ["-y", "--yes", "--no", "--no-install", "--offline", "--ignore-scripts"],
+    npm: ["-y", "--yes", "--no", "--offline", "--ignore-scripts"],
+    pnpm: ["-s", "--silent"], pnpx: ["-s", "--silent"],
+    yarn: ["-q", "--quiet"],
+    bun: ["--bun", "--no-install", "--verbose", "--silent"],
+    bunx: ["--bun", "--no-install", "--verbose", "--silent"],
+  };
+  if (!Object.hasOwn(options, name)) return undefined;
+  let i = 0;
+  if (name === "npm") {
+    if (args[i] !== "exec" && args[i] !== "x") return undefined;
+    i++;
+  } else if (["pnpm", "yarn", "bun"].includes(name)) {
+    if (args[i++] !== (name === "bun" ? "x" : "dlx")) return undefined;
+  }
+  let explicitPackage = false;
+  while (args[i]?.startsWith("-") && args[i] !== "--") {
+    const arg = args[i++]!;
+    if (options[name]!.includes(arg)) continue;
+    // --package selects an installation, not the executable/provider boundary.
+    let pkg: string | undefined;
+    if (arg === "--package" || (arg === "-p" && ["npx", "yarn", "bun", "bunx"].includes(name))) pkg = args[i++];
+    else if (arg.startsWith("--package=")) pkg = arg.slice("--package=".length);
+    if (!pkg || !codexPackage.test(pkg)) return undefined;
+    explicitPackage = true;
+  }
+  // npm exec continues parsing options after positional arguments without this separator.
+  if (name === "npm" && args[i] !== "--") return undefined;
+  if (args[i] === "--") i++;
+  return (explicitPackage ? args[i] === "codex" : codexPackage.test(args[i] ?? ""))
+    ? i + 1 : undefined;
+}
+
 /** Reconcile immediately before a native account launch, including resumed sessions. No user
  * config is rewritten, and explicit CLI overrides remain last so they retain precedence. */
 export function inheritCodexPlugins(launch: CodexPluginLaunch): string[] {
@@ -140,16 +200,14 @@ export function inheritCodexPlugins(launch: CodexPluginLaunch): string[] {
     ...overrides(Object.fromEntries(Object.entries(table(defaults.features))
       .filter(([key]) => key === "plugins" || key === "remote_plugin")), table(account.features), ["features"]),
   ];
+  const flags = inherited.flatMap((value) => ["-c", value]);
+  const bootstrap = flags.length ? providerBoundary(launch.command, launch.args) : 0;
+  if (bootstrap === undefined) {
+    // Do not include command paths, argv, environment values, or config content in diagnostics.
+    throw new Error("Codex plugin inheritance does not support this launcher form. " +
+      "Use a supported Codex launcher form; see docs/codex-plugin-launchers.md.");
+  }
   try { linkPlugins(sourceHome, accountHome, new Set(Object.keys(plugins))); }
   catch { throw new Error("Codex plugin inheritance could not reconcile the account plugin cache."); }
-  // Node's bootstrap script must precede provider flags when the CLI is launched via node.
-  const flags = inherited.flatMap((value) => ["-c", value]);
-  let bootstrap = launch.args.length && /(?:^|[\\/])node(?:\.exe)?$/iu.test(launch.command) ? 1 : 0;
-  // Package-manager flags belong to the launcher. Insert provider flags after the package name,
-  // before the existing provider overrides, so npx does not interpret -c as its own --call flag.
-  if (/(?:^|[\\/])(?:npx|npm|pnpm|bun)(?:\.cmd|\.exe)?$/iu.test(launch.command)) {
-    const packageIndex = launch.args.findIndex((arg) => /^@openai\/codex(?:@[^/]+)?$/u.test(arg));
-    if (packageIndex >= 0) bootstrap = packageIndex + 1;
-  }
   return [...launch.args.slice(0, bootstrap), ...flags, ...launch.args.slice(bootstrap)];
 }
