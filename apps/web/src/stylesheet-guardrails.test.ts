@@ -1252,7 +1252,11 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
         || kind === ts.SyntaxKind.BarBarEqualsToken || kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken) return parent.right === use ? all() : none();
       if (kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken || kind === ts.SyntaxKind.AmpersandAmpersandToken
         || (kind === ts.SyntaxKind.CommaToken && parent.right === use)) return flowsTo(parent, from);
-      return none();
+      // A strict comparison, `key in attrs` and `attrs instanceof C` only read it. Any other operator
+      // may convert it to a primitive, running its own `toString` or `valueOf`, which can write into it.
+      return kind === ts.SyntaxKind.EqualsEqualsEqualsToken || kind === ts.SyntaxKind.ExclamationEqualsEqualsToken
+        || (kind === ts.SyntaxKind.InKeyword && parent.right === use) || (kind === ts.SyntaxKind.InstanceOfKeyword && parent.left === use)
+        || kind === ts.SyntaxKind.CommaToken ? none() : all();
     }
     if (ts.isVariableDeclaration(parent) && parent.initializer === use) {
       // `const { attrs } = props` shares `props.attrs` with `attrs`, so what is written through it.
@@ -1272,11 +1276,12 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     }
     // A spread into an argument list hands on each element; one into a literal copies them.
     if (ts.isSpreadElement(parent)) return ts.isCallExpression(parent.parent) || ts.isNewExpression(parent.parent) ? all() : none();
-    if (ts.isElementAccessExpression(parent) && parent.argumentExpression === use) return none();
-    // A tagged template hands its values to the tag function; an untagged one only reads them.
-    if (ts.isTemplateSpan(parent)) return ts.isTaggedTemplateExpression(parent.parent.parent) ? all() : none();
+    // Used as a key, interpolated or negated numerically, it is converted the same way; a tagged
+    // template hands it to the tag function. Tested for truth, it is only read.
+    if ((ts.isElementAccessExpression(parent) && parent.argumentExpression === use) || ts.isTemplateSpan(parent)) return all();
+    if (ts.isPrefixUnaryExpression(parent)) return parent.operator === ts.SyntaxKind.ExclamationToken ? none() : all();
     if (ts.isSpreadAssignment(parent) || ts.isTypeOfExpression(parent) || ts.isVoidExpression(parent)
-      || ts.isPrefixUnaryExpression(parent) || ts.isExpressionStatement(parent) || ts.isTypeQueryNode(parent)
+      || ts.isExpressionStatement(parent) || ts.isTypeQueryNode(parent)
       || ts.isExportSpecifier(parent) || ts.isImportSpecifier(parent) || ts.isImportClause(parent)
       || ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent) || ts.isSwitchStatement(parent)
       || ts.isCaseClause(parent) || (ts.isForStatement(parent) && parent.condition === use)) return none();
@@ -1963,7 +1968,10 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     }
     return callee !== undefined && ts.isElementAccessExpression(callee);
   };
+  // Which calls go through a value is a matter of shape, not of what is written: read without writes.
+  ignoringWrites = true;
   const viaValue = indirectCalls.filter(throughValue);
+  ignoringWrites = false;
 
   // Which function each element renders, to a fixed point — a component passed as a prop is known
   // only once the call sites of the function taking it are — and then which a call through a value
@@ -1974,6 +1982,9 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     missed = false;
     for (let changed = true; changed;) {
       changed = false;
+      // What a binding has written into it depends on the call sites found so far (`<props.W a={a} />`
+      // writes whatever W's do), so it is read again on each pass, and only the last pass's stands.
+      writesMemo.clear();
       for (const element of elements) {
         const known = rendered.get(element) ?? new Set();
         rendered.set(element, known);
@@ -2033,16 +2044,23 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
    * another package, aliased. Its call sites are then not all the values its parameters take. A
    * component may also travel to a tag — through a constant, an object of components, a prop or a
    * return — because `componentsOf` follows those to where it renders, but not inside an object
-   * handed to another package's function, which may call it with anything (#2394).
+   * handed to a call it does not follow, which may call it with anything (#2394).
    */
-  /** Whether an object literal, or one it is nested in, is an argument to a function outside the sources (`register({ draw: Icon })`). */
-  const handedToPackage = (object: ts.Node): boolean => {
+  /**
+   * Whether an object literal, or one it is nested in, is an argument to a call the scan does not
+   * follow into the sources — another package's function (`register({ draw: Icon })`), a method, or
+   * a value it cannot read — which may call what the object holds with anything.
+   */
+  const handedAway = (object: ts.Node): boolean => {
     let node = object;
     while (isTransparent(node.parent)) node = node.parent;
     const parent = node.parent;
-    if (ts.isPropertyAssignment(parent) && parent.initializer === node) return handedToPackage(parent.parent);
-    return (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression !== node
-      && (parent.arguments ?? []).includes(node as ts.Expression) && !functionOf(declarationOf(parent.expression));
+    if (ts.isPropertyAssignment(parent) && parent.initializer === node) return handedAway(parent.parent);
+    if (!(ts.isCallExpression(parent) || ts.isNewExpression(parent)) || parent.expression === node
+      || !(parent.arguments ?? []).includes(node as ts.Expression)) return false;
+    if (functionOf(declarationOf(parent.expression))) return false;
+    const resolved = ts.isCallExpression(parent) ? called.get(parent) : undefined;
+    return !resolved || resolved.size === 0 || [...resolved].some((component) => typeof component === "string");
   };
   const escapes = (fn: SourceFunction): ts.Identifier | undefined => {
     const name = declaredName(fn);
@@ -2064,7 +2082,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if ((ts.isJsxOpeningElement(parent) || ts.isJsxSelfClosingElement(parent) || ts.isJsxClosingElement(parent)) && parent.tagName === node) return false;
       if (!component) return true;
       const stored = (ts.isPropertyAssignment(parent) && parent.initializer === node) || ts.isShorthandPropertyAssignment(parent);
-      if (stored && handedToPackage(parent.parent)) return true;
+      if (stored && handedAway(parent.parent)) return true;
       const toTag = (isConstant(parent) && parent.initializer === node) || stored
         || (ts.isConditionalExpression(parent) && parent.condition !== node)
         || (ts.isBinaryExpression(parent) && [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken,
@@ -3715,6 +3733,13 @@ test("every route #2394 found that could hide an icon class is followed, reporte
     classes: ["called-only-icon", "member-icon", "seen-icon"],
     unread: ["Stored.tsx:4 Bare is used as a value, so its arguments cannot be traced", "Stored.tsx:6 Icon is used as a value, so its arguments cannot be traced"],
   });
+  // An object handed to a function in the sources is followed into it, which never calls the icon.
+  assert.deepEqual(scanOf({ "Local.tsx": [
+    "function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
+    "const local = { register: (_: { draw: typeof Icon }) => null };",
+    "local.register({ draw: Icon });",
+    "export const Uses = () => <Icon className=\"seen-icon\" />;",
+  ].join("\n") }), { classes: ["seen-icon"], unread: [] });
 
   // 2. Reported: a component whose class comes from its caller, handed to another package's
   // component directly, through a prop, inside an object, or in the props a wrapper spreads. One
@@ -3778,6 +3803,18 @@ test("every route #2394 found that could hide an icon class is followed, reporte
     unread: ["Writes.tsx:13 ${…}", "Writes.tsx:15 ${…}", "Writes.tsx:17 ${…}", "Writes.tsx:18 ${…}", "Writes.tsx:3 ${…}", "Writes.tsx:4 ${…}",
       "Writes.tsx:5 ${…}", "Writes.tsx:7 ${…}", "Writes.tsx:9 ${…}"],
   });
+
+  // A child read through a prop is known only once the parent's call sites are, wherever they sit
+  // in the source; and an object converted to text runs its own `toString`, which can write into it.
+  assert.deepEqual(scanOf({ "Late.tsx": [
+    "function Writer(p: { a: { className?: string } }) { p.a.className = \"hidden-icon\"; return null; }",
+    "function Parent(p: { W: typeof Writer; a: { className?: string } }) { return <><p.W a={p.a} /><svg {...p.a} /></>; }",
+    "const a = { className: \"initial-icon\" };",
+    "export const Uses = () => <Parent W={Writer} a={a} />;",
+    "const attrs = { className: \"\", toString() { this.className = \"coerced-icon\"; return \"\"; } };",
+    "const text = `${attrs}`;",
+    "export function Coerced() { return <svg {...attrs} />; }",
+  ].join("\n") }), { classes: [], unread: ["Late.tsx:2 ${…}", "Late.tsx:7 ${…}"] });
 
   // 4. Followed: a value an assertion gives its type is read for its value — in a constant, an
   // object's property, or a helper's return — so what it reads is its callers' class or an unread
