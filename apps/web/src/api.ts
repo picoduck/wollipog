@@ -1,4 +1,6 @@
 import type {
+  CampaignWorkItemDetailResponse,
+  CampaignWorkItemsPage,
   AddBoxRequest,
   BackgroundJobStopResponse,
   SessionWorktreeCreateOperationSummary,
@@ -164,11 +166,6 @@ import type {
   SkillListPayload,
 } from "./skills.js";
 import { CONTROL_PLANE_HTTP } from "./config.js";
-import type {
-  CampaignWorkItemDetail,
-  CampaignWorkItemPage,
-  CampaignWorkSummaryResponse,
-} from "./campaign-work-contract.js";
 import { deviceToken } from "./device-token.js";
 import { createBrowserApiTransport, type ApiTransport } from "./api-transport.js";
 
@@ -1070,13 +1067,11 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(id)}/descendant-requests`,
       { signal },
     ),
-  /** Campaign Status (#2417). `id` may be the campaign's Orchestrator session or any member. */
-  campaignSummary: (id: string, signal?: AbortSignal) =>
-    req<CampaignWorkSummaryResponse>(`/api/sessions/${encodeURIComponent(id)}/campaign/summary`, { signal }),
+  /** Campaign Status (#2417). `id` may be the campaign root session or any member. */
   campaignWorkItems: (id: string, query: string, signal?: AbortSignal) =>
-    req<CampaignWorkItemPage>(`/api/sessions/${encodeURIComponent(id)}/campaign/work-items?${query}`, { signal }),
+    req<CampaignWorkItemsPage>(`/api/sessions/${encodeURIComponent(id)}/campaign/work-items?${query}`, { signal }),
   campaignWorkItem: (id: string, itemId: string, signal?: AbortSignal) =>
-    req<CampaignWorkItemDetail>(
+    req<CampaignWorkItemDetailResponse>(
       `/api/sessions/${encodeURIComponent(id)}/campaign/work-items/${encodeURIComponent(itemId)}`,
       { signal },
     ),

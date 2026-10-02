@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { SessionView } from "@wollipog/protocol";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  CAMPAIGN_WORK_REVISION_CHANGED,
+  type CampaignWorkItemDetail,
+  type CampaignWorkItemSummary,
+  type CampaignWorkSummary,
+  type OrchestratorCampaignProjection,
+  type SessionView,
+} from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useStoreSelector } from "../store.js";
@@ -9,33 +16,29 @@ import {
   type CampaignStatusAvailability,
   type CampaignWorkFilters,
 } from "../campaign-status.js";
-import {
-  campaignMembershipOf,
-  campaignWorkSummaryOf,
-  type CampaignWorkItem,
-  type CampaignWorkItemDetail,
-  type CampaignWorkSummary,
-  type CampaignWorkSummaryResponse,
-} from "../campaign-work-contract.js";
 
 /** Page size for the work list. A revision change reloads at least what was already showing. */
 export const CAMPAIGN_WORK_PAGE_SIZE = 50;
-const CAMPAIGN_WORK_RELOAD_CEILING = 200;
-/** A member viewing a campaign whose Orchestrator session is not in this browser's store polls. */
-const MEMBER_SUMMARY_POLL_MS = 30_000;
+/** The server's page ceiling (`CAMPAIGN_WORK_LEDGER_LIMITS.pageSizeMax`). */
+const CAMPAIGN_WORK_RELOAD_CEILING = 100;
+/** A member whose browser does not hold the root session re-reads it on this cadence. */
+const ROOT_SESSION_POLL_MS = 30_000;
 
 export type CampaignLoadStatus = "loading" | "ready" | "error";
 
 export interface CampaignSummaryState {
   status: CampaignLoadStatus;
   summary: CampaignWorkSummary | null;
-  campaign: { title: string; status: string; limits: CampaignWorkSummaryResponse["limits"] } | null;
+  campaign: Pick<OrchestratorCampaignProjection, "status" | "limits" | "heldChildren"> | null;
+  /** The root session's title, for a member's "part of" line. */
+  campaignTitle: string | null;
   error: string | null;
 }
 
 export interface CampaignListState {
   status: CampaignLoadStatus;
-  items: readonly CampaignWorkItem[];
+  items: readonly CampaignWorkItemSummary[];
+  total: number | null;
   hasMore: boolean;
   loadingMore: boolean;
   error: string | null;
@@ -64,40 +67,33 @@ function errorMessage(cause: unknown): string {
 }
 
 function isAbort(cause: unknown): boolean {
-  return cause instanceof DOMException ? cause.name === "AbortError" : (cause as { name?: string })?.name === "AbortError";
+  return (cause as { name?: string } | null)?.name === "AbortError";
 }
 
-/** Whether this session offers Campaign Status, from its own view and the server's capabilities. */
+const EMPTY_LIST: CampaignListState = { status: "loading", items: [], total: null, hasMore: false, loadingMore: false, error: null };
+
+/** Whether this session offers Campaign Status, from its own view and its parent's campaign. */
 export function useCampaignStatusAvailability(
-  session: Pick<SessionView, "id" | "orchestratorCampaign" | "parentSessionId">,
+  session: Pick<SessionView, "id" | "orchestratorCampaign" | "campaignMembership" | "parentSessionId">,
 ): CampaignStatusAvailability {
-  const supported = useStoreSelector((s) => s.campaignWorkSupported);
-  const parentCarriesCampaign = useStoreSelector((s) => session.parentSessionId
-    ? s.sessions.get(session.parentSessionId)?.orchestratorCampaign != null
-    : false);
-  const membership = campaignMembershipOf(session);
-  const membershipCampaign = membership?.campaignSessionId ?? null;
-  const membershipItem = membership?.currentWorkItemId ?? null;
-  const ownCampaign = session.orchestratorCampaign ?? undefined;
-  const hasOwnCampaign = ownCampaign !== undefined;
-  return useMemo(() => campaignStatusAvailability({
-    id: session.id,
-    orchestratorCampaign: ownCampaign,
-    parentSessionId: session.parentSessionId,
-    campaignMembership: membershipCampaign ? { campaignSessionId: membershipCampaign, currentWorkItemId: membershipItem } : null,
-  }, supported, parentCarriesCampaign),
-  // The projection object changes on every campaign update; only its presence matters here.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  [hasOwnCampaign, membershipCampaign, membershipItem, parentCarriesCampaign, session.id, session.parentSessionId, supported]);
+  // Re-render only when what availability reads of the parent changes, not on every parent update.
+  const parent = useStoreSelector(
+    (s) => session.parentSessionId ? s.sessions.get(session.parentSessionId) ?? null : null,
+    (left, right) => left?.id === right?.id &&
+      (left?.orchestratorCampaign == null) === (right?.orchestratorCampaign == null) &&
+      (left?.orchestratorCampaign?.work == null) === (right?.orchestratorCampaign?.work == null),
+  );
+  return campaignStatusAvailability(session, parent);
 }
 
 /**
  * Everything Campaign Status reads, behind one hook.
  *
- * - The summary is live: the Orchestrator's session carries it in its campaign projection, so the
- *   campaign view and any member whose browser holds that session read it from the store. A member
- *   without it fetches the summary endpoint, on open, on reconnect, and on a slow poll.
- * - The work list is paginated by an opaque cursor bound to the filter and the ledger revision.
+ * - The summary is live. It rides on the root session's campaign projection (`work`), which the
+ *   server re-sends on every ledger write, so the campaign view and any member whose browser holds
+ *   the root read it from the store. A member without it reads the root session once, on reconnect,
+ *   and on a slow poll.
+ * - The work list is paginated by an opaque cursor bound to the filter, sort, and ledger revision.
  *   A new revision reloads the rows already shown in place, and a `revision_changed` refusal on a
  *   later page restarts from the first page, so a list is never stitched from two revisions.
  * - The selected item's details reload on every revision too.
@@ -108,22 +104,18 @@ export function useCampaignStatus({
   filters,
   selectedItemId,
 }: {
-  session: Pick<SessionView, "id" | "orchestratorCampaign">;
+  session: Pick<SessionView, "id" | "title" | "orchestratorCampaign">;
   availability: Extract<CampaignStatusAvailability, { kind: "available" }>;
   filters: CampaignWorkFilters;
   selectedItemId: string | null;
 }): CampaignStatusData {
   const api = useApi();
-  const conn = useStoreSelector((s) => s.conn);
-  const online = conn === "online";
-  const rootSession = useStoreSelector((s) => availability.role === "campaign"
-    ? null
-    : s.sessions.get(availability.campaignSessionId) ?? null);
-  const campaignProjection = availability.role === "campaign" ? session.orchestratorCampaign ?? null : rootSession?.orchestratorCampaign ?? null;
-  const liveSummary = campaignWorkSummaryOf(campaignProjection);
+  const online = useStoreSelector((s) => s.conn === "online");
+  const ownView = availability.campaignSessionId === session.id;
+  const storedRoot = useStoreSelector((s) => ownView ? null : s.sessions.get(availability.campaignSessionId) ?? null);
 
-  // Reconnecting is a reload trigger for everything fetched: events missed while offline may have
-  // moved the ledger without this browser seeing the revision change.
+  // Reconnecting reloads everything fetched: events missed while offline may have moved the ledger
+  // without this browser seeing the revision change.
   const [reconnects, setReconnects] = useState(0);
   const wasOnline = useRef(online);
   useEffect(() => {
@@ -132,101 +124,86 @@ export function useCampaignStatus({
   }, [online]);
   const [retries, setRetries] = useState(0);
 
-  /* ---------------------------------------------------------------- summary (members only) */
-  const [fetchedSummary, setFetchedSummary] = useState<{ key: string; state: CampaignSummaryState } | null>(null);
-  const summaryKey = `${session.id}:${availability.campaignSessionId}`;
-  const needsFetchedSummary = liveSummary === null;
+  /* ---------------------------------------------------------------- summary */
+  const [fetchedRoot, setFetchedRoot] = useState<{ id: string; session: SessionView | null; error: string | null } | null>(null);
+  const needsFetchedRoot = !ownView && storedRoot === null;
   useEffect(() => {
-    if (!needsFetchedSummary || !online) return;
-    const controller = new AbortController();
+    if (!needsFetchedRoot || !online) return;
+    const rootId = availability.campaignSessionId;
+    let cancelled = false;
     const load = () => {
-      api.campaignSummary(session.id, controller.signal).then((response) => {
-        setFetchedSummary({
-          key: summaryKey,
-          state: {
-            status: "ready",
-            summary: response.work,
-            campaign: { title: response.campaignTitle, status: response.status, limits: response.limits },
-            error: null,
-          },
-        });
+      api.session(rootId).then(({ session: root }) => {
+        if (!cancelled) setFetchedRoot({ id: rootId, session: root, error: null });
       }).catch((cause: unknown) => {
-        if (isAbort(cause)) return;
-        setFetchedSummary((current) => ({
-          key: summaryKey,
-          state: {
-            ...(current?.key === summaryKey ? current.state : { summary: null, campaign: null }),
-            status: "error",
-            error: errorMessage(cause),
-          },
+        if (cancelled) return;
+        setFetchedRoot((current) => ({
+          id: rootId,
+          session: current?.id === rootId ? current.session : null,
+          error: errorMessage(cause),
         }));
       });
     };
     load();
-    const timer = window.setInterval(load, MEMBER_SUMMARY_POLL_MS);
+    const timer = window.setInterval(load, ROOT_SESSION_POLL_MS);
     return () => {
-      controller.abort();
+      cancelled = true;
       window.clearInterval(timer);
     };
-  }, [api, needsFetchedSummary, online, reconnects, retries, session.id, summaryKey]);
+  }, [api, availability.campaignSessionId, needsFetchedRoot, online, reconnects, retries]);
 
-  const summary: CampaignSummaryState = liveSummary
+  const root = ownView ? session : storedRoot ?? (fetchedRoot?.id === availability.campaignSessionId ? fetchedRoot.session : null);
+  const projection = root?.orchestratorCampaign ?? null;
+  const summary: CampaignSummaryState = projection?.work
     ? {
       status: "ready",
-      summary: liveSummary,
-      campaign: campaignProjection
-        ? {
-          title: availability.role === "campaign" ? "" : rootSession?.title ?? "",
-          status: campaignProjection.status,
-          limits: campaignProjection.limits,
-        }
-        : null,
+      summary: projection.work,
+      campaign: projection,
+      campaignTitle: root?.title ?? null,
       error: null,
     }
-    : fetchedSummary?.key === summaryKey
-      ? fetchedSummary.state
-      : { status: "loading", summary: null, campaign: null, error: null };
+    : {
+      status: fetchedRoot?.error ? "error" : "loading",
+      summary: null,
+      campaign: projection,
+      campaignTitle: root?.title ?? null,
+      error: fetchedRoot?.error ?? null,
+    };
   const revision = summary.summary?.revision ?? null;
 
   /* ---------------------------------------------------------------- work list */
   const listKey = JSON.stringify([session.id, filters.origin, filters.state, filters.sort]);
-  const [list, setList] = useState<{ key: string; state: CampaignListState; cursor: string | null; revision: number | null }>(
-    () => ({ key: listKey, state: { status: "loading", items: [], hasMore: false, loadingMore: false, error: null }, cursor: null, revision: null }),
+  const [list, setList] = useState<{ key: string; state: CampaignListState; cursor: string | null }>(
+    () => ({ key: listKey, state: EMPTY_LIST, cursor: null }),
   );
   const listRef = useRef(list);
   listRef.current = list;
   const listGeneration = useRef(0);
-  const loadedCount = list.key === listKey ? list.state.items.length : 0;
-  const loadedCountRef = useRef(loadedCount);
-  loadedCountRef.current = loadedCount;
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+  const loadedCountRef = useRef(0);
+  loadedCountRef.current = list.key === listKey ? list.state.items.length : 0;
 
   const loadFirstPage = useCallback((limit: number) => {
     const generation = ++listGeneration.current;
     const controller = new AbortController();
-    setList((current) => current.key === listKey
-      ? current
-      : { key: listKey, state: { status: "loading", items: [], hasMore: false, loadingMore: false, error: null }, cursor: null, revision: null });
-    api.campaignWorkItems(session.id, campaignWorkItemsQuery(filters, null, limit), controller.signal).then((page) => {
+    setList((current) => current.key === listKey ? current : { key: listKey, state: EMPTY_LIST, cursor: null });
+    api.campaignWorkItems(session.id, campaignWorkItemsQuery(filtersRef.current, null, limit), controller.signal).then((page) => {
       if (generation !== listGeneration.current) return;
       setList({
         key: listKey,
-        state: { status: "ready", items: page.items, hasMore: page.nextCursor !== null, loadingMore: false, error: null },
+        state: { status: "ready", items: page.items, total: page.total, hasMore: page.nextCursor !== null, loadingMore: false, error: null },
         cursor: page.nextCursor,
-        revision: page.revision,
       });
     }).catch((cause: unknown) => {
       if (isAbort(cause) || generation !== listGeneration.current) return;
+      // Rows already shown stay; the error sits above them rather than replacing them.
       setList((current) => ({
         key: listKey,
-        // Keep rows already shown; the error notice sits above them rather than replacing them.
-        state: { ...(current.key === listKey ? current.state : { items: [], hasMore: false }), status: "error", loadingMore: false, error: errorMessage(cause) },
+        state: { ...(current.key === listKey ? current.state : EMPTY_LIST), status: "error", loadingMore: false, error: errorMessage(cause) },
         cursor: current.key === listKey ? current.cursor : null,
-        revision: current.key === listKey ? current.revision : null,
       }));
     });
     return () => controller.abort();
-  // `filters` is captured through listKey.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, listKey, session.id]);
 
   useEffect(() => {
@@ -240,7 +217,7 @@ export function useCampaignStatus({
     if (current.key !== listKey || !current.cursor || current.state.loadingMore) return;
     const generation = listGeneration.current;
     setList({ ...current, state: { ...current.state, loadingMore: true } });
-    api.campaignWorkItems(session.id, campaignWorkItemsQuery(filters, current.cursor, CAMPAIGN_WORK_PAGE_SIZE)).then((page) => {
+    api.campaignWorkItems(session.id, campaignWorkItemsQuery(filtersRef.current, current.cursor, CAMPAIGN_WORK_PAGE_SIZE)).then((page) => {
       if (generation !== listGeneration.current) return;
       setList((latest) => {
         const seen = new Set(latest.state.items.map((item) => item.id));
@@ -249,25 +226,24 @@ export function useCampaignStatus({
           state: {
             status: "ready",
             items: [...latest.state.items, ...page.items.filter((item) => !seen.has(item.id))],
+            total: page.total,
             hasMore: page.nextCursor !== null,
             loadingMore: false,
             error: null,
           },
           cursor: page.nextCursor,
-          revision: page.revision,
         };
       });
     }).catch((cause: unknown) => {
       if (generation !== listGeneration.current) return;
-      if (cause instanceof ApiError && cause.status === 409 && cause.code === "revision_changed") {
-        // The ledger moved between pages. Reload what was shown under the new revision instead of
-        // appending rows from it to rows from the old one.
+      if (cause instanceof ApiError && cause.status === 409 && cause.code === CAMPAIGN_WORK_REVISION_CHANGED) {
+        // The ledger moved between pages. Reload what was shown, plus the page asked for, under the
+        // new revision instead of appending rows from it to rows from the old one.
         loadFirstPage(Math.min(CAMPAIGN_WORK_RELOAD_CEILING, loadedCountRef.current + CAMPAIGN_WORK_PAGE_SIZE));
         return;
       }
       setList((latest) => ({ ...latest, state: { ...latest.state, loadingMore: false, error: errorMessage(cause) } }));
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, listKey, loadFirstPage, session.id]);
 
   /* ---------------------------------------------------------------- detail */
@@ -276,8 +252,8 @@ export function useCampaignStatus({
   useEffect(() => {
     if (!selectedItemId || !detailKey || !online) return;
     const controller = new AbortController();
-    api.campaignWorkItem(session.id, selectedItemId, controller.signal).then((value) => {
-      setDetail({ key: detailKey, state: { status: "ready", detail: value, error: null } });
+    api.campaignWorkItem(session.id, selectedItemId, controller.signal).then((response) => {
+      setDetail({ key: detailKey, state: { status: "ready", detail: response.item, error: null } });
     }).catch((cause: unknown) => {
       if (isAbort(cause)) return;
       if (cause instanceof ApiError && cause.status === 404) {
@@ -292,16 +268,10 @@ export function useCampaignStatus({
     return () => controller.abort();
   }, [api, detailKey, online, revision, reconnects, retries, selectedItemId, session.id]);
 
-  const listState = list.key === listKey
-    ? list.state
-    : { status: "loading" as const, items: [], hasMore: false, loadingMore: false, error: null };
-  const detailState: CampaignDetailState | null = detailKey
-    ? detail?.key === detailKey ? detail.state : { status: "loading", detail: null, error: null }
-    : null;
   return {
     summary,
-    list: listState,
-    detail: detailState,
+    list: list.key === listKey ? list.state : EMPTY_LIST,
+    detail: detailKey ? detail?.key === detailKey ? detail.state : { status: "loading", detail: null, error: null } : null,
     offline: !online,
     loadMore,
     retry: () => setRetries((count) => count + 1),

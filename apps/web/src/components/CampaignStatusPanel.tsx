@@ -8,37 +8,46 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import type { SessionHoldView, SessionView } from "@wollipog/protocol";
+import type {
+  CampaignForgePullRequestObservation,
+  CampaignIssueRef,
+  CampaignObservedCleanup,
+  CampaignObservedFact,
+  CampaignObservedSessionStatus,
+  CampaignWorkItemSummary,
+  SessionHoldView,
+  SessionView,
+} from "@wollipog/protocol";
 import {
   CAMPAIGN_ORIGIN_FILTER_OPTIONS,
   CAMPAIGN_SORT_OPTIONS,
   CAMPAIGN_STATE_FILTER_OPTIONS,
   CAMPAIGN_WORK_STATE_LABELS,
   DEFAULT_CAMPAIGN_WORK_FILTERS,
+  REPORTED_STAGE_LABELS,
+  RESPONSIBLE_ACTOR_LABELS,
   UNAVAILABLE,
   campaignCostView,
   campaignSummaryView,
+  causeNeedsRequests,
+  durationMetricView,
   filtersAreDefault,
   issueRefHref,
   issueRefLabel,
-  measuredDuration,
+  observationUnavailableText,
+  stateCauseText,
   workItemOriginLabel,
   workItemTimeView,
   workItemTitle,
+  type CampaignCostView,
   type CampaignStatusAvailability,
   type CampaignWorkFilters,
 } from "../campaign-status.js";
-import type {
-  CampaignIssueRef,
-  CampaignObservedFact,
-  CampaignReportedStageKind,
-  CampaignWorkItem,
-  CampaignWorkItemDetail,
-} from "../campaign-work-contract.js";
-import { effortLabel, formatRecordedRelativeTime, formatRecordedTimestamp, resolvedModelLabel } from "../format.js";
+import { effortLabel, formatRecordedRelativeTime, formatRecordedTimestamp, resolvedModelLabel, titleCaseLabel } from "../format.js";
 import { viewPath } from "../navigation.js";
 import { statusMeta } from "../status-meta.js";
 import { useTimelineClock } from "../timeline-clock.js";
+import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
@@ -50,8 +59,8 @@ import { useCampaignStatus, type CampaignStatusData } from "./useCampaignStatus.
 
 /**
  * What the list remembers while a work item's details replace it, per viewing session: the filters,
- * the scroll position, and the row that had focus. Module scope, like the Requests list's scroll
- * memory, so it survives the panel body remounting.
+ * the open item, the scroll position, and the row that had focus. Module scope, like the Requests
+ * list's scroll memory, so it survives the panel body remounting.
  */
 interface CampaignListMemory {
   filters: CampaignWorkFilters;
@@ -63,11 +72,6 @@ const listMemory = new Map<string, CampaignListMemory>();
 
 export function forgetCampaignStatusMemory(): void {
   listMemory.clear();
-}
-
-function initialMemory(sessionId: string, currentWorkItemId: string | null): CampaignListMemory {
-  return listMemory.get(sessionId)
-    ?? { filters: DEFAULT_CAMPAIGN_WORK_FILTERS, selectedItemId: null, scrollTop: 0, focusItemId: currentWorkItemId };
 }
 
 type AvailableCampaign = Extract<CampaignStatusAvailability, { kind: "available" }>;
@@ -114,7 +118,13 @@ function AvailableCampaignStatus({
   onOpenSession: (sessionId: string) => void;
   onOpenRequests: () => void;
 }) {
-  const [memory, setMemoryState] = useState(() => initialMemory(session.id, availability.currentWorkItemId));
+  const [memory, setMemoryState] = useState<CampaignListMemory>(() => listMemory.get(session.id) ?? {
+    filters: DEFAULT_CAMPAIGN_WORK_FILTERS,
+    selectedItemId: null,
+    scrollTop: 0,
+    // A member starts on its own assignment.
+    focusItemId: availability.currentWorkItemId,
+  });
   const setMemory = useCallback((patch: Partial<CampaignListMemory>) => {
     setMemoryState((current) => {
       const next = { ...current, ...patch };
@@ -122,87 +132,83 @@ function AvailableCampaignStatus({
       return next;
     });
   }, [session.id]);
-  const data = useCampaignStatus({
-    session,
-    availability,
-    filters: memory.filters,
-    selectedItemId: memory.selectedItemId,
-  });
+  const data = useCampaignStatus({ session, availability, filters: memory.filters, selectedItemId: memory.selectedItemId });
   const now = useTimelineClock(true);
-  const listRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement | null>());
-  const pendingListRestore = useRef(false);
+  const returningToList = useRef(false);
 
-  const openItem = (item: CampaignWorkItem) => {
+  const openItem = (item: CampaignWorkItemSummary) => {
     // Captured on the way out, so Back puts the list exactly where it was.
-    setMemory({ selectedItemId: item.id, focusItemId: item.id, scrollTop: listRef.current?.scrollTop ?? memory.scrollTop });
+    setMemory({ selectedItemId: item.id, focusItemId: item.id, scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop });
   };
   const closeItem = () => {
-    pendingListRestore.current = true;
+    returningToList.current = true;
     setMemory({ selectedItemId: null });
   };
 
   useLayoutEffect(() => {
+    const scroller = scrollRef.current;
     if (memory.selectedItemId) {
-      detailHeadingRef.current?.focus();
+      if (scroller) scroller.scrollTop = 0;
+      detailHeadingRef.current?.focus({ preventScroll: true });
       return;
     }
-    const list = listRef.current;
-    if (list) list.scrollTop = memory.scrollTop;
-    if (!pendingListRestore.current) return;
-    pendingListRestore.current = false;
-    const row = memory.focusItemId ? rowRefs.current.get(memory.focusItemId) : null;
-    row?.focus({ preventScroll: true });
+    if (scroller) scroller.scrollTop = memory.scrollTop;
+    if (!returningToList.current) return;
+    returningToList.current = false;
+    if (memory.focusItemId) rowRefs.current.get(memory.focusItemId)?.focus({ preventScroll: true });
   // Runs on the list/detail swap only; scroll and focus are then the person's.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [memory.selectedItemId]);
 
-  if (memory.selectedItemId) {
-    return (
-      <div className="campaign-status">
+  const heldChildren = data.summary.campaign?.heldChildren ?? [];
+  return (
+    <div className="campaign-status" ref={scrollRef}>
+      {memory.selectedItemId ? (
         <CampaignWorkItemDetailView
           state={data.detail}
           offline={data.offline}
           headingRef={detailHeadingRef}
           now={now}
-          heldChildren={availability.role === "campaign" ? session.orchestratorCampaign?.heldChildren ?? [] : []}
+          heldChildren={heldChildren}
           isAssignment={availability.currentWorkItemId === memory.selectedItemId}
           onBack={closeItem}
           onRetry={data.retry}
           onOpenSession={onOpenSession}
           onOpenRequests={onOpenRequests}
         />
-      </div>
-    );
-  }
-
-  return (
-    <div className="campaign-status" ref={listRef}>
-      {availability.role === "member" && (
-        <p className="campaign-status-context">
-          This session works for the campaign run by{" "}
-          <SessionLink sessionId={availability.campaignSessionId} onOpen={onOpenSession}>
-            {data.summary.campaign?.title || "its Orchestrator"}
-          </SessionLink>
-          .{availability.currentWorkItemId ? " Its current assignment is highlighted." : " It has no current assignment."}
-        </p>
+      ) : (
+        <>
+          {availability.role === "member" && (
+            <p className="campaign-status-context">
+              This session works for the campaign run by{" "}
+              <SessionLink sessionId={availability.campaignSessionId} onOpen={onOpenSession}>
+                {data.summary.campaignTitle || "its Orchestrator"}
+              </SessionLink>
+              .{availability.currentWorkItemId ? " Its current assignment is highlighted." : " It has no current assignment."}
+            </p>
+          )}
+          {data.offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded campaign status.</p>}
+          <StaleContent stale={data.offline}>
+            <div className="campaign-status-sections">
+              <CampaignSummarySection data={data} now={now} />
+              <CampaignWorkList
+                data={data}
+                filters={memory.filters}
+                onFiltersChange={(filters) => setMemory({ filters, scrollTop: 0 })}
+                focusItemId={memory.focusItemId}
+                onFocusItem={(id) => setMemory({ focusItemId: id })}
+                currentWorkItemId={availability.currentWorkItemId}
+                rowRefs={rowRefs}
+                now={now}
+                onOpen={openItem}
+              />
+            </div>
+          </StaleContent>
+        </>
       )}
-      {data.offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded campaign status.</p>}
-      <StaleContent stale={data.offline}>
-        <CampaignSummarySection data={data} now={now} />
-        <CampaignWorkList
-          data={data}
-          filters={memory.filters}
-          onFiltersChange={(filters) => setMemory({ filters, scrollTop: 0 })}
-          focusItemId={memory.focusItemId}
-          onFocusItem={(id) => setMemory({ focusItemId: id })}
-          currentWorkItemId={availability.currentWorkItemId}
-          rowRefs={rowRefs}
-          now={now}
-          onOpen={openItem}
-        />
-      </StaleContent>
     </div>
   );
 }
@@ -236,19 +242,22 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
       )}
       <dl className="facts">
         <div><dt>State</dt><dd>{view.stateLabel}</dd></div>
-        <div><dt>Progress</dt><dd>{view.progress.text}</dd></div>
+        <div><dt>Progress</dt><dd>{view.progressText}</dd></div>
         <div>
           <dt>Scope</dt>
-          <dd>{view.scope.original} Original<span className="campaign-status-meta">{view.scope.followUp} Accepted Follow-Up{view.scope.followUp === 1 ? "" : "s"}</span></dd>
+          <dd>
+            {view.scope.original} Original
+            <span className="campaign-status-meta">{view.scope.followUp} Accepted Follow-Up{view.scope.followUp === 1 ? "" : "s"}</span>
+          </dd>
         </div>
         <div>
           <dt>Work</dt>
           <dd>
             <ul className="campaign-status-counts" aria-label="Work Items by State">
               {view.stateCounts.map((entry) => (
-                <li key={entry.state} data-state={entry.state}><strong>{entry.count}</strong> {entry.label}</li>
+                <li key={entry.state}><strong>{entry.count}</strong> {entry.label}</li>
               ))}
-              {view.withdrawn > 0 && <li data-state="withdrawn"><strong>{view.withdrawn}</strong> Canceled or Removed</li>}
+              {view.withdrawn > 0 && <li><strong>{view.withdrawn}</strong> Canceled or Removed</li>}
             </ul>
           </dd>
         </div>
@@ -258,11 +267,9 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
           <dt>Cost</dt>
           <dd>
             <CostText cost={view.cost} />
-            {view.costBreakdown.length > 0 && (
-              <span className="campaign-status-meta">
-                {view.costBreakdown.map((row) => `${row.label} ${row.text}`).join(", ")}
-              </span>
-            )}
+            {view.costBreakdown.length > 0
+              ? <span className="campaign-status-meta">{view.costBreakdown.map((row) => `${row.label} ${row.text}`).join(", ")}</span>
+              : view.cost.note && <span className="campaign-status-meta">{view.cost.note}</span>}
           </dd>
         </div>
         {view.budget && <div><dt>Budget</dt><dd>{view.budget}</dd></div>}
@@ -284,9 +291,9 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
   );
 }
 
-function CostText({ cost }: { cost: ReturnType<typeof campaignCostView> }) {
+function CostText({ cost }: { cost: CampaignCostView }) {
   return (
-    <span className="campaign-cost" data-priced={cost.priced || undefined} title={cost.note ?? undefined}>
+    <span className="campaign-cost">
       {cost.text}
       {cost.provenance && <span className="campaign-status-meta">{cost.provenance}</span>}
     </span>
@@ -316,7 +323,7 @@ function CampaignWorkList({
   currentWorkItemId: string | null;
   rowRefs: React.RefObject<Map<string, HTMLButtonElement | null>>;
   now: number;
-  onOpen: (item: CampaignWorkItem) => void;
+  onOpen: (item: CampaignWorkItemSummary) => void;
 }) {
   const headingId = useId();
   const { list } = data;
@@ -350,7 +357,7 @@ function CampaignWorkList({
     body = filtersAreDefault(filters) ? (
       <State variant="empty" title="No Unfinished Work" compact
         actions={<button type="button" className="btn sm" onClick={() => onFiltersChange({ ...filters, state: "all" })}>Show All Work</button>}>
-        Every recorded work item is finished, or the Orchestrator has not recorded any yet.
+        Every recorded work item is finished, or none has been recorded yet.
       </State>
     ) : (
       <State variant="no-results" title="No Matching Work Items" compact
@@ -395,27 +402,12 @@ function CampaignWorkList({
     <section className="campaign-work" aria-labelledby={headingId}>
       <h3 id={headingId} className="campaign-status-heading">Work Items</h3>
       <div className="campaign-work-filters">
-        <Select
-          label="Origin"
-          value={filters.origin}
-          options={CAMPAIGN_ORIGIN_FILTER_OPTIONS}
-          onChange={(origin) => onFiltersChange({ ...filters, origin })}
-          className="sm"
-        />
-        <Select
-          label="State"
-          value={filters.state}
-          options={CAMPAIGN_STATE_FILTER_OPTIONS}
-          onChange={(state) => onFiltersChange({ ...filters, state })}
-          className="sm"
-        />
-        <Select
-          label="Sort"
-          value={filters.sort}
-          options={CAMPAIGN_SORT_OPTIONS}
-          onChange={(sort) => onFiltersChange({ ...filters, sort })}
-          className="sm"
-        />
+        <Select label="Origin" value={filters.origin} options={CAMPAIGN_ORIGIN_FILTER_OPTIONS}
+          onChange={(origin) => onFiltersChange({ ...filters, origin })} />
+        <Select label="State" value={filters.state} options={CAMPAIGN_STATE_FILTER_OPTIONS}
+          onChange={(state) => onFiltersChange({ ...filters, state })} />
+        <Select label="Sort" value={filters.sort} options={CAMPAIGN_SORT_OPTIONS}
+          onChange={(sort) => onFiltersChange({ ...filters, sort })} />
       </div>
       {body}
     </section>
@@ -431,7 +423,7 @@ function CampaignWorkRow({
   onFocus,
   onOpen,
 }: {
-  item: CampaignWorkItem;
+  item: CampaignWorkItemSummary;
   now: number;
   assignment: boolean;
   tabStop: boolean;
@@ -439,7 +431,6 @@ function CampaignWorkRow({
   onFocus: () => void;
   onOpen: () => void;
 }) {
-  const title = workItemTitle(item);
   const time = workItemTimeView(item, now);
   const cost = campaignCostView(item.cost);
   return (
@@ -447,22 +438,22 @@ function CampaignWorkRow({
       ref={rowRef}
       type="button"
       className={`campaign-work-row${assignment ? " is-assignment" : ""}`}
-      data-state={item.state}
+      data-state={item.primaryState}
       tabIndex={tabStop ? 0 : -1}
       onFocus={onFocus}
       onClick={onOpen}
     >
       <span className="campaign-work-row-line">
-        <span className="campaign-work-row-title">{title}</span>
-        <StatusBadge meta={statusMeta("campaignWork", item.state)} inline />
+        <span className="campaign-work-row-title">{workItemTitle(item)}</span>
+        <StatusBadge meta={statusMeta("campaignWork", item.primaryState)} inline />
       </span>
       <span className="campaign-work-row-line campaign-work-row-meta">
         <span>{workItemOriginLabel(item)}</span>
         {item.issue && item.title && <span>{issueRefLabel(item.issue)}</span>}
         {assignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
         <span className="campaign-work-row-trail">
-          <span aria-label={`${time.label} ${time.text}`}>{time.text}</span>
-          {cost.priced && <span aria-label={`Cost ${cost.text}`}>{cost.text}</span>}
+          <span title={time.label}>{time.text}</span>
+          {cost.priced && <span title={cost.provenance ?? "Cost"}>{cost.text}</span>}
         </span>
       </span>
     </button>
@@ -473,24 +464,6 @@ function CampaignWorkRow({
  * Details
  * ---------------------------------------------------------------------------------------------- */
 
-const STAGE_LABELS: Record<CampaignReportedStageKind, string> = {
-  implementing: "Implementing",
-  in_review: "In Review",
-  awaiting_checks: "Awaiting Checks",
-  awaiting_approval: "Awaiting Approval",
-  merge_queued: "Merge Queued",
-  merged: "Merged",
-  cleanup: "Cleanup",
-};
-
-const OBSERVED_LABELS: Record<CampaignObservedFact["kind"], string> = {
-  session_status: "Session Status",
-  pull_request: "Pull Request",
-  review: "Review",
-  checks: "Checks",
-  merge_queue: "Merge Queue",
-};
-
 const END_REASON_LABELS = {
   delivered: "Delivered",
   reassigned: "Reassigned",
@@ -498,6 +471,20 @@ const END_REASON_LABELS = {
   abandoned: "Abandoned",
   failed: "Failed",
 } as const;
+
+const PR_STATE_LABELS: Record<CampaignForgePullRequestObservation["state"], string> = { open: "Open", closed: "Closed", merged: "Merged" };
+const REVIEW_LABELS: Record<CampaignForgePullRequestObservation["reviewDecision"], string> = {
+  approved: "Review Approved",
+  changes_requested: "Changes Requested",
+  review_required: "Review Required",
+  none: "No Review Decision",
+};
+const CHECK_LABELS: Record<CampaignForgePullRequestObservation["checks"], string> = {
+  passing: "Checks Passing",
+  failing: "Checks Failing",
+  pending: "Checks Pending",
+  none: "No Checks",
+};
 
 function SessionLink({ sessionId, onOpen, children }: { sessionId: string; onOpen: (sessionId: string) => void; children: ReactNode }) {
   return (
@@ -531,20 +518,39 @@ function IssueLink({ issue, kind }: { issue: CampaignIssueRef; kind: "issues" | 
   return href ? <a href={href} target="_blank" rel="noreferrer">{label}</a> : <>{label}</>;
 }
 
-function ObservedFactValue({ fact, now }: { fact: CampaignObservedFact; now: number }) {
-  if (fact.freshness.state === "unavailable") {
-    // Unavailable forge data never reads as passing: no value, just why it is missing.
-    return <>{UNAVAILABLE}<span className="campaign-status-meta">{fact.freshness.reason}</span></>;
+/** A server observation: its value with how old it is, or why it is missing. Never a guessed value. */
+function ObservedValue<T>({ fact, now, render }: { fact: CampaignObservedFact<T> | undefined; now: number; render: (value: T) => ReactNode }) {
+  if (!fact) return <>{UNAVAILABLE}<span className="campaign-status-meta">{observationUnavailableText("not_collected")}</span></>;
+  if (fact.availability === "unavailable") {
+    return <>{UNAVAILABLE}<span className="campaign-status-meta">{observationUnavailableText(fact.reason)}</span></>;
   }
   return (
     <>
-      {fact.value}
+      {render(fact.value)}
       <span className="campaign-status-meta">
-        {fact.freshness.state === "stale" ? "Stale, " : ""}
-        <RecordedTime at={fact.observedAt} now={now} prefix="Observed" />
+        {fact.availability === "stale" ? "Stale, " : ""}<RecordedTime at={fact.observedAt} now={now} prefix="Observed" />
       </span>
     </>
   );
+}
+
+function sessionStatusText(value: CampaignObservedSessionStatus): string {
+  const parts = [titleCaseLabel(value.status.replaceAll("_", " "))];
+  if (value.archived) parts.push("Archived");
+  if (value.held) parts.push("Held");
+  if (value.pendingRequests > 0) parts.push(`${value.pendingRequests} Pending Request${value.pendingRequests === 1 ? "" : "s"}`);
+  return parts.join(", ");
+}
+
+function cleanupText(value: CampaignObservedCleanup): string {
+  if (value.worktrees.length === 0) return "No Worktrees";
+  return value.worktrees.map((worktree) => titleCaseLabel(worktree.status)).join(", ");
+}
+
+function pullRequestText(value: CampaignForgePullRequestObservation): string {
+  const parts = [PR_STATE_LABELS[value.state], CHECK_LABELS[value.checks], REVIEW_LABELS[value.reviewDecision]];
+  if (value.mergeQueue) parts.push(value.mergeQueue.position === null ? "In Merge Queue" : `Merge Queue Position ${value.mergeQueue.position}`);
+  return parts.join(", ");
 }
 
 function CampaignWorkItemDetailView({
@@ -571,27 +577,25 @@ function CampaignWorkItemDetailView({
   onOpenRequests: () => void;
 }) {
   const detail = state?.detail ?? null;
-  const back = (
-    <button type="button" className="btn ghost sm campaign-detail-back" onClick={onBack}>
-      <ChevronLeftIcon size={14} aria-hidden="true" />
-      Back to Work Items
-    </button>
-  );
   // One heading element for loading and loaded alike, at the same place in the tree, so the focus it
   // takes when details open survives the details arriving.
-  const offlineLine = offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded details.</p>;
   const head = (
-    <div className="campaign-detail-head">
-      <h3 ref={headingRef} tabIndex={-1} className="campaign-detail-title">{detail ? workItemTitle(detail) : "Work Item"}</h3>
-      {detail && <StatusBadge meta={statusMeta("campaignWork", detail.state)} />}
-      {detail && isAssignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
-    </div>
+    <>
+      <button type="button" className="btn ghost sm campaign-detail-back" onClick={onBack}>
+        <ChevronLeftIcon size={14} aria-hidden="true" />
+        Back to Work Items
+      </button>
+      {offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded details.</p>}
+      <div className="campaign-detail-head">
+        <h3 ref={headingRef} tabIndex={-1} className="campaign-detail-title">{detail ? workItemTitle(detail) : "Work Item"}</h3>
+        {detail && <StatusBadge meta={statusMeta("campaignWork", detail.primaryState)} />}
+        {detail && isAssignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
+      </div>
+    </>
   );
   if (!detail) {
     return (
       <>
-        {back}
-        {offlineLine}
         {head}
         {state?.status === "missing" ? (
           <State variant="empty" title="Work Item Not Found" compact
@@ -613,155 +617,212 @@ function CampaignWorkItemDetailView({
   const time = workItemTimeView(detail, now);
   const cost = campaignCostView(detail.cost);
   const latestAttempt = detail.attempts.at(-1) ?? null;
-  const previousAttempts = detail.attempts.filter((attempt) => attempt.sessionId !== detail.currentSessionId || attempt.endedAt !== null);
-  const held = detail.currentSessionId ? heldChildren.find((child) => child.sessionId === detail.currentSessionId) : undefined;
-  const needsAction = detail.state === "blocked" || detail.state === "waiting";
+  const currentSessionId = detail.currentAttempt?.sessionId ?? null;
+  const previousAttempts = detail.attempts.filter((attempt) => attempt.id !== detail.currentAttempt?.id);
+  const attemptCost = (attemptId: string) => campaignCostView(detail.attemptCosts?.find((entry) => entry.attemptId === attemptId)?.cost);
+  const latestVerification = latestAttempt
+    ? detail.verifications.filter((verification) => verification.attemptId === latestAttempt.id).at(-1) ?? null
+    : null;
+  const held = currentSessionId ? heldChildren.find((child) => child.sessionId === currentSessionId) : undefined;
+  const pullRequests = [
+    ...(detail.observed.pullRequests?.map((entry) => entry.ref) ?? []),
+    ...(detail.stage?.pullRequests ?? []),
+  ].filter((pr, index, all) => all.findIndex((other) => other.repository === pr.repository && other.number === pr.number) === index);
+  const linksRequests = Boolean(detail.blocker?.requestOccurrenceId) || detail.stateCauses.some(causeNeedsRequests);
+  const snapshot = latestAttempt?.session ?? null;
 
   return (
     <>
-      {back}
-      {offlineLine}
       {head}
       <StaleContent stale={offline}>
-        {state?.status === "error" && (
-          <Notice tone="danger" compact role="alert" title="Couldn't Refresh Work Item"
-            actions={<button type="button" className="btn sm" onClick={onRetry}>Retry</button>}>
-            {state.error}
-          </Notice>
-        )}
-        {detail.commitment.state !== "committed" && (
-          <Notice tone="neutral" compact title={detail.commitment.state === "cancelled" ? "Canceled" : "Scope Removed"}>
-            {detail.commitment.reason ?? "No reason was recorded."} This work does not count as delivered.
-          </Notice>
-        )}
-
-        <DetailSection title="Links">
-          <div><dt>Issue</dt><dd>{detail.issue ? <IssueLink issue={detail.issue} kind="issues" /> : "Not Published"}</dd></div>
-          <div>
-            <dt>Pull Requests</dt>
-            <dd>{detail.pullRequests.length === 0 ? "None Recorded" : detail.pullRequests.map((pr, index) => (
-              <span key={`${pr.repository}#${pr.number}`}>{index > 0 ? ", " : ""}<IssueLink issue={pr} kind="pull" /></span>
-            ))}</dd>
-          </div>
-          <div>
-            <dt>Current Session</dt>
-            <dd>{detail.currentSessionId ? (
-              <SessionLink sessionId={detail.currentSessionId} onOpen={onOpenSession}>
-                {latestAttempt?.sessionId === detail.currentSessionId ? latestAttempt.sessionTitle : "Open Session"}
-              </SessionLink>
-            ) : "None"}</dd>
-          </div>
-          <div>
-            <dt>Previous Attempts</dt>
-            <dd>{previousAttempts.length === 0 ? "None" : (
-              <ul className="campaign-detail-attempts">
-                {previousAttempts.map((attempt) => (
-                  <li key={attempt.id}>
-                    {attempt.sessionId ? (
-                      <SessionLink sessionId={attempt.sessionId} onOpen={onOpenSession}>{attempt.sessionTitle}</SessionLink>
-                    ) : <span>{attempt.sessionTitle}<span className="campaign-status-meta">Session Deleted</span></span>}
-                    <span className="campaign-status-meta">
-                      {attempt.endReason ? END_REASON_LABELS[attempt.endReason] : "Open"}, {campaignCostView(attempt.cost).text}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}</dd>
-          </div>
-        </DetailSection>
-
-        <DetailSection title="Lineage">
-          <div><dt>Origin</dt><dd>{workItemOriginLabel(detail)}</dd></div>
-          {detail.originWorkItems.length > 0 && (
-            <div><dt>Recommended By</dt><dd>{detail.originWorkItems.map((origin) => workItemTitle({ ...origin, key: origin.id })).join(", ")}</dd></div>
+        <div className="campaign-status-sections">
+          {state?.status === "error" && (
+            <Notice tone="danger" compact role="alert" title="Couldn't Refresh Work Item"
+              actions={<button type="button" className="btn sm" onClick={onRetry}>Retry</button>}>
+              {state.error}
+            </Notice>
           )}
-          <div>
-            <dt>Depends On</dt>
-            <dd>{detail.dependsOn.length === 0 ? "None" : (
-              <ul className="campaign-detail-dependencies">
-                {detail.dependsOn.map((dependency) => (
-                  <li key={dependency.id}>
-                    {workItemTitle({ ...dependency, key: dependency.id })}
-                    <span className="campaign-status-meta">{CAMPAIGN_WORK_STATE_LABELS[dependency.state]}</span>
-                  </li>
-                ))}
-              </ul>
-            )}</dd>
-          </div>
-        </DetailSection>
+          {detail.commitment !== "committed" && (
+            <Notice tone="neutral" compact title={detail.commitment === "cancelled" ? "Canceled" : "Scope Removed"}>
+              {detail.commitmentRecord.reason ?? "No reason was recorded."} This work does not count as delivered.
+            </Notice>
+          )}
 
-        <DetailSection title="Progress">
-          <div><dt>Queue Position</dt><dd>{detail.queuePosition === null ? "Not Queued" : detail.queuePosition}</dd></div>
-          <div><dt>Blocker</dt><dd>{detail.blocker ?? "None Recorded"}</dd></div>
-          {held?.holds.map((hold) => (
-            <div key={hold.holdId}>
-              <dt>Held</dt>
-              <dd>{hold.reason}{hold.recoveryAction && <span className="campaign-status-meta">{hold.recoveryAction}</span>}</dd>
+          <DetailSection title="Links">
+            <div>
+              <dt>Issue</dt>
+              <dd>{detail.issue ? <IssueLink issue={detail.issue} kind="issues" />
+                : detail.sourceRecommendation?.publication === "awaiting_publication" ? "Awaiting Publication" : "Not Published"}</dd>
             </div>
-          ))}
-          <div><dt>Responsible</dt><dd>{detail.responsibleActor ?? UNAVAILABLE}</dd></div>
-          <div><dt>Next Action</dt><dd>{detail.nextAction ?? UNAVAILABLE}</dd></div>
-        </DetailSection>
-        {(needsAction || held) && (
-          <div className="campaign-detail-actions">
-            <button type="button" className="btn sm" onClick={onOpenRequests}>Open Requests</button>
-            {detail.currentSessionId && (
-              <button type="button" className="btn ghost sm" onClick={() => onOpenSession(detail.currentSessionId!)}>Open Child Session</button>
+            <div>
+              <dt>Pull Requests</dt>
+              <dd>{pullRequests.length === 0 ? "None Recorded" : pullRequests.map((pr, index) => (
+                <span key={`${pr.repository}#${pr.number}`}>{index > 0 ? ", " : ""}<IssueLink issue={pr} kind="pull" /></span>
+              ))}</dd>
+            </div>
+            <div>
+              <dt>Current Session</dt>
+              <dd>{currentSessionId ? (
+                <SessionLink sessionId={currentSessionId} onOpen={onOpenSession}>
+                  {detail.currentAttempt?.sessionTitle || "Open Session"}
+                </SessionLink>
+              ) : detail.currentAttempt
+                ? <>{detail.currentAttempt.sessionTitle ?? "Session"}<span className="campaign-status-meta">Session Deleted</span></>
+                : "None"}</dd>
+            </div>
+            <div>
+              <dt>Previous Attempts</dt>
+              <dd>{previousAttempts.length === 0 ? "None" : (
+                <ul className="campaign-detail-list">
+                  {previousAttempts.map((attempt) => (
+                    <li key={attempt.id}>
+                      {attempt.sessionId
+                        ? <SessionLink sessionId={attempt.sessionId} onOpen={onOpenSession}>{attempt.session.title || `Attempt ${attempt.ordinal}`}</SessionLink>
+                        : <>{attempt.session.title || `Attempt ${attempt.ordinal}`}</>}
+                      <span className="campaign-status-meta">
+                        {attempt.endReason ? END_REASON_LABELS[attempt.endReason] : "Open"}
+                        {attempt.sessionId ? "" : ", Session Deleted"}, {attemptCost(attempt.id).text}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}</dd>
+            </div>
+          </DetailSection>
+
+          <DetailSection title="Lineage">
+            <div><dt>Origin</dt><dd>{workItemOriginLabel(detail)}</dd></div>
+            {detail.sourceRecommendation && (
+              <div><dt>Accepted From</dt><dd>{detail.sourceRecommendation.title}</dd></div>
             )}
-          </div>
-        )}
-
-        <DetailSection title="Delivery">
-          <div>
-            <dt>Reported Stage</dt>
-            <dd>{detail.reportedStage ? (
-              <>
-                {STAGE_LABELS[detail.reportedStage.stage]}
-                <span className="campaign-status-meta">
-                  Reported by the Orchestrator <RecordedTime at={detail.reportedStage.reportedAt} now={now} />
-                </span>
-                {detail.reportedStage.note && <span className="campaign-status-note">{detail.reportedStage.note}</span>}
-              </>
-            ) : "None Reported"}</dd>
-          </div>
-          {detail.observed.map((fact) => (
-            <div key={fact.kind}>
-              <dt>{OBSERVED_LABELS[fact.kind]}</dt>
-              <dd><ObservedFactValue fact={fact} now={now} /></dd>
+            <div>
+              <dt>Depends On</dt>
+              <dd>{detail.dependsOn.length === 0 ? "None" : (
+                <ul className="campaign-detail-list">
+                  {detail.dependsOn.map((dependency) => (
+                    <li key={dependency.id}>
+                      {workItemTitle(dependency)}
+                      <span className="campaign-status-meta">{CAMPAIGN_WORK_STATE_LABELS[dependency.primaryState]}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}</dd>
             </div>
-          ))}
-          {!detail.observed.some((fact) => fact.kind === "checks") && (
-            <div><dt>Checks</dt><dd>{UNAVAILABLE}<span className="campaign-status-meta">Not observed by this server.</span></dd></div>
+            {detail.recommendations.length > 0 && (
+              <div><dt>Recommended Follow-Ups</dt><dd>{detail.recommendations.length}</dd></div>
+            )}
+          </DetailSection>
+
+          <DetailSection title="Progress">
+            <div><dt>Queue Position</dt><dd>{detail.queuePosition === null ? "Not Queued" : detail.queuePosition}</dd></div>
+            {detail.stateCauses.length > 0 && (
+              <div><dt>Reason</dt><dd>{detail.stateCauses.map(stateCauseText).join(" ")}</dd></div>
+            )}
+            <div>
+              <dt>Blocker</dt>
+              <dd>{detail.blocker ? (
+                <>
+                  {detail.blocker.reason}
+                  <span className="campaign-status-meta">Recorded <RecordedTime at={detail.blocker.recordedAt} now={now} /></span>
+                </>
+              ) : "None Recorded"}</dd>
+            </div>
+            {held?.holds.map((hold) => (
+              <div key={hold.holdId}>
+                <dt>Hold</dt>
+                <dd>{hold.reason}{hold.recoveryAction && <span className="campaign-status-meta">{hold.recoveryAction}</span>}</dd>
+              </div>
+            ))}
+            <div><dt>Responsible</dt><dd>{detail.blocker ? RESPONSIBLE_ACTOR_LABELS[detail.blocker.responsibleActor] : "None Recorded"}</dd></div>
+            <div><dt>Next Action</dt><dd>{detail.nextAction ?? "None Recorded"}</dd></div>
+          </DetailSection>
+          {(linksRequests || held || detail.primaryState === "blocked") && (
+            <div className="campaign-detail-actions">
+              {(linksRequests || held) && <button type="button" className="btn sm" onClick={onOpenRequests}>Open Requests</button>}
+              {currentSessionId && (
+                <button type="button" className="btn ghost sm" onClick={() => onOpenSession(currentSessionId)}>Open Child Session</button>
+              )}
+            </div>
           )}
-          <div>
-            <dt>Verification</dt>
-            <dd>{detail.verification ? (
-              <>
-                {detail.verification.outcome === "delivered" ? "Verified Delivered" : "Verified Incomplete"}
-                <span className="campaign-status-meta"><RecordedTime at={detail.verification.verifiedAt} now={now} /></span>
-              </>
-            ) : "Not Verified"}</dd>
-          </div>
-        </DetailSection>
 
-        <DetailSection title="Time and Cost">
-          <div><dt>Item {time.label}</dt><dd>{time.text}</dd></div>
-          <div><dt>Queue Time</dt><dd>{measuredDuration(detail.time.queueMs)}</dd></div>
-          <div><dt>Waiting Time</dt><dd>{measuredDuration(detail.time.waitingMs)}</dd></div>
-          <div><dt>Active Time</dt><dd>{measuredDuration(detail.time.activeMs)}</dd></div>
-          <div><dt>Recorded</dt><dd><RecordedTime at={detail.recordedAt} now={now} /></dd></div>
-          <div><dt>Started</dt><dd>{detail.startedAt === null ? "Not Started" : <RecordedTime at={detail.startedAt} now={now} />}</dd></div>
-          {detail.endedAt !== null && <div><dt>Finished</dt><dd><RecordedTime at={detail.endedAt} now={now} /></dd></div>}
-          <div><dt>Cost</dt><dd><CostText cost={cost} />{cost.note && <span className="campaign-status-note">{cost.note}</span>}</dd></div>
-        </DetailSection>
+          <DetailSection title="Delivery">
+            <div>
+              <dt>Reported Stage</dt>
+              <dd>{detail.stage ? (
+                <>
+                  {REPORTED_STAGE_LABELS[detail.stage.stage]}
+                  <span className="campaign-status-meta">
+                    Reported by the Orchestrator <RecordedTime at={detail.stage.reportedAt} now={now} />
+                  </span>
+                  {detail.stage.note && <span className="campaign-status-note">{detail.stage.note}</span>}
+                </>
+              ) : "None Reported"}</dd>
+            </div>
+            <div>
+              <dt>Session</dt>
+              <dd><ObservedValue fact={detail.observed.session} now={now} render={sessionStatusText} /></dd>
+            </div>
+            {detail.observed.pullRequests && detail.observed.pullRequests.length > 0
+              ? detail.observed.pullRequests.map((entry) => (
+                <div key={`${entry.ref.repository}#${entry.ref.number}`}>
+                  <dt>PR #{entry.ref.number}</dt>
+                  <dd><ObservedValue fact={entry.fact} now={now} render={pullRequestText} /></dd>
+                </div>
+              ))
+              : (
+                <div>
+                  <dt>Review and Checks</dt>
+                  <dd><ObservedValue fact={undefined} now={now} render={() => null} /></dd>
+                </div>
+              )}
+            <div>
+              <dt>Verification</dt>
+              <dd>{latestVerification ? (
+                <>
+                  {latestVerification.outcome === "delivered" ? "Verified Delivered" : "Verified Incomplete"}
+                  <span className="campaign-status-meta"><RecordedTime at={latestVerification.verifiedAt} now={now} /></span>
+                </>
+              ) : "Not Verified"}</dd>
+            </div>
+            <div>
+              <dt>Cleanup</dt>
+              <dd><ObservedValue fact={detail.observed.cleanup} now={now} render={cleanupText} /></dd>
+            </div>
+          </DetailSection>
 
-        <DetailSection title="Execution">
-          <div><dt>Harness</dt><dd>{latestAttempt?.harness ?? UNAVAILABLE}</dd></div>
-          <div><dt>Model</dt><dd>{latestAttempt?.model ? resolvedModelLabel(latestAttempt.model) : UNAVAILABLE}</dd></div>
-          <div><dt>Effort</dt><dd>{latestAttempt?.effort ? effortLabel(latestAttempt.effort) : UNAVAILABLE}</dd></div>
-        </DetailSection>
+          <DetailSection title="Time and Cost">
+            <div><dt>Item {time.label}</dt><dd>{time.text}</dd></div>
+            <MetricFact label="Queue Time" view={durationMetricView(detail.times?.queue)} />
+            <MetricFact label="Waiting Time" view={durationMetricView(detail.times?.waiting)} />
+            <MetricFact label="Active Time" view={durationMetricView(detail.times?.active)} />
+            <div><dt>Recorded</dt><dd><RecordedTime at={detail.createdAt} now={now} /></dd></div>
+            <div><dt>Started</dt><dd>{detail.elapsed.startedAt === null ? "Not Started" : <RecordedTime at={detail.elapsed.startedAt} now={now} />}</dd></div>
+            {detail.elapsed.endedAt !== null && <div><dt>Finished</dt><dd><RecordedTime at={detail.elapsed.endedAt} now={now} /></dd></div>}
+            <div><dt>Cost</dt><dd><CostText cost={cost} />{cost.note && <span className="campaign-status-note">{cost.note}</span>}</dd></div>
+          </DetailSection>
+
+          <DetailSection title="Execution">
+            <div>
+              <dt>Harness</dt>
+              <dd>{snapshot?.harness
+                ? sessionAgentLabel(snapshot.agentName, snapshot.harness.driver, snapshot.harness.agentId)
+                : snapshot?.agentName ?? UNAVAILABLE}</dd>
+            </div>
+            <div><dt>Model</dt><dd>{snapshot?.model ? resolvedModelLabel(snapshot.model) : UNAVAILABLE}</dd></div>
+            <div><dt>Effort</dt><dd>{snapshot?.effort ? effortLabel(snapshot.effort) : UNAVAILABLE}</dd></div>
+          </DetailSection>
+        </div>
       </StaleContent>
     </>
+  );
+}
+
+function MetricFact({ label, view }: { label: string; view: { text: string; note: string | null } }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{view.text}{view.note && <span className="campaign-status-meta">{view.note}</span>}</dd>
+    </div>
   );
 }
 

@@ -3,7 +3,15 @@ import { after, before, beforeEach, test } from "node:test";
 import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, OrchestratorCampaignProjection, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
+import type {
+  CampaignWorkItemDetail,
+  CampaignWorkItemSummary,
+  CampaignWorkItemsPage,
+  CampaignWorkSummary,
+  ControlPlaneToUi,
+  SessionView,
+  UiSnapshotMessage,
+} from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider } from "../store.js";
@@ -16,12 +24,13 @@ import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPan
 import { forgetCampaignStatusMemory } from "./CampaignStatusPanel.js";
 import { useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { CAMPAIGN_STATUS_UNSUPPORTED_REASON } from "../campaign-status.js";
-import type {
-  CampaignWorkItem,
-  CampaignWorkItemDetail,
-  CampaignWorkItemPage,
-  CampaignWorkSummary,
-} from "../campaign-work-contract.js";
+import {
+  campaignProjection,
+  itemDetail,
+  itemSummary,
+  MINUTE,
+  workSummary as sharedWorkSummary,
+} from "../e2e/campaign-status-fixtures.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -72,42 +81,16 @@ class FakeSocket implements UiSocket {
 }
 
 const NOW = Date.now();
-const MINUTE = 60_000;
 
 const git: GitStatus = {
   status: null, observation: 0, observedAt: null, settled: false, busy: false, error: null, errorCode: null,
   refresh: async () => {}, refreshStatusOnly: async () => {}, install: () => {}, mutationRevision: 0,
 };
 
-function workSummary(overrides: Partial<CampaignWorkSummary> = {}): CampaignWorkSummary {
-  return {
-    revision: 1,
-    planState: "recorded",
-    coverage: { untrackedChildren: 0 },
-    counts: {
-      committed: 3, delivered: 1, original: 2, followUp: 1,
-      byState: { planned: 1, queued: 0, running: 1, waiting: 0, blocked: 0, delivered: 1, cancelled: 0, removed: 0 },
-    },
-    recommendations: { awaiting_adjudication: 0, accepted: 1, rejected: 1, deferred: 0, duplicate: 2 },
-    obligations: { verification: 1, adjudication: 0, cleanup: 0 },
-    elapsed: { startedAt: NOW - 10 * MINUTE, completedAt: null },
-    cost: { totalUsd: 2.5, workItemsUsd: 2, coordinationUsd: 0.5, unattributedUsd: 0, source: "providerReported", unpricedRecords: 0, coverage: "complete" },
-    ...overrides,
-  };
-}
+const workSummary = (overrides: Partial<CampaignWorkSummary> = {}) => sharedWorkSummary(NOW, overrides);
+const campaign = (work: CampaignWorkSummary | null) => campaignProjection(work);
 
-function campaign(work: CampaignWorkSummary | null): OrchestratorCampaignProjection {
-  return {
-    status: "active",
-    policyRevision: 1,
-    limits: { maximumConcurrentChildren: 4, occupied: 1, remaining: 3, costBudgetUsd: null, maxToolCalls: null },
-    children: { total: 2, active: 1, waitingHuman: 0, blocked: 0, verified: 1, cleanupPending: 0 },
-    followUps: { unique: 1, duplicates: 2 },
-    ...(work ? { work } : {}),
-  } as unknown as OrchestratorCampaignProjection;
-}
-
-function session(overrides: Partial<SessionView> & Record<string, unknown> = {}): SessionView {
+function session(overrides: Partial<SessionView> = {}): SessionView {
   return {
     id: "s_root", runnerId: "runner-1", driver: "claude-code", status: "running", adopted: false, eventEpoch: 1,
     title: "Campaign Orchestrator", parentSessionId: null, pendingApproval: null,
@@ -115,34 +98,29 @@ function session(overrides: Partial<SessionView> & Record<string, unknown> = {})
   } as SessionView;
 }
 
-function item(id: string, overrides: Partial<CampaignWorkItem> = {}): CampaignWorkItem {
-  return {
-    id, key: `picoduck/wollipog#${id}`, issue: { repository: "picoduck/wollipog", number: Number(id.replace(/\D/g, "")) || 1 },
-    title: `Work ${id}`, origin: "original", generation: 0, state: "running", queuePosition: 1,
-    lastActivityAt: NOW, startedAt: NOW - 5 * MINUTE, endedAt: null, recordedAt: NOW - 20 * MINUTE,
-    cost: null, currentSessionId: "s_child", ...overrides,
-  };
-}
+const item = (id: string, overrides: Partial<CampaignWorkItemSummary> = {}) => itemSummary(id, NOW, overrides);
 
-function detailOf(base: CampaignWorkItem, overrides: Partial<CampaignWorkItemDetail> = {}): CampaignWorkItemDetail {
-  return {
-    ...base,
-    commitment: { state: "committed", reason: null },
-    dependsOn: [], originWorkItems: [], pullRequests: [], blocker: null, responsibleActor: "Orchestrator",
-    nextAction: null, reportedStage: null,
-    observed: [{ kind: "checks", value: "", observedAt: null, freshness: { state: "unavailable", reason: "GitHub is not connected." } }],
-    attempts: [{ id: "catt_1", sessionId: "s_child", sessionTitle: "Child One", harness: "Claude Code", model: null, effort: null,
-      startedAt: NOW - 5 * MINUTE, endedAt: null, endReason: null, cost: null }],
-    verification: null,
-    time: { queueMs: null, waitingMs: 0, activeMs: null },
+/** A detail whose queue time was never recorded, whose waiting time is a recorded zero, and whose
+ * forge facts this server does not observe. */
+function detailOf(base: CampaignWorkItemSummary, overrides: Partial<CampaignWorkItemDetail> = {}): CampaignWorkItemDetail {
+  return itemDetail(base, {
+    times: {
+      elapsed: base.elapsed,
+      queue: { availability: "unavailable", reason: "history_unavailable" },
+      waiting: { availability: "known", value: 0 },
+      active: { availability: "unavailable", reason: "not_collected" },
+      asOf: NOW,
+    },
     ...overrides,
-  };
+  });
 }
 
-interface Calls { list: string[]; detail: string[]; summary: string[] }
+interface Calls { list: string[]; detail: string[] }
 
-function fakeClient(pages: (query: string) => CampaignWorkItemPage | Error, details: Record<string, CampaignWorkItemDetail> = {}) {
-  const calls: Calls = { list: [], detail: [], summary: [] };
+type FixturePage = Omit<CampaignWorkItemsPage, "total"> & { total?: number };
+
+function fakeClient(pages: (query: string) => FixturePage | Error, details: Record<string, CampaignWorkItemDetail> = {}) {
+  const calls: Calls = { list: [], detail: [] };
   const client = {
     ...api,
     childSessions: () => Promise.reject(new ApiError("No registry in this fixture.", 404)),
@@ -150,17 +128,13 @@ function fakeClient(pages: (query: string) => CampaignWorkItemPage | Error, deta
       calls.list.push(`${id}?${query}`);
       const page = pages(query);
       if (page instanceof Error) throw page;
-      return page;
+      return { total: page.items.length, ...page };
     },
     campaignWorkItem: async (id: string, itemId: string) => {
       calls.detail.push(`${id}/${itemId}`);
       const found = details[itemId];
       if (!found) throw new ApiError("not found", 404);
-      return found;
-    },
-    campaignSummary: async (id: string) => {
-      calls.summary.push(id);
-      return { campaignSessionId: "s_root", campaignTitle: "Campaign Orchestrator", status: "active", limits: null, work: workSummary() };
+      return { revision: 1, item: found };
     },
   } as ApiClient;
   return { client, calls };
@@ -222,12 +196,10 @@ async function mount({
   initial,
   sessions = [initial],
   client,
-  campaignWork = true,
 }: {
   initial: SessionView;
   sessions?: SessionView[];
   client: ApiClient;
-  campaignWork?: boolean;
 }) {
   const host = domWindow.document.createElement("div");
   domWindow.document.body.append(host);
@@ -244,7 +216,7 @@ async function mount({
   await act(async () => {
     socket.push({
       type: "snapshot",
-      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, ...(campaignWork ? { campaignWork: true } : {}) },
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
       runners: [], boxes: [], projects: [], sessions, runs: [], pods: [],
     } as unknown as UiSnapshotMessage);
     await Promise.resolve();
@@ -290,7 +262,7 @@ async function chooseFilter(container: HTMLElement, label: string, option: strin
 const rootSession = session({ orchestratorCampaign: campaign(workSummary()) });
 const childSession = session({
   id: "s_child", title: "Child One", parentSessionId: "s_root",
-  campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2" },
+  campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" },
 });
 const unrelated = session({ id: "s_other", title: "Unrelated" });
 
@@ -315,7 +287,8 @@ test("the launcher offers Campaign Status on a campaign and its members, and now
 
 test("a recognized campaign on a server without campaign work shows why, visibly and accessibly", async () => {
   const { client, calls } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }));
-  const panel = await mount({ initial: rootSession, client, campaignWork: false });
+  // An older server sends the campaign projection without `work`.
+  const panel = await mount({ initial: session({ orchestratorCampaign: campaign(null) }), client });
   try {
     await act(async () => panel.state.show("launcher"));
     const row = launcherRow(panel.container, "Campaign Status")!;
@@ -356,7 +329,7 @@ test("navigating from a campaign to an unrelated session returns the open panel 
 test("the summary states progress, capacity, time and cost, and says when no plan was recorded", async () => {
   const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }));
   const planless = session({ orchestratorCampaign: campaign(workSummary({
-    planState: "not_recorded", coverage: { untrackedChildren: 2 }, cost: null,
+    planState: "not_recorded", coverage: { untrackedChildren: 2, predatesLedger: false }, cost: undefined,
   })) });
   const panel = await mount({ initial: planless, client });
   try {
@@ -405,7 +378,7 @@ test("filters reload the list, and returning from details restores filters, posi
     const facts = panel.container.textContent ?? "";
     assert.match(facts, /Queue TimeUnavailable/, "an unrecorded interval is Unavailable");
     assert.match(facts, /Waiting Time0s/, "a recorded zero is a real zero");
-    assert.match(facts, /ChecksUnavailableGitHub is not connected\./, "unavailable forge data never reads as passing");
+    assert.match(facts, /Review and ChecksUnavailableThis server does not observe it\./, "unobserved forge data never reads as passing");
 
     const back = [...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Back to Work Items")!;
     await click(back);
@@ -436,7 +409,8 @@ test("a member sees its campaign and its current assignment highlighted", async 
     assert.match(assigned.textContent ?? "", /Assigned Work/);
     assert.match(assigned.textContent ?? "", /Current Assignment/);
     assert.equal(assigned.tabIndex, 0, "the assignment is the list's tab stop");
-    assert.equal(calls.summary.length, 0, "the root's live summary is read from the store, not fetched");
+    assert.match(panel.container.querySelector(".campaign-status-summary")?.textContent ?? "", /1 of 3 Delivered/,
+      "the root's live summary is read from the store");
     assert.equal(calls.list[0]?.startsWith("s_child?"), true, "the member asks about its own campaign");
   } finally {
     await panel.dispose();
@@ -445,7 +419,7 @@ test("a member sees its campaign and its current assignment highlighted", async 
 
 test("a new ledger revision reloads the list, and a stale cursor restarts from the first page", async () => {
   let revision = 1;
-  const pages = (query: string): CampaignWorkItemPage | Error => {
+  const pages = (query: string): FixturePage | Error => {
     if (query.includes("cursor=")) {
       return revision === 2 ? new ApiError("revision changed", 409, "revision_changed") : { revision, items: [item("cwi_9")], nextCursor: null };
     }
