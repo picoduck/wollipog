@@ -535,6 +535,8 @@ for (const viewport of [
   await page.setViewportSize(viewport);
   const stack = await startLiveStack("codex", "async-question");
   try {
+    // Question and turn completion arrive separately; asking is not proof work has settled.
+    await expect.poll(async () => (await fetchSession(stack)).status, { timeout: 30_000 }).toBe("idle");
     const pending = await fetchSession(stack);
     expect(pending.status).toBe("idle");
     expect(pending.pendingApproval).toMatchObject({
