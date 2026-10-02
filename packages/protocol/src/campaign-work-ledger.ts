@@ -106,6 +106,8 @@ export type CampaignWorkItemStateCause =
   | "attempt_session_held"
   | "attempt_session_failed"
   | "attempt_session_stopped"
+  /** Archived without a delivered verification; an archived session takes no further turns. */
+  | "attempt_session_archived"
   | "attempt_session_unavailable"
   | "attempt_session_input_required"
   | "attempt_session_pending_decision"
@@ -180,6 +182,17 @@ export interface CampaignObservedSessionStatus {
   held: boolean;
   /** Unresolved workflow decisions or provider requests on the session. */
   pendingRequests: number;
+}
+
+/** Worktree cleanup of an attempt's session, in the existing campaign cleanup vocabulary
+ * (`OrchestratorCampaignProjection.cleanupWorktrees`), plus `retired` once nothing is held. */
+export interface CampaignObservedCleanup {
+  sessionId: string;
+  worktrees: Array<{
+    path: string;
+    status: "pending" | "deferred" | "refused" | "retired";
+    reason: string | null;
+  }>;
 }
 
 /** Slice 8: GitHub pull-request observation read on a runner through its existing `gh` login. */
@@ -353,8 +366,8 @@ export interface CampaignWorkItemTimes {
 
 export type CampaignPlanState = "recorded" | "partial" | "not_recorded";
 
-/** Lightweight campaign summary carried on `OrchestratorCampaignProjection.work` (slice 5). Any
- * ledger write increments `revision` and re-sends the root session. */
+/** Lightweight campaign summary carried on `OrchestratorCampaignProjection.work` (slice 5). Every
+ * ledger mutation increments `revision` once and re-sends the root session; reads never do. */
 export interface CampaignWorkSummary {
   revision: number;
   planState: CampaignPlanState;
@@ -404,7 +417,8 @@ export interface CampaignWorkItemSummary {
   title: string | null;
   issue: CampaignIssueRef | null;
   origin: CampaignWorkItemOrigin;
-  /** 0 for original scope; one more than the highest origin item for an accepted follow-up. */
+  /** 0 for original scope; one more than the highest origin item for an accepted follow-up, or 1
+   * when its recommendation names no origin item. */
   generation: number;
   primaryState: CampaignWorkItemPrimaryState;
   stateCauses: CampaignWorkItemStateCause[];
@@ -441,6 +455,8 @@ export interface CampaignWorkItemDetail extends CampaignWorkItemSummary {
   recommendations: CampaignRecommendation[];
   observed: {
     session?: CampaignObservedFact<CampaignObservedSessionStatus>;
+    /** Slice 5. Worktree cleanup of the latest attempt's session. Omitted means not collected. */
+    cleanup?: CampaignObservedFact<CampaignObservedCleanup>;
     /** Slice 8. Omitted means not collected. */
     pullRequests?: Array<{
       ref: CampaignPullRequestRef;
@@ -482,6 +498,24 @@ export interface CampaignWorkRevisionChangedError {
   error: string;
   code: typeof CAMPAIGN_WORK_REVISION_CHANGED;
   revision: number;
+}
+
+export type CampaignRecommendationDispositionFilter = CampaignRecommendationDisposition | "all";
+
+/** Slice 5: `GET /api/sessions/:id/campaign/recommendations?cursor&limit&disposition`. The default
+ * filter is `all`; order is awaiting adjudication first, then newest first. The cursor follows the
+ * work-items page rules, including `revision_changed`. */
+export interface CampaignRecommendationsQuery {
+  cursor?: string;
+  limit?: number;
+  disposition?: CampaignRecommendationDispositionFilter;
+}
+
+export interface CampaignRecommendationsPage {
+  revision: number;
+  items: CampaignRecommendation[];
+  nextCursor: string | null;
+  total: number;
 }
 
 export interface CampaignWorkItemDetailResponse {

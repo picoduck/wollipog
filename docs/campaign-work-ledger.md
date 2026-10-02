@@ -38,7 +38,7 @@ One unit of committed or proposed campaign work, with or without an issue or a s
 | `issue` | Optional repository-qualified issue `{repository, number}`. |
 | `title` | Optional display title. |
 | `origin` | `original` (initial scope, issue or not) or `follow_up` (accepted from a recommendation). |
-| `generation` | `0` for original scope; for a follow-up, one more than the highest generation among its origin items. |
+| `generation` | `0` for original scope; for a follow-up, one more than the highest generation among its origin items, or `1` when the recommendation names no origin item (for example, one recorded before the ledger existed). |
 | `dispatchState` | Orchestrator record for undispatched work: `planned` (known, not ready) or `queued` (ready, waiting for capacity or dependencies). |
 | `queuePosition` | Optional recorded queue order. Lower is earlier. |
 | `dependsOn` | Work item ids in the same campaign. |
@@ -104,6 +104,8 @@ value seen for display only.
 
 - **Session status** of the open attempt's session: status, archived, held, and pending request
   count. A deleted session is `unavailable{session_deleted}`; the attempt snapshot remains.
+- **Cleanup** (slice 5) of the latest attempt's session: each worktree as `pending`, `deferred`,
+  `refused` (the existing campaign cleanup vocabulary, with its reason) or `retired`.
 - **Forge facts** (slice 8): see Forge Status Scope.
 
 ## Derived Primary State
@@ -118,8 +120,9 @@ its verifications. The state is never stored. The first matching rule wins:
 3. The item has an open attempt:
    1. a recorded blocker → **blocked** (`recorded_blocker`);
    2. the session is deleted → **blocked** (`attempt_session_unavailable`);
-   3. the session is held, failed, or stopped, or archived without a delivered verification →
-      **blocked** (`attempt_session_held`, `attempt_session_failed`, `attempt_session_stopped`);
+   3. the session is held, failed, stopped, or archived (without a delivered verification, by
+      rule 2) → **blocked** (`attempt_session_held`, `attempt_session_failed`,
+      `attempt_session_stopped`, `attempt_session_archived`, checked in that order);
    4. the session is `input_required` or has a pending request → **waiting**
       (`attempt_session_input_required`, `attempt_session_pending_decision`);
    5. the session is `idle` or `completed` → **waiting** (`attempt_awaiting_verification`): the
@@ -144,8 +147,11 @@ waiting on dependencies or approvals stays unfinished.
 
 All operations are available only to the Orchestrator role through MCP tools (`ORCHESTRATOR_TOOLS`
 and `PARENT_CONTROL_TOOLS`), the `wollipog` CLI, and routes listed in `ORCHESTRATOR_API_ROUTES`. Each
-resolves the root campaign, refreshes the root and the caller's session, and increments the ledger
-`revision`. Requests over the bounds in `CAMPAIGN_WORK_LEDGER_LIMITS` are refused, not truncated.
+resolves the root campaign. Each mutating operation that changes the ledger refreshes the root and
+the caller's session and increments the ledger `revision` exactly once; a no-op repeat changes
+nothing. Reads, including `get_campaign_work_items`, never increment the revision, so they cannot
+invalidate another reader's cursor. Requests over the bounds in `CAMPAIGN_WORK_LEDGER_LIMITS` are
+refused, not truncated.
 
 | Operation | Effect |
 | --- | --- |
@@ -183,6 +189,11 @@ ledger records.
     revision; a cursor from another revision returns `409 {code: "revision_changed", revision}` and
     the client restarts from the first page.
   - `GET /api/sessions/:id/campaign/work-items/:itemId` returns a `CampaignWorkItemDetailResponse`.
+  - `GET /api/sessions/:id/campaign/recommendations?cursor&limit&disposition` returns a
+    `CampaignRecommendationsPage`: recommendations awaiting adjudication or publication, and
+    accepted, rejected, deferred, and duplicate proposals. The default filter is `all`, ordered
+    awaiting adjudication first, then newest first. Cursor and `revision_changed` rules match the
+    work-item list.
 
 ## Authorization and Cost Visibility
 
@@ -217,9 +228,16 @@ ledger records.
 | Waiting Time | Recorded intervals in which the item was `waiting` or `blocked`. |
 | Active Time | Recorded intervals within an attempt while its session was running. |
 
-Queue, Waiting, and Active Time come from durable status intervals (slice 6), kept independent of
-the event cache. Time before interval recording began is `unavailable{history_unavailable}`, never
-zero.
+Queue, Waiting, and Active Time come from durable intervals recorded by slice 6, kept independent
+of the event cache:
+
+- **Work-item intervals**: every change of an item's dispatch state, commitment, and open attempt
+  is recorded as a per-item interval, so the waits from `planned` to `queued` to the first attempt
+  are measurable even though no session exists yet.
+- **Session status intervals**: per session, for the time an attempt is open.
+
+Time before interval recording began is `unavailable{history_unavailable}` (or `partial` when only
+part of the span is covered), never zero.
 
 ## Usage Attribution (Slice 6)
 
@@ -288,8 +306,10 @@ starting contract. This document refines it as follows:
    rather than one `coverage` field for the whole cost summary.
 9. **`publication` obligations** are counted in the summary alongside verification, adjudication,
    and cleanup.
-10. **No UI protocol constant**: see Compatibility.
+10. **No UI protocol constant**: see Compatibility. Reads never increment the revision.
 11. **Capability ordering.** v196 is assigned with the contract, before the operations land. A
     control plane built between the contract and the storage slice advertises v196 without the
     operations, so the runner's ledger tools receive `404` from it. If a release ships in that
     state, the storage slice bumps the version again and moves the capability to it.
+12. **Additions requested at contract review**: an item-level `observed.cleanup` fact, a browser
+    `campaign/recommendations` page, and per-item work-item intervals as the Queue Time source.
