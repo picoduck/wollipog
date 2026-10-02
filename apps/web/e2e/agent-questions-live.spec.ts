@@ -369,18 +369,24 @@ async function startLiveStack(
       throw new Error(`recovered question never became resumable: ${JSON.stringify(lastSession)}\n${logs()}`);
     };
     const stack = { httpBase, ownerToken, receiptPath, sessionId, logs, restart, stop };
+    // An async question arrives mid-turn, and the turn's completion reaches the control plane as a
+    // separate update, so a question alone is not settled yet. Delivery runs hold the turn open.
+    const awaitIdle = codexScenario === "async-question" && !asyncDelivery;
     let lastSession: SessionView | null = null;
     for (let attempt = 0; attempt < 300; attempt += 1) {
       const session = await fetchSession(stack);
       lastSession = session;
-      if (session.pendingApproval?.kind === "question") return stack;
+      if (session.pendingApproval?.kind === "question" && (
+        !awaitIdle || (session.pendingApproval.async === true && session.status === "idle")
+      )) return stack;
       if (session.status === "failed") {
         throw new Error(`session failed before asking a question: ${JSON.stringify(session)}\n` +
           `events: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
       }
       await delay(100);
     }
-    throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane\n` +
+    throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane` +
+      `${awaitIdle ? " with the session idle" : ""}\n` +
       `session: ${JSON.stringify(lastSession)}\nevents: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
   } catch (error) {
     await stop();
