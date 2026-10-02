@@ -5,10 +5,11 @@ import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import {
-  defaultAgentControlHost,
+  type AgentControlHost,
   markAgentControlCredentialReady,
   provisionAgentControl,
   removeAgentControlFiles,
@@ -86,7 +87,16 @@ test("real WSL2 bridge carries CLI and MCP while adversarial routes fail closed 
   const workspace = `${targetFixture}/workspace`;
   const ownerHash = "a".repeat(64);
   const sessionKeys = [providerStateKey("wsl-real-session"), "b".repeat(64)];
-  const host = defaultAgentControlHost(root);
+  // This fixture provisions from a test script, so it must name its dispatcher explicitly.
+  const host: AgentControlHost = {
+    isSea: false,
+    execPath: process.execPath,
+    execArgv: process.execArgv,
+    scriptPath: fileURLToPath(new URL("./cli.ts", import.meta.url)),
+    configDir: join(root, "agent-control"),
+    platform: process.platform,
+    // Omitted installer seams retain provisionAgentControl's production installer defaults.
+  };
   const requests: Array<{ url: string; authorization?: string; actor?: string }> = [];
   const server = createServer((req, res) => {
     requests.push({ url: req.url ?? "", authorization: req.headers.authorization,
