@@ -217,6 +217,13 @@ test("no focus ring anywhere is drawn in the accent colour", () => {
  * F6 zones (docs/design-system.md §16.1): no pane is framed on focus, and the zone F6 enters shows a
  * 2px --focus line on its top edge that fades out, without the fade under reduced motion.
  */
+/** The rule that lets a container's gap space a `.field-label`, and the field label rule (§8.1). */
+const STACKED_FIELD_LABELS = [".field > .field-label", ".archive-filter > .field-label", ".automation-field > .field-label"];
+/** Labels of two forms that stack them over the control outside a `.field` (#2366). */
+const OUTSIDE_FIELD_LABELS = [".archive-search > span", ".archive-filter > .field-label", ".automation-form-grid > label",
+  ".automation-field > .field-label", ".automation-form-grid legend"];
+const FIELD_LABEL = [".field > span:first-child", ".field > .field-label", ...OUTSIDE_FIELD_LABELS, ".new-session-field-label"].join(",\n");
+
 /** The line under a field's control (§8.1): the helper, the error that replaces it, or a `.field-foot`. */
 const FIELD_LINE = ".field > :is(.field-helper, .field-error, .field-foot)";
 
@@ -231,11 +238,37 @@ test("a field stacks 8px apart, its helper or error 4px under the control, and i
   assert.equal(soleRuleBody(FIELD_LINE), "margin-top: calc(-1 * var(--space-1));",
     "the helper and the error share one offset, so one replacing the other does not move the field");
   assert.match(soleRuleBody(".field-warn"), /margin: calc\(-1 \* var\(--space-1\)\) 0 0;/);
-  for (const label of [".field > span:first-child,\n.field > .field-label,\n.new-session-field-label", ".field-head > :is(label, span):first-child"]) {
+  for (const label of [FIELD_LABEL, ".field-head > :is(label, span):first-child"]) {
     assert.match(soleRuleBody(label), /color: var\(--text\);/, `${label} is in --text`);
     assert.match(soleRuleBody(label), /font: var\(--type-label\);/, `${label} is --type-label`);
   }
-  assert.equal(soleRuleBody(".field > .field-label"), "margin-bottom: 0;", "the field's gap spaces a .field-label");
+  assert.equal(soleRuleBody(STACKED_FIELD_LABELS.join(",\n")), "margin-bottom: 0;", "the field's gap spaces a .field-label");
+});
+
+/**
+ * #2366: Archived Sessions and the Automations editor stack their labels over the control outside a
+ * `.field`. Those labels share the §8.1 rule above, their containers space them by --space-2, and no
+ * other rule gives them a colour or type of their own (the old weight-600 overrides are gone). A grid
+ * label's helper is dim, 4px under the control. e2e/field-label-outside-field.spec.ts measures them.
+ */
+test("a label stacked outside a .field is the §8.1 label, 8px above its control", () => {
+  for (const container of [".archive-search", ".archive-filter"]) {
+    assert.match(soleRuleBody(container), /gap: var\(--space-2\);/, `${container} spaces label and control by --space-2`);
+  }
+  for (const container of [".automation-form-grid > label", ".automation-form-grid > .automation-field"]) {
+    assert.equal(soleRuleBody(container), "display: grid;\ngap: var(--space-2);", `${container} spaces label and control by --space-2`);
+  }
+  assert.equal(soleRuleBody(".automation-form-grid > label > small"),
+    "margin-top: calc(-1 * var(--space-1));\ncolor: var(--text-dim);\nfont: var(--type-small);");
+  const overrides: string[] = [];
+  postcss.parse(css).walkRules((rule) => {
+    if (rule.selector === FIELD_LABEL) return;
+    const owns = rule.selectors.some((selector) => OUTSIDE_FIELD_LABELS.includes(selector.replace(/\s+/g, " ").trim()));
+    if (owns && rule.nodes.some((node) => node.type === "decl" && /^(color|font|line-height)/.test(node.prop))) {
+      overrides.push(rule.selector);
+    }
+  });
+  assert.deepEqual(overrides, [], "no other rule gives those labels a colour or type of their own");
 });
 
 /**

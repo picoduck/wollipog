@@ -9686,9 +9686,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* The field's label (§8.1) is --type-label in --text: a bare first span, a `.field-label` or
    `.new-session-field-label`, or the first item of a `.field-head` row (below). Later bare spans in
-   a field keep the dim rule above. */
+   a field keep the dim rule above. Two forms stack their labels over the control outside a `.field`
+   and take the same label (#2366): Archived Sessions (its search label and filters' `.field-label`s)
+   and the Automations editor (a grid label's own text, an `.automation-field`'s `.field-label`, and
+   a fieldset legend). */
 .field > span:first-child,
 .field > .field-label,
+.archive-search > span,
+.archive-filter > .field-label,
+.automation-form-grid > label,
+.automation-field > .field-label,
+.automation-form-grid legend,
 .new-session-field-label {
   color: var(--text);
   font: var(--type-label);
@@ -9700,7 +9708,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: block;
   margin-bottom: 6px;
 }
-.field > .field-label { margin-bottom: 0; }
+.field > .field-label,
+.archive-filter > .field-label,
+.automation-field > .field-label { margin-bottom: 0; }
 .input {
   width: 100%;
   min-width: 0;
@@ -15035,9 +15045,11 @@ body.shell-dock-dragging * {
 .automation-card-toggle[aria-expanded="true"] .automation-card-chevron { transform: rotate(90deg); }
 .automation-card-body { margin-top: 14px; }
 .automation-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
-.automation-form-grid > label { display: grid; gap: 6px; color: var(--text-dim); font-size: 12px; font-weight: 600; }
-.automation-form-grid > .automation-field { display: grid; gap: 6px; }
-.automation-form-grid > .automation-field .field-label { margin-bottom: 0; font-weight: 600; }
+/* A grid label's text is the §8.1 label (shared rule, with the other field labels); its helper sits
+   4px under the control, as a field's does. */
+.automation-form-grid > label { display: grid; gap: var(--space-2); }
+.automation-form-grid > label > small { margin-top: calc(-1 * var(--space-1)); color: var(--text-dim); font: var(--type-small); }
+.automation-form-grid > .automation-field { display: grid; gap: var(--space-2); }
 /* The shared field recipe (§8.1) supplies the height, fill, edge and padding. */
 .automation-form-grid input, .automation-form-grid select, .automation-form-grid textarea {
   width: 100%; min-width: 0;
@@ -15046,7 +15058,6 @@ body.shell-dock-dragging * {
 .automation-span { grid-column: 1 / -1; }
 .automation-checks { display: flex; flex-wrap: wrap; column-gap: var(--space-5); }
 .automation-form-grid fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
-.automation-form-grid legend { color: var(--text-dim); font-size: 12px; font-weight: 600; }
 .automation-hint { color: var(--text-dim); font-size: 12px; line-height: 1.5; }
 .automation-editor-actions { justify-content: flex-end; }
 .automation-list { display: grid; gap: 14px; }
@@ -15077,7 +15088,6 @@ body.shell-dock-dragging * {
 }
 .automation-trigger-editor h4 { margin: 0; }
 .automation-trigger-editor .automation-form-grid { margin-top: 10px; }
-.automation-trigger-editor label small { color: var(--text-dim); font-weight: 400; line-height: 1.4; }
 .automation-trigger-editor .automation-editor-actions { margin-top: 12px; }
 .automation-triggers { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
 .automation-triggers h4 { margin: 0 0 8px; }
@@ -16478,7 +16488,7 @@ body.shell-dock-dragging * {
 }
 .archive-search {
   display: grid;
-  gap: 6px;
+  gap: var(--space-2);
   color: var(--text-dim);
   font-size: var(--text-sm);
   font-weight: 650;
@@ -16521,7 +16531,7 @@ body.shell-dock-dragging * {
 .archive-filter {
   min-width: 0;
   display: grid;
-  gap: 5px;
+  gap: var(--space-2);
   color: var(--text-dim);
   font-size: var(--text-xs);
   font-weight: 650;

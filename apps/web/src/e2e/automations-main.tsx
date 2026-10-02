@@ -43,6 +43,17 @@ const runner: RunnerView = {
   protocolVersion: 90,
 };
 
+// `?capabilities` advertises a model, efforts and permission modes, so New Automation shows the
+// Model, Reasoning Effort and Permission Mode pickers.
+if (params.has("capabilities")) runner.agents[0]!.capabilities = {
+  models: [{ id: "model-1", displayName: "Model One" }],
+  effortLevels: ["low", "high"],
+  permissionModes: ["default", "plan"],
+  slashCommands: [],
+  supportsImages: false,
+  supportsApprovals: true,
+};
+
 const items: AutomationSchedule[] = [
   {
     automationId: "automation-nightly-sweep",
