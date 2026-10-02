@@ -7,6 +7,13 @@ async function rowGeometry(page: Page) {
   }));
 }
 
+/** "1m 30s" or "4.0s" as seconds. */
+function seconds(text: string): number {
+  const match = /^(?:(\d+)m )?(\d+(?:\.\d)?)s$/.exec(text);
+  if (!match) throw new Error(`not a duration: ${text}`);
+  return Number(match[1] ?? 0) * 60 + Number(match[2]);
+}
+
 const trailText = (page: Page, title: string) => page.locator(".tl-step", { hasText: title }).locator(".tl-step-trail")
   .evaluate((trail) => [...trail.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(""));
 
@@ -34,12 +41,16 @@ test("a running step's duration ticks without layout shift and freezes when the 
   await page.mouse.move(0, 0);
 
   const before = await rowGeometry(page);
-  const beforeRunning = await trailText(page, "Active Bare Tool");
-  expect(beforeRunning).toBe("1m 30s");
+  // The fixture's clock origin is read when the page loads, so a slow runner adds a second or two.
+  const beforeRunning = seconds(await trailText(page, "Active Bare Tool"));
+  expect(beforeRunning).toBeGreaterThanOrEqual(90);
+  expect(beforeRunning).toBeLessThan(95);
   await page.evaluate(() => window.timelineTimestampE2E.resetMetrics());
   await page.clock.fastForward(30_100);
   await expect.poll(async () => page.evaluate(() => window.timelineTimestampE2E.metrics().updateCommits)).toBe(1);
-  expect(await trailText(page, "Active Bare Tool")).toBe("2m 0s");
+  const afterRunning = seconds(await trailText(page, "Active Bare Tool"));
+  expect(afterRunning - beforeRunning, "the running step's duration ticks with the shared clock").toBeGreaterThanOrEqual(30);
+  expect(afterRunning - beforeRunning).toBeLessThan(33);
 
   const after = await rowGeometry(page);
   expect(after).toHaveLength(before.length);
