@@ -875,17 +875,35 @@ export async function fetchRemoteDefaultBase(
 ): Promise<{ ref: string; branch: string }> {
   const context = options.context ?? nativeContext;
   safeGitArgument(remote, "Git remote");
-  options.onProgress?.("resolving_remote");
-  const advertised = await command(context, repoPath, ["ls-remote", "--symref", remote, "HEAD"], 120_000);
-  const headRef = advertised.split("\n")
-    .map((line) => /^ref:\s+(refs\/heads\/[^\s]+)\s+HEAD$/u.exec(line)?.[1])
-    .find((value): value is string => !!value);
-  if (!headRef) throw new Error(`remote ${remote} did not advertise a default branch`);
+  // Each step gets three 30-second attempts and 500/1,000 ms backoff: at most 183 seconds
+  // across both steps, including backoff. Keep the configured remote and execution context.
+  async function retryStep<T>(phase: SessionWorktreeProgressPhase, step: string, run: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      options.onProgress?.(phase);
+      try {
+        return await run();
+      } catch (error) {
+        if (attempt === 2) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`Failed ${step} after 3 attempts. Retry, or pass an explicit base ref to skip remote default-branch lookup and fetch. Git error: ${detail}`, { cause: error });
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      }
+    }
+  }
+  const headRef = await retryStep("resolving_remote", "resolving the remote default branch", async () => {
+    const advertised = await command(context, repoPath, ["ls-remote", "--symref", remote, "HEAD"], 30_000);
+    const ref = advertised.split("\n")
+      .map((line) => /^ref:\s+(refs\/heads\/[^\s]+)\s+HEAD$/u.exec(line)?.[1])
+      .find((value): value is string => !!value);
+    if (!ref) throw new Error(`remote ${remote} did not advertise a default branch`);
+    return ref;
+  });
   const branch = headRef.slice("refs/heads/".length);
   safeGitArgument(branch, "remote default branch");
   const trackingRef = `refs/remotes/${remote}/${branch}`;
-  options.onProgress?.("fetching_remote");
-  await command(context, repoPath, ["fetch", "--no-tags", remote, `+${headRef}:${trackingRef}`], 120_000);
+  await retryStep("fetching_remote", "fetching the remote default branch", () =>
+    command(context, repoPath, ["fetch", "--no-tags", remote, `+${headRef}:${trackingRef}`], 30_000));
   // The branch is returned alongside the ref because this call just asked the remote itself, which
   // makes it the only authoritative answer available without a second round trip.
   return { ref: `${remote}/${branch}`, branch };
