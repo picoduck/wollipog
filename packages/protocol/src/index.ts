@@ -609,7 +609,12 @@
 //      Older runners keep archive cleanup pending rather than discarding pushed unmerged work.
 // 194: human-owned Orchestrator issue-closure decisions and runner-managed GitHub execution.
 // 195: authoritative per-project saved-memory policy; Claude directory selection is runner-owned.
-export const PROTOCOL_VERSION = 195;
+// 196: campaign work ledger (#2417): root-keyed work items, attempts, work-item verification,
+//      reported stages, and recommendation disposition, recorded through Orchestrator-only
+//      operations that grant no publication, dispatch, merge, or decision authority. The contract
+//      is docs/campaign-work-ledger.md. Older control planes omit `OrchestratorCampaignProjection.work`
+//      and `SessionView.campaignMembership`, which clients present as unsupported, never as empty.
+export const PROTOCOL_VERSION = 196;
 export const PROJECT_MEMORY_MIN_PROTOCOL = 195;
 /** Only Claude versions whose directory override we have verified are advertised as supported.
  * Codex native memory combines projects in a database and cannot be shared project by project. */
@@ -670,6 +675,14 @@ export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_
 /** Extra time the control plane's own abort timer allows beyond that runner request deadline. */
 export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
+export * from "./campaign-work-ledger.js";
+import type {
+  CampaignMembershipView,
+  CampaignRecommendationDisposition,
+  CampaignWorkItemVerification,
+  CampaignWorkSummary,
+  VerifyCampaignWorkItemInput,
+} from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
 export {
@@ -841,6 +854,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorChildHarnessPolicy: 157,
   orchestratorIssueScope: 158,
   orchestratorIssueClosure: 194,
+  /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
+   * and CLI commands against the connected control plane, not against a runner. */
+  campaignWorkLedger: 196,
   orchestratorAdditiveRole: 160,
   orchestratorAdditiveCodex: 162,
   orchestratorAdditivePi: 163,
@@ -2350,6 +2366,9 @@ export interface OrchestratorCampaignProjection {
     orchestratorRequestTokens?: string[];
   };
   followUps: { unique: number; duplicates: number };
+  /** v196 campaign work ledger summary (#2417), filled by the Read API slice. Omitted by older
+   * control planes, which clients present as unsupported rather than as an empty plan. */
+  work?: CampaignWorkSummary;
   /** Durable synthetic-turn state. Omitted only when the campaign has never needed a wake-up. */
   continuation?: {
     state: "pending" | "running" | "held" | "failed" | "missing_result";
@@ -2388,6 +2407,9 @@ export interface RecordOrchestratorFollowUpRequest {
   /** Optional stable caller identity. Server-side normalized repository/title deduplication is
    * authoritative, so distinct callers cannot bypass it with different keys. */
   recommendationKey?: string;
+  /** v196: work items this recommendation came from. Consolidated recommendations may name
+   * several. Each must belong to the same root campaign. */
+  originWorkItemIds?: string[];
 }
 
 export interface OrchestratorFollowUpRecord {
@@ -2400,6 +2422,9 @@ export interface OrchestratorFollowUpRecord {
   duplicate: boolean;
   executionDisposition: "recommend_only_stop" | "duplicate_stop" | "requires_typed_gates";
   createdAt: number;
+  /** v196 ledger fields. Omitted by older control planes. */
+  originWorkItemIds?: string[];
+  disposition?: CampaignRecommendationDisposition;
 }
 
 export interface VerifyOrchestratorChildRequest {
@@ -2408,6 +2433,15 @@ export interface VerifyOrchestratorChildRequest {
   reportEventSeq: number;
   /** The Orchestrator attests that every reported follow-up was recorded and deduplicated. */
   followUpsAccounted: true;
+  /** v196: also record work-item delivery verification against the child's open attempt on this
+   * item. Without it no work item is marked delivered. */
+  workItem?: VerifyCampaignWorkItemInput;
+}
+
+/** v196 `verify_campaign_child` addition, present when the request named a work item. */
+export interface VerifyOrchestratorChildWorkItemResult {
+  revision: number;
+  verification: CampaignWorkItemVerification;
 }
 
 /** Omission inherits the latest authenticated-user default. Explicit `null` selects Automatic. */
@@ -6279,6 +6313,9 @@ export interface SessionView {
   orchestratorPolicy?: OrchestratorCampaignPolicy;
   /** Current effective campaign state. Omitted by older control planes and non-Orchestrators. */
   orchestratorCampaign?: OrchestratorCampaignProjection;
+  /** v196 membership of a campaign descendant in its root campaign's work ledger (#2417), filled by
+   * the Read API slice. Omitted for non-members and by older control planes. */
+  campaignMembership?: CampaignMembershipView;
   /** What the principal that received this view may do to the session (#1843). Computed per
    * requester, so it is never stored. Omitted by older control planes and by responses to a
    * mutation; a client then keeps the value it last received, or offers the commands as before. */
