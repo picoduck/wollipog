@@ -15561,7 +15561,8 @@ export class ControlPlaneDb {
       | undefined;
     if (!campaign || !orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy)) return null;
     const seen = new Set<string>([campaign.id]);
-    for (let depth = 0; campaign.parent_session_id && depth < 64; depth += 1) {
+    let depth = 0;
+    for (; campaign.parent_session_id && depth < 64; depth += 1) {
       if (seen.has(campaign.parent_session_id)) return null;
       seen.add(campaign.parent_session_id);
       const parent = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaign.parent_session_id) as unknown as
@@ -15575,6 +15576,9 @@ export class ControlPlaneDb {
       }
       if (!parent.parent_session_id) break;
     }
+    // A walk cut off by the bound has not found the root. Naming the Orchestrator it stopped at
+    // would key rows to a campaign that a shallower caller resolves past (#1462).
+    if (depth >= 64 && campaign.parent_session_id) return null;
     return orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy) ? campaign : null;
   }
 

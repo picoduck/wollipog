@@ -2933,6 +2933,43 @@ test("verifications a nested Orchestrator recorded under its own id move to the 
   }
 });
 
+test("campaign root resolution fails closed past its depth bound, so re-keying stays idempotent (#1462)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-deep-campaign-rekey-"));
+  const file = join(root, "control-plane.db");
+  try {
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    const initial = ControlPlaneDb.open(file);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    // 66 nested Orchestrators: the deepest is 65 hops below the root, past the 64-hop walk.
+    for (let depth = 0; depth <= 65; depth += 1) {
+      initial.createSession(newSession({
+        id: `deep${depth}`, config: { permissionMode: "orchestrator" }, orchestratorPolicy: policy,
+        ...(depth > 0 ? { parentSessionId: `deep${depth - 1}` } : {}),
+      }));
+    }
+    initial.createSession(newSession({ id: "deep-child", parentSessionId: "deep65" }));
+    initial.updateSessionStatus("deep-child", "idle", 999);
+    const report = initial.appendEvent("deep-child", { kind: "agent_message", text: "Report", final: true }, 1_000);
+    initial.verifyCampaignChildReport("deep65", "deep-child", report.seq, 1_001);
+    assert.equal(initial.resolvedCampaignSessionId("deep65"), null,
+      "a truncated walk names no root rather than an intermediate Orchestrator");
+    assert.equal(initial.campaignProjection("deep65"), null);
+    assert.equal(initial.resolvedCampaignSessionId("deep1"), "deep0", "a walk within the bound still resolves");
+    initial.close();
+
+    for (let open = 0; open < 2; open += 1) {
+      const reopened = ControlPlaneDb.open(file);
+      assert.deepEqual(reopened.raw().prepare(
+        "SELECT campaign_session_id FROM orchestrator_campaign_child_reports WHERE child_session_id='deep-child'",
+      ).all().map((row) => ({ ...row })), [{ campaign_session_id: "deep65" }],
+      `open ${open + 1} leaves a row under a refused ancestry where it was`);
+      reopened.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("verified campaign children survive an event cache reset without a history read", () => {
   const db = withRunner();
   try {
