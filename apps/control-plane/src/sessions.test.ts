@@ -24334,3 +24334,44 @@ test("campaign work ledger review regressions: no-op detection, linkage, depende
     db.close();
   }
 });
+
+test("campaign work ledger retries match the exact report identity and normalized reasons (#2417)", () => {
+  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b" }], planComplete: false });
+    const [a, b] = plan.data!.items;
+    // Repeating a cancellation whose reason carries surrounding whitespace is a no-op.
+    const cancel = () => svc.updateCampaignWorkItem(parent.id, {
+      workItemId: b!.workItemId, commitment: { state: "cancelled", reason: "  Out of scope  " },
+    });
+    const first = cancel();
+    assert.ok(first.ok, first.error);
+    const second = cancel();
+    assert.equal(second.data?.revision, first.data?.revision);
+    assert.equal(second.data?.item.commitmentRecord.changedAt, first.data?.item.commitmentRecord.changedAt);
+    assert.equal(second.data?.item.commitmentRecord.reason, "Out of scope");
+
+    // A different report that reuses a sequence number after history replacement is not a retry.
+    const child = spawn(parent.id, "Work on a");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: a!.workItemId, childSessionId: child }).ok);
+    svc.onSessionStatus(child, "idle");
+    const seq = report(child, "First report");
+    const verify = () => svc.verifyCampaignChild(parent.id, {
+      childSessionId: child, reportEventSeq: seq, followUpsAccounted: true,
+      workItem: { id: a!.workItemId, outcome: "incomplete" },
+    });
+    assert.ok(verify().ok);
+    const before = svc.campaignWorkItems(parent.id, {}).data!.summary.revision;
+    db.raw().prepare("UPDATE session_events SET payload=? WHERE session_id=? AND seq=?")
+      .run(JSON.stringify({ kind: "agent_message", text: "Replacement report", final: true }), child, seq);
+    db.raw().prepare("UPDATE sessions SET event_epoch=event_epoch+1 WHERE id=?").run(child);
+    const replaced = verify();
+    assert.ok(replaced.ok, replaced.error);
+    assert.equal(svc.campaignWorkItems(parent.id, {}).data!.summary.revision, before + 1);
+    const verifications = ledgerItem(svc, parent.id, "a").verifications;
+    assert.equal(verifications.length, 2);
+    assert.notEqual(verifications[0]!.report.digest, verifications[1]!.report.digest);
+  } finally {
+    db.close();
+  }
+});

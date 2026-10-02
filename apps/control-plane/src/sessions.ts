@@ -6763,8 +6763,8 @@ export class SessionsService {
     // session-level verification untouched too.
     // The ledger lives under the same resolved root as the session-level report (#1462).
     if (workItem) {
-      const target = this.db.campaignWorkLedger.verificationTarget(
-        root.id, workItem.id, child.id, workItem.outcome, request.reportEventSeq);
+      const target = this.db.campaignWorkLedger.verificationTarget(root.id, workItem.id, child.id,
+        workItem.outcome, this.db.campaignReportIdentity(child.id, request.reportEventSeq));
       if (!target.ok) return fail(target.error, target.status);
     }
     // Settle the spent approvals now, so a later stop or archive does not audit them as revoked.

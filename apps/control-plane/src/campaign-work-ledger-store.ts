@@ -717,7 +717,7 @@ export class CampaignWorkLedgerStore {
       if (request.queuePosition !== undefined) set("queue_position", request.queuePosition, item.queue_position);
       if (request.nextAction !== undefined) set("next_action", request.nextAction?.trim() ?? null, item.next_action);
       if (commitment !== undefined && (commitment.state !== item.commitment ||
-          (commitment.reason ?? null) !== item.commitment_reason)) {
+          (commitment.reason?.trim() ?? null) !== item.commitment_reason)) {
         sets.push("commitment=?", "commitment_reason=?", "commitment_changed_at=?", "commitment_changed_by=?");
         values.push(commitment.state, commitment.reason?.trim() ?? null, now, actorSessionId);
       }
@@ -838,15 +838,15 @@ export class CampaignWorkLedgerStore {
   /* ------------------------------ Work-item verification ------------------------------ */
 
   /** Validation only, so the session-level verification is not recorded when this would fail.
-   * Repeating an identical verification of the item's latest attempt (same child, report, and
-   * outcome) resolves to the existing record, so a retried call is a no-op rather than a refusal
+   * Repeating an identical verification of the item's latest attempt (same child, exact report
+   * identity, and outcome) resolves to the existing record, so a retried call is a no-op rather than a refusal
    * or a duplicate row. */
   verificationTarget(
     campaignId: string,
     workItemId: string,
     childSessionId: string,
     outcome: CampaignWorkItemVerificationOutcome,
-    reportSeq: number,
+    report: { seq: number; eventEpoch: number | null; digest: string | null },
   ): LedgerResult<{ attempt: AttemptRow; existing: VerificationRow | null }> {
     const item = this.item(campaignId, workItemId);
     if (!item) return fail("work item not found in this campaign", 404);
@@ -854,10 +854,12 @@ export class CampaignWorkLedgerStore {
       "SELECT * FROM campaign_work_attempts WHERE work_item_id=? ORDER BY ordinal DESC LIMIT 1",
     ).get(item.id) as AttemptRow | undefined;
     if (latest && latest.session_id === childSessionId) {
+      // The exact report identity, not just its sequence: replaced history can reuse a seq.
       const existing = this.stmt(
         `SELECT * FROM campaign_work_verifications WHERE attempt_id=? AND outcome=? AND report_seq=?
+           AND report_event_epoch IS ? AND report_digest IS ?
          ORDER BY verified_at DESC LIMIT 1`,
-      ).get(latest.id, outcome, reportSeq) as VerificationRow | undefined;
+      ).get(latest.id, outcome, report.seq, report.eventEpoch, report.digest) as VerificationRow | undefined;
       if (existing) return done({ attempt: latest, existing });
     }
     if (!latest || latest.ended_at !== null || latest.session_id !== childSessionId) {
@@ -879,7 +881,7 @@ export class CampaignWorkLedgerStore {
   ): LedgerResult<{ revision: number; verification: CampaignWorkItemVerification }> {
     return this.transact(() => {
       const target = this.verificationTarget(campaignId, input.workItemId, input.childSessionId, input.outcome,
-        input.report.seq);
+        input.report);
       if (!target.ok) return target;
       if (target.data.existing) {
         return done({ revision: this.revision(campaignId), verification: this.verificationView(target.data.existing) });
