@@ -206,6 +206,40 @@ function validateRuntime(metadata, expected) {
   assert.equal(metadata.pointerBytes, 8); assert(metadata.powerShellVersion.startsWith("5."));
 }
 
+// Observe existing returned metadata only; refuse unsafe/excessive diagnostics before logging.
+function logMetadataEvidence(metadata) {
+  const strings = ["powerShellVersion", "edition", "clrVersion", "loadedClrMachine", "processStartUtcTicks", "assemblyArchitecture"];
+  const integers = ["pointerBytes", "processId", "renameRootOffset", "renameLengthOffset", "renameFirstOffset", "ioStatusBytes"];
+  const fields = [...strings, ...integers, "compiler", "loadedFromBytes", "references"];
+  const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+  assert(plain(metadata), "metadata diagnostic object refused");
+  const keys = Object.keys(metadata);
+  assert(keys.length <= 15 && keys.every((key) => fields.includes(key)), "metadata diagnostic fields refused");
+  const safeString = (value, maximum, pattern) => typeof value === "string" && value.length > 0 && value.length <= maximum && pattern.test(value);
+  const safeVersion = (value) => safeString(value, 32, /^\d{1,5}(?:\.\d{1,5}){3}$/) && value.split(".").every((part) => Number(part) <= 65535);
+  assert(safeVersion(metadata.powerShellVersion) && safeVersion(metadata.clrVersion), "runtime diagnostic version refused");
+  assert(safeString(metadata.edition, 32, /^[A-Za-z0-9_.-]+$/) && safeString(metadata.assemblyArchitecture, 32, /^[A-Za-z0-9_.-]+$/), "runtime diagnostic label refused");
+  assert(safeString(metadata.loadedClrMachine, 8, /^0x[0-9a-f]{4}$/) && safeString(metadata.processStartUtcTicks, 32, /^\d+$/), "runtime diagnostic identity refused");
+  assert(typeof metadata.compiler === "string" && metadata.compiler.length > 0 && metadata.compiler.length <= 1024 && !/[\r\n\0]/.test(metadata.compiler), "compiler diagnostic field refused");
+  for (const field of integers) assert(Number.isSafeInteger(metadata[field]) && metadata[field] >= 0 && metadata[field] <= 0xffffffff, "metadata diagnostic integer refused");
+  assert(typeof metadata.loadedFromBytes === "boolean", "metadata diagnostic boolean refused");
+  assert(Array.isArray(metadata.references) && metadata.references.length <= 32, "reference diagnostic count refused");
+  const references = metadata.references.map((reference) => {
+    assert(plain(reference), "reference diagnostic object refused");
+    const names = Object.keys(reference);
+    assert(names.length === 2 && names.includes("name") && names.includes("version"), "reference diagnostic fields refused");
+    assert(safeString(reference.name, 128, /^[A-Za-z0-9_.-]+$/) && safeVersion(reference.version), "reference diagnostic identity refused");
+    const identity = { name: reference.name, version: reference.version };
+    assert(Buffer.byteLength(JSON.stringify(identity)) <= 224, "reference diagnostic byte bound refused");
+    return identity;
+  });
+  const runtime = {};
+  for (const field of [...strings, ...integers, "loadedFromBytes"]) runtime[field] = metadata[field];
+  const evidence = { imageMetadataEvidence: true, referenceCount: references.length, references, runtime };
+  assert(Buffer.byteLength(JSON.stringify(evidence)) + 1 <= 8192, "metadata diagnostic byte bound refused");
+  log(evidence); // No paths, DLL/source bytes or new native calls; original assertions follow.
+}
+
 function anyCpuImage(bytes) {
   assert.equal(bytes.readUInt16LE(0), 0x5a4d);
   const pe = bytes.readUInt32LE(60); assert(pe >= 64 && pe + 24 < bytes.length);
@@ -289,6 +323,7 @@ try {
     log({ offlineCompiler: "one compile; descendants not exhaustively proved; fixture retained", sourceBytes: source.length, dllBytes: bytes.length, sourceDigest, dllDigest: hash(bytes), image: anyCpuImage(bytes), inventory: inventory(offline) });
     const metadata = JSON.parse((await checked(ps, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", script, "-Mode", "Metadata", "-Root", offline, "-Assembly", dll, "-Digest", hash(bytes)])).toString());
     validateRuntime(metadata, expected); assert.equal(metadata.assemblyArchitecture, "MSIL"); assert(metadata.loadedFromBytes);
+    logMetadataEvidence(metadata);
     for (const reference of metadata.references) { assert(["mscorlib", "System"].includes(reference.name)); assert.equal(reference.version, "4.0.0.0"); }
     log({ verifiedImageMetadata: metadata });
   }
