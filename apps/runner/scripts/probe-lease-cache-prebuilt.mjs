@@ -324,7 +324,15 @@ try {
     const metadata = JSON.parse((await checked(ps, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", script, "-Mode", "Metadata", "-Root", offline, "-Assembly", dll, "-Digest", hash(bytes)])).toString());
     validateRuntime(metadata, expected); assert.equal(metadata.assemblyArchitecture, "MSIL"); assert(metadata.loadedFromBytes);
     logMetadataEvidence(metadata);
-    for (const reference of metadata.references) { assert(["mscorlib", "System"].includes(reference.name)); assert.equal(reference.version, "4.0.0.0"); }
+    assert.equal(metadata.references.length, 3, "fixed helper reference count incompatible");
+    const referenceNames = new Set();
+    for (const reference of metadata.references) {
+      assert(["mscorlib", "System", "System.Core"].includes(reference.name), "fixed helper reference name incompatible");
+      assert.equal(reference.version, "4.0.0.0");
+      assert(!referenceNames.has(reference.name), "duplicate fixed helper reference");
+      referenceNames.add(reference.name);
+    }
+    assert.deepEqual([...referenceNames].sort(), ["System", "System.Core", "mscorlib"], "fixed helper reference set incompatible");
     log({ verifiedImageMetadata: metadata });
   }
   const program = path.join(offline, "fixture.cjs");
