@@ -946,7 +946,9 @@ const isSourceFunction = (node: ts.Node | undefined): node is SourceFunction =>
  * 2. A component whose class comes from its caller, handed to another package's component, is
  *    reported: the package renders it with props the scan never sees.
  * 3. An object written after it is bound — through a constant, a parameter, a member of either, a
- *    helper or a child it is handed to — and a name assigned again are reported where they are read.
+ *    helper, hook or child it is handed to — and a name assigned again are reported where they are
+ *    read. A constant handed on in any way but a spread or a reading call counts as written, as
+ *    before #2394.
  * 4. A value an assertion gives its type (`raw as "safe-icon"`), in a constant, an object's
  *    property or a source helper's return, is read for its value rather than its type.
  * 5. A name composed from parts is built in full, up to MAX_ALTERNATIVES names, and reported past it.
@@ -1192,17 +1194,26 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
    * again. A constant does not freeze what it holds, and a parameter holds its caller's object, so a
    * write through either makes what the scan read from the source incomplete (#2394).
    */
-  const writesMemo = new Map<ts.Node, Writes & { reassigned: boolean; done: boolean }>();
+  const writesMemo = new Map<ts.Node, Writes & { reassigned: boolean; done: boolean; sited: boolean }>();
+  /** Counts reads of call sites, to tell which writes depend on the call sites found so far (`sited`). */
+  let siteReads = 0;
   const writesTo = (declaration: Binding) => {
     const known = writesMemo.get(declaration);
-    if (known) return known;
-    const writes = { ...none(), reassigned: false, done: false };
+    if (known) {
+      if (known.sited) siteReads += 1;
+      return known;
+    }
+    const writes = { ...none(), reassigned: false, done: false, sited: false };
     writesMemo.set(declaration, writes);
     if (!ts.isIdentifier(declaration.name)) { writes.done = true; return writes; }
-    // Only an object or array can be changed through another name; a string cannot.
+    const before = siteReads;
+    // Only an object or array can be changed through another name; a string cannot. A constant is
+    // judged as before #2394; a parameter's type may come from a package the scan does not load, so
+    // a type it cannot read counts as an object.
     const value = transparent(declaration.initializer);
+    const type = checker.getTypeAtLocation(declaration.name);
     const mutable = (value && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value) || ts.isNewExpression(value)))
-      || isObjectLike(checker.getTypeAtLocation(declaration.name));
+      || (isConstant(declaration) ? (type.isUnion() ? type.types : [type]).some((member) => member.flags & ts.TypeFlags.Object) : isObjectLike(type));
     for (const name of usesOf(declaration.name)) {
       if (name === declaration.name || declarationOf(name) !== declaration) continue;
       // `(common)` and `common as Props` are still `common`.
@@ -1218,9 +1229,10 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       } else if (ts.isElementAccessExpression(parent) && parent.expression === use) {
         if (isWrite(parent)) writes.any = true;
         else if (writesInside(parent, declaration)) writes.insideAny = true;
-      } else merge(writes, flowsTo(use, declaration));
+      } else merge(writes, isConstant(declaration) ? constantUse(use, declaration) : flowsTo(use, declaration));
     }
     writes.done = true;
+    writes.sited = siteReads !== before;
     return writes;
   };
   const merge = (into: Writes, from: Writes) => {
@@ -1229,17 +1241,30 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     into.insideAny ||= from.insideAny;
     into.any ||= from.any;
   };
+  /**
+   * What may be written into a constant's object through one use of it other than a member's. As
+   * before #2394, only a spread, `typeof`, an import or export, `key in` it and a reading call leave
+   * it as it was; a spread into a component in the sources adds whatever that component writes.
+   */
+  const constantUse = (use: ts.Node, from: Binding): Writes => {
+    const parent = use.parent;
+    if (ts.isJsxSpreadAttribute(parent)) return receivedWrites(parent.parent.parent, null, from);
+    return ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent) || ts.isTypeQueryNode(parent) || ts.isTypeOfExpression(parent)
+      || ts.isExportSpecifier(parent) || ts.isImportSpecifier(parent) || ts.isImportClause(parent)
+      || (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InKeyword && parent.right === use)
+      || (ts.isCallExpression(parent) && READING_CALLS.has(parent.expression.getText())) ? none() : all();
+  };
   /** A binding's writes; all of them for one still being read that is not `from` itself (a cycle through another component). */
   const settledWrites = (binding: Binding, from: Binding): Writes => {
     const writes = writesTo(binding);
     return writes.done || binding === from ? writes : all();
   };
   /**
-   * What may be written into an object through wherever one use of it takes it. Tested, compared,
-   * rendered as a child or interpolated, it is only read. Destructured, or handed to a component in
-   * the sources, it is written by whatever writes the bindings it reaches there. Handed on whole any
-   * other way — aliased, passed to a function, stored, returned — it can be written through a name
-   * this scan does not follow.
+   * What may be written into a parameter's object, or one a member holds, through wherever one use
+   * of it takes it. Tested for truth or compared strictly, it is only read. Destructured, or handed to
+   * a component in the sources, it is written by whatever writes the bindings it reaches there.
+   * Handed on whole any other way — aliased, passed to a function or a hook (`instanceof`, a `ref`),
+   * stored, returned, converted — it can be written through code this scan does not follow.
    */
   const flowsTo = (use: ts.Node, from: Binding): Writes => {
     const parent = use.parent;
@@ -1252,11 +1277,11 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
         || kind === ts.SyntaxKind.BarBarEqualsToken || kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken) return parent.right === use ? all() : none();
       if (kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken || kind === ts.SyntaxKind.AmpersandAmpersandToken
         || (kind === ts.SyntaxKind.CommaToken && parent.right === use)) return flowsTo(parent, from);
-      // A strict comparison, `key in attrs` and `attrs instanceof C` only read it. Any other operator
-      // may convert it to a primitive, running its own `toString` or `valueOf`, which can write into it.
+      // A strict comparison and `key in attrs` only read it. `instanceof` hands it to a
+      // `Symbol.hasInstance` hook, and any other operator may convert it to a primitive, running its
+      // own `toString` or `valueOf`; either can write into it.
       return kind === ts.SyntaxKind.EqualsEqualsEqualsToken || kind === ts.SyntaxKind.ExclamationEqualsEqualsToken
-        || (kind === ts.SyntaxKind.InKeyword && parent.right === use) || (kind === ts.SyntaxKind.InstanceOfKeyword && parent.left === use)
-        || kind === ts.SyntaxKind.CommaToken ? none() : all();
+        || (kind === ts.SyntaxKind.InKeyword && parent.right === use) || kind === ts.SyntaxKind.CommaToken ? none() : all();
     }
     if (ts.isVariableDeclaration(parent) && parent.initializer === use) {
       // `const { attrs } = props` shares `props.attrs` with `attrs`, so what is written through it.
@@ -1265,7 +1290,10 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (ts.isJsxExpression(parent)) {
       // `<Child attrs={attrs} />`: whatever Child writes through that prop is written here, and
       // `<Child>{attrs}</Child>` hands it over as `children`.
-      if (ts.isJsxAttribute(parent.parent)) return receivedWrites(parent.parent.parent.parent, parent.parent.name.getText(), from);
+      // React writes `current` into a `ref`, on an element or a component.
+      if (ts.isJsxAttribute(parent.parent)) {
+        return parent.parent.name.getText() === "ref" ? all() : receivedWrites(parent.parent.parent.parent, parent.parent.name.getText(), from);
+      }
       return ts.isJsxElement(parent.parent) ? receivedWrites(parent.parent.openingElement, "children", from) : none();
     }
     // `<Child {...props} />` copies the props, but each value it copies is still the same object.
@@ -1563,6 +1591,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   const passedValues = (fn: SourceFunction, index: number, prop: string, content = false, visited = new Set<string>()): (ts.Node | "unknown")[] => {
     if (!readingCallee) traced.add(fn);
     sitesRead.add(fn);
+    siteReads += 1;
     const key = `${where(fn)}#${fn.pos}|${index}`;
     if (visited.has(key)) return [];
     visited.add(key);
@@ -1982,9 +2011,9 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     missed = false;
     for (let changed = true; changed;) {
       changed = false;
-      // What a binding has written into it depends on the call sites found so far (`<props.W a={a} />`
-      // writes whatever W's do), so it is read again on each pass, and only the last pass's stands.
-      writesMemo.clear();
+      // What a binding has written into it can depend on the call sites found so far (`<props.W a={a} />`
+      // writes whatever W's do), so what did is read again on each pass, and only the last pass's stands.
+      for (const [binding, writes] of writesMemo) if (writes.sited) writesMemo.delete(binding);
       for (const element of elements) {
         const known = rendered.get(element) ?? new Set();
         rendered.set(element, known);
@@ -3815,6 +3844,18 @@ test("every route #2394 found that could hide an icon class is followed, reporte
     "const text = `${attrs}`;",
     "export function Coerced() { return <svg {...attrs} />; }",
   ].join("\n") }), { classes: [], unread: ["Late.tsx:2 ${…}", "Late.tsx:7 ${…}"] });
+  // `instanceof` hands an object to a `Symbol.hasInstance` hook and a `ref` hands it to React, which
+  // writes `current`; and a constant destructured runs its getters, which can write into it.
+  assert.deepEqual(scanOf({ "Hooks.tsx": [
+    "declare class C {}",
+    "function Checked({ attrs }: { attrs: { className?: string } }) { const known = attrs instanceof C; return <svg {...attrs} />; }",
+    "function Referenced({ attrs }: { attrs: { className?: string } }) { return <><div ref={attrs} /><svg {...attrs} /></>; }",
+    "const own = { className: \"own-icon\", get label() { return \"x\"; } };",
+    "const { label } = own;",
+    "export function Uses() {",
+    "  return <><Checked attrs={{ className: \"checked-icon\" }} /><Referenced attrs={{ className: \"ref-icon\" }} /><svg {...own} /></>;",
+    "}",
+  ].join("\n") }), { classes: [], unread: ["Hooks.tsx:2 ${…}", "Hooks.tsx:3 ${…}", "Hooks.tsx:7 ${…}"] });
 
   // 4. Followed: a value an assertion gives its type is read for its value — in a constant, an
   // object's property, or a helper's return — so what it reads is its callers' class or an unread
