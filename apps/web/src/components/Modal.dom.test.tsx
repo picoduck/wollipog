@@ -145,6 +145,39 @@ test("a child stacks on its parent on desktop, and closing it returns focus insi
   await view.unmount();
 });
 
+test("closing a child leaves focus on a control the person moved to before the restore ran (#2397)", async () => {
+  matchingMedia = new Set();
+  function Parent() {
+    const [child, setChild] = useState(false);
+    return (
+      <>
+        <Modal title="Manage Groups" onClose={() => undefined}>
+          <button type="button" className="btn" data-testid="other">Back to Groups</button>
+          <button type="button" className="btn" data-testid="open-child" onClick={() => setChild(true)}>Remove…</button>
+        </Modal>
+        {child && (
+          <Modal title="Remove Skill from Group" onClose={() => setChild(false)}>
+            <p>Body</p>
+          </Modal>
+        )}
+      </>
+    );
+  }
+  const view = await mount(<Parent />);
+  const opener = document.querySelector<HTMLButtonElement>('[data-testid="open-child"]')!;
+  opener.focus();
+  await act(async () => { opener.click(); });
+  // The person moves on in the same task as the close, before the restore it queues runs.
+  await act(async () => {
+    domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape" }));
+    document.querySelector<HTMLButtonElement>('[data-testid="other"]')!.focus();
+  });
+  await act(async () => { await tick(); await tick(); });
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1, "Escape closes only the child");
+  assert.equal(document.activeElement?.textContent, "Back to Groups", "focus stays where the person put it, not on the opener");
+  await view.unmount();
+});
+
 test("an Escape that belongs to an IME composition leaves the dialog open", async () => {
   matchingMedia = new Set();
   let closes = 0;

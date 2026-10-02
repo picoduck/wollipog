@@ -380,3 +380,55 @@ test("at 390px Back from the keyboard returns focus to the chosen group, and to 
   await expect(rows.first()).toBeFocused();
   await expect(dialog).toBeVisible();
 });
+
+test("at 390px Back keeps focus when the person reaches it before a removal's confirmation finishes settling (#2397)", async ({ page }) => {
+  // The confirmation and its dialog each hand focus back to Remove… on a zero-delay task. Under
+  // load a person (or a spec) can reach Back first; hold those tasks until then.
+  await page.addInitScript(() => {
+    const queued: Array<() => void> = [];
+    const schedule = window.setTimeout.bind(window);
+    const hold = window as unknown as { holdZeroDelay?: boolean; releaseZeroDelay?: () => void };
+    window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (hold.holdZeroDelay && !delay && typeof handler === "function") {
+        queued.push(() => handler(...args));
+        return 0;
+      }
+      return schedule(handler, delay, ...args);
+    }) as typeof window.setTimeout;
+    hold.releaseZeroDelay = () => {
+      hold.holdZeroDelay = false;
+      queued.splice(0).forEach((run) => run());
+    };
+  });
+  await installSkillGroupsFixture(page, { library: "full" });
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/skills/skill-2", async route => {
+    if (route.request().method() === "PUT") await held;
+    await route.fallback();
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/skills-removals-e2e.html?groups=1");
+  await choosePageAction(page, "Manage Groups…");
+  const dialog = manageGroups(page);
+  const rows = dialog.locator(".skill-groups-list > .row");
+  const back = dialog.getByRole("button", { name: "Back to Groups", exact: true });
+  await rows.first().click();
+  await dialog.locator(".skill-groups-members .row", { hasText: "lint-fix" }).getByRole("button", { name: "Remove…", exact: true }).click();
+  await page.evaluate(() => { (window as unknown as { holdZeroDelay: boolean }).holdZeroDelay = true; });
+  await confirmation(page, "Remove Skill from Group").getByRole("button", { name: "Remove Skill", exact: true }).click();
+  await expect(confirmation(page, "Remove Skill from Group")).toHaveCount(0);
+  await expect(dialog.locator("[aria-busy='true']")).toHaveCount(1);
+  await back.focus();
+  // Run the held hand-backs, then let a frame pass: focus stays on Back, so Enter shows the list.
+  await page.evaluate(() => new Promise(requestAnimationFrame).then(() => {
+    (window as unknown as { releaseZeroDelay: () => void }).releaseZeroDelay();
+    return new Promise(requestAnimationFrame);
+  }));
+  await expect(back).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(rows).toHaveCount(4);
+  release();
+  await expect(rows.first()).toBeEnabled();
+  await expect(rows.first()).toBeFocused();
+});

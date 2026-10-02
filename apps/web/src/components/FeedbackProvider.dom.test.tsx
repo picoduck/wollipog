@@ -571,6 +571,25 @@ test("a dialog the secondary action opens keeps focus; the invoker behind it doe
   await cleanup();
 });
 
+test("a control the person moves to before the confirmation settles keeps focus (#2397)", async () => {
+  const { open, footButtons, activeText, cleanup } = await renderConfirmationService();
+  const elsewhere = domWindow.document.createElement("button");
+  elsewhere.textContent = "Elsewhere";
+  domWindow.document.body.append(elsewhere);
+  await open({ title: "Remove Skill from Group", message: "“lint-fix” leaves “Review Team”.", confirmLabel: "Remove Skill", tone: "danger" });
+  // The person moves on in the same task as the answer, before the restores queued by it run.
+  await act(async () => {
+    footButtons().find((button) => button.textContent === "Remove Skill")!.click();
+    elsewhere.focus();
+    await tick();
+    await tick();
+  });
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
+  assert.equal(activeText(), "Elsewhere", "neither the settle nor the dialog's close takes focus back to the invoker");
+  elsewhere.remove();
+  await cleanup();
+});
+
 test("a double click on the secondary action runs it once", async () => {
   const { open, outcomes, footButtons } = await renderConfirmationService();
   let shown = 0;

@@ -311,12 +311,13 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
         presentNext();
         return;
       }
-      // A dialog the outcome opened (a secondary action such as Snooze Instead… opening Snooze) has
-      // already taken focus; handing it back to the invoker behind that dialog would pull it out.
-      // The confirmation's own panel does not count: it can still be mounted here.
+      // Focus that has moved on is left where it is: a dialog the outcome opened (a secondary action
+      // such as Snooze Instead… opening Snooze) has taken it, or the person moved to another control
+      // (a phone sheet's Back) before this task ran (#2397). Only focus the confirmation dropped, or
+      // still holds, goes back to the invoker. The confirmation's own panel can still be mounted here.
       const focused = document.activeElement;
-      const focusedDialog = focused instanceof HTMLElement && focused.isConnected ? focused.closest('[role="dialog"]') : null;
-      if (focusedDialog && !focusedDialog.classList.contains("feedback-confirmation")) {
+      if (focused instanceof HTMLElement && focused !== document.body && focused.isConnected &&
+          !focused.closest(".feedback-confirmation")) {
         stableConfirmationInvoker.current = null;
         return;
       }

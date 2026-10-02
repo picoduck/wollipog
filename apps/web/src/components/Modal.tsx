@@ -290,6 +290,11 @@ export function Modal({
       const explicit = explicitReturnFocusRef.current?.current;
       const target = explicit?.isConnected ? explicit : openerFocusRef.current;
       window.setTimeout(() => {
+        // Restore only focus this close dropped. Focus that rests on a control by now was put
+        // there since — a person who moved to a dialog's Back while a confirmation settled, or
+        // the confirmation's own restore — and is never yanked back to the opener (#2397).
+        const settled = document.activeElement;
+        if (settled instanceof HTMLElement && settled !== document.body && settled.isConnected) return;
         // A queued dialog can replace this one in the same commit. Do not steal focus back to
         // the page from that newer modal; nested dialogs may still restore into their owning
         // dialog — but only the TOPMOST one, so a dying layer can never pull focus out from
