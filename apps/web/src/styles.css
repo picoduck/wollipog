@@ -9688,8 +9688,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
    `.new-session-field-label`, or the first item of a `.field-head` row (below). Later bare spans in
    a field keep the dim rule above. Two forms stack their labels over the control outside a `.field`
    and take the same label (#2366): Archived Sessions (its search label and filters' `.field-label`s)
-   and the Automations editor (a grid label's own text, an `.automation-field`'s `.field-label`, and
-   a fieldset legend). */
+   and the Automations page's `.automation-form-grid` forms, the editor and Outbound Events (a grid
+   label's own text, an `.automation-field`'s `.field-label`, and a fieldset legend). */
 .field > span:first-child,
 .field > .field-label,
 .archive-search > span,

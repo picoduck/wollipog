@@ -6,8 +6,9 @@ import { dialogMotionSettled } from "./dialog-motion.js";
  * #2366: two forms stack labels over their controls outside a `.field`, and their labels are the
  * field label of docs/design-system.md §8.1: --type-label (12px/500 on a 16px line) in --text, 8px
  * above the control. Archived Sessions: the search label and the filters' `.field-label`s. The
- * Automations editor: each grid label's own text, each `.automation-field`'s `.field-label`, and its
- * fieldset legends; a grid label's helper stays dim, 4px under the control. The labels that open
+ * Automations editor (and the Outbound Events form on its grid): each grid label's own text, each
+ * `.automation-field`'s `.field-label`, and its fieldset legends; a grid label's helper stays dim,
+ * 4px under the control. The labels that open
  * redesigns own (Snooze #2181, Rename Project #2199, the message-action form #2185) keep the older
  * dim rule until those land; whichever lands first drops its case below.
  */
@@ -38,7 +39,7 @@ async function token(page: Page, name: string): Promise<string> {
 async function labels(locator: Locator) {
   return locator.evaluateAll((elements) => elements.map((label) => {
     const style = getComputedStyle(label);
-    const wrapped = label.querySelector("input, select, textarea");
+    const wrapped = label.querySelector("input, select, textarea, .ui-select");
     const top = label.getBoundingClientRect().top;
     const lineBottom = wrapped ? top + parseFloat(style.paddingTop) + parseFloat(style.lineHeight) : label.getBoundingClientRect().bottom;
     const control = (wrapped ?? label.nextElementSibling!).getBoundingClientRect();
@@ -110,6 +111,14 @@ for (const theme of ["dark", "light"] as const) {
         await expect(page.locator(".automation-field > .field-label")).toHaveCount(4);
         await expectLabelStyle(page, page.locator(".automation-field > .field-label"),
           ["Agent-1 Agent", "Orchestrator Agent", "Alternate Agent-1 Agent", "Alternate Orchestrator Agent"]);
+      });
+
+      test("the Outbound Events subscription form, on the same grid, has §8.1 field labels", async ({ page }) => {
+        await page.goto(`/automations-e2e.html?theme=${theme}`);
+        await page.getByRole("button", { name: "New Subscription" }).click();
+        const editor = page.locator(".outbound-event-editor");
+        await expectLabelStyle(page, editor.locator(AUTOMATION_LABELS), ["Scope Type", "Project", "Callback URL"]);
+        await expectLegendStyle(page, editor.locator(".automation-form-grid legend"), ["Event Kinds"]);
       });
 
       test("the signed trigger editor's labels are §8.1 field labels, and its helper stays dim 4px under the control", async ({ page }) => {
