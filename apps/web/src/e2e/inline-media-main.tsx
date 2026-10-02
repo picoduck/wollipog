@@ -10,7 +10,11 @@ import "../styles.css";
 const signature = new URLSearchParams(window.location.search).has("expired")
   ? "X-Amz-Date=20200101T000000Z&X-Amz-Expires=3600&X-Amz-Signature=redacted"
   : "X-Amz-Signature=redacted";
-const finalImageUrl = `https://evidence.example/session-review.png?${signature}`;
+// `?longName=1` gives the image a name long enough to wrap its caption on a phone.
+const imageName = new URLSearchParams(window.location.search).has("longName")
+  ? "session-review-of-the-responsive-transcript-at-phone-width.png"
+  : "session-review.png";
+const finalImageUrl = `https://evidence.example/${imageName}?${signature}`;
 const videoUrl = `https://evidence.example/session-walkthrough.webm?${signature}`;
 const streamedImageUrls = [
   "https://evidence.example/session-review.png?X-Amz-Signature=r",

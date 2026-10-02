@@ -454,6 +454,15 @@ function isGeneratedUrlLabel(label: string, href: string): boolean {
   }
 }
 
+/** A link's text as its author wrote it, reading a linked image's alt text as that image's words. */
+function linkAuthorText(node: ReactNode): string {
+  if (Array.isArray(node)) return node.map(linkAuthorText).join("");
+  if (isValidElement<{ alt?: unknown; children?: ReactNode }>(node)) {
+    return typeof node.props.alt === "string" ? node.props.alt : linkAuthorText(node.props.children);
+  }
+  return reactNodeText(node);
+}
+
 function MarkdownLink({ href, children, inlineMedia, mediaSettled, compactUrls }: ComponentProps<"a"> & {
   inlineMedia: boolean;
   mediaSettled: boolean;
@@ -467,7 +476,7 @@ function MarkdownLink({ href, children, inlineMedia, mediaSettled, compactUrls }
         key={href}
         href={href}
         kind={kind}
-        label={transcriptMediaLabel(href, kind, childText)}
+        label={transcriptMediaLabel(href, kind, linkAuthorText(children))}
         settled={mediaSettled}
       />
     );

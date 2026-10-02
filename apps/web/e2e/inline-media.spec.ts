@@ -167,27 +167,31 @@ test.describe("on a coarse pointer", () => {
     expect(measured.position).toBe("relative");
   });
 
-  test("each collapsed caption is a 44px row, so one link's band never reaches the next", async ({ page }) => {
-    await page.route("https://evidence.example/**", (route) =>
-      route.fulfill({ status: 403, contentType: "text/plain", body: "expired" }));
-    await page.goto("/inline-media-e2e.html?expired=1");
-    const captions = page.locator("[data-virtual-key='item:agent_message:2'] .md-media-cap");
-    await expect(captions).toHaveCount(2);
-    await expect(captions.first().locator(".md-media-meta")).toHaveText("Link expired");
-    const rows = await captions.evaluateAll((elements) => elements.map((element) => {
-      const row = element.getBoundingClientRect();
-      const link = element.querySelector("a.link")!;
-      const box = link.getBoundingClientRect();
-      const band = parseFloat(getComputedStyle(link, "::after").height);
-      const bandTop = box.top + box.height / 2 - band / 2;
-      return { rowTop: row.top, rowBottom: row.bottom, bandTop, bandBottom: bandTop + band };
-    }));
-    for (const row of rows) {
-      expect(row.rowBottom - row.rowTop).toBeGreaterThanOrEqual(44);
-      expect(row.bandTop).toBeGreaterThanOrEqual(row.rowTop - 0.5);
-      expect(row.bandBottom).toBeLessThanOrEqual(row.rowBottom + 0.5);
-    }
-  });
+  for (const scenario of ["expired=1", "expired=1&longName=1"]) {
+    test(`a caption holds its link's band, so it never reaches the next target (${scenario})`, async ({ page }) => {
+      await page.route("https://evidence.example/**", (route) =>
+        route.fulfill({ status: 403, contentType: "text/plain", body: "expired" }));
+      await page.goto(`/inline-media-e2e.html?${scenario}`);
+      const captions = page.locator("[data-virtual-key='item:agent_message:2'] .md-media-cap");
+      await expect(captions).toHaveCount(2);
+      await expect(captions.first().locator(".md-media-meta")).toHaveText("Link expired");
+      const rows = await captions.evaluateAll((elements) => elements.map((element) => {
+        const row = element.getBoundingClientRect();
+        const link = element.querySelector("a.link")!;
+        const box = link.getBoundingClientRect();
+        const band = parseFloat(getComputedStyle(link, "::after").height);
+        const bandTop = box.top + box.height / 2 - band / 2;
+        const lines = Math.round((row.height - parseFloat(getComputedStyle(element).paddingTop) * 2) / 16);
+        return { rowTop: row.top, rowBottom: row.bottom, bandTop, bandBottom: bandTop + band, lines };
+      }));
+      if (scenario.includes("longName")) expect(rows[0]!.lines).toBeGreaterThan(1);
+      for (const row of rows) {
+        expect(row.rowBottom - row.rowTop).toBeGreaterThanOrEqual(44);
+        expect(row.bandTop).toBeGreaterThanOrEqual(row.rowTop - 0.5);
+        expect(row.bandBottom).toBeLessThanOrEqual(row.rowBottom + 0.5);
+      }
+    });
+  }
 });
 
 test("streamed signed URLs issue no media request until authoritative completion", async ({ page }) => {

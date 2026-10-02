@@ -176,6 +176,17 @@ test("a markdown image is the same figure with its alt text as the caption and n
   assert.doesNotMatch(html, /alt="https:\/\//);
 });
 
+test("a linked image keeps its alt text as the figure's caption and alt", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    inlineMedia: true,
+    children: "[![Reviewed Layout](https://evidence.example/thumb.png)](https://evidence.example/full.png?sig=1)",
+  }));
+
+  assert.equal(html.match(/class="md-media"/g)?.length, 1);
+  assert.match(html, /<img class="md-media-image"[^>]*src="https:\/\/evidence\.example\/full\.png\?sig=1"[^>]*alt="Reviewed Layout"/);
+  assert.match(html, /<span class="md-media-name"[^>]*>Reviewed Layout<\/span>/);
+});
+
 test("an intentionally empty Markdown image alt stays decorative", () => {
   const html = renderToStaticMarkup(React.createElement(Markdown, {
     inlineMedia: true,

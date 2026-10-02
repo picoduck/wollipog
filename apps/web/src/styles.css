@@ -7440,11 +7440,13 @@ button.file-head.source-path-link {
 .md-media-cap .link {
   white-space: nowrap;
 }
-/* Open Full Size and Open Link borrow the shared 44px band on touch (§2.8). A 44px caption row
-   holds that band, so it reaches neither the video controls above nor the next caption below. */
+/* Open Full Size and Open Link borrow the shared 44px band on touch (§2.8): 22px either side of
+   the centre of their 16px line. 14px above the first line and below the last holds that band
+   inside the caption even when a long name wraps, so it reaches neither the video controls above
+   nor the next caption or link below. */
 @media (pointer: coarse) {
   .md-media-cap {
-    min-height: var(--control-h);
+    padding-block: calc(var(--space-3) + var(--space-0-5));
   }
 }
 .md-media-image,
