@@ -1630,6 +1630,69 @@ test("row and card context menus share one surface, act on their target, and nev
 
 });
 
+for (const outcome of [
+  { archiveStatus: undefined, message: "Session archived.", tone: "t-success", icon: "lucide-circle-check", undo: true },
+  { archiveStatus: "stop_pending" as const, message: "Archiving. The session is still stopping.", tone: "t-info", icon: "lucide-info", undo: true },
+  // The Sessions list has never offered Undo after a failed stop; Retry Stop is the recovery.
+  { archiveStatus: "stop_failed" as const, message: "The stop failed, so the session may still be running.", tone: "t-warning", icon: "lucide-triangle-alert", undo: false },
+]) {
+  test(`archiving from the Sessions list shows a ${outcome.tone} toast for ${outcome.archiveStatus ?? "a finished archive"} (#2333)`, async () => {
+    mobileViewport = false;
+    setWindowFocused(true);
+    setVisibility("visible");
+    const { container, root } = mountTestRoot();
+    const socket = new FakeSocket();
+    const connection: UiConnectionRuntime = {
+      instanceId: "inbox-archive-tone",
+      runtimeKey: "inbox-archive-tone:1",
+      createSocket: () => socket,
+      close() {},
+    };
+    const archived: Array<[string, boolean]> = [];
+    const client = {
+      ...api,
+      setArchived: async (id: string, value: boolean) => {
+        archived.push([id, value]);
+        return { ...session(id, 20), archived: value, ...(value && outcome.archiveStatus ? { archiveStatus: outcome.archiveStatus } : {}) };
+      },
+    } as unknown as ApiClient;
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <FeedbackProvider>
+              <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+            </FeedbackProvider>
+          </StoreProvider>
+        </ApiProvider>,
+      );
+    });
+    await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+    const rowB = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+      .find((row) => row.textContent?.includes("Session B"))!;
+    await act(async () => {
+      rowB.dispatchEvent(new domWindow.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 60 }) as never);
+    });
+    const menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+    await act(async () => { (menu.querySelector(".menu-item.danger") as unknown as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(archived, [["B", true]]);
+
+    const toasts = [...container.querySelectorAll<HTMLElement>(".toast")];
+    assert.equal(toasts.length, 1);
+    const toast = toasts[0]!;
+    assert.equal(toast.querySelector(".toast-message")?.textContent, outcome.message);
+    assert.ok(toast.classList.contains(outcome.tone), `${outcome.tone}, not ${toast.className}`);
+    assert.ok(toast.querySelector(".toast-icon svg")?.classList.contains(outcome.icon), outcome.icon);
+    const undo = [...toast.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Undo");
+    assert.equal(Boolean(undo), outcome.undo, "Undo stays where it was offered, and is not added");
+    if (undo) {
+      await act(async () => { undo.click(); await Promise.resolve(); });
+      assert.deepEqual(archived, [["B", true], ["B", false]]);
+    }
+  });
+}
+
 test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing (#1857)", async () => {
   mobileViewport = false;
   setWindowFocused(true);

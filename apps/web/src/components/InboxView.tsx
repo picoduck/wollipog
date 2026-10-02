@@ -1,7 +1,7 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { TabList } from "./Tabs.js";
-import { archiveAndStopMessage, archiveResultMessage, sessionArchiveRequiresStop } from "../archive-actions.js";
+import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
   INBOX_COLLAPSED_THREADS_KEY,
@@ -1114,11 +1114,11 @@ export function InboxView({
         showUndo(archiveResultMessage(updated.archiveStatus), async () => {
           const restored = await api.setArchived(sessionId, false);
           loadSession(restored);
-        });
+        }, archiveResultTone(updated.archiveStatus));
         return;
       }
       if (updated.archiveStatus === "stop_failed") {
-        showToast(archiveResultMessage(updated.archiveStatus));
+        showToast(archiveResultMessage(updated.archiveStatus), { tone: archiveResultTone(updated.archiveStatus) });
         return;
       }
       const archiveSelection = inboxSelectionAfterArchive(

@@ -12,7 +12,12 @@ import {
   sessionArchiveRequiresStop,
   setArchivedForSessions,
 } from "../archive-actions.js";
-import { archiveProjectWithFeedback, projectArchiveMessage, projectArchiveResultMessage } from "../project-actions.js";
+import {
+  archiveProjectWithFeedback,
+  projectArchiveMessage,
+  projectArchiveResultMessage,
+  projectArchiveResultTone,
+} from "../project-actions.js";
 import { useApi } from "../api-context.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
@@ -246,14 +251,15 @@ export function ProjectSplitMenu({
           `Could not archive ${outcome.archiveFailures} session${outcome.archiveFailures === 1 ? "" : "s"}; ${outcome.rollbackFailures > 0 ? `${outcome.rollbackFailures} still need recovery` : "successful changes were rolled back"}.`,
         );
       }
-      showUndo(projectArchiveResultMessage(split.name, {
+      const counts = {
         archived: sessionIds.length,
         pending: outcome.pendingSessionIds.length,
         failed: outcome.failedSessionIds.length,
-      }), async () => {
+      };
+      showUndo(projectArchiveResultMessage(split.name, counts), async () => {
         const failures = await setArchivedForSessions(sessionIds, false, api.setArchived);
         if (failures > 0) throw new Error(`${failures} session${failures === 1 ? "" : "s"} could not be restored`);
-      });
+      }, projectArchiveResultTone(counts));
     } catch (cause) {
       reportError(`Could not archive ${entityLabel.toLowerCase()} sessions`, cause);
     }

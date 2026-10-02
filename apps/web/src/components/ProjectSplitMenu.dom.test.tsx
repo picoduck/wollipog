@@ -669,6 +669,97 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
   mountPoint.remove();
 });
 
+test("a Project archive toast is a success only when every stop finished: still stopping is info, a failed stop a warning (#2333)", async () => {
+  const project = {
+    id: "project-1",
+    name: "Project One",
+    hidden: false,
+    canManage: true,
+    locations: [{
+      id: "location-1",
+      projectId: "project-1",
+      runnerId: "runner-1",
+      workspaceId: "workspace-1",
+      name: "Project One",
+      path: "/repos/project-one",
+      source: "managed" as const,
+      availability: "available" as const,
+      isDefault: true,
+      createdAt: 1,
+      updatedAt: 1,
+    }],
+    activeSessionCount: 2,
+    unarchivedSessionCount: 2,
+    totalSessionCount: 2,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const durableSplit: InboxSplit = {
+    ...split,
+    key: "project:project-1",
+    project: { kind: "durable", project, primaryLocation: project.locations[0]!, legacyKeys: [split.key!] },
+  };
+  const outcomes = [
+    { archiveStatus: undefined, message: /^2 sessions archived from Project One\./, tone: "t-success", icon: "lucide-circle-check" },
+    { archiveStatus: "stop_pending" as const, message: /^Archiving from Project One\. 1 session is still stopping\./, tone: "t-info", icon: "lucide-info" },
+    { archiveStatus: "stop_failed" as const, message: /^The stop failed for 1 session in Project One/, tone: "t-warning", icon: "lucide-triangle-alert" },
+  ];
+  for (const group of ["workspace", "durable"] as const) {
+    for (const outcome of outcomes) {
+      const restored: string[] = [];
+      const client = {
+        ...api,
+        // A workspace group archives each session; the second one reports this outcome.
+        setArchived: async (sessionId: string, value: boolean) => {
+          if (!value) restored.push(sessionId);
+          return { ...session(sessionId), archived: value, archiveStatus: value && sessionId === "session-2" ? outcome.archiveStatus : undefined };
+        },
+        // A durable Project archives in one request that names the sessions by outcome.
+        archiveProjectSessions: async () => ({
+          project,
+          sessions: [],
+          archivedSessionIds: outcome.archiveStatus ? ["session-1"] : ["session-1", "session-2"],
+          ...(outcome.archiveStatus === "stop_pending" ? { pendingSessionIds: ["session-2"] } : {}),
+          ...(outcome.archiveStatus === "stop_failed" ? { failedSessionIds: ["session-2"] } : {}),
+        }),
+      } as ApiClient;
+      const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+      domWindow.document.body.append(mountPoint as never);
+      const container = domWindow.document.body as unknown as HTMLDivElement;
+      const root = createRoot(mountPoint);
+      await act(async () => {
+        root.render(
+          <ApiProvider client={client}>
+            <FeedbackProvider>
+              <ProjectSplitMenu
+                split={group === "durable" ? durableSplit : split}
+                runner={runner()}
+                pinned={false}
+                onPinnedChange={() => undefined}
+                onNewSession={() => undefined}
+              />
+            </FeedbackProvider>
+          </ApiProvider>,
+        );
+      });
+      await openMenu(container);
+      await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
+      await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
+      const label = `${group} ${outcome.archiveStatus ?? "archived"}`;
+      const toasts = [...container.querySelectorAll<HTMLElement>(".toast")];
+      assert.equal(toasts.length, 1, `${label}: one result toast`);
+      const toast = toasts[0]!;
+      assert.match(toast.querySelector(".toast-message")?.textContent ?? "", outcome.message, label);
+      assert.ok(toast.classList.contains(outcome.tone), `${label}: ${outcome.tone}, not ${toast.className}`);
+      assert.ok(toast.querySelector(".toast-icon svg")?.classList.contains(outcome.icon), `${label}: ${outcome.icon}`);
+      await act(async () => { button(toast, "Undo").click(); await tick(); await tick(); });
+      assert.deepEqual(restored, ["session-1", "session-2"], `${label}: Undo restores every session`);
+      await act(async () => { root.unmount(); });
+      mountPoint.remove();
+    }
+  }
+});
+
 test("the archive confirmation lists the split's sessions with their status, then counts the rest (#2051)", async () => {
   const statuses: Array<[string, Partial<SessionView>]> = [
     ["Fix the invoice rounding bug", { status: "running" }],

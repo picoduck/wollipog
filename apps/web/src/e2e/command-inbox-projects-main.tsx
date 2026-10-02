@@ -95,6 +95,11 @@ let sessionLookupFailed = false;
 const PAIRING_REQUIRED = FIXTURE_QUERY.get("pairingRequired") === "1";
 /** `?unarchiveRestart=1` advertises the control plane's one preflighted Unarchive and Restart. */
 const UNARCHIVE_RESTART = FIXTURE_QUERY.get("unarchiveRestart") === "1";
+/** `?archiveStop=failed` or `?archiveStop=pending`: every archive reports its sessions' stops as
+ * failed or still running, as the control plane does for Archive and Stop (#2333). */
+const ARCHIVE_STOP_STATUS = FIXTURE_QUERY.get("archiveStop") === "failed" ? "stop_failed" as const
+  : FIXTURE_QUERY.get("archiveStop") === "pending" ? "stop_pending" as const
+    : undefined;
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
 /** The `switch-account` scenario's machine (#2149): `default`, `removed` (the session's account was
  * removed from the machine), `none` (no other account), `auth` (blocked on authentication) or
@@ -2147,6 +2152,7 @@ const client = {
     const changedSessions = model.sessions.filter((candidate) => archivedSessionIds.includes(candidate.id));
     for (const value of changedSessions) {
       value.archived = true;
+      if (ARCHIVE_STOP_STATUS) value.archiveStatus = ARCHIVE_STOP_STATUS;
       value.updatedAt += 1;
     }
     owningProject.unarchivedSessionCount = 0;
@@ -2159,13 +2165,19 @@ const client = {
     return {
       project: structuredClone(owningProject),
       sessions: structuredClone(model.sessions.filter((candidate) => candidate.projectId === projectId)),
-      archivedSessionIds,
+      ...(ARCHIVE_STOP_STATUS === "stop_failed" ? { archivedSessionIds: [], failedSessionIds: archivedSessionIds }
+        : ARCHIVE_STOP_STATUS === "stop_pending" ? { archivedSessionIds: [], pendingSessionIds: archivedSessionIds }
+          : { archivedSessionIds }),
     };
   },
   setArchived: async (id: string, archived: boolean) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
     value.archived = archived;
+    if (ARCHIVE_STOP_STATUS) {
+      if (archived) value.archiveStatus = ARCHIVE_STOP_STATUS;
+      else delete value.archiveStatus;
+    }
     value.updatedAt += 1;
     const owningProject = value.projectId ? model.projects.find((candidate) => candidate.id === value.projectId) : undefined;
     if (owningProject) {

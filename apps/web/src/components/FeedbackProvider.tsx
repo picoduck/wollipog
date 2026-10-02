@@ -148,10 +148,16 @@ interface ToastEntry extends ToastOptions {
   actionBusy?: boolean;
 }
 
+/** An Undo toast's tone. A change that went through is a success; one with a caveat, such as an
+ * archive whose stop failed or is still running, is not (#2333). A warning stays until dismissed. */
+export type UndoTone = "success" | "info" | "warning";
+
+export type ShowUndo = (message: string, undo: () => void | Promise<void>, tone?: UndoTone) => number;
+
 interface FeedbackContextValue {
   confirm: (options: ConfirmationOptions) => Promise<boolean>;
   showToast: (message: string, options?: ToastOptions) => number;
-  showUndo: (message: string, undo: () => void | Promise<void>) => number;
+  showUndo: ShowUndo;
   dismissToast: (id: number) => void;
 }
 
@@ -242,11 +248,12 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     return id;
   }, [armToastTimer]);
 
-  const showUndo = useCallback((message: string, undo: () => void | Promise<void>) => (
+  const showUndo = useCallback((message: string, undo: () => void | Promise<void>, tone: UndoTone = "success") => (
     showToast(message, {
-      tone: "success",
+      tone,
       action: { label: "Undo", progress: "Undoing the change…", run: undo, failureLabel: "Undo failed", retryLabel: "Retry Undo" },
-      durationMs: 10_000,
+      // A warning stays until dismissed (§13.1), so the problem it reports is not missed (#2333).
+      durationMs: tone === "warning" ? 0 : 10_000,
     })
   ), [showToast]);
 

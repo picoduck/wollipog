@@ -13,6 +13,7 @@ import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAcc
 import {
   archiveAndStopMessage,
   archiveResultMessage,
+  archiveResultTone,
   sessionArchiveActionLabel,
   sessionArchiveRequiresStop,
   sessionUnarchiveRestarts,
@@ -558,7 +559,7 @@ export function SessionHeader({
               const message = nextArchived ? archiveResultMessage(updated.archiveStatus) : "Session restored.";
               showUndo(message, async () => {
                 await api.setArchived(session.id, !nextArchived);
-              });
+              }, nextArchived ? archiveResultTone(updated.archiveStatus) : "success");
             });
           }}
         >

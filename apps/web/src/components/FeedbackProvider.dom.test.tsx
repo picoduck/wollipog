@@ -52,6 +52,8 @@ function Harness() {
         setResult(`${first},${second}`);
       }}>Chain</button>
       <button data-testid="undo" onClick={() => feedback.showUndo("Session archived.", () => setUndoCount((count) => count + 1))}>Archive</button>
+      <button data-testid="undo-info" onClick={() => feedback.showUndo("Archiving. The session is still stopping.", () => setUndoCount((count) => count + 1), "info")}>Archive Pending</button>
+      <button data-testid="undo-warning" onClick={() => feedback.showUndo("The stop failed, so the session may still be running.", () => setUndoCount((count) => count + 1), "warning")}>Archive Failed</button>
       <button data-testid="broken-undo" onClick={() => feedback.showUndo("Session archived.", async () => { throw new Error("runner offline"); })}>Broken undo</button>
       <button data-testid="broken-recovery" onClick={() => feedback.showToast("Partial archive.", { tone: "error", durationMs: 0, action: { label: "Restore sessions", run: async () => { throw new Error("runner offline"); } } })}>Broken recovery</button>
       <button data-testid="toast-burst" onClick={() => {
@@ -255,6 +257,69 @@ test("an info toast dismisses after five seconds unless the stack is hovered, an
     const remaining = [...container.querySelectorAll(".toast")].map((toast) => toast.textContent ?? "");
     assert.equal(remaining.length, 1, "the info toast dismissed once its five seconds ran after the pause");
     assert.match(remaining[0]!, /Partial archive/, "an error persists until dismissed");
+  } finally {
+    Date.now = originalNow;
+    domWindow.setTimeout = realSet;
+    domWindow.clearTimeout = realClear;
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("an Undo toast keeps its tone: a warning persists with Undo, success and info dismiss after ten seconds (#2333)", async () => {
+  const { container, root } = await renderHarness();
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  const timers: Array<{ id: number; at: number; run: () => void }> = [];
+  let nextId = 1;
+  const realSet = domWindow.setTimeout;
+  const realClear = domWindow.clearTimeout;
+  Date.now = () => now;
+  domWindow.setTimeout = ((run: () => void, delay = 0) => {
+    const id = nextId++;
+    timers.push({ id, at: now + delay, run });
+    return id;
+  }) as never;
+  domWindow.clearTimeout = ((id: number) => {
+    const index = timers.findIndex((timer) => timer.id === id);
+    if (index >= 0) timers.splice(index, 1);
+  }) as never;
+  const advance = async (ms: number) => {
+    now += ms;
+    for (const timer of [...timers].filter((candidate) => candidate.at <= now)) {
+      timers.splice(timers.indexOf(timer), 1);
+      await act(async () => { timer.run(); });
+    }
+  };
+  const toastFor = (message: RegExp) => [...container.querySelectorAll<HTMLElement>(".toast")]
+    .find((toast) => message.test(toast.textContent ?? ""));
+  try {
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="undo-warning"]')!.click(); });
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="undo-info"]')!.click(); });
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="undo"]')!.click(); });
+    const warning = toastFor(/stop failed/)!;
+    assert.ok(warning.classList.contains("t-warning"), "a failed stop is a warning");
+    assert.ok(warning.querySelector(".toast-icon svg")?.classList.contains("lucide-triangle-alert"), "with the warning icon");
+    assert.equal(warning.getAttribute("role"), "status");
+    assert.match(warning.textContent ?? "", /Undo/);
+    const info = toastFor(/still stopping/)!;
+    assert.ok(info.classList.contains("t-info"), "a stop still running is not a success");
+    assert.ok(info.querySelector(".toast-icon svg")?.classList.contains("lucide-info"));
+    assert.match(info.textContent ?? "", /Undo/);
+    const success = toastFor(/^Session archived/)!;
+    assert.ok(success.classList.contains("t-success"), "a plain Undo stays a success");
+    assert.ok(success.querySelector(".toast-icon svg")?.classList.contains("lucide-circle-check"));
+
+    await advance(9_999);
+    assert.equal(container.querySelectorAll(".toast").length, 3, "nothing dismisses before ten seconds");
+    await advance(1);
+    const remaining = [...container.querySelectorAll(".toast")].map((toast) => toast.textContent ?? "");
+    assert.equal(remaining.length, 1, "the success and info toasts dismissed at ten seconds");
+    assert.match(remaining[0]!, /stop failed/);
+    await advance(10 * 60_000);
+    assert.equal(container.querySelectorAll(".toast").length, 1, "the warning stays until dismissed");
+    await act(async () => { toastFor(/stop failed/)!.querySelector<HTMLButtonElement>(".btn")!.click(); });
+    assert.equal(container.querySelector('[data-testid="undo-count"]')?.textContent, "1", "its Undo still runs");
   } finally {
     Date.now = originalNow;
     domWindow.setTimeout = realSet;

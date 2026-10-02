@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { archiveProjectWithFeedback, projectArchiveMessage, projectArchiveResultMessage } from "./project-actions.js";
+import {
+  archiveProjectWithFeedback,
+  projectArchiveMessage,
+  projectArchiveResultMessage,
+  projectArchiveResultTone,
+} from "./project-actions.js";
 
 test("durable Project archive offers exact undo only for sessions changed by the server", async () => {
   const restored: Array<[string, boolean]> = [];
+  const tones: unknown[] = [];
   let undo: (() => void | Promise<void>) | undefined;
   const count = await archiveProjectWithFeedback({
     projectId: "p1",
@@ -13,9 +19,10 @@ test("durable Project archive offers exact undo only for sessions changed by the
       setArchived: async (id, archived) => { restored.push([id, archived]); return {} as never; },
     },
     showToast: () => -1,
-    showUndo: (_message, action) => { undo = action; return 1; },
+    showUndo: (_message, action, tone) => { undo = action; tones.push(tone); return 1; },
   });
   assert.equal(count, 2);
+  assert.deepEqual(tones, ["success"]);
   await undo?.();
   assert.deepEqual(restored, [["a", false], ["b", false]]);
 });
@@ -23,6 +30,7 @@ test("durable Project archive offers exact undo only for sessions changed by the
 test("Project archive undo includes sessions whose stops are still pending", async () => {
   const restored: Array<[string, boolean]> = [];
   const messages: string[] = [];
+  const tones: unknown[] = [];
   let undo: (() => void | Promise<void>) | undefined;
   const count = await archiveProjectWithFeedback({
     projectId: "p1",
@@ -34,10 +42,11 @@ test("Project archive undo includes sessions whose stops are still pending", asy
       setArchived: async (id, archived) => { restored.push([id, archived]); return {} as never; },
     },
     showToast: () => -1,
-    showUndo: (message, action) => { messages.push(message); undo = action; return 1; },
+    showUndo: (message, action, tone) => { messages.push(message); tones.push(tone); undo = action; return 1; },
   });
   assert.equal(count, 2);
   assert.equal(messages[0], "Archiving from Alpha. 1 session is still stopping.");
+  assert.deepEqual(tones, ["info"], "a stop still running is not presented as a success (#2333)");
   await undo?.();
   assert.deepEqual(restored, [["done", false], ["running", false]]);
 });
@@ -45,6 +54,7 @@ test("Project archive undo includes sessions whose stops are still pending", asy
 test("Project archive reports a failed stop as possibly still running, with Retry Stop", async () => {
   const restored: Array<[string, boolean]> = [];
   const messages: string[] = [];
+  const tones: unknown[] = [];
   let undo: (() => void | Promise<void>) | undefined;
   const count = await archiveProjectWithFeedback({
     projectId: "p1",
@@ -59,10 +69,11 @@ test("Project archive reports a failed stop as possibly still running, with Retr
       setArchived: async (id, archived) => { restored.push([id, archived]); return {} as never; },
     },
     showToast: () => -1,
-    showUndo: (message, action) => { messages.push(message); undo = action; return 1; },
+    showUndo: (message, action, tone) => { messages.push(message); tones.push(tone); undo = action; return 1; },
   });
   assert.equal(count, 2);
   assert.equal(messages[0], "The stop failed for 1 session in Alpha, so it may still be running. Use Retry Stop to try again.");
+  assert.deepEqual(tones, ["warning"], "a failed stop is a warning that stays until dismissed (#2333)");
   await undo?.();
   assert.deepEqual(restored, [["done", false], ["failed-stop", false]]);
 });
@@ -94,6 +105,13 @@ test("Project archive results follow the single-session wording in plural forms"
   assert.equal(result(0, 0, 2), "The stop failed for 2 sessions in Alpha, so they may still be running. Use Retry Stop to try again.");
   // A failed stop is the outcome to act on, so it outranks sessions that are still stopping.
   assert.equal(result(1, 2, 1), "The stop failed for 1 session in Alpha, so it may still be running. Use Retry Stop to try again.");
+});
+
+test("Project archive result tones follow the message's precedence (#2333)", () => {
+  assert.equal(projectArchiveResultTone({ pending: 0, failed: 0 }), "success");
+  assert.equal(projectArchiveResultTone({ pending: 2, failed: 0 }), "info");
+  assert.equal(projectArchiveResultTone({ pending: 0, failed: 1 }), "warning");
+  assert.equal(projectArchiveResultTone({ pending: 2, failed: 1 }), "warning");
 });
 
 test("Project Archive and Stop confirmations say queued messages are canceled, with no Snooze sentence", () => {

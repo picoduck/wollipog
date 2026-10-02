@@ -1,5 +1,6 @@
 import type { ApiClient } from "./api.js";
-import { setArchivedForSessions } from "./archive-actions.js";
+import { archiveResultTone, setArchivedForSessions } from "./archive-actions.js";
+import type { ShowUndo, UndoTone } from "./components/FeedbackProvider.js";
 
 type ArchiveApi = Pick<ApiClient, "archiveProjectSessions" | "setArchived">;
 
@@ -48,6 +49,12 @@ export function projectArchiveResultMessage(
   return `${sessions(counts.archived)} archived from ${projectName}.`;
 }
 
+/** The tone of projectArchiveResultMessage()'s toast, by the same precedence: any failed stop makes
+ * it a warning, any session still stopping keeps it from reading as a success (#2333). */
+export function projectArchiveResultTone(counts: { pending: number; failed: number }): UndoTone {
+  return archiveResultTone(counts.failed > 0 ? "stop_failed" : counts.pending > 0 ? "stop_pending" : undefined);
+}
+
 /** An older server archives a Project's sessions without naming them, so there is nothing exact to undo. */
 export function projectArchiveWithoutUndoMessage(projectName: string): string {
   return `Sessions archived from ${projectName}. Undo isn't available for this archive.`;
@@ -58,7 +65,7 @@ export async function archiveProjectWithFeedback(input: {
   projectName: string;
   api: ArchiveApi;
   showToast: (message: string) => number;
-  showUndo: (message: string, undo: () => void | Promise<void>) => number;
+  showUndo: ShowUndo;
 }): Promise<number | null> {
   const outcome = await input.api.archiveProjectSessions(input.projectId);
   const archivedIds = outcome.archivedSessionIds;
@@ -69,18 +76,16 @@ export async function archiveProjectWithFeedback(input: {
     return null;
   }
   const affectedIds = [...new Set([...archivedIds, ...pendingIds, ...failedIds])];
+  const counts = { archived: archivedIds.length, pending: pendingIds.length, failed: failedIds.length };
   input.showUndo(
-    projectArchiveResultMessage(input.projectName, {
-      archived: archivedIds.length,
-      pending: pendingIds.length,
-      failed: failedIds.length,
-    }),
+    projectArchiveResultMessage(input.projectName, counts),
     async () => {
       const failures = await setArchivedForSessions(affectedIds, false, input.api.setArchived);
       if (failures > 0) {
         throw new Error(`${failures} session${failures === 1 ? "" : "s"} could not be restored`);
       }
     },
+    projectArchiveResultTone(counts),
   );
   return affectedIds.length;
 }

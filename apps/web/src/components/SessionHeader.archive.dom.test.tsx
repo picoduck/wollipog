@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { FeedbackContext } from "./FeedbackProvider.js";
+import { FeedbackContext, FeedbackProvider } from "./FeedbackProvider.js";
 import { SessionHeader } from "./SessionHeader.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -279,6 +279,80 @@ test("archive Stop Failed does not leave an empty Runtime section", async () => 
   await act(async () => root.unmount());
   container.remove();
 });
+
+for (const outcome of [
+  { action: "Archive", archiveStatus: undefined, message: "Session archived.", tone: "t-success", icon: "lucide-circle-check" },
+  { action: "Archive", archiveStatus: "stop_pending" as const, message: "Archiving. The session is still stopping.", tone: "t-info", icon: "lucide-info" },
+  { action: "Archive", archiveStatus: "stop_failed" as const, message: "The stop failed, so the session may still be running.", tone: "t-warning", icon: "lucide-triangle-alert" },
+  { action: "Retry Stop", archiveStatus: "stop_failed" as const, message: "The stop failed, so the session may still be running.", tone: "t-warning", icon: "lucide-triangle-alert" },
+]) {
+  test(`the session page's ${outcome.action} shows a ${outcome.tone} toast with Undo for ${outcome.archiveStatus ?? "a finished archive"} (#2333)`, async () => {
+    const calls: string[] = [];
+    const session = {
+      id: "session-archive-tone",
+      runnerId: "runner-1",
+      title: "Archive Tone",
+      status: "idle",
+      archived: false,
+      ...(outcome.action === "Retry Stop" ? { archiveStatus: "stop_failed" as const } : {}),
+    } as SessionView;
+    const client = {
+      ...api,
+      setArchived: async (_id: string, value: boolean) => {
+        calls.push(`archive:${value}`);
+        return { ...session, archived: value, archiveStatus: value ? outcome.archiveStatus : undefined };
+      },
+      retryStop: async () => {
+        calls.push("retry");
+        return { ...session, archived: true, archiveStatus: outcome.archiveStatus };
+      },
+    } as ApiClient;
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}>
+          <FeedbackProvider>
+            <SessionHeader
+              session={session}
+              onBack={() => undefined}
+              runnerOnline
+              runnerProtocolVersion={85}
+              providerLogoutSupported={false}
+              stopBeforeArchiveSupported={false}
+              exportReady={false}
+            />
+          </FeedbackProvider>
+        </ApiProvider>,
+      );
+    });
+    await act(async () => { button(page(), "More Actions").click(); await tick(); });
+    await act(async () => { button(page(), outcome.action === "Retry Stop" ? "Retry Stop…" : "Archive").click(); await tick(); });
+    if (outcome.action === "Retry Stop") {
+      const dialog = page().querySelector<HTMLElement>('[role="dialog"]')!;
+      const confirmRetry = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+        .find((candidate) => candidate.textContent?.trim() === "Retry Stop")!;
+      await act(async () => { confirmRetry.click(); await tick(); await tick(); });
+    }
+    await act(async () => { await tick(); });
+    assert.deepEqual(calls, [outcome.action === "Retry Stop" ? "retry" : "archive:true"]);
+
+    const toasts = [...page().querySelectorAll<HTMLElement>(".toast")];
+    assert.equal(toasts.length, 1);
+    const toast = toasts[0]!;
+    assert.equal(toast.querySelector(".toast-message")?.textContent, outcome.message);
+    assert.ok(toast.classList.contains(outcome.tone), `${outcome.tone}, not ${toast.className}`);
+    assert.ok(toast.querySelector(".toast-icon svg")?.classList.contains(outcome.icon), outcome.icon);
+    const undo = [...toast.querySelectorAll<HTMLButtonElement>("button")]
+      .find((candidate) => candidate.textContent?.trim() === "Undo");
+    assert.ok(undo, "Undo stays available");
+    await act(async () => { undo.click(); await tick(); await tick(); });
+    assert.equal(calls.at(-1), "archive:false");
+    await act(async () => root.unmount());
+    container.remove();
+  });
+}
 
 test("an archived session header offers one Unarchive and Restart without Undo or a separate Restart", async () => {
   const restores: string[] = [];

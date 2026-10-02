@@ -1,5 +1,6 @@
 import { archiveRequiresStop, type SessionView } from "@wollipog/protocol";
 import { quotedSessionTitle } from "./session-confirmation-copy.js";
+import type { UndoTone } from "./components/FeedbackProvider.js";
 
 type ArchiveActionSession = Pick<SessionView, "archiveStatus" | "archived" | "status"> &
   Partial<Pick<SessionView, "stopOperation">>;
@@ -32,6 +33,14 @@ export function archiveResultMessage(archiveStatus: SessionView["archiveStatus"]
   if (archiveStatus === "stop_pending") return "Archiving. The session is still stopping.";
   if (archiveStatus === "stop_failed") return "The stop failed, so the session may still be running.";
   return "Session archived.";
+}
+
+/** The tone of archiveResultMessage()'s toast (#2333). A stop that failed may have left the session
+ * running, so it is a warning that stays until dismissed; one still stopping is not yet a success. */
+export function archiveResultTone(archiveStatus: SessionView["archiveStatus"]): UndoTone {
+  if (archiveStatus === "stop_failed") return "warning";
+  if (archiveStatus === "stop_pending") return "info";
+  return "success";
 }
 
 export function sessionArchiveRequiresStop(

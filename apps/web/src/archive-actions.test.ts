@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionStatus } from "@wollipog/protocol";
 import {
+  archiveResultTone,
   archiveSessionsWithCompensation,
   sessionArchiveActionLabel,
   sessionArchiveRequiresStop,
@@ -60,6 +61,12 @@ test("idempotent restore attempts every id and returns the exact failure count",
   });
   assert.equal(failures, 2);
   assert.deepEqual(attempted, ["a", "b", "c"]);
+});
+
+test("an archive result is a success only when nothing is left stopping or failed (#2333)", () => {
+  assert.equal(archiveResultTone(undefined), "success");
+  assert.equal(archiveResultTone("stop_pending"), "info");
+  assert.equal(archiveResultTone("stop_failed"), "warning");
 });
 
 test("archive action labels disclose when archiving will stop runtime work", () => {
