@@ -16191,12 +16191,18 @@ body.shell-dock-dragging * {
   color: var(--text);
   font-size: var(--text-base);
 }
+/* The trigger is a button, so the base reset's weight rule for fields misses it and it would take
+   its container's weight and line (a filter's 650, a wrapping label's 500 on 16px). It sets the
+   §8.1 control type itself: --type-body's weight and line. Longhands, so a container's
+   tabular-nums and family still reach the value. */
 .ui-select-trigger {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   white-space: nowrap;
   cursor: pointer;
+  font-weight: var(--weight-normal);
+  line-height: 20px;
 }
 /* Hover steps the edge up from --control-outline; --border-strong would have faded it. */
 @media (hover: hover) {
