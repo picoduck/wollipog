@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { parse, quote } from "shell-quote";
 import {
   commandTargetsManagedWorktree,
+  commandTargetsGuardState,
+  GUARD_STATE_REFUSAL,
   MANAGED_WORKTREE_REFUSAL,
   MANAGED_WORKTREE_UNRESOLVED_REFUSAL,
 } from "./managed-worktree-protection.js";
@@ -50,4 +54,33 @@ test("escaped backslashes retain POSIX filename meaning and quoted string argume
   assert.equal(commandTargetsManagedWorktree(command, protectedPath, protections), null);
   const arguments_ = [protectedPath, String.raw`back\slash`, "${TARGET:-${FALLBACK}}", "$_name", "$'quoted'", "a;b", "a b"];
   assert.deepEqual(parse(quote(arguments_)), arguments_);
+});
+
+test("ANSI-C NUL escapes truncate the quoted fragment without creating internal references", () => {
+  const directory = join(homedir(), ".wollipog-data", "parser-compatibility");
+  for (const suffix of [
+    String.raw`$'\x00PWD\x00'`,
+    String.raw`$'\x00HOME\x00'`,
+    String.raw`$'\0'`,
+    String.raw`$'\000'`,
+    String.raw`$'\u0000'`,
+    String.raw`$'\U00000000'`,
+    String.raw`$'\c@'`,
+  ]) {
+    const command = `rm -rf ${protectedPath}${suffix}`;
+    assert.deepEqual(parse(command), ["rm", "-rf", protectedPath], suffix);
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protections),
+      MANAGED_WORKTREE_REFUSAL, suffix);
+    assert.equal(commandTargetsGuardState(`rm -rf ~/.wollipog-data/parser-compatibility${suffix}`,
+      protectedPath, directory), GUARD_STATE_REFUSAL, suffix);
+  }
+});
+
+test("ANSI-C Unicode and octal escapes resolve to the protected target", () => {
+  for (const escape of [String.raw`\u0061`, String.raw`\U00000061`, String.raw`\141`]) {
+    const command = `rm -rf $'/runner/worktrees/session/requested/man${escape}ged'`;
+    assert.deepEqual(parse(command), ["rm", "-rf", protectedPath], escape);
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protections),
+      MANAGED_WORKTREE_REFUSAL, escape);
+  }
 });
