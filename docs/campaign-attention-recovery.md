@@ -26,6 +26,13 @@ cleared event and consumption of every overlapping human baseline commit atomica
 request identities remain intact until their resolved events have been published. This prevents a
 restart from manufacturing a second cleared event from the older, larger human-token set.
 
+Consumed human baselines carry a durable `humanBaselineConsumed` marker. If an immediate
+publication observes a fresh human blocker group while a batch remains open, it rearms only those
+spent baselines with the current count and occurrence hashes. Initially empty baselines are not
+advanced: they may still owe an urgent notification for a deferred question. Original Orchestrator
+tokens and capture timestamps are preserved. A later deferred clear therefore retains its distinct
+wakeup identity across restart and replay, without requiring a separate provider turn per group.
+
 Recovery creates events, not permission to execute them. Existing continuation admission still
 checks current policy/ownership, human blockers, Stop, archive, completion, single-flight and
 ambiguous-result state. It does not answer a question, grant an approval or replay an uncertain
@@ -48,6 +55,11 @@ The bounded `campaign_attention_checkpoints_recovered` diagnostic reports entry 
 recovery correlation ID and affected campaign count, without request content. If a campaign has
 not resumed, inspect its checkpoint row, continuation events/cursor, current human blockers and
 latest continuation state; do not manually replay an ambiguous accepted command.
+
+`campaign_human_attention_rearmed` identifies a fresh group retained by an open batch. It records
+the publication entry point, campaign, correlation ID and checkpoint count, not question contents.
+Together these signals answer whether a fresh group was retained, recovered after restart, and
+published as a distinct event; continuation state explains why an event did or did not resume work.
 
 `registration-reconciliation.test.ts` tests real SIGKILL after session commits, during a partial
 event publication and after event commit but before checkpoint retirement. It also verifies current

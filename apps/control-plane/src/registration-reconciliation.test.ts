@@ -532,6 +532,102 @@ test("an immediate publication consumes human blocker transitions deferred by a 
   } finally { db.close(); }
 });
 
+test("successive human blocker groups retain distinct wakeups inside one runtime batch", async () => {
+  const { db, svc, snapshots } = fixture(20);
+  try {
+    db.setPendingApproval("child-0", question("first-0"));
+    db.setPendingApproval("child-10", question("first-10"));
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", snapshots[0]!, batch);
+    svc.applySessionRuntimeUpdate("runner", snapshots[10]!);
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: question("second") });
+    svc.applySessionRuntimeUpdate("runner", snapshots[0]!, batch);
+    await svc.flushRunnerAttention("runner", () => true);
+    const clears = db.raw().prepare("SELECT event_id FROM orchestrator_campaign_events WHERE kind='human_blockers_cleared'").all();
+    assert.equal(clears.length, 2);
+    assert.notEqual(clears[0]?.event_id, clears[1]?.event_id);
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE kind='human_blockers_cleared'").get()?.n, 2);
+  } finally { db.close(); }
+});
+
+for (const restartBeforeClear of [true, false]) {
+  test(`successive blocker identity survives restart ${restartBeforeClear ? "before" : "after"} the deferred clear`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "successive-attention-"));
+    let db: ControlPlaneDb | undefined;
+    try {
+      const file = join(root, "control-plane.db");
+      const initial = fixture(20, file);
+      db = initial.db;
+      db.setPendingApproval("child-0", question("first-0"));
+      db.setPendingApproval("child-10", question("first-10"));
+      const batch = initial.svc.beginRunnerAttentionBatch("runner");
+      initial.svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, batch);
+      initial.svc.applySessionRuntimeUpdate("runner", initial.snapshots[10]!);
+      initial.svc.applySessionRuntimeUpdate("runner", { ...initial.snapshots[0]!, pendingApproval: question("fresh") });
+      const fresh = db.campaignAttentionCheckpoint("runner", "campaign-0");
+      assert.equal(fresh?.pendingRequests.human, 1);
+      assert.doesNotMatch(JSON.stringify(fresh), /Private|fresh|first-/, "only occurrence hashes are retained");
+      assert.match(initial.logs.join("\n"), /campaign_human_attention_rearmed/);
+      assert.doesNotMatch(initial.logs.join("\n"), /Private|fresh|first-/);
+      if (!restartBeforeClear) initial.svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, batch);
+      db.close();
+      db = ControlPlaneDb.open(file);
+      db.settleStartupState();
+      db.registerRunner({ runnerId: "runner", hostname: "synthetic", os: "linux", version: "test",
+        agents: [], workspaces: [] }, Date.now(), PROTOCOL_VERSION);
+      const hub = new Hub(db);
+      let sent = 0;
+      hub.isRunnerOnline = () => true;
+      hub.sendToRunner = () => { sent++; return true; };
+      const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+      const replacement = svc.beginRunnerAttentionBatch("runner");
+      if (restartBeforeClear) svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, replacement);
+      await svc.flushRunnerAttention("runner", () => false);
+      assert.equal(db.deferredCampaignAttentionIds("runner").length, 1, "cancelled socket retains the fresh group");
+      svc.beginRunnerAttentionBatch("runner");
+      await svc.flushRunnerAttention("runner", () => true);
+      const events = db.raw().prepare("SELECT event_id FROM orchestrator_campaign_events WHERE kind='human_blockers_cleared'").all();
+      assert.equal(events.length, 2);
+      assert.notEqual(events[0]?.event_id, events[1]?.event_id);
+      const sequence = db.raw().prepare("SELECT seq FROM sqlite_sequence WHERE name='orchestrator_campaign_events'").get()?.seq;
+      svc.beginRunnerAttentionBatch("runner");
+      await svc.flushRunnerAttention("runner", () => true);
+      assert.equal(db.raw().prepare("SELECT seq FROM sqlite_sequence WHERE name='orchestrator_campaign_events'").get()?.seq, sequence);
+      db.updateSessionStatus("campaign-0", "idle", Date.now());
+      svc.retryDuePrompts(Date.now() + 3_000);
+      assert.equal(sent, 1, "eligible idle parent continues without another user prompt");
+      svc.retryDuePrompts(Date.now() + 3_001);
+      assert.equal(sent, 1, "coalesced continuation is single-flight");
+    } finally { db?.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+test("rearming overlapping checkpoints preserves orchestrator baselines and initial notification baselines", () => {
+  const { db } = fixture(10);
+  try {
+    db.registerRunner({ runnerId: "other", hostname: "synthetic", os: "linux", version: "test",
+      agents: [], workspaces: [] }, 1, PROTOCOL_VERSION);
+    const before = db.getSession("campaign-0")!;
+    const pending = { human: 2, orchestrator: 1, humanRequestTokens: ["old-0", "old-1"], orchestratorRequestTokens: ["owned"] };
+    for (const runnerId of ["runner", "other"]) db.retainCampaignAttentionCheckpoint(runnerId, {
+      ...before, orchestratorCampaign: { ...before.orchestratorCampaign!, pendingRequests: pending },
+    });
+    db.recordCampaignContinuationEvent({ eventId: "first-clear", campaignSessionId: before.id, kind: "human_blockers_cleared", now: 3 });
+    db.registerRunner({ runnerId: "initially-empty", hostname: "synthetic", os: "linux", version: "test",
+      agents: [], workspaces: [] }, 1, PROTOCOL_VERSION);
+    db.retainCampaignAttentionCheckpoint("initially-empty", before);
+    const fresh = { ...pending, human: 1, humanRequestTokens: ["fresh-hash"] };
+    assert.equal(db.rearmCampaignHumanAttention(before.id, fresh), 2);
+    for (const runnerId of ["runner", "other"]) {
+      assert.deepEqual(db.campaignAttentionCheckpoint(runnerId, before.id)?.pendingRequests, fresh);
+      assert.equal(db.campaignAttentionCheckpoint(runnerId, before.id)?.capturedAt, before.updatedAt);
+    }
+    assert.equal(db.campaignAttentionCheckpoint("initially-empty", before.id)?.pendingRequests.human, 0);
+    assert.equal(db.rearmCampaignHumanAttention(before.id, fresh), 0, "repeated publication does not rearm an unconsumed baseline");
+  } finally { db.close(); }
+});
+
 test("a campaign deleted during reconciliation cannot receive stale attention publications", async () => {
   const { db, svc, snapshots } = fixture(100);
   try {

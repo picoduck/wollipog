@@ -15107,7 +15107,7 @@ export class ControlPlaneDb {
       // two can produce a second event from an older, overlapping batch's different token set.
       if (Number(result.changes) === 1 && input.kind === "human_blockers_cleared") {
         this.stmt(`UPDATE orchestrator_campaign_attention_checkpoints
-          SET pending_requests=json_set(pending_requests,'$.human',0,'$.humanRequestTokens',json('[]'))
+          SET pending_requests=json_set(pending_requests,'$.human',0,'$.humanRequestTokens',json('[]'),'$.humanBaselineConsumed',json('true'))
           WHERE campaign_session_id=? AND json_extract(pending_requests,'$.human')>0`)
           .run(input.campaignSessionId);
       }
@@ -15126,6 +15126,17 @@ export class ControlPlaneDb {
       .run(runnerId, before.id, JSON.stringify(pending ?? {
         human: 0, orchestrator: 0, humanRequestTokens: [], orchestratorRequestTokens: [],
       }), before.updatedAt);
+  }
+
+  /** A published fresh human group replaces only spent human baselines. Keep the original
+   * orchestrator tokens and capture time: their unresolved transition still belongs to this batch.
+   * Persist before a later deferred clear so restart can replay the same occurrence identity. */
+  rearmCampaignHumanAttention(campaignId: string, pending: NonNullable<OrchestratorCampaignProjection["pendingRequests"]>): number {
+    if (pending.human === 0) return 0;
+    return Number(this.stmt(`UPDATE orchestrator_campaign_attention_checkpoints
+      SET pending_requests=json_remove(json_set(pending_requests,'$.human',?,'$.humanRequestTokens',json(?)),'$.humanBaselineConsumed')
+      WHERE campaign_session_id=? AND json_extract(pending_requests,'$.humanBaselineConsumed')=1`)
+      .run(pending.human, JSON.stringify(pending.humanRequestTokens ?? []), campaignId).changes);
   }
 
   campaignAttentionCheckpoint(runnerId: string, campaignId: string): {

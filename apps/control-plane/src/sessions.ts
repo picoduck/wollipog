@@ -6823,6 +6823,14 @@ export class SessionsService {
       }
     }
     const after = this.db.campaignProjection(before.id);
+    if (after?.pendingRequests && after.pendingRequests.human > 0) {
+      const rearmed = this.db.rearmCampaignHumanAttention(before.id, after.pendingRequests);
+      if (rearmed > 0) this.log.info(JSON.stringify({ event: "campaign_human_attention_rearmed",
+        entryPoint: "campaign_attention_publication", campaignId: before.id,
+        publicationId: randomUUID(), checkpointCount: rearmed,
+      }));
+      // Flush reads the durable human baseline; do not advance notification before-views.
+    }
     const previousOrchestratorTokens = new Set(
       before.orchestratorCampaign?.pendingRequests?.orchestratorRequestTokens ?? [],
     );
