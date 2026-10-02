@@ -400,14 +400,16 @@ function CampaignWorkList({
 
   return (
     <section className="campaign-work" aria-labelledby={headingId}>
-      <h3 id={headingId} className="campaign-status-heading">Work Items</h3>
+      <div className="campaign-work-head">
+        <h3 id={headingId} className="campaign-status-heading">Work Items</h3>
+        <Select label="Sort" value={filters.sort} options={CAMPAIGN_SORT_OPTIONS}
+          onChange={(sort) => onFiltersChange({ ...filters, sort })} />
+      </div>
       <div className="campaign-work-filters">
         <Select label="Origin" value={filters.origin} options={CAMPAIGN_ORIGIN_FILTER_OPTIONS}
           onChange={(origin) => onFiltersChange({ ...filters, origin })} />
         <Select label="State" value={filters.state} options={CAMPAIGN_STATE_FILTER_OPTIONS}
           onChange={(state) => onFiltersChange({ ...filters, state })} />
-        <Select label="Sort" value={filters.sort} options={CAMPAIGN_SORT_OPTIONS}
-          onChange={(sort) => onFiltersChange({ ...filters, sort })} />
       </div>
       {body}
     </section>
