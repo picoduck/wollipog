@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 test.use({ reducedMotion: "reduce" });
 
@@ -60,3 +60,60 @@ test("Orchestrator settings retain drifted values with actionable compatibility 
   await expect(page.getByRole("alert")).toContainText("Choose Automatic or another advertised combination");
   await page.screenshot({ path: testInfo.outputPath("orchestrator-settings-drift.png"), fullPage: true });
 });
+
+/** Every rendered line of text in `box` lies inside its border box, and no ancestor in it clips. */
+async function expectTextFits(box: Locator, what: string) {
+  const misfits = await box.evaluate((element) => {
+    const outer = element.getBoundingClientRect();
+    const found: string[] = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node.textContent?.trim();
+      if (!text) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      for (const rect of range.getClientRects()) {
+        if (rect.width === 0) continue;
+        if (rect.left < outer.left - 0.5 || rect.right > outer.right + 0.5) {
+          found.push(`"${text}" spans ${rect.left.toFixed(1)}-${rect.right.toFixed(1)} in ${outer.left.toFixed(1)}-${outer.right.toFixed(1)}`);
+        }
+      }
+      // An ellipsis keeps the glyphs it shows inside the box while hiding the rest of the words.
+      for (let parent = node.parentElement; parent && element.contains(parent); parent = parent.parentElement) {
+        if (getComputedStyle(parent).overflowX !== "visible" && parent.scrollWidth > parent.clientWidth) {
+          found.push(`"${text}" is clipped by ${parent.className || parent.tagName}`);
+        }
+      }
+    }
+    return found;
+  });
+  expect(misfits, what).toEqual([]);
+}
+
+// #2413: as three equal pills in the panel's 260px value column, "Questions and Approvals" drew over
+// its neighbour at every width. Each option is measured in the listbox and, once chosen, in the trigger.
+for (const theme of ["dark", "light"]) {
+  for (const width of [390, 1100, 1440]) {
+    test(`every Descendant Requests option fits its own box at ${width}px in ${theme}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(`/settings-rows-e2e.html?theme=${theme}&section=orchestrator`);
+      await expect(page.getByRole("heading", { name: "Decision Delegation", exact: true })).toBeVisible();
+      const trigger = page.getByRole("button", { name: /^Descendant Requests:/ });
+      for (const label of ["Human", "Questions", "Questions and Approvals"]) {
+        await trigger.click();
+        const listbox = page.getByRole("listbox", { name: "Descendant Requests" });
+        await expect(listbox).toBeVisible();
+        const options = listbox.getByRole("option");
+        await expect(options).toHaveCount(3);
+        for (const option of await options.all()) {
+          await expectTextFits(option, `${await option.getAttribute("aria-labelledby")} at ${width}px in ${theme}`);
+        }
+        await listbox.getByRole("option", { name: label, exact: true }).click();
+        await expect(listbox).toBeHidden();
+        await expect(trigger).toHaveAccessibleName(`Descendant Requests: ${label}`);
+        await expect(trigger.locator(".ui-select-value")).toHaveText(label);
+        await expectTextFits(trigger, `the ${label} trigger at ${width}px in ${theme}`);
+      }
+    });
+  }
+}

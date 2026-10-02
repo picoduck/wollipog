@@ -19,6 +19,7 @@ import {
 } from "../session-preset-defaults.js";
 import { SettingsGroup } from "./SettingsView.js";
 import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
+import type { SelectOption } from "./ui/ChoiceControls.js";
 import { SegmentedRow, SelectRow, StaticRow } from "./ui/SettingsRows.js";
 
 const AUTO = "__automatic__";
@@ -29,6 +30,17 @@ const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
   follow_up_issue_publication: "Follow-Up Issue Publication",
   ui_evidence_approval: "UI Evidence Approval",
 };
+/*
+ * A listbox rather than pills, by SettingsRows' own split: these options each need a sentence to
+ * choose between, and "Questions and Approvals" is no short label. In the panel's 260px value column
+ * three equal pills are 83px each, so that label drew over its neighbour at every width (#2413).
+ * New Session offers the same choice as a Select.
+ */
+const PARENT_CONTROL_OPTIONS: SelectOption<OrchestratorDefaults["delegation"]["parentControl"]>[] = [
+  { value: "off", label: "Human", description: "Keep descendant questions and ordinary approvals human-owned." },
+  { value: "questions", label: "Questions", description: "Delegate non-secret descendant implementation questions." },
+  { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
+];
 
 function unavailableError(caught: unknown): string {
   return caught instanceof Error && "status" in caught && (caught as Error & { status?: unknown }).status === 404
@@ -424,13 +436,11 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       <p className="settings-group-intro">
         Human ownership is the default. Delegation changes apply only to new campaigns and never grant authority to existing sessions.
       </p>
-      <SegmentedRow
+      <SelectRow
         title="Descendant Requests"
-        options={[
-          { value: "off", label: "Human", description: "Keep descendant questions and ordinary approvals human-owned." },
-          { value: "questions", label: "Questions", description: "Delegate non-secret descendant implementation questions." },
-          { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
-        ]}
+        // The selected option's sentence, as the pills showed it: the row says what the choice does.
+        description={PARENT_CONTROL_OPTIONS.find((option) => option.value === draft.delegation.parentControl)?.description}
+        options={PARENT_CONTROL_OPTIONS}
         value={draft.delegation.parentControl}
         onChange={(value) => {
           draftDirty.current = true;
