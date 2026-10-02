@@ -188,7 +188,7 @@ export function orchestratorPresetPermissionsReason(input: {
     return "Orchestrator is your saved Agent Harness default and selects the Orchestrator preset. Change it in Settings to use ordinary provider permissions.";
   }
   if (!input.controlPlaneSupportsRole) {
-    return "Update the control plane to give an Orchestrator ordinary provider permissions.";
+    return "Update Wollipog to give an Orchestrator ordinary provider permissions.";
   }
   if (!runnerSupportsProtocol(input.runnerProtocolVersion, additiveCapability)) {
     return runnerCapabilityRequirement(

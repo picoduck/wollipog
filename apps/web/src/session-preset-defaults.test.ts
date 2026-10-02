@@ -186,7 +186,9 @@ test("the Orchestrator preset applies only where independent provider permission
   assert.match(orchestratorPresetPermissionsReason({ ...additive, hostExecutionTarget: false }) ?? "", /host execution target/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, nativeTui: true }) ?? "", /Native TUI/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, savedOrchestratorDefault: true }) ?? "", /saved Agent Harness default/);
-  assert.match(orchestratorPresetPermissionsReason({ ...additive, controlPlaneSupportsRole: false }) ?? "", /Update the control plane/);
+  const olderServer = orchestratorPresetPermissionsReason({ ...additive, controlPlaneSupportsRole: false }) ?? "";
+  assert.equal(olderServer, "Update Wollipog to give an Orchestrator ordinary provider permissions.");
+  assert.doesNotMatch(olderServer, /control plane|durable/iu, "docs/design-system.md §17.2 retires both terms");
   assert.equal(
     orchestratorPresetPermissionsReason({ ...additive, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1 }),
     runnerRequirement,

@@ -2282,7 +2282,8 @@ test("Orchestrator is an additive role that keeps the harness's ordinary provide
     await act(async () => { await selectProject(legacyControlPlane.container, project.id); });
     await choosePermissionPreset(legacyControlPlane.container, "Orchestrator");
     const providerPermissions = legacyControlPlane.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
-    assert.match(providerPermissions.textContent!, /Update the control plane/);
+    assert.match(providerPermissions.textContent!, /Update Wollipog to give an Orchestrator ordinary provider permissions\./);
+    assert.doesNotMatch(providerPermissions.textContent!, RETIRED_PROJECT_TERMS);
     await act(async () => { createButton(legacyControlPlane.container).click(); });
     assert.equal(legacyControlPlane.requests[0]?.role, undefined, "older control planes never receive the field");
     assert.equal(legacyControlPlane.requests[0]?.config?.permissionMode, "orchestrator",
@@ -2446,7 +2447,7 @@ test("an installation that offers only the additive role never submits the coupl
   try {
     await act(async () => { await selectProject(legacy.container, project.id); });
     await choosePermissionPreset(legacy.container, "Orchestrator");
-    assert.match(legacy.container.textContent!, /Update the control plane/);
+    assert.match(legacy.container.textContent!, /Update Wollipog to give an Orchestrator ordinary provider permissions\./);
     assert.equal(createButton(legacy.container).disabled, true,
       "the coupled preset this control plane would force is not launchable by this installation");
     assert.equal(legacy.requests.length, 0);
