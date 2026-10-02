@@ -1319,6 +1319,34 @@ test("a continuation's usage report times the continuation, not the turn before 
     event(4, 5_000, { kind: "token_usage", inputTokens: 10, outputTokens: 2 }),
   ]);
   assert.equal(summarizeTimelineTurns(lateReport, new Map()).segments[1]!.finishedAt, 5_000);
+
+  // The same late ordering for a continuation, with and without its file checkpoint.
+  for (const fileCheckpoint of [true, false]) {
+    const late = deriveTimeline([
+      event(1, 0, { kind: "user_message", text: "Start it" }),
+      event(3, 2_000, { kind: "agent_message", text: "Started.", final: true }),
+      event(4, 3_000, { kind: "token_usage", inputTokens: 10, outputTokens: 2 }),
+      event(5, 3_001, { kind: "conversation_checkpoint", turn: 1 }),
+      event(6, 10_000, { kind: "stderr", text: "Runner resumed orphaned background work automatically." }),
+      ...(fileCheckpoint ? [event(7, 10_001, { kind: "checkpoint", turn: 2, tree: "b" } as SessionEventPayload)] : []),
+      event(8, 12_000, { kind: "agent_message", text: "Finished.", final: true }),
+      event(9, 12_001, { kind: "conversation_checkpoint", turn: 2 }),
+      event(10, 14_000, { kind: "token_usage", inputTokens: 20, outputTokens: 4 }),
+    ]);
+    assert.deepEqual(summarizeTimelineTurns(late, new Map()).segments.slice(1).map((segment) => segment.finishedAt),
+      [3_000, 14_000], `late continuation report, file checkpoint ${fileCheckpoint}`);
+  }
+
+  // A tail-first page that starts at the earlier turn's conversation checkpoint, without its prompt.
+  const page = deriveTimeline([
+    event(5, 3_001, { kind: "conversation_checkpoint", turn: 1 }),
+    event(6, 10_000, { kind: "stderr", text: "Runner resumed orphaned background work automatically." }),
+    event(8, 12_000, { kind: "agent_message", text: "Finished.", final: true }),
+    event(9, 14_000, { kind: "token_usage", inputTokens: 20, outputTokens: 4 }),
+    event(10, 14_001, { kind: "conversation_checkpoint", turn: 2 }),
+  ]);
+  const paged = summarizeTimelineTurns(page, new Map()).segments;
+  assert.deepEqual(paged.map((segment) => [segment.turn, segment.finishedAt]), [[1, undefined], [2, 14_000]]);
 });
 
 test("an empty terminal usage report settles a turn that produced nothing else", () => {
