@@ -17,10 +17,18 @@ const log = (record) => console.log(JSON.stringify(record));
 
 // Also serialized into the self-contained source/SEA fixture. Never signals a PID lookup.
 function start(executable, args, milliseconds, input) {
+  const began = process.hrtime.bigint();
+  const elapsed = () => Number(process.hrtime.bigint() - began) / 1e6;
+  const fileIndex = args.indexOf("-File");
+  const phaseEnabled = fileIndex >= 0 && path.basename(args[fileIndex + 1]) === "probe-lease-cache-prebuilt.ps1";
+  const modeIndex = args.indexOf("-Mode");
+  const mode = phaseEnabled && modeIndex >= 0 ? args[modeIndex + 1] : undefined;
+  if (phaseEnabled) log({ launchPhase: "before-spawn", mode, elapsedMs: elapsed(), deadlineMs: milliseconds });
   const child = spawn(executable, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  if (phaseEnabled) log({ launchPhase: "spawn-returned", mode, pid: child.pid, elapsedMs: elapsed() });
   children.add(child);
   const stdout = [], stderr = [];
-  let size = 0, reason = null, readyValue, lineBuffer = "";
+  let size = 0, reason = null, readyValue, lineBuffer = "", phaseBuffer = "", phaseCount = 0, lastPhase = null;
   let readyResolve;
   const ready = new Promise((resolve) => { readyResolve = resolve; });
   const kill = (why) => { reason ??= why; if (child.pid && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); };
@@ -29,6 +37,18 @@ function start(executable, args, milliseconds, input) {
     size += bytes.length;
     if (size > 65536) { kill("maxBuffer"); return; }
     target.push(bytes);
+    if (phaseEnabled && target === stderr) {
+      phaseBuffer += bytes.toString("utf8");
+      for (let index; (index = phaseBuffer.indexOf("\n")) >= 0;) {
+        const line = phaseBuffer.slice(0, index).replace(/\r$/, ""); phaseBuffer = phaseBuffer.slice(index + 1);
+        if (!line.startsWith('{"probePhase":true,')) continue;
+        let phase;
+        try { phase = JSON.parse(line); } catch { kill("phaseProtocol"); continue; }
+        if (++phaseCount > 48 || Buffer.byteLength(line) + 2 > 256 || !/^[a-z0-9-]{1,64}$/.test(phase.stage) || (phase.elapsedMs !== undefined && (!Number.isSafeInteger(phase.elapsedMs) || phase.elapsedMs < 0))) { kill("phaseProtocol"); continue; }
+        lastPhase = phase.stage;
+        log({ phaseReceipt: true, mode, pid: child.pid, stage: phase.stage, scriptElapsedMs: phase.elapsedMs ?? null, launchElapsedMs: elapsed() });
+      }
+    }
     if (target !== stdout) return;
     lineBuffer += bytes.toString("utf8");
     for (let index; (index = lineBuffer.indexOf("\n")) >= 0;) {
@@ -45,7 +65,8 @@ function start(executable, args, milliseconds, input) {
   child.on("error", (error) => { reason ??= `spawn:${error.code}`; });
   const done = new Promise((resolve) => child.on("close", (code, signal) => {
     clearTimeout(timer); children.delete(child); readyResolve(null);
-    resolve({ code, signal, reason, pid: child.pid, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+    if (phaseEnabled) log({ launchPhase: "closed", mode, pid: child.pid, elapsedMs: elapsed(), phaseCount, lastPhase, code, signal, reason });
+    resolve({ code, signal, reason, pid: child.pid, elapsedMs: elapsed(), phaseCount, lastPhase, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
   }));
   if (input !== undefined) child.stdin.end(input);
   return { child, done, ready, kill };
@@ -122,7 +143,7 @@ async function copyRuntime(asset) {
         else { assert.equal(control, "stop"); helper.child.stdin.end("stop\n"); }
       } else helper.child.stdin.end();
       const result = await helper.done;
-      log({ helperReceipt: true, mode, pid: result.pid, code: result.code, signal: result.signal, reason: result.reason, outputBytes: result.stdout.length, diagnosticBytes: result.stderr.length });
+      log({ helperReceipt: true, mode, pid: result.pid, code: result.code, signal: result.signal, reason: result.reason, outputBytes: result.stdout.length, diagnosticBytes: result.stderr.length, elapsedMs: result.elapsedMs, phaseCount: result.phaseCount, lastPhase: result.lastPhase });
       if (mode === "probeFailure") { assert.notEqual(result.code, 0); assert.equal(result.reason, null); }
       else if (mode === "hold" && result.reason === "injectedNativeDeath") assert(result.code !== 0 || result.signal !== null);
       else {
@@ -163,10 +184,12 @@ function inventory(root) {
 async function checked(executable, args, milliseconds = 10000) {
   const owned = start(executable, args, milliseconds, "");
   const result = await owned.done;
-  log({ processReceipt: true, pid: result.pid, code: result.code, signal: result.signal, reason: result.reason, outputBytes: result.stdout.length, diagnosticBytes: result.stderr.length });
+  log({ processReceipt: true, pid: result.pid, code: result.code, signal: result.signal, reason: result.reason, outputBytes: result.stdout.length, diagnosticBytes: result.stderr.length, elapsedMs: result.elapsedMs, phaseCount: result.phaseCount, lastPhase: result.lastPhase });
   if (result.code !== 0 || result.reason) {
     // Compiler/packager diagnostics are already capped; no source or binary contents logged.
-    log({ failedDiagnostic: result.stderr.toString("utf8").slice(0, 4096), stdoutDiagnostic: result.stdout.toString("utf8").slice(0, 4096) });
+    // Phase lines were already streamed above; keep them from crowding out the bounded error.
+    const diagnostic = result.stderr.toString("utf8").split(/\r?\n/).filter(line => !line.startsWith('{"probePhase":true,')).join("\n");
+    log({ failedDiagnostic: diagnostic.slice(0, 4096), stdoutDiagnostic: result.stdout.toString("utf8").slice(0, 4096) });
   }
   assert.equal(result.reason, null, "bounded child failed"); assert.equal(result.code, 0, "child failed");
   return result.stdout;

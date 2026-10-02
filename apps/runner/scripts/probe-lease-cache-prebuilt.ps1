@@ -5,40 +5,80 @@ param(
   [string]$Assembly,
   [string]$Digest
 )
+# First observable entry marker avoids cmdlet serialization and stays off binary stdout.
+[Console]::Error.WriteLine('{"probePhase":true,"stage":"script-entry"}')
+[Console]::Error.Flush()
+$script:phaseClock = [Diagnostics.Stopwatch]::StartNew()
+$script:phaseCount = 1
+function Write-ProbePhase([string]$stage) {
+  if ($stage -notmatch '^[a-z0-9-]{1,64}$' -or $script:phaseCount -ge 48) { throw 'phase diagnostic bound exceeded' }
+  $script:phaseCount++
+  $line = '{"probePhase":true,"stage":"' + $stage + '","elapsedMs":' + $script:phaseClock.ElapsedMilliseconds.ToString([Globalization.CultureInfo]::InvariantCulture) + '}'
+  if ([Text.Encoding]::UTF8.GetByteCount($line) + 2 -gt 256) { throw 'phase diagnostic byte bound exceeded' }
+  [Console]::Error.WriteLine($line)
+  [Console]::Error.Flush()
+}
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -ne 5) { throw 'Windows PowerShell 5 is required; no fallback' }
 $env:TEMP = $Root
 $env:TMP = $Root
+Write-ProbePhase 'script-initialized'
 function Read-Machine($path) {
+  Write-ProbePhase 'native-module-open-before'
   $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  Write-ProbePhase 'native-module-open-after'
   $reader = New-Object IO.BinaryReader($stream)
   try {
+    Write-ProbePhase 'native-mz-read-before'
     if ($reader.ReadUInt16() -ne 23117) { throw 'invalid native module MZ header' }
+    Write-ProbePhase 'native-mz-read-after'
+    Write-ProbePhase 'native-pe-offset-before'
     [void]$stream.Seek(60, [IO.SeekOrigin]::Begin)
     $offset = $reader.ReadUInt32()
+    Write-ProbePhase 'native-pe-offset-after'
     if ($offset -gt $stream.Length - 6) { throw 'native PE header unavailable' }
+    Write-ProbePhase 'native-pe-header-before'
     [void]$stream.Seek($offset, [IO.SeekOrigin]::Begin)
     if ($reader.ReadUInt32() -ne 17744) { throw 'invalid native module PE header' }
-    return ('0x{0:x4}' -f $reader.ReadUInt16())
+    $machine = ('0x{0:x4}' -f $reader.ReadUInt16())
+    Write-ProbePhase 'native-pe-header-after'
+    return $machine
   } finally { $reader.Dispose(); $stream.Dispose() }
 }
 function Runtime-Metadata {
+  Write-ProbePhase 'current-process-before'
   $process = [Diagnostics.Process]::GetCurrentProcess()
-  $clr = @($process.Modules | Where-Object { $_.ModuleName -ieq 'clr.dll' })
+  Write-ProbePhase 'current-process-after'
+  Write-ProbePhase 'modules-enumeration-before'
+  $modules = $process.Modules
+  Write-ProbePhase 'modules-enumeration-after'
+  Write-ProbePhase 'clr-selection-before'
+  $clr = @($modules | Where-Object { $_.ModuleName -ieq 'clr.dll' })
+  Write-ProbePhase 'clr-selection-after'
   if ($clr.Count -ne 1) { throw 'exact loaded Framework CLR module unavailable' }
-  return @{
+  Write-ProbePhase 'clr-path-before'
+  $clrPath = $clr[0].FileName
+  Write-ProbePhase 'clr-path-after'
+  $machine = Read-Machine $clrPath
+  Write-ProbePhase 'runtime-fields-before'
+  $metadata = @{
     powerShellVersion = $PSVersionTable.PSVersion.ToString()
     edition = $PSVersionTable.PSEdition
     clrVersion = [Environment]::Version.ToString()
-    loadedClrMachine = Read-Machine $clr[0].FileName
+    loadedClrMachine = $machine
     pointerBytes = [IntPtr]::Size
     processId = $PID
     processStartUtcTicks = $process.StartTime.ToUniversalTime().Ticks.ToString()
     compiler = [IO.Path]::Combine([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory(), 'csc.exe')
   }
+  Write-ProbePhase 'runtime-fields-after'
+  return $metadata
 }
 if ($Mode -eq 'Describe') {
-  Runtime-Metadata | ConvertTo-Json -Compress
+  $metadata = Runtime-Metadata
+  Write-ProbePhase 'describe-output-before'
+  $metadata | ConvertTo-Json -Compress
+  Write-ProbePhase 'describe-output-after'
   exit 0
 }
 if ($Digest -notmatch '^[0-9a-f]{64}$') { throw 'invalid expected fixture DLL digest' }
@@ -66,7 +106,9 @@ if ($Mode -eq 'Malformed') {
     exit 0
   }
 }
+Write-ProbePhase 'assembly-load-before'
 $loaded = [Reflection.Assembly]::Load($bytes)
+Write-ProbePhase 'assembly-load-after'
 $type = $loaded.GetType('WollipogProviderHomeLeaseIo', $true)
 if ($Mode -eq 'Metadata') {
   $rename = $type.GetNestedType('RENAME', [Reflection.BindingFlags]::NonPublic)
@@ -75,7 +117,14 @@ if ($Mode -eq 'Metadata') {
   $rootOffset = [Runtime.InteropServices.Marshal]::OffsetOf($rename, 'Root').ToInt64()
   $lengthOffset = [Runtime.InteropServices.Marshal]::OffsetOf($rename, 'Length').ToInt64()
   $firstOffset = [Runtime.InteropServices.Marshal]::OffsetOf($rename, 'First').ToInt64()
-  $statusBytes = [Runtime.InteropServices.Marshal]::SizeOf($status)
+  # Select the exact non-generic Type signature; do not marshal the RuntimeType object.
+  Write-ProbePhase 'marshal-sizeof-before'
+  $sizeOfType = @([Runtime.InteropServices.Marshal].GetMethods([Reflection.BindingFlags]::Public -bor [Reflection.BindingFlags]::Static) | Where-Object {
+    $_.Name -eq 'SizeOf' -and -not $_.IsGenericMethod -and $_.GetParameters().Length -eq 1 -and $_.GetParameters()[0].ParameterType -eq [Type]
+  })
+  if ($sizeOfType.Count -ne 1) { throw 'unambiguous Marshal.SizeOf(Type) unavailable' }
+  $statusBytes = [int]$sizeOfType[0].Invoke($null, [object[]]@($status))
+  Write-ProbePhase 'marshal-sizeof-after'
   if ($rootOffset -ne $pointer -or $lengthOffset -ne 2 * $pointer -or $firstOffset -ne $lengthOffset + 4 -or $statusBytes -ne 2 * $pointer) { throw 'native rename ABI layout incompatible' }
   $runtime = Runtime-Metadata
   $runtime['assemblyArchitecture'] = $loaded.GetName().ProcessorArchitecture.ToString()
