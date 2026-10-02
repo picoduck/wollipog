@@ -2366,9 +2366,6 @@ export interface OrchestratorCampaignProjection {
     orchestratorRequestTokens?: string[];
   };
   followUps: { unique: number; duplicates: number };
-  /** v196 campaign work ledger summary (#2417), filled by the Read API slice. Omitted by older
-   * control planes, which clients present as unsupported rather than as an empty plan. */
-  work?: CampaignWorkSummary;
   /** Durable synthetic-turn state. Omitted only when the campaign has never needed a wake-up. */
   continuation?: {
     state: "pending" | "running" | "held" | "failed" | "missing_result";
@@ -2383,6 +2380,9 @@ export interface OrchestratorCampaignProjection {
     canAcknowledgeMissingResult?: boolean;
     canRetry?: boolean;
   };
+  /** v196 campaign work ledger summary (#2417), filled by the Read API slice. Omitted by older
+   * control planes, which clients present as unsupported rather than as an empty plan. */
+  work?: CampaignWorkSummary;
 }
 
 /** True only when a campaign gains human work. Exact content-free identities distinguish a
