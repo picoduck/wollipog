@@ -198,3 +198,18 @@ test("older versions load as the list scrolls to its end", async ({ page }) => {
   await expect(rows.last()).toContainText("v1");
   await expect(dialog.locator(".skill-version-list-end")).toHaveCount(0);
 });
+
+test("the selected version's diff beside the list offers only Unified at 1440×900 (#2292)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await routeVersions(page, () => [v3, v2, v1]);
+  const dialog = await openHistory(page);
+  await expect(dialog.getByRole("heading", { name: "Changes If You Restore v2" })).toBeVisible();
+  const pane = dialog.locator(".skill-version-pane.detail");
+  await expect(pane.locator(".skill-diff-file", { hasText: "SKILL.md" }).locator(".diff-line-del").first()).toBeVisible();
+  // The card is wide enough for Split, but the pane the diff is read in is not.
+  const widths = await pane.evaluate((element) => ({ card: element.closest<HTMLElement>(".modal")!.offsetWidth, pane: element.offsetWidth }));
+  expect(widths.card).toBeGreaterThanOrEqual(800);
+  expect(widths.pane).toBeLessThan(800);
+  await expect(dialog.getByRole("radiogroup", { name: "Diff Layout" })).toHaveCount(0);
+  await expect(dialog.locator(".diff-split-row")).toHaveCount(0);
+});

@@ -14,6 +14,7 @@ import { CopyButton } from "./common.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { DEPLOY_TO_TRACKING_MACHINES_CONSENT, isDeploymentImpactConflict, ReviewConflict, ReviewConsent } from "./ReviewConsent.js";
+import { SKILL_DIFF_PANE_CLASS } from "./SkillFileDiff.js";
 import { SkillReviewChanges, SkillReviewFacts, skillReviewSafetyNote } from "./SkillReviewParts.js";
 import { SkillVersionListEnd, useSkillVersionPages } from "./SkillVersionPages.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -252,6 +253,6 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
       </BusyButton>
     </>}>
     {listStep && <div className="skill-version-pane list" ref={listRef}>{list}</div>}
-    {detailStep && <div className="skill-version-pane detail" ref={detailRef}>{detail}</div>}
+    {detailStep && <div className={`skill-version-pane detail ${SKILL_DIFF_PANE_CLASS}`} ref={detailRef}>{detail}</div>}
   </Modal>;
 }
