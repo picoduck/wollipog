@@ -5425,7 +5425,7 @@ function SessionDetailLoaded({
                   />
                   {showOptimistic && pending && (
                     <div className="tl-row user">
-                      <div className="bubble user-bubble">
+                      <div className="tl-bubble">
                         {pending.images.length > 0 && (
                           <div className="bubble-images">
                             {pending.images.filter((attachment) => !isWorkspaceReference(attachment)).map((img, i) => (

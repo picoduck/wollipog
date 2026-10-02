@@ -12,7 +12,14 @@ import {
   estimateTimelineRow,
   flattenTimelineRows,
   IncrementalTimelineRows,
+  placeTurnFooters,
   stabilizeTimelineRowKeys,
+  startsTimelineTurn,
+  summarizeTimelineTurns,
+  TIMELINE_ROW_GAP,
+  TIMELINE_TURN_GAP,
+  turnResponseText,
+  turnSpanDescription,
   stabilizeWorkGroupKeys,
   permissionResolutionLabel,
   timelineFileSourceLocation,
@@ -336,7 +343,7 @@ test("delegated question and approval histories identify the controlling parent"
   assert.match(html, /Approved by Parent parent-session/);
 });
 
-test("completed turn messages own compact rewind, fork, and handoff actions", () => {
+test("each settled turn's footer owns fork and handoff while its prompt keeps rewind", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [
       { kind: "user_message", id: 1, text: "First question" },
@@ -364,8 +371,12 @@ test("completed turn messages own compact rewind, fork, and handoff actions", ()
     "plain historical forks use the shared Lucide fork glyph");
   assert.equal((html.match(/lucide-share/g) ?? []).length, 2,
     "Hand Off uses a distinct shared glyph");
-  assert.match(html, /aria-label="Copy assistant message"[\s\S]*?aria-label="Fork Conversation After This Turn/,
-    "Fork follows Copy in assistant metadata");
+  assert.match(html, /aria-label="Copy Reply"[\s\S]*?aria-label="Fork Conversation After This Turn/,
+    "Fork follows Copy in the turn footer");
+  assert.equal((html.match(/class="tl-turn-footer"/g) ?? []).length, 2, "one footer per settled turn");
+  assert.match(html, /<span class="tl-turn-label">Turn 1<\/span>[\s\S]*<span class="tl-turn-label">Turn 2<\/span>/);
+  assert.match(html, /aria-label="Message Actions"[^>]*>[\s\S]*?aria-label="Rewind Files to Before This Turn"/,
+    "Rewind stays beside the prompt it rewinds to");
   assert.match(html, /<details class="tl-message-action-unavailable">[\s\S]*?Claude Code can fork only its latest completed conversation checkpoint\./);
   // light-theme.test.ts holds the unavailable summary to the 3:1 glyph floor, which is sound only
   // while it renders the icon alone: its name is the aria-label and its reason the sibling span.
@@ -381,19 +392,21 @@ test("completed turn messages own compact rewind, fork, and handoff actions", ()
     "checkpoint dividers no longer own heavy text actions");
 });
 
-test("checkpoint dividers expose symmetric turn boundary labels", () => {
-  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
-    items: [
-      { kind: "checkpoint", id: 1, turn: 19 },
-      { kind: "conversation_checkpoint", id: 2, turn: 19 },
-    ],
-  }));
+test("checkpoints stay in the model but render no Start Turn or End Turn separator", () => {
+  const items: TimelineItem[] = [
+    { kind: "user_message", id: 1, text: "Prompt" },
+    { kind: "checkpoint", id: 2, turn: 19 },
+    { kind: "agent_message", id: 3, text: "Answer" },
+    { kind: "conversation_checkpoint", id: 4, turn: 19 },
+  ];
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, { items }));
 
-  assert.match(html, /role="separator" aria-label="Start Turn 19" title="Files snapshot taken at the start of turn 19"/);
-  assert.match(html, /<span class="checkpoint-label">Start Turn 19<\/span>/);
-  assert.match(html, /role="separator" aria-label="End Turn 19" title="Conversation and files saved at the end of turn 19"/);
-  assert.match(html, /<span class="checkpoint-label">End Turn 19<\/span>/);
-  assert.doesNotMatch(html, />after turn 19<|>Turn 19</);
+  assert.doesNotMatch(html, /Start Turn|End Turn|role="separator"/);
+  assert.equal((html.match(/role="listitem"/g) ?? []).length, 2, "the checkpoints occupy no row");
+  const rows = flattenTimelineRows(groupTimeline(items), new Map());
+  assert.deepEqual(rows.map((row) => row.key), ["item:user_message:1", "item:agent_message:3"]);
+  assert.deepEqual([...userRewindTurns(items)], [[1, 19]], "rewind still reads the file checkpoint");
+  assert.deepEqual([...assistantForkTurns(items)], [[3, 19]], "fork still reads the conversation checkpoint");
 });
 
 test("rewind, fork, and handoff dividers expose concise accessible semantics", () => {
@@ -1160,22 +1173,89 @@ test("an old nested progressive edit patches its indexed parent child", () => {
   assert.equal(updated.rows.some((row) => row.kind === "item" && row.item.kind === "file_edit" && row.item.diff === "second"), true);
 });
 
-test("message rows expose semantic recorded times, honest duration, and contextual copy actions", () => {
+test("message rows carry no time; the turn footer holds one clock time, its span and contextual copy", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [
-      { kind: "user_message", id: 1, text: "raw user text", createdAt: 1_700_000_000_000, durationMs: 1_250, durationSource: "observed" },
-      { kind: "agent_message", id: 2, text: "**raw assistant text**", createdAt: 1_700_000_001_000 },
+      { kind: "user_message", id: 1, text: "raw user text", createdAt: 1_700_000_000_000, durationMs: 26_000, durationSource: "provider" },
+      { kind: "agent_message", id: 2, text: "**raw assistant text**", createdAt: 1_700_000_001_000, lastActivityAt: 1_700_000_026_000 },
     ],
   }));
-  assert.equal((html.match(/<time /g) ?? []).length, 2);
-  assert.match(html, /dateTime="2023-11-14T22:13:20\.000Z"/);
-  assert.match(html, /title="Recorded /);
-  assert.match(html, /title="Approximate runner-recorded activity span"/);
-  assert.match(html, />~1\.3s<\/span>/);
-  assert.match(html, /aria-label="Approximate runner-recorded activity span, 1\.3s"/);
-  assert.match(html, /aria-label="Copy user message"/);
-  assert.match(html, /aria-label="Copy assistant message"/);
+  assert.equal((html.match(/<time /g) ?? []).length, 1, "only the footer shows a time");
+  assert.match(html, /<div class="tl-turn-footer"[^>]*>[\s\S]*<time dateTime="2023-11-14T22:13:46\.000Z"/,
+    "the footer's clock is when the turn finished");
+  assert.match(html, /role="tooltip">Started [^<]+, finished [^<]+ \(26s\)<\/span>/);
+  assert.doesNotMatch(html.replace(/<span[^>]*role="tooltip">[^<]*<\/span>/, ""), /Recorded|Started|Last Activity|→|Ago/,
+    "outside the footer's tooltip, no row names a time range or timestamp label");
+  assert.match(html, /aria-label="Copy Message"/);
+  assert.match(html, /aria-label="Copy Reply"/);
   assert.match(html, /<strong>raw assistant text<\/strong>/);
+});
+
+test("turn summaries read the checkpoint number, span, usage, response and fork point", () => {
+  const items: TimelineItem[] = [
+    { kind: "agent_message", id: 1, text: "Before any prompt" },
+    {
+      kind: "user_message", id: 2, text: "first", createdAt: 1_000, turn: 3,
+      turnUsage: { inputTokens: 100, outputTokens: 20, cachedInputTokens: 0, cacheCreationTokens: 0, costUsd: 0.5 },
+    },
+    { kind: "checkpoint", id: 3, turn: 3 },
+    { kind: "agent_message", id: 4, text: "Working on it.", createdAt: 2_000 },
+    { kind: "tool_call", id: 5, toolCallId: "t", title: "Run", status: "completed", text: "", startedAt: 3_000, completedAt: 9_000 },
+    { kind: "agent_message", id: 6, text: "nested", parentToolUseId: "t", createdAt: 4_000 },
+    { kind: "agent_message", id: 7, text: "Done.", createdAt: 8_000 },
+    { kind: "conversation_checkpoint", id: 8, turn: 3 },
+    { kind: "checkpoint_restored", id: 9, turn: 2 },
+    { kind: "user_message", id: 10, text: "second", createdAt: 20_000, durationMs: 5_000 },
+    { kind: "user_message", id: 11, text: "steer", deliveryIntent: "steer", createdAt: 21_000 },
+  ];
+  const segments = summarizeTimelineTurns(items, assistantForkTurns(items));
+  assert.deepEqual([...segments.keys()], [null, 2, 10], "a steering message does not open a turn");
+  const first = segments.get(2)!;
+  assert.equal(first.turn, 3);
+  assert.equal(first.startedAt, 1_000);
+  assert.equal(first.finishedAt, 9_000, "the latest recorded activity, nested work included");
+  assert.equal(turnResponseText(first), "Working on it.\n\nDone.", "only top-level agent messages are copied");
+  assert.equal(first.forkTurn, 3);
+  assert.equal(first.usage?.costUsd, 0.5);
+  assert.equal(first.hasAgentContent, true);
+  const second = segments.get(10)!;
+  assert.equal(second.hasAgentContent, false, "a prompt and a steer are not agent work");
+  assert.equal(second.finishedAt, 21_000);
+  assert.equal(segments.get(null)!.turn, undefined);
+});
+
+test("one footer follows each settled turn, before trailing history dividers, and never a running one", () => {
+  const items: TimelineItem[] = [
+    { kind: "agent_message", id: 1, text: "Subagent-style output before any prompt" },
+    { kind: "user_message", id: 2, text: "first" },
+    { kind: "agent_message", id: 3, text: "answer" },
+    { kind: "conversation_checkpoint", id: 4, turn: 1 },
+    { kind: "checkpoint_restored", id: 5, turn: 1 },
+    { kind: "user_message", id: 6, text: "second" },
+    { kind: "agent_thought", id: 7, text: "thinking" },
+    { kind: "tool_call", id: 8, toolCallId: "t", title: "Run", status: "completed", text: "" },
+  ];
+  const rows = flattenTimelineRows(groupTimeline(items), new Map());
+  const segments = summarizeTimelineTurns(items, assistantForkTurns(items));
+  const settled = placeTurnFooters(rows, segments, false);
+  assert.deepEqual([...settled.keys()], ["item:agent_message:3", "work:user_message:6"],
+    "the first footer sits before the rewind divider; unnumbered pre-prompt output gets none");
+  assert.equal(settled.get("item:agent_message:3")!.turn, 1);
+  assert.deepEqual([...placeTurnFooters(rows, segments, true).keys()], ["item:agent_message:3"],
+    "the running turn has no footer");
+
+  const gaps = rows.map((_, index) => startsTimelineTurn(rows[index + 1]) ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP);
+  assert.deepEqual(gaps, [32, 12, 12, 32, 12, 12], "32px opens each new turn, 12px everywhere inside one");
+});
+
+test("the footer tooltip names the start, finish and duration it has", () => {
+  const at = (minute: number, second: number) => Date.UTC(2026, 6, 13, 0, minute, second);
+  assert.match(turnSpanDescription({ startedAt: at(25, 38), finishedAt: at(26, 4) }),
+    /^Started \d{1,2}:25:38\s?[AP]M, finished \d{1,2}:26:04\s?[AP]M \(26s\)$/);
+  assert.match(turnSpanDescription({ startedAt: at(25, 38), finishedAt: at(26, 4), durationMs: 20_000 }), /\(20s\)$/,
+    "a provider-reported duration wins over the observed span");
+  assert.match(turnSpanDescription({ finishedAt: at(26, 4) }), /^Finished \d{1,2}:26:04\s?[AP]M$/);
+  assert.equal(turnSpanDescription({}), "");
 });
 
 test("user rows prepare deliberate resend and expose edit-in-fork only for an eligible predecessor", () => {

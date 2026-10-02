@@ -71,7 +71,6 @@ const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/EventTimeline.tsx", "→", "→ Resolved by Provider", TRANSCRIPT],
   ["components/EventTimeline.tsx", "→", "→ Answered", TRANSCRIPT],
   ["components/EventTimeline.tsx", "→", "→ Dismissed", TRANSCRIPT],
-  ["components/EventTimeline.tsx", "→", "→", TRANSCRIPT],
   ["components/EventTimeline.tsx", "✓", "✓", TRANSCRIPT],
   ["components/EventTimeline.tsx", "◐", "◐", TRANSCRIPT],
   ["components/EventTimeline.tsx", "○", "○", TRANSCRIPT],

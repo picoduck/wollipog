@@ -107,7 +107,7 @@ export function PendingPromptBubbles({
         data-pending-prompt-id={prompt.commandId}
         key={prompt.commandId}
       >
-        <div className={`bubble user-bubble pending-prompt-bubble state-${prompt.state}`}>
+        <div className={`tl-bubble pending-prompt-bubble state-${prompt.state}`}>
           <div className="pending-prompt-meta">
             <StatusBadge meta={pendingPromptStatus(prompt)} inline className="pending-prompt-state" />
             <span className="pending-prompt-attempts">

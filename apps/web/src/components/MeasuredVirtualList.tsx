@@ -211,7 +211,12 @@ interface MeasuredVirtualListProps<T> {
    */
   rootRole?: string;
   rowRole?: string;
-  rowGap?: number;
+  /**
+   * Space below each row, measured as part of it. A function receives the row and its index, so a
+   * list can open a wider gap before a group boundary (the transcript's 32px between turns). It is
+   * read on every render, so it may consult the current items without changing identity.
+   */
+  rowGap?: number | ((item: T, index: number) => number);
   dataKind?: string;
   /** Reads the logical row position once, when this list instance mounts. */
   getInitialAnchor?: () => VirtualScrollAnchor | null;
@@ -505,11 +510,12 @@ function VirtualList<T>({
   }, [focusedKey, draggedKey, pendingAnchorKey, pinnedKey, revealPinnedKey, indexByKey, itemsVersion]);
   const rangeExtractor = useCallback((range: Range) => pinnedRangeExtractor(range, pinned), [pinned]);
 
+  const gapAt = (index: number) => typeof rowGap === "function" ? rowGap(items[index]!, index) : rowGap;
   const virtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollRef.current,
     getItemKey: (index) => getKey(items[index]!),
-    estimateSize: (index) => estimateSize(items[index]!, index) + rowGap,
+    estimateSize: (index) => estimateSize(items[index]!, index) + gapAt(index),
     overscan,
     rangeExtractor,
     scrollMargin,
@@ -1314,7 +1320,7 @@ function VirtualList<T>({
           top: 0,
           left: 0,
           width: "100%",
-          paddingBottom: rowGap || undefined,
+          paddingBottom: gapAt(virtualRow.index) || undefined,
           transform: `translateY(${virtualRow.start - scrollMargin}px)`,
         };
         return (

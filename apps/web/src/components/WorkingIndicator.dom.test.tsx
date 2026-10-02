@@ -63,7 +63,7 @@ test("the merged working row renders observable progress and deep-links the curr
       />,
     ));
     assert.match(container.textContent ?? "", /Elapsed2m 0s/);
-    assert.match(container.textContent ?? "", /Last Activity1m Ago/);
+    assert.match(container.textContent ?? "", /Last Activity1m ago/);
     assert.match(container.textContent ?? "", /Completed3/);
     assert.match(container.textContent ?? "", /Failed2/);
     assert.match(container.textContent ?? "", /Retried 2 TimesECONNRESET/);

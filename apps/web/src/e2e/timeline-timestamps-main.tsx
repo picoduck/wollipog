@@ -86,6 +86,70 @@ window.timelineTimestampE2E = {
   },
 };
 
+/** Three settled turns in a full-width reader, as the session page lays them out. */
+const turnStart = now - 30 * 60_000;
+const turnItems: TimelineItem[] = [1, 2, 3].flatMap((turn): TimelineItem[] => {
+  const base = turn * 100;
+  const startedAt = turnStart + (turn - 1) * 6 * 60_000;
+  return [
+    {
+      kind: "user_message",
+      id: base,
+      text: [
+        "Find why the reader loses its place after a resize, and fix it.",
+        "Now add a regression test for the phone layout.",
+        "Thanks. Summarise what changed.",
+      ][turn - 1]!,
+      createdAt: startedAt,
+      durationMs: 26_000,
+      durationSource: "provider",
+      turnUsage: { inputTokens: 9_800 * turn, outputTokens: 1_200, cachedInputTokens: 0, cacheCreationTokens: 0, costUsd: 0.04 * turn },
+    },
+    { kind: "checkpoint", id: base + 1, turn },
+    { kind: "agent_message", id: base + 2, text: "Let me look at how the reader measures its rows first.", createdAt: startedAt + 2_000, lastActivityAt: startedAt + 3_000 },
+    {
+      kind: "tool_call", id: base + 3, toolCallId: `read-${turn}`, title: "Read MeasuredVirtualList.tsx", toolKind: "read",
+      status: "completed", text: "", startedAt: startedAt + 4_000, lastActivityAt: startedAt + 9_000, completedAt: startedAt + 9_000,
+    },
+    {
+      kind: "agent_message",
+      id: base + 4,
+      text: [
+        "The anchor was saved before the width changed, so the **old row heights** decided where the reader landed. It now re-reads the anchor after the rows remeasure.",
+        "Added a phone test that resizes the reader mid-scroll and checks the same row stays at the top.",
+        "The reader keeps its row across resizes, and a phone test covers it. Nothing else changed.",
+      ][turn - 1]!,
+      createdAt: startedAt + 12_000,
+      lastActivityAt: startedAt + 26_000,
+      completedAt: startedAt + 26_000,
+    },
+    { kind: "conversation_checkpoint", id: base + 5, turn },
+  ];
+});
+
+function TurnsFixture() {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const theme = new URLSearchParams(location.search).get("theme") ?? "dark";
+  document.documentElement.dataset.theme = theme;
+  return (
+    <main style={{ display: "flex", width: "100vw", height: "100vh", background: "var(--bg)" }}>
+      <div className="detail-scroll measured-virtual-scroll" ref={scrollRef} data-testid="reader" style={{ flex: 1 }}>
+        <EventTimeline
+          items={turnItems}
+          sessionActive={false}
+          scrollRef={scrollRef}
+          historyKey="turns-e2e"
+          onRewind={() => {}}
+          onFork={() => {}}
+          handoff={{ open: () => {} }}
+          onEditAndResend={() => {}}
+          forkAvailabilityByTurn={new Map([1, 2, 3].map((turn) => [turn, { available: true as const, forkTurn: turn }]))}
+        />
+      </div>
+    </main>
+  );
+}
+
 function Fixture() {
   const [sessionActive, setSessionActive] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -101,4 +165,6 @@ function Fixture() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(
+  new URLSearchParams(location.search).get("scenario") === "turns" ? <TurnsFixture /> : <Fixture />,
+);

@@ -8,7 +8,7 @@ async function expectProgressFacts(page: Page) {
   await expect(progress.getByRole("button", { name: "Coordinate Release Audit" })).toBeVisible();
   await expect(progress).toContainText("Plan StepValidate compatibility release");
   await expect(progress).toContainText("Elapsed7m 0s");
-  await expect(progress).toContainText("Last Activity1m Ago");
+  await expect(progress).toContainText("Last Activity1m ago");
   await expect(progress).toContainText("Completed1");
   await expect(progress).toContainText("Failed3");
   await expect(progress).toContainText("Retried 2 Times");

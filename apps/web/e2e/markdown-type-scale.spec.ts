@@ -159,7 +159,7 @@ for (const theme of ["dark", "light"] as const) {
 
 test("a user message renders a code span and a list, and keeps a heading as text", async ({ page }) => {
   await open(page, 1440);
-  const bubble = page.locator(".user-bubble .bubble-text");
+  const bubble = page.locator(".tl-bubble .bubble-text");
   await expect(bubble.locator("code")).toHaveText("apps/web/src/components/Markdown.tsx");
   await expect(bubble.getByRole("listitem")).toHaveCount(2);
   await expect(bubble.locator("strong")).toHaveText("tables");

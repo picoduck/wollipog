@@ -37,7 +37,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await expect(action).toBeVisible();
     await expect(page.getByRole("button", { name: "Fork Conversation After This Turn" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Rewind Files to Before This Turn" })).toBeVisible();
-    await expect(page.locator(".tl-checkpoint.conversation")).not.toContainText("Hand Off");
+    await expect(page.locator(".tl-turn-footer").filter({ has: action })).toHaveCount(1);
     await page.screenshot({ path: test.info().outputPath("handoff-source.png") });
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(109));
     const unavailable = page.getByLabel("Hand Off After This Turn Unavailable");

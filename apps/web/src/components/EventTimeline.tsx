@@ -24,7 +24,7 @@ import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
 import { ChevronRightIcon, EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
-import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
+import { formatClock, formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { toolStatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { PromptImageView } from "./PromptImageView.js";
@@ -211,6 +211,162 @@ export function userRewindTurns(items: readonly TimelineItem[]): ReadonlyMap<num
   }
   return turns;
 }
+/** Checkpoints stay in the timeline model, where fork and rewind availability read them; the turn
+ * footer replaces their Start Turn and End Turn separators, so they render no row. */
+export function timelineItemRendersRow(item: TimelineItem): boolean {
+  return item.kind !== "checkpoint" && item.kind !== "conversation_checkpoint";
+}
+
+const startsTurn = (item: TimelineItem): boolean =>
+  item.kind === "user_message" && item.deliveryIntent !== "steer";
+
+/** A canonical (non-steering) prompt opens a turn; everything up to the next one belongs to it. */
+export function startsTimelineTurn(row: TimelineRenderRow | undefined): boolean {
+  return row?.kind === "item" && row.depth === 0 && startsTurn(row.item);
+}
+
+/** History events keep their own dividers (#2184) and sit after a turn's footer, not inside it. */
+const HISTORY_DIVIDER_KINDS = new Set<TimelineItem["kind"]>([
+  "checkpoint_restored",
+  "conversation_forked",
+  "provider_account_switched",
+]);
+
+/** §2.4 rhythm: `--space-3` between rows of one turn, `--space-8` before the first row of the next. */
+export const TIMELINE_ROW_GAP = 12;
+export const TIMELINE_TURN_GAP = 32;
+
+export interface TurnFooterSummary {
+  /** The checkpoint number the fork, rewind and recover confirmations use; absent when unrecorded. */
+  turn?: number;
+  startedAt?: number;
+  finishedAt?: number;
+  durationMs?: number;
+  usage?: TurnUsage;
+  /** The turn's top-level agent messages, for Copy; joined only by a mounted footer. */
+  responseParts: readonly string[];
+  /** The conversation checkpoint this turn's response established, for Fork and Hand Off. */
+  forkTurn?: number;
+}
+
+interface TurnSegment extends TurnFooterSummary {
+  hasAgentContent: boolean;
+  conversationTurn?: number;
+  fileTurn?: number;
+  responseParts: string[];
+}
+
+/** Copy's text: the turn's top-level replies, a blank line apart. */
+export const turnResponseText = (summary: Pick<TurnFooterSummary, "responseParts">): string =>
+  summary.responseParts.join("\n\n");
+
+function latestActivityAt(item: TimelineItem): number | undefined {
+  let candidates: Array<number | undefined>;
+  switch (item.kind) {
+    case "user_message":
+    case "turn_interrupted":
+    case "artifact_attached":
+    case "review_decision":
+      candidates = [item.createdAt];
+      break;
+    case "agent_message":
+    case "agent_thought":
+      candidates = [item.createdAt, item.lastActivityAt, item.completedAt];
+      break;
+    case "tool_call":
+      candidates = [item.startedAt, item.lastActivityAt, item.completedAt];
+      break;
+    case "governance_decision":
+      candidates = [item.decision.timestamp];
+      break;
+    default:
+      return undefined;
+  }
+  let latest: number | undefined;
+  for (const value of candidates) {
+    if (Number.isFinite(value) && (latest === undefined || value! > latest)) latest = value;
+  }
+  return latest;
+}
+
+/** One pass over the flat items: each turn's number, span, usage, response text and fork point,
+ * keyed by the id of the prompt that opened it (`null` for activity before the first prompt). */
+export function summarizeTimelineTurns(
+  items: readonly TimelineItem[],
+  forkTurns: ReadonlyMap<number, number>,
+): Map<number | null, TurnSegment> {
+  const segments = new Map<number | null, TurnSegment>();
+  let segment: TurnSegment = { hasAgentContent: false, responseParts: [] };
+  segments.set(null, segment);
+  for (const item of items) {
+    if (startsTurn(item) && item.kind === "user_message") {
+      segment = {
+        hasAgentContent: false,
+        responseParts: [],
+        ...(item.turn != null ? { turn: item.turn } : {}),
+        ...(Number.isFinite(item.createdAt) ? { startedAt: item.createdAt } : {}),
+        ...(item.durationMs != null ? { durationMs: item.durationMs } : {}),
+        ...(item.turnUsage ? { usage: item.turnUsage } : {}),
+      };
+      segments.set(item.id, segment);
+    } else if (item.kind === "conversation_checkpoint") {
+      segment.conversationTurn = item.turn;
+    } else if (item.kind === "checkpoint") {
+      segment.fileTurn ??= item.turn;
+    } else if (item.kind !== "user_message" && !HISTORY_DIVIDER_KINDS.has(item.kind)) {
+      segment.hasAgentContent = true;
+    }
+    if (item.kind === "agent_message" && !item.parentToolUseId) {
+      if (item.text) segment.responseParts.push(item.text);
+      const forkTurn = forkTurns.get(item.id);
+      if (forkTurn != null) segment.forkTurn = forkTurn;
+    }
+    const activity = latestActivityAt(item);
+    if (activity !== undefined && (segment.finishedAt === undefined || activity > segment.finishedAt)) {
+      segment.finishedAt = activity;
+    }
+  }
+  for (const value of segments.values()) {
+    value.turn = value.conversationTurn ?? value.fileTurn ?? value.turn;
+    if (value.startedAt !== undefined && value.durationMs !== undefined &&
+        (value.finishedAt === undefined || value.finishedAt <= value.startedAt)) {
+      value.finishedAt = value.startedAt + value.durationMs;
+    }
+  }
+  return segments;
+}
+
+/** Places one footer after the last row of every settled turn, before any trailing history
+ * divider. A turn that is still running has none (the working indicator stands in for it), and
+ * neither has activity before the first prompt unless a checkpoint names its turn — a subagent's
+ * output or a partial page must not claim an unnumbered turn. */
+export function placeTurnFooters(
+  rows: readonly TimelineRenderRow[],
+  segments: ReadonlyMap<number | null, TurnFooterSummary & { hasAgentContent: boolean }>,
+  sessionActive: boolean,
+): Map<string, TurnFooterSummary> {
+  const footers = new Map<string, TurnFooterSummary>();
+  let segmentKey: number | null = null;
+  let anchorKey: string | null = null;
+  const close = (last: boolean) => {
+    const segment = segments.get(segmentKey);
+    if (!segment?.hasAgentContent || anchorKey === null || (last && sessionActive)) return;
+    if (segmentKey === null && segment.turn === undefined) return;
+    footers.set(anchorKey, segment);
+  };
+  for (const row of rows) {
+    if (startsTimelineTurn(row) && row.kind === "item") {
+      close(false);
+      segmentKey = row.item.id;
+      anchorKey = row.key;
+    } else if (row.kind !== "item" || !HISTORY_DIVIDER_KINDS.has(row.item.kind)) {
+      anchorKey = row.key;
+    }
+  }
+  close(true);
+  return footers;
+}
+
 export type TimelineRenderRow =
   | {
       kind: "work_summary";
@@ -418,6 +574,17 @@ function EventTimelineBody({
   const { rows } = projection;
   const forkTurns = useMemo(() => assistantForkTurns(items), [items]);
   const rewindTurns = useMemo(() => userRewindTurns(items), [items]);
+  // Rows are patched in place between revisions, so the revision (not the array) keys this pass.
+  const turnFooters = useMemo(
+    () => placeTurnFooters(rows, summarizeTimelineTurns(items, forkTurns), sessionActive),
+    [rows, projection.revision, items, forkTurns, sessionActive],
+  );
+  // Read at call time: the projector extends `rows` in place, so the closure always sees the tail.
+  const rowGap = useCallback(
+    (_row: TimelineRenderRow, index: number) =>
+      startsTimelineTurn(rows[index + 1]) ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP,
+    [rows],
+  );
   const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
   let pinnedQuestionRow: TimelineRenderRow | undefined;
   if (pendingQuestionRequestId !== null) {
@@ -490,6 +657,21 @@ function EventTimelineBody({
     });
   };
   const renderRow = (row: TimelineRenderRow, state: VirtualRowState) => {
+    const footer = turnFooters.get(row.key);
+    const content = renderRowContent(row, state);
+    if (!footer) return content;
+    return (
+      <>
+        {content}
+        <TurnFooter
+          summary={footer}
+          onFork={onFork}
+          forkAvailability={footer.forkTurn == null ? undefined : forkAvailabilityByTurn?.get(footer.forkTurn)}
+        />
+      </>
+    );
+  };
+  const renderRowContent = (row: TimelineRenderRow, state: VirtualRowState) => {
   if (row.kind === "work_summary") {
       return (
         <WorkSummary
@@ -515,7 +697,6 @@ function EventTimelineBody({
     const item = row.item;
     const detailsKey = `row-details:${row.key}`;
     const detailsOpen = disclosure.get(detailsKey) ?? false;
-    const assistantForkTurn = item.kind === "agent_message" ? forkTurns.get(item.id) : undefined;
     const userRewindTurn = item.kind === "user_message" ? rewindTurns.get(item.id) : undefined;
     return (
       <div
@@ -536,9 +717,6 @@ function EventTimelineBody({
           onEditInFork={onEditInFork}
           onOpenSourceLocation={onOpenSourceLocation}
           editInForkAvailability={item.kind === "user_message" ? editInForkAvailabilityByItem?.get(item.id) : undefined}
-          onFork={onFork}
-          forkTurn={assistantForkTurn}
-          forkAvailability={assistantForkTurn == null ? undefined : forkAvailabilityByTurn?.get(assistantForkTurn)}
           questionContext={item.kind === "question" && row.key === pinnedQuestionRow?.key &&
             questionContext?.questionInTimeline === true ? questionContext : undefined}
           approvalContext={item.kind === "permission" && item.resolvedOptionId === undefined &&
@@ -557,7 +735,7 @@ function EventTimelineBody({
       overscan={8}
       pinnedKey={pinnedQuestionRow?.key ?? null}
       onPinnedAvailabilityChange={reportPinnedQuestionAvailability}
-      rowGap={12}
+      rowGap={rowGap}
       className="timeline"
       ariaLabel={ariaLabel}
       dataKind="timeline"
@@ -574,7 +752,13 @@ function EventTimelineBody({
   ) : (
     <div className="timeline" role="list" aria-label={ariaLabel}>
       {rows.map((row, index) => (
-        <div key={row.key} role="listitem" aria-posinset={index + 1} aria-setsize={rows.length}>
+        <div
+          key={row.key}
+          className={index > 0 && startsTimelineTurn(row) ? "tl-turn-start" : undefined}
+          role="listitem"
+          aria-posinset={index + 1}
+          aria-setsize={rows.length}
+        >
           {renderRow(row, { index, visible: true })}
         </div>
       ))}
@@ -1565,6 +1749,7 @@ function flattenTimelineItemRows(
 ): TimelineRenderRow[] {
   const rows: TimelineRenderRow[] = [];
   const appendItem = (item: TimelineItem, nestedInWork: boolean, itemDepth: number) => {
+    if (!timelineItemRendersRow(item)) return;
     const toolIdentity = item.kind === "tool_call" && (toolIds.get(item.toolCallId) ?? 0) === 1
       ? item.toolCallId
       : item.kind === "tool_call" ? `${item.toolCallId}:${item.id}` : null;
@@ -1702,14 +1887,11 @@ const TimelineRow = memo(function TimelineRow({
   onRewind,
   rewindTurn,
   rewindUnavailableReason,
-  onFork,
   onEditAndResend,
   editAndResendUnavailableReason,
   onEditInFork,
   onOpenSourceLocation,
   editInForkAvailability,
-  forkTurn,
-  forkAvailability,
   highlightEligible = true,
   disclosureOpen = false,
   onDisclosureToggle,
@@ -1721,15 +1903,12 @@ const TimelineRow = memo(function TimelineRow({
   onRewind?: (turn: number) => void;
   rewindTurn?: number;
   rewindUnavailableReason?: string;
-  onFork?: (turn: number) => void;
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
   /** Why Edit & Resend cannot be used now; it then stays visible, disabled with this reason. */
   editAndResendUnavailableReason?: string;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   editInForkAvailability?: EditInForkAvailability;
-  forkTurn?: number;
-  forkAvailability?: ConversationForkAvailability;
   highlightEligible?: boolean;
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
@@ -1739,24 +1918,10 @@ const TimelineRow = memo(function TimelineRow({
   const timingDescriptionId = useId();
   const sessionActive = useContext(TimelineActivityContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
-  const handoff = useContext(HandoffContext);
   const editInForkTurn = editInForkAvailability?.available ? editInForkAvailability.forkTurn : undefined;
   switch (item.kind) {
     case "artifact_attached":
       return <TranscriptArtifact artifact={item.artifact} />;
-    case "checkpoint":
-      return (
-        <div
-          className="tl-checkpoint"
-          role="separator"
-          aria-label={`Start Turn ${item.turn}`}
-          title={`Files snapshot taken at the start of turn ${item.turn}`}
-        >
-          <span className="checkpoint-line" />
-          <span className="checkpoint-label">Start Turn {item.turn}</span>
-          <span className="checkpoint-line" />
-        </div>
-      );
     case "checkpoint_restored":
       return (
         <div
@@ -1767,19 +1932,6 @@ const TimelineRow = memo(function TimelineRow({
         >
           <span className="checkpoint-line" />
           <span className="checkpoint-label"><span aria-hidden="true">⤺ </span>Files Rewound to Before Turn {item.turn}</span>
-          <span className="checkpoint-line" />
-        </div>
-      );
-    case "conversation_checkpoint":
-      return (
-        <div
-          className="tl-checkpoint conversation"
-          role="separator"
-          aria-label={`End Turn ${item.turn}`}
-          title={`Conversation and files saved at the end of turn ${item.turn}`}
-        >
-          <span className="checkpoint-line" />
-          <span className="checkpoint-label">End Turn {item.turn}</span>
           <span className="checkpoint-line" />
         </div>
       );
@@ -1840,7 +1992,7 @@ const TimelineRow = memo(function TimelineRow({
       return (
         <div className="tl-row user">
           <div className="tl-message-stack user">
-            <div className="bubble user-bubble">
+            <div className="tl-bubble">
               {item.deliveryIntent === "steer" && item.submissionId && (
                 <span className="steered-marker">Steered</span>
               )}
@@ -1856,13 +2008,8 @@ const TimelineRow = memo(function TimelineRow({
               )}
               {item.text && <div className="bubble-text"><Markdown profile="inline" highlightEligible={highlightEligible}>{item.text}</Markdown></div>}
             </div>
-            <MessageMeta
-              createdAt={item.createdAt}
-              durationMs={item.durationMs}
-              durationSource={item.durationSource}
-              turnUsage={item.turnUsage}
+            <UserMessageActions
               copyText={item.text}
-              copyLabel="Copy user message"
               onRewind={onRewind && rewindTurn != null ? () => onRewind(rewindTurn) : undefined}
               rewindUnavailableReason={rewindUnavailableReason}
               onEditAndResend={onEditAndResend ? () => onEditAndResend(item) : undefined}
@@ -1875,22 +2022,11 @@ const TimelineRow = memo(function TimelineRow({
         </div>
       );
     case "agent_message":
-      // Codex-style: the model response is full-width document flow, not a chat bubble.
+      // Codex-style: the model response is full-width document flow, not a chat bubble. Its time,
+      // usage and actions live once in the turn's footer.
       return (
         <div className="tl-agent-msg">
           <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
-          {/* Meta trails the text it describes, matching the user-bubble arrangement. */}
-          <MessageMeta
-            createdAt={item.createdAt}
-            lastActivityAt={item.lastActivityAt}
-            completedAt={item.completedAt}
-            copyText={item.text}
-            copyLabel="Copy assistant message"
-            onFork={onFork && forkTurn != null ? () => onFork(forkTurn) : undefined}
-            forkAvailability={forkAvailability}
-            onHandoff={handoff && forkTurn != null ? () => handoff.open(forkTurn) : undefined}
-            handoffUnavailableReason={handoff?.reason}
-          />
         </div>
       );
     case "agent_thought":
@@ -2247,7 +2383,6 @@ function ActivityTimestampMeta({
   durationOverrideMs,
   pointWhenEqual = false,
   showDuration = false,
-  compact = false,
   className,
 }: {
   id?: string;
@@ -2257,9 +2392,6 @@ function ActivityTimestampMeta({
   durationOverrideMs?: number;
   pointWhenEqual?: boolean;
   showDuration?: boolean;
-  /** Message-meta presentation: "start → end" with the Started/Last Activity labels demoted to
-   * screen-reader-only text (each value keeps its labeled title and absolute sr time). */
-  compact?: boolean;
   className?: string;
 }) {
   const now = useContext(TimelineClockContext);
@@ -2286,15 +2418,12 @@ function ActivityTimestampMeta({
   const durationLabel = completed != null ? "Duration" : sessionActive ? "Elapsed" : "Observed";
   if (started == null && lastActivity == null && !duration) return null;
   return (
-    <span id={id} className={`tl-timestamp-meta${compact ? " tl-timestamp-compact" : ""}${className ? ` ${className}` : ""}`}>
+    <span id={id} className={`tl-timestamp-meta${className ? ` ${className}` : ""}`}>
       {point ? (
         <TimelineTimestamp label="Recorded" timestamp={started} />
       ) : (
         <>
           {started != null && <TimelineTimestamp label="Started" timestamp={started} />}
-          {compact && started != null && lastActivity != null && (
-            <span className="tl-timestamp-arrow" aria-hidden="true">→</span>
-          )}
           {lastActivity != null && <TimelineTimestamp label="Last Activity" timestamp={lastActivity} />}
         </>
       )}
@@ -2333,70 +2462,124 @@ function turnUsageLabel(usage: TurnUsage, driver: AgentDriverKind | undefined): 
   return { text: parts.join(" · "), title: `Turn usage: ${detail}` };
 }
 
-function MessageMeta({
-  createdAt,
-  lastActivityAt,
-  completedAt,
-  durationMs,
-  durationSource,
-  turnUsage,
+/** The user message's own actions, beside its bubble. Its time, duration and usage belong to the
+ * turn and appear once in the turn's footer. */
+function UserMessageActions({
   copyText,
-  copyLabel,
   onEditAndResend,
   editAndResendUnavailableReason,
   onEditInFork,
   editInForkUnavailableReason,
-  onFork,
-  forkAvailability,
   onRewind,
   rewindUnavailableReason,
-  onHandoff,
-  handoffUnavailableReason,
 }: {
-  createdAt?: number;
-  lastActivityAt?: number;
-  completedAt?: number;
-  durationMs?: number;
-  durationSource?: "provider" | "observed";
-  turnUsage?: TurnUsage;
   copyText: string;
-  copyLabel: string;
   onEditAndResend?: () => void;
   editAndResendUnavailableReason?: string;
   onEditInFork?: () => void;
   /** Shown as a disabled Edit in Fork when it applies to this message but cannot be used now. */
   editInForkUnavailableReason?: string;
-  onFork?: () => void;
-  forkAvailability?: ConversationForkAvailability;
   onRewind?: () => void;
   rewindUnavailableReason?: string;
-  onHandoff?: () => void;
-  handoffUnavailableReason?: string;
 }) {
-  const duration = durationMs != null ? formatDuration(durationMs) : "";
-  const driver = useContext(TimelineDriverContext);
-  const usage = turnUsage ? turnUsageLabel(turnUsage, driver) : null;
-  const timestamp = Number.isFinite(createdAt);
   const editInFork = Boolean(onEditInFork || editInForkUnavailableReason);
-  if (!timestamp && !duration && !usage && !copyText && !onEditAndResend && !editInFork &&
-      !forkAvailability && !onRewind && !onHandoff) return null;
+  if (!copyText && !onRewind && !onEditAndResend && !editInFork) return null;
   return (
-    <div className="tl-message-meta">
-      {timestamp && (
-        <ActivityTimestampMeta
-          startedAt={createdAt}
-          lastActivityAt={lastActivityAt}
-          completedAt={completedAt}
-          pointWhenEqual
-          compact
-        />
-      )}
-      {duration && (
-        <span
-          title={durationSource === "observed" ? "Approximate runner-recorded activity span" : "Provider-reported turn duration"}
-          aria-label={`${durationSource === "observed" ? "Approximate runner-recorded activity span" : "Provider-reported turn duration"}, ${duration}`}
+    <div className="tl-message-actions tl-user-actions" role="group" aria-label="Message Actions">
+      {copyText && <CopyButton text={copyText} iconOnly ariaLabel="Copy Message" className="tl-message-icon" />}
+      {onRewind && (
+        <MessageAction
+          label="Rewind Files to Before This Turn"
+          description="Restore files from before this turn without changing conversation history."
+          reason={rewindUnavailableReason}
+          onClick={onRewind}
         >
-          {durationSource === "observed" ? "~" : ""}{duration}
+          <FolderUpIcon size={14} />
+        </MessageAction>
+      )}
+      {onEditAndResend && editAndResendUnavailableReason !== undefined && (
+        <MessageAction
+          label="Edit User Message as a New Turn"
+          description="Edit this message and load it into the composer as a new turn."
+          reason={editAndResendUnavailableReason}
+        >
+          <EditIcon size={14} />
+        </MessageAction>
+      )}
+      {onEditAndResend && editAndResendUnavailableReason === undefined && (
+        <button
+          type="button"
+          className="tl-message-icon"
+          onClick={onEditAndResend}
+          title="Edit & Resend"
+          aria-label="Edit User Message as a New Turn"
+        >
+          <EditIcon size={14} />
+        </button>
+      )}
+      {onEditInFork && (
+        <button
+          type="button"
+          className="tl-message-icon"
+          onClick={onEditInFork}
+          title="Edit in Fork"
+          aria-label="Edit User Message in a New Conversation Fork"
+        >
+          <ThreadForkIcon size={14} />
+        </button>
+      )}
+      {!onEditInFork && editInForkUnavailableReason && (
+        <MessageAction
+          label="Edit User Message in a New Conversation Fork"
+          description="Edit this message in a new fork from the checkpoint before it."
+          reason={editInForkUnavailableReason}
+        >
+          <ThreadForkIcon size={14} />
+        </MessageAction>
+      )}
+    </div>
+  );
+}
+
+/** "Started 12:25:38 AM, finished 12:26:04 AM (26s)": the exact span behind the footer's clock. */
+export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt" | "finishedAt" | "durationMs">): string {
+  const started = formatRecordedTimestamp(summary.startedAt)?.label;
+  const finished = formatRecordedTimestamp(summary.finishedAt)?.label;
+  const spanMs = summary.durationMs ?? (summary.startedAt !== undefined && summary.finishedAt !== undefined
+    ? Math.max(0, summary.finishedAt - summary.startedAt)
+    : undefined);
+  const duration = spanMs !== undefined ? formatDuration(spanMs) : "";
+  const span = started && finished
+    ? `Started ${started}, finished ${finished}`
+    : finished ? `Finished ${finished}` : started ? `Started ${started}` : "";
+  return span && duration ? `${span} (${duration})` : span;
+}
+
+/** One footer per settled turn (§11.3): Turn N, its finishing clock time, tokens and cost, and the
+ * turn's own actions at the trailing end. */
+function TurnFooter({ summary, onFork, forkAvailability }: {
+  summary: TurnFooterSummary;
+  onFork?: (turn: number) => void;
+  forkAvailability?: ConversationForkAvailability;
+}) {
+  const driver = useContext(TimelineDriverContext);
+  const handoff = useContext(HandoffContext);
+  const tooltipId = useId();
+  const { forkTurn } = summary;
+  const clockAt = summary.finishedAt ?? summary.startedAt;
+  const clock = formatClock(clockAt);
+  const span = turnSpanDescription(summary);
+  const usage = summary.usage ? turnUsageLabel(summary.usage, driver) : null;
+  const onHandoff = handoff && forkTurn != null ? () => handoff.open(forkTurn) : undefined;
+  const responseText = useMemo(() => turnResponseText(summary), [summary.responseParts]);
+  const hasActions = Boolean(responseText || forkAvailability || onHandoff);
+  return (
+    <div className="tl-turn-footer" data-turn-footer={summary.turn ?? ""}>
+      {summary.turn !== undefined && <span className="tl-turn-label">Turn {summary.turn}</span>}
+      {clock && (
+        <span className="tl-turn-time">
+          <time dateTime={new Date(clockAt!).toISOString()} aria-describedby={span ? tooltipId : undefined}>{clock}</time>
+          {span && <span id={tooltipId} className="tl-tooltip" role="tooltip">{span}</span>}
         </span>
       )}
       {usage && (
@@ -2404,25 +2587,17 @@ function MessageMeta({
           {usage.text}
         </span>
       )}
-      {(copyText || forkAvailability || onRewind || onHandoff || onEditAndResend || editInFork) && (
-        <div className="tl-message-actions" role="group" aria-label="Message Actions">
-          {copyText && <CopyButton text={copyText} iconOnly ariaLabel={copyLabel} className="tl-message-icon" />}
-          {onRewind && (
-            <MessageAction
-              label="Rewind Files to Before This Turn"
-              description="Restore files from before this turn without changing conversation history."
-              reason={rewindUnavailableReason}
-              onClick={onRewind}
-            >
-              <FolderUpIcon size={14} />
-            </MessageAction>
+      {hasActions && (
+        <div className="tl-message-actions tl-turn-actions" role="group" aria-label="Turn Actions">
+          {responseText && (
+            <CopyButton text={responseText} iconOnly ariaLabel="Copy Reply" className="tl-message-icon" />
           )}
           {forkAvailability && (
             <MessageAction
               label="Fork Conversation After This Turn"
               description="Fork with the same provider and its native conversation history."
               reason={forkAvailability.available ? undefined : forkAvailability.reason}
-              onClick={forkAvailability.available ? onFork : undefined}
+              onClick={forkAvailability.available && onFork && forkTurn != null ? () => onFork(forkTurn) : undefined}
             >
               <ThreadForkIcon size={14} />
             </MessageAction>
@@ -2431,50 +2606,10 @@ function MessageMeta({
             <MessageAction
               label="Hand Off After This Turn"
               description="Hand off to a different provider in a fresh conversation with portable context."
-              reason={handoffUnavailableReason}
+              reason={handoff?.reason}
               onClick={onHandoff}
             >
               <ShareIcon size={14} />
-            </MessageAction>
-          )}
-          {onEditAndResend && editAndResendUnavailableReason !== undefined && (
-            <MessageAction
-              label="Edit User Message as a New Turn"
-              description="Edit this message and load it into the composer as a new turn."
-              reason={editAndResendUnavailableReason}
-            >
-              <EditIcon size={14} />
-            </MessageAction>
-          )}
-          {onEditAndResend && editAndResendUnavailableReason === undefined && (
-            <button
-              type="button"
-              className="tl-message-icon"
-              onClick={onEditAndResend}
-              title="Edit & Resend"
-              aria-label="Edit User Message as a New Turn"
-            >
-              <EditIcon size={14} />
-            </button>
-          )}
-          {onEditInFork && (
-            <button
-              type="button"
-              className="tl-message-icon"
-              onClick={onEditInFork}
-              title="Edit in Fork"
-              aria-label="Edit User Message in a New Conversation Fork"
-            >
-              <ThreadForkIcon size={14} />
-            </button>
-          )}
-          {!onEditInFork && editInForkUnavailableReason && (
-            <MessageAction
-              label="Edit User Message in a New Conversation Fork"
-              description="Edit this message in a new fork from the checkpoint before it."
-              reason={editInForkUnavailableReason}
-            >
-              <ThreadForkIcon size={14} />
             </MessageAction>
           )}
         </div>

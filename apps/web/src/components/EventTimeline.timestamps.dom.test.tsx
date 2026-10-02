@@ -128,12 +128,13 @@ test("cards expose semantic relative timing while every mounted timeline shares 
     assert.equal(container.querySelectorAll(".tl-tool:not(details)").length, 2, "bare cards carry the same timing metadata");
     assert.equal(container.querySelectorAll(".tl-tool .tool-head time").length, 8, "every tool shows Started and Last Activity");
     assert.equal(container.querySelectorAll(".tl-reasoning time").length, 2, "bare thought rows expose their recorded time");
+    assert.equal(container.querySelectorAll(".tl-agent-msg time").length, 0, "message rows carry no timestamp");
 
     const times = [...container.querySelectorAll<HTMLTimeElement>("time")];
-    assert.ok(times.length >= 14);
+    assert.ok(times.length >= 10);
     for (const time of times) {
       assert.match(time.dateTime, /^2026-08-04T/);
-      assert.match(time.querySelector("[aria-hidden='true']")?.textContent ?? "", /^(Just Now|\d+[smhd] Ago)$/);
+      assert.match(time.querySelector("[aria-hidden='true']")?.textContent ?? "", /^(just now|\d+[smhd] ago)$/);
       assert.match(time.querySelector(".sr-only")?.textContent ?? "", /2026/);
       assert.equal(time.hasAttribute("aria-label"), false);
       assert.match(time.title, /^(Recorded|Started|Last Activity) /);
@@ -177,13 +178,13 @@ test("quiet active sessions keep the shared clock advancing", async () => {
   const root = createRoot(container);
   try {
     await act(async () => {
-      root.render(<EventTimeline items={[{ kind: "user_message", id: 30, text: "Queued prompt", createdAt: startedAt }]} sessionActive />);
+      root.render(<EventTimeline items={[{ kind: "turn_interrupted", id: 30, createdAt: startedAt }]} sessionActive />);
     });
-    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "Just Now");
+    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "just now");
     assert.ok(tick, "an active session owns the clock even when all current rows are point-in-time records");
     now += 120_000;
     await act(async () => tick?.());
-    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "2m Ago");
+    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "2m ago");
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -204,13 +205,13 @@ test("clock ticks update timestamp consumers without rerendering general timelin
     writable: true,
     value: ((callback: () => void) => { tick = callback; return 304; }) as unknown as typeof setInterval,
   });
-  const countedItem = { id: 40, text: "Stable response", createdAt: startedAt } as unknown as TimelineItem;
+  const countedItem = { id: 40, createdAt: startedAt } as unknown as TimelineItem;
   Object.defineProperty(countedItem, "kind", {
     configurable: true,
     enumerable: true,
     get: () => {
       kindReads += 1;
-      return "agent_message";
+      return "turn_interrupted";
     },
   });
   const countedItems = [countedItem];
@@ -221,13 +222,13 @@ test("clock ticks update timestamp consumers without rerendering general timelin
     await act(async () => root.render(<EventTimeline items={countedItems} sessionActive />));
     const readsAfterMount = kindReads;
     assert.ok(readsAfterMount > 0);
-    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "Just Now");
+    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "just now");
     assert.ok(tick);
 
     now += 120_000;
     await act(async () => tick?.());
 
-    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "2m Ago");
+    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "2m ago");
     assert.equal(kindReads, readsAfterMount,
       "the changing clock context reaches time consumers without reevaluating the row item");
   } finally {
@@ -277,7 +278,7 @@ test("the shared clock starts when enabled, pauses while hidden, republishes on 
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  const pointItem: TimelineItem[] = [{ kind: "user_message", id: 31, text: "Queued prompt", createdAt: startedAt }];
+  const pointItem: TimelineItem[] = [{ kind: "turn_interrupted", id: 31, createdAt: startedAt }];
   try {
     await act(async () => root.render(<EventTimeline items={pointItem} sessionActive={false} />));
     assert.equal(intervalStarts, 0, "disabled timelines do not subscribe");
@@ -286,7 +287,7 @@ test("the shared clock starts when enabled, pauses while hidden, republishes on 
     await act(async () => root.render(<EventTimeline items={pointItem} sessionActive />));
     assert.equal(intervalStarts, 1, "false-to-true starts the page clock");
     assert.equal(visibilityAdds, 1);
-    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "2m Ago",
+    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "2m ago",
       "enabling immediately publishes the current time");
 
     setVisibility("hidden");
@@ -297,7 +298,7 @@ test("the shared clock starts when enabled, pauses while hidden, republishes on 
     setVisibility("visible");
     await act(async () => document.dispatchEvent(new Event("visibilitychange")));
     assert.equal(intervalStarts, 2, "returning to the page restarts the timer");
-    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "3m Ago",
+    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "3m ago",
       "returning immediately republishes before the next interval");
 
     await act(async () => root.render(<EventTimeline items={pointItem} sessionActive={false} />));
@@ -386,7 +387,7 @@ test("a live one-observation tool remains Started until it becomes a stable reco
   }
 });
 
-test("live point-in-time rows remain one Recorded timestamp without fabricated activity", async () => {
+test("live point-in-time rows remain one Recorded timestamp, and a prompt carries none", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -395,8 +396,8 @@ test("live point-in-time rows remain one Recorded timestamp without fabricated a
       items={[{ kind: "user_message", id: 34, text: "Queued prompt", createdAt: startedAt }]}
       sessionActive
     />));
-    assert.equal(container.querySelectorAll(".tl-message-meta time").length, 1);
-    assert.equal(container.querySelector(".tl-message-meta .tl-timestamp-label")?.textContent, "Recorded");
+    assert.equal(container.querySelectorAll("time").length, 0, "the turn footer, not the prompt, carries its time");
+    assert.doesNotMatch(container.textContent ?? "", /Recorded|Started|Last Activity/);
 
     await act(async () => root.render(<EventTimeline
       items={[{ kind: "turn_interrupted", id: 35, createdAt: startedAt }]}
@@ -439,7 +440,7 @@ test("inactive sessions show stable absolute times and bound dangling tools to o
     const times = [...container.querySelectorAll<HTMLTimeElement>("time")];
     assert.ok(times.length > 0);
     for (const time of times) {
-      assert.doesNotMatch(time.textContent ?? "", /Ago|Just Now/);
+      assert.doesNotMatch(time.textContent ?? "", /ago|just now/i);
       assert.equal(time.hasAttribute("aria-label"), false);
       assert.match(time.querySelector(".sr-only")?.textContent ?? "", /2026/);
     }

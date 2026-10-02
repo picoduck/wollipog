@@ -88,18 +88,35 @@ export interface RecordedTimestamp {
   title: string;
 }
 
-/** Compact Title Case relative time for timestamp metadata; callers provide the shared clock. */
+/** Compact relative time for timestamp metadata, in sentence case ("4m ago", docs/design-system.md
+ * §17.2); callers provide the shared clock. */
 export function formatRecordedRelativeTime(
   timestamp: number | undefined,
   now = Date.now(),
 ): string {
   if (!Number.isFinite(timestamp) || !Number.isFinite(now)) return "";
   const diff = Math.max(0, now - timestamp!);
-  if (diff < 5_000) return "Just Now";
-  if (diff < 60_000) return `${Math.floor(diff / 1_000)}s Ago`;
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m Ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h Ago`;
-  return `${Math.floor(diff / 86_400_000)}d Ago`;
+  if (diff < 5_000) return "just now";
+  if (diff < 60_000) return `${Math.floor(diff / 1_000)}s ago`;
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+/** Wall-clock time without seconds ("12:26 AM"), the transcript's one visible timestamp. */
+export function formatClock(
+  timestamp: number | undefined,
+  locale?: string,
+  timeZone?: string,
+): string {
+  if (!Number.isFinite(timestamp)) return "";
+  const date = new Date(timestamp!);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(locale, {
+    hour: "numeric",
+    minute: "2-digit",
+    ...(timeZone ? { timeZone } : {}),
+  }).format(date);
 }
 
 /** Session event time means recorded by the runner; adopted history may not retain provider time. */

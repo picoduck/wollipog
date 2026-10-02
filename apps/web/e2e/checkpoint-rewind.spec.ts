@@ -2,10 +2,9 @@ import { expect, test } from "@playwright/test";
 
 test("rewind stays compact on its user turn across pointer interactions", async ({ page }) => {
   await page.goto("/checkpoint-rewind-e2e.html");
-  await expect(page.getByRole("separator", { name: "Start Turn 4" }))
-    .toHaveAttribute("title", "Files snapshot taken at the start of turn 4");
-  await expect(page.getByRole("separator", { name: "End Turn 4" }))
-    .toHaveAttribute("title", "Conversation and files saved at the end of turn 4");
+  // The turn's footer names it; its checkpoints draw no Start Turn or End Turn separator.
+  await expect(page.locator(".tl-turn-footer .tl-turn-label")).toHaveText("Turn 4");
+  await expect(page.getByRole("separator", { name: /^(Start|End) Turn/ })).toHaveCount(0);
   await expect(page.getByRole("separator", { name: "Files Rewound to Before Turn 4" })).toBeVisible();
   await expect(page.getByRole("separator", { name: "Forked from Turn 4" })).toBeVisible();
   const handoff = page.getByRole("separator", { name: "Handoff from Claude Code to Codex After Turn 4" });

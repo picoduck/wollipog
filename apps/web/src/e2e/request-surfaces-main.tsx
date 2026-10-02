@@ -613,7 +613,7 @@ function Fixture() {
                     ref={artifactTimelineScrollRef}>
                     {Array.from({ length: scenario === "artifact-timeline" ? 0 : 24 }, (_, index) => (
                       <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
-                        <div className={index % 2 ? "bubble agent-bubble" : "bubble user-bubble"}>
+                        <div className={index % 2 ? "tl-agent-msg" : "tl-bubble"}>
                           Transcript message {index + 1}
                         </div>
                       </div>
