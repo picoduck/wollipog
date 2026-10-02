@@ -1275,18 +1275,19 @@ test("discard_worktree relays a legacy runner's explicit non-replaying refusal t
     status: 409,
     body: {
       error: "worktree retained: the worktree is still handling a provider turn or queued input — " +
-        "this runner reports protocol v158, and durable deferred worktree retirement requires v159. " +
-        "No retirement was recorded, so this refusal will not replay on its own: retry the discard " +
-        "once the session's provider has exited, or update and restart the runner to receive a " +
-        "durable receipt instead.",
+        "no retirement was recorded, so this refusal will not replay on its own. Retry the discard " +
+        "once the session's provider has exited. This machine needs a newer runner for deferred " +
+        "worktree retirement. Update and restart the runner.",
       retirement: { status: "unsupported", reason: "legacy_runner" },
+      requiredRunnerProtocolVersion: 159,
+      runnerProtocolVersion: 158,
     },
   }));
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
   const result = await callTool(deps, "discard_worktree", { sessionId: "s_child", path: "/repo/old" });
   assert.equal(result.isError, true);
   assert.match(resultText(result), /will not replay on its own/);
-  assert.match(resultText(result), /retry the discard once the session's provider has exited/);
+  assert.match(resultText(result), /Retry the discard once the session's provider has exited/);
 });
 
 test("create_worktree can finish after the ordinary control-plane request deadline", async () => {
