@@ -941,7 +941,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   const program = ts.createProgram({
     rootNames: [...files.keys()],
     options: {
-      noLib: true, noEmit: true, types: [], jsx: ts.JsxEmit.Preserve,
+      noLib: true, noEmit: true, types: [], jsx: ts.JsxEmit.Preserve, strictNullChecks: true,
       module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler,
     },
     host: {
@@ -1060,6 +1060,8 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   const callSites = new Map<SourceFunction, ts.CallExpression[]>();
   const elements: ts.JsxOpeningLikeElement[] = [];
   const identifiers = new Map<string, ts.Identifier[]>();
+  /** Names bound by an import or a variable declaration, which may name a function under another spelling. */
+  const bindingNames: ts.Identifier[] = [];
   // React's createElement and cloneElement render, or add props to, an element without JSX, which is
   // where this scan reads classes; the DOM's createElementNS is how a script would draw an svg.
   const bypasses: ts.CallExpression[] = [];
@@ -1079,7 +1081,12 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   };
   for (const file of files.values()) {
     const visit = (node: ts.Node): void => {
-      if (ts.isIdentifier(node)) identifiers.set(node.text, [...(identifiers.get(node.text) ?? []), node]);
+      if (ts.isIdentifier(node)) {
+        identifiers.set(node.text, [...(identifiers.get(node.text) ?? []), node]);
+        const parent = node.parent;
+        if (((ts.isImportSpecifier(parent) || ts.isImportClause(parent)) && parent.name === node)
+          || (ts.isVariableDeclaration(parent) && parent.name === node)) bindingNames.push(node);
+      }
       if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) elements.push(node);
       if (ts.isCallExpression(node)) {
         const fn = functionOf(declarationOf(node.expression));
@@ -1105,6 +1112,12 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     const writes = { props: new Set<string>(), any: false };
     writesMemo.set(declaration, writes);
     if (!ts.isIdentifier(declaration.name)) return writes;
+    // Only an object or array can be changed through another name; a string cannot.
+    const value = transparent(declaration.initializer);
+    const type = checker.getTypeAtLocation(declaration.name);
+    const mutable = (value && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value) || ts.isNewExpression(value)))
+      || (type.isUnion() ? type.types : [type]).some((member) => member.flags & ts.TypeFlags.Object);
+    if (!mutable) return writes;
     const isWrite = (target: ts.Node) => {
       const parent = target.parent;
       return (ts.isBinaryExpression(parent) && parent.left === target && parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
@@ -1113,8 +1126,11 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
         || ((ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent))
           && (parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken));
     };
-    for (const use of identifiers.get(declaration.name.text) ?? []) {
-      if (use === declaration.name || declarationOf(use) !== declaration) continue;
+    for (const name of identifiers.get(declaration.name.text) ?? []) {
+      if (name === declaration.name || declarationOf(name) !== declaration) continue;
+      // `(common)` and `common as Props` are still `common`.
+      let use: ts.Node = name;
+      while (isTransparent(use.parent)) use = use.parent;
       const parent = use.parent;
       if (ts.isPropertyAccessExpression(parent) && parent.expression === use) {
         if (isWrite(parent)) writes.props.add(parent.name.text);
@@ -1144,17 +1160,15 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     const base = declarationOf(node.expression);
     return Boolean(base && base !== "glyph" && isConstant(base) && written(base, node.name.text));
   };
-  /** What a prop of an object type can hold: its literals, `[]` when no member of the type has it, or null when that cannot be told. */
+  /** What a prop of an object type can hold: its literals when every non-nullish member names it, or null when that cannot be told. */
   const propertyLiterals = (type: ts.Type, prop: string, at: ts.Node): string[] | null => {
     const out: string[] = [];
     for (const member of type.isUnion() ? type.types : [type]) {
       if (member.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return null;
       if (member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.BooleanLiteral)) continue;
       const property = member.getProperty(prop);
-      if (!property) {
-        if (member.getStringIndexType()) return null;
-        continue;
-      }
+      // An object type that does not name the prop is open: it may still carry one at run time.
+      if (!property) return null;
       const values = literalsOf(checker.getTypeOfSymbolAtLocation(property, at));
       if (!values) return null;
       out.push(...values);
@@ -1162,9 +1176,12 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     return out;
   };
 
+  /** Functions whose call sites stood for all the values a parameter takes; each is checked for escapes. */
+  const traced = new Set<SourceFunction>();
   const forwards = new Set<string>();
   const pending: { fn: SourceFunction; index: number; prop: string | null }[] = [];
   const forward = (fn: SourceFunction, index: number, prop: string | null): string[] => {
+    traced.add(fn);
     const key = `${where(fn)}#${fn.pos}|${index}|${prop}`;
     if (!forwards.has(key)) {
       forwards.add(key);
@@ -1288,6 +1305,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
    * stands for an object the scan cannot read that may hold the prop.
    */
   const passedValues = (fn: SourceFunction, index: number, prop: string, visited = new Set<string>()): (ts.Node | "unknown")[] => {
+    traced.add(fn);
     const key = `${where(fn)}#${fn.pos}|${index}`;
     if (visited.has(key)) return [];
     visited.add(key);
@@ -1522,9 +1540,22 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     return [...forward(parameter.fn, parameter.index, parameter.prop), ...fallback];
   };
   /** The values a prop can take from an object: its literal, through spreads and constants, or the call sites' values. */
+  const reading = new Set<string>();
   const objectProp = (input: ts.Node, prop: string): string[] => {
     const node = transparent(input);
     if (!node) return [UNREAD];
+    // Reading an object while already reading it (`<Mark attrs={attrs} />` inside Mark, a helper
+    // that returns its own call) adds nothing the outer read does not already collect.
+    const key = `${where(node)}#${node.pos}|${prop}`;
+    if (reading.has(key)) return [];
+    reading.add(key);
+    try {
+      return objectPropOf(node, prop);
+    } finally {
+      reading.delete(key);
+    }
+  };
+  const objectPropOf = (node: ts.Node, prop: string): string[] => {
     if (ts.isObjectLiteralExpression(node)) {
       return node.properties.flatMap((property) => {
         if (ts.isSpreadAssignment(property)) return objectProp(property.expression, prop);
@@ -1577,16 +1608,20 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     const nullish = (type.isUnion() ? type.types : [type]).every((member) => member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null));
     return nullish ? [] : [UNREAD];
   };
-  /** The values a prop takes at one element: its attribute, and what each spread object holds for it. */
-  const elementProp = (element: ts.JsxOpeningLikeElement, prop: string): string[] =>
-    element.attributes.properties.flatMap((attribute) => {
-      if (ts.isJsxSpreadAttribute(attribute)) return objectProp(attribute.expression, prop);
-      if (attribute.name.getText() !== prop) return [];
+  /**
+   * The values a prop takes at one element, in attribute order: an explicit attribute replaces
+   * everything before it, and a spread after it may or may not replace it, so it adds its values.
+   */
+  const elementProp = (element: ts.JsxOpeningLikeElement, prop: string): string[] => {
+    let values: string[] = [];
+    for (const attribute of element.attributes.properties) {
+      if (ts.isJsxSpreadAttribute(attribute)) { values = [...values, ...objectProp(attribute.expression, prop)]; continue; }
+      if (attribute.name.getText() !== prop) continue;
       const value = attribute.initializer;
-      if (!value) return [""];
-      if (ts.isStringLiteral(value)) return [value.text];
-      return ts.isJsxExpression(value) ? strings(value.expression) : [UNREAD];
-    });
+      values = !value ? [""] : ts.isStringLiteral(value) ? [value.text] : ts.isJsxExpression(value) ? strings(value.expression) : [UNREAD];
+    }
+    return values;
+  };
 
   const classes = new Map<string, string>();
   const unread = new Set<string>();
@@ -1627,6 +1662,18 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   for (const [element, components] of rendered) {
     if (components.has("icon")) collect(elementProp(element, "className"), element);
   }
+  /** The other spellings each function is bound under, by an import or a constant, read once. */
+  let aliases: Map<SourceFunction, Set<string>> | undefined;
+  const bindings = new Set(bindingNames);
+  const aliasesOf = () => {
+    if (aliases) return aliases;
+    aliases = new Map();
+    for (const binding of bindingNames) {
+      const fn = functionOf(declarationOf(binding));
+      if (fn) aliases.set(fn, new Set([...(aliases.get(fn) ?? []), binding.text]));
+    }
+    return aliases;
+  };
   /**
    * Where a function is used other than by calling it or rendering it: passed to `map()`, handed to
    * another package, aliased. Its call sites are then not all the values its parameters take. A
@@ -1637,8 +1684,10 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     const name = declaredName(fn);
     if (!name) return undefined;
     const component = jsxSites.has(fn);
-    return (identifiers.get(name.text) ?? []).find((use) => {
-      if (use === name || functionOf(declarationOf(use)) !== fn) return false;
+    // Every spelling: the declaration's, and each import or constant that names the same function.
+    const spellings = new Set([name.text, ...(aliasesOf().get(fn) ?? [])]);
+    return [...spellings].flatMap((spelling) => identifiers.get(spelling) ?? []).find((use) => {
+      if (use === name || bindings.has(use) || functionOf(declarationOf(use)) !== fn) return false;
       let node: ts.Node = use;
       while (isTransparent(node.parent)) node = node.parent;
       const parent = node.parent;
@@ -1660,8 +1709,6 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   };
   while (pending.length > 0) {
     const { fn, index, prop } = pending.shift()!;
-    const escape = escapes(fn);
-    if (escape) unread.add(`${where(escape)} ${escape.text} is used as a value, so its arguments cannot be traced`);
     if (index === 0 && prop !== null) for (const site of jsxSites.get(fn) ?? []) collect(elementProp(site, prop), site);
     for (const call of callSites.get(fn) ?? []) {
       for (const argument of argumentsAt(call, fn, index)) {
@@ -1669,6 +1716,10 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
         else collect(prop === null ? strings(argument) : objectProp(argument, prop), argument);
       }
     }
+  }
+  for (const fn of traced) {
+    const escape = escapes(fn);
+    if (escape) unread.add(`${where(escape)} ${escape.text} is used as a value, so its arguments cannot be traced`);
   }
   return { classes, unread: [...unread].sort() };
 }
@@ -3134,6 +3185,47 @@ test("icon classes are read from every way a class reaches an icon, and an unrea
     classes: ["rendered"],
     unread: ["Aliases.tsx:7 Icon is used as a value, so its arguments cannot be traced", "Aliases.tsx:8 ${…}", "Aliases.tsx:8 h() bypasses JSX"],
   });
+
+  // A joined class string kept in a constant and a parenthesised spread are read, not taken as
+  // escapes; a default applies where an argument may be undefined; a recursive component passing its
+  // own object along terminates; an explicit attribute overrides an earlier spread; and a component
+  // mapped under an import alias is still caught.
+  assert.deepEqual(scanOf({
+    "Icon.tsx": "export function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
+    "Final.tsx": [
+      "import { Icon as Alias } from \"./Icon.js\";",
+      "type P = { attrs: { className?: string }; depth: number };",
+      "function Mark({ attrs, depth }: P) { return <><svg {...attrs} />{depth > 0 && <Mark attrs={attrs} depth={depth - 1} />}</>; }",
+      "function cls(p = { className: \"default-icon\" }) { return p.className; }",
+      "export function Uses({ on }: { on: boolean }) {",
+      "  const joined = [\"mark\", on && \"hot\"].filter(Boolean).join(\" \");",
+      "  const common = { className: \"wrapped\" };",
+      "  const label = { className: \"label\" };",
+      "  const mapped = [{ className: \"mapped-icon\" }].map(Alias);",
+      "  return <>",
+      "    <svg className={joined} />",
+      "    <svg {...(common)} />",
+      "    <svg className={cls(on ? { className: \"given-icon\" } : undefined)} />",
+      "    <Mark attrs={{ className: \"recursive-icon\" }} depth={3} />",
+      "    <span {...label} /><svg {...label} className=\"override\" />",
+      "    <Alias className=\"rendered\" />",
+      "  </>;",
+      "}",
+    ].join("\n"),
+  }), {
+    classes: ["default-icon", "given-icon", "hot", "mark", "override", "recursive-icon", "rendered", "wrapped"],
+    unread: ["Final.tsx:9 Alias is used as a value, so its arguments cannot be traced"],
+  });
+
+  // A union member that does not name className is an open object type, like any other.
+  assert.deepEqual(scanOf({ "Open.tsx": [
+    "export function U({ on }: { on: boolean }) {",
+    "  const extra = { width: 16, className: \"two\" };",
+    "  let attrs: { className: \"one\" } | { width: number } = { className: \"one\" };",
+    "  if (on) attrs = extra;",
+    "  return <svg {...attrs} />;",
+    "}",
+  ].join("\n") }), { classes: [], unread: ["Open.tsx:5 ${…}"] });
 
   // A value the scan cannot follow is reported, alone or inside a composed name.
   assert.deepEqual(scanOf({ "A.tsx": "export function A(props: { data: { c: string } }) { return <svg className={props.data.c} />; }" }),
