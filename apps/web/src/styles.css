@@ -15056,29 +15056,19 @@ body.shell-dock-dragging * {
   .outbound-event-kinds { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* The reading column's one history notice (#2172; docs/design-system.md §12.4, §13.2). It is the
-   first thing in the reader and sticks to its top, so a failed or partial load stays in view while
-   the reader is at the tail. */
+/* The reading column's one history notice (#2172; docs/design-system.md §12.4, §13.2), in a band
+   above the scroller rather than inside it, so it takes its own height and no row ever sits under
+   it. The band's inline padding is the scroller's: both resolve against the reader's width, so the
+   notice spans the reading column. */
+.transcript-history-band {
+  flex: none;
+  padding-top: var(--space-3);
+  padding-inline: max(var(--tl-gutter), calc((100% - var(--chat-max)) / 2));
+}
 .notice.transcript-history-notice {
   /* Its title, body and actions wrap onto several lines in a narrow reader, so the tone icon is
      pinned to the first line, which is as tall as the Retry button beside it. */
   align-items: start;
-  position: sticky;
-  top: 0;
-  z-index: var(--z-sticky);
-  margin-bottom: var(--space-3);
-  box-shadow: var(--elev-1);
-}
-/* It sticks below the reader's top padding; this strip of the page background covers that padding,
-   so rows scrolling past never show above the notice. */
-.notice.transcript-history-notice::before {
-  content: "";
-  position: absolute;
-  right: -1px;
-  bottom: 100%;
-  left: -1px;
-  height: var(--space-6);
-  background: var(--bg);
 }
 .notice.transcript-history-notice .notice-icon,
 .notice.transcript-history-notice .notice-head { min-height: var(--control-h-sm); }

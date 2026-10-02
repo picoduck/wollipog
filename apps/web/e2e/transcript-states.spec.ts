@@ -40,20 +40,32 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await expect(page.locator(".transcript-tail-control")).toHaveCount(0);
     });
 
-    test("a history failure is one notice that stays at the top of the reading column", async ({ page }) => {
+    test("a history failure is one notice that heads the reading column and never covers a row", async ({ page }) => {
       await open(page, "state=history-partial");
-      const notice = page.locator(".detail-scroll .notice");
+      const notice = page.locator(".detail-reader .notice");
       await expect(notice).toHaveCount(1);
       await expect(notice).toContainText("Couldn't Load the Full Conversation");
       await expect(notice).toContainText("Loaded 9 of 60 events from Build Box.");
       await expect(page.getByText("Activity Unavailable")).toHaveCount(0);
       await expect(page.getByText(/502 Bad Gateway|Could not load complete/u)).toHaveCount(0);
+      await page.locator("[data-virtual-row]").first().waitFor();
+      const reader = page.locator(".detail-scroll");
       const column = await readingColumn(page);
       const box = (await notice.boundingBox())!;
       expect(Math.abs(box.x - column.left)).toBeLessThanOrEqual(1);
       expect(Math.abs(box.x + box.width - column.right)).toBeLessThanOrEqual(1);
-      // The reader opens at the tail; the notice is still in view.
+      // The notice takes its own height above the scroller: the scroller starts below it, so no
+      // row can sit under it at any scroll position.
+      const scroller = (await reader.boundingBox())!;
+      expect(scroller.y).toBeGreaterThanOrEqual(box.y + box.height);
+      // The reader opens at the tail, and the notice is still in view there.
       await expect(notice).toBeInViewport();
+      // Scrolled to the top, the first row starts below the notice and is fully readable.
+      await reader.evaluate((element) => { element.scrollTop = 0; });
+      await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBe(0);
+      const firstRow = (await page.locator("[data-virtual-row]").first().boundingBox())!;
+      expect(firstRow.y).toBeGreaterThanOrEqual(box.y + box.height);
+      expect((await notice.boundingBox())!.y).toBe(box.y);
       await notice.getByRole("button", { name: "Show Details" }).click();
       await expect(notice.locator(".notice-details-body")).toHaveText("Could not load complete session activity.");
     });

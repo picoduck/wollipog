@@ -5294,6 +5294,22 @@ function SessionDetailLoaded({
             {/* The reader region: the scroller, and NOTHING below it. It clips, so in a pane
                 shorter than the scroller's padding floor nothing can paint over the status strip. */}
             <div className="detail-reader">
+            {/* The history notice heads the reading column in its own band above the scroller
+                (#2172): it takes its height, so it never covers a row, and it stays in view while
+                the reader is at the tail. */}
+            {(transcript.notice === "stale" || transcript.notice === "error") && (
+              <div className="transcript-history-band">
+                <TranscriptHistoryNotice
+                  kind={transcript.notice}
+                  error={transcript.error}
+                  loaded={evs?.length ?? 0}
+                  total={session.messageCount > 0 ? session.messageCount : undefined}
+                  machine={runnerDisp.name || undefined}
+                  canRetry={conn === "online" && !transcript.busy}
+                  onRetry={() => setHistoryRetry((value) => value + 1)}
+                />
+              </div>
+            )}
             <div
               className="detail-scroll measured-virtual-scroll"
               ref={scrollRef}
@@ -5355,17 +5371,6 @@ function SessionDetailLoaded({
                 event.preventDefault();
               }}
             >
-              {(transcript.notice === "stale" || transcript.notice === "error") && (
-                <TranscriptHistoryNotice
-                  kind={transcript.notice}
-                  error={transcript.error}
-                  loaded={evs?.length ?? 0}
-                  total={session.messageCount > 0 ? session.messageCount : undefined}
-                  machine={runnerDisp.name || undefined}
-                  canRetry={conn === "online" && !transcript.busy}
-                  onRetry={() => setHistoryRetry((value) => value + 1)}
-                />
-              )}
               <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-earlier-activity-announcement>
                 {currentEarlierRequestSettled && eventWindow?.error
                   ? `${eventWindow.error} Retry is available.`

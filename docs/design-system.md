@@ -1725,7 +1725,7 @@ control in any of them:
 | Awaiting the first prompt | Compact `State` "Start the Conversation", "{Agent} is ready in {project} on {machine}." and **Browse Files** (opens the Files tab). |
 | Starting | Compact `State` "Starting {Agent}" with a spinner tile. |
 | Ended before any activity | Compact `State` "No Messages", "This session ended before anything was sent." No action: the session notice slot offers the way back. |
-| History failed or partial | One compact danger `Notice`, sticky at the top: "Couldn't Load the Full Conversation", how much loaded and from which machine, **Retry** and Show Details (the raw error). It replaces the unavailable state when nothing loaded, and the empty state when a once-empty history fails to refresh. |
+| History failed or partial | One compact danger `Notice` in a band above the transcript, which takes its own height so it never covers a row and stays in view at the tail: "Couldn't Load the Full Conversation", how much loaded and from which machine, **Retry** and Show Details (the raw error). It replaces the unavailable state when nothing loaded, and the empty state when a once-empty history fails to refresh. |
 | Cached while disconnected | One neutral compact `Notice`: "Showing cached activity while disconnected." Over a once-empty history it stands alone: offline outranks empty. |
 
 The head of a bounded window is one `.tl-earlier` row in every state: a hairline, centered content, a

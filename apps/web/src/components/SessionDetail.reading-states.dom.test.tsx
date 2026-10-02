@@ -194,9 +194,11 @@ async function mountSession({
   await flushAsyncWork();
   const scroller = container.querySelector(".detail-scroll") as HTMLElement;
   assert.ok(scroller, "the reader is mounted");
+  const reader = container.querySelector(".detail-reader") as HTMLElement;
   return {
     id,
     container,
+    reader,
     scroller,
     shown,
     tailRequests: () => tail.length,
@@ -312,7 +314,7 @@ test("a history load that fails with nothing loaded is one notice, not a second 
   const view = await mountSession({ messageCount: 240 });
   try {
     await view.rejectTail();
-    const notices = view.scroller.querySelectorAll(".notice");
+    const notices = view.reader.querySelectorAll(".notice");
     assert.equal(notices.length, 1, "exactly one notice");
     const notice = notices[0] as HTMLElement;
     assert.ok(notice.classList.contains("t-danger") && notice.classList.contains("compact"));
@@ -330,11 +332,15 @@ test("a partial history failure says how much loaded and keeps the raw error beh
   try {
     assert.ok(view.scroller.querySelector(".timeline"), "the cached rows are on screen");
     await view.rejectTail();
-    const notices = view.scroller.querySelectorAll(".notice");
+    const notices = view.reader.querySelectorAll(".notice");
     assert.equal(notices.length, 1, "exactly one notice");
     const notice = notices[0] as HTMLElement;
     assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Load the Full Conversation");
     assert.equal(notice.querySelector(".notice-body")?.textContent, "Loaded 9 of 240 events from Build Box.");
+    // It heads the reading column in its own band above the scroller, so no row sits under it.
+    assert.equal(view.scroller.contains(notice), false, "the notice is not inside the scroller");
+    assert.equal(notice.parentElement?.classList.contains("transcript-history-band"), true);
+    assert.equal(notice.parentElement?.nextElementSibling, view.scroller, "the band sits directly above the scroller");
     const retry = view.button(notice, "Retry");
     assert.ok(retry, "Retry is the resolving action");
     assert.equal(retry.disabled, false);
@@ -356,7 +362,7 @@ test("Retry reads the history again", async () => {
   const view = await mountSession({ messageCount: 240, cachedEvents: 9 });
   try {
     await view.rejectTail();
-    const retry = view.button(view.scroller.querySelector(".notice")!, "Retry")!;
+    const retry = view.button(view.reader.querySelector(".notice")!, "Retry")!;
     await act(async () => retry.click());
     await flushAsyncWork();
     await view.resolveTail({ events: [] });
@@ -372,8 +378,8 @@ for (const status of ["idle", "starting", "stopped"] as const) {
       await view.resolveTail(emptyHistory);
       assert.ok(view.scroller.querySelector(".state"), "the empty state shows once the history is known");
       await view.failRecovery("Reconnect history failed");
-      assert.equal(view.scroller.querySelectorAll(".notice").length, 1, "one history notice");
-      assert.equal(view.scroller.querySelector(".notice-title")?.textContent, "Couldn't Load the Full Conversation");
+      assert.equal(view.reader.querySelectorAll(".notice").length, 1, "one history notice");
+      assert.equal(view.reader.querySelector(".notice-title")?.textContent, "Couldn't Load the Full Conversation");
       assertNoDomNode(view.scroller.querySelector(".state"), "an error outranks the empty state (§12)");
     } finally {
       await view.unmount();
@@ -387,7 +393,7 @@ for (const status of ["idle", "starting"] as const) {
     try {
       await view.resolveTail(emptyHistory);
       await view.disconnect();
-      const notices = view.scroller.querySelectorAll(".notice");
+      const notices = view.reader.querySelectorAll(".notice");
       assert.equal(notices.length, 1, "one notice");
       assert.equal(notices[0]!.textContent, "Showing cached activity while disconnected.");
       assertNoDomNode(view.scroller.querySelector(".state"), "offline outranks the empty state (§12.5)");
