@@ -1726,7 +1726,7 @@ control in any of them:
 | Starting | Compact `State` "Starting {Agent}" with a spinner tile. |
 | Ended before any activity | Compact `State` "No Messages", "This session ended before anything was sent." No action: the session notice slot offers the way back. |
 | History failed or partial | One compact danger `Notice`, sticky at the top: "Couldn't Load the Full Conversation", how much loaded and from which machine, **Retry** and Show Details (the raw error). It replaces the unavailable state when nothing loaded, and the empty state when a once-empty history fails to refresh. |
-| Cached while disconnected | One neutral compact `Notice`: "Showing cached activity while disconnected." |
+| Cached while disconnected | One neutral compact `Notice`: "Showing cached activity while disconnected." Over a once-empty history it stands alone: offline outranks empty. |
 
 The head of a bounded window is one `.tl-earlier` row in every state: a hairline, centered content, a
 hairline. Idle is a `.btn.sm.ghost` "Load Earlier Activity" with a `.count` of older events when

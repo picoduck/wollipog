@@ -200,6 +200,12 @@ async function mountSession({
     scroller,
     shown,
     tailRequests: () => tail.length,
+    /** The connection to the control plane drops. */
+    async disconnect() {
+      assert.ok(actions, "store actions are available");
+      await act(async () => actions!.dispatch({ type: "conn", conn: "offline" }));
+      await flushAsyncWork();
+    },
     /** A later recovery of this session's history fails, as a reconnect's would. */
     async failRecovery(message: string) {
       assert.ok(actions, "store actions are available");
@@ -369,6 +375,22 @@ for (const status of ["idle", "starting", "stopped"] as const) {
       assert.equal(view.scroller.querySelectorAll(".notice").length, 1, "one history notice");
       assert.equal(view.scroller.querySelector(".notice-title")?.textContent, "Couldn't Load the Full Conversation");
       assertNoDomNode(view.scroller.querySelector(".state"), "an error outranks the empty state (§12)");
+    } finally {
+      await view.unmount();
+    }
+  });
+}
+
+for (const status of ["idle", "starting"] as const) {
+  test(`a once-empty ${status} history cached while disconnected is the neutral notice alone`, async () => {
+    const view = await mountSession({ status });
+    try {
+      await view.resolveTail(emptyHistory);
+      await view.disconnect();
+      const notices = view.scroller.querySelectorAll(".notice");
+      assert.equal(notices.length, 1, "one notice");
+      assert.equal(notices[0]!.textContent, "Showing cached activity while disconnected.");
+      assertNoDomNode(view.scroller.querySelector(".state"), "offline outranks the empty state (§12.5)");
     } finally {
       await view.unmount();
     }

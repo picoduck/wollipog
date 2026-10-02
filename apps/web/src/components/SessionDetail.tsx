@@ -5404,9 +5404,10 @@ function SessionDetailLoaded({
                   </State>
                 )
               ) : transcript.body === "empty" && (session.pendingPrompts?.length ?? 0) === 0 ? (
-                // An error outranks empty (§12): a failed refresh of a once-empty history is the
-                // history notice alone, not the notice above "Start the Conversation".
-                transcript.notice !== "error" && <TranscriptEmptyState
+                // Offline and error outrank empty (§12): a once-empty history that failed to refresh
+                // or is cached while disconnected is its notice alone, never the notice above "Start
+                // the Conversation" or "Starting {Agent}".
+                transcript.notice !== "error" && transcript.notice !== "stale" && <TranscriptEmptyState
                   kind={transcriptEmptyKind(session)}
                   agent={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
                   project={currentProjectName ?? undefined}
