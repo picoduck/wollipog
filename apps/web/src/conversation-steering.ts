@@ -51,7 +51,7 @@ export function conversationSteeringAvailability(
       reason: runnerCapabilityRequirement(
         input.runnerProtocolVersion,
         "conversationSteering",
-        "Conversation steering",
+        "conversation steering",
       ),
     };
   }
@@ -129,7 +129,7 @@ export function queuedPromptEditingAvailability(
       reason: runnerCapabilityRequirement(
         input.runnerProtocolVersion,
         "queuedPromptEditing",
-        "Queued prompt editing",
+        "queued prompt editing",
       ),
     };
   }

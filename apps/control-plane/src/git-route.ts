@@ -153,13 +153,13 @@ export function gitActionRequiresLinkedWorktree(action: GitAction): boolean {
 }
 
 /** Runner capability required by protocol-backed git actions; baseline actions predate capability gates. */
-export function gitActionCapability(action: GitAction): readonly [RunnerProtocolCapability, string] | null {
-  if (action.kind === "diff") return ["richDiff", "Rich diff loading"];
-  if (action.kind === "stage_hunk") return ["hunkStaging", "Hunk staging"];
+export function gitActionCapability(action: GitAction): { capability: RunnerProtocolCapability; label: string } | null {
+  if (action.kind === "diff") return { capability: "richDiff", label: "rich diff loading" };
+  if (action.kind === "stage_hunk") return { capability: "hunkStaging", label: "hunk staging" };
   if (action.kind === "stage_lines" || action.kind === "discard_file") {
-    return ["fineGrainedDiff", "Line staging and tracked-file discard"];
+    return { capability: "fineGrainedDiff", label: "line staging and tracked-file discard" };
   }
-  if (action.kind === "github_review_sync") return ["githubReviewReconciliation", "GitHub review reconciliation"];
-  if (action.kind === "forge_review_sync") return ["forgeIntegration", "Forge review reconciliation"];
+  if (action.kind === "github_review_sync") return { capability: "githubReviewReconciliation", label: "GitHub review reconciliation" };
+  if (action.kind === "forge_review_sync") return { capability: "forgeIntegration", label: "forge review reconciliation" };
   return null;
 }

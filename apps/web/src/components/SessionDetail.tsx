@@ -3616,7 +3616,7 @@ function SessionDetailLoaded({
   const rewindUnavailableReason = rewindRefusal ?? (session.worktreePath == null
     ? "A worktree is required."
     : !runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
-      ? runnerCapabilityRequirement(runner?.protocolVersion, "checkpointRewind", "Checkpoint rewind")
+      ? runnerCapabilityRequirement(runner?.protocolVersion, "checkpointRewind", "checkpoint rewind")
       : undefined);
   const latestForkAvailability = useMemo(
     () => conversationForkAvailability(latestConversationForkTurn, latestKnownTurn, forkContext),
@@ -3849,7 +3849,7 @@ function SessionDetailLoaded({
       ? "the selected account"
       : failure.providerAccountLabel;
     const switchReason = !accountSwitchSupported
-      ? runnerCapabilityRequirement(runner?.protocolVersion, "sessionProviderAccountSwitch", "Session account switching")
+      ? runnerCapabilityRequirement(runner?.protocolVersion, "sessionProviderAccountSwitch", "session account switching")
       : runnerOfflineReason;
     sessionNotices.push({
       ...accountSwitchFailedOrder,
@@ -4097,7 +4097,7 @@ function SessionDetailLoaded({
 
   const attachWorkspaceTarget = useCallback(async (target: CreateWorkspaceReferenceRequest) => {
     if (!workspaceReferencesSupported) {
-      setError(runnerCapabilityRequirement(runner?.protocolVersion, "workspaceReferences", "Workspace references"));
+      setError(runnerCapabilityRequirement(runner?.protocolVersion, "workspaceReferences", "workspace references"));
       return;
     }
     try {
@@ -5754,7 +5754,7 @@ function SessionDetailLoaded({
                                 ? runnerCapabilityRequirement(
                                     runner?.protocolVersion,
                                     "queuedPromptCancellation",
-                                    "Queued prompt cancellation",
+                                    "queued prompt cancellation",
                                   )
                                 : reserved || locallyPromoting
                                   ? "Resolve steering before canceling this queued message."

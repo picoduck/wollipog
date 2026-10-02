@@ -10,7 +10,7 @@ test("Stop Job applies to Claude Code sessions with managed work, and says why i
   assert.deepEqual(backgroundJobStopAvailability(claude, 190, true), { available: true });
   assert.deepEqual(backgroundJobStopAvailability(claude, 189, true), {
     available: false,
-    reason: "Runner protocol is v189; Stop Job requires protocol v190. Update and restart the runner.",
+    reason: "This machine needs a newer runner for stopping a background job. Update and restart the runner.",
   });
   assert.equal(backgroundJobStopAvailability(claude, null, true)?.available, false);
   assert.deepEqual(backgroundJobStopAvailability(claude, PROTOCOL_VERSION, false),

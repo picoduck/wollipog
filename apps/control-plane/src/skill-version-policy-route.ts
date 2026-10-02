@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { runnerCapabilityRequirement, runnerSupportsProtocol } from "@wollipog/protocol";
+import { runnerCapabilityRequirementError, runnerSupportsProtocol } from "@wollipog/protocol";
 import { SkillImportConflictError } from "./db.js";
 import type { SkillsRouteDeps } from "./skills-route.js";
 
@@ -37,7 +37,7 @@ export function registerSkillVersionPolicyRoutes(app: FastifyInstance, deps: Ski
     const { id, runnerId } = req.params as { id: string; runnerId: string };
     if (!db.canAccessSkill(principal, id) || !db.canAccessRunner(principal, runnerId)) return reply.code(404).send({ error: "skill or runner not found" });
     const runner = db.getRunner(runnerId)!;
-    if (!runnerSupportsProtocol(runner.protocolVersion, "agentSkills")) return reply.code(409).send({ error: runnerCapabilityRequirement(runner.protocolVersion, "agentSkills", "Managed agent skills") });
+    if (!runnerSupportsProtocol(runner.protocolVersion, "agentSkills")) return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "agentSkills", "managed agent skills"));
     const skillScope = db.skillScope(id);
     const runnerScope = db.runnerScope(runnerId);
     if (!skillScope || !runnerScope || !db.scopeAudienceContainedWithMembership(skillScope, runnerScope)) return reply.code(409).send({ error: "the skill's access scope does not include this machine" });

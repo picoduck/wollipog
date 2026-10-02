@@ -29,7 +29,7 @@ export function backgroundJobStopAvailability(
   const refusal = sessionCommandRefusal(session, "stopBackgroundJob");
   if (refusal) return { available: false, reason: refusal };
   if (!runnerSupportsProtocol(runnerProtocolVersion, "backgroundJobStop")) {
-    return { available: false, reason: runnerCapabilityRequirement(runnerProtocolVersion, "backgroundJobStop", "Stop Job") };
+    return { available: false, reason: runnerCapabilityRequirement(runnerProtocolVersion, "backgroundJobStop", "stopping a background job") };
   }
   if (!runnerOnline) return { available: false, reason: "The runner is offline." };
   return { available: true };

@@ -366,7 +366,7 @@ function AgentRow({
               disabled={!online || !registrySupported || registryBusy}
               onClick={() => void changeRegistryApproval()}
               title={!registrySupported
-                ? runnerCapabilityRequirement(protocolVersion, "acpRegistryApproval", "Registry approval")
+                ? runnerCapabilityRequirement(protocolVersion, "acpRegistryApproval", "registry approval")
                 : registryAction === "approve"
                   ? "Review and explicitly approve this exact package launch"
                   : "Disable this approved package launch"}
@@ -388,7 +388,7 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
   const pv = runner.protocolVersion;
   const [findingSessions, setFindingSessions] = useState(false);
   const externalSessionsSupported = runnerSupportsProtocol(pv, "externalSessions");
-  const unsupported = runnerCapabilityRequirement(pv, "externalSessions", "Finding agent sessions");
+  const unsupported = runnerCapabilityRequirement(pv, "externalSessions", "finding agent sessions");
   return (
     <div className="runner-details">
       <div className="runner-details-body">
@@ -903,7 +903,7 @@ function MachineSettingsDialog({
           <h3>Agent Harness Installations</h3>
           <p>Choose the executable this Machine uses for each harness and execution context. A missing choice stays saved until you select another installation.</p>
           {!installationSupported && <p className="hint">{runnerCapabilityRequirement(
-            runner.protocolVersion, "harnessInstallations", "Harness Installation selection",
+            runner.protocolVersion, "harnessInstallations", "harness installation selection",
           )}</p>}
           {installations.map((agent) => {
             const installation = agent.installation!;
@@ -1023,7 +1023,7 @@ function MachineSettingsDialog({
           {!capacitySupported && <p className="hint">{runnerCapabilityRequirement(
             runner.protocolVersion,
             "machineRunnerCapacity",
-            "Runner Capacity changes",
+            "runner capacity changes",
           )}</p>}
           {capacitySupported && runner.canManage !== true && (
             <p className="hint">Only the Machine owner or an organization administrator can change Runner Capacity.</p>
@@ -1119,7 +1119,7 @@ function MachineSettingsDialog({
           {!automaticAccountSwitchSupported && <p className="hint">{runnerCapabilityRequirement(
             runner.protocolVersion,
             "automaticProviderAccountSwitch",
-            "Automatic Account Switching changes",
+            "automatic account switching changes",
           )}</p>}
         </section>
       )}

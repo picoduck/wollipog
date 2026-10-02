@@ -224,9 +224,9 @@ export function ReviewPanel({
   const requestName = mergeRequest ? "Merge Request" : "Pull Request";
   const requestShortName = mergeRequest ? "MR" : "PR";
   const reviewSyncSupported = forgeReviewSupported || (!mergeRequest && githubReviewSupported);
-  const diffHint = runnerCapabilityRequirement(runnerProtocolVersion, "richDiff", "Rich diff loading");
-  const stagingHint = runnerCapabilityRequirement(runnerProtocolVersion, "hunkStaging", "Hunk staging");
-  const fineDiffHint = runnerCapabilityRequirement(runnerProtocolVersion, "fineGrainedDiff", "Staged panes, line staging, and discard");
+  const diffHint = runnerCapabilityRequirement(runnerProtocolVersion, "richDiff", "rich diff loading");
+  const stagingHint = runnerCapabilityRequirement(runnerProtocolVersion, "hunkStaging", "hunk staging");
+  const fineDiffHint = runnerCapabilityRequirement(runnerProtocolVersion, "fineGrainedDiff", "staged panes, line staging, and discard");
   const diffEnabled = runnerOnline && !!session.worktreePath && diffSupported;
   // Every Git action below is refused to a person the server would refuse (#1870). The ref is read
   // after Discard's confirmation closes, so a refusal that arrives while it is open sends nothing.

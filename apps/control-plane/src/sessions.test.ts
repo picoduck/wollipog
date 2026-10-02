@@ -7311,7 +7311,7 @@ test("ACP context fails closed against a pre-v38 runner instead of being silentl
     acpSessionContext: { mcpServers: [{ type: "sse", name: "docs", url: "https://mcp.example/sse" }] },
   });
   assert.equal(result.status, 409);
-  assert.match(result.error!, /requires protocol v38/);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 38);
   assert.equal(db.listSessions().length, 0);
   assert.equal(hub.sentToRunner.length, 0);
 });
@@ -7536,7 +7536,7 @@ test("prompt images fail closed against a pre-v56 runner", () => {
     images: [{ mimeType: "image/jpeg", data: "/9j/2Q==" }],
   });
   assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /requires protocol v56/);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 56);
   assert.equal(db.listSessions().length, 0);
   assert.equal(hub.sentToRunner.length, 0);
 });
@@ -7555,7 +7555,7 @@ test("Codex service tiers fail closed on explicit pre-v126 input while implicit 
     config: { model: "image-model", serviceTier: "fast" },
   });
   assert.equal(explicit.status, 409);
-  assert.match(explicit.error ?? "", /requires protocol v126/);
+  assert.equal(explicit.capabilityRequirement?.requiredRunnerProtocolVersion, 126);
   assert.equal(db.listSessions().length, 0);
 
   const legacy = svc.createSession({
@@ -7645,7 +7645,7 @@ test("inherited and workflow service tiers respect rolling runner compatibility"
     config: { serviceTier: "fast" },
   });
   assert.equal(workflow.status, 409);
-  assert.match(workflow.error ?? "", /requires protocol v126/);
+  assert.equal(workflow.capabilityRequirement?.requiredRunnerProtocolVersion, 126);
 });
 
 test("workspace references fail closed against a pre-v106 runner", () => {
@@ -7666,7 +7666,7 @@ test("workspace references fail closed against a pre-v106 runner", () => {
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt: "look", images: [reference],
   });
   assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /requires protocol v106/);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 106);
   assert.equal(db.listSessions().length, 0);
   assert.equal(hub.sentToRunner.length, 0);
 });
@@ -9336,7 +9336,7 @@ test("workspace-reference steering fails closed against a pre-v106 runner", asyn
     submissionId: "submission-workspace-reference", turnId: "turn-workspace-reference", text: "inspect", images: [reference],
   });
   assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /requires protocol v106/);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 106);
   assert.equal(db.findSteeringAttemptBySubmission(id, "submission-workspace-reference"), null);
   assert.equal(hub.sentOfType("steer_session").length, 0);
 });
@@ -9683,7 +9683,7 @@ test("admission-queued prompts fail closed for a released v77 runner before muta
 
   assert.equal(result.ok, false);
   assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /requires protocol v78/);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 78);
   assert.equal(hub.sentToRunner.length, 0);
   assert.equal(db.getSession(id)?.queued, undefined);
   assert.equal(db.getSession(id)?.status, "queued");
@@ -15884,7 +15884,8 @@ test("restart-after-stop requires correlated restart echo support before mutatio
 
   assert.equal(result.ok, false);
   assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /requires protocol v84.*Update and restart the runner/i);
+  assert.match(result.error ?? "", /^This machine needs a newer runner for .+\. Update and restart the runner\.$/);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 84);
   assert.equal(db.sessionStopRestartLaunchId(id), null);
   assert.equal(db.getSession(id)!.status, "stopped");
   assert.equal(hub.sentOfType("start_session").length, 0);
@@ -16082,7 +16083,7 @@ test("a new control plane fails closed instead of sending interrupt_turn to a v7
   const result = await svc.cancelTurn(id);
 
   assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /requires protocol v71/i);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 71);
   assert.equal(hub.sentOfType("interrupt_turn").length, 0);
   assert.equal(hub.sentOfType("cancel_session").length, 0);
 });
@@ -17742,21 +17743,21 @@ test("capability gates reject old/unknown runners before requests or cache mutat
   const adopt = await svc.adoptSession(RUNNER_ID, extDescriptor("/external"), true);
   assert.equal(adopt.ok, false);
   assert.equal(adopt.status, 409);
-  assert.match(adopt.error ?? "", /requires protocol v6/i);
+  assert.equal(adopt.capabilityRequirement?.requiredRunnerProtocolVersion, 6);
   assert.equal(db.listSessions().length, before, "unsupported adopt must not create an orphan cache row");
   assert.equal(hub.sentOfType("adopt_session").length, 0);
 
   db.registerRunner(runnerMeta(), Date.now(), 9);
   const directory = await svc.listDirectory(RUNNER_ID, "");
   assert.equal(directory.status, 409);
-  assert.match(directory.error ?? "", /requires protocol v10/i);
+  assert.equal(directory.capabilityRequirement?.requiredRunnerProtocolVersion, 10);
 
   db.registerRunner(runnerMeta(), Date.now(), 15);
   const files = await svc.listSessionFiles(sessionId, "");
   const file = await svc.readSessionFile(sessionId, "README.md");
   assert.equal(files.status, 409);
   assert.equal(file.status, 409);
-  assert.match(files.error ?? "", /requires protocol v16/i);
+  assert.equal(files.capabilityRequirement?.requiredRunnerProtocolVersion, 16);
 });
 
 test("Pi discovery and adoption fail closed until the runner supports managed transcript copies", async () => {
@@ -17777,7 +17778,8 @@ test("Pi discovery and adoption fail closed until the runner supports managed tr
   const before = db.listSessions().length;
   const listed = await svc.listExternalSessions(RUNNER_ID, "pi-native");
   assert.equal(listed.status, 409);
-  assert.match(listed.error ?? "", /Pi session discovery requires protocol v156/i);
+  assert.match(listed.error ?? "", /needs a newer runner for Pi session discovery\./);
+  assert.equal(listed.capabilityRequirement?.requiredRunnerProtocolVersion, 156);
 
   const adopted = await svc.adoptSession(RUNNER_ID, {
     agentSessionId: "pi-external-session",
@@ -17790,7 +17792,8 @@ test("Pi discovery and adoption fail closed until the runner supports managed tr
     messageCount: 1,
   }, true);
   assert.equal(adopted.status, 409);
-  assert.match(adopted.error ?? "", /Pi session adoption requires protocol v156/i);
+  assert.match(adopted.error ?? "", /needs a newer runner for Pi session adoption\./);
+  assert.equal(adopted.capabilityRequirement?.requiredRunnerProtocolVersion, 156);
   assert.equal(db.listSessions().length, before, "unsupported adoption cannot seed a cache row");
   assert.equal(hub.sentOfType("list_external_sessions").length, 0);
   assert.equal(hub.sentOfType("adopt_session").length, 0);
@@ -23675,7 +23678,8 @@ test("stopBackgroundJob is refused for a runner older than v190 without contacti
   db.registerRunner(runnerMeta(), Date.now(), 189);
   const result = await svc.stopBackgroundJob(id, "monitor-1", { kind: "user", userId: "usr_owner" });
   assert.equal(result.status, 409);
-  assert.match(result.error ?? "", /Stopping one background job requires protocol v190/);
+  assert.match(result.error ?? "", /needs a newer runner for stopping one background job\./);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 190);
   assert.equal(hub.sentOfType("stop_background_job").length, 0);
 });
 

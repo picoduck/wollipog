@@ -872,7 +872,7 @@ test("listExternalSessions sends the selected agent and filters broad legacy run
   assert.deepEqual(res.data?.map((session) => session.agentSessionId), ["claude-native"]);
 });
 
-test("listExternalSessions requires protocol v63 for Codex App Server discovery", async () => {
+test("listExternalSessions requires a newer runner for Codex App Server discovery", async () => {
   const db = ControlPlaneDb.open(":memory:");
   const meta = runnerMeta();
   const appServer = {
@@ -897,9 +897,11 @@ test("listExternalSessions requires protocol v63 for Codex App Server discovery"
   assert.equal(res.ok, false);
   assert.equal(res.status, 409);
   const error = res.error ?? "";
-  assert.match(error, /Codex App Server session discovery/);
-  assert.doesNotMatch(error, /Codex(?: —)? Interactive session discovery/);
-  assert.match(error, /protocol is v62.*requires protocol v63.*update and restart/i);
+  assert.equal(
+    error,
+    "This machine needs a newer runner for Codex app server session discovery. Update and restart the runner.",
+  );
+  assert.deepEqual(res.capabilityRequirement, { requiredRunnerProtocolVersion: 63, runnerProtocolVersion: 62 });
   assert.equal(sent, false, "an old runner must not return a misleading empty App Server result");
 });
 
@@ -923,7 +925,11 @@ test("listExternalSessions fails fast when an online runner cannot prove protoco
   const res = await svc.listExternalSessions(RUNNER_ID);
   assert.equal(res.ok, false);
   assert.equal(res.status, 409);
-  assert.match(res.error ?? "", /protocol.*unknown.*requires protocol v6.*update and restart/i);
+  assert.equal(
+    res.error,
+    "This machine needs a newer runner for finding agent sessions. Update and restart the runner.",
+  );
+  assert.deepEqual(res.capabilityRequirement, { requiredRunnerProtocolVersion: 6, runnerProtocolVersion: null });
   assert.equal(sent, false, "unsupported requests must not start the 20 second runner timeout");
 });
 

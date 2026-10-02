@@ -1235,7 +1235,7 @@ export function machineSkillAdoptionRequirement(
   if (context?.kind === "wsl") {
     return os === "windows" ? { capability: "wslMachineSkillAdoption", label: "WSL machine skill adoption" } : null;
   }
-  if (os === "linux") return { capability: "machineSkillAdoption", label: "Machine skill adoption" };
+  if (os === "linux") return { capability: "machineSkillAdoption", label: "machine skill adoption" };
   if (os === "macos") return { capability: "nativeMacosMachineSkillAdoption", label: "macOS machine skill adoption" };
   if (os === "windows") {
     return { capability: "nativeWindowsMachineSkillAdoption", label: "Windows machine skill adoption" };
@@ -1246,7 +1246,7 @@ export function machineSkillAdoptionRequirement(
 /** Recovery inspection and restore share the adoption platform gate; Linux added them separately. */
 export function machineSkillAdoptionRecoveryRequirement(os: OS | undefined): MachineSkillAdoptionRequirement | null {
   if (os === "linux") {
-    return { capability: "machineSkillAdoptionRecovery", label: "Machine skill adoption recovery" };
+    return { capability: "machineSkillAdoptionRecovery", label: "machine skill adoption recovery" };
   }
   if (os === "macos") {
     return { capability: "nativeMacosMachineSkillAdoption", label: "macOS machine skill adoption recovery" };
@@ -1257,19 +1257,48 @@ export function machineSkillAdoptionRecoveryRequirement(os: OS | undefined): Mac
   return null;
 }
 
-/** Shared actionable copy for HTTP errors and disabled UI affordances. */
+/** Shared actionable copy for HTTP errors and disabled UI affordances. `label` is a lowercase noun
+ * phrase naming what is unavailable ("directory browsing", "GitHub review reconciliation"); only
+ * proper nouns and acronyms keep their capitals. The sentence names no protocol numbers
+ * (docs/design-system.md §17.2) and reads the same for a missing or malformed version; HTTP
+ * responses carry the versions beside it through `runnerCapabilityRequirementError`. The version
+ * and capability stay in the signature so every caller states the gate it is explaining. */
 export function runnerCapabilityRequirement(
+  _protocolVersion: number | null | undefined,
+  _capability: RunnerProtocolCapability,
+  label: string,
+): string {
+  return `This machine needs a newer runner for ${label}. Update and restart the runner.`;
+}
+
+/** Diagnostic versions returned beside `runnerCapabilityRequirement`'s sentence in HTTP 409s. */
+export interface RunnerCapabilityRequirementDetails {
+  /** Lowest runner protocol version that provides the capability. */
+  requiredRunnerProtocolVersion: number;
+  /** The version the runner reported, or null when it reported none or a malformed one. */
+  runnerProtocolVersion: number | null;
+}
+
+export function runnerCapabilityRequirementDetails(
+  protocolVersion: number | null | undefined,
+  capability: RunnerProtocolCapability,
+): RunnerCapabilityRequirementDetails {
+  return {
+    requiredRunnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL[capability],
+    runnerProtocolVersion: Number.isInteger(protocolVersion) ? protocolVersion! : null,
+  };
+}
+
+/** HTTP 409 body: the shared sentence as `error`, plus the versions as additive fields. */
+export function runnerCapabilityRequirementError(
   protocolVersion: number | null | undefined,
   capability: RunnerProtocolCapability,
   label: string,
-): string {
-  const actual = Number.isInteger(protocolVersion)
-    ? `is v${protocolVersion}`
-    : "is unknown (pre-v15, malformed, or not reported)";
-  return (
-    `Runner protocol ${actual}; ${label} requires protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL[capability]}. ` +
-    "Update and restart the runner."
-  );
+): { error: string } & RunnerCapabilityRequirementDetails {
+  return {
+    error: runnerCapabilityRequirement(protocolVersion, capability, label),
+    ...runnerCapabilityRequirementDetails(protocolVersion, capability),
+  };
 }
 
 export type OS = "windows" | "linux" | "macos";

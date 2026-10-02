@@ -194,7 +194,7 @@ export function orchestratorPresetPermissionsReason(input: {
     return runnerCapabilityRequirement(
       input.runnerProtocolVersion,
       additiveCapability,
-      "Independent Orchestrator provider permissions",
+      "independent Orchestrator provider permissions",
     );
   }
   return undefined;

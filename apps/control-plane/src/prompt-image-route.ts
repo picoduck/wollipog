@@ -4,6 +4,7 @@ import {
   PROMPT_IMAGE_MIME_TYPES,
   type GovernanceActor,
 } from "@wollipog/protocol";
+import { failureBody } from "./capability-refusal.js";
 import { extractBearer, hashToken } from "./auth.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal } from "./identity.js";
@@ -39,7 +40,7 @@ export function registerPromptImageRoutes(app: FastifyInstance, deps: {
       : "";
     if (!Buffer.isBuffer(req.body)) return reply.code(415).send({ error: "an allowed raw image media type is required" });
     const result = deps.service.createPromptImageArtifact(id, mimeType, req.body, deps.actor(req));
-    if (!result.ok) return reply.code(result.status).send({ error: result.error });
+    if (!result.ok) return reply.code(result.status).send(failureBody(result));
     return reply.headers({ "cache-control": "private, no-store", pragma: "no-cache" }).code(result.status).send(result.data);
   });
 
@@ -49,7 +50,7 @@ export function registerPromptImageRoutes(app: FastifyInstance, deps: {
     };
     const bearer = extractBearer(req.headers.authorization);
     const result = runnerPromptImage(deps.db, runnerId, sessionId, artifactId, bearer ? hashToken(bearer) : null);
-    if (!result.ok) return reply.code(result.status).send({ error: result.error });
+    if (!result.ok) return reply.code(result.status).send(failureBody(result));
     return reply.headers({
       "content-type": result.mimeType,
       "content-length": String(result.body.byteLength),

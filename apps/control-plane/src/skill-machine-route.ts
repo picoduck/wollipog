@@ -4,7 +4,7 @@ import {
   machineSkillAdoptionRecoveryRequirement,
   machineSkillAdoptionRequirement,
   runnerSupportsProtocol,
-  runnerCapabilityRequirement,
+  runnerCapabilityRequirementError,
   validSkillName,
   type MachineSkillCandidate,
   type SkillAdoptionRecoveryOperation,
@@ -66,20 +66,20 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     const runner = deps.db.getRunner(runnerId);
     if (!runner || !deps.hub.isRunnerOnline(runnerId)) { reply.code(409).send({ error: "Machine is offline." }); return false; }
     if (!runnerSupportsProtocol(runner.protocolVersion, "machineSkillSnapshots")) {
-      reply.code(409).send({ error: runnerCapabilityRequirement(runner.protocolVersion, "machineSkillSnapshots", "Machine skill snapshots") }); return false;
+      reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "machineSkillSnapshots", "machine skill snapshots")); return false;
     }
     if (runner.os === "windows" &&
         !runnerSupportsProtocol(runner.protocolVersion, "nativeWindowsMachineSkillSnapshots")) {
-      reply.code(409).send({ error: runnerCapabilityRequirement(
+      reply.code(409).send(runnerCapabilityRequirementError(
         runner.protocolVersion, "nativeWindowsMachineSkillSnapshots", "Windows machine skill snapshots",
-      ) });
+      ));
       return false;
     }
     if (runner.os === "macos" &&
         !runnerSupportsProtocol(runner.protocolVersion, "nativeMacosMachineSkillSnapshots")) {
-      reply.code(409).send({ error: runnerCapabilityRequirement(
+      reply.code(409).send(runnerCapabilityRequirementError(
         runner.protocolVersion, "nativeMacosMachineSkillSnapshots", "macOS machine skill snapshots",
-      ) });
+      ));
       return false;
     }
     if (runner.os !== "linux" && runner.os !== "macos" && runner.os !== "windows") {
@@ -99,8 +99,8 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     // Snapshot-only Linux runners keep the read-only preflight report; its adoption token and the
     // mutation route require machineSkillAdoption separately. Other platforms gate the whole flow.
     if (runner.os !== "linux" && !runnerSupportsProtocol(runner.protocolVersion, requirement.capability)) {
-      reply.code(409).send({ error: runnerCapabilityRequirement(runner.protocolVersion, requirement.capability,
-        requirement.label) });
+      reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, requirement.capability,
+        requirement.label));
       return false;
     }
     return true;
@@ -117,9 +117,9 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       return false;
     }
     if (!runnerSupportsProtocol(runner.protocolVersion, requirement.capability)) {
-      reply.code(409).send({ error: runnerCapabilityRequirement(
+      reply.code(409).send(runnerCapabilityRequirementError(
         runner.protocolVersion, requirement.capability, requirement.label,
-      ) });
+      ));
       return false;
     }
     return true;
@@ -328,7 +328,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     if (!adoptionAvailable(discovery.runnerId, reply, preview.candidate)) return;
     const runner = deps.db.getRunner(discovery.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "machineSkillAdoption")) {
-      return reply.code(409).send({ error: runnerCapabilityRequirement(runner?.protocolVersion, "machineSkillAdoption", "Machine skill adoption") });
+      return reply.code(409).send(runnerCapabilityRequirementError(runner?.protocolVersion, "machineSkillAdoption", "machine skill adoption"));
     }
     if (pending) return reply.code(429).send({ error: "Another machine skill operation is in progress." });
     pending = true;
@@ -377,7 +377,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       if (!adoptionAvailable(discovery.runnerId, reply, preview.candidate)) return;
       const afterSyncRunner = deps.db.getRunner(discovery.runnerId);
       if (!runnerSupportsProtocol(afterSyncRunner?.protocolVersion, "machineSkillAdoption")) {
-        return reply.code(409).send({ error: runnerCapabilityRequirement(afterSyncRunner?.protocolVersion, "machineSkillAdoption", "Machine skill adoption") });
+        return reply.code(409).send(runnerCapabilityRequirementError(afterSyncRunner?.protocolVersion, "machineSkillAdoption", "machine skill adoption"));
       }
       if (skillAdoptionPreflight(deps.db, discovery.runnerId, preview.candidate, payload.digest, executable).status !== "prerequisites_met") {
         return reply.code(409).send({ error: "Assignments or connectivity changed while preparing adoption. Run preflight again." });

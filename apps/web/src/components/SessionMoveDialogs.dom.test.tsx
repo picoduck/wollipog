@@ -4,7 +4,14 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, ProjectView, RunnerView, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
+import {
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+  type ControlPlaneToUi,
+  type ProjectView,
+  type RunnerView,
+  type SessionView,
+  type UiSnapshotMessage,
+} from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -487,6 +494,25 @@ test("New Workspace… is unavailable with a visible reason while the machine is
     assert.equal(newWorkspace.disabled, true);
     const reason = domWindow.document.getElementById(newWorkspace.getAttribute("aria-describedby") ?? "");
     assert.equal(reason?.textContent, "Studio is offline.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Browse… in New Workspace on a runner without directory browsing says what to do (#2362)", async () => {
+  const value = session({ projectId: null, projectName: null, projectLocationId: null });
+  const view = await mount((onClose) => <NewWorkspaceDialog session={value} onClose={onClose} />, {
+    projectsSupported: false,
+    runners: [runner({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.directoryListing - 1 })],
+    sessions: [value],
+  });
+  try {
+    const dialog = view.dialog("New Workspace")!;
+    const browse = view.buttonIn(dialog, "Browse…")!;
+    assert.equal(browse.disabled, true);
+    const reason = domWindow.document.getElementById(browse.getAttribute("aria-describedby") ?? "");
+    assert.ok(reason?.classList.contains("field-helper"), "the reason is visible helper text under Folder");
+    assert.equal(reason?.textContent, "This machine needs a newer runner for directory browsing. Update and restart the runner.");
   } finally {
     await view.unmount();
   }

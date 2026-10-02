@@ -43,6 +43,8 @@ import {
   normalizeSourcePath,
   parseSourceLocation,
   runnerCapabilityRequirement,
+  runnerCapabilityRequirementDetails,
+  runnerCapabilityRequirementError,
   runnerSupportsProtocol,
   BOARD_COLUMNS,
   archiveRequiresStop,
@@ -1012,9 +1014,29 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(97, "sessionNamingDriftCodes"), true);
   assert.equal(runnerSupportsProtocol(Number.NaN, "externalSessions"), false);
   assert.equal(runnerSupportsProtocol(6.5, "externalSessions"), false);
-  assert.match(runnerCapabilityRequirement(null, "sessionFiles", "Files"), /unknown.*requires protocol v16/i);
-  assert.match(runnerCapabilityRequirement(15, "sessionFiles", "Files"), /protocol is v15.*v16/i);
-  assert.match(runnerCapabilityRequirement(Number.NaN, "sessionFiles", "Files"), /unknown.*v16/i);
+});
+
+test("runner capability requirements read as user copy and keep versions out of the sentence", () => {
+  const sentence = "This machine needs a newer runner for session file browsing. Update and restart the runner.";
+  for (const version of [15, null, undefined, Number.NaN, 6.5]) {
+    const copy = runnerCapabilityRequirement(version, "sessionFiles", "session file browsing");
+    assert.equal(copy, sentence, `version ${version}`);
+    assert.doesNotMatch(copy, /protocol|\bv\d|;/i, `version ${version}`);
+  }
+  assert.deepEqual(runnerCapabilityRequirementError(15, "sessionFiles", "session file browsing"), {
+    error: sentence,
+    requiredRunnerProtocolVersion: 16,
+    runnerProtocolVersion: 15,
+  });
+  assert.deepEqual(runnerCapabilityRequirementError(Number.NaN, "sessionFiles", "session file browsing"), {
+    error: sentence,
+    requiredRunnerProtocolVersion: 16,
+    runnerProtocolVersion: null,
+  });
+  assert.deepEqual(runnerCapabilityRequirementDetails(undefined, "directoryListing"), {
+    requiredRunnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.directoryListing,
+    runnerProtocolVersion: null,
+  });
 });
 
 test("provider-authentication receipts are projected for the peer only at send time", () => {

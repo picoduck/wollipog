@@ -134,6 +134,7 @@ test("an old runner suppresses only an unverified generic agent claim", () => {
 });
 
 test("the Orchestrator preset applies only where independent provider permissions are unsupported", () => {
+  const runnerRequirement = "This machine needs a newer runner for independent Orchestrator provider permissions. Update and restart the runner.";
   const additive = {
     controlPlaneSupportsRole: true, runnerProtocolVersion: PROTOCOL_VERSION, driver: "claude-code" as const,
     contextKind: "native", hostExecutionTarget: true, nativeTui: false, strictProjectIsolation: false,
@@ -144,11 +145,18 @@ test("the Orchestrator preset applies only where independent provider permission
   for (const driver of ["codex", "codex-app-server"] as const) {
     assert.equal(orchestratorPresetPermissionsReason({ ...additive, driver }), undefined,
       "a non-strict Codex Orchestrator keeps ordinary provider permissions");
-    assert.match(
+    // Each harness gates on its own floor: the reason appears just below it and not at it.
+    assert.equal(
       orchestratorPresetPermissionsReason({
         ...additive, driver, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1,
-      }) ?? "",
-      /protocol v162/,
+      }),
+      runnerRequirement,
+    );
+    assert.equal(
+      orchestratorPresetPermissionsReason({
+        ...additive, driver, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex,
+      }),
+      undefined,
       "each harness names its own runner requirement",
     );
     assert.match(orchestratorPresetPermissionsReason({ ...additive, driver, contextKind: "wsl" }) ?? "",
@@ -157,11 +165,17 @@ test("the Orchestrator preset applies only where independent provider permission
   // Pi gained the additive shape in v163 (#1294); ACP still has no audited provider-mode contract.
   assert.equal(orchestratorPresetPermissionsReason({ ...additive, driver: "pi" }), undefined,
     "a non-strict Pi Orchestrator keeps ordinary provider permissions");
-  assert.match(
+  assert.equal(
     orchestratorPresetPermissionsReason({
       ...additive, driver: "pi", runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi - 1,
-    }) ?? "",
-    /protocol v163/,
+    }),
+    runnerRequirement,
+  );
+  assert.equal(
+    orchestratorPresetPermissionsReason({
+      ...additive, driver: "pi", runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditivePi,
+    }),
+    undefined,
     "Pi names its own runner requirement",
   );
   assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "pi", contextKind: "wsl" }) ?? "",
@@ -173,8 +187,12 @@ test("the Orchestrator preset applies only where independent provider permission
   assert.match(orchestratorPresetPermissionsReason({ ...additive, nativeTui: true }) ?? "", /Native TUI/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, savedOrchestratorDefault: true }) ?? "", /saved Agent Harness default/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, controlPlaneSupportsRole: false }) ?? "", /Update the control plane/);
-  assert.match(
-    orchestratorPresetPermissionsReason({ ...additive, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1 }) ?? "",
-    /protocol v160/,
+  assert.equal(
+    orchestratorPresetPermissionsReason({ ...additive, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1 }),
+    runnerRequirement,
+  );
+  assert.equal(
+    orchestratorPresetPermissionsReason({ ...additive, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole }),
+    undefined,
   );
 });

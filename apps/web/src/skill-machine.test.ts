@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
+import { ApiError } from "./api.js";
 import {
   MACHINE_SKILL_RESULT_FACT,
   MACHINE_SKILL_RESULT_LABEL,
@@ -82,6 +83,22 @@ test("a server refusal phrased with runner protocol numbers becomes the runner-u
     "Build Machine needs a runner update to do this.",
   );
   assert.equal(userFacingMachineError(new Error("Source changed. Discover it again."), "Build Machine"), "Source changed. Discover it again.");
+});
+
+test("a capability refusal is recognized by its structured versions, not its wording", () => {
+  const sentence = "This machine needs a newer runner for machine skill adoption. Update and restart the runner.";
+  assert.equal(
+    userFacingMachineError(new ApiError(sentence, 409, undefined, {
+      error: sentence,
+      requiredRunnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoption,
+      runnerProtocolVersion: 12,
+    }), "Build Machine"),
+    "Build Machine needs a runner update to do this.",
+  );
+  assert.equal(
+    userFacingMachineError(new ApiError("Machine is offline.", 409, undefined, { error: "Machine is offline." }), "Build Machine"),
+    "Machine is offline.",
+  );
 });
 
 test("machine requests run one at a time, in order, even after a failure, and are counted until they settle", async () => {

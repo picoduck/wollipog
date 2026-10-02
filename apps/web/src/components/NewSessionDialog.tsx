@@ -237,7 +237,7 @@ export function NewSessionDialog({
   );
   const runner = runners.get(runnerId);
   const browseSupported = runnerSupportsProtocol(runner?.protocolVersion, "directoryListing");
-  const browseHint = runnerCapabilityRequirement(runner?.protocolVersion, "directoryListing", "Directory browsing");
+  const browseHint = runnerCapabilityRequirement(runner?.protocolVersion, "directoryListing", "directory browsing");
   const [workspaceId, setWorkspaceId] = useState(
     (preset?.workspaceId && runner?.workspaces.some((w) => w.id === preset.workspaceId)
       ? preset.workspaceId
@@ -453,13 +453,13 @@ export function NewSessionDialog({
   const parentControlUnavailable = runnerCapabilityRequirement(
     runner?.protocolVersion,
     "delegatedParentControl",
-    "Parent Control",
+    "parent control",
   );
   const typedDelegationSupported = runnerSupportsProtocol(runner?.protocolVersion, "typedWorkflowDecisionDelegation");
   const typedDelegationUnavailable = runnerCapabilityRequirement(
     runner?.protocolVersion,
     "typedWorkflowDecisionDelegation",
-    "Typed Decision Delegation",
+    "typed decision delegation",
   );
   const setOrchestratorBehavior = <K extends keyof OrchestratorDefaults["behavior"]>(
     key: K,
@@ -721,7 +721,7 @@ export function NewSessionDialog({
     : runnerCapabilityRequirement(
       runner?.protocolVersion,
       "orchestratorIntegrationIsolation",
-      "Integration Isolation",
+      "integration isolation",
     );
   const orchestratorExecutionValid = (orchestratorDraft.execution.strictProjectIsolation
     ? strictProjectBoundaryAvailable
@@ -789,7 +789,7 @@ export function NewSessionDialog({
   const nativeTuiStartFenceHint = runnerCapabilityRequirement(
     runner?.protocolVersion,
     "sessionStartFencedShells",
-    "Initial Native TUI launch",
+    "initial Native TUI launch",
   );
   const nativeTuiHostTarget = hostExecutionTarget;
   const orchestratorTuiSupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorNativeTui");

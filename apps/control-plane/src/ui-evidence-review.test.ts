@@ -197,7 +197,7 @@ test("a runner that predates the attestation keeps the gate human-owned with an 
   for (const runnerProtocolVersion of [required - 1, RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorUiEvidenceReview, undefined]) {
     const fallback = fallbackCode({ runnerProtocolVersion });
     assert.equal(fallback?.code, "runner_unsupported");
-    assert.match(fallback?.reason ?? "", new RegExp(`requires protocol v${required}\\b`));
+    assert.equal(fallback?.reason, "This machine needs a newer runner for Orchestrator UI evidence review. Update and restart the runner.");
   }
   assert.deepEqual(evaluateUiEvidenceReviewClient(client({ runnerProtocolVersion: required })), { effectiveOwner: "orchestrator" });
 });

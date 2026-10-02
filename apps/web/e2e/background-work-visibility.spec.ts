@@ -300,12 +300,16 @@ for (const width of [320, 1280]) {
     await resultBlocked();
     let panel = await openPanel();
     const summary = panel.locator('[data-watchdog-state="continuation_blocked"] .background-delivery-summary');
-    await expect(summary).toContainText("Stop Job is unavailable: Runner protocol is v189; Stop Job requires protocol v190.");
+    await expect(summary).toContainText(
+      "Stop Job is unavailable: This machine needs a newer runner for stopping a background job. Update and restart the runner.",
+    );
     await expect(summary).toContainText("Ask the session to stop the unfinished job");
     const monitorRow = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" });
     const unavailable = monitorRow.getByRole("button", { name: "Stop Job", exact: true });
     await expect(unavailable).toBeDisabled();
-    await expect(unavailable).toHaveAccessibleDescription(/^Stops Monitor Job \d\. Stop Job is unavailable: Runner protocol is v189/);
+    await expect(unavailable).toHaveAccessibleDescription(
+      /^Stops Monitor Job \d\. Stop Job is unavailable: This machine needs a newer runner for stopping a background job\./,
+    );
     await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
 
     // A v190 runner offers Stop Job, but its restart still discards the result (#1779).

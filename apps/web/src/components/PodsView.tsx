@@ -439,7 +439,7 @@ function PodDetailContent({ podId }: { podId: string }) {
   const reconcileCapabilityCopy = runnerCapabilityRequirement(
     reconcileRunner?.protocolVersion,
     "podReconciliation",
-    "Pod worktree reconciliation",
+    "pod worktree reconciliation",
   );
   const reconcileIssue = (() => {
     if (!active) return "This pod is closed.";

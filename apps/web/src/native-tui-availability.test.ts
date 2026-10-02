@@ -18,7 +18,7 @@ const AVAILABLE = {
   runnerSupported: true,
   startFenceSupported: true,
   hostExecutionTarget: true,
-  orchestratorTuiRequirement: "Runner protocol is v108; Orchestrator Native TUI requires v112.",
+  orchestratorTuiRequirement: "This machine needs a newer runner for Orchestrator Native TUI. Update and restart the runner.",
   startFenceHint: "Initial Native TUI launch requires a newer runner.",
 } as const;
 
@@ -49,7 +49,7 @@ test("the orchestrator branches apply only under the Orchestrator preset", () =>
   assert.equal(reason({ orchestrator: false, orchestratorTuiHostContext: false }), undefined);
 
   assert.match(reason({ orchestrator: true, orchestratorTuiSupported: false }) ?? "",
-    /requires v112/, "the caller's capability sentence is passed through verbatim");
+    /needs a newer runner for Orchestrator Native TUI\./, "the caller's capability sentence is passed through verbatim");
   assert.match(reason({ orchestrator: true, orchestratorTuiHostContext: false }) ?? "",
     /unavailable for WSL agents/);
 });
@@ -117,5 +117,5 @@ test("an Orchestrator installation without the coupled preset cannot launch a Na
   // Ordered after the capability sentence, which is the more actionable of the two.
   assert.match(reason({
     orchestrator: true, orchestratorTuiSupported: false, orchestratorPresetAvailable: false,
-  }) ?? "", /requires v112/);
+  }) ?? "", /needs a newer runner for Orchestrator Native TUI\./);
 });

@@ -11,7 +11,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
-  runnerCapabilityRequirement,
+  runnerCapabilityRequirementError,
   runnerSupportsProtocol,
   validSkillName,
   type SkillDriftState,
@@ -90,7 +90,7 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
       return false;
     }
     if (!runnerSupportsProtocol(runner.protocolVersion, "skillDrift")) {
-      reply.code(409).send({ error: runnerCapabilityRequirement(runner.protocolVersion, "skillDrift", "Edited skill copy resolution") });
+      reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "skillDrift", "edited skill copy resolution"));
       return false;
     }
     return true;

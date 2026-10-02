@@ -222,10 +222,11 @@ test("queued prompt edit routes correlate exact reads and atomic writes with a v
     },
   );
   assert.equal(unsupportedWorkspaceReferenceResponse.status, 409);
-  assert.match(
-    (await unsupportedWorkspaceReferenceResponse.json() as { error: string }).error,
-    /requires protocol v106/,
-  );
+  assert.deepEqual(await unsupportedWorkspaceReferenceResponse.json(), {
+    error: "This machine needs a newer runner for workspace references. Update and restart the runner.",
+    requiredRunnerProtocolVersion: 106,
+    runnerProtocolVersion: 99,
+  });
 
   const foreignImageResponse = await fetch(`${httpBase}/api/sessions/${sessionId}/queued/prompt-1/edit`, {
     method: "POST",

@@ -42,7 +42,7 @@ export function DirectoryPicker({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const supported = runnerSupportsProtocol(protocolVersion, "directoryListing");
-  const unsupported = runnerCapabilityRequirement(protocolVersion, "directoryListing", "Directory browsing");
+  const unsupported = runnerCapabilityRequirement(protocolVersion, "directoryListing", "directory browsing");
 
   useEffect(() => {
     if (!supported) {

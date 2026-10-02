@@ -238,7 +238,11 @@ test("drift resolution requires a runner that negotiated it and an online machin
   const refused = await older.app.inject({ method: "POST", url: "/api/runners/runner-1/skill-drift/restore",
     payload: { ...target(older.v1.digest), observedDigest: null, confirmation: "explicit" } });
   assert.equal(refused.statusCode, 409);
-  assert.match(refused.json().error, /requires protocol v183/);
+  assert.deepEqual(refused.json(), {
+    error: "This machine needs a newer runner for edited skill copy resolution. Update and restart the runner.",
+    requiredRunnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift,
+    runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift - 1,
+  });
 
   const offline = setup(t);
   offline.reportEdit();

@@ -305,7 +305,7 @@ export function NewWorkspaceDialog({ session, onClose, onMoved, returnFocusRef }
   const formId = `${ids}-form`;
   const browseReason = !machine.online
     ? `${machine.name} is offline.`
-    : browseSupported ? null : runnerCapabilityRequirement(machine.runner?.protocolVersion, "directoryListing", "Directory browsing");
+    : browseSupported ? null : runnerCapabilityRequirement(machine.runner?.protocolVersion, "directoryListing", "directory browsing");
   const trimmed = name.trim();
   const missing = !trimmed && !folder ? "Enter a name and choose a folder."
     : !trimmed ? "Enter a name."

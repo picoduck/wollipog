@@ -24,5 +24,5 @@ test("a protocol v155 runner explains why Pi adoption is unavailable", async ({ 
   const pi = page.getByRole("radio", { name: /Pi/ });
   await expect(pi).toBeDisabled();
   await expect(page.getByText("Runner Update Required", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Pi session discovery.*requires protocol v156/u)).toBeVisible();
+  await expect(page.getByText(/needs a newer runner for Pi session discovery\. Update and restart the runner\./u)).toBeVisible();
 });

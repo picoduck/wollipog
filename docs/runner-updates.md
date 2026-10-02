@@ -199,8 +199,10 @@ bounded privacy-safe inventory through the authorized single-session projection.
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol
 metadata itself arrived in v15, so the dashboard cannot prove which earlier commands such a runner
-understands. Disabled controls and HTTP 409 responses name the required protocol and say to update
-and restart, instead of waiting for a runner timeout.
+understands. Disabled controls and HTTP 409 responses say what needs a newer runner on that machine
+and to update and restart it, instead of waiting for a runner timeout. The sentence carries no
+protocol numbers; each such 409 also returns `requiredRunnerProtocolVersion` and
+`runnerProtocolVersion` (`null` when the runner reported none) beside `error`.
 
 ## Native runners are externally managed
 

@@ -19,7 +19,7 @@ import { deploymentImpactRefusal } from "./skill-deployment-impact.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   SKILL_MAX_TOTAL_BYTES,
-  runnerCapabilityRequirement,
+  runnerCapabilityRequirementError,
   runnerSupportsProtocol,
   type ResourceScope,
   type SkillInvocationPolicy,
@@ -780,9 +780,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (!runner) return reply.code(404).send({ error: "runner not found" });
     if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
     if (!runnerSupportsProtocol(runner.protocolVersion, "agentSkills")) {
-      return reply.code(409).send({
-        error: runnerCapabilityRequirement(runner.protocolVersion, "agentSkills", "Managed agent skills"),
-      });
+      return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "agentSkills", "managed agent skills"));
     }
     const requestId = `skills_${randomUUID().slice(0, 8)}`;
     try {

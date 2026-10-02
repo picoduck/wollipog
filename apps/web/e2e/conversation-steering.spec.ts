@@ -361,7 +361,7 @@ test("steering gates fail closed across protocol, provider, active-turn, held-qu
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(72));
   await composer.fill("old runner");
   await page.keyboard.press("Control+Enter");
-  await expect(page.getByText(/requires protocol v73/i)).toBeVisible();
+  await expect(page.getByText(/needs a newer runner for conversation steering\. Update and restart the runner\./)).toBeVisible();
   await expect.poll(requests).toBe(0);
 
   await page.evaluate(() => {

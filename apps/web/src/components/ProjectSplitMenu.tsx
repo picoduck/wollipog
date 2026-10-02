@@ -116,7 +116,7 @@ export function ProjectSplitMenu({
   const hostActionsHint = runnerCapabilityRequirement(
     runner?.protocolVersion,
     "hostActions",
-    "Host editor and file-manager actions",
+    "host editor and file-manager actions",
   );
   // Native Windows cannot reveal a WSL path without distro context.
   const wslPathOnWindows = runner?.os === "windows" && !!workspacePath && workspacePath.startsWith("/");

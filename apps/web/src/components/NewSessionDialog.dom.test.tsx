@@ -1417,7 +1417,7 @@ test("Browse… on a runner without directory browsing is disabled with its reas
     const reason = form.querySelector(`[id="${reasonId}"]`);
     assert.ok(reason, "the reason is rendered");
     assert.ok(reason.classList.contains("field-helper"), "the reason is helper text under the field");
-    assert.match(reason.textContent ?? "", /Directory browsing/);
+    assert.equal(reason.textContent, "This machine needs a newer runner for directory browsing. Update and restart the runner.");
   } finally {
     await unmountFixture(fixture);
   }
@@ -1910,7 +1910,7 @@ test("Native TUI initial launch fails closed against a v66 runner", async () => 
     assert.ok(native);
     assert.equal(cardRefused(native), true);
     // The start-fence hint is the refused card's own reason now, not a sibling paragraph.
-    assert.match(native.textContent ?? "", /Initial Native TUI launch requires protocol v67/);
+    assert.match(native.textContent ?? "", /This machine needs a newer runner for initial Native TUI launch\. Update and restart the runner\./);
   } finally {
     await unmountFixture(fixture);
   }
@@ -2284,7 +2284,9 @@ test("a non-strict Codex Orchestrator shows the saved harness default rather tha
     await choosePermissionPreset(outdatedRunner.container, "Orchestrator");
     const providerPermissions = outdatedRunner.container.querySelector('[role="group"][aria-label="Provider Permissions"]')!;
     assert.match(providerPermissions.textContent!, /Orchestrator Preset — Harness-Enforced/);
-    assert.match(providerPermissions.textContent!, /protocol v162/,
+    // This version already satisfies the Claude gate, so the requirement shown is Codex's own.
+    assert.ok(RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveCodex - 1 >= RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole);
+    assert.match(providerPermissions.textContent!, /needs a newer runner for independent Orchestrator provider permissions\./,
       "the runner requirement names the Codex gate, not the Claude one");
   } finally { await unmountFixture(outdatedRunner); }
 });

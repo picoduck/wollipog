@@ -580,18 +580,23 @@ test("adoption and recovery are gated per platform so older and unsupported runn
   requests.length = 0;
   const older = (await preflight()).response;
   assert.equal(older.statusCode, 409);
-  assert.match(older.json().error, /macOS machine skill adoption requires protocol v181/u);
+  assert.equal(older.json().error, "This machine needs a newer runner for macOS machine skill adoption. Update and restart the runner.");
+  assert.equal(older.json().requiredRunnerProtocolVersion, 181);
   const olderRecovery = await inspect();
   assert.equal(olderRecovery.statusCode, 409);
-  assert.match(olderRecovery.json().error, /macOS machine skill adoption recovery requires protocol v181/u);
+  assert.equal(olderRecovery.json().error, "This machine needs a newer runner for macOS machine skill adoption recovery. Update and restart the runner.");
+  assert.equal(olderRecovery.json().requiredRunnerProtocolVersion, 181);
   assert.deepEqual(requests, ["snapshot:read"], "an older macOS runner receives no adoption or recovery command");
 
   register("windows", RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillAdoption - 1);
   requests.length = 0;
   const olderWindows = (await preflight()).response;
   assert.equal(olderWindows.statusCode, 409);
-  assert.match(olderWindows.json().error, /Windows machine skill adoption requires protocol v182/u);
-  assert.match((await inspect()).json().error, /Windows machine skill adoption recovery requires protocol v182/u);
+  assert.equal(olderWindows.json().error, "This machine needs a newer runner for Windows machine skill adoption. Update and restart the runner.");
+  assert.equal(olderWindows.json().requiredRunnerProtocolVersion, 182);
+  const olderWindowsRecovery = (await inspect()).json();
+  assert.equal(olderWindowsRecovery.error, "This machine needs a newer runner for Windows machine skill adoption recovery. Update and restart the runner.");
+  assert.equal(olderWindowsRecovery.requiredRunnerProtocolVersion, 182);
   assert.deepEqual(requests, ["snapshot:read"], "an older Windows runner receives no adoption or recovery command");
 
   register("windows", RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillAdoption);

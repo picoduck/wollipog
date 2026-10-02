@@ -4,6 +4,7 @@ import {
   type RunnerProtocolCapability,
   type RunnerView,
 } from "@wollipog/protocol";
+import { ApiError } from "./api.js";
 import { accountLabelText } from "./personal-identifiers.js";
 import type { MachineSkillPreview } from "./skills.js";
 
@@ -112,12 +113,18 @@ export function adoptionAdvisoryText(advisory: string): string {
 }
 
 /**
- * A request failure in the dialog's words. The server phrases a capability refusal with runner
- * protocol numbers, which the dialog never shows (§17.2): that becomes the runner-update sentence.
+ * A request failure in the dialog's words. A capability refusal, which the server marks with the
+ * required runner protocol version, becomes the runner-update sentence naming this machine; so
+ * does any other failure that mentions runner protocol numbers, which the dialog never shows
+ * (§17.2).
  */
 export function userFacingMachineError(cause: unknown, machineName: string): string {
   const message = cause instanceof Error ? cause.message : String(cause);
-  return /\bprotocol\b/i.test(message) ? `${machineName} needs a runner update to do this.` : message;
+  const capabilityRefusal = cause instanceof ApiError &&
+    typeof cause.details?.requiredRunnerProtocolVersion === "number";
+  return capabilityRefusal || /\bprotocol\b/i.test(message)
+    ? `${machineName} needs a runner update to do this.`
+    : message;
 }
 
 /**

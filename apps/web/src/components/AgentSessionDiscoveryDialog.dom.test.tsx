@@ -141,8 +141,7 @@ test("Pi is selectable only when the runner proves source-preserving session ado
     });
     const radio = container.querySelector('input[value="pi"]') as HTMLInputElement;
     assert.equal(radio.disabled, true);
-    assert.match(container.textContent ?? "", /Pi session discovery/);
-    assert.match(container.textContent ?? "", /requires protocol v156/);
+    assert.match(container.textContent ?? "", /needs a newer runner for Pi session discovery\. Update and restart the runner\./);
   } finally {
     await act(async () => { root.unmount(); });
     mountPoint.remove();
@@ -165,9 +164,9 @@ test("an old runner explains why Codex App Server discovery requires an update",
     assert.equal(appServerRadio.disabled, true);
     const copy = container.textContent ?? "";
     assert.match(copy, /Runner Update Required/);
-    assert.match(copy, /Codex App Server session discovery/);
+    assert.match(copy, /This machine needs a newer runner for Codex app server session discovery\. Update and restart the runner\./);
     assert.doesNotMatch(copy, /Codex(?: —)? Interactive session discovery/);
-    assert.match(copy, /Runner protocol is v62.*requires protocol v63.*Update and restart the runner/);
+    assert.doesNotMatch(copy, /protocol|v6[23]/);
     assert.equal((container.querySelector('input[value="codex-exec"]') as HTMLInputElement).disabled, false);
   } finally {
     await act(async () => { root.unmount(); });

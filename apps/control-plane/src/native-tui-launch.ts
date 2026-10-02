@@ -1,13 +1,14 @@
 import {
   nativeTuiHasTrackedGuardrails,
-  runnerCapabilityRequirement,
   runnerSupportsProtocol,
   sessionRole,
   usesOrchestratorPresetPermissions,
   type CreateSessionRequest,
+  type RunnerCapabilityRequirementDetails,
   type SessionView,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
+import { capabilityRefusal } from "./capability-refusal.js";
 
 const TUI_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"]);
 
@@ -19,6 +20,7 @@ export const NATIVE_TUI_DAILY_BUDGET_ERROR =
 export interface NativeTuiLaunchError {
   status: 400 | 404 | 409;
   error: string;
+  capabilityRequirement?: RunnerCapabilityRequirementDetails;
 }
 
 export interface RunnerAvailability {
@@ -29,6 +31,7 @@ export interface NativeTuiOpenResult {
   ok: boolean;
   status: number;
   error?: string;
+  capabilityRequirement?: RunnerCapabilityRequirementDetails;
   /** False when a timeout/disconnect leaves runner execution unknown. */
   definitive?: boolean;
   /** True when the ordinary session still exists and the client must recover it, not retry create. */
@@ -94,7 +97,7 @@ function runnerError(
   if (!runnerSupportsProtocol(runner.protocolVersion, "agentTuiMirror")) {
     return {
       status: 409,
-      error: runnerCapabilityRequirement(
+      ...capabilityRefusal(
         runner.protocolVersion,
         "agentTuiMirror",
         "Native TUI launch",
@@ -123,10 +126,10 @@ export function nativeTuiCreationError(
   if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionStartFencedShells")) {
     return {
       status: 409,
-      error: runnerCapabilityRequirement(
+      ...capabilityRefusal(
         runner?.protocolVersion,
         "sessionStartFencedShells",
-        "Initial Native TUI launch",
+        "initial Native TUI launch",
       ),
     };
   }
@@ -168,7 +171,7 @@ export function nativeTuiSessionError(
     }
     const protocolVersion = db.getRunner(session.runnerId)?.protocolVersion;
     if (!runnerSupportsProtocol(protocolVersion, "orchestratorNativeTui")) {
-      return { status: 409, error: runnerCapabilityRequirement(
+      return { status: 409, ...capabilityRefusal(
         protocolVersion, "orchestratorNativeTui", "Orchestrator Native TUI",
       ) };
     }
@@ -181,10 +184,10 @@ export function nativeTuiSessionError(
     if (!runnerSupportsProtocol(protocolVersion, "sessionStartFencedShells")) {
       return {
         status: 409,
-        error: runnerCapabilityRequirement(
+        ...capabilityRefusal(
           protocolVersion,
           "sessionStartFencedShells",
-          "Initial Native TUI launch",
+          "initial Native TUI launch",
         ),
       };
     }

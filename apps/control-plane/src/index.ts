@@ -43,7 +43,8 @@ import {
   parseMessage,
   CONTROL_PLANE_SERVICE,
   providerSupportsConversationFork,
-  runnerCapabilityRequirement,
+  runnerCapabilityRequirementError,
+  type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
   scopeAudienceContained,
   isPromptImageReference,
@@ -123,6 +124,7 @@ import {
   nativeTuiSessionError,
   openNativeTuiAtomically,
 } from "./native-tui-launch.js";
+import { capabilityRefusal, failureBody, type CapabilityRefusal } from "./capability-refusal.js";
 import {
   carriesTokenParam,
   extractBearer,
@@ -992,11 +994,11 @@ function runnerCapabilityError(
   runnerId: string,
   capability: RunnerProtocolCapability,
   label: string,
-): string | null {
+): CapabilityRefusal | null {
   const protocolVersion = db.getRunner(runnerId)?.protocolVersion;
   return runnerSupportsProtocol(protocolVersion, capability)
     ? null
-    : runnerCapabilityRequirement(protocolVersion, capability, label);
+    : capabilityRefusal(protocolVersion, capability, label);
 }
 
 function sessionProviderAccountChoices(
@@ -2156,8 +2158,8 @@ app.post("/api/projects/:id/locations/new", async (req, reply) => {
   const requested = requestedAccessScope(principal, body.owner, projectScope);
   if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
   if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(runnerId, "directoryListing", "Directory browsing");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(runnerId, "directoryListing", "directory browsing");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const browsed = await svc.listDirectory(runnerId, path);
   if (!browsed.ok) {
     const message = browsed.status === 404
@@ -2265,8 +2267,8 @@ async function projectLocationWorktreeSetup(
   if (location.availability !== "available" || !hub.isRunnerOnline(location.runnerId)) {
     return reply.code(409).send({ error: "project location is unavailable" });
   }
-  const unsupported = runnerCapabilityError(location.runnerId, "worktreeSetupConfig", "Worktree setup configuration");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(location.runnerId, "worktreeSetupConfig", "worktree setup configuration");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const requestId = `workspace_setup_${randomUUID().slice(0, 8)}`;
   try {
     const result = await hub.requestFromRunner(location.runnerId, requestId, {
@@ -2705,8 +2707,8 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   const runner = db.getRunner(id);
   if (!runner) return reply.code(404).send({ error: "runner not found" });
   if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(id, "providerLogin", "Provider Sign-In");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(id, "providerLogin", "provider sign-in");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   if (runner.harnessSelections?.length && !runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) {
     return reply.code(409).send({ error: "This runner cannot enforce the saved Harness Installation choice" });
   }
@@ -2767,9 +2769,7 @@ app.post("/api/runners/:id/provider-logins/:operationId/code", async (req, reply
   if (!runner) return reply.code(404).send({ error: "runner not found" });
   if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
   if (!runnerSupportsProtocol(runner.protocolVersion, "providerLogin")) {
-    return reply.code(409).send({
-      error: runnerCapabilityRequirement(runner.protocolVersion, "providerLogin", "Provider Sign-In"),
-    });
+    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "providerLogin", "provider sign-in"));
   }
   const code = (req.body as { code?: unknown })?.code;
   if (typeof code !== "string" || !code.trim() || code.trim().length > 4_096 || /[\u0000\r\n]/u.test(code.trim())) {
@@ -2809,9 +2809,7 @@ app.delete("/api/runners/:id/provider-logins/:operationId", async (req, reply) =
   if (!runner) return reply.code(404).send({ error: "runner not found" });
   if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
   if (!runnerSupportsProtocol(runner.protocolVersion, "providerLogin")) {
-    return reply.code(409).send({
-      error: runnerCapabilityRequirement(runner.protocolVersion, "providerLogin", "Provider Sign-In"),
-    });
+    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "providerLogin", "provider sign-in"));
   }
   const requestId = `provider_login_cancel_${randomUUID()}`;
   try {
@@ -2845,8 +2843,8 @@ app.delete("/api/runners/:id/provider-accounts/:accountId", async (req, reply) =
   const runner = db.getRunner(id);
   if (!runner) return reply.code(404).send({ error: "runner not found" });
   if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(id, "providerAccountRemoval", "Provider Account Removal");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(id, "providerAccountRemoval", "provider account removal");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   if (!runner.providerAccounts?.some((account) => account.id === accountId)) {
     return reply.code(404).send({ error: "The provider account is not available on this Machine." });
   }
@@ -2876,8 +2874,8 @@ app.post("/api/runners/:id/acp-registry/:agentId/approval", async (req, reply) =
   const runner = db.getRunner(id);
   if (!runner) return reply.code(404).send({ error: "runner not found" });
   if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(id, "acpRegistryApproval", "ACP Registry approval");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(id, "acpRegistryApproval", "ACP registry approval");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const validated = validateRegistryApproval(runner.agents, agentId, body);
   if (!validated.ok) return reply.code(validated.status).send({ error: validated.error });
   const requestId = `registry_${randomUUID().slice(0, 8)}`;
@@ -2940,9 +2938,7 @@ app.put("/api/runners/:id/harness-installation", async (req, reply) => {
   const runner = db.getRunner(id);
   if (!runner) return reply.code(404).send({ error: "runner not found" });
   if (!runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) {
-    return reply.code(409).send({
-      error: runnerCapabilityRequirement(runner.protocolVersion, "harnessInstallations", "Harness Installation selection"),
-    });
+    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "harnessInstallations", "harness installation selection"));
   }
   const selection = db.selectHarnessInstallation(id, agentId, installationId);
   if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
@@ -2982,9 +2978,7 @@ app.put("/api/runners/:id/target-harness-installation", async (req, reply) => {
   const runner = db.getRunner(id);
   if (!runner) return reply.code(404).send({ error: "runner not found" });
   if (!runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations")) {
-    return reply.code(409).send({
-      error: runnerCapabilityRequirement(runner.protocolVersion, "targetHarnessInstallations", "Target Harness Installation selection"),
-    });
+    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "targetHarnessInstallations", "target harness installation selection"));
   }
   const selection = db.selectTargetHarnessInstallation(id, body.targetId, body.agentId, body.installationId);
   if (!selection) return reply.code(409).send({ error: "This target installation is no longer available for selection" });
@@ -3010,9 +3004,7 @@ app.put("/api/runners/:id/capacity", async (req, reply) => {
   const boxId = db.boxIdForRunner(id);
   if (!runner && !boxId) return reply.code(404).send({ error: "runner not found" });
   if (runner?.status === "online" && !runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity")) {
-    return reply.code(409).send({
-      error: runnerCapabilityRequirement(runner.protocolVersion, "machineRunnerCapacity", "Runner Capacity changes"),
-    });
+    return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "machineRunnerCapacity", "runner capacity changes"));
   }
   const changed = db.setMachineRunnerCapacity(
     id,
@@ -3049,13 +3041,11 @@ app.put("/api/runners/:id/automatic-account-switching", async (req, reply) => {
   if (!runner && !boxId) return reply.code(404).send({ error: "runner not found" });
   if (runner?.status === "online" &&
       !runnerSupportsProtocol(runner.protocolVersion, "automaticProviderAccountSwitch")) {
-    return reply.code(409).send({
-      error: runnerCapabilityRequirement(
+    return reply.code(409).send(runnerCapabilityRequirementError(
         runner.protocolVersion,
         "automaticProviderAccountSwitch",
-        "Automatic Account Switching changes",
-      ),
-    });
+        "automatic account switching changes",
+      ));
   }
   const changed = db.setMachineAutomaticAccountSwitch(
     id,
@@ -3102,9 +3092,9 @@ app.put("/api/runners/:id/provider-account-defaults/:provider", async (req, repl
   const runner = db.getRunner(id);
   if (!runner) return reply.code(404).send({ error: "runner not found" });
   if (!runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
-    return reply.code(409).send({ error: runnerCapabilityRequirement(
-      runner.protocolVersion, "providerAccounts", "Default Provider Account changes",
-    ) });
+    return reply.code(409).send(runnerCapabilityRequirementError(
+      runner.protocolVersion, "providerAccounts", "default provider account changes",
+    ));
   }
   if (body.accountId !== null && !runner.providerAccounts?.some((account) =>
     account.provider === provider && account.id === body.accountId)) {
@@ -3148,7 +3138,7 @@ app.delete("/api/runners/:id", async (req, reply) => {
 app.get("/api/runners/:id/external-sessions", async (req, reply) => {
   const query = req.query as { agentId?: string };
   const r = await svc.listExternalSessions((req.params as { id: string }).id, query.agentId || undefined);
-  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return { sessions: r.data };
 });
 
@@ -3157,7 +3147,7 @@ app.get("/api/runners/:id/list-directory", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const q = req.query as { path?: string; distro?: string };
   const r = await svc.listDirectory(id, q.path ?? "", q.distro || undefined);
-  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });
 
@@ -3171,7 +3161,7 @@ app.get("/api/sessions/:id/files", async (req, reply) => {
     return reply.code(400).send({ error: "path must be a single string" });
   }
   const r = await svc.listSessionFiles(id, q.path ?? "");
-  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });
 
@@ -3190,7 +3180,7 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
     return reply.code(400).send({ error: "path is required (a single string)" });
   }
   const r = await svc.readSessionFile(id, q.path);
-  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });
 
@@ -3201,7 +3191,7 @@ app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
     return reply.code(400).send({ error: "q must contain 1-256 characters" });
   }
   const r = await svc.searchWorkspaceReferences(id, q.q);
-  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });
 
@@ -3213,7 +3203,7 @@ app.post("/api/sessions/:id/workspace-references", async (req, reply) => {
     return reply.code(400).send({ error: "path and a valid reference kind are required" });
   }
   const r = await svc.createWorkspaceReference(id, body as CreateWorkspaceReferenceRequest);
-  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return { reference: r.data };
 });
 
@@ -3228,8 +3218,8 @@ app.post("/api/sessions/:id/cancel-queued", async (req, reply) => {
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptCancellation", "Queued prompt cancellation");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptCancellation", "queued prompt cancellation");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   if (!hub.sendToRunner(session.runnerId, { type: "cancel_queued_prompt", sessionId: id, promptId: body.promptId })) {
     return reply.code(409).send({ error: "runner is offline" });
   }
@@ -3242,8 +3232,8 @@ app.get("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "Queued prompt editing");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "queued prompt editing");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const requestId = `read_queue_${randomUUID().slice(0, 12)}`;
   try {
     const result = await hub.requestFromRunner(session.runnerId, requestId, {
@@ -3287,21 +3277,21 @@ app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "Queued prompt editing");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(session.runnerId, "queuedPromptEditing", "queued prompt editing");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   if (typedImages.some(isWorkspaceReference)) {
     const unsupportedWorkspaceReferences = runnerCapabilityError(
       session.runnerId,
       "workspaceReferences",
-      "Workspace references",
+      "workspace references",
     );
     if (unsupportedWorkspaceReferences) {
-      return reply.code(409).send({ error: unsupportedWorkspaceReferences });
+      return reply.code(409).send(failureBody(unsupportedWorkspaceReferences));
     }
   }
   const preparedImages = svc.prepareQueuedPromptEditImages(id, typedImages);
   if (!preparedImages.ok || !preparedImages.data) {
-    return reply.code(preparedImages.status).send({ error: preparedImages.error ?? "queued message images are invalid" });
+    return reply.code(preparedImages.status).send(failureBody(preparedImages, "queued message images are invalid"));
   }
   const requestId = `edit_queue_${randomUUID().slice(0, 12)}`;
   try {
@@ -3347,7 +3337,7 @@ app.post("/api/sessions/:id/pending-prompts/:commandId/resolve", async (req, rep
   if (body.action === "cancel") result = svc.cancelPendingPrompt(id, commandId);
   else if (body.action === "dismiss") result = svc.dismissPendingPrompt(id, commandId);
   else result = svc.retryPendingWork(id, commandId);
-  if (!result.ok) return reply.code(result.status).send({ error: result.error });
+  if (!result.ok) return reply.code(result.status).send(failureBody(result));
   return result.data;
 });
 
@@ -3375,6 +3365,7 @@ type OpenSessionShellResult =
       ok: false;
       status: 400 | 404 | 409 | 502 | 504;
       error: string;
+      capabilityRequirement?: RunnerCapabilityRequirementDetails;
       /** False when a runner timeout/disconnect leaves process creation unknown. */
       definitive?: boolean;
     };
@@ -3387,8 +3378,8 @@ async function openSessionShell(
   const session = db.getSession(sessionId);
   if (!session) return { ok: false, status: 404, error: "session not found" };
   if (!hub.isRunnerOnline(session.runnerId)) return { ok: false, status: 409, error: "runner is offline" };
-  const unsupported = runnerCapabilityError(session.runnerId, "sessionShells", "Session terminal access");
-  if (unsupported) return { ok: false, status: 409, error: unsupported };
+  const unsupported = runnerCapabilityError(session.runnerId, "sessionShells", "session terminal access");
+  if (unsupported) return { ok: false, status: 409, ...unsupported };
   if (body.kind !== undefined && body.kind !== "shell" && body.kind !== "agent_tui") {
     return { ok: false, status: 400, error: "kind must be shell or agent_tui" };
   }
@@ -3465,7 +3456,7 @@ app.post("/api/sessions/:id/shells", async (req, reply) => {
   );
   return result.ok
     ? reply.code(result.status).send({ shell: result.shell })
-    : reply.code(result.status).send({ error: result.error });
+    : reply.code(result.status).send(failureBody(result));
 });
 
 // Best-effort PTY resize (fire-and-forget, like input — pipe shells ignore it).
@@ -3518,7 +3509,7 @@ app.post("/api/sessions/adopt", async (req, reply) => {
     return reply.code(400).send({ error: "runnerId and descriptor (with agentSessionId) are required" });
   }
   const r = await svc.adoptSession(body.runnerId, body.descriptor, body.backfill ?? true);
-  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return reply.code(r.status).send(r.data);
 });
 
@@ -3527,7 +3518,7 @@ app.post("/api/sessions/adopt", async (req, reply) => {
 app.post("/api/sessions/:id/reprocess", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const r = await svc.reprocessSession(id);
-  if (!r.ok) return reply.code(r.status).send({ error: r.error });
+  if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return reply.code(r.status).send(r.data);
 });
 
@@ -4293,7 +4284,7 @@ app.post("/api/sessions", async (req, reply) => {
   );
   if (!ownership.ok) return reply.code(ownership.status).send({ error: ownership.error });
   const launchError = nativeTuiCreationError(db, hub, ownership.body);
-  if (launchError) return reply.code(launchError.status).send({ error: launchError.error });
+  if (launchError) return reply.code(launchError.status).send(failureBody(launchError));
   const initialNativeTui = ownership.body.launchSurface === "native_tui";
   const created = svc.createSession(
     ownership.body,
@@ -4338,7 +4329,7 @@ app.post("/api/sessions", async (req, reply) => {
         sessionId,
       });
     }
-    return reply.code(opened.status).send({ error: opened.error });
+    return reply.code(opened.status).send(failureBody(opened));
   }
   return respond(reply, { ...created, data: db.getSession(sessionId) ?? created.data });
 });
@@ -4466,9 +4457,9 @@ app.get("/api/sessions/:id/provider-accounts", async (req, reply) => {
   const unsupported = runnerCapabilityError(
     session.runnerId,
     "sessionProviderAccountSwitch",
-    "Session account switching",
+    "session account switching",
   );
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   if (!session.providerAccountId || !providerForSessionAccountSwitch(session.driver)) {
     return reply.code(409).send({ error: "this session is not bound to a switchable provider account" });
   }
@@ -4486,9 +4477,9 @@ app.post("/api/sessions/:id/provider-account", async (req, reply) => {
   const unsupported = runnerCapabilityError(
     session.runnerId,
     "sessionProviderAccountSwitch",
-    "Session account switching",
+    "session account switching",
   );
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const body = (req.body ?? {}) as { providerAccountId?: unknown };
   if (typeof body.providerAccountId !== "string" ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.providerAccountId)) {
@@ -4530,7 +4521,7 @@ app.post("/api/sessions/:id/logout-agent", async (req, reply) => {
   if (session.driver !== "acp") return reply.code(409).send({ error: "only ACP sessions support in-app logout" });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
   const unsupported = runnerCapabilityError(session.runnerId, "acpLogout", "ACP logout");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const requestId = `logout_${randomUUID().slice(0, 8)}`;
   try {
     const result = await hub.requestFromRunner(
@@ -4720,11 +4711,11 @@ async function runSessionWorktreeRequest(
     request.operation === "discard" ? "sessionWorktreeDiscard"
       : request.operation === "retry_setup" ? "worktreeSetup"
       : request.operation === "generate_setup" ? "worktreeSetupConfig" : "sessionWorktrees",
-    request.operation === "discard" ? "Session worktree discard"
-      : request.operation === "retry_setup" ? "Worktree setup"
-      : request.operation === "generate_setup" ? "Worktree setup generation" : "Session worktrees",
+    request.operation === "discard" ? "session worktree discard"
+      : request.operation === "retry_setup" ? "worktree setup"
+      : request.operation === "generate_setup" ? "worktree setup generation" : "session worktrees",
   );
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
@@ -4886,8 +4877,8 @@ app.post("/api/sessions/:id/rewind", async (req, reply) => {
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
   // Persisted checkpoint events can outlive a runner downgrade — a pre-v25 runner ignores the
   // unknown command and the caller would eat a 30s timeout instead of a clear failure.
-  const unsupported = runnerCapabilityError(session.runnerId, "checkpointRewind", "Checkpoint rewind");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(session.runnerId, "checkpointRewind", "checkpoint rewind");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const requestId = `rew_${randomUUID().slice(0, 8)}`;
   try {
     const res = await hub.requestFromRunner(
@@ -4937,8 +4928,8 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
     if ((quarantine.recovery === "handoff") !== !!handoff) {
       return reply.code(409).send({ error: `this quarantined conversation recovers by ${quarantine.recovery ?? "fork"}` });
     }
-    const unsupported = runnerCapabilityError(source.runnerId, "providerHistoryQuarantine", "Quarantine recovery");
-    if (unsupported) return reply.code(409).send({ error: unsupported });
+    const unsupported = runnerCapabilityError(source.runnerId, "providerHistoryQuarantine", "quarantine recovery");
+    if (unsupported) return reply.code(409).send(failureBody(unsupported));
   } else if (quarantine) {
     return reply.code(409).send({ error: "this session's provider conversation is quarantined — use its recovery action" });
   }
@@ -4949,8 +4940,8 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
     if (!db.getAgentLaunch(source.runnerId, handoff.agentId)) {
       return reply.code(409).send({ error: "The destination harness installation is unavailable or not selected." });
     }
-    const unsupported = runnerCapabilityError(source.runnerId, "conversationHandoff", "Checkpoint handoffs");
-    if (unsupported) return reply.code(409).send({ error: unsupported });
+    const unsupported = runnerCapabilityError(source.runnerId, "conversationHandoff", "checkpoint handoffs");
+    if (unsupported) return reply.code(409).send(failureBody(unsupported));
   }
   const supportsFork = providerSupportsConversationFork(source.driver, sourceAgent?.capabilities);
   if (!supportsFork && !handoff) return reply.code(409).send({ error: "this provider session does not support conversation fork" });
@@ -4959,8 +4950,8 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
     return reply.code(409).send({ error: "the source session is busy — wait before forking" });
   }
   if (!hub.isRunnerOnline(source.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  const unsupported = runnerCapabilityError(source.runnerId, "conversationFork", "Conversation forks");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(source.runnerId, "conversationFork", "conversation forks");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const deferHistory = runnerSupportsProtocol(db.getRunner(source.runnerId)?.protocolVersion, "indexedHistory");
   const sourceExecutionWorkspacePath = db.getAdHocWorkspacePath(sourceId);
   const targetSessionId = `s_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
@@ -5097,14 +5088,14 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
     const unsupported = runnerCapabilityError(
       session.runnerId,
       "gitVisibility",
-      "Primary-checkout Git visibility",
+      "primary-checkout Git visibility",
     );
-    if (unsupported) return reply.code(409).send({ error: unsupported });
+    if (unsupported) return reply.code(409).send(failureBody(unsupported));
   }
   const gitCapability = gitActionCapability(action);
   if (gitCapability) {
-    const unsupported = runnerCapabilityError(session.runnerId, ...gitCapability);
-    if (unsupported) return reply.code(409).send({ error: unsupported });
+    const unsupported = runnerCapabilityError(session.runnerId, gitCapability.capability, gitCapability.label);
+    if (unsupported) return reply.code(409).send(failureBody(unsupported));
   }
 
   // Branch-relative diffs (all_branch / last_turn) only make sense on a worktree session; a
@@ -5164,7 +5155,7 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
       }
       const reconciled = svc.reconcileGitHubReviewFindings(id, result.data.githubReview);
       if (!reconciled.ok || !reconciled.data) {
-        return reply.code(reconciled.status).send({ error: reconciled.error ?? "GitHub reviews could not be reconciled" });
+        return reply.code(reconciled.status).send(failureBody(reconciled, "GitHub reviews could not be reconciled"));
       }
       const { reconciliation, findings, summary } = reconciled.data;
       return {
@@ -5179,7 +5170,7 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
       }
       const reconciled = svc.reconcileForgeReviewFindings(id, result.data.forgeReview);
       if (!reconciled.ok || !reconciled.data) {
-        return reply.code(reconciled.status).send({ error: reconciled.error ?? "Forge reviews could not be reconciled" });
+        return reply.code(reconciled.status).send(failureBody(reconciled, "Forge reviews could not be reconciled"));
       }
       const { reconciliation, findings, summary } = reconciled.data;
       return {
@@ -5218,9 +5209,9 @@ app.post("/api/sessions/:id/host-action", async (req, reply) => {
   if (!parsed) {
     return reply.code(400).send({ error: "invalid host action; precise editor locations require a canonical root-relative path" });
   }
-  const label = parsed.capability === "editorLocations" ? "Precise editor locations" : "Host editor and file-manager actions";
+  const label = parsed.capability === "editorLocations" ? "precise editor locations" : "host editor and file-manager actions";
   const unsupported = runnerCapabilityError(session.runnerId, parsed.capability, label);
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   if (parsed.action.kind === "open_editor_location") {
     const locationAction = parsed.action;
     const editor = db.getRunner(session.runnerId)?.editors?.find((candidate) => candidate.id === locationAction.editorId);
@@ -5384,8 +5375,8 @@ app.post("/api/runners/:runnerId/host-action", async (req, reply) => {
   if (!runner?.workspaces.some((w) => w.path === body.path)) {
     return reply.code(400).send({ error: "path is not a workspace root on this runner" });
   }
-  const unsupported = runnerCapabilityError(runnerId, "hostActions", "Host editor and file-manager actions");
-  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const unsupported = runnerCapabilityError(runnerId, "hostActions", "host editor and file-manager actions");
+  if (unsupported) return reply.code(409).send(failureBody(unsupported));
   const requestId = randomUUID();
   try {
     const result = await hub.requestFromRunner(
@@ -5505,7 +5496,7 @@ app.post("/api/sessions/:id/unarchive-and-restart", async (req, reply) => {
   // exists has no archive state, so it carries no receipt rather than a misleading `false`.
   const current = db.getSession(id);
   return reply.code(result.status).send(
-    current ? { error: result.error, archived: current.archived } : { error: result.error },
+    current ? { ...failureBody(result), archived: current.archived } : failureBody(result),
   );
 });
 
@@ -6153,7 +6144,7 @@ function lanIpv4(): string[] {
 
 function respond(
   reply: { code: (n: number) => { send: (b: unknown) => unknown } },
-  result: { ok: boolean; status: number; data?: unknown; error?: string },
+  result: { ok: boolean; status: number; data?: unknown; error?: string; capabilityRequirement?: RunnerCapabilityRequirementDetails },
 ) {
-  return reply.code(result.status).send(result.ok ? result.data : { error: result.error });
+  return reply.code(result.status).send(result.ok ? result.data : failureBody(result));
 }

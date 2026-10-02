@@ -27,6 +27,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   mergeSessionCapabilities,
   nativeTuiHasTrackedGuardrails,
   runnerCapabilityRequirement,
+  type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
   validatePromptImageInputs,
   validatePromptImages,
@@ -205,6 +206,7 @@ import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } fr
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { withHoldAdviceFor } from "./session-command-permissions.js";
 import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
+import { capabilityRefusal, failureBody } from "./capability-refusal.js";
 import { NATIVE_TUI_DAILY_BUDGET_ERROR, NATIVE_TUI_TRACKED_GUARDRAILS_ERROR } from "./native-tui-launch.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
 import { type GuardrailFields, normalizeCostCheckpoints,
@@ -425,6 +427,8 @@ export interface ServiceResult<T> {
   status: number;
   data?: T;
   error?: string;
+  /** Set by a refused runner capability gate; routes return it beside `error` (`failureBody`). */
+  capabilityRequirement?: RunnerCapabilityRequirementDetails;
 }
 
 /** Exact runner commands plus the control-plane resources they materialize. Durable automation
@@ -466,6 +470,16 @@ function ok<T>(data: T, status = 200): ServiceResult<T> {
 }
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
+}
+
+/** Re-type a failed result, keeping its status, error and any capability-gate versions. */
+function failAs<T>(result: ServiceResult<unknown>, fallback?: string): ServiceResult<T> {
+  return {
+    ok: false,
+    status: result.status,
+    error: result.error ?? fallback,
+    ...(result.capabilityRequirement ? { capabilityRequirement: result.capabilityRequirement } : {}),
+  };
 }
 
 function boundedDecisionString(value: unknown, max: number): value is string {
@@ -1242,7 +1256,7 @@ export function workflowRunCapabilityError(
     return runnerCapabilityRequirement(
       db.getRunner(req.runnerId)?.protocolVersion,
       "codexServiceTiers",
-      "Codex Service Tier selection",
+      "Codex service tier selection",
     );
   }
   const definition = db.getWorkflowDefinition(req.workflowId, req.workflowVersion);
@@ -1677,12 +1691,12 @@ export class SessionsService {
       const restarted = this.restart(session.id);
       return restarted.ok
         ? fail("workflow member session is restarting; retry dispatch when it is idle", 409)
-        : fail(restarted.error ?? "workflow member session could not restart", restarted.status);
+        : failAs(restarted, "workflow member session could not restart");
     }
     if (session.status !== "idle") return fail(`workflow member session is ${session.status}`, 409);
 
     const prepared = this.workflowPrompt(instance, node);
-    if (!prepared.ok || !prepared.data) return fail(prepared.error ?? "workflow inputs could not be prepared", prepared.status);
+    if (!prepared.ok || !prepared.data) return failAs(prepared, "workflow inputs could not be prepared");
     const now = Date.now();
     let claimed: { attempt: WorkflowAttemptView; idempotent: boolean };
     try {
@@ -1718,7 +1732,7 @@ export class SessionsService {
     actor: GovernanceActor = { kind: "human", id: "local" },
   ): ServiceResult<WorkflowInstanceDetail> {
     const parsed = this.parseWorkflowCompletion(input);
-    if (!parsed.ok || !parsed.data) return fail(parsed.error ?? "workflow completion is malformed", parsed.status);
+    if (!parsed.ok || !parsed.data) return failAs(parsed, "workflow completion is malformed");
     const completion = parsed.data;
     const attempt = this.db.getWorkflowAttempt(attemptId);
     if (!attempt) return fail("workflow attempt not found", 404);
@@ -2881,7 +2895,7 @@ export class SessionsService {
       findings.push(finding);
     }
     const sent = this.prompt(sessionId, formatReviewFindingsPrompt(findings));
-    if (!sent.ok) return fail(sent.error ?? "review findings could not be sent", sent.status);
+    if (!sent.ok) return failAs(sent, "review findings could not be sent");
     // prompt() is synchronous and does not mutate review findings, so the revisions validated
     // above cannot interleave with another request before this atomic status update.
     const marked = this.db.markReviewFindingsSent(sessionId, parsed.value.findings, Date.now());
@@ -2935,7 +2949,7 @@ export class SessionsService {
         requestId,
         ok: result.ok,
         status: result.status,
-        ...(result.error ? { error: result.error } : {}),
+        ...(result.error ? failureBody(result) : {}),
       };
     });
     return ok({ results });
@@ -3049,7 +3063,7 @@ export class SessionsService {
     const runner = this.db.getRunner(runnerId);
     if (!runner) return fail("runner not found", 404);
     if (runnerSupportsProtocol(runner.protocolVersion, capability)) return null;
-    return fail(runnerCapabilityRequirement(runner.protocolVersion, capability, label), 409);
+    return { ok: false, status: 409, ...capabilityRefusal(runner.protocolVersion, capability, label) };
   }
 
   private promptImageReference(artifact: WorkflowArtifactView): PromptImageReference {
@@ -3431,7 +3445,7 @@ export class SessionsService {
       reserved.maxToolCalls += guarded.config.maxToolCalls ?? 0;
     }
     const gate = this.sessionSpawnGate(parentSessionId, request, configs.length);
-    return gate.ok ? ok(applied) : fail(gate.error!, gate.status);
+    return gate.ok ? ok(applied) : failAs(gate);
   }
 
   createSession(
@@ -3558,7 +3572,7 @@ export class SessionsService {
       if (unsupported) return unsupported;
     }
     if (!snapshotSpec && req.executionTargetId) {
-      const unsupported = this.capabilityFailure(req.runnerId, "executionTargets", "Execution target selection");
+      const unsupported = this.capabilityFailure(req.runnerId, "executionTargets", "execution target selection");
       if (unsupported) return unsupported;
     }
     const resolvedTarget = resolveExecutionTarget(
@@ -3724,11 +3738,11 @@ export class SessionsService {
     const imageValidation = validateImagesForDriver(images, launch.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
     if (images.some(isWorkspaceReference)) {
-      const unsupported = this.capabilityFailure(req.runnerId, "workspaceReferences", "Workspace references");
+      const unsupported = this.capabilityFailure(req.runnerId, "workspaceReferences", "workspace references");
       if (unsupported) return unsupported;
     }
     if (images.some((image) => !isWorkspaceReference(image))) {
-      const unsupported = this.capabilityFailure(req.runnerId, "promptImageReferences", "Prompt image attachments");
+      const unsupported = this.capabilityFailure(req.runnerId, "promptImageReferences", "prompt image attachments");
       if (unsupported) return unsupported;
     }
     if (images.length && delivery && !snapshotCommand) {
@@ -3813,7 +3827,7 @@ export class SessionsService {
       return fail("service tier selection is supported only by Codex app-server sessions", 409);
     }
     if (requestedConfig.serviceTier && !supportsServiceTiers) {
-      return this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection")!;
+      return this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex service tier selection")!;
     }
     const serviceTier = supportsServiceTiers
       ? resolveEffectiveServiceTier(requestedConfig, agentCapabilities, launch.driver)
@@ -4030,8 +4044,8 @@ export class SessionsService {
       }
       const wslDirect = contextKind === "wsl" && req.launchSurface !== "native_tui" &&
         ["codex", "codex-app-server", "claude-code"].includes(launch.driver) &&
-        this.capabilityFailure(req.runnerId, "wslAgentControlBridge", "Direct WSL Agent Control") === null &&
-        this.capabilityFailure(req.runnerId, "wslSafeLauncher", "Direct WSL safe launcher") === null &&
+        this.capabilityFailure(req.runnerId, "wslAgentControlBridge", "direct WSL agent control") === null &&
+        this.capabilityFailure(req.runnerId, "wslSafeLauncher", "direct WSL safe launcher") === null &&
         launch.wslAgentControl?.safeLauncherProtocolVersion === 1 &&
         launch.wslAgentControl.bwrapRuntime === "/usr/bin/bwrap" &&
         this.db.getRunner(req.runnerId)?.runtime?.executionIsolation?.mode === "bwrap";
@@ -4052,7 +4066,7 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(
         req.runnerId,
         "delegatedParentControl",
-        "Parent Control",
+        "parent control",
       );
       if (unsupported) return unsupported;
     }
@@ -4063,7 +4077,7 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(
         req.runnerId,
         "typedWorkflowDecisionDelegation",
-        "Typed Parent Control workflow decisions",
+        "typed parent control workflow decisions",
       );
       if (unsupported) return unsupported;
     }
@@ -4127,7 +4141,7 @@ export class SessionsService {
       req, req.runnerId, workspaceId, allowProjectWithoutLocation, parentSessionId, workspacePath,
     );
     if (!requestedProject.ok || !requestedProject.data) {
-      return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
+      return failAs(requestedProject, "project assignment is invalid");
     }
     let sessionScope = scope ?? (parentSession ? this.db.sessionScope(parentSession.id) ?? undefined : undefined);
     if (parentSession && !sessionScope) return fail("parent session ownership is unavailable", 409);
@@ -4139,7 +4153,7 @@ export class SessionsService {
           : this.db.runnerScope(req.runnerId),
       );
       if (!projectSessionScope.ok || !projectSessionScope.data) {
-        return fail(projectSessionScope.error ?? "session ownership is unavailable", projectSessionScope.status);
+        return failAs(projectSessionScope, "session ownership is unavailable");
       }
       if (sessionScope &&
           !this.db.scopeAudienceContainedWithMembership(sessionScope, projectSessionScope.data)) {
@@ -4218,7 +4232,7 @@ export class SessionsService {
     // deterministic ID reuses the exact row if materialization completed before a crash.
     if (parentSessionId && !existing) {
       const gate = this.sessionSpawnGate(parentSessionId, spawnRequest);
-      if (!gate.ok) return fail(gate.error!, gate.status);
+      if (!gate.ok) return failAs(gate);
     }
     if (delivery) delivery.stage(plan!);
     const session = existing ?? this.db.createSession({
@@ -4266,7 +4280,7 @@ export class SessionsService {
       if (!externalized.ok || !externalized.data) {
         this.db.deleteSession(id);
         if (session.projectId) this.hub.projectChangedById(session.projectId);
-        return fail(externalized.error ?? "prompt images could not be stored", externalized.status);
+        return failAs(externalized, "prompt images could not be stored");
       }
       if (command.type === "start_session") command.initialImages = nonEmpty(externalized.data);
     }
@@ -4562,7 +4576,7 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(
         session.runnerId,
         "durablePromptQueueIdentity",
-        "Admission-queued prompt delivery",
+        "admission-queued prompt delivery",
       );
       if (unsupported) return unsupported;
     }
@@ -4576,11 +4590,11 @@ export class SessionsService {
     const imageValidation = validateImagesForDriver(effectiveImages, session.driver);
     if (!imageValidation.ok) return fail(imageValidation.error ?? "invalid image attachment", 400);
     if (effectiveImages.some(isWorkspaceReference)) {
-      const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+      const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "workspace references");
       if (unsupported) return unsupported;
     }
     if (effectiveImages.some((image) => !isWorkspaceReference(image))) {
-      const unsupported = this.capabilityFailure(session.runnerId, "promptImageReferences", "Prompt image attachments");
+      const unsupported = this.capabilityFailure(session.runnerId, "promptImageReferences", "prompt image attachments");
       if (unsupported) return unsupported;
     }
     const agentCapabilities = mergeSessionCapabilities(
@@ -4622,7 +4636,7 @@ export class SessionsService {
         return fail("service tier selection is supported only by Codex app-server sessions", 409);
       }
       if (effectiveConfig?.serviceTier && !supportsServiceTiers) {
-        return this.capabilityFailure(session.runnerId, "codexServiceTiers", "Codex Service Tier selection")!;
+        return this.capabilityFailure(session.runnerId, "codexServiceTiers", "Codex service tier selection")!;
       }
       const serviceTier = supportsServiceTiers
         ? resolveEffectiveServiceTier({
@@ -4678,7 +4692,7 @@ export class SessionsService {
         imageScope === "run",
       );
       if (!externalized.ok || !externalized.data) {
-        return fail(externalized.error ?? "prompt images could not be stored", externalized.status);
+        return failAs(externalized, "prompt images could not be stored");
       }
       commandImages = externalized.data;
     }
@@ -5044,7 +5058,7 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(
         session.runnerId,
         "workspaceReferences",
-        "Workspace references",
+        "workspace references",
       );
       if (unsupported) return unsupported;
     }
@@ -5052,7 +5066,7 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(
         session.runnerId,
         "promptImageReferences",
-        "Prompt image attachments",
+        "prompt image attachments",
       );
       if (unsupported) return unsupported;
     }
@@ -5183,7 +5197,7 @@ export class SessionsService {
       return fail("service tier selection is supported only by Codex app-server sessions", 409);
     }
     if (config.serviceTier && !supportsServiceTiers) {
-      return this.capabilityFailure(session.runnerId, "codexServiceTiers", "Codex Service Tier selection")!;
+      return this.capabilityFailure(session.runnerId, "codexServiceTiers", "Codex service tier selection")!;
     }
     const serviceTier = supportsServiceTiers
       ? resolveEffectiveServiceTier({
@@ -5374,7 +5388,7 @@ export class SessionsService {
     const unsupported = this.capabilityFailure(
       session.runnerId,
       "sessionCommandInvocations",
-      "Session command invocation",
+      "session command invocation",
     );
     if (unsupported) return unsupported;
     const command = session.agentCapabilities?.slashCommands?.find(
@@ -5663,7 +5677,7 @@ export class SessionsService {
     }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
-    const unsupported = this.capabilityFailure(session.runnerId, "conversationSteering", "Conversation steering");
+    const unsupported = this.capabilityFailure(session.runnerId, "conversationSteering", "conversation steering");
     if (unsupported) return unsupported;
     const agentCapabilities = mergeSessionCapabilities(
       this.db.getRunner(session.runnerId)?.agents.find((agent) => agent.id === session.agentId)?.capabilities,
@@ -5695,14 +5709,14 @@ export class SessionsService {
       if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
     }
     if (!promotion && images.some(isWorkspaceReference)) {
-      const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+      const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "workspace references");
       if (unsupported) return unsupported;
     }
     let commandImages: PromptImageInput[] = [];
     if (!promotion && images.length) {
       const externalized = this.externalizePromptImages(sessionId, images);
       if (!externalized.ok || !externalized.data) {
-        return fail(externalized.error ?? "prompt images could not be stored", externalized.status);
+        return failAs(externalized, "prompt images could not be stored");
       }
       commandImages = externalized.data;
     }
@@ -6123,7 +6137,7 @@ export class SessionsService {
     if (pod?.orchestration?.state.status === "running" && pod.orchestration.state.currentSessionId === sessionId) {
       return fail("pod-orchestrated sessions must be stopped through pod orchestration controls", 409);
     }
-    const unsupported = this.capabilityFailure(session.runnerId, "turnInterruption", "Turn interruption");
+    const unsupported = this.capabilityFailure(session.runnerId, "turnInterruption", "turn interruption");
     if (unsupported) return unsupported;
     if (!sessionBlocksConversationFork(session.status)) return ok(session);
     if (isPolicyApproval(session.pendingApproval)) {
@@ -6183,7 +6197,7 @@ export class SessionsService {
   ): Promise<ServiceResult<BackgroundJobStopResponse>> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    const unsupported = this.capabilityFailure(session.runnerId, "backgroundJobStop", "Stopping one background job");
+    const unsupported = this.capabilityFailure(session.runnerId, "backgroundJobStop", "stopping one background job");
     if (unsupported) return unsupported;
     const requestId = `stopjob_${randomUUID()}`;
     try {
@@ -6365,7 +6379,7 @@ export class SessionsService {
       const capabilityFailure = this.capabilityFailure(
         session.runnerId,
         "correlatedRestartEcho",
-        "Restarting a stopped session",
+        "restarting a stopped session",
       );
       if (capabilityFailure) return capabilityFailure;
     }
@@ -6495,7 +6509,7 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(
         session.runnerId,
         "delegatedParentControl",
-        "Parent Control",
+        "parent control",
       );
       if (unsupported) return unsupported;
     }
@@ -6527,7 +6541,7 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(
         session.runnerId,
         "typedWorkflowDecisionDelegation",
-        "Typed Parent Control workflow decisions",
+        "typed parent control workflow decisions",
       );
       if (unsupported) return unsupported;
     }
@@ -6718,7 +6732,7 @@ export class SessionsService {
     let updated = this.db.getSession(child.id)!;
     if (campaign.orchestratorPolicy.behavior.completion === "stop_and_archive") {
       const archived = this.setArchived(child.id, true);
-      if (!archived.ok || !archived.data) return fail(archived.error ?? "campaign child archive failed", archived.status);
+      if (!archived.ok || !archived.data) return failAs(archived, "campaign child archive failed");
       updated = archived.data;
       if (updated.archived) this.queueCampaignWorktreeRetirement(child.id);
     }
@@ -7148,7 +7162,7 @@ export class SessionsService {
         this.db.resolvedCampaignSessionId(sessionId) !== sessionId) {
       return fail("issue closure requires the root campaign Orchestrator", 403);
     }
-    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "Human-approved issue closure");
+    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
     if (isTerminal(session.status) || !boundedDecisionString(request?.requestId, 256) ||
         !session.orchestratorPolicy.issueNumbers?.includes(request?.issue) ||
@@ -7180,7 +7194,7 @@ export class SessionsService {
           ...(request.comment === undefined ? {} : { comment: request.comment }),
           activeChildren: issueClosureActiveChildren(this.db, sessionId) },
       }, canAccess, { trustedIssueClosure: true });
-      return created.ok ? ok({ decision: created.data }, created.status) : fail(created.error!, created.status);
+      return created.ok ? ok({ decision: created.data }, created.status) : failAs(created);
     } catch {
       return fail("issue inspection failed or the runner did not respond; no closure was attempted", 409);
     }
@@ -7212,7 +7226,7 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("issue-closure approval expired or its scope, payload, policy, or active child work changed; request renewed human review", 409);
     }
-    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "Human-approved issue closure");
+    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
     // Guardrails and governance remain authoritative even though execution is provider-neutral.
@@ -7257,7 +7271,7 @@ export class SessionsService {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
     }
     const normalized = normalizeWorkflowDecisionSnapshot(request.resourceSnapshot, internal?.trustedDerivedVideo);
-    if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
+    if (!normalized.ok || !normalized.data) return failAs(normalized);
     // An item naming an artifact is reviewed as that artifact's checked bytes, so the human review
     // card must be able to show it; its `uri` never stands in. Checked only for new requests, so an
     // occurrence approved before this rule can still be consumed with its unchanged snapshot.
@@ -7273,7 +7287,7 @@ export class SessionsService {
     const unsupported = this.capabilityFailure(
       child.runnerId,
       "typedWorkflowDecisionDelegation",
-      "Typed workflow decisions",
+      "typed workflow decisions",
     );
     if (unsupported) return unsupported;
     if (normalized.data.category === "issue_closure" && !internal?.trustedIssueClosure) {
@@ -7304,7 +7318,7 @@ export class SessionsService {
       const parentUnsupported = this.capabilityFailure(
         controller.session.runnerId,
         "typedWorkflowDecisionDelegation",
-        "Typed Parent Control workflow decisions",
+        "typed parent control workflow decisions",
       );
       if (parentUnsupported) return parentUnsupported;
     }
@@ -7381,11 +7395,11 @@ export class SessionsService {
       const unsupported = owner && this.capabilityFailure(
         owner.runnerId,
         "typedWorkflowDecisionDelegation",
-        "Typed workflow decisions",
+        "typed workflow decisions",
       );
       if (unsupported) {
         this.revokeWorkflowDecision(decision, actor);
-        return fail(unsupported.error!, unsupported.status);
+        return unsupported;
       }
     }
     const currentChild = this.db.getSession(childSessionId);
@@ -7405,7 +7419,7 @@ export class SessionsService {
       return fail("issue closure always requires an authenticated human response", 403);
     }
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
-    if (!checked.ok || !checked.data) return fail(checked.error!, checked.status);
+    if (!checked.ok || !checked.data) return failAs(checked);
     const now = Date.now();
     // Repeating evidence identifiers proves nothing. An Orchestrator approval is backed only by
     // receipts the server itself recorded when it delivered each exact artifact to this reviewer.
@@ -7502,7 +7516,7 @@ export class SessionsService {
     const matchesOriginal = video && original?.ok && original.data?.category === "ui_evidence_approval" &&
       auditDigest(original.data) === video.originalRequestSha256;
     if (!matchesStored && !matchesOriginal && !supplied.ok && !original?.ok) {
-      return fail(supplied.error!, supplied.status);
+      return failAs(supplied);
     }
     if (!matchesStored && !matchesOriginal) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
@@ -7525,11 +7539,11 @@ export class SessionsService {
       const unsupported = owner && this.capabilityFailure(
         owner.runnerId,
         "typedWorkflowDecisionDelegation",
-        "Typed workflow decisions",
+        "typed workflow decisions",
       );
       if (unsupported) {
         this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
-        return fail(unsupported.error!, unsupported.status);
+        return unsupported;
       }
     }
     const policy = parent?.parentControlPolicy;
@@ -7542,7 +7556,7 @@ export class SessionsService {
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
     }
     const action = normalizeWorkflowDecisionAction(normalized.data, request?.action);
-    if (!action.ok) return fail(action.error!, action.status);
+    if (!action.ok) return failAs(action);
     if (action.data) {
       if (child.driver !== "claude-code" && child.driver !== "codex-app-server") {
         this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
@@ -7552,11 +7566,11 @@ export class SessionsService {
         const unsupported = this.capabilityFailure(
           owner.runnerId,
           "workflowDecisionActionAdmission",
-          "Workflow decision action admission",
+          "workflow decision action admission",
         );
         if (unsupported) {
           this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
-          return fail(unsupported.error!, unsupported.status);
+          return unsupported;
         }
       }
     }
@@ -7666,7 +7680,7 @@ export class SessionsService {
       return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
     }
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
-    if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
+    if (!normalized.ok || !normalized.data) return failAs(normalized);
     if (normalized.data.category !== "pr_merge" || decision.category !== "pr_merge" ||
         auditDigest(normalized.data) !== decision.resourceDigest) {
       return fail("workflow decision resource snapshot is stale", 409);
@@ -7686,9 +7700,9 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(
         owner.runnerId,
         "workflowDecisionActionReconciliation",
-        "Workflow decision action reconciliation",
+        "workflow decision action reconciliation",
       );
-      if (unsupported) return fail(unsupported.error!, unsupported.status);
+      if (unsupported) return unsupported;
     }
     const command = canonicalPrMergeEnqueueCommand(normalized.data);
     const admission = decision.actionAdmission;
@@ -7775,9 +7789,9 @@ export class SessionsService {
       const unsupported = this.capabilityFailure(
         owner.runnerId,
         "workflowDecisionActionReconciliation",
-        "Workflow decision action reconciliation",
+        "workflow decision action reconciliation",
       );
-      if (unsupported) return fail(unsupported.error!, unsupported.status);
+      if (unsupported) return unsupported;
     }
     const receiptDigest = auditDigest({
       transport: "codex-app-server",
@@ -7917,7 +7931,7 @@ export class SessionsService {
     const unsupported = [child, parent].some((owner) => owner && this.capabilityFailure(
       owner.runnerId,
       "workflowDecisionActionAdmission",
-      "Workflow decision action admission",
+      "workflow decision action admission",
     ));
     if (!child || child.id !== session.id || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
         unsupported || !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
@@ -8663,7 +8677,7 @@ export class SessionsService {
       !this.capabilityFailure(
         child.runnerId,
         "workflowDecisionActionReconciliation",
-        "Workflow decision action reconciliation",
+        "workflow decision action reconciliation",
       );
   }
 
@@ -8758,7 +8772,7 @@ export class SessionsService {
     return [child, parent].every((owner) => !this.capabilityFailure(
       owner.runnerId,
       "workflowDecisionActionReconciliation",
-      "Workflow decision action reconciliation",
+      "workflow decision action reconciliation",
     ));
   }
 
@@ -8996,7 +9010,7 @@ export class SessionsService {
         { kind: "agent", id: parentSessionId },
         canAccess,
       );
-      return resolved.ok ? ok(this.db.getSession(childSessionId)!) : fail(resolved.error!, resolved.status);
+      return resolved.ok ? ok(this.db.getSession(childSessionId)!) : failAs(resolved);
     }
     const pending = pendingRequests(child.pendingApproval).find((request) => request.occurrenceId === occurrenceId);
     if (!pending) return fail("descendant request occurrence is stale or no longer pending", 409);
@@ -9009,7 +9023,7 @@ export class SessionsService {
     const unsupported = this.capabilityFailure(
       child.runnerId,
       "delegatedParentControl",
-      "Delegated Parent Control",
+      "delegated parent control",
     );
     if (unsupported) return unsupported;
     const actor: GovernanceActor = { kind: "agent", id: parentSessionId };
@@ -9085,7 +9099,7 @@ export class SessionsService {
       const capabilityFailure = this.capabilityFailure(
         session.runnerId,
         "resumableQuestionAnswers",
-        "Recovered structured-question answers",
+        "recovered structured-question answers",
       );
       if (capabilityFailure) return capabilityFailure;
       const command: DurableSessionCommand = {
@@ -9263,7 +9277,7 @@ export class SessionsService {
         actor,
         canAccess,
       );
-      return resolved.ok ? ok(this.db.getSession(sessionId)!) : fail(resolved.error!, resolved.status);
+      return resolved.ok ? ok(this.db.getSession(sessionId)!) : failAs(resolved);
     }
 
     // A hook ask is already parked inside Claude's live PreToolUse invocation. Persist the
@@ -9635,7 +9649,7 @@ export class SessionsService {
   /** Explicit local retitle requests are metadata work and never enter runner lifecycle or queues. */
   async retitleSession(sessionId: string): Promise<ServiceResult<{ title: string }>> {
     const started = this.generateSessionTitle(sessionId, "user");
-    if (!started.ok) return fail(started.error ?? "Session naming could not start.", started.status);
+    if (!started.ok) return failAs(started, "Session naming could not start.");
     return started.data!.completion;
   }
 
@@ -9976,7 +9990,7 @@ export class SessionsService {
     const sessions: SessionView[] = [];
     for (const candidate of candidates) {
       const result = this.setArchived(candidate.id, true, false);
-      if (!result.ok || !result.data) return fail(result.error ?? "session archive failed", result.status);
+      if (!result.ok || !result.data) return failAs(result, "session archive failed");
       sessions.push(result.data);
     }
     return ok({
@@ -10067,7 +10081,7 @@ export class SessionsService {
       config,
       ...(workspacePath ? { workspacePath } : {}),
     }, undefined, scope, true, true, true);
-    if (!created.ok || !created.data) return fail(created.error ?? "side chat could not be started", created.status);
+    if (!created.ok || !created.data) return failAs(created, "side chat could not be started");
 
     const now = Date.now();
     try {
@@ -10199,7 +10213,7 @@ export class SessionsService {
       }
     }
     const created = this.storeWorkflowArtifact(validated.value, actor);
-    if (!created.ok || !created.data) return fail(created.error!, created.status);
+    if (!created.ok || !created.data) return failAs(created);
     const { data: _bytes, ...view } = created.data;
     this.ensureAttachmentEvent(sessionId, view);
     return ok(view, 201);
@@ -10317,10 +10331,10 @@ export class SessionsService {
       req, req.runnerId, req.workspaceId, false, parentSessionId,
     );
     if (!requestedProject.ok || !requestedProject.data) {
-      return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
+      return failAs(requestedProject, "project assignment is invalid");
     }
     if (req.config?.serviceTier) {
-      const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection");
+      const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex service tier selection");
       if (unsupported) return unsupported;
     }
     this.ensureBuiltinWorkflows();
@@ -10405,7 +10419,7 @@ export class SessionsService {
       this.db.workspaceScope(req.runnerId, req.workspaceId) ?? runnerScope,
     );
     if (!workerSessionScope.ok || !workerSessionScope.data) {
-      return fail(workerSessionScope.error ?? "workflow session ownership is unavailable", workerSessionScope.status);
+      return failAs(workerSessionScope, "workflow session ownership is unavailable");
     }
     let childSessionScope = workerSessionScope.data;
     if (parentSessionId) {
@@ -10444,7 +10458,7 @@ export class SessionsService {
       spawnRequest,
       members,
     );
-    if (!admitted.ok || !admitted.data) return fail(admitted.error!, admitted.status);
+    if (!admitted.ok || !admitted.data) return failAs(admitted);
 
     const now = Date.now();
     const runId = shortId("r_");
@@ -10970,7 +10984,7 @@ export class SessionsService {
       if (!appended.ok) {
         const stopped = this.db.stopPodOrchestration(podId, appended.error ?? "seed note failed", Date.now()) ?? pod;
         this.hub.podChanged(stopped);
-        return fail(appended.error ?? "orchestration seed note could not be appended", appended.status);
+        return failAs(appended, "orchestration seed note could not be appended");
       }
       appendedEntry = appended.data!.entry;
     }
@@ -11026,7 +11040,7 @@ export class SessionsService {
     if (source.status !== "idle" || target.status !== "idle") return fail("source and target members must both be idle", 409);
     if (source.pendingApproval || target.pendingApproval) return fail("resolve member approvals before reconciling worktrees", 409);
     if (!this.hub.isRunnerOnline(source.runnerId)) return fail("runner is offline", 409);
-    const unsupported = this.capabilityFailure(source.runnerId, "podReconciliation", "Pod worktree reconciliation");
+    const unsupported = this.capabilityFailure(source.runnerId, "podReconciliation", "pod worktree reconciliation");
     if (unsupported) return unsupported;
     if (typeof actorId !== "string" || !actorId || actorId.length > 256) return fail("invalid reconciliation actor");
 
@@ -11179,7 +11193,7 @@ export class SessionsService {
     let appendedEntry: PodContextEntry | undefined;
     if (note) {
       const appended = this.appendPodContext(podId, { kind: "note", text: note }, actorId);
-      if (!appended.ok) return fail(appended.error ?? "relay note could not be appended", appended.status);
+      if (!appended.ok) return failAs(appended, "relay note could not be appended");
       appendedEntry = appended.data!.entry;
     }
     const delivered: SessionView[] = [];
@@ -11438,14 +11452,14 @@ export class SessionsService {
       req, req.runnerId, req.workspaceId, false, parentSessionId,
     );
     if (!requestedProject.ok || !requestedProject.data) {
-      return fail(requestedProject.error ?? "project assignment is invalid", requestedProject.status);
+      return failAs(requestedProject, "project assignment is invalid");
     }
     const projectSessionScope = this.sessionScopeForProjectAssignment(
       requestedProject.data,
       this.db.workspaceScope(req.runnerId, req.workspaceId) ?? this.db.runnerScope(req.runnerId),
     );
     if (!projectSessionScope.ok || !projectSessionScope.data) {
-      return fail(projectSessionScope.error ?? "run session ownership is unavailable", projectSessionScope.status);
+      return failAs(projectSessionScope, "run session ownership is unavailable");
     }
     let sessionScope = projectSessionScope.data;
     if (parentSessionId) {
@@ -11472,7 +11486,7 @@ export class SessionsService {
         return fail(`${agentId}: service tier selection is supported only by Codex app-server sessions`, 409);
       }
       if (req.config?.serviceTier) {
-        const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex Service Tier selection");
+        const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex service tier selection");
         if (unsupported) return unsupported;
       }
       if (launch) resolved.push({ agentId, launch });
@@ -11491,7 +11505,7 @@ export class SessionsService {
       spawnRequest,
       resolved,
     );
-    if (!admitted.ok || !admitted.data) return fail(admitted.error!, admitted.status);
+    if (!admitted.ok || !admitted.data) return failAs(admitted);
 
     const now = Date.now();
     const runId = shortId("r_");
@@ -13394,7 +13408,7 @@ export class SessionsService {
   /** Lazily enumerate external (CLI-started) sessions on a box by asking its runner. */
   async listExternalSessions(runnerId: string, agentId?: string): Promise<ServiceResult<ExternalSessionDescriptor[]>> {
     if (!this.hub.isRunnerOnline(runnerId)) return fail("runner is offline", 409);
-    const unsupported = this.capabilityFailure(runnerId, "externalSessions", "Finding agent sessions");
+    const unsupported = this.capabilityFailure(runnerId, "externalSessions", "finding agent sessions");
     if (unsupported) return unsupported;
     const runner = this.db.getRunner(runnerId);
     const selectionCannotBeEnforced = Boolean(runner?.harnessSelections?.length) &&
@@ -13407,7 +13421,7 @@ export class SessionsService {
       const appServerUnsupported = this.capabilityFailure(
         runnerId,
         "codexAppServerExternalSessions",
-        "Codex App Server session discovery",
+        "Codex app server session discovery",
       );
       if (appServerUnsupported) return appServerUnsupported;
     }
@@ -13453,7 +13467,7 @@ export class SessionsService {
     distro?: string,
   ): Promise<ServiceResult<{ path: string; parent: string | null; entries: DirectoryEntry[] }>> {
     if (!this.hub.isRunnerOnline(runnerId)) return fail("runner is offline", 409);
-    const unsupported = this.capabilityFailure(runnerId, "directoryListing", "Directory browsing");
+    const unsupported = this.capabilityFailure(runnerId, "directoryListing", "directory browsing");
     if (unsupported) return unsupported;
     const requestId = `dir_${randomUUID().slice(0, 8)}`;
     const context: AgentContext = distro ? { kind: "wsl", distro } : { kind: "native" };
@@ -13486,7 +13500,7 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
-    const unsupported = this.capabilityFailure(session.runnerId, "sessionFiles", "Session file browsing");
+    const unsupported = this.capabilityFailure(session.runnerId, "sessionFiles", "session file browsing");
     if (unsupported) return unsupported;
     const requestId = `sfl_${randomUUID().slice(0, 8)}`;
     try {
@@ -13512,7 +13526,7 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
-    const unsupported = this.capabilityFailure(session.runnerId, "sessionFiles", "Session file browsing");
+    const unsupported = this.capabilityFailure(session.runnerId, "sessionFiles", "session file browsing");
     if (unsupported) return unsupported;
     const requestId = `sfr_${randomUUID().slice(0, 8)}`;
     try {
@@ -13537,7 +13551,7 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
-    const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+    const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "workspace references");
     if (unsupported) return unsupported;
     const requestId = `wsr_search_${randomUUID().slice(0, 8)}`;
     try {
@@ -13559,7 +13573,7 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
-    const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "Workspace references");
+    const unsupported = this.capabilityFailure(session.runnerId, "workspaceReferences", "workspace references");
     if (unsupported) return unsupported;
     const requestId = `wsr_create_${randomUUID().slice(0, 8)}`;
     try {
@@ -13582,7 +13596,7 @@ export class SessionsService {
   ): Promise<ServiceResult<SessionView>> {
     if (!this.hub.isRunnerOnline(runnerId)) return fail("runner is offline", 409);
     if (!descriptor.agentSessionId) return fail("descriptor is missing an agent session id", 400);
-    const unsupported = this.capabilityFailure(runnerId, "externalSessions", "Adopting agent sessions");
+    const unsupported = this.capabilityFailure(runnerId, "externalSessions", "adopting agent sessions");
     if (unsupported) return unsupported;
     const runner = this.db.getRunner(runnerId);
     if (!descriptor.agentId && runner?.harnessSelections?.length &&
@@ -13711,7 +13725,7 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     if (!session.adopted) return fail("only adopted sessions can be reprocessed", 400);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
-    const unsupported = this.capabilityFailure(session.runnerId, "sessionReprocess", "Session reprocessing");
+    const unsupported = this.capabilityFailure(session.runnerId, "sessionReprocess", "session reprocessing");
     if (unsupported) return unsupported;
     // Re-importing replaces the whole event log; refuse while a turn is in flight so live events
     // aren't truncated. The runner enforces this authoritatively too (active-map + session lock).

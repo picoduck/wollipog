@@ -21,16 +21,16 @@ test("GitHub review sync is a version-gated read", () => {
   assert.deepEqual(gitActionAllowed({ kind: "github_review_sync" }, "running"), { ok: true });
   assert.deepEqual(
     gitActionCapability({ kind: "github_review_sync" }),
-    ["githubReviewReconciliation", "GitHub review reconciliation"],
+    { capability: "githubReviewReconciliation", label: "GitHub review reconciliation" },
   );
 });
 
 test("forge review sync is a v106-gated read and legacy GitHub remains available", () => {
   assert.deepEqual(parseGitAction({ action: "forge_review_sync" }), { action: { kind: "forge_review_sync" } });
   assert.deepEqual(gitActionAllowed({ kind: "forge_review_sync" }, "running"), { ok: true });
-  assert.deepEqual(gitActionCapability({ kind: "forge_review_sync" }), ["forgeIntegration", "Forge review reconciliation"]);
+  assert.deepEqual(gitActionCapability({ kind: "forge_review_sync" }), { capability: "forgeIntegration", label: "forge review reconciliation" });
   assert.equal(gitActionRequiresLinkedWorktree({ kind: "forge_review_sync" }), true);
-  assert.deepEqual(gitActionCapability({ kind: "github_review_sync" }), ["githubReviewReconciliation", "GitHub review reconciliation"]);
+  assert.deepEqual(gitActionCapability({ kind: "github_review_sync" }), { capability: "githubReviewReconciliation", label: "GitHub review reconciliation" });
 });
 
 test("gitActionAllowed: summary is a read — allowed even while a turn runs", () => {
@@ -217,7 +217,7 @@ test("parseGitAction: commit accepts an optional boolean expectStaged and reject
 });
 
 test("gitActionCapability: rich diff and hunk staging are version-gated", () => {
-  assert.deepEqual(gitActionCapability({ kind: "diff", scope: "uncommitted" }), ["richDiff", "Rich diff loading"]);
+  assert.deepEqual(gitActionCapability({ kind: "diff", scope: "uncommitted" }), { capability: "richDiff", label: "rich diff loading" });
   assert.deepEqual(
     gitActionCapability({
       kind: "stage_hunk",
@@ -226,15 +226,15 @@ test("gitActionCapability: rich diff and hunk staging are version-gated", () => 
       hunkIndex: 0,
       diffHash: "a".repeat(64),
     }),
-    ["hunkStaging", "Hunk staging"],
+    { capability: "hunkStaging", label: "hunk staging" },
   );
   assert.equal(gitActionCapability({ kind: "status" }), null);
   assert.equal(gitActionCapability({ kind: "commit", message: "m" }), null);
   assert.deepEqual(gitActionCapability({
     kind: "stage_lines", direction: "stage", filePath: "a.ts", hunkIndex: 0,
     lineIndices: [1], diffHash: "a".repeat(64),
-  }), ["fineGrainedDiff", "Line staging and tracked-file discard"]);
+  }), { capability: "fineGrainedDiff", label: "line staging and tracked-file discard" });
   assert.deepEqual(gitActionCapability({
     kind: "discard_file", filePath: "a.ts", diffHash: "a".repeat(64),
-  }), ["fineGrainedDiff", "Line staging and tracked-file discard"]);
+  }), { capability: "fineGrainedDiff", label: "line staging and tracked-file discard" });
 });

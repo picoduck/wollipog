@@ -64,7 +64,7 @@ test("Native TUI preflight rejects every tracked session guardrail", () => {
 });
 
 test("Native TUI preflight rejects unsupported protocol, OS, driver, and target", () => {
-  assert.match(nativeTuiCreationError(fakeDb({ protocolVersion: 57 }), online, request())!.error, /protocol v58/i);
+  assert.equal(nativeTuiCreationError(fakeDb({ protocolVersion: 57 }), online, request())?.capabilityRequirement?.requiredRunnerProtocolVersion, 58);
   assert.match(nativeTuiCreationError(fakeDb({ os: "macos" }), online, request())!.error, /Windows or Linux/);
   assert.match(nativeTuiCreationError(fakeDb({ driver: "acp" }), online, request())!.error, /does not expose/);
   assert.match(
@@ -74,7 +74,7 @@ test("Native TUI preflight rejects unsupported protocol, OS, driver, and target"
 });
 
 test("v66 keeps manual Agent TUI attachment but rejects initial Native TUI launch", () => {
-  assert.match(nativeTuiCreationError(fakeDb({ protocolVersion: 66 }), online, request())!.error, /protocol v67/i);
+  assert.equal(nativeTuiCreationError(fakeDb({ protocolVersion: 66 }), online, request())?.capabilityRequirement?.requiredRunnerProtocolVersion, 67);
   const session = {
     runnerId: "runner",
     agentId: "agent",
@@ -123,7 +123,7 @@ test("materialized session validation rejects user daily cost governance", () =>
 test("orchestrator TUI manual attachment requires v112 and an active session", () => {
   const session = { runnerId: "runner", agentId: "agent", driver: "codex", status: "idle",
     permissionMode: "orchestrator" } as SessionView;
-  assert.match(nativeTuiSessionError(fakeDb({ protocolVersion: 111 }), online, session)!.error, /protocol v112/i);
+  assert.equal(nativeTuiSessionError(fakeDb({ protocolVersion: 111 }), online, session)?.capabilityRequirement?.requiredRunnerProtocolVersion, 112);
   assert.equal(nativeTuiSessionError(fakeDb({ protocolVersion: 112 }), online, session), null);
   assert.match(nativeTuiSessionError(fakeDb({ protocolVersion: 112 }), online, {
     ...session, status: "stopped",

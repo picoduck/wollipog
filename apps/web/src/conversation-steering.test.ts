@@ -51,8 +51,8 @@ test("direct steering availability requires every UI-known affirmative gate", ()
   assert.deepEqual(conversationSteeringAvailability(available), { available: true });
 
   const cases: Array<[Partial<ConversationSteeringAvailabilityInput>, RegExp]> = [
-    [{ runnerProtocolVersion: 72 }, /requires protocol v73/i],
-    [{ runnerProtocolVersion: undefined }, /is unknown/i],
+    [{ runnerProtocolVersion: 72 }, /needs a newer runner for conversation steering\./],
+    [{ runnerProtocolVersion: undefined }, /needs a newer runner for conversation steering\./],
     [{ runnerOnline: false }, /runner is offline/i],
     [{ supportsSteering: false }, /has not verified/i],
     [{ supportsSteering: undefined }, /has not verified/i],
@@ -125,7 +125,7 @@ test("queued promotion requires explicit per-entry eligibility and blocks reserv
     { id: "queue-a", text: "Misleading projection", steerable: true },
   );
   assert.equal(oldRunner.available, false);
-  if (!oldRunner.available) assert.match(oldRunner.reason, /requires protocol v73/i);
+  if (!oldRunner.available) assert.match(oldRunner.reason, /needs a newer runner for conversation steering\./);
 });
 
 test("queued editing requires v99 and affirmative live per-entry eligibility", () => {
@@ -143,7 +143,7 @@ test("queued editing requires v99 and affirmative live per-entry eligibility", (
   }, prompt), { available: true });
 
   for (const [patch, reason] of [
-    [{ runnerProtocolVersion: 98 }, /requires protocol v99/i],
+    [{ runnerProtocolVersion: 98 }, /needs a newer runner for queued prompt editing\./],
     [{ runnerOnline: false }, /runner is offline/i],
     [{ requestBusy: true }, /current message action/i],
   ] as const) {

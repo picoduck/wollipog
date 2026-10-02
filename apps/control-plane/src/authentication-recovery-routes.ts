@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
-  runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type ProviderAuthenticationAccountOptionsResponse,
   type ProviderAuthenticationCurrentIdentityResponse,
   type SelectProviderAuthenticationAccountResponse,
+  type RunnerCapabilityRequirementDetails,
   type SessionView,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
@@ -16,6 +16,7 @@ import {
   providerForSessionAccountSwitch,
 } from "./provider-account-switch.js";
 import { SUBSCRIPTION_USAGE_STALE_AFTER_MS } from "./subscription-usage.js";
+import { capabilityRefusal, failureBody } from "./capability-refusal.js";
 
 const PROVIDER_ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const IDENTITY_TIMEOUT_MS = 30_000;
@@ -30,7 +31,13 @@ export interface AuthenticationRecoveryRouteDeps {
 
 type RecoveryTarget =
   | { ok: true; session: SessionView; principal: HumanPrincipal }
-  | { ok: false; code: number; error: string; reason?: "recovery_changed" };
+  | {
+    ok: false;
+    code: number;
+    error: string;
+    reason?: "recovery_changed";
+    capabilityRequirement?: RunnerCapabilityRequirementDetails;
+  };
 
 /**
  * Routes behind an Authentication Required card's account context (#1649). Only a person who can
@@ -56,10 +63,10 @@ export function registerAuthenticationRecoveryRoutes(
       return {
         ok: false,
         code: 409,
-        error: runnerCapabilityRequirement(
+        ...capabilityRefusal(
           protocolVersion,
           "providerAuthenticationAccountRecovery",
-          "Account identity and selection during authentication recovery",
+          "account identity and selection during authentication recovery",
         ),
       };
     }
@@ -84,7 +91,7 @@ export function registerAuthenticationRecoveryRoutes(
 
   app.get("/api/sessions/:id/authentication/accounts", async (req, reply) => {
     const resolved = target(req);
-    if (!resolved.ok) return reply.code(resolved.code).send({ error: resolved.error });
+    if (!resolved.ok) return reply.code(resolved.code).send(failureBody(resolved));
     const { session, principal } = resolved;
     const response: ProviderAuthenticationAccountOptionsResponse = {
       accounts: providerForSessionAccountSwitch(session.driver) ? recoveryOptions(session, principal) : [],
@@ -97,7 +104,7 @@ export function registerAuthenticationRecoveryRoutes(
     reply.header("cache-control", "private, no-store");
     const body = (req.body ?? {}) as { requestId?: unknown };
     const resolved = target(req, body.requestId ?? "");
-    if (!resolved.ok) return reply.code(resolved.code).send({ error: resolved.error });
+    if (!resolved.ok) return reply.code(resolved.code).send(failureBody(resolved));
     const { session } = resolved;
     if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
     const requestId = `auth_identity_${randomUUID()}`;
@@ -138,7 +145,7 @@ export function registerAuthenticationRecoveryRoutes(
     const resolved = target(req, body.requestId ?? "");
     if (!resolved.ok) {
       return reply.code(resolved.code).send({
-        error: resolved.error,
+        ...failureBody(resolved),
         ...(resolved.reason ? { code: resolved.reason } : {}),
       });
     }

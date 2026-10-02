@@ -548,7 +548,7 @@ export function ProjectsView({
                         : wslOnWindows
                           ? "WSL workspace paths cannot be revealed from this machine."
                           : !hostActionsSupported
-                            ? runnerCapabilityRequirement(runner?.protocolVersion, "hostActions", "Reveal in File Manager")
+                            ? runnerCapabilityRequirement(runner?.protocolVersion, "hostActions", "revealing files in the file manager")
                             : null;
                       return (
                         <article className="project-location-row" key={location.id}>

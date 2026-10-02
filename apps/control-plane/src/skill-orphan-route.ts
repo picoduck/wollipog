@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
-  runnerCapabilityRequirement,
+  runnerCapabilityRequirementError,
   runnerSupportsProtocol,
   validSkillName,
   type SkillInvocationPolicy,
@@ -160,7 +160,7 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
     }
     const capability = kind === "kept_aside" ? "skillKeptAsideCopies" : "skillDrift";
     if (!runnerSupportsProtocol(runner.protocolVersion, capability)) {
-      reply.code(409).send({ error: runnerCapabilityRequirement(runner.protocolVersion, capability, "Orphaned skill copy resolution") });
+      reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, capability, "orphaned skill copy resolution"));
       return false;
     }
     return true;

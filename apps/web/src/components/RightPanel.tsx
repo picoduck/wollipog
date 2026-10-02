@@ -259,8 +259,8 @@ export function RightPanel({
   const previouslyOpenRef = useRef(false);
   const filesSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionFiles");
   const terminalSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionShells");
-  const filesHint = runnerCapabilityRequirement(runnerProtocolVersion, "sessionFiles", "Session file browsing");
-  const terminalHint = runnerCapabilityRequirement(runnerProtocolVersion, "sessionShells", "Session terminal access");
+  const filesHint = runnerCapabilityRequirement(runnerProtocolVersion, "sessionFiles", "session file browsing");
+  const terminalHint = runnerCapabilityRequirement(runnerProtocolVersion, "sessionShells", "session terminal access");
 
   useLayoutEffect(() => {
     const wasOpen = previouslyOpenRef.current;

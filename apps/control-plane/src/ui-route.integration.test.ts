@@ -2056,10 +2056,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     body: JSON.stringify({ action: "status" }),
   });
   assert.equal(unsupportedPrimary.status, 409);
-  assert.match(
-    (await unsupportedPrimary.json() as { error: string }).error,
-    /Primary-checkout Git visibility requires protocol v76/,
-  );
+  assert.deepEqual(await unsupportedPrimary.json(), {
+    error: "This machine needs a newer runner for primary-checkout Git visibility. Update and restart the runner.",
+    requiredRunnerProtocolVersion: 76,
+    runnerProtocolVersion: 75,
+  });
 
   const malformed = await openStrictSocket(authenticatedUiUrl(wsBase, ownerToken));
   strictSockets.add(malformed);

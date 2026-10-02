@@ -1012,9 +1012,9 @@ test("Stop Job is shown as unavailable on an older runner, and Result Blocked sa
     assert.equal(button.disabled, true);
     assert.equal(button.textContent, "Stop Job");
     const reason = domWindow.document.getElementById(button.getAttribute("aria-describedby")!);
-    assert.match(reason?.textContent ?? "", /Stop Job is unavailable: Runner protocol is v189; Stop Job requires protocol v190/);
+    assert.match(reason?.textContent ?? "", /Stop Job is unavailable: This machine needs a newer runner for stopping a background job\./);
     const summary = container.querySelector<HTMLElement>(".background-delivery-summary");
-    assert.match(summary?.textContent ?? "", /Stop Job is unavailable: Runner protocol is v189; Stop Job requires protocol v190\. Update and restart the runner\. Ask the session to stop the unfinished job/);
+    assert.match(summary?.textContent ?? "", /Stop Job is unavailable: This machine needs a newer runner for stopping a background job\. Update and restart the runner\. Ask the session to stop the unfinished job/);
     await act(async () => button.click());
     assert.equal(called, false);
 
