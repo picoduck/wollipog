@@ -3477,9 +3477,12 @@ function SessionDetailLoaded({
     queuedEditReconciliation.status === "retryable";
   const canSend = canPrompt && (text.trim().length > 0 || images.length > 0);
   const restartRefusal = sessionCommandRefusal(session, "restart");
+  // The control plane refuses to restart an archived session, so the composer offers no Restart
+  // there; the Session Archived notice's Unarchive (and Restart) is the way back (#2301).
+  const composerRestartOffered = session.status === "stopped" &&
+    session.stopOperation?.status !== "stop_failed" && !session.archived;
   const restartFromComposer = useCallback(async () => {
-    if (session.status !== "stopped" || session.stopOperation?.status === "stop_failed" ||
-      !runnerOnline || busy || restartPending || restartRefusal !== null) return;
+    if (!composerRestartOffered || !runnerOnline || busy || restartPending || restartRefusal !== null) return;
     const generation = viewGenerationRef.current;
     setError(null);
     setBusy(true);
@@ -3494,8 +3497,7 @@ function SessionDetailLoaded({
         setBusy(false);
       }
     }
-  }, [api, busy, loadSession, restartPending, restartRefusal, runnerOnline, session.id, session.status,
-    session.stopOperation?.status]);
+  }, [api, busy, composerRestartOffered, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
   const failedSetupWorktree = session.worktrees?.find((worktree) => worktree.setup?.status === "failed");
   const { creation: recoveryCreation, create: createRecoveryWorktreeWithProgress } =
     useRecoveryWorktreeCreation({ api, session, onSession: loadSession });
@@ -6064,7 +6066,7 @@ function SessionDetailLoaded({
                       <MicIcon size={14} />
                     </button>
                   )}
-                  {session.status === "stopped" && session.stopOperation?.status !== "stop_failed" ? (
+                  {composerRestartOffered ? (
                     <button
                       type="button"
                       className="send-btn"

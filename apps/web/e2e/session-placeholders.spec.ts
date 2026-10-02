@@ -124,6 +124,27 @@ test("an archived session reads Archived, says so above the composer, and Unarch
   await expect(page.locator("header.session-bar .session-status-button")).not.toHaveAccessibleName(/Archived/u);
 });
 
+// #2301: the control plane refuses to restart an archived session, so the composer offers no Restart.
+test("an archived session's composer offers no Restart Session, and the notice is the way back", async ({ page }) => {
+  await openArchived(page, 1440);
+  const composer = page.locator(".composer-box");
+  await expect(composer.getByRole("button", { name: "Restart Session" })).toHaveCount(0);
+  const send = composer.getByRole("button", { name: "Send" });
+  await expect(send).toBeDisabled();
+  await send.click({ force: true });
+  expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.restartRequests())).toEqual([]);
+
+  // A stopped session that is not archived keeps its working Restart Session.
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { archived: false });
+  });
+  const restart = composer.getByRole("button", { name: "Restart Session" });
+  await expect(restart).toBeEnabled();
+  await restart.click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.restartRequests())).toEqual(["session-alpha"]);
+});
+
 test("at 390px Unarchive and Restart from the keyboard hands focus to the collapsed composer", async ({ page }) => {
   await openArchived(page, 390);
   const action = page.locator(".session-notice-slot").getByRole("button", { name: "Unarchive and Restart" });

@@ -3773,6 +3773,56 @@ test("a stopped Session with a failed Stop does not offer Restart in the compose
   }
 });
 
+// #2301: the control plane refuses to restart an archived session, so the composer offers none.
+test("an archived stopped Session offers no composer Restart, and unarchiving brings a working one back", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const restarted: string[] = [];
+  const prompted: string[] = [];
+  const fixture = await mountFixture(draft, {
+    sessionPatch: { status: "stopped", archived: true },
+    client: {
+      restart: async (sessionId) => {
+        restarted.push(sessionId);
+        return { ...session(sessionId), status: "starting" };
+      },
+      prompt: async (sessionId) => {
+        prompted.push(sessionId);
+        throw new Error("an archived session takes no prompt");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    assertNoDomNode(fixture.container.querySelector('button[aria-label="Restart Session"]'),
+      "an archived session's composer offers no Restart the control plane would refuse");
+    const send = fixture.container.querySelector('button[aria-label="Send"]') as HTMLButtonElement | null;
+    assert.ok(send, "the action slot keeps the ordinary Send action");
+    assert.equal(send.disabled, true);
+    assert.equal(fixture.composer.placeholder, "Unarchive the session to send a message.");
+    await act(async () => {
+      send.click();
+      fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Enter", bubbles: true, cancelable: true,
+      }) as never);
+    });
+    await flushAsyncWork();
+    assert.deepEqual(restarted, [], "no restart request is sent");
+    assert.deepEqual(prompted, [], "no prompt is sent");
+
+    await fixture.pushSession({ archived: false, updatedAt: 2 });
+    const restart = fixture.container.querySelector(
+      'button[aria-label="Restart Session"]',
+    ) as HTMLButtonElement | null;
+    assert.ok(restart, "a stopped session that is not archived keeps Restart Session");
+    assert.equal(restart.disabled, false);
+    await act(async () => { restart.click(); });
+    await flushAsyncWork();
+    assert.deepEqual(restarted, [fixture.sessionId], "the unarchived session restarts");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("the stop-turn button's press keeps focus in the composer", async () => {
   const draft = deferred<ComposerDraft | null>();
   // An active turn with an EMPTY composer is what renders Stop Turn in the send slot — the state
