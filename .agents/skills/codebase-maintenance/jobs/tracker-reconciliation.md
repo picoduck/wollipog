@@ -32,18 +32,24 @@ gh issue list --state closed --search "closed:>=${TRACKER_PREVIOUS_START}" --lim
 ```
 
 Do not slice this inventory to 30 or 60 before saving it. If the result reaches 300, completeness
-is unproven: increase the retrieval limit or split the close-time window into smaller searches
-until every interval is accounted for. Do not advance `harvestedThrough` for an incomplete
-harvest. Keep the previous boundary and the retrieved pending entries for a later retry.
+is unproven: split the close-time window into smaller searches until each interval returns fewer
+than 300 entries. Raising the requested limit is not proof that a search returned everything.
+If a saturated interval cannot be split further, use a fully paginated repository issue listing
+filtered by close time, or leave the harvest incomplete. Do not advance `harvestedThrough` for an
+incomplete harvest. Keep the previous boundary and retrieved pending entries for a later retry.
 For a complete harvest, advance the boundary only to this run's recorded start time; overlapping
 entries are harmless because of deduplication. Save the merged inventory before investigating.
 
 Review the oldest 60 pending entries first. Update the audit artifact after each completed review,
 moving only fully assessed entries to `reviewed`; interrupted or budget-limited entries remain
 pending. Fetch the issue's current state and criteria when reviewing a carried entry; record a
-reopened issue as superseded rather than judging it as still closed. Write artifact updates through
-a temporary sibling and atomic rename. Report the number reviewed, the remaining pending count,
-and the oldest pending close date. A partial run must never claim a complete reconciliation.
+reopened issue as superseded and move that closure key to `reviewed` with this outcome. Treat a
+confirmed transfer or deletion likewise, without claiming its criteria were delivered; transport
+or authorization failures remain pending. Write artifact updates through a temporary sibling and
+atomic rename. Report the number reviewed, the remaining pending count, and the oldest pending
+close date. If the backlog grows across consecutive runs, recommend exact schedule or capacity
+changes sized to the observed inflow; do not silently raise the budget or review cap. A partial
+run must never claim a complete reconciliation.
 
 `gh issue list --state closed --limit 30` on its own orders by creation, so an old issue closed
 this week falls outside the window while a young one crowds in. One run's window silently
@@ -100,7 +106,8 @@ Two sections.
 
 **Delivery drift** — for each closed issue with unmet criteria: the issue number, the specific
 criterion, and the evidence it is unmet. For each open issue already fixed: the issue number and the
-commit or PR that fixed it.
+commit or PR that fixed it. List unverified process evidence separately from unmet criteria,
+including which evidence source could not be inspected.
 
 **Hygiene** — the exact branch and worktree cleanup commands you would run, with a note on any
 worktree holding uncommitted changes. Present them for the human to run; do not run them.
