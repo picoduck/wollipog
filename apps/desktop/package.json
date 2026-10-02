@@ -1,6 +1,6 @@
 {
   "name": "@wollipog/desktop",
-  "version": "0.29.1",
+  "version": "0.30.0-rc.1",
   "private": true,
   "license": "Apache-2.0",
   "description": "Tauri desktop shell wrapping the Wollipog web UI in a native window",
