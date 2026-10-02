@@ -1247,7 +1247,9 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (ts.isConditionalExpression(parent)) return parent.condition === use ? none() : flowsTo(parent, from);
     if (ts.isBinaryExpression(parent)) {
       const kind = parent.operatorToken.kind;
-      if (kind === ts.SyntaxKind.EqualsToken) return parent.right === use ? all() : none();
+      // `holder = attrs`, and `holder ??= attrs`, `||=` and `&&=`, alias the value assigned.
+      if (kind === ts.SyntaxKind.EqualsToken || kind === ts.SyntaxKind.QuestionQuestionEqualsToken
+        || kind === ts.SyntaxKind.BarBarEqualsToken || kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken) return parent.right === use ? all() : none();
       if (kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken || kind === ts.SyntaxKind.AmpersandAmpersandToken
         || (kind === ts.SyntaxKind.CommaToken && parent.right === use)) return flowsTo(parent, from);
       return none();
@@ -1257,8 +1259,10 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       return ts.isObjectBindingPattern(parent.name) ? patternWrites(parent.name, null, from) : all();
     }
     if (ts.isJsxExpression(parent)) {
-      // `<Child attrs={attrs} />`: whatever Child writes through that prop is written here.
-      return ts.isJsxAttribute(parent.parent) ? receivedWrites(parent.parent.parent.parent, parent.parent.name.getText(), from) : none();
+      // `<Child attrs={attrs} />`: whatever Child writes through that prop is written here, and
+      // `<Child>{attrs}</Child>` hands it over as `children`.
+      if (ts.isJsxAttribute(parent.parent)) return receivedWrites(parent.parent.parent.parent, parent.parent.name.getText(), from);
+      return ts.isJsxElement(parent.parent) ? receivedWrites(parent.parent.openingElement, "children", from) : none();
     }
     // `<Child {...props} />` copies the props, but each value it copies is still the same object.
     if (ts.isJsxSpreadAttribute(parent)) return receivedWrites(parent.parent.parent, null, from);
@@ -1269,7 +1273,9 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     // A spread into an argument list hands on each element; one into a literal copies them.
     if (ts.isSpreadElement(parent)) return ts.isCallExpression(parent.parent) || ts.isNewExpression(parent.parent) ? all() : none();
     if (ts.isElementAccessExpression(parent) && parent.argumentExpression === use) return none();
-    if (ts.isSpreadAssignment(parent) || ts.isTemplateSpan(parent) || ts.isTypeOfExpression(parent) || ts.isVoidExpression(parent)
+    // A tagged template hands its values to the tag function; an untagged one only reads them.
+    if (ts.isTemplateSpan(parent)) return ts.isTaggedTemplateExpression(parent.parent.parent) ? all() : none();
+    if (ts.isSpreadAssignment(parent) || ts.isTypeOfExpression(parent) || ts.isVoidExpression(parent)
       || ts.isPrefixUnaryExpression(parent) || ts.isExpressionStatement(parent) || ts.isTypeQueryNode(parent)
       || ts.isExportSpecifier(parent) || ts.isImportSpecifier(parent) || ts.isImportClause(parent)
       || ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent) || ts.isSwitchStatement(parent)
@@ -1322,17 +1328,35 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   };
   const changedAtAll = (writes: Writes) => writes.any || writes.insideAny || writes.props.size > 0 || writes.inside.size > 0;
   /**
-   * What a component writes into the props one element hands it: into the object under `prop`, or,
-   * for a spread (`prop` null), into the objects under any of them. An element name renders a DOM
-   * node, which writes nothing back. Another package's component is taken to write a prop it is
-   * handed, as a constant's was before #2394, but not a spread of props, which it receives as a copy.
+   * What the components one element renders write into the props it hands them: into the object
+   * under `prop`, or, for a spread (`prop` null), into the objects under any of them. An element name
+   * or a glyph renders a DOM node, which writes nothing back. Another package's component is taken to
+   * write a prop it is handed, as a constant's was before #2394, but not a spread of props, which it
+   * receives as a copy. A tag the scan cannot follow, which it reports, may write anything.
    */
   const receivedWrites = (element: ts.Node, prop: string | null, from: Binding): Writes => {
     if (!ts.isJsxOpeningElement(element) && !ts.isJsxSelfClosingElement(element)) return all();
     const tag = element.tagName;
     if (ts.isIdentifier(tag) && /^[a-z]/.test(tag.text)) return none();
-    const fn = functionOf(declarationOf(tag));
-    if (!fn) return prop === null ? none() : all();
+    const direct = functionOf(declarationOf(tag));
+    let components: Rendered[] = direct ? [direct] : [];
+    if (!direct) {
+      // Which components the tag renders, read without asking what is written, which would ask this
+      // again: a tag whose component prop is replaced reads as `unknown` where it renders, and is reported.
+      const saved = [functionsOnly, ignoringWrites] as const;
+      functionsOnly = false;
+      ignoringWrites = true;
+      try { components = componentsOf(tag); } finally { [functionsOnly, ignoringWrites] = saved; }
+    }
+    const out = none();
+    for (const component of components) {
+      if (component === "unknown" || (component === "other" && prop !== null)) return all();
+      if (typeof component !== "string") merge(out, parameterWrites(component, prop, from));
+    }
+    return out;
+  };
+  /** What a function writes into the props its first parameter receives, as `receivedWrites` reads them. */
+  const parameterWrites = (fn: SourceFunction, prop: string | null, from: Binding): Writes => {
     const parameter = fn.parameters[0];
     if (!parameter) return none();
     if (ts.isObjectBindingPattern(parameter.name)) return patternWrites(parameter.name, prop, from);
@@ -1341,18 +1365,22 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (prop === null) return { props: new Set(), inside: new Set(writes.inside), insideAny: writes.insideAny, any: writes.any };
     return writes.any || writes.insideAny || writes.inside.has(prop) ? all() : none();
   };
+  /** On while `receivedWrites` reads which components a tag renders. */
+  let ignoringWrites = false;
   /** Whether a binding's value, or the value under one key of it, may have been replaced after it was bound. */
   const written = (declaration: Binding, prop?: string) => {
+    if (ignoringWrites) return false;
     const writes = writesTo(declaration);
     return writes.any || writes.reassigned || (prop === undefined ? writes.props.size > 0 : writes.props.has(prop));
   };
   /** Whether, besides, something inside the object under that key may have been written. */
   const writtenInto = (declaration: Binding, prop: string) => {
+    if (ignoringWrites) return false;
     const writes = writesTo(declaration);
     return written(declaration, prop) || writes.insideAny || writes.inside.has(prop);
   };
   /** Whether a binding is assigned again, so what it holds is not only what it was bound to. */
-  const reassigned = (declaration: ts.Node | "glyph" | undefined) => isBinding(declaration) && writesTo(declaration).reassigned;
+  const reassigned = (declaration: ts.Node | "glyph" | undefined) => !ignoringWrites && isBinding(declaration) && writesTo(declaration).reassigned;
   /** `obj.key` whose object has `key` written after it is bound. */
   const writtenMember = (node: ts.Node) => {
     if (!ts.isPropertyAccessExpression(node) || !ts.isIdentifier(node.expression)) return false;
@@ -1942,8 +1970,6 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   // calls. A call found that way that a read already made missed starts both over.
   const rendered = new Map<ts.JsxOpeningLikeElement, Set<Rendered>>();
   const called = new Map<ts.CallExpression, Set<Rendered>>();
-  /** Functions some call through a value calls, which reach it by the routes a rendered component does. */
-  const calledThrough = new Set<SourceFunction>();
   for (let missed = true; missed;) {
     missed = false;
     for (let changed = true; changed;) {
@@ -1972,7 +1998,6 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
         known.add(component);
         if (typeof component === "string") continue;
         callSites.set(component, [...(callSites.get(component) ?? []), call]);
-        calledThrough.add(component);
         if (sitesRead.has(component)) missed = true;
       }
     }
@@ -2006,13 +2031,23 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   /**
    * Where a function is used other than by calling it or rendering it: passed to `map()`, handed to
    * another package, aliased. Its call sites are then not all the values its parameters take. A
-   * component may also travel to a tag or a call — through a constant, an object of components, a
-   * prop or a return — because `componentsOf` follows those to where it renders or is called.
+   * component may also travel to a tag — through a constant, an object of components, a prop or a
+   * return — because `componentsOf` follows those to where it renders, but not inside an object
+   * handed to another package's function, which may call it with anything (#2394).
    */
+  /** Whether an object literal, or one it is nested in, is an argument to a function outside the sources (`register({ draw: Icon })`). */
+  const handedToPackage = (object: ts.Node): boolean => {
+    let node = object;
+    while (isTransparent(node.parent)) node = node.parent;
+    const parent = node.parent;
+    if (ts.isPropertyAssignment(parent) && parent.initializer === node) return handedToPackage(parent.parent);
+    return (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression !== node
+      && (parent.arguments ?? []).includes(node as ts.Expression) && !functionOf(declarationOf(parent.expression));
+  };
   const escapes = (fn: SourceFunction): ts.Identifier | undefined => {
     const name = declaredName(fn);
     if (!name) return undefined;
-    const component = jsxSites.has(fn) || calledThrough.has(fn);
+    const component = jsxSites.has(fn);
     // Every spelling: the declaration's, and each import or constant that names the same function.
     const spellings = new Set([name.text, ...(aliasesOf().get(fn) ?? [])]);
     return [...spellings].flatMap((spelling) => identifiers.get(spelling) ?? []).find((use) => {
@@ -2028,8 +2063,9 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if (ts.isFunctionExpression(parent) && parent.name === node) return false;
       if ((ts.isJsxOpeningElement(parent) || ts.isJsxSelfClosingElement(parent) || ts.isJsxClosingElement(parent)) && parent.tagName === node) return false;
       if (!component) return true;
-      const toTag = (isConstant(parent) && parent.initializer === node)
-        || (ts.isPropertyAssignment(parent) && parent.initializer === node) || ts.isShorthandPropertyAssignment(parent)
+      const stored = (ts.isPropertyAssignment(parent) && parent.initializer === node) || ts.isShorthandPropertyAssignment(parent);
+      if (stored && handedToPackage(parent.parent)) return true;
+      const toTag = (isConstant(parent) && parent.initializer === node) || stored
         || (ts.isConditionalExpression(parent) && parent.condition !== node)
         || (ts.isBinaryExpression(parent) && [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken,
           ts.SyntaxKind.AmpersandAmpersandToken].includes(parent.operatorToken.kind))
@@ -3656,12 +3692,28 @@ test("every route #2394 found that could hide an icon class is followed, reporte
     "  const Picked = RENDERERS[k];",
     "  return <>",
     "    {RENDERERS[k]({ className: \"computed-icon\" })}{RENDERERS.a({ className: \"member-icon\" })}{Picked({ className: \"picked-icon\" })}",
-    "    <Slot draw={Icon} />{call({ a: Icon }, k)}{bare({ a: Defaulted }, k)}<Defaulted className=\"rendered-icon\" />",
+    "    <Slot draw={Icon} />{call({ a: Icon }, k)}{bare({ a: Defaulted }, k)}<Defaulted className=\"rendered-icon\" /><Icon className=\"seen-icon\" />",
     "  </>;",
     "}",
   ].join("\n") }), {
-    classes: ["computed-icon", "member-icon", "picked-icon", "prop-call-icon", "rendered-icon"],
+    classes: ["computed-icon", "member-icon", "picked-icon", "prop-call-icon", "rendered-icon", "seen-icon"],
     unread: ["Called.tsx:5 map[key]() calls a value the scan cannot follow"],
+  });
+  // A component stored in an object is followed only while it renders somewhere and the object
+  // stays where the scan reads it: one also handed to another package's function inside an object,
+  // or one that is only ever called, is still reported as used as a value (#2440 review).
+  assert.deepEqual(scanOf({ "Stored.tsx": [
+    "import { register } from \"some-package\";",
+    "function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
+    "function Bare({ className }: { className?: string }) { return <svg className={className} />; }",
+    "const MAP = { a: Icon, b: Bare };",
+    "export function Uses() {",
+    "  register({ draw: Icon });",
+    "  return <><Icon className=\"seen-icon\" />{MAP.a({ className: \"member-icon\" })}{MAP.b({ className: \"called-only-icon\" })}</>;",
+    "}",
+  ].join("\n") }), {
+    classes: ["called-only-icon", "member-icon", "seen-icon"],
+    unread: ["Stored.tsx:4 Bare is used as a value, so its arguments cannot be traced", "Stored.tsx:6 Icon is used as a value, so its arguments cannot be traced"],
   });
 
   // 2. Reported: a component whose class comes from its caller, handed to another package's
@@ -3691,9 +3743,10 @@ test("every route #2394 found that could hide an icon class is followed, reporte
   });
 
   // 3. Reported: an object written through the parameter that receives it — directly, under one of
-  // its props, by a helper it is handed to, or by a child it is passed to — and a parameter
-  // assigned again. Without the writes, each of these reads its callers' classes. Accepted: a
-  // package's component spread the same object writes nothing back (`spread-icon`).
+  // its props, through an alias, by a helper or a tag function it is handed to, or by a child it is
+  // passed to as a prop, as children or in spread props, however that child is chosen — and a
+  // parameter assigned again. Without the writes, each of these reads its callers' classes. Accepted: a package's
+  // component spread the same object writes nothing back (`spread-icon`).
   assert.deepEqual(scanOf({ "Writes.tsx": [
     "import { Slot } from \"some-package\";",
     "type A = { className?: string };",
@@ -3706,16 +3759,24 @@ test("every route #2394 found that could hide an icon class is followed, reporte
     "function Parent({ attrs }: { attrs: A }) { return <><Child attrs={attrs} /><svg {...attrs} /></>; }",
     "function Reader({ attrs }: { attrs: A }) { return <><span title={attrs.className} /><svg {...attrs} /></>; }",
     "function Shared({ attrs }: { attrs: A }) { return <><Slot {...attrs} /><svg {...attrs} /></>; }",
+    "declare function tag(strings: unknown, ...values: unknown[]): string;",
+    "function Tagged({ attrs }: { attrs: A }) { tag`${attrs}`; return <svg {...attrs} />; }",
+    "function Kids({ children }: { children: A }) { children.className = \"kids-write-icon\"; return null; }",
+    "function Holder({ attrs }: { attrs: A }) { return <><Kids>{attrs}</Kids><svg {...attrs} /></>; }",
+    "const WRITERS = { a: Child };",
+    "function Chosen({ k, ...rest }: { k: \"a\"; attrs: A }) { const W = WRITERS[k]; return <><W {...rest} /><svg {...rest.attrs} /></>; }",
+    "function Logical({ attrs }: { attrs: A }) { let holder: A | undefined; holder ??= attrs; holder.className = \"alias-write-icon\"; return <svg {...attrs} />; }",
     "export function Uses() {",
     "  return <>",
     "    <Mark attrs={{}} /><Whole attrs={{}} /><Renamed className=\"given\" /><Helper attrs={{}} />",
     "    <Parent attrs={{ className: \"parent-icon\" }} /><Reader attrs={{ className: \"read-only-icon\" }} />",
-    "    <Shared attrs={{ className: \"spread-icon\" }} />",
+    "    <Shared attrs={{ className: \"spread-icon\" }} /><Tagged attrs={{}} /><Holder attrs={{}} /><Chosen k=\"a\" attrs={{}} /><Logical attrs={{}} />",
     "  </>;",
     "}",
   ].join("\n") }), {
     classes: ["read-only-icon", "spread-icon"],
-    unread: ["Writes.tsx:3 ${…}", "Writes.tsx:4 ${…}", "Writes.tsx:5 ${…}", "Writes.tsx:7 ${…}", "Writes.tsx:9 ${…}"],
+    unread: ["Writes.tsx:13 ${…}", "Writes.tsx:15 ${…}", "Writes.tsx:17 ${…}", "Writes.tsx:18 ${…}", "Writes.tsx:3 ${…}", "Writes.tsx:4 ${…}",
+      "Writes.tsx:5 ${…}", "Writes.tsx:7 ${…}", "Writes.tsx:9 ${…}"],
   });
 
   // 4. Followed: a value an assertion gives its type is read for its value — in a constant, an
