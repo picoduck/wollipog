@@ -36,8 +36,8 @@ import {
   skillGroupsFromPayload,
   skillLibrarySummary,
   skillListDescription,
+  skillFileFrontmatter,
   skillMarkdownBody,
-  skillMarkdownFrontmatterName,
   skillNameError,
   skillOfflineMachineSentence,
   skillOverviewAttention,
@@ -626,6 +626,14 @@ test("draft validation mirrors the protocol validators and limits", () => {
     .some((error) => error.includes("SKILL.md must exist")));
   assert.ok(validateSkillDraft({ name: "code-review", files: [md("other-name")] })
     .some((error) => error.includes("must match the skill name")));
+  // A SKILL.md the library reads no name from is reported, not skipped (#2377).
+  const noName = (content: string): SkillFile => ({ path: "SKILL.md", content, encoding: "utf8" });
+  const needsName = 'SKILL.md needs a frontmatter name: a "name: code-review" line between two "---" lines at its top.';
+  assert.deepEqual(validateSkillFiles({ name: "code-review", files: [noName("---\ndescription: x\n---\n")] }), [needsName]);
+  assert.deepEqual(validateSkillFiles({ name: "code-review", files: [noName("---\nname: code-review\n")] }), [needsName]);
+  assert.deepEqual(validateSkillFiles({ name: "code-review", files: [noName("# no frontmatter")] }), [needsName]);
+  assert.deepEqual(validateSkillFiles({ files: [noName("# no frontmatter")] }), []);
+  assert.deepEqual(validateSkillFiles({ name: "code-review", files: [noName('---\nname: "code\\u002dreview"\n---\n')] }), []);
   assert.ok(validateSkillDraft({ name: "code-review", files: [md("code-review"), md("code-review")] })
     .some((error) => error.includes("more than once")));
 
@@ -639,18 +647,29 @@ test("draft validation mirrors the protocol validators and limits", () => {
   assert.equal(skillFileByteLength({ path: "a", content: btoa("1234"), encoding: "base64" }), 4);
 });
 
-test("SKILL.md helpers read and strip frontmatter the same line-based way", () => {
+test("SKILL.md helpers read frontmatter with the library's reader and strip it for display", () => {
+  const md = (content: string): SkillFile => ({ path: "SKILL.md", content, encoding: "utf8" });
   const markdown = "---\nname: code-review\ndescription: Reviews code\n---\n\n# Usage\n";
-  assert.equal(skillMarkdownFrontmatterName(markdown), "code-review");
-  assert.equal(skillMarkdownFrontmatterName("# no frontmatter"), null);
+  assert.deepEqual(skillFileFrontmatter(md(markdown)), { name: "code-review", description: "Reviews code" });
+  assert.deepEqual(skillFileFrontmatter(md("# no frontmatter")), {});
   assert.equal(skillMarkdownBody(markdown), "# Usage\n");
   assert.equal(skillMarkdownBody("plain body"), "plain body");
-  // New Skill builds SKILL.md from its fields; every reader here agrees on the name it wrote.
+  // New Skill builds SKILL.md from its fields; the library reads back the name it wrote.
   for (const name of ["my-skill", "1.5", "true"]) {
     const built = skillMarkdownFromFields({ name, description: "Does: things, \"quoted\".\nTwice.", body: "# Usage\n" });
-    assert.equal(skillMarkdownFrontmatterName(built), name);
+    assert.equal(skillFileFrontmatter(md(built)).name, name);
     assert.equal(skillMarkdownBody(built), "# Usage\n");
   }
+  // The cases a line reader disagreed with the library on (#2377): an unterminated block, a block
+  // closed by "...", and a JSON-escaped double-quoted name.
+  assert.deepEqual(skillFileFrontmatter(md("---\nname: my-skill\nBody.\n")), {});
+  assert.deepEqual(skillFileFrontmatter(md("---\ntitle: x\n...\nname: my-skill\n---\n")), {});
+  assert.equal(skillFileFrontmatter(md('---\nname: "my\\u002dskill"\n---\n')).name, "my-skill");
+  // A SKILL.md carried base64 (not clean UTF-8 text) is read as the server decodes its bytes.
+  const bytes = new TextEncoder().encode("---\nname: my-skill\n---\nNUL \0 here\n");
+  const base64 = btoa(String.fromCharCode(...bytes));
+  assert.equal(skillFileFrontmatter({ path: "SKILL.md", content: base64, encoding: "base64" }).name, "my-skill");
+  assert.deepEqual(skillFileFrontmatter({ path: "SKILL.md", content: "not base64!", encoding: "base64" }), {});
 });
 
 test("orphaned copies are read defensively and addressed without paths", () => {

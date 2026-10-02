@@ -1,8 +1,8 @@
 import { useCallback, useId, useRef, useState, type DragEvent } from "react";
-import { SKILL_MAX_FILES, isSkillScriptFile, readSkillFrontmatter, skillMarkdownFromFields, type SkillFile } from "@wollipog/protocol";
+import { SKILL_MAX_FILES, isSkillScriptFile, skillMarkdownFromFields, type SkillFile } from "@wollipog/protocol";
 import {
+  skillFileFrontmatter,
   skillFilesFromUploads,
-  skillMarkdownFrontmatterName,
   skillNameError,
   validateSkillFiles,
   type UploadedSkillFile,
@@ -107,8 +107,8 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
   const trimmedName = name.trim();
   // An empty Description saves the uploaded SKILL.md's own description, so the field says so.
   const uploadedSkillMd = source === "upload" ? folderFiles.find((file) => file.path === "SKILL.md") : undefined;
-  const keepsFolderDescription = !description.trim() && uploadedSkillMd?.encoding === "utf8" &&
-    Boolean(readSkillFrontmatter(uploadedSkillMd.content).description);
+  const keepsFolderDescription = !description.trim() && uploadedSkillMd !== undefined &&
+    Boolean(skillFileFrontmatter(uploadedSkillMd).description);
 
   const applyUploads = (uploads: UploadedSkillFile[] | null) => {
     if (!uploads) {
@@ -119,11 +119,12 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
     const converted = skillFilesFromUploads(uploads);
     setFolderFiles(converted.files);
     setFileErrors(converted.errors);
-    // A folder's SKILL.md already names the skill; an empty Name takes that name. The field's own
-    // value, not this render's: the files were read asynchronously, and the person may have typed
-    // a name meanwhile.
+    // A folder's SKILL.md already names the skill; an empty Name takes that name, read as the
+    // library reads it (#2377). The field's own value, not this render's: the files were read
+    // asynchronously, and the person may have typed a name meanwhile.
     const skillMd = converted.files.find((file) => file.path === "SKILL.md");
-    const named = skillMd?.encoding === "utf8" ? skillMarkdownFrontmatterName(skillMd.content) : null;
+    const frontmatter = skillMd ? skillFileFrontmatter(skillMd) : {};
+    const named = frontmatter.name;
     if (named && !nameRef.current?.value.trim()) {
       setName(named);
       setNameError((error) => error && skillNameError(named));
@@ -131,7 +132,7 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
     // Its description too, read as the library will store it, unless the person typed one.
     const current = descriptionRef.current;
     if (!current.trim() || current === filledDescription.current) {
-      const folderDescription = skillMd?.encoding === "utf8" ? readSkillFrontmatter(skillMd.content).description ?? "" : "";
+      const folderDescription = frontmatter.description ?? "";
       filledDescription.current = folderDescription || null;
       setDescription(folderDescription);
     }

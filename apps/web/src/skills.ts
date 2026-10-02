@@ -6,6 +6,7 @@ import {
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_FILES,
   SKILL_MAX_TOTAL_BYTES,
+  readSkillFrontmatter,
   validSkillFilePath,
   validSkillName,
   type AgentDefinition,
@@ -1043,18 +1044,17 @@ export function skillFileByteLength(file: SkillFile): number {
   return new TextEncoder().encode(file.content).length;
 }
 
-/** Line-based frontmatter `name:` reader — deliberately not YAML, mirroring the runner's and the
- * control plane's readers so all three surfaces agree on what "the name matches" means. */
-export function skillMarkdownFrontmatterName(markdown: string): string | null {
-  const lines = markdown.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return null;
-  for (let index = 1; index < Math.min(lines.length, 128); index++) {
-    const line = lines[index]!;
-    if (line.trim() === "---") break;
-    const match = /^name\s*:\s*(.+?)\s*$/.exec(line);
-    if (match) return match[1]!.replace(/^["']|["']$/g, "");
+/** A SKILL.md's `name:` and `description:` exactly as the control plane reads them: the library's
+ * reader over the file's text, a base64 file decoded as UTF-8 the way the server decodes its bytes
+ * (#2377). An unterminated frontmatter block has neither. */
+export function skillFileFrontmatter(file: SkillFile): { name?: string; description?: string } {
+  if (file.encoding === "utf8") return readSkillFrontmatter(file.content);
+  try {
+    const bytes = Uint8Array.from(atob(file.content), (char) => char.charCodeAt(0));
+    return readSkillFrontmatter(new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes));
+  } catch {
+    return {};
   }
-  return null;
 }
 
 /** SKILL.md without its frontmatter block, for rendering through the transcript's Markdown
@@ -1071,9 +1071,9 @@ export function validateSkillDraft(input: { name: string; files: SkillFile[] }):
   return [...(nameError ? [nameError] : []), ...validateSkillFiles(input)];
 }
 
-/** The draft's file errors: count, paths, sizes, and a top-level SKILL.md whose frontmatter name
- * is `name`. The name itself is checked by `skillNameError`; without a usable name the frontmatter
- * name is not compared. */
+/** The draft's file errors: count, paths, sizes, and a top-level SKILL.md whose frontmatter name,
+ * read as the library reads it, is `name`. The name itself is checked by `skillNameError`; without
+ * a usable name the frontmatter name is not compared. */
 export function validateSkillFiles(input: { name?: string; files: SkillFile[] }): string[] {
   const errors: string[] = [];
   if (input.files.length === 0) {
@@ -1101,9 +1101,11 @@ export function validateSkillFiles(input: { name?: string; files: SkillFile[] })
   const skillMd = input.files.find((file) => file.path === "SKILL.md");
   if (!skillMd) {
     errors.push("SKILL.md must exist at the top level of the skill.");
-  } else if (skillMd.encoding === "utf8") {
-    const frontmatterName = skillMarkdownFrontmatterName(skillMd.content);
-    if (input.name !== undefined && frontmatterName !== null && frontmatterName !== input.name) {
+  } else if (input.name !== undefined) {
+    const frontmatterName = skillFileFrontmatter(skillMd).name;
+    if (frontmatterName === undefined) {
+      errors.push(`SKILL.md needs a frontmatter name: a "name: ${input.name}" line between two "---" lines at its top.`);
+    } else if (frontmatterName !== input.name) {
       errors.push(`The SKILL.md frontmatter name "${frontmatterName}" must match the skill name "${input.name}".`);
     }
   }

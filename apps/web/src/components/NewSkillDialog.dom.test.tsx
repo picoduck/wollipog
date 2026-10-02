@@ -245,6 +245,46 @@ async function pickFolder(dialog: HTMLElement, files: Record<string, string>) {
   await settle();
 }
 
+test("an uploaded SKILL.md's name is read as the library reads it: no name or an unterminated block is reported before Create sends (#2377)", async () => {
+  const needsName = 'SKILL.md needs a frontmatter name: a "name: my-skill" line between two "---" lines at its top.';
+  for (const [label, skillMd] of [
+    ["an unterminated frontmatter block", "---\nname: my-skill\nReview."],
+    ["a frontmatter block without a name", "---\ndescription: Reviews.\n---\nReview."],
+  ] as const) {
+    const view = await mount();
+    try {
+      const { dialog, created } = view;
+      await pickFolder(dialog, { "review/SKILL.md": skillMd });
+      assert.equal(labelled(dialog, "Name").value, "", `${label} does not fill Name`);
+      await type(labelled(dialog, "Name"), "my-skill");
+      await act(async () => button(dialog, "Create Skill").click());
+      await settle();
+      assert.deepEqual(created, [], `${label} is not sent`);
+      const errors = [...dialog.querySelectorAll(".skill-dropzone ~ .field-error")].map((error) => error.textContent);
+      assert.deepEqual(errors, [needsName], `${label} is reported under the dropzone`);
+      assert.equal(document.activeElement, button(dialog, "Choose Folder…"));
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("an uploaded SKILL.md's JSON-escaped double-quoted name fills Name decoded, and Create Skill sends it (#2377)", async () => {
+  const view = await mount();
+  try {
+    const { dialog, created } = view;
+    const skillMd = '---\nname: "my\\u002dskill"\n---\nReview.';
+    await pickFolder(dialog, { "review/SKILL.md": skillMd });
+    assert.equal(labelled(dialog, "Name").value, "my-skill");
+    await act(async () => button(dialog, "Create Skill").click());
+    await settle();
+    assert.equal(dialog.querySelectorAll(".field-error").length, 0);
+    assert.deepEqual(created, [{ name: "my-skill", description: "", files: [{ path: "SKILL.md", encoding: "utf8", content: skillMd }] }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
 const DESCRIPTION_HELPER = "Agents read this to decide when the skill applies. Say what it does and when to use it.";
 
 test("an uploaded SKILL.md's description fills an empty Description, and Create Skill saves what the field shows (#2290)", async () => {
