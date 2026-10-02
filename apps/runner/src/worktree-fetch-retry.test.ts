@@ -5,9 +5,9 @@ import { test, type TestContext } from "node:test";
 import { fetchRemoteDefaultBase } from "./worktree.js";
 
 const advertised = "ref: refs/heads/develop\tHEAD\nabc123\tHEAD\n";
-const gitError = Object.assign(new Error("Permission denied (publickey).\nfatal: Could not read from remote repository."), { code: 128 });
+const gitError = Object.assign(new Error("Permission denied (publickey).\nfatal: Could not read from remote repository."), { code: 128, cmd: "git" });
 type Call = { file: string; args: string[]; options: ExecFileOptions; at: number };
-type Result = { stdout?: string; error?: Error; delay?: number };
+type Result = { stdout?: string; error?: ExecFileException; delay?: number };
 
 function fixture(t: TestContext, respond: (call: Call, index: number) => Result) {
   const calls: Call[] = [];
@@ -126,7 +126,7 @@ test("missing default-branch advertisement is bounded and actionable without fet
 
 test("slow lookup and fetch failures exhaust their deadlines within the total 183-second budget", async (t) => {
   const calls = fixture(t, (call, index) => ({
-    ...(index === 2 ? { stdout: advertised } : { error: new Error("Git command timed out") }),
+    ...(index === 2 ? { stdout: advertised } : { error: Object.assign(new Error("Git command timed out"), { cmd: "git" }) }),
     delay: call.options.timeout,
   }));
   const rejected = assert.rejects(fetchRemoteDefaultBase("/repo"), /fetching the remote default branch.*Git command timed out/);
