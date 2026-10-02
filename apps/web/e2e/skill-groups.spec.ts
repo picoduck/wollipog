@@ -432,3 +432,42 @@ test("at 390px Back keeps focus when the person reaches it before a removal's co
   await expect(rows.first()).toBeEnabled();
   await expect(rows.first()).toBeFocused();
 });
+
+test("at 390px deleting a group returns focus to the row of the group that took its place (#2408)", async ({ page }, info) => {
+  const fixture = await installSkillGroupsFixture(page, { library: "full" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/skills-removals-e2e.html?groups=1");
+  await choosePageAction(page, "Manage Groups…");
+  const dialog = manageGroups(page);
+  const rows = dialog.locator(".skill-groups-list > .row");
+  const deleteFromKeyboard = async (index: number, name: string) => {
+    await rows.nth(index).focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog.locator(".skill-groups-name")).toHaveText(name);
+    await dialog.getByRole("button", { name: `More Actions for ${name}`, exact: true }).click();
+    await page.getByRole("menuitem", { name: "Delete Group…", exact: true }).click();
+    const remove = confirmation(page, "Delete Group");
+    await page.keyboard.type(name);
+    await remove.getByRole("button", { name: "Delete Group", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(remove).toHaveCount(0);
+  };
+  // Platform Tools is not first: My Drafts takes its place, and focus is on its row, not the first.
+  await deleteFromKeyboard(1, "Platform Tools");
+  await expect(rows).toHaveText([/^Review Team/, /^My Drafts/, /^Legacy Tools/]);
+  await expect(rows.nth(1)).toBeEnabled();
+  await expect(rows.nth(1)).toBeFocused();
+  await page.mouse.move(0, 0);
+  await page.screenshot({ path: info.outputPath("delete-focus-next-390.png") });
+  // Legacy Tools is last, so the group before it takes its place.
+  await deleteFromKeyboard(2, "Legacy Tools");
+  await expect(rows).toHaveText([/^Review Team/, /^My Drafts/]);
+  await expect(rows.nth(1)).toBeEnabled();
+  await expect(rows.nth(1)).toBeFocused();
+  await page.screenshot({ path: info.outputPath("delete-focus-previous-390.png") });
+  expect(fixture.writes.filter(write => write.method === "DELETE").map(write => write.path))
+    .toEqual(["/api/skill-groups/platform", "/api/skill-groups/legacy"]);
+  // Enter acts on that row and the dialog stays open.
+  await page.keyboard.press("Enter");
+  await expect(dialog.locator(".skill-groups-name")).toHaveText("My Drafts");
+});

@@ -177,6 +177,9 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
     document.addEventListener("focusin", onFocusIn);
     return () => document.removeEventListener("focusin", onFocusIn);
   }, []);
+  // A phone marks no row as chosen, so a group's row is found by its id.
+  const groupRow = (id: string | undefined) => [...listRef.current?.querySelectorAll<HTMLElement>(".skill-groups-list > .row") ?? []]
+    .find((row) => row.dataset.groupId === id);
   const defaultFocus = (): HTMLElement | null | undefined => {
     if (phone && !showList) return dialogRef.current?.querySelector<HTMLElement>(".modal-back");
     return listRef.current?.querySelector<HTMLElement>('[aria-current="true"]')
@@ -197,10 +200,8 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
     const back = backPressed && dialog.contains(active);
     if (back) {
       rescuing.current = true;
-      // A phone marks no row as chosen, so the chosen group's row is found by its id.
       const chosen = selected?.id;
-      nextFocus.current = () => [...listRef.current?.querySelectorAll<HTMLElement>(".skill-groups-list > .row") ?? []]
-        .find((row) => row.dataset.groupId === chosen);
+      nextFocus.current = () => groupRow(chosen);
     }
     if (rescuing.current) {
       if (!back && !lost && active !== dialog) {
@@ -367,7 +368,7 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
       await api.deleteSkillGroup(group.id);
       setSelectedId(neighbour?.id ?? "");
       setStep("list");
-    }, `Deleted ${group.name}.`, () => listRef.current?.querySelector<HTMLElement>('[aria-current="true"]'));
+    }, `Deleted ${group.name}.`, () => groupRow(neighbour?.id));
   };
 
   const addRule = async (group: SkillGroupView, input: AddAssignmentInput) => {

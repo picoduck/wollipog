@@ -558,6 +558,52 @@ test("Delete Group… asks for the group's name, and the next group takes its pl
   }
 });
 
+/** Deletes the group on show from its ⋯, typing its name to confirm. */
+async function deleteShownGroup(view: Awaited<ReturnType<typeof mount>>, name: string) {
+  await chooseFromMenu(button(view.dialog(), `More Actions for ${name}`), "Delete Group…");
+  const confirmation = view.confirmation()!;
+  await typeInto(confirmation.querySelector<HTMLInputElement>(".modal-body .field input")!, name);
+  await click(button(confirmation, "Delete Group"));
+}
+
+test("deleting the last group on desktop selects the one before it, and focus goes to its row", async () => {
+  phone = false;
+  const view = await mount(fakeApi(), "legacy");
+  try {
+    const dialog = view.dialog();
+    await deleteShownGroup(view, "Legacy Tools");
+    assert.deepEqual(view.api.writes, [["delete", "legacy"]]);
+    assert.equal(dialog.querySelector(".skill-groups-name")?.textContent, "My Drafts");
+    assert.equal(active()?.dataset.groupId, "mine");
+    assert.equal(active()?.getAttribute("aria-current"), "true");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("on a phone, deleting a group returns to the list with focus on the next group's row, else the one before it (#2408)", async () => {
+  phone = true;
+  const view = await mount();
+  try {
+    const dialog = view.dialog();
+    // Platform Tools is not first, so the next group's row is told apart from the first row.
+    await click(listRows(dialog)[1]!);
+    await deleteShownGroup(view, "Platform Tools");
+    assert.deepEqual(listRows(dialog).map((row) => row.dataset.groupId), ["review", "mine", "legacy"]);
+    assert.equal(active()?.dataset.groupId, "mine", "focus is on the row of the group after the deleted one");
+    // The last group has no next one, so focus goes to the row before it.
+    await click(listRows(dialog)[2]!);
+    await deleteShownGroup(view, "Legacy Tools");
+    assert.deepEqual(listRows(dialog).map((row) => row.dataset.groupId), ["review", "mine"]);
+    assert.equal(active()?.dataset.groupId, "mine", "focus is on the row of the group before the deleted one");
+    assert.deepEqual(view.api.writes, [["delete", "platform"], ["delete", "legacy"]]);
+    assert.equal(view.closed(), 0);
+  } finally {
+    phone = false;
+    await view.unmount();
+  }
+});
+
 test("converting a legacy group confirms, and a refusal keeps it legacy with the server's reason", async () => {
   phone = false;
   const api = fakeApi();
