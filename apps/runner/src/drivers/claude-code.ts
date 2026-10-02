@@ -1683,17 +1683,23 @@ export class ClaudeCodeDriver implements Driver {
           this.activeProviderTurnId(),
         );
       } else if (msg.subtype === "task_updated" && taskId) {
-        // Read only for a stop someone asked for: Claude patches the task to `killed` first.
+        // Monitor timeout also patches the task to `killed`, without a requested stop.
         const patch = msg.patch as Record<string, Json> | undefined;
         const status = typeof patch?.status === "string" ? patch.status.toLowerCase() : "";
         if (status === "killed" && this.stoppingBackgroundTasks.has(taskId)) this.completeStoppedTask(taskId);
         else if (status === "killed" && this.stopWasRequested(taskId)) this.completeProviderStop(taskId, toolUseId);
+        else if (status === "killed" && this.pendingBackgroundTasks.get(taskId)?.launchType === "monitor") {
+          this.completeMonitorTask(taskId, toolUseId);
+        }
       } else if (msg.subtype === "task_notification" && taskId) {
         const status = typeof msg.status === "string" ? msg.status.toLowerCase() : "";
         if ((status === "stopped" || status === "killed") && this.stoppingBackgroundTasks.has(taskId)) {
           this.completeStoppedTask(taskId);
         } else if ((status === "stopped" || status === "killed") && this.stopWasRequested(taskId)) {
           this.completeProviderStop(taskId, toolUseId);
+        } else if ((status === "stopped" || status === "killed" || status === "completed" || status === "failed") &&
+            this.pendingBackgroundTasks.get(taskId)?.launchType === "monitor") {
+          this.completeMonitorTask(taskId, toolUseId, status === "failed" ? "failed" : status === "completed" ? "completed" : "killed");
         } else if (status === "completed" || status === "failed" || status === "killed") {
           this.completePendingTask(taskId, toolUseId, status);
         } else {
@@ -1712,6 +1718,15 @@ export class ClaudeCodeDriver implements Driver {
         const stopTarget = taskStopTarget(name, input);
         if (stopTarget) this.modelTaskStops.set(block.id, { taskId: stopTarget, turnId: this.activeProviderTurnId() });
         if (!isBackgroundCapableLaunch(name, input)) continue;
+        // Replayed Monitor launches must not replace their provider identity or revive expiry.
+        if (name === "Monitor") {
+          if (this.endedBackgroundTaskIds.has(`tool:${block.id}`)) continue;
+          const known = [...this.pendingBackgroundTasks.values()].find(task => task.toolUseId === block.id);
+          if (known) {
+            this.recordPendingTask(known.id, block.id, undefined, undefined, true, "monitor");
+            continue;
+          }
+        }
         // A tool_use is provisional. Only a provider task lifecycle event or a structured
         // async-launch result promotes it to a hold that requires separate terminal evidence.
         this.recordPendingTask(
@@ -1730,7 +1745,22 @@ export class ClaudeCodeDriver implements Driver {
       const blocks: Json[] = msg.message?.content ?? [];
       for (const block of blocks) {
         if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+        const stopTarget = this.modelTaskStops.get(block.tool_use_id)?.taskId;
+        if (stopTarget && block.is_error === true &&
+            this.pendingBackgroundTasks.get(stopTarget)?.launchType === "monitor" &&
+            block.content === `<tool_use_error>No task found with ID: ${stopTarget}</tool_use_error>`) {
+          this.completeMonitorTask(stopTarget);
+        }
         this.modelTaskStops.delete(block.tool_use_id);
+        // Monitor's observed launch result has taskId but no async_launched status. Its prose
+        // content is not structured; use the provider's separate result only for a known Monitor.
+        const monitor = [...this.pendingBackgroundTasks.values()].find(task =>
+          task.toolUseId === block.tool_use_id && task.launchType === "monitor");
+        const monitorTaskId = firstString(structuredToolResult(msg.tool_use_result), ["taskId"]);
+        if (monitor && monitorTaskId && blocks.length === 1 && block.is_error !== true) {
+          this.recordPendingTask(monitorTaskId, block.tool_use_id, undefined, true, true, "monitor");
+          continue;
+        }
         this.reconcileBackgroundToolResult(block.tool_use_id, block.content, block.is_error === true);
       }
     }
@@ -1800,14 +1830,20 @@ export class ClaudeCodeDriver implements Driver {
   ): void {
     const terminal = new Map<string, DriverBackgroundTerminalJob>();
     const activeTurnId = this.activeProviderTurnId();
-    const capture = (task: PendingBackgroundTask) => terminal.set(task.id, {
-      ...driverBackgroundJob(task),
-      status,
-      terminalAt: this.deps.now(),
-      continuationRequired: activeTurnId == null ||
-        (task.parentPersistentTurnId != null && task.parentPersistentTurnId !== activeTurnId),
-      ...provenance,
-    });
+    const capture = (task: PendingBackgroundTask) => {
+      if (task.launchType === "monitor") {
+        this.endedBackgroundTaskIds.add(task.id);
+        if (task.toolUseId) this.endedBackgroundTaskIds.add(`tool:${task.toolUseId}`);
+      }
+      terminal.set(task.id, {
+        ...driverBackgroundJob(task),
+        status,
+        terminalAt: this.deps.now(),
+        continuationRequired: activeTurnId == null ||
+          (task.parentPersistentTurnId != null && task.parentPersistentTurnId !== activeTurnId),
+        ...provenance,
+      });
+    };
     this.unverifiedBackgroundTaskIds.delete(id);
     const direct = this.pendingBackgroundTasks.get(id);
     if (direct) capture(direct);
@@ -1836,6 +1872,7 @@ export class ClaudeCodeDriver implements Driver {
     const stop = this.stoppingBackgroundTasks.get(id);
     const task = this.pendingBackgroundTasks.get(id);
     if (!stop || stop.ended || !task) return;
+    if (task.launchType === "monitor" && task.toolUseId) this.endedBackgroundTaskIds.add(`tool:${task.toolUseId}`);
     for (const [key, pending] of this.pendingBackgroundTasks) {
       if (key !== id && !(task.toolUseId && pending.toolUseId === task.toolUseId)) continue;
       this.pendingBackgroundTasks.delete(key);
@@ -1897,6 +1934,16 @@ export class ClaudeCodeDriver implements Driver {
     return this.activePersistentTurn?.id ?? this.activeOneShotTurnId ?? undefined;
   }
 
+  /** Expiry and an exact missing-task response prove a monitor ended. Remember both identities
+   * before publishing its terminal record, so trailing notifications/results cannot revive it. */
+  private completeMonitorTask(id: string, toolUseId?: string, status: "completed" | "failed" | "killed" = "killed"): void {
+    const task = this.pendingBackgroundTasks.get(id);
+    const alias = toolUseId ?? task?.toolUseId;
+    this.endedBackgroundTaskIds.add(id);
+    if (alias) this.endedBackgroundTaskIds.add(`tool:${alias}`);
+    this.completePendingTask(id, alias, status);
+  }
+
   /** A restart seed gets one recovery turn. If that live process did not re-observe the id, the
    * seed is handled rather than being carried into an automatic replay loop forever. */
   private settleUnverifiedBackgroundTasks(): void {
@@ -1925,7 +1972,11 @@ export class ClaudeCodeDriver implements Driver {
     this.cb.onBackgroundWork?.({
       state: "running",
       pendingTaskIds: tasks.map((task) => task.id).sort(),
-      jobs: tasks.map(driverBackgroundJob).sort((left, right) => left.id.localeCompare(right.id)),
+      // A Monitor's provisional id still holds handoffs, but must not become a second durable
+      // ledger row when task_started supplies the provider id. Terminal launch errors are emitted
+      // normally; a successful launch is registered once under its provider identity.
+      jobs: tasks.filter(task => !(task.launchType === "monitor" && task.id === `tool:${task.toolUseId}`))
+        .map(driverBackgroundJob).sort((left, right) => left.id.localeCompare(right.id)),
       ...(terminalJobs.length ? { terminalJobs } : {}),
       observedTaskIds: tasks.filter((task) => !this.unverifiedBackgroundTaskIds.has(task.id)).map((task) => task.id).sort(),
       oldestPendingAt: Math.min(...tasks.map((task) => task.startedAt)),
