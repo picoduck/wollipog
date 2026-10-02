@@ -257,9 +257,13 @@ os.close(home_fd)`)], { env: { ...process.env, HOME: helperHome }, encoding: "ut
 // (normal cases measured 2-6s). Report the active phase on cancellation.
 function crashPhases(t: TestContext) {
   let active: { name: string; started: number } | undefined;
-  t.after(() => {
-    if (active) t.diagnostic(`${t.name}: interrupted during ${active.name} after ${Math.round(performance.now() - active.started)}ms`);
-  });
+  const interrupted = () => {
+    // A completed/cancelled node:test context can discard late diagnostics.
+    // Emit at abort time so the stalled phase survives cancellation reporting.
+    if (active) console.error(`[lease-crash] ${t.name}: interrupted during ${active.name} after ${Math.round(performance.now() - active.started)}ms`);
+  };
+  t.signal.addEventListener("abort", interrupted, { once: true });
+  t.after(() => t.signal.removeEventListener("abort", interrupted));
   return async <T>(name: string, run: () => T | Promise<T>): Promise<T> => {
     t.signal.throwIfAborted();
     active = { name, started: performance.now() };
