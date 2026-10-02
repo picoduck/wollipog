@@ -2750,7 +2750,7 @@ button.status { cursor: pointer; }
   font: inherit;
   min-width: 0;
   max-width: none;
-  max-height: 50%;
+  max-height: none;
   padding: var(--space-1);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -4107,7 +4107,7 @@ textarea {
   cursor: pointer;
 }
 .approval-review-details .approval-context {
-  max-height: 50%;
+  max-height: none;
   margin: 10px 0 0;
 }
 .approval-review-actions {
@@ -4472,7 +4472,7 @@ textarea {
   gap: 12px;
 }
 .files-browser .files-list {
-  max-height: 50%;
+  max-height: none;
   flex: 1;
 }
 
@@ -12834,7 +12834,7 @@ body.shell-dock-dragging * {
 .timeline .question-bar {
   max-width: none;
   min-height: auto;
-  max-height: 50%;
+  max-height: none;
   margin-top: 0;
   overflow: visible;
 }
