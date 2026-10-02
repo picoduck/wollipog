@@ -45,10 +45,11 @@ export function winningSkillRule<T extends SkillRule>(rules: ReadonlyArray<T>, r
 export interface SkillManualOnlyError<T extends SkillRule = SkillRule> {
   /** The rule that targets them, or null when it is not among the rules this page has read. */
   rule: T | null;
-  /** The machines that skip them, in the order given. */
+  /** The machines that skip any of them, in the order given. */
   runnerIds: string[];
-  /** The skipped agents, in the order found. */
-  agents: Array<Pick<AgentDefinition, "id" | "name" | "driver">>;
+  /** The skipped agents, in the order found, each with the machine that skips it: an agent skipped
+   * on two machines appears twice, so the notice can say which agent is skipped where (#2367). */
+  agents: Array<Pick<AgentDefinition, "id" | "name" | "driver"> & { runnerId: string }>;
 }
 
 /** Every Manual Only rule that leaves agents unable to run this skill, one entry per rule, in the
@@ -79,7 +80,7 @@ export function skillManualOnlyErrors<T extends SkillRule>(
       const key = rule ? `rule:${rule.id}` : "unknown";
       const entry = byRule.get(key) ?? { rule, runnerIds: [], agents: [] };
       if (!entry.runnerIds.includes(runner.runnerId)) entry.runnerIds.push(runner.runnerId);
-      entry.agents.push({ id: agent.id, name: agent.name, driver: agent.driver });
+      entry.agents.push({ id: agent.id, name: agent.name, driver: agent.driver, runnerId: runner.runnerId });
       byRule.set(key, entry);
     }
   }

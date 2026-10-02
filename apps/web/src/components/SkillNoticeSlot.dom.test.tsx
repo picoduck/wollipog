@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import { PROTOCOL_VERSION, type RunnerView } from "@wollipog/protocol";
 import { skillOverviewAttention, type RunnerSkillsResponse, type SkillSummary } from "../skills.js";
 import type { SkillRule } from "../skill-assignment-matrix.js";
-import { SkillNoticeSlot, listText, skillNoticeItem, type SkillNoticeSlotProps } from "./SkillNoticeSlot.js";
+import { SkillNoticeSlot, listText, manualOnlySkipText, skillNoticeItem, type SkillNoticeSlotProps } from "./SkillNoticeSlot.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -198,6 +198,46 @@ test("a group's Manual Only rule sends the person to Groups, and an unread rule 
   assert.equal(unknown.notice().querySelector(".notice-title")?.textContent, "Codex and Pi Can't Run Manual-Only Skills");
   assert.deepEqual(unknown.actions(), []);
   await unknown.unmount();
+});
+
+test("a Manual Only notice names each skipped agent's own machines (#2367)", async () => {
+  // The issue's machines: Travel Laptop has Claude Code and Codex, but no Pi.
+  const laptop: RunnerView = { ...studio, runnerId: "laptop", hostname: "laptop", displayName: "Travel Laptop", agents: agents.slice(0, 2) };
+  const labels = new Map([["studio", "Studio Workstation"], ["laptop", "Travel Laptop"]]);
+  const laptopManual: RunnerSkillsResponse = {
+    desired: [{ name: "collect", versionDigest: digest, targets: laptop.agents.map((agent) => ({ agentId: agent.id, invocation: "manual" as const })) }],
+    reported: null,
+  };
+  const view = await mount({ runners: [studio, laptop], machineLabels: labels, machineSkills: { studio: manualEverywhere, laptop: laptopManual } });
+  assert.equal(view.notice().querySelector(".notice-title")?.textContent, "Codex and Pi Can't Run Manual-Only Skills");
+  assert.equal(view.body(), "Codex is skipped on Studio Workstation and Travel Laptop, and Pi on Studio Workstation. " +
+    "Switch the assignment to Agent Invocable, or limit it to Claude Code.");
+  await view.click(view.action("Change Invocation…"));
+  assert.equal(view.menuItem("Switch to Agent Invocable")?.querySelector(".menu-desc")?.textContent,
+    "Agents run it on their own, so Codex and Pi can use it too.");
+  await view.unmount();
+
+  // Agents skipped on the same machines still share one sentence, however many machines.
+  const both = await mount({ runners: [studio, { ...laptop, agents }], machineLabels: labels,
+    machineSkills: { studio: manualEverywhere, laptop: manualEverywhere } });
+  assert.equal(both.body(), "They're skipped on Studio Workstation and Travel Laptop. Switch the assignment to Agent Invocable, or limit it to Claude Code.");
+  await both.unmount();
+
+  // Agents sharing machines share a clause; only the first clause carries the verb, in agreement.
+  const names = new Map([["a", "Studio Workstation"], ["b", "Travel Laptop"], ["c", "Build Box"]]);
+  const skip = (...pairs: Array<[string, string]>) =>
+    manualOnlySkipText(pairs.map(([name, runnerId]) => ({ id: name.toLowerCase(), name, driver: "codex" as const, runnerId })), (id) => names.get(id)!);
+  assert.equal(skip(["Codex", "a"], ["Pi", "a"], ["Gemini", "a"], ["Codex", "b"]),
+    "Codex is skipped on Studio Workstation and Travel Laptop, and Pi and Gemini on Studio Workstation.");
+  assert.equal(skip(["Codex", "a"], ["Pi", "a"], ["Codex", "b"], ["Pi", "b"], ["Gemini", "b"]),
+    "Codex and Pi are skipped on Studio Workstation and Travel Laptop, and Gemini on Travel Laptop.");
+  assert.equal(skip(["Codex", "a"], ["Pi", "a"], ["Codex", "b"], ["Gemini", "c"]),
+    "Codex is skipped on Studio Workstation and Travel Laptop, Pi on Studio Workstation, and Gemini on Build Box.");
+  assert.equal(skip(["Pi", "b"], ["Codex", "a"], ["Codex", "b"], ["Pi", "a"]), "They're skipped on Travel Laptop and Studio Workstation.",
+    "the same machines in any order the agents were found are one set, in Deployment's order");
+  assert.equal(skip(["Codex", "a"], ["Codex", "b"], ["Codex", "c"]), "It's skipped on Studio Workstation, Travel Laptop and 1 more.");
+  assert.equal(skip(["Codex", "a"], ["Pi", "a"]), "They're skipped on Studio Workstation.");
+  assert.equal(skip(), "");
 });
 
 test("a machine's own deployment error names its agents, keeps its words behind Show Details and offers Sync Now", async () => {

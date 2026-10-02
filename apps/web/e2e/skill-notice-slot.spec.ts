@@ -56,7 +56,7 @@ test.describe("at 1440×900", () => {
     await expect(page.locator(".skill-detail-head + .skill-notice-slot")).toHaveCount(1);
     await expect(notice(page).locator(".notice-title")).toHaveText("Codex and Pi Can't Run Manual-Only Skills");
     await expect(notice(page).locator(".notice-body")).toHaveText(
-      "They're skipped on Studio Workstation and Travel Laptop. Switch the assignment to Agent Invocable, or limit it to Claude Code.");
+      "Codex is skipped on Studio Workstation and Travel Laptop, and Pi on Studio Workstation. Switch the assignment to Agent Invocable, or limit it to Claude Code.");
     await expect(actions(page)).toHaveText(["Change Invocation…"]);
     await expect(slot(page).locator(".notice")).toHaveCount(1);
 

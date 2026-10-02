@@ -83,6 +83,38 @@ export function listText(items: ReadonlyArray<string>, max = 2): string {
 
 const unique = (items: ReadonlyArray<string>) => [...new Set(items)];
 
+/** Where a Manual Only rule's agents are skipped, so every machine it names skips every agent named
+ * with it (#2367). Agents skipped on the same machines share a clause, in the order found, and each
+ * clause's machines keep the order they were found in (Deployment's). One agent, or one set of
+ * machines, reads as before. */
+export function manualOnlySkipText(
+  agents: SkillManualOnlyError["agents"],
+  machineName: (runnerId: string) => string,
+): string {
+  const machineOrder = unique(agents.map((agent) => agent.runnerId));
+  const machinesByAgent = new Map<string, string[]>();
+  for (const agent of agents) {
+    const name = agent.name || agent.id;
+    const runnerIds = machinesByAgent.get(name) ?? [];
+    if (!runnerIds.includes(agent.runnerId)) runnerIds.push(agent.runnerId);
+    machinesByAgent.set(name, runnerIds);
+  }
+  for (const runnerIds of machinesByAgent.values()) runnerIds.sort((a, b) => machineOrder.indexOf(a) - machineOrder.indexOf(b));
+  const clauses = new Map<string, { names: string[]; runnerIds: string[] }>();
+  for (const [name, runnerIds] of machinesByAgent) {
+    const key = JSON.stringify(runnerIds);
+    const clause = clauses.get(key) ?? { names: [], runnerIds };
+    clause.names.push(name);
+    clauses.set(key, clause);
+  }
+  const [first, ...rest] = [...clauses.values()];
+  if (!first) return "";
+  if (!rest.length) return `${machinesByAgent.size === 1 ? "It's" : "They're"} skipped on ${listText(first.runnerIds.map(machineName))}.`;
+  const parts = [first, ...rest].map(({ names, runnerIds }, index) =>
+    `${listText(names, 3)}${index ? "" : names.length === 1 ? " is skipped" : " are skipped"} on ${listText(runnerIds.map(machineName))}`);
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}.`;
+}
+
 /** A notice action that opens a menu anchored to itself (§9.1): one item per choice. */
 function NoticeMenuButton({ label, chevron = false, disabled, children }: {
   label: string;
@@ -257,7 +289,7 @@ export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps
 
   let notice: ReactNode;
   if (item.kind === "manual-only") {
-    const { rule, runnerIds } = item.error;
+    const { rule } = item.error;
     const names = unique(item.error.agents.map((agent) => agent.name || agent.id));
     const title = `${listText(names, 3)} Can't Run Manual-Only Skills`;
     const fromGroup = Boolean(rule?.groupId);
@@ -291,7 +323,7 @@ export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps
         )}
       >
         <p>
-          {names.length === 1 ? "It's" : "They're"} skipped on {listText(runnerIds.map(machineName))}.{" "}
+          {manualOnlySkipText(item.error.agents, machineName)}{" "}
           {fromGroup
             ? "Switch the group's assignment to Agent Invocable, or limit it to Claude Code."
             : "Switch the assignment to Agent Invocable, or limit it to Claude Code."}

@@ -162,6 +162,8 @@ test("a Manual Only rule names the agents it skips, the machines that skip them 
   assert.equal(errors[0]!.rule?.id, "manual");
   assert.deepEqual(errors[0]!.runnerIds, ["studio", "laptop"]);
   assert.deepEqual(errors[0]!.agents.map((agent) => agent.name), ["Codex", "Pi", "Codex"], "Claude Code enforces manual-only invocation");
+  assert.deepEqual(errors[0]!.agents.map((agent) => [agent.name, agent.runnerId]), [["Codex", "studio"], ["Pi", "studio"], ["Codex", "laptop"]],
+    "each skipped agent keeps the machine that skips it (#2367)");
 
   // Each offending rule is its own entry, in the order its first skipped agent appears.
   const codexOnly = rule("codex-only", { scopeKind: "runner", runnerId: "laptop", agentSelector: { kind: "driver", driver: "codex" } });
