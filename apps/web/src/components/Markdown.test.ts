@@ -4,11 +4,13 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   compactMarkdownUrlLabel,
+  formatTranscriptMediaDuration,
   Markdown,
   markdownCodeBlockContinues,
   markdownCodeLanguage,
   markdownCodeText,
   markdownCodeWrapsByDefault,
+  transcriptMediaExpiry,
   transcriptMediaKind,
   transcriptMediaLabel,
 } from "./Markdown.js";
@@ -43,8 +45,9 @@ test("safe Markdown renders immediately without synchronous highlighting or acti
   assert.doesNotMatch(html, / node=/);
   assert.doesNotMatch(html, /hljs/);
   assert.doesNotMatch(html, /<script|<img/i);
-  assert.match(html, /class="md-img-link"/);
+  assert.match(html, /<a class="md-img-link"[^>]*><svg[^>]*class="[^"]*lucide-image app-icon"[^>]*>.*<\/svg>tracking pixel<\/a>/);
   assert.match(html, /href="https:\/\/attacker\.example\/pixel\.png"/);
+  assert.doesNotMatch(html, /\u{1F5BC}/u);
 });
 
 test("compact URL rendering hides signatures while retaining exact safe destinations", () => {
@@ -120,14 +123,14 @@ test("generated transcript media labels remove invisible Unicode without rewriti
   }));
   assert.match(imageMarkup, /<img class="md-media-image"[^>]*alt=""/,
     "an intentionally empty image alt remains decorative after generated-label sanitization");
-  assert.match(imageMarkup, /class="md-img-link"[^>]*>🖼 sessionreview\.png<\/a>/);
+  assert.match(imageMarkup, /<span class="md-media-name"[^>]*>sessionreview\.png<\/span>/);
 
   const video = `https://evidence.example/session${encodedUnsafe}review.webm?X-Amz-Signature=secret`;
   const videoMarkup = renderToStaticMarkup(React.createElement(Markdown, { inlineMedia: true, children: video }));
   assert.match(videoMarkup, /<video class="md-media-video"[^>]*aria-label="sessionreview\.webm"/);
 });
 
-test("transcript media opt-in keeps links and adds bounded native image/video elements", () => {
+test("transcript media renders as captioned figures whose visible text omits the signed query", () => {
   const image = "https://evidence.example/review.png?X-Amz-Signature=redacted";
   const video = "https://evidence.example/review.webm?X-Amz-Signature=redacted";
   const html = renderToStaticMarkup(React.createElement(Markdown, {
@@ -135,15 +138,17 @@ test("transcript media opt-in keeps links and adds bounded native image/video el
     children: `${image}\n\n${video}`,
   }));
 
-  assert.match(html, new RegExp(`href="${image.replaceAll("?", "\\?")}"`));
-  assert.match(html, /<a class="md-media-image-link" aria-hidden="true">/);
-  assert.doesNotMatch(html, /aria-label="Open review\.png Full Size"/);
+  assert.equal(html.match(/<figure class="md-media"/g)?.length, 2);
+  assert.doesNotMatch(html, /<p>\s*<figure|<figure[^>]*>(?:(?!<\/figure>).)*<\/p>/, "a figure never sits inside a paragraph");
   assert.match(html, /<img class="md-media-image"[^>]*src="https:\/\/evidence\.example\/review\.png[^>]*alt="review\.png"[^>]*loading="lazy"/);
   assert.match(html, /<video class="md-media-video"[^>]*src="https:\/\/evidence\.example\/review\.webm[^>]*aria-label="review\.webm"[^>]*controls=""[^>]*playsInline=""[^>]*preload="metadata"/);
   assert.doesNotMatch(html, /autoplay/);
+  assert.match(html, /<figcaption class="md-media-cap"><span class="md-media-title"><span class="md-media-name" id="[^"]+">review\.png<\/span><\/span><a class="link" href="https:\/\/evidence\.example\/review\.png\?X-Amz-Signature=redacted" target="_blank" rel="noopener noreferrer" aria-describedby="[^"]+">Open Full Size<\/a><\/figcaption>/);
+  const visibleText = html.replace(/<[^>]*>/g, "");
+  assert.doesNotMatch(visibleText, /X-Amz|\?/);
 });
 
-test("unsettled transcript media keeps its plain link without mounting a remote element", () => {
+test("unsettled transcript media shows its caption without mounting a remote element", () => {
   const image = "https://evidence.example/review.png?X-Amz-Signature=partial";
   const video = "https://evidence.example/review.webm?X-Amz-Signature=partial";
   const html = renderToStaticMarkup(React.createElement(Markdown, {
@@ -152,19 +157,22 @@ test("unsettled transcript media keeps its plain link without mounting a remote 
     children: `${image}\n\n${video}`,
   }));
 
-  assert.match(html, new RegExp(`href="${image.replaceAll("?", "\\?")}"`));
-  assert.match(html, new RegExp(`href="${video.replaceAll("?", "\\?")}"`));
-  assert.doesNotMatch(html, /md-media-embed|<img|<video/);
+  assert.match(html, new RegExp(`href="${image.replaceAll("?", "\\?")}"[^>]*>Open Link</a>`));
+  assert.match(html, new RegExp(`href="${video.replaceAll("?", "\\?")}"[^>]*>Open Link</a>`));
+  assert.match(html, /data-media-state="unsettled"/);
+  assert.doesNotMatch(html, /<img|<video/);
 });
 
-test("author-provided image alt text remains the media name", () => {
+test("a markdown image is the same figure with its alt text as the caption and no emoji", () => {
   const html = renderToStaticMarkup(React.createElement(Markdown, {
     inlineMedia: true,
     children: "![Reviewed Layout](https://evidence.example/review.png?signature=redacted)",
   }));
 
+  assert.match(html, /<figure class="md-media"/);
   assert.match(html, /<img class="md-media-image"[^>]*alt="Reviewed Layout"/);
-  assert.match(html, /class="md-img-link"[^>]*>🖼 Reviewed Layout<\/a>/);
+  assert.match(html, /<span class="md-media-name"[^>]*>Reviewed Layout<\/span>/);
+  assert.doesNotMatch(html, /md-img-link|\u{1F5BC}/u);
   assert.doesNotMatch(html, /alt="https:\/\//);
 });
 
@@ -175,7 +183,51 @@ test("an intentionally empty Markdown image alt stays decorative", () => {
   }));
 
   assert.match(html, /<img class="md-media-image"[^>]*alt=""/);
-  assert.match(html, /class="md-img-link"[^>]*>🖼 review\.png<\/a>/);
+  assert.match(html, /<span class="md-media-name"[^>]*>review\.png<\/span>/);
+});
+
+test("text sharing a paragraph with media stays a paragraph beside the figure", () => {
+  const video = "https://evidence.example/walkthrough.webm?X-Amz-Signature=redacted";
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    inlineMedia: true,
+    children: `Interaction recording:\n${video}\nRecorded at 1x.`,
+  }));
+
+  assert.match(html, /^<div class="md"><p>Interaction recording:<\/p><figure class="md-media"[^>]*>.*<\/figure><p>Recorded at 1x\.<\/p><\/div>$/);
+});
+
+test("non-HTTPS and non-media links stay ordinary links without a figure", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    inlineMedia: true,
+    children: "http://evidence.example/review.png and https://evidence.example/report.pdf?sig=1",
+  }));
+
+  assert.match(html, /^<div class="md"><p><a href="http:\/\/evidence\.example\/review\.png"[^>]*>http:\/\/evidence\.example\/review\.png<\/a> and <a href="https:\/\/evidence\.example\/report\.pdf\?sig=1"/);
+  assert.doesNotMatch(html, /<figure|<img|<video/);
+});
+
+test("signed URL expiry is read from S3, GCS, CloudFront and Azure query strings", () => {
+  assert.equal(
+    transcriptMediaExpiry("https://b.example/a.png?X-Amz-Date=20260101T000000Z&X-Amz-Expires=3600&X-Amz-Signature=s"),
+    Date.UTC(2026, 0, 1, 1),
+  );
+  assert.equal(
+    transcriptMediaExpiry("https://b.example/a.png?X-Goog-Date=20260101T120000Z&X-Goog-Expires=60"),
+    Date.UTC(2026, 0, 1, 12, 1),
+  );
+  assert.equal(transcriptMediaExpiry("https://b.example/a.png?Expires=1767225600&Signature=s"), 1_767_225_600_000);
+  assert.equal(transcriptMediaExpiry("https://b.example/a.png?se=2026-01-01T00%3A00%3A00Z&sig=s"), Date.UTC(2026, 0, 1));
+  assert.equal(transcriptMediaExpiry("https://b.example/a.png?X-Amz-Date=garbage&X-Amz-Expires=60"), null);
+  assert.equal(transcriptMediaExpiry("https://b.example/a.png"), null);
+  assert.equal(transcriptMediaExpiry("not a url"), null);
+});
+
+test("video durations read as m:ss or h:mm:ss and stay unknown when not finite", () => {
+  assert.equal(formatTranscriptMediaDuration(7.4), "0:07");
+  assert.equal(formatTranscriptMediaDuration(75), "1:15");
+  assert.equal(formatTranscriptMediaDuration(3_725), "1:02:05");
+  assert.equal(formatTranscriptMediaDuration(Number.POSITIVE_INFINITY), null);
+  assert.equal(formatTranscriptMediaDuration(Number.NaN), null);
 });
 
 test("inline code stays action-free", () => {
@@ -272,7 +324,7 @@ test("the inline profile leaves headings, tables, quotes, images and raw HTML as
       "![shot](https://evidence.example/shot.png) <b>bold</b>",
     ].join("\n"),
   }));
-  assert.doesNotMatch(html, /<h\d|<table|<blockquote|<img|<video|<b>|md-media-embed/);
+  assert.doesNotMatch(html, /<h\d|<table|<blockquote|<img|<video|<b>|<figure/);
   assert.match(html, /<p># Heading<\/p>/);
   assert.match(html, /\| a \| b \|/);
   assert.match(html, /&gt; quoted/);

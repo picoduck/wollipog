@@ -40,6 +40,7 @@ import {
   Grid2X2 as LucideGrid2X2,
   History as LucideHistory,
   Image as LucideImage,
+  ImageOff as LucideImageOff,
   Inbox as LucideInbox,
   Info as LucideInfo,
   Keyboard as LucideKeyboard,
@@ -397,6 +398,10 @@ export function MicIcon(props: IconProps) {
 
 export function ImageIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideImage} {...props} />;
+}
+
+export function ImageOffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideImageOff} {...props} />;
 }
 
 export function ChainIcon(props: IconProps) {

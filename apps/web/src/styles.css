@@ -7385,12 +7385,11 @@ button.file-head.source-path-link {
 .md img {
   max-width: 100%;
 }
-/* Transcript media always retains its plain link; a failed fetch removes only the embed. */
+/* A markdown image that is not embedded stays a link, led by the image icon (§18). */
 .md-img-link {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 0.9em;
+  gap: var(--space-1);
   color: var(--accent);
   text-decoration: none;
   word-break: break-all;
@@ -7398,15 +7397,54 @@ button.file-head.source-path-link {
 .md-img-link:hover {
   text-decoration: underline;
 }
-.md-media-embed {
-  display: block;
+/* Transcript media is a captioned figure (#2165): the image or video, then one caption line with
+   its name, its size or length (§11.3 meta) and Open Full Size. A failed fetch drops the media and
+   leaves only the caption, so nothing reserves an empty box. */
+.md-media {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
   max-width: 100%;
-  margin: 8px 0;
+  margin: 0 0 var(--space-2);
 }
-.md-media-image-link {
-  display: block;
-  width: fit-content;
+/* Open Full Size borrows a 44px band on touch (§2.8); 12px keeps that band off the video controls. */
+@media (pointer: coarse) {
+  .md-media {
+    gap: var(--space-3);
+  }
+}
+.md-media-cap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: var(--space-1);
+  min-width: 0;
   max-width: 100%;
+  font: var(--type-small);
+  color: var(--text-dim);
+}
+/* The name, led by the failure icon, which keeps the caption's dim colour. */
+.md-media-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.md-media-title > .app-icon {
+  flex: none;
+}
+.md-media-name {
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.md-media-meta {
+  font-variant-numeric: tabular-nums;
+}
+.md-media-cap .link {
+  white-space: nowrap;
 }
 .md-media-image,
 .md-media-video {

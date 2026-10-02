@@ -259,64 +259,107 @@ test("a consumer that opts out of highlighting never shows highlight classes", a
   }
 });
 
-test("failed transcript image and video loads collapse to their plain links", async () => {
-  const image = "https://evidence.example/expired.png?signature=expired";
-  const video = "https://evidence.example/expired.webm?signature=expired";
-  const { container, root } = await renderMarkdown(`${image}\n\n${video}`, true);
+function dispatch(element: Element, type: string): void {
+  element.dispatchEvent(new domWindow.Event(type) as unknown as Event);
+}
+
+function caption(figure: Element) {
+  const cap = figure.querySelector("figcaption.md-media-cap")!;
+  return {
+    name: cap.querySelector(".md-media-name")!.textContent,
+    meta: [...cap.querySelectorAll(".md-media-meta")].map((element) => element.textContent),
+    icon: cap.querySelector("svg.app-icon"),
+    link: cap.querySelector("a.link")!,
+  };
+}
+
+test("a signed image shows its name, then its pixel size once loaded, and Open Full Size", async () => {
+  const image = "https://evidence.example/screenshot.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc";
+  const { container, root } = await renderMarkdown(`Here is the result.\n\n${image}`, true);
   try {
-    assert.equal(container.querySelectorAll(".md-media-embed").length, 2);
-    assert.equal(container.querySelectorAll(`a[href^="https://evidence.example/expired"]`).length, 2,
-      "only the two visible plain URL links are actionable before the image loads");
+    const figure = container.querySelector("figure.md-media")!;
+    assert.equal(figure.parentElement, container.querySelector(".md"), "the figure is never inside a paragraph");
+    const img = figure.querySelector("img.md-media-image")!;
+    assert.equal(img.getAttribute("src"), image);
+    assert.equal(img.getAttribute("data-load-state"), "pending");
+    assert.deepEqual(caption(figure).meta, [], "no size before the image loads");
 
-    await act(async () => {
-      container.querySelector("img.md-media-image")!.dispatchEvent(new domWindow.Event("error") as unknown as Event);
-      container.querySelector("video.md-media-video")!.dispatchEvent(new domWindow.Event("error") as unknown as Event);
-    });
+    Object.defineProperty(img, "naturalWidth", { configurable: true, value: 1280 });
+    Object.defineProperty(img, "naturalHeight", { configurable: true, value: 720 });
+    await act(async () => { dispatch(img, "load"); });
 
-    assert.equal(container.querySelectorAll(".md-media-embed").length, 0, "failed embeds reserve no layout space");
-    assert.equal(container.querySelectorAll(`a[href^="https://evidence.example/expired"]`).length, 2,
-      "each original plain link remains usable");
+    const { name, meta, link, icon } = caption(figure);
+    assert.equal(name, "screenshot.png");
+    assert.deepEqual(meta, ["1280 × 720"]);
+    assertNoDomNode(icon, "a loaded figure has no failure icon");
+    assert.equal(link.textContent, "Open Full Size");
+    assert.equal(link.getAttribute("href"), image, "the anchor keeps the full signed href");
+    assert.equal(link.getAttribute("target"), "_blank");
+    assert.equal(link.getAttribute("rel"), "noopener noreferrer");
+    assert.equal(link.getAttribute("aria-describedby"), figure.querySelector(".md-media-name")!.id);
+    assert.doesNotMatch(container.textContent ?? "", /X-Amz|\?/, "the signed query string is never visible text");
+    assert.equal(container.querySelectorAll("a").length, 1, "one action per figure: no separate link row");
   } finally {
     await cleanup(container, root);
   }
 });
 
-test("pending transcript images stay out of the accessibility tree and tab order until loaded", async () => {
-  const image = "https://evidence.example/session%20review.png?signature=valid";
-  const { container, root } = await renderMarkdown(image, true);
+test("a signed video shows its duration once metadata loads", async () => {
+  const video = "https://evidence.example/walkthrough.webm?X-Amz-Signature=abc";
+  const { container, root } = await renderMarkdown(video, true);
   try {
-    const fullSizeLink = container.querySelector("a.md-media-image-link")!;
-    const embeddedImage = container.querySelector("img.md-media-image")!;
-    assert.equal(fullSizeLink.hasAttribute("href"), false);
-    assert.equal(fullSizeLink.getAttribute("aria-hidden"), "true");
-    assert.equal(fullSizeLink.hasAttribute("aria-label"), false);
-    assert.equal(embeddedImage.getAttribute("alt"), "session review.png");
-
-    await act(async () => {
-      embeddedImage.dispatchEvent(new domWindow.Event("load") as unknown as Event);
-    });
-
-    assert.equal(fullSizeLink.getAttribute("href"), image, "loaded image becomes a full-size link");
-    assert.equal(fullSizeLink.hasAttribute("aria-hidden"), false, "loaded link returns to the accessibility tree");
-    assert.equal(fullSizeLink.getAttribute("aria-label"), "Open session review.png Full Size");
+    const figure = container.querySelector("figure.md-media")!;
+    const element = figure.querySelector("video.md-media-video")!;
+    Object.defineProperty(element, "duration", { configurable: true, value: 83.2 });
+    await act(async () => { dispatch(element, "loadedmetadata"); });
+    assert.equal(caption(figure).name, "walkthrough.webm");
+    assert.deepEqual(caption(figure).meta, ["1:23"]);
+    assert.equal(caption(figure).link.textContent, "Open Full Size");
   } finally {
     await cleanup(container, root);
   }
 });
 
-test("generated media names remove invisible Unicode from image alt and loaded actions", async () => {
+test("failed media collapses to one caption line with the icon, its name, a reason and Open Link", async () => {
+  const expired = "https://evidence.example/expired.png?X-Amz-Date=20200101T000000Z&X-Amz-Expires=3600&X-Amz-Signature=s";
+  const broken = "https://evidence.example/broken.png?signature=valid";
+  const video = "https://evidence.example/broken.webm?signature=valid";
+  const { container, root } = await renderMarkdown(`${expired}\n\n${broken}\n\n${video}`, true);
+  try {
+    const figures = [...container.querySelectorAll("figure.md-media")];
+    assert.equal(figures.length, 3);
+    await act(async () => {
+      dispatch(figures[0]!.querySelector("img")!, "error");
+      dispatch(figures[1]!.querySelector("img")!, "error");
+      dispatch(figures[2]!.querySelector("video")!, "error");
+    });
+
+    assertNoDomNode(container.querySelector("img, video"), "a failed figure reserves no media box");
+    const [first, second, third] = figures.map(caption);
+    assert.equal(first!.name, "expired.png");
+    assert.deepEqual(first!.meta, ["Link expired"]);
+    assert.deepEqual(second!.meta, ["Couldn't load this image"]);
+    assert.deepEqual(third!.meta, ["Couldn't load this video"]);
+    for (const [index, href] of [expired, broken, video].entries()) {
+      const { icon, link } = [first, second, third][index]!;
+      assert.ok(icon?.classList.contains("lucide-image-off"), "the ImageOff icon leads the caption");
+      assert.equal(link.textContent, "Open Link");
+      assert.equal(link.getAttribute("href"), href);
+      assert.equal(link.getAttribute("target"), "_blank");
+      assert.equal(link.getAttribute("rel"), "noopener noreferrer");
+    }
+    for (const figure of figures) assert.equal(figure.getAttribute("data-media-state"), "failed");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("generated media names remove invisible Unicode from the caption and image alt", async () => {
   const image = "https://evidence.example/session%E2%80%8B%E2%80%8C%E2%80%8D%E2%80%A8%E2%80%A9review.png?signature=valid";
   const { container, root } = await renderMarkdown(image, true);
   try {
-    const fullSizeLink = container.querySelector("a.md-media-image-link")!;
-    const embeddedImage = container.querySelector("img.md-media-image")!;
-    assert.equal(embeddedImage.getAttribute("alt"), "sessionreview.png");
-
-    await act(async () => {
-      embeddedImage.dispatchEvent(new domWindow.Event("load") as unknown as Event);
-    });
-
-    assert.equal(fullSizeLink.getAttribute("aria-label"), "Open sessionreview.png Full Size");
+    assert.equal(container.querySelector("img.md-media-image")!.getAttribute("alt"), "sessionreview.png");
+    assert.equal(container.querySelector(".md-media-name")!.textContent, "sessionreview.png");
   } finally {
     await cleanup(container, root);
   }
@@ -328,17 +371,20 @@ test("streaming URL changes mount no media until the final settled URL", async (
   const final = "https://evidence.example/review.png?signature=valid";
   const { container, root } = await renderMarkdown(first, true, false);
   try {
-    assertNoDomNode(container.querySelector(".md-media-embed"));
+    assertNoDomNode(container.querySelector("img, video"));
+    assert.equal(container.querySelector(".md-media-name")!.textContent, "review.png");
+    assert.equal(container.querySelector("figcaption a")!.textContent, "Open Link");
     await act(async () => {
       root.render(<Markdown highlightEligible={false} inlineMedia settled={false}>{second}</Markdown>);
     });
-    assertNoDomNode(container.querySelector(".md-media-embed"));
+    assertNoDomNode(container.querySelector("img, video"));
 
     await act(async () => {
       root.render(<Markdown highlightEligible={false} inlineMedia settled>{final}</Markdown>);
     });
-    assert.equal(container.querySelectorAll(".md-media-embed").length, 1);
+    assert.equal(container.querySelectorAll("img.md-media-image").length, 1);
     assert.equal(container.querySelector("img.md-media-image")?.getAttribute("src"), final);
+    assert.equal(container.querySelector("figcaption a")!.textContent, "Open Full Size");
   } finally {
     await cleanup(container, root);
   }
@@ -349,9 +395,7 @@ test("loaded transcript media survives visibility-only rerenders without remount
   const { container, root } = await renderMarkdown(image, true);
   try {
     const loadedImage = container.querySelector("img.md-media-image")!;
-    await act(async () => {
-      loadedImage.dispatchEvent(new domWindow.Event("load") as unknown as Event);
-    });
+    await act(async () => { dispatch(loadedImage, "load"); });
     assert.equal(loadedImage.getAttribute("data-load-state"), "loaded");
 
     await act(async () => {
@@ -371,9 +415,7 @@ test("settled transcript media never regresses when an existing session becomes 
   const { container, root } = await renderMarkdown(image, true);
   try {
     const loadedImage = container.querySelector("img.md-media-image")!;
-    await act(async () => {
-      loadedImage.dispatchEvent(new domWindow.Event("load") as unknown as Event);
-    });
+    await act(async () => { dispatch(loadedImage, "load"); });
 
     await act(async () => {
       root.render(<Markdown highlightEligible={false} inlineMedia settled={false}>{image}</Markdown>);
@@ -392,9 +434,7 @@ test("a completed signed media URL retries after its streamed unsigned prefix fa
   const signed = `${unsigned}?signature=valid`;
   const { container, root } = await renderMarkdown(unsigned, true);
   try {
-    await act(async () => {
-      container.querySelector("img.md-media-image")!.dispatchEvent(new domWindow.Event("error") as unknown as Event);
-    });
+    await act(async () => { dispatch(container.querySelector("img.md-media-image")!, "error"); });
     assertNoDomNode(container.querySelector("img.md-media-image"));
 
     await act(async () => {
