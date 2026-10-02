@@ -192,7 +192,7 @@ async function main() {
           crt1, crti, begin, "/dev/fd/3", "--start-group", gcc, gccEH, libc, "--end-group", end, crtn], [object, output], temporary);
       } else {
         // Investigate the native driver/linker path rather than claim GNU ld flags apply on macOS.
-        link = limited(compiler, ["-Wl,-no_uuid", "/dev/fd/3", "-o", "/dev/fd/4"], [object, output], temporary);
+        link = limited(compiler, ["/dev/fd/3", "-o", "/dev/fd/4"], [object, output], temporary);
       }
       const linked = await link.done;
       assert.ifError(samplingError);
