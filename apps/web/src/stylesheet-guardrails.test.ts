@@ -695,15 +695,36 @@ export const ICON_SIZE_EXEMPTIONS: ReadonlyMap<string, { owner: string; why: str
  * has `.b` as its subject, and `svg/* glyph *\/:hover` is `svg` then `:hover`.
  */
 export function selectorSubjects(selectorList: string): string[][] {
-  const members: string[][] = [];
+  return selectorCompounds(selectorList).map(({ compounds }) => compounds.at(-1)!);
+}
+
+/**
+ * Each member of a selector list as its compounds, each split into simple selectors as written,
+ * and the combinator before each compound after the first (` `, `>`, `+` or `~`).
+ *
+ * The scan `selectorSubjects` reads its subjects from, so a compound boundary, the specificity
+ * walk and the context a forced-colors counterpart must repeat (#2349) all split in one place.
+ */
+export function selectorCompounds(selectorList: string): { compounds: string[][]; combinators: string[] }[] {
+  const members: { compounds: string[][]; combinators: string[] }[] = [];
+  let compounds: string[][] = [];
+  let combinators: string[] = [];
   let parts: string[] = [];
+  let pending: string | null = null;
   let current = "";
   let depth = 0;
   let quote: string | null = null;
-  let afterCombinator = false;
   const flush = () => {
     if (current) parts.push(current);
     current = "";
+  };
+  const endCompound = () => {
+    flush();
+    if (parts.length > 0) {
+      compounds.push(parts);
+      parts = [];
+      pending = " ";
+    }
   };
   for (let index = 0; index < selectorList.length; index += 1) {
     const char = selectorList[index]!;
@@ -714,19 +735,22 @@ export function selectorSubjects(selectorList: string): string[][] {
     }
     if (depth === 0 && !quote) {
       if (char === ",") {
-        flush();
-        members.push(parts);
-        parts = [];
-        afterCombinator = false;
+        endCompound();
+        members.push({ compounds, combinators });
+        compounds = [];
+        combinators = [];
+        pending = null;
         continue;
       }
       if (/[\s>+~]/.test(char)) {
-        flush();
-        afterCombinator = true;
+        endCompound();
+        if (!/\s/.test(char)) pending = char;
         continue;
       }
-      if (afterCombinator) parts = [];
-      afterCombinator = false;
+      if (pending !== null && parts.length === 0 && !current) {
+        if (compounds.length > 0) combinators.push(pending);
+        pending = null;
+      }
       if (char === "." || char === "#" || char === "[" || (char === ":" && current !== ":")) flush();
     }
     if (char === "\\") {
@@ -743,9 +767,9 @@ export function selectorSubjects(selectorList: string): string[][] {
     else if (char === ")" || char === "]") depth -= 1;
     current += char;
   }
-  flush();
-  members.push(parts);
-  return members.filter((member) => member.length > 0);
+  endCompound();
+  members.push({ compounds, combinators });
+  return members.filter((member) => member.compounds.length > 0);
 }
 
 /** An identifier as the browser reads it: `\2d ` and `\-` are both `-`. */
@@ -858,6 +882,626 @@ export function assertIconSizesOnScale(
 
 test("every stylesheet icon size is on the §18 scale", () => {
   assertIconSizesOnScale(offScaleIconSizes(root), ICON_SIZE_EXEMPTIONS);
+});
+
+/*
+ * Forced colors (#2269, #2349). Chromium gives an `svg` `forced-color-adjust: preserve-parent-color`,
+ * so an icon whose own rule sets `color` keeps that author colour while the words beside it turn a
+ * system colour. Every rule that colours an icon therefore needs a `@media (forced-colors: active)`
+ * rule after it, at least as heavy, that hands the icon back its words' colour.
+ *
+ * Which classes are icons is read from production source rather than listed. The hand-written list
+ * this replaced checked only the rules someone remembered, and its first audit had already missed
+ * the AgentIcon marks, which reach their svg through a spread props object.
+ */
+
+/** Stands, inside a class string, for a value the scan cannot read. */
+const UNREAD = "\u0000";
+/** Stands for a prop, whose classes come from the call sites of the function that takes it. */
+const FORWARDED = "\u0001";
+/** Past this many alternatives a value is read as all of them at once: more classes, never fewer. */
+const MAX_ALTERNATIVES = 64;
+
+type SourceFunction = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
+const isSourceFunction = (node: ts.Node | undefined): node is SourceFunction =>
+  node !== undefined && (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node));
+
+/**
+ * Every class that can reach an icon's element, with the first place it does, and every class value
+ * on an icon the scan could not read.
+ *
+ * An icon is a raw `<svg>` or a lucide-react glyph. A class reaches one through its `className`, a
+ * spread props object, a constant, a typed union (`agent-${provider}`) or a helper's return, and
+ * through any prop of a function the value came from, which is followed to that function's call
+ * sites: `<WarningIcon className="x" />` reaches LibraryIcon's `<Glyph>` that way, and so does a
+ * `glyph` prop holding the glyph itself. A value it cannot read is reported rather than dropped,
+ * because a class the scan misses is a rule the guard never checks.
+ */
+export function iconClasses(sources: readonly { file: string; source: string }[]): { classes: Map<string, string>; unread: string[] } {
+  const files = new Map(sources.map(({ file, source }) => [`/src/${file}`, parseSource(source, `/src/${file}`)]));
+  // A program over the sources alone: enough for the checker to follow imports between them and to
+  // read a union type, without the libraries, which no class comes from.
+  const program = ts.createProgram({
+    rootNames: [...files.keys()],
+    options: {
+      noLib: true, noEmit: true, types: [], jsx: ts.JsxEmit.Preserve,
+      module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler,
+    },
+    host: {
+      getSourceFile: (name) => files.get(name),
+      fileExists: (name) => files.has(name),
+      readFile: () => undefined,
+      getDefaultLibFileName: () => "/lib.d.ts",
+      writeFile: () => undefined,
+      getCurrentDirectory: () => "/",
+      getCanonicalFileName: (name) => name,
+      useCaseSensitiveFileNames: () => true,
+      getNewLine: () => "\n",
+    },
+  });
+  const checker = program.getTypeChecker();
+  const where = (node: ts.Node) => {
+    const file = node.getSourceFile();
+    return `${file.fileName.slice("/src/".length)}:${file.getLineAndCharacterOfPosition(node.getStart()).line + 1}`;
+  };
+
+  const moduleOf = (declaration: ts.Node): string | null => {
+    for (let node: ts.Node | undefined = declaration; node; node = node.parent) {
+      if (ts.isImportDeclaration(node)) return ts.isStringLiteral(node.moduleSpecifier) ? node.moduleSpecifier.text : null;
+    }
+    return null;
+  };
+  /** What a name refers to, through imports; `glyph` for anything imported from lucide-react. */
+  const declarationOf = (node: ts.Node): ts.Declaration | "glyph" | undefined => {
+    let symbol = ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
+      ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node);
+    if (!symbol) return undefined;
+    if (symbol.flags & ts.SymbolFlags.Alias) {
+      if (symbol.declarations?.some((declaration) => moduleOf(declaration) === "lucide-react")) return "glyph";
+      symbol = checker.getAliasedSymbol(symbol);
+    }
+    return symbol.valueDeclaration ?? symbol.declarations?.[0];
+  };
+  const isConstant = (declaration: ts.Node): declaration is ts.VariableDeclaration =>
+    ts.isVariableDeclaration(declaration) && Boolean(ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const);
+  /** The function a declaration names: itself, or what its constant holds, through `memo()` and `forwardRef()`. */
+  const functionOf = (declaration: ts.Node | "glyph" | undefined): SourceFunction | undefined => {
+    if (!declaration || declaration === "glyph") return undefined;
+    if (isSourceFunction(declaration)) return declaration;
+    if (!ts.isVariableDeclaration(declaration)) return undefined;
+    let value = transparent(declaration.initializer);
+    while (value && ts.isCallExpression(value)) value = transparent(value.arguments[0]);
+    return isSourceFunction(value) ? value : undefined;
+  };
+  /** Whether a function is reached by name, so its call sites are all the values its parameters take. */
+  const isNamed = (fn: SourceFunction) => {
+    if (ts.isFunctionDeclaration(fn)) return true;
+    let node: ts.Node = fn.parent;
+    while (ts.isCallExpression(node) || isTransparent(node)) node = node.parent;
+    return ts.isVariableDeclaration(node);
+  };
+  /** The parameter a binding reads: its function, its position, and the prop it takes, or `rest` for the remainder. */
+  const parameterOf = (declaration: ts.Node): { fn: SourceFunction; index: number; prop: string | null; rest: boolean } | null => {
+    if (ts.isParameter(declaration) && ts.isIdentifier(declaration.name) && isSourceFunction(declaration.parent)) {
+      return { fn: declaration.parent, index: declaration.parent.parameters.indexOf(declaration), prop: null, rest: false };
+    }
+    if (!ts.isBindingElement(declaration) || !ts.isObjectBindingPattern(declaration.parent)) return null;
+    const parameter = declaration.parent.parent;
+    if (!ts.isParameter(parameter) || !isSourceFunction(parameter.parent)) return null;
+    const index = parameter.parent.parameters.indexOf(parameter);
+    if (declaration.dotDotDotToken) return { fn: parameter.parent, index, prop: null, rest: true };
+    const key = declaration.propertyName ?? declaration.name;
+    return ts.isIdentifier(key) || ts.isStringLiteral(key) ? { fn: parameter.parent, index, prop: key.text, rest: false } : null;
+  };
+  /** `const { a, ...rest } = value`: the object a binding is taken from, and its key, or null for the rest. */
+  const destructuredFrom = (declaration: ts.Node): { from: ts.Expression; key: string | null; taken: string[] } | null => {
+    if (!ts.isBindingElement(declaration) || !ts.isObjectBindingPattern(declaration.parent)) return null;
+    const variable = declaration.parent.parent;
+    if (!ts.isVariableDeclaration(variable) || !variable.initializer) return null;
+    const keyOf = (element: ts.BindingElement) => {
+      const key = element.propertyName ?? element.name;
+      return ts.isIdentifier(key) || ts.isStringLiteral(key) ? key.text : null;
+    };
+    const taken = declaration.parent.elements.filter((element) => !element.dotDotDotToken).map(keyOf)
+      .filter((key): key is string => key !== null);
+    if (declaration.dotDotDotToken) return { from: variable.initializer, key: null, taken };
+    const key = keyOf(declaration);
+    return key === null ? null : { from: variable.initializer, key, taken };
+  };
+
+  /** A finite set of strings a type allows, or null when it allows any string. */
+  const literalsOf = (type: ts.Type): string[] | null => {
+    const members = type.isUnion() ? type.types : [type];
+    if (!members.some((member) => member.isStringLiteral())) return null;
+    const out: string[] = [];
+    for (const member of members) {
+      if (member.isStringLiteral()) out.push(member.value);
+      else if (member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.BooleanLiteral)) out.push("");
+      else return null;
+    }
+    return out;
+  };
+  const limit = (alternatives: string[]): string[] => {
+    const distinct = [...new Set(alternatives)];
+    return distinct.length > MAX_ALTERNATIVES ? [distinct.join(" ")] : distinct;
+  };
+  const product = (left: string[], right: string[]) => limit(left.flatMap((head) => right.map((tail) => head + tail)));
+
+  // Call sites, by the function they render or call.
+  const jsxSites = new Map<SourceFunction, ts.JsxOpeningLikeElement[]>();
+  const callSites = new Map<SourceFunction, ts.CallExpression[]>();
+  const elements: ts.JsxOpeningLikeElement[] = [];
+  for (const file of files.values()) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) elements.push(node);
+      if (ts.isCallExpression(node)) {
+        const fn = functionOf(declarationOf(node.expression));
+        if (fn) callSites.set(fn, [...(callSites.get(fn) ?? []), node]);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+  }
+
+  const forwards = new Set<string>();
+  const pending: { fn: SourceFunction; index: number; prop: string | null }[] = [];
+  const forward = (fn: SourceFunction, index: number, prop: string | null): string[] => {
+    const key = `${where(fn)}#${fn.pos}|${index}|${prop}`;
+    if (!forwards.has(key)) {
+      forwards.add(key);
+      pending.push({ fn, index, prop });
+    }
+    return [FORWARDED];
+  };
+
+  /** The components an element's tag can be: functions in the sources, or `icon` for an svg or a glyph. */
+  const componentsOf = (input: ts.Node | undefined, seen = new Set<ts.Node>()): (SourceFunction | "icon")[] => {
+    const node = transparent(input);
+    if (!node || seen.has(node)) return [];
+    seen.add(node);
+    if (ts.isConditionalExpression(node)) return [...componentsOf(node.whenTrue, seen), ...componentsOf(node.whenFalse, seen)];
+    if (ts.isBinaryExpression(node)) return [...componentsOf(node.left, seen), ...componentsOf(node.right, seen)];
+    if (isSourceFunction(node)) return [node];
+    if (ts.isElementAccessExpression(node)) {
+      // `ICONS[tone]` is any of the object's values.
+      return objectValues(node.expression).flatMap((value) => componentsOf(value, seen));
+    }
+    if (!ts.isIdentifier(node) && !ts.isPropertyAccessExpression(node)) return [];
+    const declaration = declarationOf(node);
+    if (declaration === "glyph") return ["icon"];
+    const fn = functionOf(declaration);
+    if (fn) return [fn];
+    if (!declaration) return [];
+    if (isConstant(declaration)) return componentsOf(declaration.initializer, seen);
+    if (ts.isPropertyAssignment(declaration)) return componentsOf(declaration.initializer, seen);
+    if (ts.isShorthandPropertyAssignment(declaration)) return componentsOf(declaration.name, seen);
+    // A component passed as a prop is whatever the call sites pass: LibraryIcon's `glyph`.
+    const parameter = parameterOf(declaration);
+    if (!parameter || parameter.rest || parameter.index !== 0 || parameter.prop === null) return [];
+    return (jsxSites.get(parameter.fn) ?? []).flatMap((site) => site.attributes.properties.flatMap((attribute) =>
+      ts.isJsxAttribute(attribute) && attribute.name.getText() === parameter.prop
+        && attribute.initializer && ts.isJsxExpression(attribute.initializer)
+        ? componentsOf(attribute.initializer.expression, seen) : []));
+  };
+  /** Every value an object can hold, for an access whose key is not known. */
+  const objectValues = (input: ts.Node): ts.Node[] => {
+    const node = transparent(input);
+    if (!node) return [];
+    if (ts.isObjectLiteralExpression(node)) {
+      return node.properties.flatMap((property) => ts.isPropertyAssignment(property) ? [property.initializer]
+        : ts.isShorthandPropertyAssignment(property) ? [property.name] : []);
+    }
+    if (!ts.isIdentifier(node)) return [];
+    const declaration = declarationOf(node);
+    return declaration && declaration !== "glyph" && isConstant(declaration) && declaration.initializer
+      ? objectValues(declaration.initializer) : [];
+  };
+
+  const memo = new Map<ts.Node, string[]>();
+  /** Every string an expression can evaluate to, with UNREAD and FORWARDED standing in for what it reads. */
+  const strings = (node: ts.Node | undefined): string[] => {
+    if (!node) return [UNREAD];
+    const known = memo.get(node);
+    if (known) return known;
+    memo.set(node, [UNREAD]);
+    const result = limit(evaluate(node));
+    memo.set(node, result);
+    return result;
+  };
+  const typed = (node: ts.Node): string[] | null => literalsOf(checker.getTypeAtLocation(node));
+  const evaluate = (node: ts.Node): string[] => {
+    if (isTransparent(node)) return strings(node.expression);
+    if (ts.isStringLiteralLike(node)) return [node.text];
+    if (ts.isTemplateExpression(node)) {
+      return node.templateSpans.reduce((heads, span) =>
+        product(product(heads, strings(span.expression)), [span.literal.text]), [node.head.text]);
+    }
+    if (ts.isConditionalExpression(node)) return [...strings(node.whenTrue), ...strings(node.whenFalse)];
+    if (ts.isBinaryExpression(node)) {
+      const kind = node.operatorToken.kind;
+      if (kind === ts.SyntaxKind.PlusToken) return product(strings(node.left), strings(node.right));
+      if (kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken) {
+        return [...strings(node.left), ...strings(node.right)];
+      }
+      if (kind === ts.SyntaxKind.AmpersandAmpersandToken) return [...strings(node.right), ""];
+      // A comparison is a boolean, which renders no class.
+      return [""];
+    }
+    // The elements of a class array and the arguments of a class helper all render together.
+    if (ts.isArrayLiteralExpression(node)) {
+      return [node.elements.map((element) => strings(ts.isSpreadElement(element) ? element.expression : element).join(" ")).join(" ")];
+    }
+    if (ts.isObjectLiteralExpression(node)) {
+      // `clsx({ "is-on": on })`: the keys are the classes.
+      return [node.properties.map((property) => property.name && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))
+        ? property.name.text : UNREAD).join(" ")];
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
+      if (ts.isPropertyAccessExpression(callee) && (name === "join" || RELAY_METHODS.has(name))) return strings(callee.expression);
+      if (ts.isPropertyAccessExpression(callee) && MAPPING_METHODS.has(name)) return results(node.arguments[0]);
+      if (CLASS_HELPERS.has(name)) return [node.arguments.map((argument) => strings(argument).join(" ")).join(" ")];
+      const fn = functionOf(declarationOf(callee));
+      if (fn) return results(fn);
+      return typed(node) ?? [UNREAD];
+    }
+    if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) return reference(node);
+    return typed(node) ?? [UNREAD];
+  };
+  /** What a function returns: its concise body, or each `return` that is its own. */
+  const results = (input: ts.Node | undefined): string[] => {
+    const fn = transparent(input);
+    if (!isSourceFunction(fn) || !fn.body) return [UNREAD];
+    if (!ts.isBlock(fn.body)) return strings(fn.body);
+    const out: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (isSourceFunction(node)) return;
+      if (ts.isReturnStatement(node)) out.push(...(node.expression ? strings(node.expression) : [""]));
+      else ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(fn.body, visit);
+    return out;
+  };
+  const reference = (node: ts.Identifier | ts.PropertyAccessExpression | ts.ElementAccessExpression): string[] => {
+    const narrowed = typed(node);
+    if (narrowed) return narrowed;
+    if (ts.isElementAccessExpression(node)) {
+      const values = objectValues(node.expression);
+      return values.length > 0 ? values.flatMap(strings) : [UNREAD];
+    }
+    if (ts.isPropertyAccessExpression(node)) {
+      // `props.className`, or a prop of the rest.
+      const base = declarationOf(node.expression);
+      const parameter = base && base !== "glyph" ? parameterOf(base) : null;
+      if (parameter && parameter.prop === null) {
+        return isNamed(parameter.fn) ? forward(parameter.fn, parameter.index, node.name.text) : [UNREAD];
+      }
+    }
+    const declaration = declarationOf(node);
+    if (!declaration || declaration === "glyph") return [UNREAD];
+    if (isConstant(declaration) && declaration.initializer) return strings(declaration.initializer);
+    if (ts.isPropertyAssignment(declaration)) return strings(declaration.initializer);
+    if (ts.isShorthandPropertyAssignment(declaration)) return strings(declaration.name);
+    const destructured = destructuredFrom(declaration);
+    if (destructured?.key) {
+      const fallback = ts.isBindingElement(declaration) && declaration.initializer ? strings(declaration.initializer) : [];
+      return [...objectProp(destructured.from, destructured.key), ...fallback];
+    }
+    const parameter = parameterOf(declaration);
+    if (!parameter || parameter.rest || !isNamed(parameter.fn)) return [UNREAD];
+    const fallback = (ts.isParameter(declaration) || ts.isBindingElement(declaration)) && declaration.initializer
+      ? strings(declaration.initializer) : [];
+    return [...forward(parameter.fn, parameter.index, parameter.prop), ...fallback];
+  };
+  /** The values a prop can take from an object: its literal, through spreads and constants, or the call sites' values. */
+  const objectProp = (input: ts.Node, prop: string): string[] => {
+    const node = transparent(input);
+    if (!node) return [UNREAD];
+    if (ts.isObjectLiteralExpression(node)) {
+      return node.properties.flatMap((property) => {
+        if (ts.isSpreadAssignment(property)) return objectProp(property.expression, prop);
+        if (ts.isShorthandPropertyAssignment(property)) return property.name.text === prop ? strings(property.name) : [];
+        if (!ts.isPropertyAssignment(property)) return [];
+        if (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) {
+          return property.name.text === prop ? strings(property.initializer) : [];
+        }
+        return [UNREAD];
+      });
+    }
+    if (ts.isConditionalExpression(node)) return [...objectProp(node.whenTrue, prop), ...objectProp(node.whenFalse, prop)];
+    if (ts.isIdentifier(node)) {
+      const declaration = declarationOf(node);
+      if (declaration && declaration !== "glyph") {
+        if (isConstant(declaration) && declaration.initializer) return objectProp(declaration.initializer, prop);
+        const destructured = destructuredFrom(declaration);
+        if (destructured && destructured.key === null) {
+          return destructured.taken.includes(prop) ? [] : objectProp(destructured.from, prop);
+        }
+        const parameter = parameterOf(declaration);
+        // `({ className, ...props })`: the rest no longer holds what was taken out of it.
+        const taken = parameter?.rest && ts.isObjectBindingPattern(declaration.parent) && declaration.parent.elements
+          .some((element) => !element.dotDotDotToken && (element.propertyName ?? element.name).getText() === prop);
+        if (taken) return [];
+        if (parameter && parameter.prop === null && isNamed(parameter.fn)) return forward(parameter.fn, parameter.index, prop);
+      }
+    }
+    // An object whose type is known and has no such prop carries no class.
+    const type = checker.getTypeAtLocation(node);
+    if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return [UNREAD];
+    const property = type.getProperty(prop);
+    if (!property) return [];
+    return literalsOf(checker.getTypeOfSymbolAtLocation(property, node)) ?? [UNREAD];
+  };
+  /** The values a prop takes at one element: its attribute, and what each spread object holds for it. */
+  const elementProp = (element: ts.JsxOpeningLikeElement, prop: string): string[] =>
+    element.attributes.properties.flatMap((attribute) => {
+      if (ts.isJsxSpreadAttribute(attribute)) return objectProp(attribute.expression, prop);
+      if (attribute.name.getText() !== prop) return [];
+      const value = attribute.initializer;
+      if (!value) return [""];
+      if (ts.isStringLiteral(value)) return [value.text];
+      return ts.isJsxExpression(value) ? strings(value.expression) : [UNREAD];
+    });
+
+  const classes = new Map<string, string>();
+  const unread = new Set<string>();
+  const collect = (alternatives: string[], at: ts.Node) => {
+    for (const token of alternatives.flatMap((alternative) => alternative.split(/\s+/))) {
+      if (!token || [...token].every((char) => char === FORWARDED)) continue;
+      if (token.includes(UNREAD) || token.includes(FORWARDED)) {
+        unread.add(`${where(at)} ${token.replaceAll(UNREAD, "${…}").replaceAll(FORWARDED, "${prop}")}`);
+      } else if (/^-?[_a-z][\w-]*$/i.test(token) && !classes.has(token)) classes.set(token, where(at));
+    }
+  };
+
+  // Which function each element renders, to a fixed point: a component passed as a prop is known
+  // only once the call sites of the function taking it are.
+  const rendered = new Map<ts.JsxOpeningLikeElement, Set<SourceFunction | "icon">>();
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const element of elements) {
+      const known = rendered.get(element) ?? new Set();
+      rendered.set(element, known);
+      const tag = element.tagName;
+      const found = ts.isIdentifier(tag) && /^[a-z]/.test(tag.text) ? (tag.text === "svg" ? ["icon" as const] : []) : componentsOf(tag);
+      for (const component of found) {
+        if (known.has(component)) continue;
+        known.add(component);
+        changed = true;
+        if (component !== "icon") jsxSites.set(component, [...(jsxSites.get(component) ?? []), element]);
+      }
+    }
+  }
+  for (const [element, components] of rendered) {
+    if (components.has("icon")) collect(elementProp(element, "className"), element);
+  }
+  while (pending.length > 0) {
+    const { fn, index, prop } = pending.shift()!;
+    if (index === 0 && prop !== null) for (const site of jsxSites.get(fn) ?? []) collect(elementProp(site, prop), site);
+    for (const call of callSites.get(fn) ?? []) {
+      const argument = call.arguments[index];
+      if (argument) collect(prop === null ? strings(argument) : objectProp(argument, prop), argument);
+    }
+  }
+  return { classes, unread: [...unread].sort() };
+}
+
+const SYSTEM_COLOURS = new Set(["accentcolor", "accentcolortext", "activetext", "buttonborder", "buttonface",
+  "buttontext", "canvas", "canvastext", "field", "fieldtext", "graytext", "highlight", "highlighttext", "linktext",
+  "mark", "marktext", "selecteditem", "selecteditemtext", "visitedtext"]);
+
+/** Whether a colour hands an icon its words' colour in forced colors: it inherits, or it is a system colour. */
+export function followsWords(value: string): boolean {
+  const colour = stripComments(value).trim().toLowerCase();
+  return colour === "inherit" || colour === "currentcolor" || colour === "unset" || SYSTEM_COLOURS.has(colour);
+}
+
+type Specificity = readonly [number, number, number];
+const compareSpecificity = (left: Specificity, right: Specificity) =>
+  left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
+const heaviest = (weights: Specificity[]): Specificity =>
+  weights.reduce((best, weight) => compareSpecificity(weight, best) > 0 ? weight : best, [0, 0, 0] as Specificity);
+const addSpecificity = (left: Specificity, right: Specificity): Specificity =>
+  [left[0] + right[0], left[1] + right[1], left[2] + right[2]];
+
+/** One simple selector's weight. `:is()`, `:not()` and `:has()` weigh their heaviest argument and `:where()` nothing. */
+function simpleSpecificity(part: string): Specificity {
+  const functional = /^:([\w-]+)\(([\s\S]*)\)$/.exec(part);
+  if (functional) {
+    const name = functional[1]!.toLowerCase();
+    if (name === "where") return [0, 0, 0];
+    const heaviestOf = (list: string) => heaviest(selectorCompounds(list).map(memberSpecificity));
+    if (["is", "not", "has", "matches", "-webkit-any"].includes(name)) return heaviestOf(functional[2]!);
+    const of = /^nth-(?:last-)?child$/.test(name) ? /\sof\s+([\s\S]+)$/i.exec(functional[2]!) : null;
+    return of ? addSpecificity([0, 1, 0], heaviestOf(of[1]!)) : [0, 1, 0];
+  }
+  if (part.startsWith("::") || /^:(?:before|after|first-line|first-letter)$/i.test(part)) return [0, 0, 1];
+  if (part.startsWith("#")) return [1, 0, 0];
+  if (/^[.[:]/.test(part)) return [0, 1, 0];
+  return /^(?:(?:[\w-]*|\*)\|)?\*$/.test(part) ? [0, 0, 0] : [0, 0, 1];
+}
+
+type ParsedMember = { compounds: string[][]; combinators: string[] };
+const memberSpecificity = (member: ParsedMember): Specificity =>
+  member.compounds.flat().map(simpleSpecificity).reduce(addSpecificity, [0, 0, 0]);
+/** The weight of each member of a selector list, as (ids, classes, types). */
+export const selectorSpecificity = (selectorList: string): Specificity[] => selectorCompounds(selectorList).map(memberSpecificity);
+/** A member as one canonical string: comments dropped, combinators spaced. */
+const memberText = (member: ParsedMember) => member.compounds
+  .map((parts, index) => `${index === 0 ? "" : member.combinators[index - 1] === " " ? " " : ` ${member.combinators[index - 1]} `}${parts.join("")}`)
+  .join("");
+/** Everything before the subject, which a counterpart must repeat exactly unless it has none. */
+const memberContext = (member: ParsedMember) =>
+  memberText({ compounds: [...member.compounds.slice(0, -1), []], combinators: member.combinators });
+/** A simple selector as the browser compares it: escapes read, and case folded where CSS ignores it. */
+const normalSimple = (part: string) => /^[.#]/.test(part) ? part[0] + unescapeIdentifier(part.slice(1))
+  : /^\[/.test(part) ? canonicalSelector(part) : /^:/.test(part) ? canonicalSelector(part).replace(/^::?[\w-]+/, (name) => name.toLowerCase())
+    : part.toLowerCase();
+
+/**
+ * A subject narrowed to the icon it can be: as written when one of its own simple selectors names the
+ * icon, or else once per icon alternative of an `:is()` or `:where()`, so `.row > :is(.ps-icon, .v)`
+ * is the icon `.row > .ps-icon` and its words `.row > .v` are not. Empty when the subject is no icon.
+ */
+function iconSubjects(parts: readonly string[], icons: ReadonlySet<string>): string[][] {
+  const isIcon = (part: string, index: number) => {
+    const name = unescapeIdentifier(part);
+    return (name.startsWith(".") && icons.has(name.slice(1))) || (index === 0 && /^(?:(?:[\w-]*|\*)\|)?svg$/i.test(name));
+  };
+  if (parts.some(isIcon)) return [parts.map(normalSimple)];
+  return parts.flatMap((part, index) => {
+    const alternatives = /^:(?:is|where)\(([\s\S]*)\)$/i.exec(part);
+    if (!alternatives) return [];
+    const others = parts.filter((_, other) => other !== index).map(normalSimple);
+    return selectorCompounds(alternatives[1]!).flatMap((alternative) => {
+      const narrowed = iconSubjects(alternative.compounds.at(-1)!, icons);
+      if (narrowed.length === 0) return [];
+      // An alternative with its own combinators cannot be flattened into the subject; a counterpart
+      // then has to repeat the whole `:is()`.
+      return alternative.compounds.length > 1 ? [parts.map(normalSimple)] : narrowed.map((subject) => [...others, ...subject]);
+    });
+  });
+}
+
+/** A subject's simple selectors once each `:is()` and `:where()` of single compounds is expanded: any one of them matches. */
+function expandedSubjects(parts: readonly string[]): string[][] {
+  const index = parts.findIndex((part) => /^:(?:is|where)\(/i.test(part));
+  if (index < 0) return [parts.map(normalSimple)];
+  const alternatives = selectorCompounds(/^:(?:is|where)\(([\s\S]*)\)$/i.exec(parts[index]!)![1]!);
+  if (alternatives.some((alternative) => alternative.compounds.length > 1)) {
+    return expandedSubjects(parts.filter((_, other) => other !== index)).map((rest) => [normalSimple(parts[index]!), ...rest]);
+  }
+  return alternatives.flatMap((alternative) =>
+    expandedSubjects([...parts.slice(0, index), ...alternative.compounds[0]!, ...parts.slice(index + 1)]));
+}
+
+/**
+ * Whether a counterpart selects every element an icon subject does: its own subject is a subset of
+ * the icon's, and it has no context or exactly the icon rule's context. A counterpart that matches
+ * more broadly (`.icon` for `.row .icon`) counts; one that relies on different ancestors does not,
+ * because nothing proves it reaches the same icons.
+ */
+function covers(counterpart: ParsedMember, context: string, subject: readonly string[]): boolean {
+  const counterpartContext = memberContext(counterpart);
+  if (counterpartContext !== "" && counterpartContext !== context) return false;
+  return expandedSubjects(counterpart.compounds.at(-1)!).some((parts) => parts.every((part) => subject.includes(part)));
+}
+
+export interface SelfColouredIcon { rule: string; at: string; problem: string }
+
+/**
+ * Every rule that sets an icon's `color` to an author colour and is not undone in forced colors: by
+ * a later `@media (forced-colors: active)` rule, at least as heavy, that selects the same icon and
+ * sets `color` to `inherit`, `currentColor` or a system colour. A rule inside forced colors that
+ * sets an author colour on an icon is reported outright, since nothing can undo it there.
+ */
+export function selfColouredIcons(sheet: postcss.Root, icons: ReadonlySet<string>): SelfColouredIcon[] {
+  type Entry = {
+    rule: postcss.Rule; declaration: postcss.Declaration; members: ParsedMember[]; forced: boolean;
+    conditions: string[]; order: number; follows: boolean;
+  };
+  const entries: Entry[] = [];
+  sheet.walkDecls((declaration) => {
+    if (declaration.prop.toLowerCase() !== "color") return;
+    const target = declarationTarget(declaration);
+    if (!target) return;
+    const atRules: postcss.AtRule[] = [];
+    for (let node = declaration.parent as postcss.Node | undefined; node; node = node.parent as postcss.Node | undefined) {
+      if (node.type === "atrule") atRules.push(node as postcss.AtRule);
+    }
+    if (atRules.some((atRule) => /keyframes$/i.test(atRule.name))) return;
+    const isMedia = (atRule: postcss.AtRule) => atRule.name.toLowerCase() === "media";
+    const forcedMedia = atRules.filter((atRule) => isMedia(atRule) && /\(\s*forced-colors\s*:\s*active\s*\)/i.test(atRule.params)
+      && !/\bnot\b/i.test(atRule.params));
+    // A query that adds a condition to forced colors (`… and (max-width: 760px)`) is still a condition.
+    const onlyForced = forcedMedia.filter((atRule) => /^\(\s*forced-colors\s*:\s*active\s*\)$/i.test(atRule.params.trim()));
+    // Media that cannot match in forced colors never applies where the icon would keep its colour.
+    if (atRules.some((atRule) => isMedia(atRule) && !atRule.params.includes(",") && (/forced-colors\s*:\s*none/i.test(atRule.params)
+      || (/\bnot\b/i.test(atRule.params) && /forced-colors\s*:\s*active/i.test(atRule.params))))) return;
+    entries.push({
+      rule: target.rule,
+      declaration,
+      members: selectorCompounds(target.selector),
+      forced: forcedMedia.length > 0,
+      conditions: atRules.filter((atRule) => !onlyForced.includes(atRule))
+        .map((atRule) => `@${atRule.name} ${atRule.params}`.replace(/\s+/g, " ").trim()),
+      order: declaration.source?.start?.offset ?? 0,
+      follows: followsWords(declaration.value),
+    });
+  });
+
+  const found: SelfColouredIcon[] = [];
+  for (const entry of entries) {
+    if (entry.follows) continue;
+    const line = entry.declaration.source?.start?.line ?? 0;
+    const value = `color: ${entry.declaration.value}${entry.declaration.important ? " !important" : ""}`;
+    for (const member of entry.members) {
+      const subjects = iconSubjects(member.compounds.at(-1)!, icons);
+      if (subjects.length === 0) continue;
+      const report = (problem: string) =>
+        found.push({ rule: contextKey(entry.rule), at: `styles.css:${line} ${memberText(member)} { ${value} }`, problem });
+      if (entry.forced) {
+        report("it sets an author colour inside forced colors, where an svg keeps it");
+        continue;
+      }
+      const weight = memberSpecificity(member);
+      const context = memberContext(member);
+      let lighter: string | null = null;
+      const undone = (subject: readonly string[]) => entries.some((counterpart) => {
+        if (!counterpart.forced || !counterpart.follows || counterpart.order <= entry.order) return false;
+        if (entry.declaration.important && !counterpart.declaration.important) return false;
+        if (!counterpart.conditions.every((condition) => entry.conditions.includes(condition))) return false;
+        return counterpart.members.some((candidate) => {
+          if (!covers(candidate, context, subject)) return false;
+          if ((counterpart.declaration.important && !entry.declaration.important)
+            || compareSpecificity(memberSpecificity(candidate), weight) >= 0) return true;
+          lighter ??= `${memberText(candidate)} (styles.css:${counterpart.declaration.source?.start?.line ?? 0})`;
+          return false;
+        });
+      });
+      if (subjects.every(undone)) continue;
+      report(lighter
+        ? `its forced-colors rule ${lighter} is lighter, so the icon keeps this colour`
+        : "no later @media (forced-colors: active) rule sets this icon's color to inherit or a system colour");
+    }
+  }
+  return found;
+}
+
+/**
+ * Rules allowed to colour an icon with no forced-colors counterpart, by `contextKey`, each with why.
+ *
+ * Empty: every rule #2269 found is undone. An entry must still name a rule the guard reports, so
+ * one whose rule is fixed or deleted fails until it is removed.
+ */
+export const SELF_COLOURED_ICON_EXEMPTIONS: ReadonlyMap<string, string> = new Map();
+
+export function assertIconsFollowWords(found: readonly SelfColouredIcon[], exemptions: ReadonlyMap<string, string>): void {
+  const reported = found.filter(({ rule }) => !exemptions.has(rule)).map(({ at, problem }) => `${at}: ${problem}`);
+  assert.deepEqual(reported, [],
+    "an icon sets its own colour, which it keeps in forced colors while its words turn a system colour " +
+    "(Chromium gives an svg forced-color-adjust: preserve-parent-color). Add a later @media (forced-colors: active) " +
+    "rule with the same selector that sets color: inherit (or a system colour), or let the icon inherit its " +
+    `colour in normal mode:\n${reported.join("\n")}`);
+  for (const [rule] of exemptions) {
+    assert.ok(found.some((entry) => entry.rule === rule),
+      `${rule}: exempted as a self-coloured icon, but the guard no longer reports it; remove its SELF_COLOURED_ICON_EXEMPTIONS entry`);
+  }
+}
+
+/** Read once, on first use: the scan reads every production source through the TypeScript checker. */
+let iconClassScan: ReturnType<typeof iconClasses> | undefined;
+const productionIconClasses = () => iconClassScan ??= iconClasses(productionSources());
+
+test("every icon class in production source is read", () => {
+  assert.deepEqual(productionIconClasses().unread, [],
+    "a class value on an icon could not be read, so a rule colouring that icon would go unchecked; " +
+    "write it as a literal, a constant, a typed union or a prop the scan follows");
+});
+
+test("every icon that sets its own colour follows its words in forced colors", () => {
+  assertIconsFollowWords(selfColouredIcons(root, new Set(productionIconClasses().classes.keys())), SELF_COLOURED_ICON_EXEMPTIONS);
 });
 
 /**
@@ -1924,4 +2568,145 @@ test("an icon sized off the scale fails, naming the rule and §18, and a stale e
   assert.equal(targetsIcon(".a svg\\"), false, "a trailing backslash is read, not thrown on");
   assert.throws(() => assertIconSizesOnScale(sizesOf(clean), new Map([["|.gone svg", { owner: "#1958", why: "test" }]])),
     failsNaming("|.gone svg", "#1958", "remove its ICON_SIZE_EXEMPTIONS entry"));
+});
+
+test("icon classes are read from every way a class reaches an icon, and an unread value is reported", () => {
+  const scanOf = (files: Record<string, string>) => {
+    const scan = iconClasses(Object.entries(files).map(([file, source]) => ({ file, source })));
+    return { classes: [...scan.classes.keys()].sort(), unread: scan.unread };
+  };
+  // AgentIcon's shape: a spread props object, and a class composed from a typed union.
+  assert.deepEqual(scanOf({ "Mark.tsx": [
+    "type Provider = \"openai\" | \"other\";",
+    "function providerOf(name: string): Provider { return name ? \"openai\" : \"other\"; }",
+    "export function Mark({ name }: { name: string }) {",
+    "  const p = providerOf(name);",
+    "  const common = { className: `mark mark-${p}`, viewBox: \"0 0 24 24\" } as const;",
+    "  return <svg {...common}><path /></svg>;",
+    "}",
+  ].join("\n") }), { classes: ["mark", "mark-openai", "mark-other"], unread: [] });
+
+  // Icons.tsx's shape: a lucide glyph passed as a prop, wrappers that spread their props (whole or
+  // the rest), a component picked from a map, and a class handed down through another prop.
+  const icons = [
+    "import { Check as LucideCheck, type LucideIcon } from \"lucide-react\";",
+    "type Props = { className?: string; size?: number };",
+    "function LibraryIcon({ glyph: Glyph, className, ...props }: Props & { glyph: LucideIcon }) {",
+    "  return <Glyph className={`app-icon${className ? ` ${className}` : \"\"}`} {...props} />;",
+    "}",
+    "export function CheckIcon(props: Props) { return <LibraryIcon glyph={LucideCheck} {...props} />; }",
+    "export function StopIcon(props: Props) { const { size, ...rest } = props; return <LibraryIcon glyph={LucideCheck} {...rest} />; }",
+  ].join("\n");
+  const row = [
+    "import { CheckIcon, StopIcon } from \"./Icons.js\";",
+    "const TONES = { done: CheckIcon, stop: StopIcon } as const;",
+    "export function Row({ tone, iconClass }: { tone: \"done\" | \"stop\"; iconClass: string }) {",
+    "  const Icon = TONES[tone];",
+    "  return <div className=\"row\"><CheckIcon className=\"row-check\" /><Icon className={iconClass} /><StopIcon className=\"row-stop\" /></div>;",
+    "}",
+    "export function List() { return <Row tone=\"done\" iconClass=\"row-tone\" />; }",
+    "function Plain({ className }: { className: string }) { return <span className={className} />; }",
+    "export function Page() { return <Plain className=\"not-an-icon\" />; }",
+  ].join("\n");
+  assert.deepEqual(scanOf({ "components/Icons.tsx": icons, "components/Row.tsx": row }),
+    { classes: ["app-icon", "row-check", "row-stop", "row-tone"], unread: [] });
+
+  // A value the scan cannot follow is reported, alone or inside a composed name.
+  assert.deepEqual(scanOf({ "A.tsx": "export function A(props: { data: { c: string } }) { return <svg className={props.data.c} />; }" }),
+    { classes: [], unread: ["A.tsx:1 ${…}"] });
+  assert.deepEqual(scanOf({ "B.tsx": "export function B({ tone }: { tone: string }) { return <svg className={`b b-${tone}`} />; }" }),
+    { classes: ["b"], unread: ["B.tsx:1 b-${prop}"] });
+});
+
+test("a rule that colours an icon needs a later forced-colors rule, at least as heavy, that hands back its words' colour", () => {
+  const found = (sheet: string) => selfColouredIcons(postcss.parse(sheet), new Set(["mark", "app-icon"]));
+  const forced = (rules: string) => `@media (forced-colors: active) {\n${rules}\n}`;
+  const clean = [
+    ".mark { color: var(--amber); }", forced(".mark { color: inherit; }"),
+    // Words, filters and descendants of an icon are not the icon.
+    ".label { color: var(--red); }\n.row:has(> svg) { color: var(--red); }\nsvg .label { color: var(--red); }",
+    ".row:not(.mark) { color: var(--red); }\n.mark { & .label { color: var(--red); } }",
+    // Colours that already follow the words.
+    ".a svg { color: inherit; }\n.b .mark { color: currentColor; }\n.c .app-icon { color: GrayText; }",
+    // A counterpart may name only the icon among an :is() subject's alternatives.
+    ".row > :is(.mark, .label) { color: var(--warning); }", forced(".row > .mark { color: inherit; }"),
+    // A nested rule, a conditional rule and an !important one, each undone at their own weight.
+    ".mark { &:hover { color: var(--accent); } }", forced(".mark:hover { color: CanvasText; }"),
+    "@media (max-width: 760px) { .tile svg { color: var(--accent); } }", forced(".tile svg { color: inherit; }"),
+    ".hot .app-icon { color: var(--red) !important; }", forced(".hot .app-icon { color: inherit !important; }"),
+    // Media that never matches in forced colors needs no counterpart.
+    "@media (forced-colors: none) { .cold .mark { color: var(--blue); } }",
+  ].join("\n");
+  assert.deepEqual(found(clean), []);
+  assert.doesNotThrow(() => assertIconsFollowWords(found(clean), new Map()));
+
+  for (const [rules, at, problem] of [
+    [".tile .mark { color: var(--amber); }", ".tile .mark { color: var(--amber) }", "no later @media (forced-colors: active)"],
+    // Before the rule it should undo, an equal weight loses.
+    [`${forced(".tile .mark { color: inherit; }")}\n.tile .mark { color: var(--amber); }`, ".tile .mark { color: var(--amber) }", "no later"],
+    // A counterpart lighter than the rule never wins, even though it matches the icon.
+    [`.tile .mark { color: var(--amber); }\n${forced(".mark { color: inherit; }")}`, ".tile .mark { color: var(--amber) }",
+      "its forced-colors rule .mark (styles.css:"],
+    [`.tile > :is(.mark, .label) { color: var(--amber); }\n${forced(":is(.mark) { color: inherit; }")}`,
+      ".tile > :is(.mark, .label) { color: var(--amber) }", "is lighter"],
+    // Every icon alternative needs undoing, not only the first.
+    [`.row > :is(.mark, svg) { color: var(--amber); }\n${forced(".row > .mark { color: inherit; }")}`,
+      ".row > :is(.mark, svg) { color: var(--amber) }", "no later"],
+    // Other ancestors do not prove the counterpart reaches the same icons.
+    [`.tile .mark { color: var(--amber); }\n${forced(".card .mark { color: inherit; }")}`, ".tile .mark", "no later"],
+    // A counterpart that only applies under a further condition, or loses to !important.
+    [`.tile svg { color: var(--amber); }\n@media (forced-colors: active) and (max-width: 760px) { .tile svg { color: inherit; } }`,
+      ".tile svg { color: var(--amber) }", "no later"],
+    [`.tile svg { color: var(--amber) !important; }\n${forced(".tile svg { color: inherit; }")}`,
+      ".tile svg { color: var(--amber) !important }", "no later"],
+    // Unconditional or not, nested or not, and spelled with an escape, a rule colouring an icon counts.
+    ["@media (max-width: 760px) { .tile .app-icon { color: var(--amber); } }", ".tile .app-icon { color: var(--amber) }", "no later"],
+    [".tile { .mark { color: var(--amber); } }", ":is(.tile) .mark { color: var(--amber) }", "no later"],
+    [".tile .m\\61 rk { color: var(--amber); }", ".tile .m\\61 rk { color: var(--amber) }", "no later"],
+    // Inside forced colors an author colour cannot be undone at all.
+    [forced(".tile .mark { color: var(--amber); }"), ".tile .mark { color: var(--amber) }", "inside forced colors"],
+  ] as const) {
+    const reported = found(`${clean}\n${rules}`);
+    assert.equal(reported.length, 1, `${rules}: ${JSON.stringify(reported)}`);
+    assert.ok(reported[0]!.at.includes(at) && reported[0]!.problem.includes(problem), `${rules}: ${JSON.stringify(reported)}`);
+    assert.throws(() => assertIconsFollowWords(reported, new Map()),
+      failsNaming(at, "@media (forced-colors: active)", "color: inherit", "inherit its colour in normal mode"));
+    assert.doesNotThrow(() => assertIconsFollowWords(reported, new Map([[reported[0]!.rule, "test"]])));
+  }
+  assert.throws(() => assertIconsFollowWords(found(clean), new Map([["|.gone", "test"]])),
+    failsNaming("|.gone", "remove its SELF_COLOURED_ICON_EXEMPTIONS entry"));
+});
+
+test("selector weights follow the cascade's rules for :is(), :where(), :not() and pseudo-elements", () => {
+  assert.deepEqual(selectorSpecificity(".a > :is(.b, #c) .d, :where(#x) .y"), [[1, 2, 0], [0, 1, 0]]);
+  assert.deepEqual(selectorSpecificity("svg::before, *|svg:hover, li:nth-child(2 of .x), *, .a:not(.b, .c)"),
+    [[0, 0, 2], [0, 1, 1], [0, 2, 1], [0, 0, 0], [0, 2, 0]]);
+  assert.deepEqual(selectorSpecificity(".row:has(> svg) .m\\61 rk/* c */:after"), [[0, 2, 2]]);
+});
+
+test("the guard fails the #2349 reproduction and a removed counterpart, naming the rule", () => {
+  // A new production component colours a new icon class, with no forced-colors rule.
+  const scan = iconClasses([...productionSources(), {
+    file: "components/SomeNewThing.tsx",
+    source: "import { WarningIcon } from \"./Icons.js\";\nexport function SomeNewThing() { return <WarningIcon className=\"some-new-icon\" />; }",
+  }]);
+  assert.equal(scan.classes.get("some-new-icon"), "components/SomeNewThing.tsx:2");
+  const icons = new Set(scan.classes.keys());
+  assert.throws(
+    () => assertIconsFollowWords(selfColouredIcons(postcss.parse(`${css}\n.some-new-icon { color: var(--amber); }`), icons),
+      SELF_COLOURED_ICON_EXEMPTIONS),
+    failsNaming(".some-new-icon { color: var(--amber) }", "no later @media (forced-colors: active)"));
+
+  // One of today's counterparts removed: AgentIcon's OpenAI mark, whose class only a spread carries.
+  const sheet = postcss.parse(css);
+  let removed = 0;
+  sheet.walkRules((rule) => {
+    if (rule.parent?.type !== "atrule" || !/forced-colors/.test((rule.parent as postcss.AtRule).params)) return;
+    if (!rule.selectors.includes(".agent-openai")) return;
+    rule.selectors = rule.selectors.filter((selector) => selector !== ".agent-openai");
+    removed += 1;
+  });
+  assert.equal(removed, 1);
+  assert.throws(() => assertIconsFollowWords(selfColouredIcons(sheet, icons), SELF_COLOURED_ICON_EXEMPTIONS),
+    failsNaming(".agent-openai { color: #10a37f }"));
 });
