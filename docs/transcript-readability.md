@@ -115,7 +115,7 @@ Presentation is deterministic:
 | Cache/recovery state | Presentation |
 | --- | --- |
 | Empty, never complete, connected | Two turn-shaped skeleton placeholders; after 3 seconds, “Loading a long conversation ({count} events)…” or “Loading the conversation…” |
-| Empty, completed | A compact state for the session, even while a reconnect refresh runs: “Start the Conversation” (awaiting the first prompt, with Browse Files), “Starting {Agent}”, or “No Messages” (stopped, failed or archived) |
+| Empty, completed | A compact state for the session, even while a reconnect refresh runs: “Start the Conversation” (awaiting the first prompt, with Browse Files), “Starting {Agent}”, or “No Messages” (stopped, failed or archived). A failed refresh shows the history notice alone |
 | Content present | Timeline remains mounted during refresh, failure, or disconnect |
 | Never complete and offline/unauthorized | Reconnect or pairing-specific unavailable state |
 | GET failure, with or without content | One danger notice at the top of the reading column, “Couldn't Load the Full Conversation”: how much loaded and from which machine, a safe history-recovery Retry (no prompt replay), and the raw error behind Show Details |

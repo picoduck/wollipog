@@ -106,6 +106,12 @@ function EventSeeder({ sessionId, events }: { sessionId: string; events: Session
   return null;
 }
 
+type StoreActions = ReturnType<typeof useStoreActions>;
+function ActionsProbe({ onActions }: { onActions: (actions: StoreActions) => void }) {
+  onActions(useStoreActions());
+  return null;
+}
+
 async function flushAsyncWork(delay = 0) {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, delay));
@@ -153,6 +159,7 @@ async function mountSession({
     getSessionEventTailPage: () => new Promise<SessionEventsResponse>((resolve, reject) => { tail.push({ resolve, reject }); }),
   } as unknown as ApiClient;
   const record = (panel: string) => { shown.push(panel); };
+  let actions: StoreActions | undefined;
   const rightPanel = {
     open: false, mode: "launcher" as const, width: 360, dragging: false, subagentTarget: null,
     toggle() {}, openMode: record, show: record, setMode() {}, setWidth() {}, setDragging() {}, close() {},
@@ -166,6 +173,7 @@ async function mountSession({
     <ApiProvider client={client}>
       <StoreProvider connection={connection} navigation={navigation}>
         <EventSeeder sessionId={id} events={events} />
+        <ActionsProbe onActions={(current) => { actions = current; }} />
         <SessionDetail sessionId={id} mode={mode} rightPanel={rightPanel} onOpenTerminal={() => {}}
           composerDraftLoader={async () => null} />
       </StoreProvider>
@@ -192,6 +200,15 @@ async function mountSession({
     scroller,
     shown,
     tailRequests: () => tail.length,
+    /** A later recovery of this session's history fails, as a reconnect's would. */
+    async failRecovery(message: string) {
+      assert.ok(actions, "store actions are available");
+      await act(async () => {
+        actions!.beginEventHistoryLoad(id);
+        actions!.failEventHistoryLoad(id, message);
+      });
+      await flushAsyncWork();
+    },
     async resolveTail(value: Partial<SessionEventsResponse> & { events: SessionEvent[] }) {
       const pending = tail.shift();
       assert.ok(pending, "a history read is in flight");
@@ -341,6 +358,22 @@ test("Retry reads the history again", async () => {
     await view.unmount();
   }
 });
+
+for (const status of ["idle", "starting", "stopped"] as const) {
+  test(`a failed refresh of a once-empty ${status} history is the notice alone`, async () => {
+    const view = await mountSession({ status });
+    try {
+      await view.resolveTail(emptyHistory);
+      assert.ok(view.scroller.querySelector(".state"), "the empty state shows once the history is known");
+      await view.failRecovery("Reconnect history failed");
+      assert.equal(view.scroller.querySelectorAll(".notice").length, 1, "one history notice");
+      assert.equal(view.scroller.querySelector(".notice-title")?.textContent, "Couldn't Load the Full Conversation");
+      assertNoDomNode(view.scroller.querySelector(".state"), "an error outranks the empty state (§12)");
+    } finally {
+      await view.unmount();
+    }
+  });
+}
 
 test("a slow load adds its sentence after 3 seconds, with the snapshot's event count", async () => {
   const view = await mountSession({ messageCount: 1240 });
