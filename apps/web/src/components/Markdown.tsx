@@ -82,6 +82,14 @@ interface MarkdownRenderContext {
   highlighter: CodeHighlighter | null;
 }
 
+/**
+ * Where media renders. In phrasing content (a heading or emphasis) a `<figure>` is not allowed, so
+ * media keeps the same layout built from spans with `role="figure"`. Inside a link it also drops
+ * its own Open action, because an anchor cannot hold another; the surrounding link is the action.
+ */
+type MediaHost = "flow" | "phrasing" | "link";
+const MediaHostContext = createContext<MediaHost>("flow");
+
 const MarkdownContext = createContext<MarkdownRenderContext>({
   inlineMedia: false,
   mediaSettled: true,
@@ -354,9 +362,18 @@ function TranscriptMediaFigure({ href, kind, label, settled, imageAlt }: {
   const expiry = failed ? transcriptMediaExpiry(href) : null;
   const reason = expiry !== null && expiry <= Date.now() ? "Link expired" : `Couldn't load this ${kind}`;
   const showMedia = settled && !failed;
+  const host = useContext(MediaHostContext);
+  const phrasing = host !== "flow";
+  const Figure = phrasing ? "span" : "figure";
+  const Caption = phrasing ? "span" : "figcaption";
 
   return (
-    <figure className="md-media" data-media-state={settled ? state.phase : "unsettled"}>
+    <Figure
+      className="md-media"
+      data-media-state={settled ? state.phase : "unsettled"}
+      role={phrasing ? "figure" : undefined}
+      aria-labelledby={phrasing ? nameId : undefined}
+    >
       {showMedia && (kind === "image" ? (
         <img
           className="md-media-image"
@@ -383,21 +400,28 @@ function TranscriptMediaFigure({ href, kind, label, settled, imageAlt }: {
             phase: "loaded",
             meta: formatTranscriptMediaDuration(event.currentTarget.duration),
           })}
+          // An unindexed recording reports an unknown length at first and learns it later.
+          onDurationChange={(event) => {
+            const meta = formatTranscriptMediaDuration(event.currentTarget.duration);
+            setState((current) => current.phase === "loaded" ? { phase: "loaded", meta } : current);
+          }}
           onError={() => setState({ phase: "failed" })}
         />
       ))}
-      <figcaption className="md-media-cap">
+      <Caption className="md-media-cap">
         <span className="md-media-title">
           {failed && <ImageOffIcon size={14} />}
           <span className="md-media-name" id={nameId}>{label}</span>
         </span>
         {meta && <span className="md-media-meta">{meta}</span>}
         {failed && <span className="md-media-meta">{reason}</span>}
-        <a className="link" href={href} target="_blank" rel="noopener noreferrer" aria-describedby={nameId}>
-          {showMedia ? "Open Full Size" : "Open Link"}
-        </a>
-      </figcaption>
-    </figure>
+        {host !== "link" && (
+          <a className="link" href={href} target="_blank" rel="noopener noreferrer" aria-describedby={nameId}>
+            {showMedia ? "Open Full Size" : "Open Link"}
+          </a>
+        )}
+      </Caption>
+    </Figure>
   );
 }
 
@@ -453,7 +477,7 @@ function MarkdownLink({ href, children, inlineMedia, mediaSettled, compactUrls }
     : children;
   return (
     <a href={href} target="_blank" rel="noopener noreferrer">
-      {visibleChildren}
+      <MediaHostContext.Provider value="link">{visibleChildren}</MediaHostContext.Provider>
     </a>
   );
 }
@@ -538,8 +562,29 @@ function MarkdownParagraph({ children, node: _node, ...props }: ComponentProps<"
   return <>{blocks}</>;
 }
 
+type PhrasingTag = "em" | "strong" | "del" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+
+/** An element whose content model is phrasing, so media inside it cannot be a `<figure>`. */
+function phrasingElement(Tag: PhrasingTag) {
+  return function PhrasingElement({ node: _node, children, ...props }: Omit<ComponentProps<"em">, "ref"> & { node?: unknown }) {
+    const host = useContext(MediaHostContext);
+    // Emphasis inside a link stays inside that link.
+    const inner = host === "link" ? host : "phrasing";
+    return <Tag {...props}><MediaHostContext.Provider value={inner}>{children}</MediaHostContext.Provider></Tag>;
+  };
+}
+
 const MARKDOWN_COMPONENTS: MarkdownComponents = {
   p: MarkdownParagraph,
+  em: phrasingElement("em"),
+  strong: phrasingElement("strong"),
+  del: phrasingElement("del"),
+  h1: phrasingElement("h1"),
+  h2: phrasingElement("h2"),
+  h3: phrasingElement("h3"),
+  h4: phrasingElement("h4"),
+  h5: phrasingElement("h5"),
+  h6: phrasingElement("h6"),
   pre: CodeBlockPre,
   code: MarkdownCode,
   table: MarkdownTable,

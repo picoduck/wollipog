@@ -7408,12 +7408,6 @@ button.file-head.source-path-link {
   max-width: 100%;
   margin: 0 0 var(--space-2);
 }
-/* Open Full Size borrows a 44px band on touch (§2.8); 12px keeps that band off the video controls. */
-@media (pointer: coarse) {
-  .md-media {
-    gap: var(--space-3);
-  }
-}
 .md-media-cap {
   display: flex;
   flex-wrap: wrap;
@@ -7445,6 +7439,13 @@ button.file-head.source-path-link {
 }
 .md-media-cap .link {
   white-space: nowrap;
+}
+/* Open Full Size and Open Link borrow the shared 44px band on touch (§2.8). A 44px caption row
+   holds that band, so it reaches neither the video controls above nor the next caption below. */
+@media (pointer: coarse) {
+  .md-media-cap {
+    min-height: var(--control-h);
+  }
 }
 .md-media-image,
 .md-media-video {

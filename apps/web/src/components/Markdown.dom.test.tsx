@@ -320,6 +320,66 @@ test("a signed video shows its duration once metadata loads", async () => {
   }
 });
 
+test("a video whose length is unknown at first shows it once the duration changes", async () => {
+  const video = "https://evidence.example/recording.webm?X-Amz-Signature=abc";
+  const { container, root } = await renderMarkdown(video, true);
+  try {
+    const figure = container.querySelector("figure.md-media")!;
+    const element = figure.querySelector("video.md-media-video")!;
+    Object.defineProperty(element, "duration", { configurable: true, writable: true, value: Number.POSITIVE_INFINITY });
+    await act(async () => { dispatch(element, "loadedmetadata"); });
+    assert.deepEqual(caption(figure).meta, [], "an unindexed recording shows no length yet");
+
+    Object.defineProperty(element, "duration", { configurable: true, writable: true, value: 83.2 });
+    await act(async () => { dispatch(element, "durationchange"); });
+    assert.deepEqual(caption(figure).meta, ["1:23"]);
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("media inside emphasis, a heading or a link is never a figure inside phrasing content", async () => {
+  const image = "https://evidence.example/shot.png?signature=valid";
+  const errors: unknown[][] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    const { container, root } = await renderMarkdown([
+      `**[Bold shot](${image})**`,
+      "",
+      `# ${image}`,
+      "",
+      `*![Emphasized](${image})*`,
+      "",
+      `Before [![Linked](${image})](https://example.test/page) after`,
+    ].join("\n"), true);
+    try {
+      for (const figure of container.querySelectorAll("figure")) {
+        assertNoDomNode(figure.closest("p, em, strong, del, a, h1, h2, h3, h4, h5, h6"),
+          "a <figure> only appears in flow content");
+      }
+      const inline = [...container.querySelectorAll("span.md-media[role='figure']")];
+      assert.equal(inline.length, 4, "each nested image keeps the figure layout as spans");
+      for (const element of inline) {
+        const name = element.querySelector(".md-media-name")!;
+        assert.equal(element.getAttribute("aria-labelledby"), name.id, "the span figure is named by its file name");
+        assertNoDomNode(element.querySelector("figcaption"), "no figcaption inside phrasing content");
+      }
+      assert.deepEqual(inline.map((element) => element.querySelector(".md-media-name")!.textContent),
+        ["Bold shot", "shot.png", "Emphasized", "Linked"]);
+      assert.equal(container.querySelectorAll("a a").length, 0, "media inside a link adds no nested anchor");
+      assert.equal(inline[3]!.closest("a")?.getAttribute("href"), "https://example.test/page",
+        "the surrounding link stays the linked image's action");
+      assert.deepEqual(errors.filter((args) => /descendant|child of/.test(String(args[0]))), [],
+        "React reports no invalid DOM nesting for figures");
+    } finally {
+      await cleanup(container, root);
+    }
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test("failed media collapses to one caption line with the icon, its name, a reason and Open Link", async () => {
   const expired = "https://evidence.example/expired.png?X-Amz-Date=20200101T000000Z&X-Amz-Expires=3600&X-Amz-Signature=s";
   const broken = "https://evidence.example/broken.png?signature=valid";
