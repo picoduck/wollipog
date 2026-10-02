@@ -35,7 +35,6 @@ export const LABEL_SWAP = new RegExp(
 
 /** The inventory, exact: production file → label-swapping sites it still has. */
 const BASELINE: Readonly<Record<string, number>> = {
-  "App.tsx": 2,
   "components/AccessScopeControls.tsx": 1,
   "components/AddBoxDialog.tsx": 1,
   "components/AgentSessionDiscoveryDialog.tsx": 3,
@@ -58,6 +57,8 @@ const BASELINE: Readonly<Record<string, number>> = {
   "components/OnboardRunnerDialog.tsx": 3,
   "components/OrchestratorSettingsPanel.tsx": 1,
   "components/OutboundEventSubscriptions.tsx": 1,
+  // Moved with the pairing banner from App.tsx (#2303), which kept its behaviour as it was.
+  "components/PairingBanner.tsx": 2,
   "components/PendingPromptBubbles.tsx": 3,
   "components/PeopleDevicesPanel.tsx": 4,
   "components/PodsView.tsx": 9,

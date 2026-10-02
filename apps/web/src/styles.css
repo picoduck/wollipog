@@ -13329,6 +13329,8 @@ body.shell-dock-dragging * {
   padding: 6px 9px;
   font-size: 13px;
 }
+/* A command is copied whole, so it wraps as one chip, never at its spaces or hyphens. */
+.pairing-details code { white-space: nowrap; }
 /* --------------------------- Phone layout (≤760px) --------------------------- */
 /* Keep the breakpoint in sync with MOBILE_BREAKPOINT_PX in components/useIsMobile.ts. */
 @media (max-width: 760px) {

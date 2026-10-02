@@ -102,6 +102,13 @@ test("offline and unpaired states name the next step without Wollipog's internal
   await expect(page.getByText("This device needs to be paired before it can open sessions.")).toBeVisible();
   // The pairing banner above is the next step; the page itself never names Wollipog's internals.
   await expect(page.locator("[data-placeholder]")).not.toContainText(/control[ -]plane/iu);
+  // Nor does the banner (#2303): the startup-link command waits behind Show Details.
+  const banner = page.locator(".notice.page-banner");
+  await expect(banner).toContainText("Pair this device to use Wollipog");
+  await expect(banner).not.toContainText(/control[ -]plane|print-pair-url/iu);
+  await banner.getByRole("button", { name: "Show Details" }).click();
+  await expect(banner.locator(".notice-details-body code")).toHaveText(["wollipog pair url", "--print-pair-url"]);
+  await expect(banner).not.toContainText(/control[ -]plane/iu);
 });
 
 async function openArchived(page: Page, width: number, query = "&unarchiveRestart=1") {

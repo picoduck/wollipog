@@ -5,6 +5,7 @@ import { MOBILE_BREAKPOINT_PX } from "./components/useIsMobile.js";
 
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const offlineBanner = readFileSync(new URL("./components/OfflineBanner.tsx", import.meta.url), "utf8");
+const pairingBanner = readFileSync(new URL("./components/PairingBanner.tsx", import.meta.url), "utf8");
 const remoteInstanceBanner = readFileSync(new URL("./components/RemoteInstanceBanner.tsx", import.meta.url), "utf8");
 const feedbackProvider = readFileSync(new URL("./components/FeedbackProvider.tsx", import.meta.url), "utf8");
 const rail = readFileSync(new URL("./components/Rail.tsx", import.meta.url), "utf8");
@@ -34,18 +35,18 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   const combined = [app, rail, inbox, shortcuts, css].join("\n");
   // docs/design-system.md §13.3: the offline and pairing banners are one Notice page banner, whose
   // tone icon is the scalable status icon treatment.
-  // The offline banner lives in its own component, so its Retry Now and build variants are testable,
-  // and the remote instance banner in its own, so the instance harness can show it (#1970).
-  assert.equal(app.match(/<Notice pageBanner /g)?.length, 1,
-    "every pairing banner renders the Notice page banner");
+  // Each lives in its own component: the offline banner so its Retry Now and build variants are
+  // testable, the remote instance banner so the instance harness can show it (#1970), and the pairing
+  // banner so its browser and desktop copy is DOM tested (#2303). The shell itself draws none.
+  assert.doesNotMatch(app, /<Notice\b/, "the shell renders its banners through their components");
+  assert.match(app, /<PairingBanner connecting=\{conn === "connecting"\} \/>/);
   assert.equal(remoteInstanceBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
     "the remote instance banner renders the Notice page banner");
   assert.equal(offlineBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
     "the offline banner renders the Notice page banner");
   // The banner is the live region, so its pairing error is not a second one.
-  const pairing = app.slice(app.indexOf("function PairingBanner"), app.indexOf("\nfunction ", app.indexOf("function PairingBanner") + 1));
-  assert.match(pairing, /<Notice pageBanner tone="warning" role="status"/);
-  assert.doesNotMatch(pairing, /role="alert"/, "a pairing error inside the status banner would be announced twice");
+  assert.match(pairingBanner, /<Notice\s+pageBanner\s+tone="warning"\s+role="status"/);
+  assert.doesNotMatch(pairingBanner, /role="alert"/, "a pairing error inside the status banner would be announced twice");
   for (const retired of [
     ["Projects", "Sidebar"].join(""),
     ["Sidebar", "View", "Switcher"].join(""),

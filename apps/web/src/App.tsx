@@ -13,11 +13,7 @@ import { useApi } from "./api-context.js";
 import { notifier } from "./notify.js";
 import { CONTROL_PLANE_HTTP, CONTROL_PLANE_WS } from "./config.js";
 import { useConnectionLost, useConnectionLostFor } from "./connection-lost.js";
-import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken, parsePairingInput, storeDeviceToken } from "./device-token.js";
-import {
-  adoptManagedDesktopPairing,
-  desktopLocalPairingFailure,
-} from "./desktop-local-pairing.js";
+import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken } from "./device-token.js";
 import { createBrowserInstanceRuntime } from "./instance-runtime.js";
 import { InstanceRuntimeHost } from "./InstanceRuntimeHost.js";
 import { InstanceProvider, desktopMultiInstanceAvailable } from "./InstanceProvider.js";
@@ -77,8 +73,8 @@ import {
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { Modal } from "./components/common.js";
-import { Notice } from "./components/Notice.js";
 import { OfflineBanner } from "./components/OfflineBanner.js";
+import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
@@ -982,93 +978,6 @@ export function Header({
         <div className="topbar-actions topbar-mobile-controls">{sessionActions}</div>
       )}
     </header>
-  );
-}
-
-/**
- * Shown when the /ui socket was policy-closed (1008): this device isn't paired (or was
- * revoked). Matters most for the INSTALLED iOS PWA — its storage is partitioned from Safari,
- * so a token adopted in the browser never carries over, and a standalone app has no address
- * bar to open a fresh `#pair=` link in. Pasting the token (or the whole link) here is the way in.
- */
-function PairingBanner({ connecting }: { connecting: boolean }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [submitted, setSubmitted] = useState(false);
-  const [retrying, setRetrying] = useState(false);
-  const nativePairingFailure = desktopLocalPairingFailure();
-  const submit = () => {
-    const token = parsePairingInput(value);
-    if (!token) {
-      setError("that doesn't look like a pairing token or link");
-      return;
-    }
-    storeDeviceToken(token);
-    setSubmitted(true);
-    // Reconnect IN-PROCESS (no reload): when localStorage is blocked the token lives only in
-    // this page's memory — a reload would drop it and loop straight back to this card.
-    window.dispatchEvent(new Event(DEVICE_TOKEN_CHANGED_EVENT));
-  };
-  const retryDesktopPairing = async () => {
-    setRetrying(true);
-    setError(null);
-    try {
-      const adopted = await adoptManagedDesktopPairing();
-      if (!adopted) {
-        throw new Error("Another control-plane process owns the local port; pair with that process explicitly.");
-      }
-      window.dispatchEvent(new Event(DEVICE_TOKEN_CHANGED_EVENT));
-    } catch (retryError) {
-      setError(retryError instanceof Error ? retryError.message : "the desktop could not retry local pairing");
-    } finally {
-      setRetrying(false);
-    }
-  };
-  return (
-    <Notice pageBanner tone="warning" role="status" actions={(
-      <span className="pairing-controls">
-        {nativePairingFailure && (
-          <button
-            type="button"
-            className="btn secondary sm"
-            onClick={() => void retryDesktopPairing()}
-            disabled={retrying || connecting}
-          >
-            {retrying ? "Retrying…" : "Retry Pairing"}
-          </button>
-        )}
-        <input
-          type="password"
-          value={value}
-          maxLength={2048}
-          placeholder="#pair=… link or token"
-          onChange={(e) => {
-            setValue(e.target.value);
-            setError(null);
-            setSubmitted(false);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
-          }}
-          aria-label="Pairing Token"
-        />
-        <button type="button" className="btn primary sm" onClick={submit} disabled={!value.trim() || connecting}>
-          {connecting ? "Pairing…" : "Pair"}
-        </button>
-      </span>
-    )}>
-      {nativePairingFailure
-        ? "The desktop could not read its managed local pairing credential. Retry pairing, or paste a pairing link or token from the control-plane owner:"
-        : <>
-          This device isn't paired with the control plane. Open its startup pairing URL, or print it
-          again on the control-plane machine with <code>--print-pair-url</code>, then paste the link or token here:
-        </>}
-      {/* The banner is the live region; a nested alert would announce the error twice. */}
-      {error && <p className="notice-error">{error}</p>}
-      {submitted && !error && !connecting && (
-        <p className="notice-error">Still not accepted. Check the token or pair a fresh one.</p>
-      )}
-    </Notice>
   );
 }
 
