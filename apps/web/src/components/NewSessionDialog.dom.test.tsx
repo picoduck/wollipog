@@ -26,6 +26,8 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { fireDomEvent } from "./test-dom-events.js";
 
 const SKILLS_UNAVAILABLE = /Managed skills from this Machine are unavailable on container and cloud targets/u;
+/** System nouns docs/design-system.md §17.2 retires from user copy. */
+const RETIRED_PROJECT_TERMS = /control plane|durable/iu;
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -455,10 +457,12 @@ test("Project visibility copy names every audience and the new transcript conseq
     const fixture = await mountFixture({ projects: [{ ...project, audience }] });
     try {
       await act(async () => { await selectProject(fixture.container, project.id); });
-      const copy = fixture.container.querySelector(".new-session-project-actions")?.textContent ?? "";
+      const copy = fixture.container.querySelector(".new-session-project-actions > span")?.textContent ?? "";
+      assert.match(copy, /^A Project keeps related sessions together across Locations\. /);
       assert.match(copy, new RegExp(expected));
       assert.match(copy, /New session transcripts use the Project's visibility\./);
       assert.doesNotMatch(copy, /\bAccess:/);
+      assert.doesNotMatch(copy, RETIRED_PROJECT_TERMS);
     } finally {
       await unmountFixture(fixture);
     }
@@ -468,15 +472,27 @@ test("Project visibility copy names every audience and the new transcript conseq
 test("Project visibility copy stays neutral before selection and fails closed when audience is missing", async () => {
   const fixture = await mountFixture({ projects: [{ ...project, audience: undefined }] });
   try {
-    const copy = () => fixture.container.querySelector(".new-session-project-actions")?.textContent ?? "";
+    const copy = () => fixture.container.querySelector(".new-session-project-actions > span")?.textContent ?? "";
     assert.match(copy(), /Choose a Project to organize the new session, or choose No Project./);
     assert.doesNotMatch(copy(), /transcripts use/);
+    assert.doesNotMatch(copy(), RETIRED_PROJECT_TERMS);
 
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.match(copy(), /This control plane does not report the Project's visibility./);
+    assert.match(copy(), /^A Project keeps related sessions together across Locations\. Wollipog can't show who can see this Project\.$/);
     assert.doesNotMatch(copy(), /transcripts use/);
+    assert.doesNotMatch(copy(), RETIRED_PROJECT_TERMS);
   } finally {
     await unmountFixture(fixture);
+  }
+
+  const noProject = await mountFixture({ projects: [{ ...project, audience: undefined }] });
+  try {
+    await act(async () => { await selectProject(noProject.container, NO_PROJECT_SELECTION); });
+    const copy = noProject.container.querySelector(".new-session-project-actions > span")?.textContent ?? "";
+    assert.match(copy, /^This session will run in the selected folder without being added to a Project\.$/);
+    assert.doesNotMatch(copy, RETIRED_PROJECT_TERMS);
+  } finally {
+    await unmountFixture(noProject);
   }
 });
 

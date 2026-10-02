@@ -17,6 +17,7 @@ import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
+import { NO_PROJECT_SELECTION } from "../project-session-selection.js";
 import { NewRunDialog } from "./NewRunDialog.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -226,6 +227,16 @@ function choosePreset(container: HTMLDivElement, title: string): void {
   row.click();
 }
 
+/** System nouns docs/design-system.md §17.2 retires from user copy. */
+const RETIRED_PROJECT_TERMS = /control plane|durable/iu;
+
+/** The helper under the Project field; the label's own text also holds every option's name. */
+function projectHelper(container: HTMLDivElement): string {
+  return [...container.querySelectorAll("label")]
+    .find((label) => label.querySelector(":scope > span")?.textContent === "Project")
+    ?.querySelector(":scope > span.muted")?.textContent ?? "";
+}
+
 test("run Project copy names every audience and the new transcript consequence", async () => {
   const expectations = [
     ["user", "Project Visibility: Only the Project Owner"],
@@ -236,12 +247,13 @@ test("run Project copy names every audience and the new transcript consequence",
     const fixture = await mountFixture({ projects: [{ ...project, audience }] });
     try {
       await act(async () => { selectByLabel(fixture.container, "Project", project.id); });
-      const copy = [...fixture.container.querySelectorAll("label")]
-        .find((label) => label.querySelector(":scope > span")?.textContent === "Project")?.textContent ?? "";
+      const copy = projectHelper(fixture.container);
       assert.equal(fixture.container.querySelector('select[aria-label="Project"]')?.getAttribute("aria-label"), "Project");
+      assert.match(copy, /^A Project keeps related run sessions together across Locations\. /);
       assert.match(copy, new RegExp(expected));
       assert.match(copy, /New run session transcripts use the Project's visibility\./);
       assert.doesNotMatch(copy, /\bAccess:/);
+      assert.doesNotMatch(copy, RETIRED_PROJECT_TERMS);
     } finally {
       await unmountFixture(fixture);
     }
@@ -251,14 +263,19 @@ test("run Project copy names every audience and the new transcript consequence",
 test("run Project copy stays neutral before selection and fails closed when audience is missing", async () => {
   const fixture = await mountFixture({ projects: [{ ...project, audience: undefined }] });
   try {
-    const copy = () => [...fixture.container.querySelectorAll("label")]
-      .find((label) => label.querySelector(":scope > span")?.textContent === "Project")?.textContent ?? "";
-    assert.match(copy(), /Choose a Project to organize related run sessions, or choose No Project./);
+    const copy = () => projectHelper(fixture.container);
+    assert.match(copy(), /^Choose a Project to organize related run sessions, or choose No Project\.$/);
     assert.doesNotMatch(copy(), /transcripts use/);
+    assert.doesNotMatch(copy(), RETIRED_PROJECT_TERMS);
 
     await act(async () => { selectByLabel(fixture.container, "Project", project.id); });
-    assert.match(copy(), /This control plane does not report the Project's visibility./);
+    assert.match(copy(), /^A Project keeps related run sessions together across Locations\. Wollipog can't show who can see this Project\.$/);
     assert.doesNotMatch(copy(), /transcripts use/);
+    assert.doesNotMatch(copy(), RETIRED_PROJECT_TERMS);
+
+    await act(async () => { selectByLabel(fixture.container, "Project", NO_PROJECT_SELECTION); });
+    assert.match(copy(), /^This run will use the selected folder without being added to a Project\.$/);
+    assert.doesNotMatch(copy(), RETIRED_PROJECT_TERMS);
   } finally {
     await unmountFixture(fixture);
   }

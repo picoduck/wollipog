@@ -196,8 +196,8 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     : !selectedProject
       ? "Choose a Project to organize related run sessions, or choose No Project."
       : selectedProjectVisibility
-        ? `A Project keeps related run sessions together. ${selectedProjectVisibility}. New run session transcripts use the Project's visibility.`
-        : "A Project keeps related run sessions together across Locations. This control plane does not report the Project's visibility.";
+        ? `A Project keeps related run sessions together across Locations. ${selectedProjectVisibility}. New run session transcripts use the Project's visibility.`
+        : "A Project keeps related run sessions together across Locations. Wollipog can't show who can see this Project.";
 
   const submit = async () => {
     // Re-entrancy guard: Ctrl/Cmd+Enter bypasses the footer button's disabled attribute, and a

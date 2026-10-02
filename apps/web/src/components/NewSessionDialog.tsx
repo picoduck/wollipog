@@ -1319,8 +1319,8 @@ export function NewSessionDialog({
                     : !selectedProject
                       ? "Choose a Project to organize the new session, or choose No Project."
                       : projectAudienceVisibilitySummary(selectedProject.audience)
-                      ? `A Project is a durable home across Locations. ${projectAudienceVisibilitySummary(selectedProject.audience)}. New session transcripts use the Project's visibility.`
-                      : "A Project is a durable home for related sessions across Locations. This control plane does not report the Project's visibility."}
+                      ? `A Project keeps related sessions together across Locations. ${projectAudienceVisibilitySummary(selectedProject.audience)}. New session transcripts use the Project's visibility.`
+                      : "A Project keeps related sessions together across Locations. Wollipog can't show who can see this Project."}
                 </span>
                 <button ref={createProjectButtonRef} type="button" className="btn ghost new-session-project-control" onClick={() => { setCreateProjectFromPicker(false); setCreatingProject(true); }}>Create Project…</button>
               </div>

@@ -76,7 +76,7 @@ export function CreateProjectDialog({
     >
       <form id="create-project-form" className="form" onSubmit={(event) => void submit(event)}>
         <p id="create-project-description" className="muted">
-          A Project is a durable home for related sessions. Choose who can discover and manage it; Locations must use the same or broader access. You can add Locations after creating it.
+          A Project keeps related sessions together. Choose who can discover and manage it; Locations must use the same or broader access. You can add Locations after creating it.
         </p>
         <label className="field">
           <span>Project Name</span>
