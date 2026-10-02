@@ -551,8 +551,8 @@ test("successive human blocker groups retain distinct wakeups inside one runtime
   } finally { db.close(); }
 });
 
-for (const restartBeforeClear of [true, false]) {
-  test(`successive blocker identity survives restart ${restartBeforeClear ? "before" : "after"} the deferred clear`, async () => {
+for (const restartPoint of ["before_publication", "before_clear", "after_clear"] as const) {
+  test(`successive blocker identity survives restart ${restartPoint}`, async () => {
     const root = mkdtempSync(join(tmpdir(), "successive-attention-"));
     let db: ControlPlaneDb | undefined;
     try {
@@ -564,13 +564,20 @@ for (const restartBeforeClear of [true, false]) {
       const batch = initial.svc.beginRunnerAttentionBatch("runner");
       initial.svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, batch);
       initial.svc.applySessionRuntimeUpdate("runner", initial.snapshots[10]!);
-      initial.svc.applySessionRuntimeUpdate("runner", { ...initial.snapshots[0]!, pendingApproval: question("fresh") });
+      const rearm = db.rearmCampaignHumanAttention.bind(db);
+      if (restartPoint === "before_publication") {
+        db.rearmCampaignHumanAttention = () => { throw new Error("publication interrupted"); };
+        assert.throws(() => initial.svc.applySessionRuntimeUpdate("runner", {
+          ...initial.snapshots[0]!, pendingApproval: question("fresh"),
+        }), /publication interrupted/);
+        db.rearmCampaignHumanAttention = rearm;
+      } else initial.svc.applySessionRuntimeUpdate("runner", { ...initial.snapshots[0]!, pendingApproval: question("fresh") });
       const fresh = db.campaignAttentionCheckpoint("runner", "campaign-0");
-      assert.equal(fresh?.pendingRequests.human, 1);
+      assert.equal(fresh?.pendingRequests.human, restartPoint === "before_publication" ? 0 : 1);
       assert.doesNotMatch(JSON.stringify(fresh), /Private|fresh|first-/, "only occurrence hashes are retained");
-      assert.match(initial.logs.join("\n"), /campaign_human_attention_rearmed/);
+      if (restartPoint !== "before_publication") assert.match(initial.logs.join("\n"), /campaign_human_attention_rearmed/);
       assert.doesNotMatch(initial.logs.join("\n"), /Private|fresh|first-/);
-      if (!restartBeforeClear) initial.svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, batch);
+      if (restartPoint === "after_clear") initial.svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, batch);
       db.close();
       db = ControlPlaneDb.open(file);
       db.settleStartupState();
@@ -582,7 +589,7 @@ for (const restartBeforeClear of [true, false]) {
       hub.sendToRunner = () => { sent++; return true; };
       const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
       const replacement = svc.beginRunnerAttentionBatch("runner");
-      if (restartBeforeClear) svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, replacement);
+      if (restartPoint !== "after_clear") svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!, replacement);
       await svc.flushRunnerAttention("runner", () => false);
       assert.equal(db.deferredCampaignAttentionIds("runner").length, 1, "cancelled socket retains the fresh group");
       svc.beginRunnerAttentionBatch("runner");

@@ -32,6 +32,8 @@ spent baselines with the current count and occurrence hashes. Initially empty ba
 advanced: they may still owe an urgent notification for a deferred question. Original Orchestrator
 tokens and capture timestamps are preserved. A later deferred clear therefore retains its distinct
 wakeup identity across restart and replay, without requiring a separate provider turn per group.
+Recovery also rearms spent baselines from still-authoritative human requests before accepting
+deferred mutations, covering interruption between the fresh question commit and its publication.
 
 Recovery creates events, not permission to execute them. Existing continuation admission still
 checks current policy/ownership, human blockers, Stop, archive, completion, single-flight and

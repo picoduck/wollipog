@@ -12696,7 +12696,14 @@ export class SessionsService {
     const campaigns = new Map<string, SessionView>();
     for (const id of this.db.deferredCampaignAttentionIds(runnerId)) {
       const current = this.db.getSession(id);
-      if (current) campaigns.set(id, this.checkpointBeforeView(runnerId, current));
+      if (current) {
+        // A fresh question can commit just before its immediate publication is interrupted.
+        // Recover its spent baseline while the question is still authoritative, before accepting
+        // a replacement runner's deferred clear. This remains once per campaign, not per child.
+        if (current.orchestratorCampaign?.pendingRequests)
+          this.db.rearmCampaignHumanAttention(id, current.orchestratorCampaign.pendingRequests);
+        campaigns.set(id, this.checkpointBeforeView(runnerId, current));
+      }
     }
     this.registrationAttention.set(runnerId, campaigns);
     if (campaigns.size) this.log.info(JSON.stringify({ event: "campaign_attention_checkpoints_recovered",
