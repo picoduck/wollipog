@@ -577,11 +577,22 @@ function CampaignWorkItemDetailView({
       Back to Work Items
     </button>
   );
+  // One heading element for loading and loaded alike, at the same place in the tree, so the focus it
+  // takes when details open survives the details arriving.
+  const offlineLine = offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded details.</p>;
+  const head = (
+    <div className="campaign-detail-head">
+      <h3 ref={headingRef} tabIndex={-1} className="campaign-detail-title">{detail ? workItemTitle(detail) : "Work Item"}</h3>
+      {detail && <StatusBadge meta={statusMeta("campaignWork", detail.state)} />}
+      {detail && isAssignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
+    </div>
+  );
   if (!detail) {
     return (
       <>
         {back}
-        <h3 ref={headingRef} tabIndex={-1} className="campaign-detail-title">Work Item</h3>
+        {offlineLine}
+        {head}
         {state?.status === "missing" ? (
           <State variant="empty" title="Work Item Not Found" compact
             actions={<button type="button" className="btn sm" onClick={onBack}>Back to Work Items</button>}>
@@ -609,13 +620,9 @@ function CampaignWorkItemDetailView({
   return (
     <>
       {back}
-      {offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded details.</p>}
+      {offlineLine}
+      {head}
       <StaleContent stale={offline}>
-        <div className="campaign-detail-head">
-          <h3 ref={headingRef} tabIndex={-1} className="campaign-detail-title">{workItemTitle(detail)}</h3>
-          <StatusBadge meta={statusMeta("campaignWork", detail.state)} />
-          {isAssignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
-        </div>
         {state?.status === "error" && (
           <Notice tone="danger" compact role="alert" title="Couldn't Refresh Work Item"
             actions={<button type="button" className="btn sm" onClick={onRetry}>Retry</button>}>

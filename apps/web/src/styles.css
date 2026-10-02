@@ -4473,11 +4473,20 @@ textarea {
   opacity: 0.6;
 }
 /* Campaign Status (#2417): summary facts over a filterable work list; an item's details replace it. */
+/* The panel owns its scroll so the list position it restores is the one the person sees. */
+.rp-body:has(> .campaign-status) {
+  overflow: hidden;
+  padding: 0;
+}
 .campaign-status {
   display: grid;
+  flex: 1;
   align-content: start;
   gap: var(--space-4);
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
 }
 .campaign-status-context,
 .campaign-status-offline {
