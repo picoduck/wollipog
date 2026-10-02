@@ -4,6 +4,7 @@ import { isWorkspaceReference, normalizeSourcePath, type AgentQuestion, type Pla
 import { type TurnUsage,
   groupTimeline,
   isCollapsibleWorkItem,
+  isTurnActivity,
   SubagentTreeProjector,
   timelineBoundaryKey,
   timelineItemIsStreaming,
@@ -320,12 +321,14 @@ export function summarizeTimelineTurns(
   let segment = emptySegment(null, false);
   const segments = [segment];
   const segmentOf = new Map<number, number>();
+  // Nested subagent output belongs to its parent tool's turn, however late it arrives; the row
+  // projector nests it there too.
+  const toolSegments = new Map<string, number>();
   for (const item of items) {
-    const continues = item.kind !== "user_message" && item.kind !== "conversation_checkpoint" &&
-      !HISTORY_DIVIDER_KINDS.has(item.kind) && !("parentToolUseId" in item && item.parentToolUseId) && (
-        segment.conversationTurn !== undefined ||
-        (item.kind === "checkpoint" && segment.fileTurn !== undefined && item.turn !== segment.fileTurn)
-      );
+    const continues = isTurnActivity(item) && (
+      segment.conversationTurn !== undefined ||
+      (item.kind === "checkpoint" && segment.fileTurn !== undefined && item.turn !== segment.fileTurn)
+    );
     if (startsTurn(item) && item.kind === "user_message") {
       segment = {
         ...emptySegment(item.id, true),
@@ -340,7 +343,11 @@ export function summarizeTimelineTurns(
       segment = emptySegment(item.id, false);
       segments.push(segment);
     }
-    segmentOf.set(item.id, segments.length - 1);
+    const parent = "parentToolUseId" in item ? item.parentToolUseId : undefined;
+    const targetIndex = (parent ? toolSegments.get(parent) : undefined) ?? segments.length - 1;
+    const target = segments[targetIndex]!;
+    if (item.kind === "tool_call" && !toolSegments.has(item.toolCallId)) toolSegments.set(item.toolCallId, targetIndex);
+    segmentOf.set(item.id, targetIndex);
     if (item.kind === "conversation_checkpoint") {
       segment.conversationTurn = item.turn;
       if (item.lastUsageAt != null) segment.usageReported = true;
@@ -348,7 +355,7 @@ export function summarizeTimelineTurns(
       segment.fileTurn ??= item.turn;
       if (item.lastUsageAt != null) segment.usageReported = true;
     } else if (item.kind !== "user_message" && !HISTORY_DIVIDER_KINDS.has(item.kind)) {
-      segment.hasAgentContent = true;
+      target.hasAgentContent = true;
     }
     if (item.kind === "agent_message" && !item.parentToolUseId) {
       if (item.text) segment.responseParts.push(item.text);
@@ -356,8 +363,8 @@ export function summarizeTimelineTurns(
       if (forkTurn != null) segment.forkTurn = forkTurn;
     }
     const activity = latestActivityAt(item);
-    if (activity !== undefined && (segment.finishedAt === undefined || activity > segment.finishedAt)) {
-      segment.finishedAt = activity;
+    if (activity !== undefined && (target.finishedAt === undefined || activity > target.finishedAt)) {
+      target.finishedAt = activity;
     }
   }
   for (const value of segments) {

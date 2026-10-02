@@ -1349,6 +1349,38 @@ test("a continuation's usage report times the continuation, not the turn before 
   assert.deepEqual(paged.map((segment) => [segment.turn, segment.finishedAt]), [[1, undefined], [2, 14_000]]);
 });
 
+test("late subagent output stays with its parent tool's turn and never opens another", () => {
+  const event = (seq: number, ts: number, payload: SessionEventPayload) => ({ id: seq, sessionId: "s", seq, ts, payload });
+  const task = { kind: "tool_call", toolCallId: "task", title: "Agent", toolKind: "agent", status: "in_progress" } as SessionEventPayload;
+  // A detached child speaks after the prompt's conversation checkpoint, before its late usage report.
+  const detached = deriveTimeline([
+    event(1, 0, { kind: "user_message", text: "Investigate" }),
+    event(2, 1_000, task),
+    event(3, 2_000, { kind: "agent_message", text: "Delegated.", final: true }),
+    event(4, 2_100, { kind: "conversation_checkpoint", turn: 1 }),
+    event(5, 3_000, { kind: "agent_message", text: "Child note", final: true, parentToolUseId: "task" }),
+    event(6, 5_000, { kind: "token_usage", inputTokens: 10, outputTokens: 2 }),
+  ]);
+  const one = summarizeTimelineTurns(detached, new Map()).segments;
+  assert.deepEqual(one.map((segment) => segment.key), [null, 1], "the child's message opens no turn");
+  assert.equal(one[1]!.finishedAt, 5_000, "the late report still times the prompt's turn");
+
+  // A child launched in turn 1 speaks after turn 2 completed.
+  const later = deriveTimeline([
+    event(1, 0, { kind: "user_message", text: "Start a task" }),
+    event(2, 1_000, task),
+    event(3, 2_000, { kind: "agent_message", text: "Started.", final: true }),
+    event(4, 2_100, { kind: "conversation_checkpoint", turn: 1 }),
+    event(5, 10_000, { kind: "user_message", text: "Meanwhile, something else" }),
+    event(6, 12_000, { kind: "agent_message", text: "Done.", final: true }),
+    event(7, 12_100, { kind: "conversation_checkpoint", turn: 2 }),
+    event(8, 20_000, { kind: "agent_message", text: "Task finding", final: true, parentToolUseId: "task" }),
+  ]);
+  const two = summarizeTimelineTurns(later, new Map());
+  assert.deepEqual(two.segments.slice(1).map((segment) => segment.finishedAt), [20_000, 12_000]);
+  assert.equal(two.segmentOf.get(8), 1, "the finding belongs to turn 1, where its row nests");
+});
+
 test("an empty terminal usage report settles a turn that produced nothing else", () => {
   const events = [
     { id: 1, sessionId: "s", seq: 1, ts: 1_000, payload: { kind: "user_message", text: "Anything?" } },

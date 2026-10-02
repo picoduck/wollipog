@@ -372,6 +372,21 @@ function nativePolicyHookDecision(ev: SessionEvent): GovernanceDecision | null {
   };
 }
 
+const TURN_NEUTRAL_KINDS = new Set<TimelineItem["kind"]>([
+  "user_message",
+  "conversation_checkpoint",
+  "checkpoint_restored",
+  "conversation_forked",
+  "provider_account_switched",
+]);
+
+/** Top-level activity that, after a completed turn, means the runner began another without a
+ * prompt (resumed background work). Prompts, conversation checkpoints, history dividers and nested
+ * subagent output (which belongs to its parent tool's turn) never do. */
+export function isTurnActivity(item: TimelineItem): boolean {
+  return !TURN_NEUTRAL_KINDS.has(item.kind) && !("parentToolUseId" in item && item.parentToolUseId);
+}
+
 /** A rendered row is either a standalone item or a collapsible block of "work" (reasoning + tools). */
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }
@@ -607,6 +622,14 @@ export class TimelineBuilder {
   private readonly planIndex = new Map<string, number>();
   private readonly pendingSubagentRollups = new Map<string, SubagentRollup>();
   private activeUserIndex: number | null = null;
+
+  private turnActivitySinceCompletion(): boolean {
+    if (this.usageOwnerCompletedAt == null) return false;
+    for (let index = this.usageOwnerCompletedAt; index < this.items.length; index += 1) {
+      if (isTurnActivity(this.items[index]!)) return true;
+    }
+    return false;
+  }
 
   /** Records a usage report's time on the checkpoint anchoring an automatic continuation. */
   private stampUsageAt(index: number, at: number): void {
@@ -1028,8 +1051,7 @@ export class TimelineBuilder {
       }
       case "token_usage": {
         if (!p.parentToolUseId) {
-          if (this.usageOwner == null ||
-              (this.usageOwnerCompletedAt != null && this.items.length > this.usageOwnerCompletedAt)) {
+          if (this.usageOwner == null || this.turnActivitySinceCompletion()) {
             this.usageOwner = { kind: "continuation", anchor: null, pendingUsageAt: null };
             this.usageOwnerCompletedAt = null;
           }
