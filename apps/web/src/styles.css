@@ -5605,6 +5605,17 @@ textarea {
 }
 .composer-answer-input:focus { border-color: var(--focus); }
 .composer-answer-actions { margin-top: 2px; }
+/* Answer Mode keeps the context and cost triggers (#2166): beside Submit, or, in a narrow column,
+   on their own row above the two buttons so neither is crowded. */
+.composer-answer-usage {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+.composer-answer-usage.own-row { justify-content: flex-end; }
+.composer-answer-usage:empty { display: none; }
+.composer-answer-usage > :is(.context-control, .session-usage) { flex: none; }
 @media (max-width: 600px) {
   .composer-question-waiting,
   .composer-answer-heading { align-items: stretch; flex-direction: column; }

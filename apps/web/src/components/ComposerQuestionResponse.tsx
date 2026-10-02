@@ -3,7 +3,7 @@ import {
   type AgentQuestion,
   type SessionView,
 } from "@wollipog/protocol";
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { useApi } from "../api-context.js";
 import {
   clearQuestionDrafts,
@@ -35,6 +35,10 @@ export interface ComposerQuestionResponseProps {
   onEnter: () => void;
   onExit: () => void;
   onSessionUpdate?: (session: SessionView) => void;
+  /** The session's context and cost triggers, which Answer Mode keeps in reach while it replaces
+   * the composer bar (#2166). Beside Submit, or on their own row when the column is narrow. */
+  usage?: ReactNode;
+  usageOwnRow?: boolean;
 }
 
 function withDraft(
@@ -91,6 +95,8 @@ export function ComposerQuestionResponse({
   onEnter,
   onExit,
   onSessionUpdate,
+  usage = null,
+  usageOwnRow = false,
 }: ComposerQuestionResponseProps) {
   const api = useApi();
   const answerKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
@@ -398,6 +404,7 @@ export function ComposerQuestionResponse({
       </div>
       {validationError && <div className="form-error" id={questionErrorId} role="alert">{validationError}</div>}
       {submissionError && <div className="form-error" role="alert">Could not answer the question: {submissionError}</div>}
+      {usage && usageOwnRow && <div className="composer-answer-usage own-row">{usage}</div>}
       <div className="composer-answer-actions">
         <button
           className="btn ghost sm"
@@ -412,6 +419,7 @@ export function ComposerQuestionResponse({
         >
           Previous Question
         </button>
+        {usage && !usageOwnRow && <div className="composer-answer-usage">{usage}</div>}
         <button className="btn primary sm" type="button" disabled={controlsDisabled} onClick={() => accept()}>
           {busy ? <><Spinner /> Submitting…</> : currentIndex === questions.length - 1 ? "Submit Answers" : "Next Question"}
         </button>

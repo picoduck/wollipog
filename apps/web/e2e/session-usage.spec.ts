@@ -341,6 +341,45 @@ test.describe("Answer Mode ownership", () => {
     await page.evaluate(() => window.resolveSessionUsageQuestion());
     await expect(composer).toBeFocused();
   });
+
+  // Answer Mode replaces the composer bar, Model Settings included, so the figures come with it
+  // (#2166): beside Submit in a wide column, on their own row above the buttons on a phone.
+  for (const viewport of [
+    { name: "desktop", width: 1200, height: 820, frame: 1180, ownRow: false },
+    { name: "phone", width: 390, height: 844, frame: 390, ownRow: true },
+  ] as const) {
+    test(`${viewport.name}: context and cost stay in reach while answering`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`/session-usage-e2e.html?width=${viewport.frame}&height=${viewport.height - 40}&approval=question&driver=claude-code`);
+      await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
+      await expect(page.locator(".composer-bar")).toHaveCount(0);
+
+      const usage = page.locator(".composer-answer-usage");
+      const ring = usage.getByRole("button", { name: "Context Window 36% Used" });
+      const cost = usage.getByRole("button", { name: "Session Usage: $1.37" });
+      await expect(ring).toBeVisible();
+      await expect(cost).toBeVisible();
+      const [usageBox, actionsBox, submitBox] = await Promise.all([
+        usage.boundingBox(),
+        page.locator(".composer-answer-actions").boundingBox(),
+        page.getByRole("button", { name: "Submit Answers" }).boundingBox(),
+      ]);
+      if (viewport.ownRow) {
+        expect(usageBox!.y + usageBox!.height).toBeLessThanOrEqual(actionsBox!.y + 0.5);
+        expect(usageBox!.x + usageBox!.width).toBeCloseTo(actionsBox!.x + actionsBox!.width, 0);
+      } else {
+        expect(usageBox!.x + usageBox!.width).toBeLessThanOrEqual(submitBox!.x);
+        expect(Math.abs((usageBox!.y + usageBox!.height / 2) - (submitBox!.y + submitBox!.height / 2))).toBeLessThan(2);
+      }
+      await page.locator(".composer-box").screenshot({ path: `${SHOT}/answer-mode-usage-${viewport.name}.png` });
+
+      await cost.click();
+      await expect(page.locator(".session-usage-popover")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.locator(".session-usage-popover")).toHaveCount(0);
+      await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
+    });
+  }
 });
 
 /**

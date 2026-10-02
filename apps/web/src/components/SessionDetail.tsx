@@ -5842,6 +5842,13 @@ function SessionDetailLoaded({
                   onEnter={enterAnswerMode}
                   onExit={exitAnswerMode}
                   onSessionUpdate={loadSession}
+                  // Answer Mode replaces the composer bar, Model Settings included, so the figures
+                  // come along to stay in reach while the person answers (#2166).
+                  usage={composerAnswerActive ? <>
+                    <ContextWindowMeter session={session} resolution={contextWindow} placement="bar" />
+                    <SessionUsageControl session={session} placement="bar" />
+                  </> : null}
+                  usageOwnRow={isMobile || composerColumnNarrow}
                 />
               )}
               {!composerAnswerActive && <>
