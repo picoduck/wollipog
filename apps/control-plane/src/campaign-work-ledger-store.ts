@@ -207,10 +207,13 @@ CREATE TABLE IF NOT EXISTS campaign_recommendation_dispositions (
 );
 `;
 
-export type LedgerResult<T> = { ok: true; data: T } | { ok: false; status: number; error: string; code?: string };
+/** `details` carries machine-readable fields a client acts on, such as `revision_changed`. */
+export type LedgerResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; status: number; error: string; details?: Record<string, string | number> };
 
-const fail = <T>(error: string, status = 400, code?: string): LedgerResult<T> =>
-  ({ ok: false, status, error, ...(code ? { code } : {}) });
+const fail = <T>(error: string, status = 400, details?: Record<string, string | number>): LedgerResult<T> =>
+  ({ ok: false, status, error, ...(details ? { details } : {}) });
 const done = <T>(data: T): LedgerResult<T> => ({ ok: true, data });
 
 /** What the ledger needs from the rest of the control plane. Observations must read raw session
@@ -328,7 +331,8 @@ function decodeCursor(
     }
     if (parsed.k !== key) return fail("cursor belongs to a different filter or sort");
     if (parsed.r !== revision) {
-      return fail("the campaign ledger changed since this cursor was issued", 409, CAMPAIGN_WORK_REVISION_CHANGED);
+      return fail("the campaign ledger changed since this cursor was issued; restart from the first page", 409,
+        { code: CAMPAIGN_WORK_REVISION_CHANGED, revision });
     }
     return done(parsed.o as number);
   } catch {
@@ -362,11 +366,11 @@ export class CampaignWorkLedgerStore {
     try {
       return this.hooks.atomic(() => {
         const result = work();
-        if (!result.ok) throw new LedgerRefusal(result.error, result.status, result.code);
+        if (!result.ok) throw new LedgerRefusal(result.error, result.status, result.details);
         return result;
       });
     } catch (error) {
-      if (error instanceof LedgerRefusal) return fail(error.message, error.status, error.code);
+      if (error instanceof LedgerRefusal) return fail(error.message, error.status, error.details);
       throw error;
     }
   }
@@ -437,18 +441,19 @@ export class CampaignWorkLedgerStore {
 
   /* ------------------------------ Dependencies ------------------------------ */
 
-  /** True when `itemId` reaching `targets` through existing edges would close a cycle. */
-  private createsCycle(itemId: string, dependsOn: readonly string[], edges: Map<string, string[]>): boolean {
-    const stack = [...dependsOn];
-    const seen = new Set<string>();
-    while (stack.length) {
-      const next = stack.pop()!;
-      if (next === itemId) return true;
-      if (seen.has(next)) continue;
-      seen.add(next);
-      stack.push(...(edges.get(next) ?? []));
-    }
-    return false;
+  /** True when the dependency graph contains a cycle. */
+  private hasCycle(edges: Map<string, string[]>): boolean {
+    const state = new Map<string, "visiting" | "done">();
+    const visit = (id: string): boolean => {
+      const current = state.get(id);
+      if (current === "done") return false;
+      if (current === "visiting") return true;
+      state.set(id, "visiting");
+      for (const next of edges.get(id) ?? []) if (visit(next)) return true;
+      state.set(id, "done");
+      return false;
+    };
+    return [...edges.keys()].some((id) => visit(id));
   }
 
   private dependencyEdges(campaignId: string): Map<string, string[]> {
@@ -462,26 +467,35 @@ export class CampaignWorkLedgerStore {
     return edges;
   }
 
-  /** Replace an item's dependency set. Returns an error for unknown, self, or cyclic edges. */
+  /** Apply dependency replacements together: each set is validated, then the FINAL graph is
+   * checked for cycles, so a valid batch never depends on the order it lists its items in.
+   * Returns the ids whose set changed, or an error. */
   private replaceDependencies(
     campaignId: string,
-    itemId: string,
-    dependsOn: readonly string[],
-    edges: Map<string, string[]>,
-  ): string | null {
-    const unique = [...new Set(dependsOn)];
-    if (unique.length > L.dependsOn) return `an item may depend on at most ${L.dependsOn} items`;
-    if (unique.includes(itemId)) return "an item cannot depend on itself";
-    const missing = this.missingItemIds(campaignId, unique);
-    if (missing.length) return `unknown work items: ${missing.slice(0, 8).join(", ")}`;
-    if (this.createsCycle(itemId, unique, edges)) return "the dependency would create a cycle";
-    this.stmt("DELETE FROM campaign_work_item_dependencies WHERE work_item_id=?").run(itemId);
-    for (const dependency of unique) {
-      this.stmt("INSERT INTO campaign_work_item_dependencies (work_item_id, depends_on_id) VALUES (?, ?)")
-        .run(itemId, dependency);
+    replacements: ReadonlyArray<{ itemId: string; label: string; dependsOn: readonly string[] }>,
+  ): { changed: string[] } | { error: string; status: number } {
+    const edges = this.dependencyEdges(campaignId);
+    const changed: string[] = [];
+    for (const { itemId, label, dependsOn } of replacements) {
+      const unique = [...new Set(dependsOn)];
+      if (unique.length > L.dependsOn) return { error: `${label}: an item may depend on at most ${L.dependsOn} items`, status: 400 };
+      if (unique.includes(itemId)) return { error: `${label}: an item cannot depend on itself`, status: 409 };
+      const missing = this.missingItemIds(campaignId, unique);
+      if (missing.length) return { error: `${label}: unknown work items: ${missing.slice(0, 8).join(", ")}`, status: 404 };
+      if ([...(edges.get(itemId) ?? [])].sort().join("\n") === [...unique].sort().join("\n")) continue;
+      edges.set(itemId, unique);
+      changed.push(itemId);
     }
-    edges.set(itemId, unique);
-    return null;
+    if (!changed.length) return { changed };
+    if (this.hasCycle(edges)) return { error: "the dependencies would create a cycle", status: 409 };
+    for (const itemId of changed) {
+      this.stmt("DELETE FROM campaign_work_item_dependencies WHERE work_item_id=?").run(itemId);
+      for (const dependency of edges.get(itemId)!) {
+        this.stmt("INSERT INTO campaign_work_item_dependencies (work_item_id, depends_on_id) VALUES (?, ?)")
+          .run(itemId, dependency);
+      }
+    }
+    return { changed };
   }
 
   /* ------------------------------ record_campaign_plan ------------------------------ */
@@ -579,21 +593,21 @@ export class CampaignWorkLedgerStore {
         }
         results.push({ key: input.key, workItemId: existing.id, created: false });
       }
-      const edges = this.dependencyEdges(campaignId);
+      const replacements: Array<{ itemId: string; label: string; dependsOn: string[] }> = [];
       for (const input of request.items) {
         if (input.dependsOnKeys === undefined) continue;
-        const item = this.itemByKey(campaignId, input.key)!;
         const ids: string[] = [];
         for (const key of input.dependsOnKeys) {
           const dependency = this.itemByKey(campaignId, key);
           if (!dependency) throw new LedgerRefusal(`item ${input.key} depends on unknown key ${key}`, 400);
           ids.push(dependency.id);
         }
-        const before = [...(edges.get(item.id) ?? [])].sort().join("\n");
-        if (before === [...new Set(ids)].sort().join("\n")) continue;
-        const error = this.replaceDependencies(campaignId, item.id, ids, edges);
-        if (error) throw new LedgerRefusal(`item ${input.key}: ${error}`, 409);
-        this.stmt("UPDATE campaign_work_items SET updated_at=? WHERE id=?").run(now, item.id);
+        replacements.push({ itemId: this.itemByKey(campaignId, input.key)!.id, label: `item ${input.key}`, dependsOn: ids });
+      }
+      const dependencies = this.replaceDependencies(campaignId, replacements);
+      if ("error" in dependencies) throw new LedgerRefusal(dependencies.error, dependencies.status);
+      for (const itemId of dependencies.changed) {
+        this.stmt("UPDATE campaign_work_items SET updated_at=? WHERE id=?").run(now, itemId);
         changed = true;
       }
       const planState: CampaignPlanState = request.planComplete ? "recorded" : "partial";
@@ -728,13 +742,10 @@ export class CampaignWorkLedgerStore {
       }
       let changed = sets.length > 0;
       if (request.dependsOn !== undefined) {
-        const edges = this.dependencyEdges(campaignId);
-        const before = [...(edges.get(item.id) ?? [])].sort().join("\n");
-        if (before !== [...new Set(request.dependsOn)].sort().join("\n")) {
-          const error = this.replaceDependencies(campaignId, item.id, request.dependsOn, edges);
-          if (error) throw new LedgerRefusal(error, error.startsWith("unknown") ? 404 : 409);
-          changed = true;
-        }
+        const dependencies = this.replaceDependencies(campaignId,
+          [{ itemId: item.id, label: "dependsOn", dependsOn: request.dependsOn }]);
+        if ("error" in dependencies) throw new LedgerRefusal(dependencies.error, dependencies.status);
+        if (dependencies.changed.length) changed = true;
       }
       const open = this.openAttemptForItem(item.id);
       if (endAttempt !== undefined) {
@@ -826,15 +837,33 @@ export class CampaignWorkLedgerStore {
 
   /* ------------------------------ Work-item verification ------------------------------ */
 
-  /** Validation only, so the session-level verification is not recorded when this would fail. */
-  verificationTarget(campaignId: string, workItemId: string, childSessionId: string): LedgerResult<AttemptRow> {
+  /** Validation only, so the session-level verification is not recorded when this would fail.
+   * Repeating an identical verification of the item's latest attempt (same child, report, and
+   * outcome) resolves to the existing record, so a retried call is a no-op rather than a refusal
+   * or a duplicate row. */
+  verificationTarget(
+    campaignId: string,
+    workItemId: string,
+    childSessionId: string,
+    outcome: CampaignWorkItemVerificationOutcome,
+    reportSeq: number,
+  ): LedgerResult<{ attempt: AttemptRow; existing: VerificationRow | null }> {
     const item = this.item(campaignId, workItemId);
     if (!item) return fail("work item not found in this campaign", 404);
-    const open = this.openAttemptForItem(item.id);
-    if (!open || open.session_id !== childSessionId) {
+    const latest = this.stmt(
+      "SELECT * FROM campaign_work_attempts WHERE work_item_id=? ORDER BY ordinal DESC LIMIT 1",
+    ).get(item.id) as AttemptRow | undefined;
+    if (latest && latest.session_id === childSessionId) {
+      const existing = this.stmt(
+        `SELECT * FROM campaign_work_verifications WHERE attempt_id=? AND outcome=? AND report_seq=?
+         ORDER BY verified_at DESC LIMIT 1`,
+      ).get(latest.id, outcome, reportSeq) as VerificationRow | undefined;
+      if (existing) return done({ attempt: latest, existing });
+    }
+    if (!latest || latest.ended_at !== null || latest.session_id !== childSessionId) {
       return fail("the child has no open attempt on this work item; assign it first", 409);
     }
-    return done(open);
+    return done({ attempt: latest, existing: null });
   }
 
   recordVerification(
@@ -849,17 +878,21 @@ export class CampaignWorkLedgerStore {
     now: number,
   ): LedgerResult<{ revision: number; verification: CampaignWorkItemVerification }> {
     return this.transact(() => {
-      const target = this.verificationTarget(campaignId, input.workItemId, input.childSessionId);
+      const target = this.verificationTarget(campaignId, input.workItemId, input.childSessionId, input.outcome,
+        input.report.seq);
       if (!target.ok) return target;
+      if (target.data.existing) {
+        return done({ revision: this.revision(campaignId), verification: this.verificationView(target.data.existing) });
+      }
       const id = newId(CAMPAIGN_WORK_VERIFICATION_ID_PREFIX);
       this.stmt(
         `INSERT INTO campaign_work_verifications
          (id, campaign_session_id, work_item_id, attempt_id, child_session_id, outcome, report_seq,
           report_event_epoch, report_digest, report_ts, verified_by_session_id, verified_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(id, campaignId, input.workItemId, target.data.id, input.childSessionId, input.outcome, input.report.seq,
-        input.report.eventEpoch, input.report.digest, input.report.ts, input.verifiedBySessionId, now);
-      if (input.outcome === "delivered") this.closeAttempt(target.data, "delivered", now, null);
+      ).run(id, campaignId, input.workItemId, target.data.attempt.id, input.childSessionId, input.outcome,
+        input.report.seq, input.report.eventEpoch, input.report.digest, input.report.ts, input.verifiedBySessionId, now);
+      if (input.outcome === "delivered") this.closeAttempt(target.data.attempt, "delivered", now, null);
       else this.stmt("UPDATE campaign_work_items SET updated_at=? WHERE id=?").run(now, input.workItemId);
       const row = this.stmt("SELECT * FROM campaign_work_verifications WHERE id=?").get(id) as unknown as VerificationRow;
       return done({ revision: this.bump(campaignId, now), verification: this.verificationView(row) });
@@ -921,6 +954,9 @@ export class CampaignWorkLedgerStore {
         return fail(`this recommendation duplicates ${recommendation.duplicate_of}; adjudicate that one instead`, 409);
       }
       let workItemId: string | null = null;
+      // Creating or completing the resulting item is a ledger change of its own, even when the
+      // disposition row is identical to a previous adjudication.
+      let itemChanged = false;
       if (request.disposition === "duplicate" && request.resultingWorkItemKey !== undefined) {
         const existing = this.itemByKey(campaignId, request.resultingWorkItemKey);
         if (!existing) return fail(`no work item has key ${request.resultingWorkItemKey}`, 404);
@@ -931,10 +967,21 @@ export class CampaignWorkLedgerStore {
           (request.resultingIssue ? `${request.resultingIssue.repository}#${request.resultingIssue.number}` : `followup:${recommendation.id}`);
         const existing = this.itemByKey(campaignId, key);
         if (existing) {
+          // Accepted work links only a follow-up item; a match in the original scope is a duplicate.
+          if (existing.origin !== "follow_up") {
+            return fail(`work item ${key} is original scope; adjudicate the recommendation as duplicate instead`, 409);
+          }
+          const resultingIssue = request.resultingIssue;
+          if (resultingIssue && existing.issue_repository !== null &&
+              (existing.issue_repository.toLowerCase() !== resultingIssue.repository.toLowerCase() ||
+                existing.issue_number !== resultingIssue.number)) {
+            return fail(`work item ${key} already tracks ${existing.issue_repository}#${existing.issue_number}`, 409);
+          }
           workItemId = existing.id;
-          if (request.resultingIssue && existing.issue_repository === null) {
+          if (resultingIssue && existing.issue_repository === null) {
             this.stmt("UPDATE campaign_work_items SET issue_repository=?, issue_number=?, updated_at=? WHERE id=?")
-              .run(request.resultingIssue.repository, request.resultingIssue.number, now, existing.id);
+              .run(resultingIssue.repository, resultingIssue.number, now, existing.id);
+            itemChanged = true;
           }
         } else {
           const count = Number((this.stmt(
@@ -959,6 +1006,7 @@ export class CampaignWorkLedgerStore {
             request.resultingIssue?.repository ?? null, request.resultingIssue?.number ?? null,
             (originGeneration.generation ?? 0) + 1, now, actorSessionId, actorSessionId, now, now,
           );
+          itemChanged = true;
         }
       }
       const previous = this.stmt(
@@ -974,7 +1022,11 @@ export class CampaignWorkLedgerStore {
         resulting_work_item_id: workItemId,
       };
       if (previous && Object.entries(next).every(([key, value]) => previous[key] === value)) {
-        return done({ revision: this.revision(campaignId), recommendationId: recommendation.id, workItemId });
+        return done({
+          revision: itemChanged ? this.bump(campaignId, now) : this.revision(campaignId),
+          recommendationId: recommendation.id,
+          workItemId,
+        });
       }
       this.stmt(
         `INSERT INTO campaign_recommendation_dispositions
@@ -1290,8 +1342,9 @@ export class CampaignWorkLedgerStore {
       (query.origin === undefined || summary.origin === query.origin) &&
       (state === "all" || (state === "unfinished" ? unfinished.has(summary.primaryState)
         : state === "finished" ? FINISHED_STATES.has(summary.primaryState) : summary.primaryState === state)));
-    const elapsed = (summary: CampaignWorkItemSummary) => summary.elapsed.startedAt === null ? -1
-      : (summary.elapsed.endedAt ?? now) - summary.elapsed.startedAt;
+    // An item that never started shows its recorded age, so it sorts by that age too.
+    const elapsed = (summary: CampaignWorkItemSummary) =>
+      (summary.elapsed.endedAt ?? now) - (summary.elapsed.startedAt ?? summary.createdAt);
     const byQueue = (a: CampaignWorkItemSummary, b: CampaignWorkItemSummary) =>
       (a.queuePosition ?? Number.MAX_SAFE_INTEGER) - (b.queuePosition ?? Number.MAX_SAFE_INTEGER) ||
       a.createdAt - b.createdAt || a.id.localeCompare(b.id);
@@ -1356,7 +1409,7 @@ export class CampaignWorkLedgerStore {
 
 /** Thrown inside a ledger transaction to roll it back and surface a client error. */
 export class LedgerRefusal extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string) {
+  constructor(message: string, readonly status: number, readonly details?: Record<string, string | number>) {
     super(message);
   }
 }

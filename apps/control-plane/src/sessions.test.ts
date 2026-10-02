@@ -24250,3 +24250,87 @@ test("campaign work ledger operations are Orchestrator-only, root-keyed, and bou
     db.close();
   }
 });
+
+test("campaign work ledger review regressions: no-op detection, linkage, dependency batches, cursors, and sorting (#2417)", () => {
+  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+  try {
+    // A dependency batch is validated against its final graph, whatever order it lists items in.
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b", dependsOnKeys: ["a"] }], planComplete: false });
+    assert.ok(plan.ok, plan.error);
+    const swapped = svc.recordCampaignPlan(parent.id, {
+      items: [{ key: "a", dependsOnKeys: ["b"] }, { key: "b", dependsOnKeys: [] }], planComplete: false,
+    });
+    assert.ok(swapped.ok, swapped.error);
+    assert.deepEqual(ledgerItem(svc, parent.id, "a").dependsOn.map((dependency) => dependency.key), ["b"]);
+    assert.deepEqual(ledgerItem(svc, parent.id, "b").dependsOn, []);
+
+    // Repeating an identical incomplete verification is a no-op.
+    const child = spawn(parent.id, "Work on a");
+    const itemA = ledgerItem(svc, parent.id, "a");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: itemA.id, childSessionId: child }).ok);
+    svc.onSessionStatus(child, "idle");
+    const seq = report(child, "Partial");
+    const verify = (outcome: "delivered" | "incomplete") => svc.verifyCampaignChild(parent.id, {
+      childSessionId: child, reportEventSeq: seq, followUpsAccounted: true, workItem: { id: itemA.id, outcome },
+    });
+    assert.ok(verify("incomplete").ok);
+    const afterFirst = svc.campaignWorkItems(parent.id, {}).data!.summary.revision;
+    assert.ok(verify("incomplete").ok);
+    assert.equal(svc.campaignWorkItems(parent.id, {}).data!.summary.revision, afterFirst);
+    assert.equal(ledgerItem(svc, parent.id, "a").verifications.length, 1);
+    // A repeated delivered verification is idempotent too, not a refusal.
+    assert.ok(verify("delivered").ok);
+    const delivered = svc.campaignWorkItems(parent.id, {}).data!.summary.revision;
+    const repeat = verify("delivered");
+    assert.ok(repeat.ok, repeat.error);
+    assert.equal(svc.campaignWorkItems(parent.id, {}).data!.summary.revision, delivered);
+    assert.equal(ledgerItem(svc, parent.id, "a").verifications.length, 2);
+
+    // Acceptance links only a follow-up item, and never one tracking a different issue.
+    const followUp = (title: string) => svc.recordCampaignFollowUp(parent.id, {
+      originSessionId: child, repository: "o/r", title,
+    }).data!.id;
+    svc.recordCampaignPlan(parent.id, { items: [{ key: "o/r#1", issue: { repository: "o/r", number: 1 } }], planComplete: false });
+    assert.equal(svc.adjudicateCampaignRecommendation(parent.id, {
+      recommendationId: followUp("Original link"), disposition: "accepted", reason: "x",
+      resultingWorkItemKey: "o/r#1", resultingIssue: { repository: "o/r", number: 2 },
+    }).status, 409, "an original-scope item is a duplicate target, not an accepted one");
+    const accepted = followUp("Follow up");
+    assert.ok(svc.adjudicateCampaignRecommendation(parent.id, {
+      recommendationId: accepted, disposition: "accepted", reason: "x", resultingWorkItemKey: "fu",
+      resultingIssue: { repository: "o/r", number: 3 },
+    }).ok);
+    assert.equal(svc.adjudicateCampaignRecommendation(parent.id, {
+      recommendationId: followUp("Conflicting"), disposition: "accepted", reason: "x", resultingWorkItemKey: "fu",
+      resultingIssue: { repository: "o/r", number: 4 },
+    }).status, 409, "a linked item tracking another issue is refused");
+
+    // Restoring the linked item's issue through a repeated adjudication is a ledger change.
+    const fu = ledgerItem(svc, parent.id, "fu");
+    assert.ok(svc.updateCampaignWorkItem(parent.id, { workItemId: fu.id, issue: null }).ok);
+    const cleared = svc.campaignWorkItems(parent.id, {}).data!.summary.revision;
+    const restored = svc.adjudicateCampaignRecommendation(parent.id, {
+      recommendationId: accepted, disposition: "accepted", reason: "x", resultingWorkItemKey: "fu",
+      resultingIssue: { repository: "o/r", number: 3 },
+    });
+    assert.ok(restored.ok, restored.error);
+    assert.equal(restored.data?.revision, cleared + 1);
+    assert.deepEqual(ledgerItem(svc, parent.id, "fu").issue, { repository: "o/r", number: 3 });
+
+    // A stale cursor carries a machine-readable code and the current revision.
+    const page = svc.campaignWorkItems(parent.id, { limit: 1, state: "all" });
+    svc.updateCampaignWorkItem(parent.id, { workItemId: fu.id, nextAction: "Dispatch" });
+    const stale = svc.campaignWorkItems(parent.id, { limit: 1, state: "all", cursor: page.data!.page!.nextCursor! });
+    assert.equal(stale.status, 409);
+    assert.deepEqual(stale.errorDetails, {
+      code: "revision_changed", revision: svc.campaignWorkItems(parent.id, {}).data!.summary.revision,
+    });
+
+    // Items that never started sort by their recorded age.
+    db.raw().prepare("UPDATE campaign_work_items SET created_at=0 WHERE item_key='b'").run();
+    const byElapsed = svc.campaignWorkItems(parent.id, { sort: "elapsed", state: "all" }).data!.page!.items.map((item) => item.key);
+    assert.equal(byElapsed[0], "b", "the oldest unstarted item sorts first");
+  } finally {
+    db.close();
+  }
+});

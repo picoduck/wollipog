@@ -343,3 +343,9 @@ starting contract. This document refines it as follows:
     rather than any descendant of the root campaign.
 14. **A server-deduplicated recommendation** can only be adjudicated as `duplicate`; the canonical
     recommendation it duplicates carries the decision.
+15. **Accepted linkage** may name only a `follow_up` item, and never one that already tracks a
+    different issue; an original-scope match is adjudicated as `duplicate`.
+16. **Repeated verification** of the same child, report, and outcome on an item's latest attempt
+    returns the existing record without a write, so a retried `verify_campaign_child` is a no-op.
+17. **Stale cursors** return `409 {error, code: "revision_changed", revision}` on the Orchestrator
+    route as well, through the shared refusal body.

@@ -6220,7 +6220,10 @@ function lanIpv4(): string[] {
 
 function respond(
   reply: { code: (n: number) => { send: (b: unknown) => unknown } },
-  result: { ok: boolean; status: number; data?: unknown; error?: string; capabilityRequirement?: RunnerCapabilityRequirementDetails },
+  result: {
+    ok: boolean; status: number; data?: unknown; error?: string;
+    capabilityRequirement?: RunnerCapabilityRequirementDetails; errorDetails?: Record<string, string | number>;
+  },
 ) {
   return reply.code(result.status).send(result.ok ? result.data : failureBody(result));
 }

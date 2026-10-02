@@ -441,6 +441,9 @@ export interface ServiceResult<T> {
   error?: string;
   /** Set by a refused runner capability gate; routes return it beside `error` (`failureBody`). */
   capabilityRequirement?: RunnerCapabilityRequirementDetails;
+  /** Machine-readable refusal fields routes return beside `error`, such as a ledger cursor's
+   * `{ code: "revision_changed", revision }`. */
+  errorDetails?: Record<string, string | number>;
 }
 
 /** Exact runner commands plus the control-plane resources they materialize. Durable automation
@@ -6760,7 +6763,8 @@ export class SessionsService {
     // session-level verification untouched too.
     // The ledger lives under the same resolved root as the session-level report (#1462).
     if (workItem) {
-      const target = this.db.campaignWorkLedger.verificationTarget(root.id, workItem.id, child.id);
+      const target = this.db.campaignWorkLedger.verificationTarget(
+        root.id, workItem.id, child.id, workItem.outcome, request.reportEventSeq);
       if (!target.ok) return fail(target.error, target.status);
     }
     // Settle the spent approvals now, so a later stop or archive does not audit them as revoked.
@@ -6937,7 +6941,9 @@ export class SessionsService {
       response.item = item;
     } else {
       const page = ledger.page(root.id, request ?? {}, now);
-      if (!page.ok) return { ok: false, status: page.status, error: page.error };
+      if (!page.ok) {
+        return { ok: false, status: page.status, error: page.error, ...(page.details ? { errorDetails: page.details } : {}) };
+      }
       response.page = page.data;
     }
     if (request?.includeRecommendations === true) {

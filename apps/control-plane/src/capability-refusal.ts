@@ -26,8 +26,12 @@ export function capabilityRefusal(
 /** JSON body for a failed result. A capability refusal adds the required and reported runner
  * protocol versions as additive fields; they are never part of the sentence. */
 export function failureBody(
-  result: { error?: string; capabilityRequirement?: RunnerCapabilityRequirementDetails },
+  result: {
+    error?: string;
+    capabilityRequirement?: RunnerCapabilityRequirementDetails;
+    errorDetails?: Record<string, string | number>;
+  },
   fallback?: string,
-): { error?: string } & Partial<RunnerCapabilityRequirementDetails> {
-  return { error: result.error ?? fallback, ...result.capabilityRequirement };
+): { error?: string } & Partial<RunnerCapabilityRequirementDetails> & Record<string, unknown> {
+  return { ...result.errorDetails, error: result.error ?? fallback, ...result.capabilityRequirement };
 }
