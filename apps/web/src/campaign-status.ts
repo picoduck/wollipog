@@ -327,9 +327,9 @@ export interface CampaignSummaryView {
   capacity: string;
   elapsed: string;
   cost: CampaignCostView;
-  costBreakdown: { label: string; text: string }[];
+  costBreakdown: { phrase: string; text: string }[];
   budget: string | null;
-  obligations: { label: string; count: number }[];
+  obligations: { phrase: string; count: number }[];
   recommendations: { awaiting: number; rejected: number; deferred: number; duplicate: number };
 }
 
@@ -370,9 +370,9 @@ export function campaignSummaryView(
   // Each bucket keeps its own provenance where it differs from the total's, so an estimated or
   // partially priced bucket never reads as exact under a provider-reported total.
   const breakdown = work.cost && cost.priced ? [
-    { label: "Work items", text: costWithProvenance(campaignCostView(work.cost.workItems), cost.provenance) },
-    { label: "coordination", text: costWithProvenance(campaignCostView(work.cost.coordination), cost.provenance) },
-    { label: "unattributed", text: costWithProvenance(campaignCostView(work.cost.unattributed), cost.provenance) },
+    { phrase: "Work items", text: costWithProvenance(campaignCostView(work.cost.workItems), cost.provenance) },
+    { phrase: "coordination", text: costWithProvenance(campaignCostView(work.cost.coordination), cost.provenance) },
+    { phrase: "unattributed", text: costWithProvenance(campaignCostView(work.cost.unattributed), cost.provenance) },
   ] : [];
   const limits = campaign?.limits;
   return {
@@ -393,10 +393,10 @@ export function campaignSummaryView(
     // The projection's budget caps the Orchestrator's own session. Say so; it is not campaign-wide.
     budget: limits?.costBudgetUsd != null ? `${formatCost(limits.costBudgetUsd) || "$0.00"} Orchestrator Session Budget` : null,
     obligations: [
-      { label: "verification", count: work.obligations.verification },
-      { label: "recommendation adjudication", count: work.obligations.adjudication },
-      { label: "issue publication", count: work.obligations.publication },
-      { label: "cleanup", count: work.obligations.cleanup },
+      { phrase: "verification", count: work.obligations.verification },
+      { phrase: "recommendation adjudication", count: work.obligations.adjudication },
+      { phrase: "issue publication", count: work.obligations.publication },
+      { phrase: "cleanup", count: work.obligations.cleanup },
     ].filter((obligation) => obligation.count > 0),
     recommendations: {
       awaiting: work.recommendations.awaiting_adjudication ?? 0,

@@ -160,7 +160,7 @@ test("The summary keeps rejected and duplicate recommendations out of committed 
   assert.equal(view.capacity, "2 of 4 Occupied");
   assert.equal(view.budget, "$20.00 Orchestrator Session Budget", "a session budget is never called campaign-wide");
   assert.deepEqual(view.obligations, [
-    { label: "verification", count: 1 }, { label: "issue publication", count: 1 }, { label: "cleanup", count: 2 },
+    { phrase: "verification", count: 1 }, { phrase: "issue publication", count: 1 }, { phrase: "cleanup", count: 2 },
   ]);
   assert.deepEqual(view.stateCounts.map((entry) => entry.count), [1, 1, 1, 0, 0, 2]);
   assert.equal(view.planNotice, null);

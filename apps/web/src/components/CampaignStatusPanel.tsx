@@ -314,14 +314,14 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
             <dd>
               <CostText cost={view.cost} />
               {view.costBreakdown.length > 0
-                ? <span className="campaign-status-meta">{view.costBreakdown.map((row) => `${row.label} ${row.text}`).join(", ")}</span>
+                ? <span className="campaign-status-meta">{view.costBreakdown.map((row) => `${row.phrase} ${row.text}`).join(", ")}</span>
                 : view.cost.note && <span className="campaign-status-meta">{view.cost.note}</span>}
             </dd>
           </div>
           {view.budget && <div><dt>Budget</dt><dd>{view.budget}</dd></div>}
           <div>
             <dt>Outstanding</dt>
-            <dd>{view.obligations.length === 0 ? "None" : view.obligations.map((entry) => `${entry.count} ${entry.label}`).join(", ")}</dd>
+            <dd>{view.obligations.length === 0 ? "None" : view.obligations.map((entry) => `${entry.count} ${entry.phrase}`).join(", ")}</dd>
           </div>
           <div>
             <dt>Recommendations</dt>
