@@ -3,7 +3,7 @@ import test from "node:test";
 import * as React from "react";
 import type { SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { renderToStaticMarkup } from "react-dom/server";
-import { groupTimeline, SubagentTreeProjector, TimelineBuilder, type TimelineItem } from "../timeline.js";
+import { deriveTimeline, groupTimeline, SubagentTreeProjector, TimelineBuilder, type TimelineItem } from "../timeline.js";
 import {
   automaticSubagentOpen,
   automaticSubagentOpenAfterChange,
@@ -1220,7 +1220,7 @@ test("turn summaries read the checkpoint number, span, usage, response and fork 
   assert.equal(first.hasAgentContent, true);
   const second = segments.get(10)!;
   assert.equal(second.hasAgentContent, false, "a prompt and a steer are not agent work");
-  assert.equal(second.finishedAt, 21_000);
+  assert.equal(second.finishedAt, 25_000, "the recorded duration outlasts the last visible row (the steer at 21s)");
   assert.equal(segments.get(null)!.turn, undefined);
 });
 
@@ -1252,10 +1252,43 @@ test("the footer tooltip names the start, finish and duration it has", () => {
   const at = (minute: number, second: number) => Date.UTC(2026, 6, 13, 0, minute, second);
   assert.match(turnSpanDescription({ startedAt: at(25, 38), finishedAt: at(26, 4) }),
     /^Started \d{1,2}:25:38\s?[AP]M, finished \d{1,2}:26:04\s?[AP]M \(26s\)$/);
-  assert.match(turnSpanDescription({ startedAt: at(25, 38), finishedAt: at(26, 4), durationMs: 20_000 }), /\(20s\)$/,
-    "a provider-reported duration wins over the observed span");
   assert.match(turnSpanDescription({ finishedAt: at(26, 4) }), /^Finished \d{1,2}:26:04\s?[AP]M$/);
   assert.equal(turnSpanDescription({}), "");
+});
+
+test("a turn finishes at its terminal usage report when that lands after the last visible row", () => {
+  const at = (second: number) => Date.UTC(2026, 9, 2, 10, 0, second);
+  const event = (seq: number, ts: number, payload: SessionEventPayload) => ({ id: seq, sessionId: "s", seq, ts, payload });
+  const items = deriveTimeline([
+    event(1, at(0), { kind: "user_message", text: "Run it" }),
+    event(2, at(30), { kind: "agent_message", text: "Done.", final: true }),
+    // Codex's turn.completed reports usage half a minute after the final reply.
+    event(3, at(60), { kind: "token_usage", inputTokens: 10, outputTokens: 4 }),
+  ]);
+  const summary = summarizeTimelineTurns(items, new Map()).get(1)!;
+  assert.equal(summary.finishedAt, at(60));
+  assert.match(turnSpanDescription(summary), /^Started \d{1,2}:00:00\s?[AP]M, finished \d{1,2}:01:00\s?[AP]M \(1m 0s\)$/,
+    "the clock, the finish and the duration agree");
+});
+
+test("replies no turn footer copies keep their own Copy", () => {
+  const subagentOutput = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [{ kind: "agent_message", id: 1, text: "Subagent finding", parentToolUseId: "task" }],
+  }));
+  assert.equal((subagentOutput.match(/aria-label="Copy Reply"/g) ?? []).length, 1,
+    "a subagent transcript has no prompt, so no footer, and its reply keeps Copy");
+  assert.doesNotMatch(subagentOutput, /tl-turn-footer/);
+
+  const session = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [
+      { kind: "user_message", id: 1, text: "Prompt" },
+      { kind: "agent_message", id: 2, text: "Answer" },
+      { kind: "conversation_checkpoint", id: 3, turn: 1 },
+    ],
+  }));
+  assert.equal((session.match(/aria-label="Copy Reply"/g) ?? []).length, 1,
+    "a turn's own replies are copied once, from its footer");
+  assert.match(session, /class="tl-turn-footer"[\s\S]*aria-label="Copy Reply"/);
 });
 
 test("user rows prepare deliberate resend and expose edit-in-fork only for an eligible predecessor", () => {

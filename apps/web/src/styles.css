@@ -6594,6 +6594,8 @@ textarea,
   word-break: break-word;
 }
 .tl-user-actions { justify-self: end; }
+/* A reply no turn footer copies (a subagent's) keeps its own Copy under its last line. */
+.tl-reply-actions { display: flex; margin-top: var(--space-1); }
 
 /* Turn footer (§11.3): quiet meta text after the last row of a settled turn, actions trailing. */
 .tl-turn-footer {

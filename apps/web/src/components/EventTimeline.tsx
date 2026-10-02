@@ -328,9 +328,10 @@ export function summarizeTimelineTurns(
   }
   for (const value of segments.values()) {
     value.turn = value.conversationTurn ?? value.fileTurn ?? value.turn;
-    if (value.startedAt !== undefined && value.durationMs !== undefined &&
-        (value.finishedAt === undefined || value.finishedAt <= value.startedAt)) {
-      value.finishedAt = value.startedAt + value.durationMs;
+    // The prompt's duration ends at the turn's terminal usage report, which can land after the last
+    // visible row (Codex's turn.completed); the turn finished at whichever came later.
+    if (value.startedAt !== undefined && value.durationMs !== undefined) {
+      value.finishedAt = Math.max(value.finishedAt ?? value.startedAt, value.startedAt + value.durationMs);
     }
   }
   return segments;
@@ -365,6 +366,24 @@ export function placeTurnFooters(
   }
   close(true);
   return footers;
+}
+
+/** Replies no turn footer will ever copy keep their own Copy: a subagent's replies, which a turn's
+ * Copy leaves out, and output before the first prompt that no checkpoint numbers (a subagent's own
+ * transcript in the Subagents panel). */
+export function standaloneReplyKeys(
+  rows: readonly TimelineRenderRow[],
+  segments: ReadonlyMap<number | null, TurnFooterSummary>,
+): Set<string> {
+  const keys = new Set<string>();
+  const unnumberedHead = segments.get(null)?.turn === undefined;
+  let inHead = true;
+  for (const row of rows) {
+    if (startsTimelineTurn(row)) inHead = false;
+    if (row.kind !== "item" || row.item.kind !== "agent_message") continue;
+    if (row.item.parentToolUseId || (inHead && unnumberedHead)) keys.add(row.key);
+  }
+  return keys;
 }
 
 export type TimelineRenderRow =
@@ -575,10 +594,13 @@ function EventTimelineBody({
   const forkTurns = useMemo(() => assistantForkTurns(items), [items]);
   const rewindTurns = useMemo(() => userRewindTurns(items), [items]);
   // Rows are patched in place between revisions, so the revision (not the array) keys this pass.
-  const turnFooters = useMemo(
-    () => placeTurnFooters(rows, summarizeTimelineTurns(items, forkTurns), sessionActive),
-    [rows, projection.revision, items, forkTurns, sessionActive],
-  );
+  const { turnFooters, standaloneReplies } = useMemo(() => {
+    const segments = summarizeTimelineTurns(items, forkTurns);
+    return {
+      turnFooters: placeTurnFooters(rows, segments, sessionActive),
+      standaloneReplies: standaloneReplyKeys(rows, segments),
+    };
+  }, [rows, projection.revision, items, forkTurns, sessionActive]);
   // Read at call time: the projector extends `rows` in place, so the closure always sees the tail.
   const rowGap = useCallback(
     (_row: TimelineRenderRow, index: number) =>
@@ -717,6 +739,7 @@ function EventTimelineBody({
           onEditInFork={onEditInFork}
           onOpenSourceLocation={onOpenSourceLocation}
           editInForkAvailability={item.kind === "user_message" ? editInForkAvailabilityByItem?.get(item.id) : undefined}
+          standaloneCopy={standaloneReplies.has(row.key)}
           questionContext={item.kind === "question" && row.key === pinnedQuestionRow?.key &&
             questionContext?.questionInTimeline === true ? questionContext : undefined}
           approvalContext={item.kind === "permission" && item.resolvedOptionId === undefined &&
@@ -1892,6 +1915,7 @@ const TimelineRow = memo(function TimelineRow({
   onEditInFork,
   onOpenSourceLocation,
   editInForkAvailability,
+  standaloneCopy = false,
   highlightEligible = true,
   disclosureOpen = false,
   onDisclosureToggle,
@@ -1909,6 +1933,8 @@ const TimelineRow = memo(function TimelineRow({
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   editInForkAvailability?: EditInForkAvailability;
+  /** A reply no turn footer copies (a subagent's) keeps its own Copy. */
+  standaloneCopy?: boolean;
   highlightEligible?: boolean;
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
@@ -2027,6 +2053,11 @@ const TimelineRow = memo(function TimelineRow({
       return (
         <div className="tl-agent-msg">
           <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
+          {standaloneCopy && item.text && (
+            <div className="tl-message-actions tl-reply-actions" role="group" aria-label="Message Actions">
+              <CopyButton text={item.text} iconOnly ariaLabel="Copy Reply" className="tl-message-icon" />
+            </div>
+          )}
         </div>
       );
     case "agent_thought":
@@ -2541,14 +2572,14 @@ function UserMessageActions({
   );
 }
 
-/** "Started 12:25:38 AM, finished 12:26:04 AM (26s)": the exact span behind the footer's clock. */
-export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt" | "finishedAt" | "durationMs">): string {
+/** "Started 12:25:38 AM, finished 12:26:04 AM (26s)": the exact span behind the footer's clock. The
+ * duration is always finish minus start, so the three figures never contradict one another. */
+export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt" | "finishedAt">): string {
   const started = formatRecordedTimestamp(summary.startedAt)?.label;
   const finished = formatRecordedTimestamp(summary.finishedAt)?.label;
-  const spanMs = summary.durationMs ?? (summary.startedAt !== undefined && summary.finishedAt !== undefined
-    ? Math.max(0, summary.finishedAt - summary.startedAt)
-    : undefined);
-  const duration = spanMs !== undefined ? formatDuration(spanMs) : "";
+  const duration = summary.startedAt !== undefined && summary.finishedAt !== undefined
+    ? formatDuration(Math.max(0, summary.finishedAt - summary.startedAt))
+    : "";
   const span = started && finished
     ? `Started ${started}, finished ${finished}`
     : finished ? `Finished ${finished}` : started ? `Started ${started}` : "";
