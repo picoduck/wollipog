@@ -27,7 +27,7 @@ function Read-Machine($path) {
   Write-ProbePhase 'native-module-open-before'
   $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   Write-ProbePhase 'native-module-open-after'
-  $reader = New-Object IO.BinaryReader($stream)
+  $reader = [IO.BinaryReader]::new([IO.Stream]$stream)
   try {
     Write-ProbePhase 'native-mz-read-before'
     if ($reader.ReadUInt16() -ne 23117) { throw 'invalid native module MZ header' }
