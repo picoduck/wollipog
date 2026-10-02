@@ -916,8 +916,11 @@ const READING_CALLS = new Set(["Object.hasOwn", "Object.keys", "Object.values", 
   "Object.getOwnPropertyNames", "Array.isArray", "JSON.stringify"]);
 /** Methods that change an array or collection in place. */
 const MUTATING_METHODS = new Set(["push", "unshift", "splice", "fill", "copyWithin", "set", "add", "delete", "clear"]);
-/** Past this many alternatives a value is read as all of them at once: more classes, never fewer. */
-const MAX_ALTERNATIVES = 64;
+/**
+ * Past this many names, a value composed from parts is reported rather than built. Read as all of
+ * its alternatives at once, a composed value would put a prefix on the first of them only (#2394).
+ */
+const MAX_ALTERNATIVES = 1024;
 
 type SourceFunction = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
 const isSourceFunction = (node: ts.Node | undefined): node is SourceFunction =>
@@ -933,6 +936,34 @@ const isSourceFunction = (node: ts.Node | undefined): node is SourceFunction =>
  * sites: `<WarningIcon className="x" />` reaches LibraryIcon's `<Glyph>` that way, and so does a
  * `glyph` prop holding the glyph itself. A value it cannot read is reported rather than dropped,
  * because a class the scan misses is a rule the guard never checks.
+ *
+ * Five routes once dropped a class silently (#2394). Each is pinned by a fixture in "every route
+ * #2394 found that could hide an icon class is followed, reported or accepted":
+ *
+ * 1. A component called rather than rendered — `RENDERERS[k](props)`, a member, a constant, a prop
+ *    — is followed to what the call hands it, and a call through a key the scan cannot list that
+ *    hands it props is reported.
+ * 2. A component whose class comes from its caller, handed to another package's component, is
+ *    reported: the package renders it with props the scan never sees.
+ * 3. An object written after it is bound — through a constant, a parameter, a member of either, a
+ *    helper or a child it is handed to — and a name assigned again are reported where they are read.
+ * 4. A value an assertion gives its type (`raw as "safe-icon"`), in a constant, an object's
+ *    property or a source helper's return, is read for its value rather than its type.
+ * 5. A name composed from parts is built in full, up to MAX_ALTERNATIVES names, and reported past it.
+ *
+ * Accepted, each for its reason:
+ *
+ * - A call through a key the scan cannot list that passes no arguments (`actions[action]()` in
+ *   useInboxKeys and useSessionReadingKeys) is not reported. It hands a component no props, so the
+ *   most it can miss is a class from a whole-parameter default (`props = { className: "x" }`).
+ * - A parameter, member or package return whose declared type is a union of names is read from its
+ *   type. TypeScript checks every value that reaches it except one asserted or typed `any` where it
+ *   enters (`<Typed tone={raw as Tone} />`). Reading values there instead of types would lose the
+ *   typed unions the AgentIcon marks are read through, and reporting each assertion would flag the
+ *   hundreds in production, which almost never reach a class.
+ * - Another package's component is taken not to write into the objects held by props spread into it
+ *   (`<Slot {...attrs} />`), as before #2394. React hands it a props object of its own, so it can
+ *   reach only those nested objects, and a package that wrote into them would break React's rules.
  */
 export function iconClasses(sources: readonly { file: string; source: string }[]): { classes: Map<string, string>; unread: string[] } {
   const files = new Map(sources.map(({ file, source }) => [`/src/${file}`, parseSource(source, `/src/${file}`)]));
@@ -1049,11 +1080,9 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     }
     return out;
   };
-  const limit = (alternatives: string[]): string[] => {
-    const distinct = [...new Set(alternatives)];
-    return distinct.length > MAX_ALTERNATIVES ? [distinct.join(" ")] : distinct;
-  };
-  const product = (left: string[], right: string[]) => limit(left.flatMap((head) => right.map((tail) => head + tail)));
+  const limit = (alternatives: string[]): string[] => [...new Set(alternatives)];
+  const product = (left: string[], right: string[]) => left.length * right.length > MAX_ALTERNATIVES ? [UNREAD]
+    : limit(left.flatMap((head) => right.map((tail) => head + tail)));
 
   // Call sites, by the function they render or call.
   const jsxSites = new Map<SourceFunction, ts.JsxOpeningLikeElement[]>();
@@ -1065,6 +1094,8 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   // React's createElement and cloneElement render, or add props to, an element without JSX, which is
   // where this scan reads classes; the DOM's createElementNS is how a script would draw an svg.
   const bypasses: ts.CallExpression[] = [];
+  /** Calls whose callee does not name a function, read once the values it can hold are known. */
+  const indirectCalls: ts.CallExpression[] = [];
   /** The module a name is imported from at its root (`React` of `React.createElement`), or null. */
   const importedFrom = (node: ts.Node): string | null => {
     let root: ts.Node = node;
@@ -1091,6 +1122,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if (ts.isCallExpression(node)) {
         const fn = functionOf(declarationOf(node.expression));
         if (fn) callSites.set(fn, [...(callSites.get(fn) ?? []), node]);
+        else indirectCalls.push(node);
         const callee = importedName(node.expression);
         if (((callee === "createElement" || callee === "cloneElement") && importedFrom(node.expression) === "react")
           || callee === "createElementNS") bypasses.push(node);
@@ -1100,65 +1132,232 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     visit(file);
   }
 
+  /** A name a value is bound to: a variable, a parameter, or one taken from either by destructuring. */
+  type Binding = ts.VariableDeclaration | ts.ParameterDeclaration | ts.BindingElement;
+  const isBinding = (node: ts.Node | "glyph" | undefined): node is Binding =>
+    node !== undefined && node !== "glyph" && (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node));
+  /** Whether a node is assigned to: `x = …`, `x += …`, `x++`, `delete x`, or a target of a destructuring assignment. */
+  const isWrite = (target: ts.Node): boolean => {
+    const parent = target.parent;
+    if (ts.isBinaryExpression(parent) && parent.left === target) {
+      return parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
+    }
+    if (ts.isDeleteExpression(parent)) return true;
+    if (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) {
+      return parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken;
+    }
+    if (ts.isForInStatement(parent) || ts.isForOfStatement(parent)) return parent.initializer === target;
+    // `({ className } = next)` and `[first] = list`: a name inside a pattern on the left of `=`.
+    if (ts.isShorthandPropertyAssignment(parent) || ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent)
+      || (ts.isPropertyAssignment(parent) && parent.initializer === target)) return isWrite(parent.parent);
+    return (ts.isObjectLiteralExpression(parent) || ts.isArrayLiteralExpression(parent)) && isWrite(parent);
+  };
   /**
-   * What is written into a constant object or array after it is declared: the properties assigned
-   * or deleted by name, and `any` for a computed key, a mutating method or `Object.assign`. A
-   * constant binding does not freeze what it holds, so a write makes its initializer incomplete.
+   * The identifiers that may name a binding: within its function when it is declared in one, which
+   * nothing outside can see, and anywhere in the sources for one at the top of a module.
    */
-  const writesMemo = new Map<ts.Node, { props: Set<string>; any: boolean }>();
-  const writesTo = (declaration: ts.VariableDeclaration) => {
+  const scopeNames = new Map<ts.Node, Map<string, ts.Identifier[]>>();
+  const usesOf = (name: ts.Identifier): ts.Identifier[] => {
+    let scope: ts.Node | undefined = name.parent;
+    while (scope && !isSourceFunction(scope)) scope = scope.parent;
+    if (!scope) return identifiers.get(name.text) ?? [];
+    let names = scopeNames.get(scope);
+    if (!names) {
+      const found = new Map<string, ts.Identifier[]>();
+      const visit = (node: ts.Node): void => {
+        if (ts.isIdentifier(node)) found.set(node.text, [...(found.get(node.text) ?? []), node]);
+        ts.forEachChild(node, visit);
+      };
+      visit(scope);
+      scopeNames.set(scope, names = found);
+    }
+    return names.get(name.text) ?? [];
+  };
+  /**
+   * What is written into an object after it is bound: `props` for the keys assigned or deleted by
+   * name (`common.className = …`), `inside` for the keys whose objects are written into
+   * (`props.attrs.className = …`), `insideAny` when that key is computed (`MAP[k].className = …`),
+   * and `any` for a computed key, a mutating method, or the object handed on whole where it may be
+   * written.
+   */
+  type Writes = { props: Set<string>; inside: Set<string>; insideAny: boolean; any: boolean };
+  const none = (): Writes => ({ props: new Set(), inside: new Set(), insideAny: false, any: false });
+  const all = (): Writes => ({ ...none(), any: true });
+  /** Whether a type may hold an object a class can be written into: not a string, and not a function, whose own properties hold no class. */
+  const isObjectLike = (type: ts.Type) => (type.isUnion() ? type.types : [type]).some((member) =>
+    (member.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown))
+    || ((member.flags & ts.TypeFlags.Object) && member.getCallSignatures().length === 0 && member.getConstructSignatures().length === 0));
+  /**
+   * What is written through a binding after it is made, and whether the name itself is assigned
+   * again. A constant does not freeze what it holds, and a parameter holds its caller's object, so a
+   * write through either makes what the scan read from the source incomplete (#2394).
+   */
+  const writesMemo = new Map<ts.Node, Writes & { reassigned: boolean; done: boolean }>();
+  const writesTo = (declaration: Binding) => {
     const known = writesMemo.get(declaration);
     if (known) return known;
-    const writes = { props: new Set<string>(), any: false };
+    const writes = { ...none(), reassigned: false, done: false };
     writesMemo.set(declaration, writes);
-    if (!ts.isIdentifier(declaration.name)) return writes;
+    if (!ts.isIdentifier(declaration.name)) { writes.done = true; return writes; }
     // Only an object or array can be changed through another name; a string cannot.
     const value = transparent(declaration.initializer);
-    const type = checker.getTypeAtLocation(declaration.name);
     const mutable = (value && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value) || ts.isNewExpression(value)))
-      || (type.isUnion() ? type.types : [type]).some((member) => member.flags & ts.TypeFlags.Object);
-    if (!mutable) return writes;
-    const isWrite = (target: ts.Node) => {
-      const parent = target.parent;
-      return (ts.isBinaryExpression(parent) && parent.left === target && parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
-        && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
-        || ts.isDeleteExpression(parent)
-        || ((ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent))
-          && (parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken));
-    };
-    for (const name of identifiers.get(declaration.name.text) ?? []) {
+      || isObjectLike(checker.getTypeAtLocation(declaration.name));
+    for (const name of usesOf(declaration.name)) {
       if (name === declaration.name || declarationOf(name) !== declaration) continue;
       // `(common)` and `common as Props` are still `common`.
       let use: ts.Node = name;
       while (isTransparent(use.parent)) use = use.parent;
+      if (isWrite(use)) { writes.reassigned = true; continue; }
+      if (!mutable) continue;
       const parent = use.parent;
       if (ts.isPropertyAccessExpression(parent) && parent.expression === use) {
         if (isWrite(parent)) writes.props.add(parent.name.text);
         else if (MUTATING_METHODS.has(parent.name.text) && ts.isCallExpression(parent.parent) && parent.parent.expression === parent) writes.any = true;
+        else if (writesInside(parent, declaration)) writes.inside.add(parent.name.text);
       } else if (ts.isElementAccessExpression(parent) && parent.expression === use) {
         if (isWrite(parent)) writes.any = true;
-      } else if (!(ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent) || ts.isJsxSpreadAttribute(parent)
-        || ts.isTypeQueryNode(parent) || ts.isTypeOfExpression(parent) || ts.isExportSpecifier(parent)
-        || ts.isImportSpecifier(parent) || ts.isImportClause(parent)
-        || (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InKeyword && parent.right === use)
-        || (ts.isCallExpression(parent) && READING_CALLS.has(parent.expression.getText())))) {
-        // Handed on whole — aliased, passed to a function, stored, returned — the value can be
-        // written through a name this scan does not follow.
-        writes.any = true;
-      }
+        else if (writesInside(parent, declaration)) writes.insideAny = true;
+      } else merge(writes, flowsTo(use, declaration));
     }
+    writes.done = true;
     return writes;
   };
-  /** Whether a constant's value, or one property of it, may have been written after its declaration. */
-  const written = (declaration: ts.VariableDeclaration, prop?: string) => {
-    const writes = writesTo(declaration);
-    return writes.any || (prop === undefined ? writes.props.size > 0 : writes.props.has(prop));
+  const merge = (into: Writes, from: Writes) => {
+    from.props.forEach((prop) => into.props.add(prop));
+    from.inside.forEach((prop) => into.inside.add(prop));
+    into.insideAny ||= from.insideAny;
+    into.any ||= from.any;
   };
-  /** `obj.key` whose constant object has `key` written after it is declared. */
+  /** A binding's writes; all of them for one still being read that is not `from` itself (a cycle through another component). */
+  const settledWrites = (binding: Binding, from: Binding): Writes => {
+    const writes = writesTo(binding);
+    return writes.done || binding === from ? writes : all();
+  };
+  /**
+   * What may be written into an object through wherever one use of it takes it. Tested, compared,
+   * rendered as a child or interpolated, it is only read. Destructured, or handed to a component in
+   * the sources, it is written by whatever writes the bindings it reaches there. Handed on whole any
+   * other way — aliased, passed to a function, stored, returned — it can be written through a name
+   * this scan does not follow.
+   */
+  const flowsTo = (use: ts.Node, from: Binding): Writes => {
+    const parent = use.parent;
+    if (isTransparent(parent)) return flowsTo(parent, from);
+    if (ts.isConditionalExpression(parent)) return parent.condition === use ? none() : flowsTo(parent, from);
+    if (ts.isBinaryExpression(parent)) {
+      const kind = parent.operatorToken.kind;
+      if (kind === ts.SyntaxKind.EqualsToken) return parent.right === use ? all() : none();
+      if (kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken || kind === ts.SyntaxKind.AmpersandAmpersandToken
+        || (kind === ts.SyntaxKind.CommaToken && parent.right === use)) return flowsTo(parent, from);
+      return none();
+    }
+    if (ts.isVariableDeclaration(parent) && parent.initializer === use) {
+      // `const { attrs } = props` shares `props.attrs` with `attrs`, so what is written through it.
+      return ts.isObjectBindingPattern(parent.name) ? patternWrites(parent.name, null, from) : all();
+    }
+    if (ts.isJsxExpression(parent)) {
+      // `<Child attrs={attrs} />`: whatever Child writes through that prop is written here.
+      return ts.isJsxAttribute(parent.parent) ? receivedWrites(parent.parent.parent.parent, parent.parent.name.getText(), from) : none();
+    }
+    // `<Child {...props} />` copies the props, but each value it copies is still the same object.
+    if (ts.isJsxSpreadAttribute(parent)) return receivedWrites(parent.parent.parent, null, from);
+    if ((ts.isJsxOpeningElement(parent) || ts.isJsxSelfClosingElement(parent) || ts.isJsxClosingElement(parent)) && parent.tagName === use) return none();
+    if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
+      return parent.expression === use || READING_CALLS.has(parent.expression.getText()) ? none() : all();
+    }
+    // A spread into an argument list hands on each element; one into a literal copies them.
+    if (ts.isSpreadElement(parent)) return ts.isCallExpression(parent.parent) || ts.isNewExpression(parent.parent) ? all() : none();
+    if (ts.isElementAccessExpression(parent) && parent.argumentExpression === use) return none();
+    if (ts.isSpreadAssignment(parent) || ts.isTemplateSpan(parent) || ts.isTypeOfExpression(parent) || ts.isVoidExpression(parent)
+      || ts.isPrefixUnaryExpression(parent) || ts.isExpressionStatement(parent) || ts.isTypeQueryNode(parent)
+      || ts.isExportSpecifier(parent) || ts.isImportSpecifier(parent) || ts.isImportClause(parent)
+      || ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent) || ts.isSwitchStatement(parent)
+      || ts.isCaseClause(parent) || (ts.isForStatement(parent) && parent.condition === use)) return none();
+    return all();
+  };
+  /**
+   * What a destructuring pattern writes into the object it takes apart: `inside` for the keys whose
+   * values are written through the binding that takes them, or, when the object is the one value
+   * under `prop`, `any` when that value is. The rest is a copy of the object, so only a write into a
+   * value it shares counts.
+   */
+  const patternWrites = (pattern: ts.ObjectBindingPattern, prop: string | null, from: Binding): Writes => {
+    const out = none();
+    for (const element of pattern.elements) {
+      const writes = ts.isObjectBindingPattern(element.name) ? patternWrites(element.name, null, from)
+        : ts.isArrayBindingPattern(element.name) ? all() : settledWrites(element, from);
+      if (element.dotDotDotToken) {
+        if (prop === null) {
+          out.any ||= writes.any;
+          out.insideAny ||= writes.insideAny;
+          writes.inside.forEach((name) => out.inside.add(name));
+        } else if (writes.any || writes.insideAny || writes.inside.has(prop)) out.any = true;
+        continue;
+      }
+      const key = element.propertyName ?? element.name;
+      const name = ts.isIdentifier(key) || ts.isStringLiteral(key) ? key.text : null;
+      if (name === null) { out.any = true; continue; }
+      if ((prop !== null && prop !== name) || !changedAtAll(writes)) continue;
+      if (prop === null) out.inside.add(name); else out.any = true;
+    }
+    return out;
+  };
+  /**
+   * Whether a member read off a binding (`props.attrs`) has something inside it written or mutated,
+   * there or wherever the object it holds is handed (`decorate(props.attrs)`).
+   */
+  const writesInside = (member: ts.Node, from: Binding): boolean => {
+    let node = member;
+    while (isTransparent(node.parent)) node = node.parent;
+    const parent = node.parent;
+    if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === node) {
+      if (isWrite(parent)) return true;
+      if (ts.isPropertyAccessExpression(parent) && MUTATING_METHODS.has(parent.name.text)
+        && ts.isCallExpression(parent.parent) && parent.parent.expression === parent) return true;
+      return writesInside(parent, from);
+    }
+    if (isWrite(node) || !isObjectLike(checker.getTypeAtLocation(node))) return false;
+    return changedAtAll(flowsTo(node, from));
+  };
+  const changedAtAll = (writes: Writes) => writes.any || writes.insideAny || writes.props.size > 0 || writes.inside.size > 0;
+  /**
+   * What a component writes into the props one element hands it: into the object under `prop`, or,
+   * for a spread (`prop` null), into the objects under any of them. An element name renders a DOM
+   * node, which writes nothing back. Another package's component is taken to write a prop it is
+   * handed, as a constant's was before #2394, but not a spread of props, which it receives as a copy.
+   */
+  const receivedWrites = (element: ts.Node, prop: string | null, from: Binding): Writes => {
+    if (!ts.isJsxOpeningElement(element) && !ts.isJsxSelfClosingElement(element)) return all();
+    const tag = element.tagName;
+    if (ts.isIdentifier(tag) && /^[a-z]/.test(tag.text)) return none();
+    const fn = functionOf(declarationOf(tag));
+    if (!fn) return prop === null ? none() : all();
+    const parameter = fn.parameters[0];
+    if (!parameter) return none();
+    if (ts.isObjectBindingPattern(parameter.name)) return patternWrites(parameter.name, prop, from);
+    if (!ts.isIdentifier(parameter.name)) return all();
+    const writes = settledWrites(parameter, from);
+    if (prop === null) return { props: new Set(), inside: new Set(writes.inside), insideAny: writes.insideAny, any: writes.any };
+    return writes.any || writes.insideAny || writes.inside.has(prop) ? all() : none();
+  };
+  /** Whether a binding's value, or the value under one key of it, may have been replaced after it was bound. */
+  const written = (declaration: Binding, prop?: string) => {
+    const writes = writesTo(declaration);
+    return writes.any || writes.reassigned || (prop === undefined ? writes.props.size > 0 : writes.props.has(prop));
+  };
+  /** Whether, besides, something inside the object under that key may have been written. */
+  const writtenInto = (declaration: Binding, prop: string) => {
+    const writes = writesTo(declaration);
+    return written(declaration, prop) || writes.insideAny || writes.inside.has(prop);
+  };
+  /** Whether a binding is assigned again, so what it holds is not only what it was bound to. */
+  const reassigned = (declaration: ts.Node | "glyph" | undefined) => isBinding(declaration) && writesTo(declaration).reassigned;
+  /** `obj.key` whose object has `key` written after it is bound. */
   const writtenMember = (node: ts.Node) => {
     if (!ts.isPropertyAccessExpression(node) || !ts.isIdentifier(node.expression)) return false;
     const base = declarationOf(node.expression);
-    return Boolean(base && base !== "glyph" && isConstant(base) && written(base, node.name.text));
+    return isBinding(base) && written(base, node.name.text);
   };
   /** What a prop of an object type can hold: its literals when every non-nullish member names it, or null when that cannot be told. */
   const propertyLiterals = (type: ts.Type, prop: string, at: ts.Node): string[] | null => {
@@ -1178,6 +1377,16 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
 
   /** Functions whose call sites stood for all the values a parameter takes; each is checked for escapes. */
   const traced = new Set<SourceFunction>();
+  /**
+   * On while reading what a call through a value calls. A function that call reads a parameter of
+   * (`onKey(e)` reading `e.preventDefault`) is not thereby traced: a component reaches a value that
+   * function is called with only by a route the component's own escape check reports.
+   */
+  let readingCallee = false;
+  /** On while reading only which functions a value can be, so its type is not read for an element name. */
+  let functionsOnly = false;
+  /** Functions whose call sites have been read for the values a parameter takes. */
+  const sitesRead = new Set<SourceFunction>();
   const forwards = new Set<string>();
   const pending: { fn: SourceFunction; index: number; prop: string | null }[] = [];
   const forward = (fn: SourceFunction, index: number, prop: string | null): string[] => {
@@ -1220,7 +1429,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (seen.has(node)) return [];
     seen.add(node);
     // A tag that is a string names an element: `as="svg"`, or `` `h${level}` as "h1" | "h2" ``.
-    const names = literalsOf(checker.getTypeAtLocation(input!));
+    const names = functionsOnly ? null : literalsOf(checker.getTypeAtLocation(input!));
     if (names) return names.some((name) => SVG_ELEMENTS.has(name)) ? ["icon"] : [];
     if (ts.isStringLiteralLike(node)) return SVG_ELEMENTS.has(node.text) ? ["icon"] : [];
     if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) return ["other"];
@@ -1252,6 +1461,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     // A component passed as a prop is whatever the call sites pass, or its default: LibraryIcon's
     // `glyph`, however it is read — destructured in the signature, as `props.glyph`, or from `props`.
     const passed = propRead(node);
+    if (passed?.replaced) return ["unknown"];
     if (passed) {
       return [...passedValues(passed.fn, passed.index, passed.prop).flatMap((value) => value === "unknown" ? [value] : componentsOf(value, seen)),
         ...(passed.fallback ? componentsOf(passed.fallback, seen) : [])];
@@ -1276,36 +1486,50 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   };
   /**
    * The parameter prop a name or property access reads, when it reads one — `glyph`, `props.glyph`,
-   * or `const { glyph } = props` — with the default a binding gives it.
+   * or `const { glyph } = props` — with the default a binding gives it, and whether the function
+   * replaces that prop or assigns the name again (`replaced`), or, besides, writes into the object it
+   * holds (`changed`), so the call sites are not all it can hold.
    */
   const propRead = (node: ts.Identifier | ts.PropertyAccessExpression):
-    { fn: SourceFunction; index: number; prop: string; fallback?: ts.Expression } | null => {
+    { fn: SourceFunction; index: number; prop: string; fallback?: ts.Expression; replaced: boolean; changed: boolean } | null => {
     const wholeParameter = (base: ts.Node) => {
       const declaration = declarationOf(base);
-      const parameter = declaration && declaration !== "glyph" ? parameterOf(declaration) : null;
-      return parameter && parameter.prop === null ? parameter : null;
+      const parameter = isBinding(declaration) ? parameterOf(declaration) : null;
+      return parameter && parameter.prop === null && isBinding(declaration) ? { ...parameter, declaration } : null;
     };
     if (ts.isPropertyAccessExpression(node)) {
       const parameter = wholeParameter(node.expression);
-      return parameter ? { fn: parameter.fn, index: parameter.index, prop: node.name.text } : null;
+      return parameter ? {
+        fn: parameter.fn, index: parameter.index, prop: node.name.text,
+        replaced: written(parameter.declaration, node.name.text), changed: writtenInto(parameter.declaration, node.name.text),
+      } : null;
     }
     const declaration = declarationOf(node);
     if (!declaration || declaration === "glyph") return null;
     const fallback = ts.isBindingElement(declaration) ? declaration.initializer : undefined;
     const parameter = parameterOf(declaration);
-    if (parameter && parameter.prop !== null) return { fn: parameter.fn, index: parameter.index, prop: parameter.prop, fallback };
+    if (parameter && parameter.prop !== null) {
+      const again = reassigned(declaration);
+      return { fn: parameter.fn, index: parameter.index, prop: parameter.prop, fallback, replaced: again, changed: again };
+    }
     const destructured = destructuredFrom(declaration);
     const source = destructured?.key && transparent(destructured.from);
     const base = source && ts.isIdentifier(source) ? wholeParameter(source) : null;
-    return base && destructured?.key ? { fn: base.fn, index: base.index, prop: destructured.key, fallback } : null;
+    return base && destructured?.key ? {
+      fn: base.fn, index: base.index, prop: destructured.key, fallback,
+      replaced: written(base.declaration, destructured.key) || reassigned(declaration),
+      changed: writtenInto(base.declaration, destructured.key) || reassigned(declaration),
+    } : null;
   };
   /**
    * The expressions a function's call sites pass for one prop of one parameter: attributes, spread
    * objects, and through a wrapper that spreads its own props, that wrapper's call sites. `unknown`
-   * stands for an object the scan cannot read that may hold the prop.
+   * stands for an object the scan cannot read that may hold the prop, or one that may have had it
+   * replaced, or, for a read of what is `content` of the value, written into.
    */
-  const passedValues = (fn: SourceFunction, index: number, prop: string, visited = new Set<string>()): (ts.Node | "unknown")[] => {
-    traced.add(fn);
+  const passedValues = (fn: SourceFunction, index: number, prop: string, content = false, visited = new Set<string>()): (ts.Node | "unknown")[] => {
+    if (!readingCallee) traced.add(fn);
+    sitesRead.add(fn);
     const key = `${where(fn)}#${fn.pos}|${index}`;
     if (visited.has(key)) return [];
     visited.add(key);
@@ -1326,16 +1550,17 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if (ts.isIdentifier(node)) {
         const declaration = declarationOf(node);
         if (declaration && declaration !== "glyph") {
-          if (isConstant(declaration)) return written(declaration, prop) ? ["unknown" as const] : fromObject(declaration.initializer, seen);
+          const changed = isBinding(declaration) && (content ? writtenInto : written)(declaration, prop);
+          if (isConstant(declaration)) return changed ? ["unknown" as const] : fromObject(declaration.initializer, seen);
           const destructured = destructuredFrom(declaration);
           if (destructured && destructured.key === null) {
-            return destructured.taken.includes(prop) ? [] : fromObject(destructured.from, seen);
+            return destructured.taken.includes(prop) ? [] : changed ? ["unknown" as const] : fromObject(destructured.from, seen);
           }
           const parameter = parameterOf(declaration);
           if (parameter && parameter.prop === null) {
             const taken = parameter.rest && ts.isObjectBindingPattern(declaration.parent) && declaration.parent.elements
               .some((element) => !element.dotDotDotToken && (element.propertyName ?? element.name).getText() === prop);
-            return taken ? [] : passedValues(parameter.fn, parameter.index, prop, visited);
+            return taken ? [] : changed ? ["unknown" as const] : passedValues(parameter.fn, parameter.index, prop, content, visited);
           }
         }
       }
@@ -1404,6 +1629,33 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     return result;
   };
   const typed = (node: ts.Node): string[] | null => literalsOf(checker.getTypeAtLocation(node));
+  /**
+   * Whether an expression, or a source helper it calls, asserts a type (`raw as "safe-icon"`). The
+   * checker takes an assertion on trust, so a type it produced is no evidence of the value (#2394).
+   */
+  const assertsMemo = new Map<ts.Node, boolean>();
+  const asserts = (node: ts.Node): boolean => {
+    const known = assertsMemo.get(node);
+    if (known !== undefined) return known;
+    assertsMemo.set(node, false);
+    let found: boolean;
+    if ((ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) && !ts.isConstTypeReference(node.type)) found = true;
+    else if (isSourceFunction(node)) found = false;
+    else if (ts.isCallExpression(node) && functionOf(declarationOf(node.expression))) {
+      found = returnedNodes(functionOf(declarationOf(node.expression))!).some(asserts);
+    } else found = ts.forEachChild(node, (child) => asserts(child) || undefined) ?? false;
+    assertsMemo.set(node, found);
+    return found;
+  };
+  /** Whether what a name or member holds was given its type by an assertion, so its declaration is read instead. */
+  const assertedValue = (node: ts.Identifier | ts.PropertyAccessExpression | ts.ElementAccessExpression): boolean => {
+    if (ts.isElementAccessExpression(node)) return objectValues(node.expression)?.some(asserts) ?? false;
+    const declaration = declarationOf(node);
+    if (!declaration || declaration === "glyph") return false;
+    if ((isConstant(declaration) || ts.isPropertyAssignment(declaration)) && declaration.initializer) return asserts(declaration.initializer);
+    const destructured = destructuredFrom(declaration);
+    return destructured !== null && asserts(destructured.from);
+  };
   const evaluate = (node: ts.Node): string[] => {
     if (isTransparent(node)) return strings(node.expression);
     if (ts.isStringLiteralLike(node)) return [node.text];
@@ -1508,7 +1760,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     return out;
   };
   const reference = (node: ts.Identifier | ts.PropertyAccessExpression | ts.ElementAccessExpression): string[] => {
-    const narrowed = typed(node);
+    const narrowed = assertedValue(node) ? null : typed(node);
     if (narrowed) return narrowed;
     if (ts.isElementAccessExpression(node)) {
       const values = objectValues(node.expression);
@@ -1517,9 +1769,9 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (ts.isPropertyAccessExpression(node)) {
       // `props.className`, or a prop of the rest.
       const base = declarationOf(node.expression);
-      const parameter = base && base !== "glyph" ? parameterOf(base) : null;
-      if (parameter && parameter.prop === null) {
-        return isNamed(parameter.fn) ? forward(parameter.fn, parameter.index, node.name.text) : [UNREAD];
+      const parameter = isBinding(base) ? parameterOf(base) : null;
+      if (isBinding(base) && parameter && parameter.prop === null) {
+        return isNamed(parameter.fn) && !written(base, node.name.text) ? forward(parameter.fn, parameter.index, node.name.text) : [UNREAD];
       }
     }
     if (writtenMember(node)) return [UNREAD];
@@ -1528,6 +1780,8 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (isConstant(declaration) && declaration.initializer) return written(declaration) ? [UNREAD] : strings(declaration.initializer);
     if (ts.isPropertyAssignment(declaration)) return strings(declaration.initializer);
     if (ts.isShorthandPropertyAssignment(declaration)) return strings(declaration.name);
+    // A name assigned again holds more than what it was bound to (#2394).
+    if (reassigned(declaration)) return [UNREAD];
     const destructured = destructuredFrom(declaration);
     if (destructured?.key) {
       const fallback = ts.isBindingElement(declaration) && declaration.initializer ? strings(declaration.initializer) : [];
@@ -1576,8 +1830,11 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) {
       // `function Mark({ attrs }) { return <svg {...attrs} />; }`: whatever objects the call sites pass.
       const passed = propRead(node);
+      // `function Mark({ attrs }) { attrs.className = "x"; … }` writes into what its callers pass.
+      const base = ts.isIdentifier(node) ? declarationOf(node) : undefined;
+      if (passed && (passed.changed || (isBinding(base) && written(base, prop)))) return [UNREAD];
       if (passed) {
-        return [...passedValues(passed.fn, passed.index, passed.prop).flatMap((value) => value === "unknown" ? [UNREAD] : objectProp(value, prop)),
+        return [...passedValues(passed.fn, passed.index, passed.prop, true).flatMap((value) => value === "unknown" ? [UNREAD] : objectProp(value, prop)),
           ...(passed.fallback ? objectProp(passed.fallback, prop) : [])];
       }
     }
@@ -1587,16 +1844,19 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
         if (isConstant(declaration) && declaration.initializer) {
           return written(declaration, prop) ? [UNREAD] : objectProp(declaration.initializer, prop);
         }
+        const changed = isBinding(declaration) && written(declaration, prop);
         const destructured = destructuredFrom(declaration);
         if (destructured && destructured.key === null) {
-          return destructured.taken.includes(prop) ? [] : objectProp(destructured.from, prop);
+          return destructured.taken.includes(prop) ? [] : changed ? [UNREAD] : objectProp(destructured.from, prop);
         }
         const parameter = parameterOf(declaration);
         // `({ className, ...props })`: the rest no longer holds what was taken out of it.
         const taken = parameter?.rest && ts.isObjectBindingPattern(declaration.parent) && declaration.parent.elements
           .some((element) => !element.dotDotDotToken && (element.propertyName ?? element.name).getText() === prop);
         if (taken) return [];
-        if (parameter && parameter.prop === null && isNamed(parameter.fn)) return forward(parameter.fn, parameter.index, prop);
+        if (parameter && parameter.prop === null && isNamed(parameter.fn)) {
+          return changed ? [UNREAD] : forward(parameter.fn, parameter.index, prop);
+        }
       }
     }
     // A type that names the prop bounds its values. One that does not proves nothing: TypeScript's
@@ -1641,26 +1901,91 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     }
   };
 
-  // Which function each element renders, to a fixed point: a component passed as a prop is known
-  // only once the call sites of the function taking it are.
+  /**
+   * A call through a value `componentsOf` can follow to a function in the sources —
+   * `RENDERERS[k](props)`, `RENDERERS.a(props)`, a constant, a prop, a helper's result — rather than
+   * a name for one. Anything else it reads as `unknown`: a method of a value from a package, or a
+   * setter from `useState`, which no component reaches by the routes `escapes` lets it travel.
+   */
+  const throughValue = (call: ts.CallExpression): boolean => {
+    const callee = transparent(call.expression)!;
+    if (ts.isElementAccessExpression(callee) || ts.isCallExpression(callee) || ts.isConditionalExpression(callee)
+      || ts.isBinaryExpression(callee)) return true;
+    // Judged by the name a member is read from, which needs no type: `RENDERERS.a` or `props.render`.
+    const base = ts.isPropertyAccessExpression(callee) ? transparent(callee.expression)! : callee;
+    if (!ts.isIdentifier(base)) return false;
+    const declaration = declarationOf(base);
+    if (!declaration || declaration === "glyph") return false;
+    const parameter = parameterOf(declaration);
+    if (base !== callee) {
+      const value = isConstant(declaration) ? transparent(declaration.initializer) : undefined;
+      if (value !== undefined && ts.isObjectLiteralExpression(value)) return true;
+      // `text.slice()` and `parts.map()` call a method of a string or an array, not a prop.
+      const type = checker.getTypeAtLocation(base);
+      return parameter?.prop === null && !(type.flags & ts.TypeFlags.StringLike) && !checker.isArrayType(type) && !checker.isTupleType(type);
+    }
+    return isConstant(declaration) || (parameter !== null && parameter.prop !== null) || propRead(callee) !== null;
+  };
+  /** A callee read through a key the scan cannot list: `map[key]`, directly or through a constant. */
+  const computedCallee = (call: ts.CallExpression): boolean => {
+    let callee = transparent(call.expression);
+    if (callee && ts.isIdentifier(callee)) {
+      const declaration = declarationOf(callee);
+      if (declaration && declaration !== "glyph" && isConstant(declaration)) callee = transparent(declaration.initializer);
+    }
+    return callee !== undefined && ts.isElementAccessExpression(callee);
+  };
+  const viaValue = indirectCalls.filter(throughValue);
+
+  // Which function each element renders, to a fixed point — a component passed as a prop is known
+  // only once the call sites of the function taking it are — and then which a call through a value
+  // calls. A call found that way that a read already made missed starts both over.
   const rendered = new Map<ts.JsxOpeningLikeElement, Set<Rendered>>();
-  for (let changed = true; changed;) {
-    changed = false;
-    for (const element of elements) {
-      const known = rendered.get(element) ?? new Set();
-      rendered.set(element, known);
-      const tag = element.tagName;
-      const found: Rendered[] = ts.isIdentifier(tag) && /^[a-z]/.test(tag.text) ? (SVG_ELEMENTS.has(tag.text) ? ["icon"] : []) : componentsOf(tag);
+  const called = new Map<ts.CallExpression, Set<Rendered>>();
+  /** Functions some call through a value calls, which reach it by the routes a rendered component does. */
+  const calledThrough = new Set<SourceFunction>();
+  for (let missed = true; missed;) {
+    missed = false;
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const element of elements) {
+        const known = rendered.get(element) ?? new Set();
+        rendered.set(element, known);
+        const tag = element.tagName;
+        const found: Rendered[] = ts.isIdentifier(tag) && /^[a-z]/.test(tag.text) ? (SVG_ELEMENTS.has(tag.text) ? ["icon"] : []) : componentsOf(tag);
+        for (const component of found) {
+          if (known.has(component)) continue;
+          known.add(component);
+          changed = true;
+          if (typeof component !== "string") jsxSites.set(component, [...(jsxSites.get(component) ?? []), element]);
+        }
+      }
+    }
+    for (const call of viaValue) {
+      const known = called.get(call) ?? new Set();
+      called.set(call, known);
+      readingCallee = functionsOnly = true;
+      let found: Rendered[];
+      try { found = componentsOf(call.expression); } finally { readingCallee = functionsOnly = false; }
       for (const component of found) {
         if (known.has(component)) continue;
         known.add(component);
-        changed = true;
-        if (typeof component !== "string") jsxSites.set(component, [...(jsxSites.get(component) ?? []), element]);
+        if (typeof component === "string") continue;
+        callSites.set(component, [...(callSites.get(component) ?? []), call]);
+        calledThrough.add(component);
+        if (sitesRead.has(component)) missed = true;
       }
     }
   }
   for (const [element, components] of rendered) {
     if (components.has("unknown")) unread.add(`${where(element)} <${element.tagName.getText()}>`);
+  }
+  // A call through a key the scan cannot list may call any component stored with the others, and
+  // hand it a class. One with no arguments hands it none (`actions[action]()`).
+  for (const [call, components] of called) {
+    if (components.has("unknown") && computedCallee(call) && call.arguments.length > 0) {
+      unread.add(`${where(call)} ${call.expression.getText()}() calls a value the scan cannot follow`);
+    }
   }
   for (const call of bypasses) unread.add(`${where(call)} ${call.expression.getText()}() bypasses JSX`);
   for (const [element, components] of rendered) {
@@ -1681,13 +2006,13 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   /**
    * Where a function is used other than by calling it or rendering it: passed to `map()`, handed to
    * another package, aliased. Its call sites are then not all the values its parameters take. A
-   * component may also travel to a tag — through a constant, an object of components, a prop or a
-   * return — because `componentsOf` follows those to where it renders.
+   * component may also travel to a tag or a call — through a constant, an object of components, a
+   * prop or a return — because `componentsOf` follows those to where it renders or is called.
    */
   const escapes = (fn: SourceFunction): ts.Identifier | undefined => {
     const name = declaredName(fn);
     if (!name) return undefined;
-    const component = jsxSites.has(fn);
+    const component = jsxSites.has(fn) || calledThrough.has(fn);
     // Every spelling: the declaration's, and each import or constant that names the same function.
     const spellings = new Set([name.text, ...(aliasesOf().get(fn) ?? [])]);
     return [...spellings].flatMap((spelling) => identifiers.get(spelling) ?? []).find((use) => {
@@ -1699,6 +2024,8 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if (isFunctionWrapper(parent) && parent.arguments[0] === node) return false;
       if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isExportSpecifier(parent)
         || ts.isExportAssignment(parent) || ts.isTypeQueryNode(parent)) return false;
+      // `memo(function Markdown(…))`: the function's own name, not a use of it.
+      if (ts.isFunctionExpression(parent) && parent.name === node) return false;
       if ((ts.isJsxOpeningElement(parent) || ts.isJsxSelfClosingElement(parent) || ts.isJsxClosingElement(parent)) && parent.tagName === node) return false;
       if (!component) return true;
       const toTag = (isConstant(parent) && parent.initializer === node)
@@ -1718,6 +2045,74 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       for (const argument of argumentsAt(call, fn, index)) {
         if (argument === "unknown") collect([UNREAD], call);
         else collect(prop === null ? strings(argument) : objectProp(argument, prop), argument);
+      }
+    }
+  }
+  /** The functions a value hands on: itself, or those it holds in an object or array, literal or constant. */
+  const handed = (input: ts.Node | undefined, seen = new Set<ts.Node>()): SourceFunction[] => {
+    const node = transparent(input);
+    if (!node || seen.has(node)) return [];
+    seen.add(node);
+    if (ts.isArrayLiteralExpression(node)) return node.elements.flatMap((element) => handed(ts.isSpreadElement(element) ? element.expression : element, seen));
+    if (ts.isObjectLiteralExpression(node)) return node.properties.flatMap((property) => handed(ts.isPropertyAssignment(property) ? property.initializer
+      : ts.isShorthandPropertyAssignment(property) ? property.name : ts.isSpreadAssignment(property) ? property.expression : undefined, seen));
+    if (ts.isIdentifier(node)) {
+      const declaration = declarationOf(node);
+      const value = declaration && declaration !== "glyph" && isConstant(declaration) ? transparent(declaration.initializer) : undefined;
+      if (value && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))) return handed(value, seen);
+    }
+    functionsOnly = true;
+    try {
+      return componentsOf(node).filter((component): component is SourceFunction => typeof component !== "string");
+    } finally { functionsOnly = false; }
+  };
+  /**
+   * The values a spread of props hands on: an object's, or, for a function's own props (`{...rest}`),
+   * every prop its call sites pass that the rest still holds, through wrappers that spread theirs.
+   */
+  const spreadValues = (input: ts.Node, taken: readonly string[], visited: Set<string>): ts.Node[] => {
+    const node = transparent(input);
+    if (!node) return [];
+    if (ts.isObjectLiteralExpression(node)) {
+      return node.properties.flatMap((property) => {
+        if (ts.isSpreadAssignment(property)) return spreadValues(property.expression, taken, visited);
+        const name = property.name && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) ? property.name.text : null;
+        if (name !== null && taken.includes(name)) return [];
+        return ts.isPropertyAssignment(property) ? [property.initializer] : ts.isShorthandPropertyAssignment(property) ? [property.name] : [];
+      });
+    }
+    if (!ts.isIdentifier(node)) return [node];
+    const declaration = declarationOf(node);
+    if (!declaration || declaration === "glyph") return [node];
+    if (isConstant(declaration) && declaration.initializer) return spreadValues(declaration.initializer, taken, visited);
+    const parameter = parameterOf(declaration);
+    if (!parameter || parameter.prop !== null) return [node];
+    const key = `${where(parameter.fn)}#${parameter.fn.pos}|${parameter.index}`;
+    if (visited.has(key)) return [];
+    visited.add(key);
+    const rest = parameter.rest && ts.isObjectBindingPattern(declaration.parent) ? declaration.parent.elements
+      .filter((element) => !element.dotDotDotToken).map((element) => (element.propertyName ?? element.name).getText()) : [];
+    const without = [...taken, ...rest];
+    const fromSites = parameter.index !== 0 ? [] : (jsxSites.get(parameter.fn) ?? []).flatMap((site) => site.attributes.properties.flatMap((attribute) => {
+      if (ts.isJsxSpreadAttribute(attribute)) return spreadValues(attribute.expression, without, visited);
+      if (without.includes(attribute.name.getText()) || !attribute.initializer || !ts.isJsxExpression(attribute.initializer)) return [];
+      return attribute.initializer.expression ? [attribute.initializer.expression] : [];
+    }));
+    return [...fromSites, ...(callSites.get(parameter.fn) ?? []).flatMap((call) => argumentsAt(call, parameter.fn, parameter.index)
+      .flatMap((argument) => argument === "unknown" ? [] : spreadValues(argument, without, visited)))];
+  };
+  // A component handed to another package's component — directly, through a prop, inside an object,
+  // or in the props a wrapper spreads — is rendered there with props the scan never sees (#2394).
+  for (const [element, components] of rendered) {
+    if (!components.has("other")) continue;
+    for (const attribute of element.attributes.properties) {
+      const values = ts.isJsxSpreadAttribute(attribute) ? spreadValues(attribute.expression, [], new Set())
+        : attribute.initializer && ts.isJsxExpression(attribute.initializer) ? [attribute.initializer.expression] : [];
+      const label = ts.isJsxSpreadAttribute(attribute) ? `{...${attribute.expression.getText()}}` : attribute.name.getText();
+      for (const fn of values.flatMap((value) => handed(value))) {
+        if (!traced.has(fn)) continue;
+        unread.add(`${where(attribute)} <${element.tagName.getText()} ${label}> hands ${declaredName(fn)?.text ?? "a function"} `
+          + "to another package, so its arguments cannot be traced");
       }
     }
   }
@@ -3024,11 +3419,12 @@ test("an icon sized off the scale fails, naming the rule and §18, and a stale e
     failsNaming("|.gone svg", "#1958", "remove its ICON_SIZE_EXEMPTIONS entry"));
 });
 
+const scanOf = (files: Record<string, string>) => {
+  const scan = iconClasses(Object.entries(files).map(([file, source]) => ({ file, source })));
+  return { classes: [...scan.classes.keys()].sort(), unread: scan.unread };
+};
+
 test("icon classes are read from every way a class reaches an icon, and an unread value is reported", () => {
-  const scanOf = (files: Record<string, string>) => {
-    const scan = iconClasses(Object.entries(files).map(([file, source]) => ({ file, source })));
-    return { classes: [...scan.classes.keys()].sort(), unread: scan.unread };
-  };
   // AgentIcon's shape: a spread props object, and a class composed from a typed union.
   assert.deepEqual(scanOf({ "Mark.tsx": [
     "type Provider = \"openai\" | \"other\";",
@@ -3242,6 +3638,114 @@ test("icon classes are read from every way a class reaches an icon, and an unrea
     { classes: [], unread: ["A.tsx:1 ${…}"] });
   assert.deepEqual(scanOf({ "B.tsx": "export function B({ tone }: { tone: string }) { return <svg className={`b b-${tone}`} />; }" }),
     { classes: ["b"], unread: ["B.tsx:1 b-${prop}"] });
+});
+
+test("every route #2394 found that could hide an icon class is followed, reported or accepted", () => {
+  // 1. Followed: a component called rather than rendered, through a computed key, a member, a
+  // constant or a prop. Reported: a call through a key the scan cannot list that hands it props.
+  // Accepted: such a call with no arguments, which hands no props and so misses only a
+  // whole-parameter default (`default-only-icon`).
+  assert.deepEqual(scanOf({ "Called.tsx": [
+    "function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
+    "function Defaulted(props: { className?: string } = { className: \"default-only-icon\" }) { return <svg className={props.className} />; }",
+    "const RENDERERS = { a: Icon };",
+    "function Slot({ draw }: { draw: typeof Icon }) { return draw({ className: \"prop-call-icon\" }); }",
+    "function call(map: Record<string, typeof Icon>, key: string) { return map[key]({ className: \"unlisted-key-icon\" }); }",
+    "function bare(map: Record<string, typeof Defaulted>, key: string) { return map[key](); }",
+    "export function Uses({ k }: { k: \"a\" }) {",
+    "  const Picked = RENDERERS[k];",
+    "  return <>",
+    "    {RENDERERS[k]({ className: \"computed-icon\" })}{RENDERERS.a({ className: \"member-icon\" })}{Picked({ className: \"picked-icon\" })}",
+    "    <Slot draw={Icon} />{call({ a: Icon }, k)}{bare({ a: Defaulted }, k)}<Defaulted className=\"rendered-icon\" />",
+    "  </>;",
+    "}",
+  ].join("\n") }), {
+    classes: ["computed-icon", "member-icon", "picked-icon", "prop-call-icon", "rendered-icon"],
+    unread: ["Called.tsx:5 map[key]() calls a value the scan cannot follow"],
+  });
+
+  // 2. Reported: a component whose class comes from its caller, handed to another package's
+  // component directly, through a prop, inside an object, or in the props a wrapper spreads. One
+  // whose class is its own carries nothing the package could change.
+  assert.deepEqual(scanOf({ "Package.tsx": [
+    "import { Slot } from \"some-package\";",
+    "function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
+    "function Fixed() { return <svg className=\"fixed-icon\" />; }",
+    "function Relay({ icon }: { icon: typeof Icon }) { return <Slot icon={icon} />; }",
+    "function Spread({ label, ...rest }: { label: string; icon: typeof Icon }) { return <Slot {...rest} aria-label={label} />; }",
+    "const ITEMS = { Item: Icon };",
+    "export function Uses() {",
+    "  return <>",
+    "    <Icon className=\"seen\" /><Slot icon={Icon} iconClassName=\"package-icon\" /><Slot items={ITEMS} />",
+    "    <Relay icon={Icon} /><Spread label=\"x\" icon={Icon} /><Slot icon={Fixed} />",
+    "  </>;",
+    "}",
+  ].join("\n") }), {
+    classes: ["fixed-icon", "seen"],
+    unread: [
+      "Package.tsx:4 <Slot icon> hands Icon to another package, so its arguments cannot be traced",
+      "Package.tsx:5 <Slot {...rest}> hands Icon to another package, so its arguments cannot be traced",
+      "Package.tsx:9 <Slot icon> hands Icon to another package, so its arguments cannot be traced",
+      "Package.tsx:9 <Slot items> hands Icon to another package, so its arguments cannot be traced",
+    ],
+  });
+
+  // 3. Reported: an object written through the parameter that receives it — directly, under one of
+  // its props, by a helper it is handed to, or by a child it is passed to — and a parameter
+  // assigned again. Without the writes, each of these reads its callers' classes. Accepted: a
+  // package's component spread the same object writes nothing back (`spread-icon`).
+  assert.deepEqual(scanOf({ "Writes.tsx": [
+    "import { Slot } from \"some-package\";",
+    "type A = { className?: string };",
+    "function Mark({ attrs }: { attrs: A }) { attrs.className = \"param-write-icon\"; return <svg {...attrs} />; }",
+    "function Whole(props: { attrs: A }) { props.attrs.className = \"nested-write-icon\"; return <svg {...props.attrs} />; }",
+    "function Renamed({ className }: A) { className = \"reassigned-icon\"; return <svg className={className} />; }",
+    "function decorate(attrs: A) { attrs.className = \"helper-write-icon\"; }",
+    "function Helper(props: { attrs: A }) { decorate(props.attrs); return <svg {...props.attrs} />; }",
+    "function Child({ attrs }: { attrs: A }) { attrs.className = \"child-write-icon\"; return null; }",
+    "function Parent({ attrs }: { attrs: A }) { return <><Child attrs={attrs} /><svg {...attrs} /></>; }",
+    "function Reader({ attrs }: { attrs: A }) { return <><span title={attrs.className} /><svg {...attrs} /></>; }",
+    "function Shared({ attrs }: { attrs: A }) { return <><Slot {...attrs} /><svg {...attrs} /></>; }",
+    "export function Uses() {",
+    "  return <>",
+    "    <Mark attrs={{}} /><Whole attrs={{}} /><Renamed className=\"given\" /><Helper attrs={{}} />",
+    "    <Parent attrs={{ className: \"parent-icon\" }} /><Reader attrs={{ className: \"read-only-icon\" }} />",
+    "    <Shared attrs={{ className: \"spread-icon\" }} />",
+    "  </>;",
+    "}",
+  ].join("\n") }), {
+    classes: ["read-only-icon", "spread-icon"],
+    unread: ["Writes.tsx:3 ${…}", "Writes.tsx:4 ${…}", "Writes.tsx:5 ${…}", "Writes.tsx:7 ${…}", "Writes.tsx:9 ${…}"],
+  });
+
+  // 4. Followed: a value an assertion gives its type is read for its value — in a constant, an
+  // object's property, or a helper's return — so what it reads is its callers' class or an unread
+  // value. Accepted: a parameter typed as a union is read from its type, which TypeScript checks
+  // at every call site except one that asserts it (`typed-icon`).
+  assert.deepEqual(scanOf({ "Casts.tsx": [
+    "declare const label: string;",
+    "function Cast({ raw }: { raw: string }) { const cls = raw as \"safe-icon\"; return <svg className={cls} />; }",
+    "function toneOf(raw: string) { return raw as \"helper-icon\"; }",
+    "function Helper({ raw }: { raw: string }) { const cls = toneOf(raw); return <svg className={cls} />; }",
+    "const NAMES = { a: label as \"listed-icon\" };",
+    "function Typed({ tone }: { tone: \"typed-icon\" }) { return <svg className={tone} />; }",
+    "export function Uses({ raw }: { raw: string }) {",
+    "  return <><Cast raw=\"cast-icon\" /><Helper raw=\"helper-actual-icon\" /><svg className={NAMES.a} /><Typed tone={raw as \"typed-icon\"} /></>;",
+    "}",
+  ].join("\n") }), {
+    classes: ["cast-icon", "helper-actual-icon", "typed-icon"],
+    unread: ["Casts.tsx:8 ${…}"],
+  });
+
+  // 5. Followed: a name composed from a union of more than 64 members gets its prefix on every one.
+  // Reported: a name with more alternatives than MAX_ALTERNATIVES.
+  const union = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => `"${prefix}${index}"`).join(" | ");
+  const tones = scanOf({ "Tones.tsx": [
+    `function Tone({ tone }: { tone: ${union("t", 65)} }) { return <svg className={\`tone-\${tone}\`} />; }`,
+    `function Cell({ row, col }: { row: ${union("r", 33)}; col: ${union("c", 33)} }) { return <svg className={\`cell-\${row}-\${col}\`} />; }`,
+  ].join("\n") });
+  assert.deepEqual(tones.classes, Array.from({ length: 65 }, (_, index) => `tone-t${index}`).sort());
+  assert.deepEqual(tones.unread, ["Tones.tsx:2 ${…}"]);
 });
 
 test("a rule that colours an icon needs a later forced-colors rule, at least as heavy, that hands back its words' colour", () => {
