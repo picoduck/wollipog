@@ -532,14 +532,22 @@ test("an immediate publication consumes human blocker transitions deferred by a 
   } finally { db.close(); }
 });
 
-test("successive human blocker groups retain distinct wakeups inside one runtime batch", async () => {
+for (const initiallyEmpty of [false, true]) {
+test(`successive human blocker groups retain distinct wakeups inside one ${initiallyEmpty ? "initially empty" : "blocked"} runtime batch`, async () => {
   const { db, svc, snapshots } = fixture(20);
   try {
-    db.setPendingApproval("child-0", question("first-0"));
-    db.setPendingApproval("child-10", question("first-10"));
+    if (!initiallyEmpty) {
+      db.setPendingApproval("child-0", question("first-0"));
+      db.setPendingApproval("child-10", question("first-10"));
+    }
     const batch = svc.beginRunnerAttentionBatch("runner");
-    svc.applySessionRuntimeUpdate("runner", snapshots[0]!, batch);
-    svc.applySessionRuntimeUpdate("runner", snapshots[10]!);
+    if (initiallyEmpty) {
+      svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: question("first") }, batch);
+      svc.applySessionRuntimeUpdate("runner", snapshots[0]!);
+    } else {
+      svc.applySessionRuntimeUpdate("runner", snapshots[0]!, batch);
+      svc.applySessionRuntimeUpdate("runner", snapshots[10]!);
+    }
     svc.applySessionRuntimeUpdate("runner", { ...snapshots[0]!, pendingApproval: question("second") });
     svc.applySessionRuntimeUpdate("runner", snapshots[0]!, batch);
     await svc.flushRunnerAttention("runner", () => true);
@@ -548,6 +556,28 @@ test("successive human blocker groups retain distinct wakeups inside one runtime
     assert.notEqual(clears[0]?.event_id, clears[1]?.event_id);
     await svc.flushRunnerAttention("runner", () => true);
     assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE kind='human_blockers_cleared'").get()?.n, 2);
+  } finally { db.close(); }
+});
+}
+
+test("rearming spent wakeups does not consume an unreported deferred question's urgent alert", async () => {
+  const { db, hub, snapshots } = fixture(30);
+  let urgent = 0;
+  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, (before, after) => {
+    if (pushDecision(before, after)?.sessionId === "campaign-0" && pushDecision(before, after)?.urgency === "high") urgent++;
+  });
+  try {
+    db.setPendingApproval("child-0", question("first"));
+    const batch = svc.beginRunnerAttentionBatch("runner");
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[20]!, preview: "Capture" }, batch);
+    svc.applySessionRuntimeUpdate("runner", snapshots[0]!);
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[10]!, pendingApproval: question("deferred") }, batch);
+    svc.applySessionRuntimeUpdate("runner", { ...snapshots[20]!, pendingApproval: question("immediate") });
+    assert.equal(urgent, 1);
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(urgent, 2, "wakeup rearm must not mark the deferred question as already notified");
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(urgent, 2);
   } finally { db.close(); }
 });
 
@@ -573,7 +603,8 @@ for (const restartPoint of ["before_publication", "before_clear", "after_clear"]
         db.rearmCampaignHumanAttention = rearm;
       } else initial.svc.applySessionRuntimeUpdate("runner", { ...initial.snapshots[0]!, pendingApproval: question("fresh") });
       const fresh = db.campaignAttentionCheckpoint("runner", "campaign-0");
-      assert.equal(fresh?.pendingRequests.human, restartPoint === "before_publication" ? 0 : 1);
+      assert.equal(fresh?.pendingRequests.human, 0, "notification baseline remains empty");
+      assert.equal(fresh?.humanWakeupBaseline?.human ?? 0, restartPoint === "before_publication" ? 0 : 1);
       assert.doesNotMatch(JSON.stringify(fresh), /Private|fresh|first-/, "only occurrence hashes are retained");
       if (restartPoint !== "before_publication") assert.match(initial.logs.join("\n"), /campaign_human_attention_rearmed/);
       assert.doesNotMatch(initial.logs.join("\n"), /Private|fresh|first-/);
@@ -610,6 +641,36 @@ for (const restartPoint of ["before_publication", "before_clear", "after_clear"]
   });
 }
 
+test("a fresh question committed before publication still receives an urgent alert after restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "successive-alert-"));
+  let db: ControlPlaneDb | undefined;
+  try {
+    const file = join(root, "control-plane.db");
+    const initial = fixture(20, file);
+    db = initial.db;
+    db.setPendingApproval("child-0", question("first"));
+    initial.svc.applySessionRuntimeUpdate("runner", { ...initial.snapshots[10]!, preview: "Capture" },
+      initial.svc.beginRunnerAttentionBatch("runner"));
+    initial.svc.applySessionRuntimeUpdate("runner", initial.snapshots[0]!);
+    db.rearmCampaignHumanAttention = () => { throw new Error("interrupted publication"); };
+    assert.throws(() => initial.svc.applySessionRuntimeUpdate("runner", {
+      ...initial.snapshots[0]!, pendingApproval: question("fresh"),
+    }), /interrupted publication/);
+    db.close();
+    db = ControlPlaneDb.open(file);
+    let urgent = 0;
+    const svc = new SessionsService(db, new Hub(db), { info() {}, warn() {}, error() {} }, (before, after) => {
+      if (pushDecision(before, after)?.sessionId === "campaign-0" && pushDecision(before, after)?.urgency === "high") urgent++;
+    });
+    svc.beginRunnerAttentionBatch("runner");
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(urgent, 1, "recovering the wakeup baseline must not consume an unanswered question's alert");
+    assert.equal(db.getSession("campaign-0")?.orchestratorCampaign?.pendingRequests?.human, 1);
+    await svc.flushRunnerAttention("runner", () => true);
+    assert.equal(urgent, 1);
+  } finally { db?.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("rearming overlapping checkpoints preserves orchestrator baselines and initial notification baselines", () => {
   const { db } = fixture(10);
   try {
@@ -624,10 +685,15 @@ test("rearming overlapping checkpoints preserves orchestrator baselines and init
     db.registerRunner({ runnerId: "initially-empty", hostname: "synthetic", os: "linux", version: "test",
       agents: [], workspaces: [] }, 1, PROTOCOL_VERSION);
     db.retainCampaignAttentionCheckpoint("initially-empty", before);
-    const fresh = { ...pending, human: 1, humanRequestTokens: ["fresh-hash"] };
+    const fresh = { human: 1, humanRequestTokens: ["fresh-hash"], orchestrator: 99, orchestratorRequestTokens: ["different"] };
     assert.equal(db.rearmCampaignHumanAttention(before.id, fresh), 2);
     for (const runnerId of ["runner", "other"]) {
-      assert.deepEqual(db.campaignAttentionCheckpoint(runnerId, before.id)?.pendingRequests, fresh);
+      assert.deepEqual(db.campaignAttentionCheckpoint(runnerId, before.id)?.pendingRequests, {
+        ...pending, human: 0, humanRequestTokens: [],
+      });
+      assert.deepEqual(db.campaignAttentionCheckpoint(runnerId, before.id)?.humanWakeupBaseline, {
+        human: 1, humanRequestTokens: ["fresh-hash"],
+      });
       assert.equal(db.campaignAttentionCheckpoint(runnerId, before.id)?.capturedAt, before.updatedAt);
     }
     assert.equal(db.campaignAttentionCheckpoint("initially-empty", before.id)?.pendingRequests.human, 0);

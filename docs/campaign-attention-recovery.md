@@ -28,8 +28,10 @@ restart from manufacturing a second cleared event from the older, larger human-t
 
 Consumed human baselines carry a durable `humanBaselineConsumed` marker. If an immediate
 publication observes a fresh human blocker group while a batch remains open, it rearms only those
-spent baselines with the current count and occurrence hashes. Initially empty baselines are not
-advanced: they may still owe an urgent notification for a deferred question. Original Orchestrator
+spent wakeup baselines with the current count and occurrence hashes in a separate
+`humanWakeupBaseline` field. Notification baselines are never advanced by rearming: initially
+empty and consumed baselines may still owe an urgent alert for a deferred question. A clear marks
+all overlapping checkpoints spent, including a batch that began empty. Original Orchestrator
 tokens and capture timestamps are preserved. A later deferred clear therefore retains its distinct
 wakeup identity across restart and replay, without requiring a separate provider turn per group.
 Recovery also rearms spent baselines from still-authoritative human requests before accepting

@@ -6774,7 +6774,7 @@ export class SessionsService {
       : null;
   }
 
-  private publishCampaignAttentionTransition(before: SessionView | null, batch?: RunnerAttentionBatch): void {
+  private publishCampaignAttentionTransition(before: SessionView | null, batch?: RunnerAttentionBatch, notificationBefore?: SessionView): void {
     if (batch) { batch.defer(before); return; }
     if (!before) return;
     // A yielded batch may outlive deletion or reparenting of its controlling campaign. Do not
@@ -6887,7 +6887,7 @@ export class SessionsService {
     }
     // Only own-session status/approval/delivery progress was already reported. Child request
     // tokens must still come from the deferred before-view, or their urgent push can be lost.
-    this.notifyTransition({ ...before, ...this.registrationNotificationViews.get(before.id) }, before.id);
+    this.notifyTransition({ ...(notificationBefore ?? before), ...this.registrationNotificationViews.get(before.id) }, before.id);
     this.hub.sessionChangedById(before.id);
   }
 
@@ -12675,7 +12675,8 @@ export class SessionsService {
     if (!campaigns) return;
     for (const before of campaigns.values()) {
       if (!isCurrent()) return; // replacement inherits before-views for partially committed frames
-      this.publishCampaignAttentionTransition(this.checkpointBeforeView(runnerId, before));
+      this.publishCampaignAttentionTransition(this.checkpointBeforeView(runnerId, before), undefined,
+        this.checkpointBeforeView(runnerId, before, false));
       this.discardCampaignAttentionBefore(runnerId, campaigns, before.id);
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
@@ -12683,10 +12684,12 @@ export class SessionsService {
       this.registrationAttention.delete(runnerId);
   }
 
-  private checkpointBeforeView(runnerId: string, before: SessionView): SessionView {
+  private checkpointBeforeView(runnerId: string, before: SessionView, forEvents = true): SessionView {
     const checkpoint = this.db.campaignAttentionCheckpoint(runnerId, before.id);
     return checkpoint && before.orchestratorCampaign ? { ...before, updatedAt: checkpoint.capturedAt,
-      orchestratorCampaign: { ...before.orchestratorCampaign, pendingRequests: checkpoint.pendingRequests },
+      orchestratorCampaign: { ...before.orchestratorCampaign, pendingRequests: {
+        ...checkpoint.pendingRequests, ...(forEvents ? checkpoint.humanWakeupBaseline : {}),
+      } },
     } : before;
   }
 
@@ -12702,7 +12705,7 @@ export class SessionsService {
         // a replacement runner's deferred clear. This remains once per campaign, not per child.
         if (current.orchestratorCampaign?.pendingRequests)
           this.db.rearmCampaignHumanAttention(id, current.orchestratorCampaign.pendingRequests);
-        campaigns.set(id, this.checkpointBeforeView(runnerId, current));
+        campaigns.set(id, this.checkpointBeforeView(runnerId, current, false));
       }
     }
     this.registrationAttention.set(runnerId, campaigns);
@@ -12947,7 +12950,8 @@ export class SessionsService {
       yield;
       // An immediate publication during this yield may have consumed the human transition.
       const before = campaigns.get(campaignId);
-      if (before) this.publishCampaignAttentionTransition(this.checkpointBeforeView(runnerId, before));
+      if (before) this.publishCampaignAttentionTransition(this.checkpointBeforeView(runnerId, before), undefined,
+        this.checkpointBeforeView(runnerId, before, false));
       this.discardCampaignAttentionBefore(runnerId, campaigns, campaignId);
     }
     this.registrationAttention.delete(runnerId);

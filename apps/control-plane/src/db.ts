@@ -15107,8 +15107,8 @@ export class ControlPlaneDb {
       // two can produce a second event from an older, overlapping batch's different token set.
       if (Number(result.changes) === 1 && input.kind === "human_blockers_cleared") {
         this.stmt(`UPDATE orchestrator_campaign_attention_checkpoints
-          SET pending_requests=json_set(pending_requests,'$.human',0,'$.humanRequestTokens',json('[]'),'$.humanBaselineConsumed',json('true'))
-          WHERE campaign_session_id=? AND json_extract(pending_requests,'$.human')>0`)
+          SET pending_requests=json_remove(json_set(pending_requests,'$.human',0,'$.humanRequestTokens',json('[]'),'$.humanBaselineConsumed',json('true')),'$.humanWakeupBaseline')
+          WHERE campaign_session_id=?`)
           .run(input.campaignSessionId);
       }
       return Number(result.changes) === 1;
@@ -15134,18 +15134,22 @@ export class ControlPlaneDb {
   rearmCampaignHumanAttention(campaignId: string, pending: NonNullable<OrchestratorCampaignProjection["pendingRequests"]>): number {
     if (pending.human === 0) return 0;
     return Number(this.stmt(`UPDATE orchestrator_campaign_attention_checkpoints
-      SET pending_requests=json_remove(json_set(pending_requests,'$.human',?,'$.humanRequestTokens',json(?)),'$.humanBaselineConsumed')
-      WHERE campaign_session_id=? AND json_extract(pending_requests,'$.humanBaselineConsumed')=1`)
-      .run(pending.human, JSON.stringify(pending.humanRequestTokens ?? []), campaignId).changes);
+      SET pending_requests=json_set(pending_requests,'$.humanWakeupBaseline',json(?))
+      WHERE campaign_session_id=? AND json_extract(pending_requests,'$.humanBaselineConsumed')=1
+        AND json_type(pending_requests,'$.humanWakeupBaseline') IS NULL`)
+      .run(JSON.stringify({ human: pending.human, humanRequestTokens: pending.humanRequestTokens ?? [] }), campaignId).changes);
   }
 
   campaignAttentionCheckpoint(runnerId: string, campaignId: string): {
     pendingRequests: NonNullable<OrchestratorCampaignProjection["pendingRequests"]>; capturedAt: number;
+    humanWakeupBaseline?: { human: number; humanRequestTokens: string[] };
   } | null {
     const row = this.stmt(`SELECT pending_requests,captured_at FROM orchestrator_campaign_attention_checkpoints
       WHERE runner_id=? AND campaign_session_id=?`).get(runnerId, campaignId) as
       { pending_requests: string; captured_at: number } | undefined;
-    return row ? { pendingRequests: JSON.parse(row.pending_requests), capturedAt: row.captured_at } : null;
+    if (!row) return null;
+    const { humanBaselineConsumed: _consumed, humanWakeupBaseline, ...pendingRequests } = JSON.parse(row.pending_requests);
+    return { pendingRequests, capturedAt: row.captured_at, ...(humanWakeupBaseline ? { humanWakeupBaseline } : {}) };
   }
 
   deferredCampaignAttentionIds(runnerId: string): string[] {
