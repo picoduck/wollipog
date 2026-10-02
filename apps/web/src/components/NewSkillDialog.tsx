@@ -63,7 +63,9 @@ async function uploadsFromDrop(transfer: DataTransfer): Promise<UploadedSkillFil
  * here or uploaded as a folder. Written instructions are the SKILL.md body; its frontmatter is
  * built from the name and description when the skill is created, so there is one place to edit
  * each. An uploaded folder is used as it is, with its own SKILL.md; its frontmatter fills an empty
- * Name and Description, so the fields show what the skill is saved with (#2290).
+ * Name and Description, so the fields show what the skill is saved with (#2290). Its files are never
+ * rewritten, so an edited Description only labels the skill in the library while agents read the
+ * folder's SKILL.md, and the field's helper says so (#2370).
  */
 export function NewSkillDialog({ onClose, onCreate, busy, error }: {
   onClose: () => void;
@@ -105,7 +107,8 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
   }, [growBody]);
 
   const trimmedName = name.trim();
-  // An empty Description saves the uploaded SKILL.md's own description, so the field says so.
+  // An empty Description saves the uploaded SKILL.md's own description, so the field says so;
+  // otherwise, for an upload, it says agents read the folder's SKILL.md, not this field (#2370).
   const uploadedSkillMd = source === "upload" ? folderFiles.find((file) => file.path === "SKILL.md") : undefined;
   const keepsFolderDescription = !description.trim() && uploadedSkillMd !== undefined &&
     Boolean(skillFileFrontmatter(uploadedSkillMd).description);
@@ -226,7 +229,9 @@ export function NewSkillDialog({ onClose, onCreate, busy, error }: {
         </div>
 
         <SkillDescriptionField value={description} onChange={setDescription}
-          helper={keepsFolderDescription ? "Left empty, the skill keeps the description in the folder's SKILL.md." : undefined} />
+          helper={source !== "upload" ? undefined
+            : keepsFolderDescription ? "Left empty, the skill keeps the description in the folder's SKILL.md."
+            : "Labels the skill in the library only. Agents read the description in the folder's SKILL.md."} />
 
         <div className="field">
           <div className="field-head">

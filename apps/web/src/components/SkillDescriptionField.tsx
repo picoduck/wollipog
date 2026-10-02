@@ -23,8 +23,8 @@ export function SkillDescriptionField({ value, onChange, disabled = false, label
   onChange: (value: string) => void;
   disabled?: boolean;
   label?: string;
-  /** Replaces the usual helper, when the field's meaning differs (an empty field in New Skill's
-   * upload keeps the folder's own description). */
+  /** Replaces the usual helper, when the field's meaning differs (in New Skill's upload, agents
+   * read the folder's own SKILL.md, and an empty field keeps its description). */
   helper?: string;
 }) {
   const id = useId();

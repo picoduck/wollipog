@@ -286,6 +286,7 @@ test("an uploaded SKILL.md's JSON-escaped double-quoted name fills Name decoded,
 });
 
 const DESCRIPTION_HELPER = "Agents read this to decide when the skill applies. Say what it does and when to use it.";
+const UPLOAD_DESCRIPTION_HELPER = "Labels the skill in the library only. Agents read the description in the folder's SKILL.md.";
 
 test("an uploaded SKILL.md's description fills an empty Description, and Create Skill saves what the field shows (#2290)", async () => {
   const view = await mount();
@@ -297,7 +298,7 @@ test("an uploaded SKILL.md's description fills an empty Description, and Create 
     // Decoded as the library stores it: the double-quoted value is a JSON string.
     assert.equal(description.value, "Reviews a diff.\nUse when: asked to \"review\".");
     assert.equal(dialog.querySelector(".field-counter")?.textContent, "44 / 1,024");
-    assert.deepEqual(describedBy(description), [DESCRIPTION_HELPER, "44 / 1,024"]);
+    assert.deepEqual(describedBy(description), [UPLOAD_DESCRIPTION_HELPER, "44 / 1,024"]);
     await act(async () => button(dialog, "Create Skill").click());
     await settle();
     assert.deepEqual(created, [{
@@ -315,8 +316,8 @@ test("a SKILL.md without a description leaves Description empty, and a typed des
   try {
     await pickFolder(view.dialog, { "review/SKILL.md": "---\nname: code-review\n---\nReview." });
     assert.equal(labelled(view.dialog, "Description").value, "");
-    assert.deepEqual(describedBy(labelled(view.dialog, "Description")), [DESCRIPTION_HELPER, "0 / 1,024"],
-      "nothing to keep, so the usual helper");
+    assert.deepEqual(describedBy(labelled(view.dialog, "Description")), [UPLOAD_DESCRIPTION_HELPER, "0 / 1,024"],
+      "nothing to keep, so the upload's helper");
     await act(async () => button(view.dialog, "Create Skill").click());
     await settle();
     assert.equal(view.created[0]?.description, "");
@@ -332,6 +333,47 @@ test("a SKILL.md without a description leaves Description empty, and a typed des
     await act(async () => button(view.dialog, "Create Skill").click());
     await settle();
     assert.equal(view.created[0]?.description, "My own words.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("for an uploaded folder, Description's helper says agents read the folder's SKILL.md, and an edit leaves the files as they are (#2370)", async () => {
+  const description = (dialog: HTMLElement) => labelled(dialog, "Description");
+  // An edited description: the library takes the field, the folder's SKILL.md is sent byte for byte.
+  let view = await mount();
+  try {
+    const { dialog, created } = view;
+    assert.deepEqual(describedBy(description(dialog)), [DESCRIPTION_HELPER, "0 / 1,024"], "Write builds SKILL.md from the field");
+    await act(async () => button(dialog, "Upload Folder").click());
+    assert.deepEqual(describedBy(description(dialog)), [UPLOAD_DESCRIPTION_HELPER, "0 / 1,024"], "before a folder is chosen");
+    const skillMd = "---\nname: code-review\ndescription: A\n---\nReview.\n";
+    await pickFolder(dialog, { "review/SKILL.md": skillMd, "review/notes.md": "Notes." });
+    assert.equal(description(dialog).value, "A");
+    await type(description(dialog), "B");
+    assert.deepEqual(describedBy(description(dialog)), [UPLOAD_DESCRIPTION_HELPER, "1 / 1,024"]);
+    await act(async () => button(dialog, "Create Skill").click());
+    await settle();
+    assert.deepEqual(created, [{
+      name: "code-review",
+      description: "B",
+      files: [{ path: "SKILL.md", encoding: "utf8", content: skillMd }, { path: "notes.md", encoding: "utf8", content: "Notes." }],
+    }]);
+  } finally {
+    await view.unmount();
+  }
+
+  // A description typed for a folder whose SKILL.md has none: the same helper, the same files.
+  view = await mount();
+  try {
+    const { dialog, created } = view;
+    const skillMd = "---\nname: code-review\n---\nReview.\n";
+    await pickFolder(dialog, { "review/SKILL.md": skillMd });
+    await type(description(dialog), "Typed here.");
+    assert.deepEqual(describedBy(description(dialog)), [UPLOAD_DESCRIPTION_HELPER, "11 / 1,024"]);
+    await act(async () => button(dialog, "Create Skill").click());
+    await settle();
+    assert.deepEqual(created, [{ name: "code-review", description: "Typed here.", files: [{ path: "SKILL.md", encoding: "utf8", content: skillMd }] }]);
   } finally {
     await view.unmount();
   }
