@@ -35,6 +35,7 @@ export interface CampaignSummaryState {
   campaign: Pick<OrchestratorCampaignProjection, "status" | "limits" | "heldChildren"> | null;
   /** The root session's title, for a member's "part of" line. */
   campaignTitle: string | null;
+  /** Why the summary could not be loaded, or, beside a shown summary, why it could not be refreshed. */
   error: string | null;
 }
 
@@ -112,11 +113,14 @@ export function useCampaignStatus({
   availability,
   filters,
   selectedItemId,
+  restoreCount = 0,
 }: {
   session: Pick<SessionView, "id" | "title" | "orchestratorCampaign">;
   availability: Extract<CampaignStatusAvailability, { kind: "available" }>;
   filters: CampaignWorkFilters;
   selectedItemId: string | null;
+  /** Rows a previous mount of this list had loaded; the first load reloads at least that many. */
+  restoreCount?: number;
 }): CampaignStatusData {
   const api = useApi();
   const online = useStoreSelector((s) => s.conn === "online");
@@ -171,13 +175,17 @@ export function useCampaignStatus({
 
   const root = ownView ? session : storedRoot ?? (fetchedRoot?.id === availability.campaignSessionId ? fetchedRoot.session : null);
   const projection = root?.orchestratorCampaign ?? null;
+  // A fetched root that later fails to refresh keeps its last summary, with the failure beside it.
+  const refreshError = !ownView && storedRoot === null && fetchedRoot?.id === availability.campaignSessionId
+    ? fetchedRoot.error
+    : null;
   const summary: CampaignSummaryState = projection?.work
     ? {
       status: "ready",
       summary: projection.work,
       campaign: projection,
       campaignTitle: root?.title ?? null,
-      error: null,
+      error: refreshError,
     }
     : {
       status: fetchedRoot?.error ? "error" : "loading",
@@ -260,9 +268,14 @@ export function useCampaignStatus({
     return () => controller.abort();
   }, [api, listKey, session.id]);
 
+  // A remounted panel reloads as many rows as it last showed, so returning from an item's details
+  // finds that item's row and scroll position again. Only for the list it was showing: a new
+  // filter starts from one page.
+  const restore = useRef({ key: listKey, count: restoreCount });
+  if (restore.current.key !== listKey) restore.current.count = 0;
   useEffect(() => {
     if (!online) return;
-    return reload(loadedCountRef.current);
+    return reload(Math.max(loadedCountRef.current, restore.current.count));
   }, [reload, online, revision, reconnects, retries]);
 
   const loadMore = useCallback(() => {

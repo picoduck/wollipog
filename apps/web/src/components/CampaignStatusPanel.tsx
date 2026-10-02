@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useId,
   useLayoutEffect,
   useRef,
@@ -69,6 +70,8 @@ interface CampaignListMemory {
   selectedItemId: string | null;
   scrollTop: number;
   focusItemId: string | null;
+  /** Rows the list had loaded, so a remounted panel reloads as deep before restoring position. */
+  shownCount: number;
 }
 const listMemory = new Map<string, CampaignListMemory>();
 
@@ -78,17 +81,25 @@ export function forgetCampaignStatusMemory(): void {
 
 type AvailableCampaign = Extract<CampaignStatusAvailability, { kind: "available" }>;
 
+/** The request a work item waits on: the occurrence its blocker names, else its child session's. */
+export interface CampaignRequestTarget {
+  occurrenceId: string | null;
+  sessionId: string | null;
+}
+
 export function CampaignStatusPanel({
   session,
   availability,
   onOpenSession,
-  onOpenRequests,
+  findRequest,
+  onOpenRequest,
 }: {
   session: SessionView;
   availability: Exclude<CampaignStatusAvailability, { kind: "hidden" }>;
   onOpenSession: (sessionId: string) => void;
-  /** Opens Requests on the named request; absent when no request is reachable from this session. */
-  onOpenRequests?: (occurrenceId: string | null) => void;
+  /** The Requests key of the item's request when this session lists it, else null. */
+  findRequest: (target: CampaignRequestTarget) => string | null;
+  onOpenRequest: (requestKey: string) => void;
 }) {
   if (availability.kind === "unavailable") {
     return (
@@ -105,7 +116,8 @@ export function CampaignStatusPanel({
       session={session}
       availability={availability}
       onOpenSession={onOpenSession}
-      onOpenRequests={onOpenRequests}
+      findRequest={findRequest}
+      onOpenRequest={onOpenRequest}
     />
   );
 }
@@ -114,12 +126,14 @@ function AvailableCampaignStatus({
   session,
   availability,
   onOpenSession,
-  onOpenRequests,
+  findRequest,
+  onOpenRequest,
 }: {
   session: SessionView;
   availability: AvailableCampaign;
   onOpenSession: (sessionId: string) => void;
-  onOpenRequests?: (occurrenceId: string | null) => void;
+  findRequest: (target: CampaignRequestTarget) => string | null;
+  onOpenRequest: (requestKey: string) => void;
 }) {
   const [memory, setMemoryState] = useState<CampaignListMemory>(() => listMemory.get(session.id) ?? {
     filters: DEFAULT_CAMPAIGN_WORK_FILTERS,
@@ -127,6 +141,7 @@ function AvailableCampaignStatus({
     scrollTop: 0,
     // A member starts on its own assignment.
     focusItemId: availability.currentWorkItemId,
+    shownCount: 0,
   });
   const setMemory = useCallback((patch: Partial<CampaignListMemory>) => {
     setMemoryState((current) => {
@@ -135,7 +150,17 @@ function AvailableCampaignStatus({
       return next;
     });
   }, [session.id]);
-  const data = useCampaignStatus({ session, availability, filters: memory.filters, selectedItemId: memory.selectedItemId });
+  const data = useCampaignStatus({
+    session,
+    availability,
+    filters: memory.filters,
+    selectedItemId: memory.selectedItemId,
+    restoreCount: memory.shownCount,
+  });
+  const shownCount = data.list.status === "ready" ? data.list.items.length : null;
+  useEffect(() => {
+    if (shownCount !== null && shownCount !== memory.shownCount) setMemory({ shownCount });
+  }, [memory.shownCount, setMemory, shownCount]);
   const now = useTimelineClock(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -180,7 +205,8 @@ function AvailableCampaignStatus({
           onBack={closeItem}
           onRetry={data.retry}
           onOpenSession={onOpenSession}
-          onOpenRequests={onOpenRequests}
+          findRequest={findRequest}
+          onOpenRequest={onOpenRequest}
         />
       ) : (
         <>
@@ -238,58 +264,66 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
   return (
     <section className="campaign-status-summary" aria-labelledby={headingId}>
       <h3 id={headingId} className="campaign-status-heading">Summary</h3>
+      {summary.error && (
+        <Notice tone="danger" compact role="alert" title="Couldn't Refresh Campaign Summary"
+          actions={<button type="button" className="btn sm" onClick={data.retry}>Retry</button>}>
+          {summary.error} Showing the last loaded summary.
+        </Notice>
+      )}
       {view.planNotice && (
         <Notice tone="info" title={view.planNotice.title}>
           {view.planNotice.body}
         </Notice>
       )}
-      <dl className="facts">
-        <div><dt>State</dt><dd>{view.stateLabel}</dd></div>
-        <div><dt>Progress</dt><dd>{view.progressText}</dd></div>
-        <div>
-          <dt>Scope</dt>
-          <dd>
-            {view.scope.original} Original
-            <span className="campaign-status-meta">{view.scope.followUp} Accepted Follow-Up{view.scope.followUp === 1 ? "" : "s"}</span>
-          </dd>
-        </div>
-        <div>
-          <dt>Work</dt>
-          <dd>
-            <ul className="campaign-status-counts" aria-label="Work Items by State">
-              {view.stateCounts.map((entry) => (
-                <li key={entry.state}><strong>{entry.count}</strong> {entry.label}</li>
-              ))}
-              {view.withdrawn > 0 && <li><strong>{view.withdrawn}</strong> Canceled or Removed</li>}
-            </ul>
-          </dd>
-        </div>
-        <div><dt>Capacity</dt><dd>{view.capacity}</dd></div>
-        <div><dt>Elapsed</dt><dd>{view.elapsed}</dd></div>
-        <div>
-          <dt>Cost</dt>
-          <dd>
-            <CostText cost={view.cost} />
-            {view.costBreakdown.length > 0
-              ? <span className="campaign-status-meta">{view.costBreakdown.map((row) => `${row.label} ${row.text}`).join(", ")}</span>
-              : view.cost.note && <span className="campaign-status-meta">{view.cost.note}</span>}
-          </dd>
-        </div>
-        {view.budget && <div><dt>Budget</dt><dd>{view.budget}</dd></div>}
-        <div>
-          <dt>Outstanding</dt>
-          <dd>{view.obligations.length === 0 ? "None" : view.obligations.map((entry) => `${entry.count} ${entry.label}`).join(", ")}</dd>
-        </div>
-        <div>
-          <dt>Recommendations</dt>
-          <dd>
-            {view.recommendations.awaiting} Awaiting Adjudication
-            <span className="campaign-status-meta">
-              {view.recommendations.rejected} Rejected, {view.recommendations.deferred} Deferred, {view.recommendations.duplicate} Duplicate
-            </span>
-          </dd>
-        </div>
-      </dl>
+      <StaleContent stale={summary.error !== null}>
+        <dl className="facts">
+          <div><dt>State</dt><dd>{view.stateLabel}</dd></div>
+          <div><dt>Progress</dt><dd>{view.progressText}</dd></div>
+          <div>
+            <dt>Scope</dt>
+            <dd>
+              {view.scope.original} Original
+              <span className="campaign-status-meta">{view.scope.followUp} Accepted Follow-Up{view.scope.followUp === 1 ? "" : "s"}</span>
+            </dd>
+          </div>
+          <div>
+            <dt>Work</dt>
+            <dd>
+              <ul className="campaign-status-counts" aria-label="Work Items by State">
+                {view.stateCounts.map((entry) => (
+                  <li key={entry.state}><strong>{entry.count}</strong> {entry.label}</li>
+                ))}
+                {view.withdrawn > 0 && <li><strong>{view.withdrawn}</strong> Canceled or Removed</li>}
+              </ul>
+            </dd>
+          </div>
+          <div><dt>Capacity</dt><dd>{view.capacity}</dd></div>
+          <div><dt>Elapsed</dt><dd>{view.elapsed}</dd></div>
+          <div>
+            <dt>Cost</dt>
+            <dd>
+              <CostText cost={view.cost} />
+              {view.costBreakdown.length > 0
+                ? <span className="campaign-status-meta">{view.costBreakdown.map((row) => `${row.label} ${row.text}`).join(", ")}</span>
+                : view.cost.note && <span className="campaign-status-meta">{view.cost.note}</span>}
+            </dd>
+          </div>
+          {view.budget && <div><dt>Budget</dt><dd>{view.budget}</dd></div>}
+          <div>
+            <dt>Outstanding</dt>
+            <dd>{view.obligations.length === 0 ? "None" : view.obligations.map((entry) => `${entry.count} ${entry.label}`).join(", ")}</dd>
+          </div>
+          <div>
+            <dt>Recommendations</dt>
+            <dd>
+              {view.recommendations.awaiting} Awaiting Adjudication
+              <span className="campaign-status-meta">
+                {view.recommendations.rejected} Rejected, {view.recommendations.deferred} Deferred, {view.recommendations.duplicate} Duplicate
+              </span>
+            </dd>
+          </div>
+        </dl>
+      </StaleContent>
     </section>
   );
 }
@@ -569,7 +603,8 @@ function CampaignWorkItemDetailView({
   onBack,
   onRetry,
   onOpenSession,
-  onOpenRequests,
+  findRequest,
+  onOpenRequest,
 }: {
   state: CampaignStatusData["detail"];
   offline: boolean;
@@ -580,7 +615,8 @@ function CampaignWorkItemDetailView({
   onBack: () => void;
   onRetry: () => void;
   onOpenSession: (sessionId: string) => void;
-  onOpenRequests?: (occurrenceId: string | null) => void;
+  findRequest: (target: CampaignRequestTarget) => string | null;
+  onOpenRequest: (requestKey: string) => void;
 }) {
   const detail = state?.detail ?? null;
   // One heading element for loading and loaded alike, at the same place in the tree, so the focus it
@@ -635,6 +671,9 @@ function CampaignWorkItemDetailView({
     ...(detail.stage?.pullRequests ?? []),
   ].filter((pr, index, all) => all.findIndex((other) => other.repository === pr.repository && other.number === pr.number) === index);
   const linksRequests = Boolean(detail.blocker?.requestOccurrenceId) || detail.stateCauses.some(causeNeedsRequests);
+  const requestKey = linksRequests
+    ? findRequest({ occurrenceId: detail.blocker?.requestOccurrenceId ?? null, sessionId: currentSessionId })
+    : null;
   const snapshot = latestAttempt?.session ?? null;
 
   return (
@@ -744,10 +783,10 @@ function CampaignWorkItemDetailView({
           </DetailSection>
           {/* A request is answered in Requests when this session can reach it; a hold has nothing to
               answer, so a held child, like any request this session cannot see, is opened instead. */}
-          {(linksRequests || held || detail.primaryState === "blocked") && (onOpenRequests || currentSessionId) && (
+          {(linksRequests || held || detail.primaryState === "blocked") && (requestKey || currentSessionId) && (
             <div className="campaign-detail-actions">
-              {linksRequests && onOpenRequests && (
-                <button type="button" className="btn sm" onClick={() => onOpenRequests(detail.blocker?.requestOccurrenceId ?? null)}>
+              {requestKey && (
+                <button type="button" className="btn sm" onClick={() => onOpenRequest(requestKey)}>
                   Open Requests
                 </button>
               )}

@@ -9,6 +9,7 @@ import type {
   CampaignWorkItemsPage,
   CampaignWorkSummary,
   ControlPlaneToUi,
+  DescendantRequestView,
   SessionView,
   UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -61,6 +62,8 @@ before(() => {
 beforeEach(() => {
   domWindow.localStorage.clear();
   forgetCampaignStatusMemory();
+  harnessRequests.descendants = [];
+  harnessRequests.selected = [];
 });
 after(() => {
   for (const [name, value] of Object.entries(prior)) {
@@ -166,6 +169,9 @@ function Harness({ initial, client, sessions, onState, onSession, socket }: {
   );
 }
 
+/** Requests the panel lists, and every Requests selection it made; tests set these before mounting. */
+const harnessRequests: { descendants: DescendantRequestView[]; selected: (string | null)[] } = { descendants: [], selected: [] };
+
 function PanelWithAvailability({ session: current, onState, onOpen }: {
   session: SessionView;
   onState: (state: RightPanelState) => void;
@@ -174,6 +180,7 @@ function PanelWithAvailability({ session: current, onState, onOpen }: {
   const state = useRightPanelState();
   onState(state);
   const availability = useCampaignStatusAvailability(current);
+  const [selectedRequestKey, setSelectedRequestKey] = useState<string | null>(null);
   return (
     <RightPanel
       state={state}
@@ -188,6 +195,13 @@ function PanelWithAvailability({ session: current, onState, onOpen }: {
       onInsertSideChatDraft={() => {}}
       campaignAvailability={availability}
       onOpenSession={onOpen}
+      descendantRequests={harnessRequests.descendants}
+      selectedRequestKey={selectedRequestKey}
+      onSelectedRequestKeyChange={(key) => {
+        harnessRequests.selected.push(key);
+        setSelectedRequestKey(key);
+      }}
+      onSessionUpdate={() => {}}
     />
   );
 }
@@ -612,6 +626,115 @@ test("a held child links to its session, and a blocker's request opens that requ
     await click(panel.container.querySelectorAll(".campaign-work-row")[0]!);
     assert.ok(!buttons().includes("Open Requests"));
     assert.ok(buttons().includes("Open Child Session"));
+  } finally {
+    await panel.dispose();
+  }
+});
+
+function pendingRequest(sessionId: string, occurrenceId: string): DescendantRequestView {
+  return {
+    sessionId, sessionTitle: sessionId, runnerId: "runner-1", runnerOnline: true, eventEpoch: 1, createdAt: NOW,
+    responseOwner: "human", occurrenceId,
+    request: { requestId: occurrenceId, occurrenceId, title: "Approve the command", options: [] },
+  };
+}
+
+test("an item waiting on a decision opens its own child's request, never another child's", async () => {
+  harnessRequests.descendants = [pendingRequest("s_child_a", "occ_a"), pendingRequest("s_child_b", "occ_b")];
+  const waiting = item("cwi_2", {
+    primaryState: "waiting",
+    stateCauses: ["attempt_session_pending_decision"],
+    currentAttempt: { id: "catt_2", sessionId: "s_child_b", sessionTitle: "Child B" },
+  });
+  const elsewhere = item("cwi_3", {
+    primaryState: "waiting",
+    stateCauses: ["attempt_session_input_required"],
+    currentAttempt: { id: "catt_3", sessionId: "s_child_c", sessionTitle: "Child C" },
+  });
+  const { client } = fakeClient(() => ({ revision: 1, items: [waiting, elsewhere], nextCursor: null }), {
+    cwi_2: detailOf(waiting),
+    cwi_3: detailOf(elsewhere),
+  });
+  const panel = await mount({ initial: rootSession, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelectorAll(".campaign-work-row")[0]!);
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Open Requests")!);
+    assert.equal(harnessRequests.selected.at(-1), JSON.stringify(["s_child_b", "occ_b"]));
+    assert.equal(panel.state.mode, "requests");
+
+    // Child C's request is not listed here, so its item offers the child rather than Requests.
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Back to Work Items")!);
+    await click(panel.container.querySelectorAll(".campaign-work-row")[1]!);
+    const labels = [...panel.container.querySelectorAll("button")].map((button) => button.textContent);
+    assert.ok(!labels.includes("Open Requests"));
+    assert.ok(labels.includes("Open Child Session"));
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("reopening the panel on an item's details still returns to that row in a long list", async () => {
+  const all = Array.from({ length: 160 }, (_, index) => item(`cwi_${index + 1}`, { queuePosition: index + 1 }));
+  const pages = (query: string): FixturePage => {
+    const search = new URLSearchParams(query);
+    const offset = Number(search.get("cursor") ?? 0);
+    const limit = Number(search.get("limit"));
+    return { revision: 1, items: all.slice(offset, offset + limit), nextCursor: offset + limit < all.length ? String(offset + limit) : null, total: all.length };
+  };
+  const { client } = fakeClient(pages, { cwi_120: detailOf(all[119]!) });
+  const panel = await mount({ initial: rootSession, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    for (let page = 0; page < 2; page += 1) {
+      await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent?.includes("Show More"))!);
+    }
+    await click(panel.container.querySelectorAll(".campaign-work-row")[119]!);
+    // Leave through the launcher, which unmounts the mode, and come back.
+    await act(async () => panel.state.setMode("launcher"));
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    assert.equal(panel.container.querySelector("h3.campaign-detail-title")?.textContent, "Work cwi_120");
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Back to Work Items")!);
+    const rows = panel.container.querySelectorAll(".campaign-work-row");
+    assert.equal(rows.length, 150, "the list reloads as deep as it was");
+    assert.equal(domWindow.document.activeElement, rows[119], "focus returns to the opened row");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a member's summary that fails to refresh says so instead of passing off old numbers", async () => {
+  let rootReads = 0;
+  const client = {
+    ...fakeClient(() => ({ revision: 1, items: [item("cwi_1")], nextCursor: null })).client,
+    session: async () => {
+      rootReads += 1;
+      if (rootReads > 1) throw new ApiError("control plane unavailable", 503);
+      return { session: rootSession };
+    },
+    campaignWorkItem: async () => { throw new ApiError("details unavailable", 503); },
+  } as ApiClient;
+  // The member's browser does not hold the root session, so the summary is read through the API.
+  const panel = await mount({ initial: childSession, sessions: [childSession], client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const summary = () => panel.container.querySelector(".campaign-status-summary")!;
+    assert.match(summary().textContent ?? "", /1 of 3 Delivered/);
+    assertNoDomNode(summary().querySelector('[role="alert"]'));
+    // Retrying the failed details reads the root again, and that read fails.
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Retry")!);
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Back to Work Items")!);
+    assert.equal(rootReads, 2);
+    assert.match(summary().textContent ?? "", /Couldn't Refresh Campaign Summary/);
+    assert.match(summary().textContent ?? "", /1 of 3 Delivered/, "the last summary stays, marked stale");
+    assert.ok(summary().querySelector("[data-stale]"));
   } finally {
     await panel.dispose();
   }

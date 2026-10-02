@@ -445,16 +445,25 @@ export function RightPanel({
             session={session}
             availability={campaignAvailability}
             onOpenSession={onOpenSession}
-            onOpenRequests={requestsAvailable ? (occurrenceId) => {
-              // Select the blocker's request when this panel lists it; otherwise Requests keeps its own.
-              const descendant = occurrenceId ? descendantRequests.find((request) => request.occurrenceId === occurrenceId) : undefined;
+            findRequest={(target) => {
+              // The request the blocker names, else one pending on the item's own child session.
+              // Never another child's: an item with no listed request offers its child instead.
+              const descendant = (target.occurrenceId
+                ? descendantRequests.find((request) => request.occurrenceId === target.occurrenceId)
+                : undefined) ?? (target.sessionId
+                ? descendantRequests.find((request) => request.sessionId === target.sessionId)
+                : undefined);
+              if (descendant) return sessionRequestPanelKey(descendant.sessionId, descendant.occurrenceId);
               const own = standaloneApprovalForReview(session.pendingApproval);
-              if (descendant) onSelectedRequestKeyChange(sessionRequestPanelKey(descendant.sessionId, descendant.occurrenceId));
-              else if (occurrenceId && own && (own.occurrenceId ?? own.requestId) === occurrenceId) {
-                onSelectedRequestKeyChange(sessionRequestPanelKey(session.id, occurrenceId));
-              }
+              const ownOccurrence = own ? own.occurrenceId ?? own.requestId : null;
+              return ownOccurrence && (target.occurrenceId === ownOccurrence || target.sessionId === session.id)
+                ? sessionRequestPanelKey(session.id, ownOccurrence)
+                : null;
+            }}
+            onOpenRequest={(requestKey) => {
+              onSelectedRequestKeyChange(requestKey);
               state.show("requests");
-            } : undefined}
+            }}
           />
         );
       case "review":
