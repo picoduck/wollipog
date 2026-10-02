@@ -17,9 +17,14 @@ const owner = "a".repeat(64);
 const nativeModule = new URL("./provider-home-lease.ts", import.meta.url).href;
 const boundaries = ["before-guard", "guard-temp-written", "guard-file-durable", "guard-published", "guard-durable", "before-candidate", "candidate-written", "candidate-file-durable", "candidate-durable", "before-selection", "selection-published", "selection-durable", "before-retire", "after-retire", "retirement-durable"];
 
-function fixture(t: TestContext): string {
+function fixture(t: Pick<TestContext, "after">, reapers: Array<() => Promise<void>> = []): string {
   const home = fs.mkdtempSync(join(tmpdir(), "wollipog-canonical-checkpoint-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  t.after(async () => {
+    // Parent timeouts can start this hook before a child's async after-hook ends.
+    // Share its idempotent reaper rather than depending on hook nesting order.
+    await Promise.all(reapers.map(reap => reap()));
+    fs.rmSync(home, { recursive: true, force: true });
+  });
   return home;
 }
 function paths(home: string) {
@@ -276,7 +281,7 @@ function crashPhases(t: TestContext) {
   };
 }
 
-function crashWriter(t: Pick<TestContext, "signal" | "after">, home: string, command: string, args: string[]) {
+function crashWriter(t: Pick<TestContext, "signal" | "after">, home: string, command: string, args: string[], reapers: Array<() => Promise<void>> = []) {
   t.signal.throwIfAborted();
   const child = spawn(command, args, { env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -284,10 +289,13 @@ function crashWriter(t: Pick<TestContext, "signal" | "after">, home: string, com
   child.stdout.on("data", capture); child.stderr.on("data", capture);
   child.on("error", error => capture(Buffer.from(String(error))));
   const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
-  t.after(async () => {
+  let reaping: Promise<void> | undefined;
+  const reap = () => reaping ??= (async () => {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await closed;
-  });
+  })();
+  reapers.push(reap);
+  t.after(reap);
   return { child, output: () => output };
 }
 
@@ -312,7 +320,8 @@ print(${passes - 1})`)], { env: { ...process.env, HOME: home }, encoding: "utf8"
 }
 
 test("crash fixture refuses a writer after cancellation between phases", { skip: process.platform !== "linux" }, (t) => {
-  const home = fixture(t);
+  const reapers: Array<() => Promise<void>> = [];
+  const home = fixture(t, reapers);
   const cancelled = new AbortController();
   const reason = new Error("fixture cancelled between writers");
   cancelled.abort(reason);
@@ -320,23 +329,41 @@ test("crash fixture refuses a writer after cancellation between phases", { skip:
   // registered on the parent so a reverted spawn guard cannot leak the probe.
   const context = { signal: cancelled.signal, after: t.after.bind(t) };
   assert.throws(() => crashWriter(context, home, process.execPath,
-    ["-e", "setInterval(() => {}, 1000)"]), error => error === reason);
+    ["-e", "setInterval(() => {}, 1000)"], reapers), error => error === reason);
 });
 
 test("crash fixture teardown reaps an unfinished writer before returning", { skip: process.platform !== "linux" }, async (t) => {
-  const home = fixture(t);
+  const reapers: Array<() => Promise<void>> = [];
+  const home = fixture(t, reapers);
   let writer: ChildProcess | undefined;
   await t.test("unfinished synthetic writer", (t) => {
-    writer = crashWriter(t, home, "python3", ["-c", "import time; time.sleep(60)"]).child;
+    writer = crashWriter(t, home, "python3", ["-c", "import time; time.sleep(60)"], reapers).child;
   });
   assert.equal(writer!.signalCode, "SIGKILL");
+});
+
+test("crash fixture parent awaits writer close before removing HOME", { skip: process.platform !== "linux" }, async (t) => {
+  const reapers: Array<() => Promise<void>> = [];
+  const parentHooks: Array<() => Promise<void>> = [];
+  // Run the real fixture's parent hook first, as node:test does on a parent timeout.
+  const parent = { after: (hook: () => Promise<void>) => { parentHooks.push(hook); } };
+  const home = fixture(parent, reapers);
+  t.after(() => parentHooks[0]!());
+  const { child } = crashWriter(t, home, "python3", ["-c", "import time; time.sleep(60)"], reapers);
+  let homeExistedAtClose = false;
+  child.once("close", () => { homeExistedAtClose = fs.existsSync(home); });
+  await parentHooks[0]!();
+  assert.equal(child.signalCode, "SIGKILL", "parent cleanup reaps its writer");
+  assert.equal(homeExistedAtClose, true, "HOME exists until the writer has closed");
+  assert.equal(fs.existsSync(home), false);
 });
 
 test("SIGKILL at every native/helper checkpoint boundary recovers across readers", { timeout: 180_000, skip: process.platform !== "linux" }, async (t) => {
   for (const writer of ["native", "helper"] as const) for (const boundary of boundaries) {
     // Parent teardown removes HOME only after the child's async teardown reaps its writer.
     if (t.signal.aborted) return;
-    const home = fixture(t);
+    const reapers: Array<() => Promise<void>> = [];
+    const home = fixture(t, reapers);
     await t.test(`${writer}/${boundary}`, { timeout: 45_000 }, async (t) => {
       const phase = crashPhases(t);
       await phase("seed", () => seed(home));
@@ -353,7 +380,7 @@ lease = acquire_lease(home_fd, "${owner}")
 release_lease(lease)
 os.close(home_fd)`);
       const { child, output } = crashWriter(t, home, writer === "native" ? process.execPath : "python3",
-        writer === "native" ? ["--import", "tsx", script] : ["-c", helper]);
+        writer === "native" ? ["--import", "tsx", script] : ["-c", helper], reapers);
       await phase("writer barrier", () => ready(child, marker, output, t.signal));
       await phase("live-owner refusal and evidence preservation", () => {
         const before = evidence(home);
@@ -381,7 +408,8 @@ os.close(home_fd)`);
 test("repeated killed candidate publishers recover without exhausting bounded staging", { timeout: 120_000, skip: process.platform !== "linux" }, async (t) => {
   for (const sequence of [["native", "native"], ["helper", "helper"], ["native", "helper"], ["helper", "native"]]) {
     if (t.signal.aborted) return;
-    const home = fixture(t);
+    const reapers: Array<() => Promise<void>> = [];
+    const home = fixture(t, reapers);
     await t.test(sequence.join("/"), { timeout: 45_000 }, async (t) => {
       const phase = crashPhases(t);
       await phase("seed", () => seed(home));
@@ -399,7 +427,7 @@ def checkpoint_boundary(stage):
 home_fd, _ = open_root(os.environ["HOME"])
 acquire_lease(home_fd, "${owner}")`);
         const { child, output } = crashWriter(t, home, writer === "native" ? process.execPath : "python3",
-          writer === "native" ? ["--import", "tsx", script] : ["-c", helper]);
+          writer === "native" ? ["--import", "tsx", script] : ["-c", helper], reapers);
         await phase(`writer ${index + 1} (${writer}) candidate-durable barrier`, () => ready(child, marker, output, t.signal));
         await phase(`kill writer ${index + 1} (${writer})`, () => kill(child));
       }

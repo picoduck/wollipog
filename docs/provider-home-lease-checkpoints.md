@@ -180,7 +180,6 @@ used 57,307 record operations / 221,215,834 read-or-hashed bytes native, and 73,
 1.54 MiB after subsequent cross-reader handoffs. These are workload measurements, not latency
 guarantees. Large-run and exact platform CI evidence are recorded in the implementation report.
 
-
 ### Crash-Fixture Budgets
 
 The Linux crash matrix retains all 15 checkpoint boundaries for both native and Python writers,
@@ -188,7 +187,8 @@ live-owner refusal without evidence mutation, recovery through the other reader,
 and pending-record cleanup. The repeated-candidate matrix retains all four native/Python writer
 sequences. Each case reports its writer/boundary or sequence and elapsed time for setup, barrier
 waiting, kill, recovery, subsequent handoffs, and storage checks. A cancelled case reports the
-active phase. Teardown kills only its own unfinished writer, awaits close, and then removes its
+active phase. Parent and child teardown share idempotent writer reapers, so a parent timeout also awaits
+close before removing its
 synthetic HOME; cancellation stops further fixture phases and case creation.
 
 | Fixture Budget | Limit |
@@ -218,7 +218,7 @@ five consecutive times with a documented bounded workload and also run the compl
 
 ```sh
 node --import tsx --test --test-concurrency=2 \
-  --test-name-pattern='SIGKILL at every|repeated killed candidate|crash fixture teardown|real native and helper processes elect one winner' \
+  --test-name-pattern='SIGKILL at every|repeated killed candidate|crash fixture|real native and helper processes elect one winner' \
   apps/runner/src/provider-home-lease-checkpoint.test.ts \
   apps/runner/src/wsl-skills-helper.test.ts
 ```
