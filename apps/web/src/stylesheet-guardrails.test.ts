@@ -1613,8 +1613,12 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
    * everything before it, and a spread after it may or may not replace it, so it adds its values.
    */
   const elementProp = (element: ts.JsxOpeningLikeElement, prop: string): string[] => {
+    // Nothing before the last explicit attribute reaches the element, so it is not even read: reading
+    // a spread of props would follow its call sites and collect classes this element never gets.
+    const attributes = element.attributes.properties;
+    const last = attributes.findLastIndex((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText() === prop);
     let values: string[] = [];
-    for (const attribute of element.attributes.properties) {
+    for (const attribute of attributes.slice(Math.max(last, 0))) {
       if (ts.isJsxSpreadAttribute(attribute)) { values = [...values, ...objectProp(attribute.expression, prop)]; continue; }
       if (attribute.name.getText() !== prop) continue;
       const value = attribute.initializer;
@@ -3216,6 +3220,13 @@ test("icon classes are read from every way a class reaches an icon, and an unrea
     classes: ["default-icon", "given-icon", "hot", "mark", "override", "recursive-icon", "rendered", "wrapped"],
     unread: ["Final.tsx:9 Alias is used as a value, so its arguments cannot be traced"],
   });
+
+  // An explicit className after a spread of props (Menu.tsx's order) is all the svg gets, so the
+  // caller's class never counts as the icon's.
+  assert.deepEqual(scanOf({ "Override.tsx": [
+    "function Mark(props: { className?: string }) { return <svg {...props} className=\"fixed\" />; }",
+    "export function Uses() { return <><Mark className=\"label\" /><span className=\"label\" /></>; }",
+  ].join("\n") }), { classes: ["fixed"], unread: [] });
 
   // A union member that does not name className is an open object type, like any other.
   assert.deepEqual(scanOf({ "Open.tsx": [
