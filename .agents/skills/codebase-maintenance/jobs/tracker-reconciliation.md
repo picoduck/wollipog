@@ -81,8 +81,10 @@ entry stays pending until the coordinator validates full criterion coverage and 
 
 Completed assessment and delivered behavior are different: a fully investigated issue may have
 unmet criteria. Record verified approved deviations with their decision evidence, and deliberate
-later replacements with the merged change that superseded the original behavior; do not report
-either as accidental delivery drift. Unknown approval is not an approved deviation. Keep the
+later replacements with the merged change and explicit intent evidence from its PR, issue or
+decision naming the replaced behavior or requirement; a removing commit alone does not prove
+intent. Do not report either as accidental delivery drift. Unknown approval is not an approved
+deviation, and unknown intent is not a deliberate replacement. Keep the
 separate unverified-process category from the Gate below rather than claiming missing process
 evidence proves missing behavior or approval.
 
