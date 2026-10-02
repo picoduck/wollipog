@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { titleCaseLabel } from "./format.js";
 import { projectArchiveMessage, projectArchiveResultMessage, projectArchiveWithoutUndoMessage } from "./project-actions.js";
+import { sessionLifecycleDescription, statusValues } from "./status-meta.js";
 import {
   absoluteViewUrl,
   backLabel,
@@ -187,6 +189,62 @@ test("a Project's bulk-archive confirmations and results use no retired terms (#
   // The copy lives in those helpers only: neither surface keeps a copy of its own.
   for (const path of ["./components/ProjectSplitMenu.tsx", "./components/ProjectsView.tsx", "./project-actions.ts"]) {
     assert.doesNotMatch(source(path), /runtime capacity|queued work|Snooze instead|Exact undo/i, path);
+  }
+});
+
+/**
+ * Every string a source file could show: string and template literals and JSX text. Comments and
+ * identifiers are not nodes here, so they are never read, and neither are module specifiers. The
+ * rest is read whole, a superset of the visible copy, so a retired term in a value that is never
+ * shown fails as well.
+ */
+function sourceStrings(fileName: string, text: string): string[] {
+  const file = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true,
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const strings: string[] = [];
+  const visit = (node: ts.Node) => {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
+      if (ts.isImportDeclaration(node) && node.importClause) visit(node.importClause);
+      return;
+    }
+    if (ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
+      strings.push(node.text);
+    } else if (ts.isJsxText(node) && !node.containsOnlyTriviaWhiteSpaces) {
+      strings.push(node.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return strings;
+}
+
+function retiredTermsIn(text: string): string[] {
+  return RETIRED_TERMS.filter((term) => text.toLowerCase().includes(term));
+}
+
+test("the source-string scan reads literals and JSX text, not comments, identifiers or imports", () => {
+  const strings = sourceStrings("fixture.tsx", `
+    import { snapshotLoaded } from "./durable-snapshot.js";
+    // The control plane holds runtime capacity.
+    const durable = snapshotLoaded ? "Saved" : \`Runtime capacity: \${count}\`;
+    export const Note = () => <p title="Projection">Update the control plane.</p>;
+  `);
+  assert.deepEqual(strings.flatMap(retiredTermsIn), ["runtime capacity", "projection", "control plane"]);
+});
+
+test("session status details and the Projects page use no retired terms (#2334)", () => {
+  for (const value of statusValues("session")) {
+    const description = sessionLifecycleDescription(value);
+    assert.deepEqual(retiredTermsIn(description), [], `${value}: "${description}"`);
+  }
+  // A Stop that has not landed leaves the session as it was: say so in the person's terms.
+  for (const value of ["stop_waiting_for_runner", "stop_failed"] as const) {
+    assert.match(sessionLifecycleDescription(value), /, so the session may still be running\.$/, value);
+  }
+  for (const path of ["./status-meta.ts", "./components/ProjectsView.tsx"]) {
+    const failures = sourceStrings(path, source(path)).flatMap((text) =>
+      retiredTermsIn(text).map((term) => `"${text.trim()}" uses the retired term "${term}"`));
+    assert.deepEqual(failures, [], path);
   }
 });
 

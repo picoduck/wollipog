@@ -410,14 +410,18 @@ const LIFECYCLE_DESCRIPTIONS: Partial<Record<StatusValue<"session">, string>> = 
   stopped: "The session was stopped.",
   quarantined: "This conversation's history is quarantined, so it cannot take another prompt.",
   stop_pending: "A Stop is being delivered to the session's machine.",
-  stop_waiting_for_runner: "A Stop is waiting for the session's machine to reconnect; runtime capacity may still be held.",
-  stop_failed: "The Stop failed, so runtime capacity may still be held.",
+  stop_waiting_for_runner: "A Stop is waiting for the session's machine to reconnect, so the session may still be running.",
+  stop_failed: "The Stop failed, so the session may still be running.",
   archived: "This session is archived and stopped.",
 };
 
-function lifecycleDescription(meta: StatusMeta): string {
-  const value = statusValues("session").find((candidate) => statusMeta("session", candidate).label === meta.label);
+/** The sentence a session's status details show for one lifecycle value. */
+export function sessionLifecycleDescription(value: StatusValue<"session"> | undefined): string {
   return (value && LIFECYCLE_DESCRIPTIONS[value]) ?? "The session's current state.";
+}
+
+function lifecycleDescription(meta: StatusMeta): string {
+  return sessionLifecycleDescription(statusValues("session").find((candidate) => statusMeta("session", candidate).label === meta.label));
 }
 
 function plural(count: number, one: string, many: string): string {

@@ -355,7 +355,7 @@ export function ProjectsView({
         <PageHeader title={PROJECTS.name} />
         <div className="project-manager-unavailable">
           <strong>Project Management Unavailable</strong>
-          <span>Update the connected control plane to manage durable Projects and Locations.</span>
+          <span>Wollipog on the server needs an update to manage Projects and Locations.</span>
         </div>
       </div>
     );
