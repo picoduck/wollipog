@@ -38,6 +38,7 @@ import {
   issueRefLabel,
   observationUnavailableText,
   stateCauseText,
+  timeAgo,
   workItemOriginLabel,
   workItemTimeView,
   workItemTitle,
@@ -45,7 +46,7 @@ import {
   type CampaignStatusAvailability,
   type CampaignWorkFilters,
 } from "../campaign-status.js";
-import { effortLabel, formatRecordedRelativeTime, formatRecordedTimestamp, resolvedModelLabel, titleCaseLabel } from "../format.js";
+import { effortLabel, formatRecordedTimestamp, resolvedModelLabel, titleCaseLabel } from "../format.js";
 import { viewPath } from "../navigation.js";
 import { statusMeta } from "../status-meta.js";
 import { useTimelineClock } from "../timeline-clock.js";
@@ -272,7 +273,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
   const view = campaignSummaryView(summary.summary, summary.campaign, now);
   return (
     <section className="campaign-status-summary" aria-labelledby={headingId}>
-      <h3 id={headingId} className="campaign-status-heading">Summary</h3>
+      <h3 id={headingId} className="section-title">Summary</h3>
       {summary.error && (
         <Notice tone="danger" compact role="alert" title="Couldn't Refresh Campaign Summary"
           actions={<button type="button" className="btn sm" onClick={data.retry}>Retry</button>}>
@@ -292,7 +293,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
             <dt>Scope</dt>
             <dd>
               {view.scope.original} Original
-              <span className="campaign-status-meta">{view.scope.followUp} Accepted Follow-Up{view.scope.followUp === 1 ? "" : "s"}</span>
+              <span className="campaign-status-meta">{view.scope.followUp} accepted follow-up{view.scope.followUp === 1 ? "" : "s"}</span>
             </dd>
           </div>
           <div>
@@ -327,7 +328,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
             <dd>
               {view.recommendations.awaiting} Awaiting Adjudication
               <span className="campaign-status-meta">
-                {view.recommendations.rejected} Rejected, {view.recommendations.deferred} Deferred, {view.recommendations.duplicate} Duplicate
+                {view.recommendations.rejected} rejected, {view.recommendations.deferred} deferred, {view.recommendations.duplicate} duplicate
               </span>
             </dd>
           </div>
@@ -448,7 +449,7 @@ function CampaignWorkList({
   return (
     <section className="campaign-work" aria-labelledby={headingId}>
       <div className="campaign-work-head">
-        <h3 id={headingId} className="campaign-status-heading">Work Items</h3>
+        <h3 id={headingId} className="section-title">Work Items</h3>
         <Select label="Sort" value={filters.sort} options={CAMPAIGN_SORT_OPTIONS}
           onChange={(sort) => onFiltersChange({ ...filters, sort })} />
       </div>
@@ -522,17 +523,18 @@ const END_REASON_LABELS = {
 } as const;
 
 const PR_STATE_LABELS: Record<CampaignForgePullRequestObservation["state"], string> = { open: "Open", closed: "Closed", merged: "Merged" };
+/** The pull request phrase follows its state word, so these read in sentence case. */
 const REVIEW_LABELS: Record<CampaignForgePullRequestObservation["reviewDecision"], string> = {
-  approved: "Review Approved",
-  changes_requested: "Changes Requested",
-  review_required: "Review Required",
-  none: "No Review Decision",
+  approved: "review approved",
+  changes_requested: "changes requested",
+  review_required: "review required",
+  none: "no review decision",
 };
 const CHECK_LABELS: Record<CampaignForgePullRequestObservation["checks"], string> = {
-  passing: "Checks Passing",
-  failing: "Checks Failing",
-  pending: "Checks Pending",
-  none: "No Checks",
+  passing: "checks passing",
+  failing: "checks failing",
+  pending: "checks pending",
+  none: "no checks",
 };
 
 function SessionLink({ sessionId, onOpen, children }: { sessionId: string; onOpen: (sessionId: string) => void; children: ReactNode }) {
@@ -556,7 +558,7 @@ function RecordedTime({ at, now, prefix }: { at: number | null; now: number; pre
   const stamp = formatRecordedTimestamp(at);
   return (
     <time dateTime={stamp?.dateTime} title={stamp?.title}>
-      {prefix ? `${prefix} ` : ""}{formatRecordedRelativeTime(at, now)}
+      {prefix ? `${prefix} ` : ""}{timeAgo(at, now)}
     </time>
   );
 }
@@ -577,7 +579,7 @@ function ObservedValue<T>({ fact, now, render }: { fact: CampaignObservedFact<T>
     <>
       {render(fact.value)}
       <span className="campaign-status-meta">
-        {fact.availability === "stale" ? "Stale, " : ""}<RecordedTime at={fact.observedAt} now={now} prefix="Observed" />
+        <RecordedTime at={fact.observedAt} now={now} prefix={fact.availability === "stale" ? "Stale, observed" : "Observed"} />
       </span>
     </>
   );
@@ -585,20 +587,20 @@ function ObservedValue<T>({ fact, now, render }: { fact: CampaignObservedFact<T>
 
 function sessionStatusText(value: CampaignObservedSessionStatus): string {
   const parts = [titleCaseLabel(value.status.replaceAll("_", " "))];
-  if (value.archived) parts.push("Archived");
-  if (value.held) parts.push("Held");
-  if (value.pendingRequests > 0) parts.push(`${value.pendingRequests} Pending Request${value.pendingRequests === 1 ? "" : "s"}`);
+  if (value.archived) parts.push("archived");
+  if (value.held) parts.push("held");
+  if (value.pendingRequests > 0) parts.push(`${value.pendingRequests} pending request${value.pendingRequests === 1 ? "" : "s"}`);
   return parts.join(", ");
 }
 
 function cleanupText(value: CampaignObservedCleanup): string {
   if (value.worktrees.length === 0) return "No Worktrees";
-  return value.worktrees.map((worktree) => titleCaseLabel(worktree.status)).join(", ");
+  return value.worktrees.map((worktree, index) => index === 0 ? titleCaseLabel(worktree.status) : worktree.status).join(", ");
 }
 
 function pullRequestText(value: CampaignForgePullRequestObservation): string {
   const parts = [PR_STATE_LABELS[value.state], CHECK_LABELS[value.checks], REVIEW_LABELS[value.reviewDecision]];
-  if (value.mergeQueue) parts.push(value.mergeQueue.position === null ? "In Merge Queue" : `Merge Queue Position ${value.mergeQueue.position}`);
+  if (value.mergeQueue) parts.push(value.mergeQueue.position === null ? "in merge queue" : `merge queue position ${value.mergeQueue.position}`);
   return parts.join(", ");
 }
 
@@ -721,7 +723,7 @@ function CampaignWorkItemDetailView({
                   {detail.currentAttempt?.sessionTitle || "Open Session"}
                 </SessionLink>
               ) : detail.currentAttempt
-                ? <>{detail.currentAttempt.sessionTitle ?? "Session"}<span className="campaign-status-meta">Session Deleted</span></>
+                ? <>{detail.currentAttempt.sessionTitle ?? "Session"}<span className="campaign-status-meta">Session deleted</span></>
                 : "None"}</dd>
             </div>
             <div>
@@ -735,7 +737,7 @@ function CampaignWorkItemDetailView({
                         : <>{attempt.session.title || `Attempt ${attempt.ordinal}`}</>}
                       <span className="campaign-status-meta">
                         {attempt.endReason ? END_REASON_LABELS[attempt.endReason] : "Open"}
-                        {attempt.sessionId ? "" : ", Session Deleted"}, {costWithProvenance(attemptCost(attempt.id))}
+                        {attempt.sessionId ? "" : ", session deleted"}, {costWithProvenance(attemptCost(attempt.id))}
                       </span>
                     </li>
                   ))}
@@ -890,7 +892,7 @@ function DetailSection({ title, children }: { title: string; children: ReactNode
   const headingId = useId();
   return (
     <section className="campaign-detail-section" aria-labelledby={headingId}>
-      <h4 id={headingId} className="campaign-status-heading">{title}</h4>
+      <h4 id={headingId} className="section-title">{title}</h4>
       <dl className="facts">{children}</dl>
     </section>
   );

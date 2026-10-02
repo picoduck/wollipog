@@ -92,9 +92,9 @@ test("Cost labels distinguish provider-reported, estimated, partially priced, un
 
 test("Bucket and attempt costs keep their own provenance beside a total", () => {
   const estimated = campaignCostView(knownCost(1.1, "modelPriced"));
-  assert.equal(costWithProvenance(estimated), "$1.10 (Estimated API Cost)");
+  assert.equal(costWithProvenance(estimated), "$1.10 (estimated API cost)");
   assert.equal(costWithProvenance(estimated, "Estimated API Cost"), "$1.10", "the same provenance as its total is not repeated");
-  assert.equal(costWithProvenance(campaignCostView(knownCost(1, "modelPriced", 2)), "Partially Priced"), "$1.00 (Partially Priced)",
+  assert.equal(costWithProvenance(campaignCostView(knownCost(1, "modelPriced", 2)), "Partially Priced"), "$1.00 (partially priced)",
     "a lower bound always says so");
   assert.equal(costWithProvenance(campaignCostView(undefined)), "Unavailable");
   const view = campaignSummaryView(workSummary(NOW, {
@@ -106,18 +106,25 @@ test("Bucket and attempt costs keep their own provenance beside a total", () => 
       attributedSince: null,
     },
   }), withWork, NOW);
-  assert.deepEqual(view.costBreakdown.map((row) => row.text), ["$2.00 (Partially Priced)", "$1.00", "$0.00"]);
+  assert.deepEqual(view.costBreakdown.map((row) => row.text), ["$2.00 (partially priced)", "$1.00", "$0.00"]);
 });
 
 test("Unrecorded durations read Unavailable, partial ones are lower bounds, and zero is real", () => {
   assert.equal(measuredDuration(null), "Unavailable");
   assert.equal(measuredDuration(Number.NaN), "Unavailable");
   assert.equal(measuredDuration(0), "0s");
+  // One format everywhere: at most two units, no zero unit, seconds only under a minute.
+  assert.equal(measuredDuration(400), "<1s");
+  assert.equal(measuredDuration(45_000), "45s");
+  assert.equal(measuredDuration(50 * MINUTE + 20_000), "50m");
+  assert.equal(measuredDuration(95 * MINUTE), "1h 35m");
+  assert.equal(measuredDuration(180 * MINUTE), "3h");
+  assert.equal(measuredDuration(52 * 60 * MINUTE), "2d 4h");
   assert.deepEqual(durationMetricView(undefined), { text: "Unavailable", note: "This server does not record it yet." });
   assert.deepEqual(durationMetricView({ availability: "unavailable", reason: "history_unavailable" }),
     { text: "Unavailable", note: "It was not recorded for this part of the campaign." });
   assert.deepEqual(durationMetricView({ availability: "known", value: 0 }), { text: "0s", note: null });
-  assert.equal(durationMetricView({ availability: "partial", value: 3 * MINUTE, reason: "history_unavailable" }).text, "At Least 3m 0s");
+  assert.equal(durationMetricView({ availability: "partial", value: 3 * MINUTE, reason: "history_unavailable" }).text, "At least 3m");
 });
 
 test("Campaign elapsed is wall-clock time, so two concurrent ten-minute items read ten minutes", () => {
@@ -125,13 +132,13 @@ test("Campaign elapsed is wall-clock time, so two concurrent ten-minute items re
   assert.equal(elapsedMs({ startedAt: 0, endedAt: 4 * MINUTE }, 10 * MINUTE), 4 * MINUTE);
   assert.equal(elapsedMs({ startedAt: null, endedAt: null }, 10 * MINUTE), null);
   const view = campaignSummaryView(workSummary(NOW, { elapsed: { startedAt: NOW - 10 * MINUTE, endedAt: null } }), withWork, NOW);
-  assert.equal(view.elapsed, "10m 0s");
+  assert.equal(view.elapsed, "10m");
 });
 
 test("Work without an attempt shows its age, started work its elapsed time", () => {
-  assert.deepEqual(workItemTimeView({ elapsed: { startedAt: null, endedAt: null }, createdAt: 0 }, 5 * MINUTE), { label: "Age", text: "5m 0s" });
-  assert.deepEqual(workItemTimeView({ elapsed: { startedAt: MINUTE, endedAt: null }, createdAt: 0 }, 5 * MINUTE), { label: "Elapsed", text: "4m 0s" });
-  assert.deepEqual(workItemTimeView({ elapsed: { startedAt: MINUTE, endedAt: 3 * MINUTE }, createdAt: 0 }, 9 * MINUTE), { label: "Elapsed", text: "2m 0s" });
+  assert.deepEqual(workItemTimeView({ elapsed: { startedAt: null, endedAt: null }, createdAt: 0 }, 5 * MINUTE), { label: "Age", text: "5m" });
+  assert.deepEqual(workItemTimeView({ elapsed: { startedAt: MINUTE, endedAt: null }, createdAt: 0 }, 5 * MINUTE), { label: "Elapsed", text: "4m" });
+  assert.deepEqual(workItemTimeView({ elapsed: { startedAt: MINUTE, endedAt: 3 * MINUTE }, createdAt: 0 }, 9 * MINUTE), { label: "Elapsed", text: "2m" });
 });
 
 test("The summary keeps rejected and duplicate recommendations out of committed progress", () => {
@@ -153,7 +160,7 @@ test("The summary keeps rejected and duplicate recommendations out of committed 
   assert.equal(view.capacity, "2 of 4 Occupied");
   assert.equal(view.budget, "$20.00 Orchestrator Session Budget", "a session budget is never called campaign-wide");
   assert.deepEqual(view.obligations, [
-    { label: "Verification", count: 1 }, { label: "Issue Publication", count: 1 }, { label: "Cleanup", count: 2 },
+    { label: "verification", count: 1 }, { label: "issue publication", count: 1 }, { label: "cleanup", count: 2 },
   ]);
   assert.deepEqual(view.stateCounts.map((entry) => entry.count), [1, 1, 1, 0, 0, 2]);
   assert.equal(view.planNotice, null);

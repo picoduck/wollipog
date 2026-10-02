@@ -4498,16 +4498,11 @@ textarea {
 .campaign-status .facts {
   grid-template-columns: minmax(0, 8.5rem) minmax(0, 1fr);
 }
-.campaign-status-heading {
-  margin: 0 0 var(--space-2);
-  color: var(--text-dim);
-  font: var(--type-label);
-}
 .campaign-status-summary,
 .campaign-work,
 .campaign-detail-section {
   display: grid;
-  gap: var(--space-2);
+  gap: var(--space-3);
   min-width: 0;
 }
 .campaign-status-meta {
@@ -4542,9 +4537,6 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-}
-.campaign-work-head > .campaign-status-heading {
-  margin: 0;
 }
 .campaign-work-filters {
   display: grid;
@@ -4627,9 +4619,10 @@ textarea {
   flex-wrap: wrap;
   gap: var(--space-2);
 }
+/* Body sections sit 24px apart under their section titles (§3, --type-section). */
 .campaign-status-sections {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-6);
   min-width: 0;
 }
 .campaign-detail-list {

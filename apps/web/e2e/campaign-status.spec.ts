@@ -78,12 +78,16 @@ test("details separate reported stages from observations and never show missing 
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
   await workRows(page).filter({ hasText: "Campaign Status Panel" }).click();
   const details = page.locator(".campaign-status");
-  await expect(details).toContainText("Reported by the Orchestrator");
-  await expect(details).toContainText("Observed 1m Ago");
+  await expect(details).toContainText("Reported by the Orchestrator 20m ago");
+  // Helper text is sentence case (AGENTS.md): no Title Cased relative times anywhere in the panel.
+  expect(await details.textContent()).not.toMatch(/\bAgo\b|Just Now/);
+  await expect(details).toContainText("Observed 1m ago");
   await expect(details.locator("dd", { hasText: "No runner has a signed-in GitHub CLI." })).toContainText("Unavailable");
   await expect(details.locator("dd", { hasText: "This server does not record it yet." })).toContainText("Unavailable");
-  await expect(details).toContainText("At Least 9m 0s");
-  await expect(details).toContainText("Superseded, Session Deleted, $1.10 (Estimated API Cost)");
+  await expect(details).toContainText("At least 9m");
+  await expect(details).toContainText("Superseded, session deleted, $1.10 (estimated API cost)");
+  // Two back controls, two destinations: the panel header leaves the mode, the detail returns to the list.
+  await expect(page.getByRole("button", { name: "Back to Panel List" })).toHaveCount(1);
   await page.getByRole("button", { name: "Back to Work Items" }).click();
 
   await workRows(page).filter({ hasText: "Ledger Read API" }).click();

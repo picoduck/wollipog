@@ -358,6 +358,18 @@ function Fixture() {
           <PanelForSession state={state} session={session} onOpenSession={(id) => { openedSession = id; setSessionId(id); }} />
         </div>
       </section>
+      {/* On a phone the app's tab bar fills the band below the panel sheet (--bottom-bar-h); this
+          stand-in shows that band for what it is in the captures. */}
+      {window.innerWidth <= 760 && (
+        <nav aria-label="App Navigation" style={{
+          position: "fixed", left: 0, right: 0, bottom: 0, height: "var(--bottom-bar-h)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          borderTop: "1px solid var(--border)", background: "var(--bg-elev)", color: "var(--text-dim)",
+          font: "var(--type-small)",
+        }}>
+          App Tab Bar
+        </nav>
+      )}
     </main>
   );
 }

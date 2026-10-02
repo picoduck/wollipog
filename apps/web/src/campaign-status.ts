@@ -27,7 +27,7 @@ import {
   type OrchestratorCampaignProjection,
   type SessionView,
 } from "@wollipog/protocol";
-import { formatCost, formatDuration, titleCaseLabel } from "./format.js";
+import { formatCost, formatRecordedRelativeTime, titleCaseLabel } from "./format.js";
 
 export const UNAVAILABLE = "Unavailable";
 
@@ -139,13 +139,22 @@ export function campaignCostView(metric: CampaignMetric<CampaignCostValue> | und
   return { text, provenance: "Estimated API Cost", note: "Estimated from the model rate table.", priced: true };
 }
 
+/** Provenance labels as they read inside sentence-case helper text. */
+const PROVENANCE_IN_SENTENCE: Record<string, string> = {
+  "Provider-Reported": "provider-reported",
+  "Estimated API Cost": "estimated API cost",
+  "Partially Priced": "partially priced",
+};
+
 /**
  * A cost inline in a list of costs: the amount, plus its provenance whenever that is not already
  * stated by `context` (the provenance of the figure it sits under). A lower bound always says so.
  */
 export function costWithProvenance(view: CampaignCostView, context: string | null = null): string {
   if (!view.priced || !view.provenance) return view.text;
-  return view.provenance === context && view.provenance !== "Partially Priced" ? view.text : `${view.text} (${view.provenance})`;
+  return view.provenance === context && view.provenance !== "Partially Priced"
+    ? view.text
+    : `${view.text} (${PROVENANCE_IN_SENTENCE[view.provenance] ?? view.provenance})`;
 }
 
 /** A duration metric: its value, a lower bound, or "Unavailable" with why. Zero is a real zero. */
@@ -154,15 +163,32 @@ export function durationMetricView(metric: CampaignMetric<number> | undefined): 
   if (metric.availability === "unavailable") return { text: UNAVAILABLE, note: metricGapNote(metric.reason) };
   const text = measuredDuration(metric.value);
   return metric.availability === "partial"
-    ? { text: `At Least ${text}`, note: metricGapNote(metric.reason) }
+    ? { text: `At least ${text}`, note: metricGapNote(metric.reason) }
     : { text, note: null };
 }
 
-/** A duration in milliseconds; anything that is not a measurement reads "Unavailable". */
+/**
+ * A duration in milliseconds, in at most two units and never a trailing zero unit: "45s", "50m",
+ * "1h 35m", "3h", "2d 4h". Seconds appear only under a minute. Anything that is not a measurement
+ * reads "Unavailable".
+ */
 export function measuredDuration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 0) return UNAVAILABLE;
   if (ms === 0) return "0s";
-  return formatDuration(ms);
+  const seconds = Math.round(ms / 1_000);
+  if (seconds < 1) return "<1s";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours}h ${minutes % 60}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return hours % 24 ? `${days}d ${hours % 24}h` : `${days}d`;
+}
+
+/** A recorded time as it reads inside helper text: "just now", "5m ago" (sentence case). */
+export function timeAgo(at: number, now: number): string {
+  return formatRecordedRelativeTime(at, now).toLowerCase();
 }
 
 /** Wall-clock span `(endedAt ?? now) - startedAt`. Never a sum of parallel item durations. */
@@ -344,9 +370,9 @@ export function campaignSummaryView(
   // Each bucket keeps its own provenance where it differs from the total's, so an estimated or
   // partially priced bucket never reads as exact under a provider-reported total.
   const breakdown = work.cost && cost.priced ? [
-    { label: "Work Items", text: costWithProvenance(campaignCostView(work.cost.workItems), cost.provenance) },
-    { label: "Coordination", text: costWithProvenance(campaignCostView(work.cost.coordination), cost.provenance) },
-    { label: "Unattributed", text: costWithProvenance(campaignCostView(work.cost.unattributed), cost.provenance) },
+    { label: "Work items", text: costWithProvenance(campaignCostView(work.cost.workItems), cost.provenance) },
+    { label: "coordination", text: costWithProvenance(campaignCostView(work.cost.coordination), cost.provenance) },
+    { label: "unattributed", text: costWithProvenance(campaignCostView(work.cost.unattributed), cost.provenance) },
   ] : [];
   const limits = campaign?.limits;
   return {
@@ -367,10 +393,10 @@ export function campaignSummaryView(
     // The projection's budget caps the Orchestrator's own session. Say so; it is not campaign-wide.
     budget: limits?.costBudgetUsd != null ? `${formatCost(limits.costBudgetUsd) || "$0.00"} Orchestrator Session Budget` : null,
     obligations: [
-      { label: "Verification", count: work.obligations.verification },
-      { label: "Recommendation Adjudication", count: work.obligations.adjudication },
-      { label: "Issue Publication", count: work.obligations.publication },
-      { label: "Cleanup", count: work.obligations.cleanup },
+      { label: "verification", count: work.obligations.verification },
+      { label: "recommendation adjudication", count: work.obligations.adjudication },
+      { label: "issue publication", count: work.obligations.publication },
+      { label: "cleanup", count: work.obligations.cleanup },
     ].filter((obligation) => obligation.count > 0),
     recommendations: {
       awaiting: work.recommendations.awaiting_adjudication ?? 0,
