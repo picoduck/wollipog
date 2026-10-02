@@ -111,11 +111,11 @@ export interface CodexPluginLaunch {
   executionTarget?: { adapter: string };
 }
 
-const codexPackage = /^@openai\/codex(?:@[^/\s]+)?$/u;
+const codexPackage = /^@openai\/codex(?:@[^/:\s]+)?$/u;
 
 /** Recognize an argv grammar, never search arbitrary wrapper arguments for a package name. */
 function providerBoundary(command: string, args: string[], allowEnv = true): number | undefined {
-  const name = command.split(/[\\/]/u).at(-1)!.replace(/\.(?:exe|cmd)$/iu, "").toLowerCase();
+  const name = command.split(/[\\/]/u).at(-1)!.replace(/\.(?:exe|cmd|bat)$/iu, "").toLowerCase();
   if (name === "codex") return 0;
   if (name === "node") {
     let i = 0;
@@ -204,7 +204,7 @@ export function inheritCodexPlugins(launch: CodexPluginLaunch): string[] {
   const bootstrap = flags.length ? providerBoundary(launch.command, launch.args) : 0;
   if (bootstrap === undefined) {
     // Do not include command paths, argv, environment values, or config content in diagnostics.
-    throw new Error("Codex plugin inheritance does not support this launcher form. " +
+    throw new Error("Codex plugin inheritance could not identify a supported launcher form. " +
       "Use a supported Codex launcher form; see docs/codex-plugin-launchers.md.");
   }
   try { linkPlugins(sourceHome, accountHome, new Set(Object.keys(plugins))); }

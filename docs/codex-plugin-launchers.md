@@ -9,7 +9,7 @@ account settings and later Codex CLI overrides keep precedence.
 
 `<package>` below means `@openai/codex`, optionally followed by a version or tag such as
 `@openai/codex@0.159.2` or `@openai/codex@latest`. Executable paths and Windows `.exe` /
-`.cmd` names are recognized. Options must occur before the package or entry script.
+`.cmd` / `.bat` names are recognized. Options must occur before the package or entry script.
 
 | Launcher | Form | Supported Launcher Options |
 | --- | --- | --- |

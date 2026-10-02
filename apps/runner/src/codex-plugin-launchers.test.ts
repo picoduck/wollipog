@@ -26,7 +26,7 @@ const explicit = ["-c", "plugins.review@local.enabled=false", "app-server"];
 test("supported launcher prefixes precede inherited flags and explicit Codex overrides", (t) => {
   const f = fixture(t);
   const cases: [string, string[]][] = [
-    ["codex", []], ["/opt/bin/codex", []], ["C:\\tools\\codex.exe", []],
+    ["codex", []], ["/opt/bin/codex", []], ["C:\\tools\\codex.exe", []], ["C:\\tools\\codex.bat", []],
     ["node", ["codex.js"]], [process.execPath, ["--no-warnings", "--enable-source-maps", "--", "codex.js"]],
     ["npx", ["-y", "@openai/codex"]], ["npx.cmd", ["--offline", "--", "@openai/codex@0.159.2"]],
     ["npx", ["-p", "@openai/codex@latest", "codex"]],
@@ -67,6 +67,7 @@ test("ambiguous wrappers fail before cache mutation with a fixed sanitized diagn
     ["yarn", ["dlx", "-p", "@openai/codex", "other-command"]],
     ["bunx", ["--package=other-package", "codex", "@openai/codex"]],
     ["pnpx", ["--package"]], ["bunx", ["@openai/codex@"]],
+    ["npx", ["@openai/codex@npm:other-package"]], ["bunx", ["@openai/codex@file:codex.tgz"]],
     ["node", ["-e", "SECRET"]], ["node", ["--no-warnings"]],
     ["env", ["-i", "codex"]], ["env", ["CODEX_HOME=SECRET", "codex"]],
     ["env", ["HOME=SECRET", "codex"]], ["env", ["-u", "CODEX_HOME", "codex"]],
@@ -75,7 +76,7 @@ test("ambiguous wrappers fail before cache mutation with a fixed sanitized diagn
   ];
   for (const [command, args] of cases) {
     assert.throws(() => inheritCodexPlugins({ ...f.launch, command, args }), {
-      message: "Codex plugin inheritance does not support this launcher form. " +
+      message: "Codex plugin inheritance could not identify a supported launcher form. " +
         "Use a supported Codex launcher form; see docs/codex-plugin-launchers.md.",
     });
     assert.equal(existsSync(join(f.account, "plugins")), false);
