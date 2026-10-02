@@ -2,6 +2,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
+import { performance } from "node:perf_hooks";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { mkdir, rm, rmdir, statfs } from "node:fs/promises";
 import {
@@ -875,24 +876,30 @@ export async function fetchRemoteDefaultBase(
 ): Promise<{ ref: string; branch: string }> {
   const context = options.context ?? nativeContext;
   safeGitArgument(remote, "Git remote");
-  // Each step gets three 30-second attempts and 500/1,000 ms backoff: at most 183 seconds
-  // across both steps, including backoff. Keep the configured remote and execution context.
-  async function retryStep<T>(phase: SessionWorktreeProgressPhase, step: string, run: () => Promise<T>): Promise<T> {
+  // Preserve each step's existing 120-second allowance, shared across up to three attempts and
+  // 500/1,000 ms backoff. Both steps together stay within a 240-second configured budget.
+  async function retryStep<T>(phase: SessionWorktreeProgressPhase, step: string, run: (timeoutMs: number) => Promise<T>): Promise<T> {
+    const deadline = performance.now() + 120_000;
+    let lastError: unknown;
     for (let attempt = 0; ; attempt++) {
       options.onProgress?.(phase);
       try {
-        return await run();
+        const remainingMs = Math.ceil(deadline - performance.now());
+        if (remainingMs <= 0) throw lastError ?? new Error("Git command deadline expired");
+        return await run(remainingMs);
       } catch (error) {
-        if (attempt === 2) {
+        lastError = error;
+        const backoffMs = 500 * (attempt + 1);
+        if (attempt === 2 || deadline - performance.now() <= backoffMs) {
           const detail = error instanceof Error ? error.message : String(error);
-          throw new Error(`Failed ${step} after 3 attempts. Retry, or pass an explicit base ref to skip remote default-branch lookup and fetch. Git error: ${detail}`, { cause: error });
+          throw new Error(`Failed ${step} after ${attempt + 1} attempt${attempt === 0 ? "" : "s"}. Retry, or pass an explicit base ref to skip remote default-branch lookup and fetch. Git error: ${detail}`, { cause: error });
         }
-        await new Promise<void>((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+        await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
       }
     }
   }
-  const headRef = await retryStep("resolving_remote", "resolving the remote default branch", async () => {
-    const advertised = await command(context, repoPath, ["ls-remote", "--symref", remote, "HEAD"], 30_000);
+  const headRef = await retryStep("resolving_remote", "resolving the remote default branch", async (timeoutMs) => {
+    const advertised = await command(context, repoPath, ["ls-remote", "--symref", remote, "HEAD"], timeoutMs);
     const ref = advertised.split("\n")
       .map((line) => /^ref:\s+(refs\/heads\/[^\s]+)\s+HEAD$/u.exec(line)?.[1])
       .find((value): value is string => !!value);
@@ -902,8 +909,8 @@ export async function fetchRemoteDefaultBase(
   const branch = headRef.slice("refs/heads/".length);
   safeGitArgument(branch, "remote default branch");
   const trackingRef = `refs/remotes/${remote}/${branch}`;
-  await retryStep("fetching_remote", "fetching the remote default branch", () =>
-    command(context, repoPath, ["fetch", "--no-tags", remote, `+${headRef}:${trackingRef}`], 30_000));
+  await retryStep("fetching_remote", "fetching the remote default branch", (timeoutMs) =>
+    command(context, repoPath, ["fetch", "--no-tags", remote, `+${headRef}:${trackingRef}`], timeoutMs));
   // The branch is returned alongside the ref because this call just asked the remote itself, which
   // makes it the only authoritative answer available without a second round trip.
   return { ref: `${remote}/${branch}`, branch };

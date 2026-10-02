@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { type ChildProcess, type ExecFileException, type ExecFileOptions } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
+import { performance } from "node:perf_hooks";
 import { test, type TestContext } from "node:test";
 import { fetchRemoteDefaultBase } from "./worktree.js";
 
@@ -12,6 +13,7 @@ type Result = { stdout?: string; error?: ExecFileException; delay?: number };
 function fixture(t: TestContext, respond: (call: Call, index: number) => Result) {
   const calls: Call[] = [];
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  t.mock.method(performance, "now", () => Date.now());
   const execFile = ((file: string, args: string[], options: ExecFileOptions,
     callback: (error: ExecFileException | null, stdout: string, stderr: string) => void) => {
     const call = { file, args: [...args], options, at: Date.now() };
@@ -53,7 +55,8 @@ test("default-base fetch retries once with backoff, keeping remote, refspec, con
   assert.deepEqual(calls[1]?.args, ["-d", "Test", "--cd", "/repo", "--exec", "git", "fetch", "--no-tags", "upstream",
     "+refs/heads/develop:refs/remotes/upstream/develop"]);
   assert.deepEqual(calls[2]?.args, calls[1]?.args);
-  assert.ok(calls.every((call) => call.file === "wsl.exe" && call.options.timeout === 30_000));
+  assert.ok(calls.every((call) => call.file === "wsl.exe"));
+  assert.deepEqual(calls.map((call) => call.options.timeout), [120_000, 120_000, 119_500]);
 });
 
 test("default-branch lookup retries before fetching and uses the later advertised branch", async (t) => {
@@ -124,18 +127,47 @@ test("missing default-branch advertisement is bounded and actionable without fet
   assert.ok(calls.every((call) => call.args[0] === "ls-remote"));
 });
 
-test("slow lookup and fetch failures exhaust their deadlines within the total 183-second budget", async (t) => {
+test("a slow successful fetch retains the existing 120-second allowance", async (t) => {
+  const calls = fixture(t, (call) => call.args[0] === "ls-remote" ? { stdout: advertised } : {
+    delay: Math.min(45_000, call.options.timeout ?? 0),
+    ...(Number(call.options.timeout) < 45_000
+      ? { error: Object.assign(new Error("Git command timed out"), { cmd: "git", killed: true, signal: "SIGKILL" as const }) }
+      : { stdout: "" }),
+  });
+  const pending = fetchRemoteDefaultBase("/repo");
+  await settle();
+  assert.equal(calls[1]?.options.timeout, 120_000);
+  t.mock.timers.tick(45_000);
+  assert.deepEqual(await pending, { ref: "origin/develop", branch: "develop" });
+  assert.equal(calls.length, 2);
+});
+
+test("a failure near the deadline preserves its cause without starting a backoff outside the budget", async (t) => {
+  const calls = fixture(t, () => ({ error: gitError, delay: 119_800 }));
+  const rejected = assert.rejects(fetchRemoteDefaultBase("/repo"), (error: Error) => {
+    assert.equal(error.cause, gitError);
+    assert.match(error.message, /resolving the remote default branch after 1 attempt/);
+    return true;
+  });
+  t.mock.timers.tick(119_800);
+  await rejected;
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(calls.length, 1);
+});
+
+test("slow lookup and fetch failures share deadlines including backoff within the total 240-second budget", async (t) => {
   const calls = fixture(t, (call, index) => ({
     ...(index === 2 ? { stdout: advertised } : { error: Object.assign(new Error("Git command timed out"), { cmd: "git" }) }),
-    delay: call.options.timeout,
+    delay: index === 0 ? 60_000 : index === 1 ? 50_000 : call.options.timeout,
   }));
   const rejected = assert.rejects(fetchRemoteDefaultBase("/repo"), /fetching the remote default branch.*Git command timed out/);
-  for (const duration of [30_000, 500, 30_000, 1000, 30_000, 30_000, 500, 30_000, 1000, 30_000]) {
+  for (const duration of [60_000, 500, 50_000, 1000, 8500, 120_000]) {
     t.mock.timers.tick(duration);
     await settle();
   }
   await rejected;
-  assert.equal(Date.now(), 183_000);
-  assert.equal(calls.length, 6);
-  assert.ok(calls.every((call) => call.options.timeout === 30_000));
+  assert.equal(Date.now(), 240_000);
+  assert.equal(calls.length, 4, "an exhausted command deadline gets no further retries");
+  assert.deepEqual(calls.map((call) => call.options.timeout), [120_000, 59_500, 8500, 120_000]);
 });
