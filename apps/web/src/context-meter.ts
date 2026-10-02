@@ -10,11 +10,19 @@ export interface ContextFill {
   formatPct: string;
   /** At/over the effective ceiling — the UI can warn (compaction imminent). */
   isFull: boolean;
+  /** The ring's and bar's tone (§11.6): warning from 75%, danger from 90%, neutral below. */
+  tone: ContextFillTone;
   /** False when we couldn't compute (no/zero context window). */
   known: boolean;
 }
 
-const UNKNOWN: ContextFill = { fillPct: 0, formatPct: "—", isFull: false, known: false };
+export type ContextFillTone = "neutral" | "warning" | "danger";
+
+/** Where the level starts needing attention, and where compaction is imminent. */
+const WARNING_PCT = 75;
+const DANGER_PCT = 90;
+
+const UNKNOWN: ContextFill = { fillPct: 0, formatPct: "—", isFull: false, tone: "neutral", known: false };
 
 /** What the popover says about compaction. Every native harness compacts on its own once the
  * window fills; none advertises the threshold, and Wollipog exposes no manual compact, so the
@@ -43,5 +51,6 @@ export function computeContextFill(input: {
   const pct = (used / contextWindow) * 100;
   const clamped = Math.min(100, Math.max(0, pct));
   const formatPct = clamped < 10 ? `${clamped.toFixed(1)}%` : `${Math.round(clamped)}%`;
-  return { fillPct: clamped, formatPct, isFull: clamped >= 90, known: true };
+  const tone: ContextFillTone = clamped >= DANGER_PCT ? "danger" : clamped >= WARNING_PCT ? "warning" : "neutral";
+  return { fillPct: clamped, formatPct, isFull: clamped >= DANGER_PCT, tone, known: true };
 }

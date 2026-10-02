@@ -41,17 +41,17 @@ test("a tall pane floats recovery above the reader's lower edge without reservin
   const recoveryBox = await box(recovery);
   expect(readerBox.bottom - recoveryBox.bottom).toBeCloseTo(12, 0);
   expect(Math.abs((recoveryBox.left + recoveryBox.width / 2) - (readerBox.left + readerBox.width / 2))).toBeLessThan(8);
-  // No band: the strip starts where the reader ends.
-  const stripBox = await box(page.locator(".transcript-status-strip"));
-  expect(stripBox.top).toBeCloseTo(readerBox.bottom, 0);
+  // No band and no strip (#2166): the composer starts where the reader ends.
+  const composerBox = await box(page.locator(".composer"));
+  expect(composerBox.top).toBeCloseTo(readerBox.bottom, 0);
 
   // A status, not a control: focus cannot land on it.
   await recovery.evaluate((element) => (element as HTMLElement).focus());
   expect(await recovery.evaluate((element) => document.activeElement === element)).toBe(false);
 
-  // Session cost stays in the strip, never in the composer, until #2166 moves it.
-  await expect(page.locator(".transcript-status-usage")).toBeVisible();
-  await expect(page.locator(".cbar-usage")).toHaveCount(0);
+  // Context and cost live in the composer bar's trailing cluster (#2166).
+  await expect(page.locator(".cbar-right .session-usage .cbar-usage")).toBeVisible();
+  await expect(page.locator("[class*='transcript-status']")).toHaveCount(0);
   await expect(page.locator(".transcript-recovery-slot, .follow-tail-chip")).toHaveCount(0);
 });
 
@@ -65,14 +65,12 @@ test("recovery coming and going never moves the reader or its follow state", asy
     await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "following");
     return {
       reader: await box(page.locator(".detail-reader")),
-      strip: await box(page.locator(".transcript-status-strip")),
       composer: await box(page.locator(".composer")),
     };
   };
   const active = await geometry(false);
   const settled = await geometry(true);
   expect(active.reader.height).toBeCloseTo(settled.reader.height, 0);
-  expect(active.strip.top).toBeCloseTo(settled.strip.top, 0);
   expect(active.composer.top).toBeCloseTo(settled.composer.top, 0);
 });
 
@@ -139,11 +137,11 @@ test("an off-screen message that was not sent is named in danger text and scroll
 });
 
 for (const width of [320, 390]) {
-  test(`a ${width}px phone shows the whole recovery sentence and keeps the strip inside the pane`, async ({ page }) => {
+  test(`a ${width}px phone shows the whole recovery sentence and keeps the composer bar inside the pane`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
     await page.goto(`/recovery-notice-e2e.html?mode=expanded&height=640&width=${width}`);
-    // Stress the strip with wider-than-default text metrics, as GitHub's Linux fallback face does.
-    await page.addStyleTag({ content: ".transcript-status-strip { letter-spacing: 0.35px; }" });
+    // Stress the bar with wider-than-default text metrics, as GitHub's Linux fallback face does.
+    await page.addStyleTag({ content: ".composer-bar { letter-spacing: 0.35px; }" });
     const recovery = control(page);
     await expect(recovery).toBeVisible();
     const label = await recovery.locator("span").last().evaluate((element) => ({
@@ -159,24 +157,32 @@ for (const width of [320, 390]) {
 
     const frame = await page.locator("#frame").evaluate((element) => {
       const rect = (selector: string) => element.querySelector(selector)!.getBoundingClientRect();
-      const strip = rect(".transcript-status-strip");
+      const bar = element.querySelector(".composer-bar") as HTMLElement;
+      const controls = [...bar.querySelectorAll(":scope > * > :is(button, .context-control, .session-usage, .cbar-menu)")]
+        .map((control) => control.getBoundingClientRect())
+        .filter((control) => control.width > 0);
       return {
         reader: rect(".detail-reader"),
-        strip,
+        composer: rect(".composer"),
+        bar: bar.getBoundingClientRect(),
+        barOverflow: bar.scrollWidth - bar.clientWidth,
         meter: rect(".context-control"),
-        usage: rect(".transcript-status-usage"),
-        stripCenter: strip.left + strip.width / 2,
+        usage: rect(".session-usage"),
+        rows: new Set(controls.map((control) => Math.round(control.top + control.height / 2))).size,
         hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
       };
     });
-    expect(frame.strip.top).toBeCloseTo(frame.reader.bottom, 0);
-    expect(frame.strip.height).toBeLessThanOrEqual(37.5);
+    // The reader extends to the composer: no strip sits between them (#2166).
+    expect(frame.composer.top).toBeCloseTo(frame.reader.bottom, 0);
     expect(frame.hasHorizontalOverflow).toBe(false);
-    // Context and cost flank the strip's empty center.
-    expect(frame.meter.left).toBeGreaterThanOrEqual(frame.strip.left - 0.5);
-    expect(frame.meter.right).toBeLessThanOrEqual(frame.stripCenter + 0.5);
-    expect(frame.usage.left).toBeGreaterThanOrEqual(frame.stripCenter - 0.5);
-    expect(frame.usage.right).toBeLessThanOrEqual(frame.strip.right + 0.5);
+    // This agent has no Model Settings to open, so the figures keep their seats in the bar, which
+    // still holds every control on one row.
+    expect(frame.barOverflow).toBeLessThanOrEqual(0);
+    expect(frame.rows, "the bar's controls share one row").toBe(1);
+    for (const control of [frame.meter, frame.usage]) {
+      expect(control.left).toBeGreaterThanOrEqual(frame.bar.left - 0.5);
+      expect(control.right).toBeLessThanOrEqual(frame.bar.right + 0.5);
+    }
   });
 }
 
@@ -213,8 +219,8 @@ test("a short preview pane keeps the floating control inside the pane", async ({
   expect(main.height).toBeLessThan(240);
   expect(main.height).toBeGreaterThan(60);
 
-  // The preview has no strip at all; the control floats inside the reader.
-  await expect(page.locator(".transcript-status-strip")).toHaveCount(0);
+  // The preview has no strip; the control floats inside the reader.
+  await expect(page.locator("[class*='transcript-status']")).toHaveCount(0);
   const recovery = control(page);
   await expect(recovery).toHaveText("Checking for missed activity…");
   const recoveryBox = await box(recovery);

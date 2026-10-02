@@ -9,7 +9,7 @@ const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
  * #781 split the two questions apart: the ring answers "how full is the model's window right
  * now", the neighbouring Session Usage control answers "what has this session accumulated".
  * These guard the split at the source, because a billing figure creeping back into the context
- * popover is exactly the regression that made the strip's trailing value unreadable.
+ * popover is exactly the regression that once made the trailing cost figure unreadable.
  */
 test("the context popover reports occupancy and capacity, and no session billing", () => {
   assert.match(meter, /<dt>Used<\/dt>[\s\S]*<dt>Capacity<\/dt>[\s\S]*<dt>Remaining<\/dt>/,
@@ -28,7 +28,7 @@ test("the meter shares one anchored-popover implementation with the session-cost
     "dismissal and viewport placement live in the shared hook, not duplicated per control");
 });
 
-test("the meter consumes the capacity resolution that also allocates its status-strip seat", () => {
+test("the meter consumes the one capacity resolution SessionDetail makes", () => {
   assert.match(meter, /resolution: ContextWindowCapacity/);
   assert.match(meter, /const contextWindow = resolution\.capacity/);
   assert.doesNotMatch(meter, /resolveCaps|useStoreSelector/,

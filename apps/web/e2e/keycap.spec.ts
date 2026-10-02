@@ -87,15 +87,10 @@ test.describe("with a fine pointer at 1440px", () => {
 
     await page.getByRole("button", { name: "Expand Session" }).click();
     await page.getByRole("region", { name: "Session Activity" }).focus();
-    const reply = page.locator('.transcript-status-strip .shortcut-hint[data-shortcut-hint="R"]');
-    await expectKeycap(page, reply.locator("kbd"), "Reply hint");
-    // The label beside the keycap is the small type token in --text-dim.
-    const label = await reply.locator(".shortcut-hint-label").evaluate((element) => {
-      const style = getComputedStyle(element);
-      return { fontSize: style.fontSize, color: style.color };
-    });
-    expect(label.fontSize).toBe("12px");
-    expect(label.color).toBe(await tokenColour(page, "--text-dim"));
+    // The Reply shortcut's keycap sits in the idle composer's placeholder row (#2166).
+    const reply = page.locator(".composer-reply-hint kbd");
+    await expect(reply).toHaveText("R");
+    await expectKeycap(page, reply, "Reply keycap");
   });
 
   test("the Keyboard Shortcuts reference draws the same keycap", async ({ page }) => {
@@ -182,6 +177,10 @@ for (const width of [390, 1440]) {
         await expect(jump.locator("kbd")).toBeHidden();
         await expect(page.locator(".inbox-shortcut-rail button").first()).toBeVisible();
         await expect(page.locator(".inbox-shortcut-rail kbd").first()).toBeHidden();
+        // An expanded session's idle composer offers no Reply keycap on a touch screen.
+        await page.getByRole("button", { name: "Expand Session" }).click();
+        await expect(page.locator(".composer-box")).toBeVisible();
+        await expect(page.locator(".composer-reply-hint kbd")).toBeHidden();
       }
     });
 

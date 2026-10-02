@@ -445,7 +445,7 @@ One definition of each tier, shared by components and the stylesheet (#1969):
   dialogs, §7; the command palette). Or it stays in place and subtracts the offset that
   `fixedContainingBlockOffset()` (`fixed-containing-block.ts`) measures for its real containing
   block. Surfaces that stay in place are the Select and combobox lists (which take their field's
-  font), the Snooze suggestions, the session strip's popovers (which take the strip's type) and the
+  font), the Snooze suggestions, the composer bar's context and cost popovers (which take the bar's type) and the
   F6 zone line (a pseudo-element). The measurement inserts a probe and forces a layout, so it runs
   only when the surface opens or its anchor moves, never on a scroll or resize that moved nothing.
   A surface that stays in place remains inside the column's stacking context at the floor, which
@@ -1563,11 +1563,11 @@ A hint's label beside it is `--type-small` in `--text-dim`. A menu item with a b
 keycap in its trailing slot (§9.1).
 Hidden on coarse pointers (`@media (pointer: coarse)`), never by viewport width, except in the
 Keyboard Shortcuts reference, which keeps its keycaps because it is where someone with a hardware
-keyboard on a touch device looks them up. Inline hints still hide there (§15.1). Inside a cramped
-pane a hint may yield to the content it would squeeze, as the transcript strip's Reply hint does
-below its measured transcript-pane width; the shortcut keeps working and the reference lists it. The
-transcript's floating Jump to Latest control (#2153) carries the End keycap on fine pointers only;
-its tooltip names the chord.
+keyboard on a touch device looks them up. Inline hints still hide there (§15.1). The Reply shortcut's
+hint is a bare `R` keycap at the end of the idle, unfocused composer's placeholder row (#2166): the
+placeholder is its label, and the row takes no height, so the keycap comes and goes without moving
+the textarea. The transcript's floating Jump to Latest control (#2153) carries the End keycap on fine
+pointers only; its tooltip names the chord.
 
 ### 11.6 Meter
 
@@ -1579,8 +1579,10 @@ its tooltip names the chord.
 - `.meter.is-progress` is normal forward progress through known steps (a replacement worktree being
   created, §13.2), so its fill is `--accent` (§2.2). A label beside it names the phase and step
   ("Running Setup, Step 3 of 4"); progress is never drawn in a warning tone.
-- `.meter.t-warning` and `.meter.t-danger` fill with the tone when the level needs attention (the
-  context window when full).
+- `.meter.t-warning` and `.meter.t-danger` fill with the tone when the level needs attention. The
+  context window is warning from 75% and danger from 90%, and its ring takes the same tone classes
+  on `.context-control`; below 75% the ring's fill is the neutral `--text-dim` on a `--bg-elev-3`
+  track.
 - The element carries `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`
   and a Title Case `aria-label`.
 - Replaces the context meter's bar (`.context-popover-bar`). The context control itself (the ring
@@ -1784,7 +1786,7 @@ state leaves its own out, and the bar has no panel toggles.
 | Actions | `.btn.sm` row under the body, left-aligned; the resolving action first (primary only if it is the page's main next step). An action a person cannot take now keeps a visible reason line in the body ("Build Box is offline.", a Viewer's refusal) that the button references with `aria-describedby`, never only a `title`. |
 | Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. |
 | Placement | Directly where the problem is: above the composer for session state, above the footer for submit errors, at the top of a section for section state. Aligned to that column's edges. |
-| Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts, the status strip and queued rows are not notices and do not share this slot. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
+| Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts and queued rows are not notices and do not share this slot. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
 
 **Session notice slot.** `SessionNoticeSlot` (`apps/web/src/components/SessionNoticeSlot.tsx`) is that
 slot: the first child of the composer column, on the composer's width and gutters. It takes a list of
@@ -1917,6 +1919,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Toasts | Bottom center above the tab bar or composer, inside the safe area; one visible (§13.1). |
 | Request dock | Caps at 50% of the chat column, 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). |
 | Keyboard hints | Hidden (`pointer: coarse`). |
+| Live usage | The composer bar seats the context ring and the session cost before the mic as two `.btn.sm.ghost` triggers (§3.1) in `--type-small` and `--text-dim`, each opening its popover. Below 760px, or in a composer column narrower than 640px at any width, they leave the bar so it never wraps, and Model Settings opens with a read-only Session Usage group at the top: Context Window (ring, percentage and "72K of 200K") and Session Cost. An agent without a Model Settings that can open keeps them in the bar, where that trigger's room is free. A session with no usage yet shows neither (#2166). |
 | Fixed bottom layers | Every bottom-anchored surface (right panel sheet, shell dock, composer) follows the same `:has(textarea:focus)` rule as the rail so nothing shows through. |
 | Gutter | `--page-gutter: 16px`. Centered columns use `max(var(--space-3), (100% - max) / 2)` so content never touches the screen edge. |
 

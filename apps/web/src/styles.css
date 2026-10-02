@@ -4626,10 +4626,6 @@ textarea {
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  /* The pane the status strip's cutoffs measure. Size containment is safe here: `flex: 1` resolves
-     to basis 0%, so this pane's size is always assigned by its parent and never depends on its own
-     contents. */
-  container: transcript-pane / size;
 }
 /* The reader region: the scroller, and NOTHING below it. */
 .detail-reader {
@@ -4639,9 +4635,9 @@ textarea {
   flex: 1;
   min-height: 0;
   /* In a pane shorter than the scroller's own padding floor, the scroller would overflow the
-     reader region down over the status strip and swallow its clicks. The reader clips: nothing
-     inside it may ever paint or intercept below its bounds, so the strip always stays usable.
-     `clip` rather than `hidden` so the region can never become a scroll container either. */
+     reader region down over the composer and swallow its clicks. The reader clips: nothing inside
+     it may ever paint or intercept below its bounds, so the composer always stays usable. `clip`
+     rather than `hidden` so the region can never become a scroll container either. */
   overflow: clip;
 }
 
@@ -5629,6 +5625,19 @@ textarea {
   outline: none;
   font-family: inherit;
 }
+/* The Reply keycap (§11.5) at the end of the idle composer's placeholder row (#2166). The row takes
+   no height: its negative margin returns the box's 8px gap, so the textarea does not move. */
+.composer-reply-hint {
+  position: relative;
+  height: 0;
+  margin-bottom: calc(-1 * var(--space-2));
+  pointer-events: none;
+}
+.composer-reply-hint > kbd {
+  position: absolute;
+  top: 2px;
+  right: 0;
+}
 /* Phase 6: image drag-drop onto the composer */
 .composer-box.drag-over {
   outline: 2px dashed var(--accent);
@@ -6312,8 +6321,8 @@ textarea,
   border-radius: 6px;
 }
 /* Phase 5: plan-mode checkbox — a first-class toggle inside the session controls row */
-/* Phase 4: context-window meter (thread header, beside the token badge). The bar in its popover
-   is the shared `.meter`. */
+/* Context-window meter: the composer bar's trigger (#2166) and the Sessions preview header's
+   compact ring. The bar in its popover is the shared `.meter`. */
 .context-control {
   position: relative;
   display: inline-flex;
@@ -6334,16 +6343,17 @@ textarea,
 }
 .context-ring-button:hover, .context-ring-button:focus-visible, .context-control.is-open .context-ring-button { color: var(--text-dim); }
 .context-ring-button:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
-.context-ring { display: block; }
-.context-ring-track { fill: none; stroke: var(--bg-elev-2); stroke-width: 2.5; }
+.context-ring { display: block; flex: none; }
+/* A level, not progress (§11.6): the meter's track and neutral fill, and its tone from 75% and 90%. */
+.context-ring-track { fill: none; stroke: var(--bg-elev-3); stroke-width: 2.5; }
 .context-ring-fill {
   fill: none;
-  stroke: var(--accent);
+  stroke: var(--text-dim);
   stroke-width: 2.5;
   stroke-linecap: round;
   transition: stroke-dasharray var(--dur-slow) var(--ease-out), stroke var(--dur-slow) var(--ease-out);
 }
-.context-control.is-full .context-ring-fill { stroke: var(--red); }
+.context-control:is(.t-warning, .t-danger) .context-ring-fill { stroke: var(--tone); }
 .context-ring-label {
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
@@ -6379,9 +6389,9 @@ textarea,
 /* The provider served a different window than the selected model advertises. */
 .context-popover-discrepancy { color: var(--warning-on-tint, var(--warning)); }
 
-/* Session cost (#781): the strip's trailing control. Visually distinct from the context ring —
-   no ring, tabular figures — because it answers a different question: what the session has spent,
-   not how full the model's window is. */
+/* Session cost (#781): the composer bar's trigger after the ring (#2166), and the Sessions preview
+   header's figure. Visually distinct from the context ring — no ring, tabular figures — because it
+   answers a different question: what the session has spent, not how full the model's window is. */
 .session-usage {
   position: relative;
   display: inline-flex;
@@ -6405,6 +6415,43 @@ textarea,
   background: var(--bg-elev-2);
 }
 .session-cost-button:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
+/* In the composer bar both are borderless small ghost buttons in the small type (§3.1); an open
+   popover keeps its trigger in the hover state. */
+.cbar-right > :is(.context-control, .session-usage) { flex: none; }
+.btn.cbar-usage {
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.btn.cbar-usage > .context-ring-label { font-size: inherit; }
+.btn.cbar-usage.is-unpriced { color: var(--text-faint); }
+:is(.context-control, .session-usage).is-open > .btn.cbar-usage {
+  background: var(--bg-elev-2);
+  color: var(--text);
+}
+/* The same two figures, read-only, at the top of Model Settings when the bar has no room (#2166). */
+.session-usage-group-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: 0 var(--space-2) var(--space-2);
+  font: var(--type-small);
+}
+.session-usage-group-facts > div { display: contents; }
+.session-usage-group-facts dt { color: var(--text-dim); }
+.session-usage-group-facts dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.session-usage-group-facts dd.is-unpriced { color: var(--text-faint); }
+.session-usage-group-context {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+.session-usage-group-capacity { color: var(--text-dim); }
 .session-usage-popover {
   position: absolute;
   top: calc(100% + 6px);
@@ -12614,114 +12661,7 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
-
-.transcript-status-strip {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  flex: none;
-  align-items: center;
-  column-gap: 8px;
-  min-height: 42px;
-  padding: 6px 14px;
-  background: var(--bg);
-}
-.transcript-status-cluster {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-row: 1;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  column-gap: 8px;
-  width: 100%;
-  min-width: 0;
-}
-.transcript-status-context {
-  display: flex;
-  position: relative;
-  grid-column: 1;
-  flex: none;
-  align-items: center;
-  justify-content: flex-end;
-  justify-self: stretch;
-  width: auto;
-  min-width: 44px;
-  overflow: visible;
-  color: var(--text-faint);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.transcript-status-context:empty {
-  display: none;
-}
-.transcript-status-context .context-control {
-  flex: none;
-}
-.transcript-status-usage {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  font-size: var(--text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.transcript-status-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.transcript-status-trailing {
-  display: flex;
-  grid-column: 3;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-  overflow: hidden;
-}
-/* Contextual actions use only the far end of the trailing track. */
-.transcript-status-actions {
-  display: flex;
-  flex: 1 1000 auto;
-  align-items: center;
-  justify-content: flex-end;
-  max-width: 100%;
-  min-width: 0;
-  overflow: hidden;
-}
-.transcript-status-actions:empty { display: none; }
-/* A cramped pane cannot hold all three tracks. The cost is a permanent seat and truncates rather
-   than vanishing; the Reply hint is pure discoverability for a shortcut that keeps working, so it
-   is what yields. Without this, a desktop session beside an open side panel shrank the cost to a
-   few pixels — or to nothing — while the hint kept its full width (#893).
-
-   The threshold is the width at which the strip stops fitting, split into the part that scales
-   with the reader's text-size preference and the part that does not. The context meter and the
-   cost flank the strip's empty center (#2153 retired the follow control that sat there), and each
-   symmetric 1fr track must reserve the larger side: a wide cost plus the Reply hint. A fixed cutoff
-   alone was inactive at wider panes with a 24px or 32px root, where the enlarged labels could put
-   the cost back below its own scrollWidth — the exact inversion this rule exists to prevent.
-
-   Two rules rather than one calc(): the plain length parses in every engine that supports size
-   container queries at all, while the calc() refinement, which an older engine may drop as
-   invalid, only ever retires the hint EARLIER. Whichever survives, the cost keeps its seat.
-
-   These numbers are CHECKED, not just explained (#915). A container query cannot read a custom
-   property, so the budget cannot be composed from the values it depends on — it has to be a
-   literal. `apps/web/e2e/status-strip-budget.spec.ts` closes that loop from the other end: it parses
-   these rules back out of this file, measures what the meter, the hint, and a wide cost actually
-   render at, and fails when the constants stop covering them. Retuning any control in this strip
-   therefore fails that spec rather than silently squeezing the cost. Change these numbers only in
-   response to a measurement, and let the spec confirm it. 342px and calc(150px + 12rem): the strip
-   measured 312, 356, 400 and 492px at 16, 20, 24 and 32px roots; the margin above that is for wider
-   fallback faces. The calc() carries the budget at every root and the plain length only matches it
-   at 16px. */
-@container transcript-pane (max-width: 342px) {
-  .transcript-status-actions { display: none; }
-}
-@container transcript-pane (max-width: calc(150px + 12rem)) {
-  .transcript-status-actions { display: none; }
-}
-/* At the narrowest supported phone width, compact the side gaps so fallback-font differences cannot
-   make the context ring and the cost collide. */
-@container transcript-pane (max-width: 340px) {
-  .transcript-status-cluster { column-gap: 4px; }
-}
+/* A keycap with its label: the Search palette's footer hints (§11.5). */
 .shortcut-hint {
   display: inline-flex;
   position: relative;
@@ -12733,14 +12673,6 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .shortcut-hint-label { white-space: nowrap; }
-.shortcut-hint-button {
-  padding: 3px 6px;
-  border: 0;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  cursor: pointer;
-}
-.shortcut-hint-button:hover { color: var(--text); background: var(--bg-elev-2); }
 /* Keycaps are for a keyboard, so a touch pointer hides them and the hints they label, at any width.
    The Keyboard Shortcuts reference keeps its keycaps: it is where someone with a hardware keyboard
    on a touch device looks them up. After the hint rules, so their `display` does not win. */
@@ -13695,10 +13627,6 @@ body.shell-dock-dragging * {
     min-width: 0;
     align-self: center;
     gap: var(--mobile-session-action-gap);
-  }
-  .transcript-status-strip {
-    min-height: 36px;
-    padding: 4px 8px;
   }
 
   /* Right panel: a full-width overlay under the topbar instead of a side column.

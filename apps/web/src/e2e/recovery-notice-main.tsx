@@ -154,7 +154,7 @@ const session: SessionView = {
       canRetry: true,
     }],
   } : {}),
-  // A known context window makes the ContextWindowMeter render in the strip's leading cell.
+  // A known context window makes the ContextWindowMeter render in the composer bar.
   contextWindow: 200_000,
   ...(notSentFixture ? {
     pendingPrompts: [{

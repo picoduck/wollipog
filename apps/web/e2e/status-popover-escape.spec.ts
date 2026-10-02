@@ -2,12 +2,13 @@ import { expect, test } from "@playwright/test";
 
 /**
  * #1796: the session cost and context window popovers follow the shell's "one Escape, one layer"
- * rule (#718). The first Escape closes only the popover and returns focus to its trigger; the
- * session stays open until a second Escape leaves it.
+ * rule (#718). The first Escape closes only the popover and returns focus to its trigger. The
+ * triggers live in the composer bar (#2166), so the next Escape leaves the composer for the reader,
+ * as it does from any composer control, and only the one after that leaves the session.
  */
 const POPOVERS = [
-  { name: "session usage", trigger: ".session-cost-button", panel: ".session-usage-popover" },
-  { name: "context window", trigger: ".context-ring-button", panel: ".context-popover" },
+  { name: "session usage", trigger: ".session-usage > button", panel: ".session-usage-popover" },
+  { name: "context window", trigger: ".context-control > button", panel: ".context-popover" },
 ] as const;
 
 for (const width of [390, 1440]) {
@@ -35,7 +36,12 @@ for (const width of [390, 1440]) {
       await expect(sessionHeading).toBeVisible();
       await expect(page.locator(".composer-box")).toHaveCount(1);
 
-      // The next Escape belongs to the session again.
+      // The next Escape steps out of the composer to the reader; the session stays open.
+      await page.keyboard.press("Escape");
+      await expect(page.locator(".main-body .detail-scroll")).toBeFocused();
+      await expect(sessionHeading).toBeVisible();
+
+      // The one after that belongs to the session again.
       await page.keyboard.press("Escape");
       await expect(sessionHeading).toHaveCount(0);
       await expect(page.locator(".composer-box")).toHaveCount(0);
@@ -51,7 +57,7 @@ test("a modal opened over a status popover takes the first Escape", async ({ pag
   if (await expand.isVisible()) await expand.click();
   const sessionHeading = page.getByRole("heading", { level: 1, name: "Alpha Session" });
   await expect(sessionHeading).toBeVisible();
-  const trigger = page.locator(".session-cost-button:visible");
+  const trigger = page.locator(".session-usage > button:visible");
   await trigger.click();
   const panel = page.locator(".session-usage-popover");
   await expect(panel).toBeVisible();

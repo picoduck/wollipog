@@ -535,14 +535,16 @@ test("recovery over a long cached transcript shows at the reader's lower edge wh
       "the live status region announces the active recovery");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "true");
 
-    // At the LOWER edge, outside the reader region, on a zero-height anchor above the strip.
+    // At the LOWER edge, outside the reader region, on a zero-height anchor above the composer.
     const reader = fixture.container.querySelector(".detail-reader") as HTMLElement;
     const anchor = tailAnchor(fixture);
     assert.ok(reader.contains(fixture.scroller), "the scroller lives inside the reader region");
     assert.equal(reader.contains(anchor), false, "the anchor must not live inside the reader region");
     assert.equal(anchor.previousElementSibling, reader);
-    // anchor → sr-only live region → status strip.
-    assert.ok(anchor.nextElementSibling?.nextElementSibling?.classList.contains("transcript-status-strip"));
+    // anchor → sr-only live region, and nothing else: no status strip sits between the reader and
+    // the composer (#2166).
+    assertNoDomNode(anchor.nextElementSibling?.nextElementSibling ?? null);
+    assertNoDomNode(fixture.container.querySelector("[class^='transcript-status'], [class*=' transcript-status']"));
 
     // Neither the old band nor the chip render, and the top-of-reader notice stays away.
     assertNoDomNode(fixture.container.querySelector(".transcript-recovery-slot"));

@@ -27,7 +27,6 @@ const commandPalette = readFileSync(new URL("./components/CommandPalette.tsx", i
 const projectLocationDialog = readFileSync(new URL("./components/ProjectLocationDialog.tsx", import.meta.url), "utf8");
 const detail = readFileSync(new URL("./components/SessionDetail.tsx", import.meta.url), "utf8");
 const sessionHeader = readFileSync(new URL("./components/SessionHeader.tsx", import.meta.url), "utf8");
-const shortcutHint = readFileSync(new URL("./components/ShortcutHint.tsx", import.meta.url), "utf8");
 const shortcuts = readFileSync(new URL("./shortcuts.ts", import.meta.url), "utf8");
 const newSessionShortcut = readFileSync(new URL("./useNewSessionShortcut.ts", import.meta.url), "utf8");
 
@@ -159,53 +158,39 @@ test("heartbeat activity feeds cards, preview, split/footer counts, and independ
   assert.match(css, /prefers-reduced-motion: reduce[\s\S]*activity-strip/);
 });
 
-test("the transcript's lower edge has one floating tail control and a strip of context, cost and Reply", () => {
-  // #2153: no always-on chip and no reserved recovery band. A zero-height anchor between the reader
-  // and the strip carries the floating control; the strip keeps context, cost and Reply (#2166).
-  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>[\s\S]*\{mode === "expanded" && \(\s*<div className="transcript-status-strip"/,
-    "the anchor and the one recovery live region sit between the reader and the expanded-only strip");
+test("the transcript's lower edge has one floating tail control, and context and cost live in the composer bar", () => {
+  // #2153: no always-on chip and no reserved recovery band. A zero-height anchor below the reader
+  // carries the floating control. #2166: the status strip under it is gone, so the reader extends
+  // to the composer column, and context, cost and the Reply hint moved into the composer.
+  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>\s*<\/div>\s*\{mode === "expanded" && \(\s*<div\s+className="composer"/,
+    "the anchor and the one recovery live region are the last things before the composer");
+  assert.doesNotMatch(detail, /transcript-status-|<ShortcutHint/,
+    "no element of the retired status strip, nor its Reply hint button, remains");
   assert.doesNotMatch(detail, /follow-tail-chip|follow-tail-control|transcript-recovery-slot|TranscriptRecoveryStripEcho|label="Page Up"|label="Page Down"/,
     "the chip, its pager hints and the recovery band are gone");
-  assert.match(detail, /className="transcript-status-strip"[\s\S]*className="transcript-status-cluster"[\s\S]*hasContextWindow && \([\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>/);
-  assert.match(detail, /activePane === "reader"[\s\S]*<ShortcutHint[\s\S]*label="Reply"[\s\S]*shortcut=\{shortcutDisplay\("session-reading-reply"\)\}/);
-  assert.match(shortcutHint, /className="shortcut-hint-label"[\s\S]*<kbd aria-hidden=\{interactive \? "true" : undefined\}>[\s\S]*className=\{`shortcut-hint shortcut-hint-button/,
-    "Reply and transcript discovery hints must share the same component and keycap markup");
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
-  assert.match(detail, /className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*className="transcript-status-trailing"[\s\S]*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"/,
-    "context and the cost/actions track occupy independent symmetric grid seats");
-  assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);[\s\S]*const hasContextWindow = contextWindow\.known;/,
-    "seat allocation consumes the shared capacity result");
-  assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>/g)?.length, 2,
-    "both meter placements consume the exact result used to allocate the status-strip seat");
-  assert.doesNotMatch(detail, /cbar-usage|className="composer-bar"[\s\S]*<SessionUsageControl/,
-    "the composer bar hosts no session-cost control: session accounting is not a message control");
+  // The trailing cluster holds context, then cost, then the mic: only while the bar has room.
+  assert.match(detail, /<div className="cbar-right">[\s\S]*\{usagePlacement === "bar" && <>[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/>\}\s*\{dictation\.supported && \(/,
+    "context and cost sit just before the mic in the composer bar's trailing cluster");
+  assert.match(detail, /<ModelEffortControl[\s\S]*sessionUsage=\{usagePlacement === "model-settings"\s*\? <SessionUsageMenuGroup session=\{session\} resolution=\{contextWindow\} \/>\s*: null\}/,
+    "otherwise Model Settings opens with the Session Usage group, and only then");
+  assert.match(detail, /const usagePlacement = composerUsagePlacement\(\{\s*phone: isMobile,\s*narrowColumn: composerColumnNarrow,\s*modelSettingsOpenable: modelSettingsAvailable && configRefusal === null,\s*\}\);/);
+  assert.match(detail, /<div\s+ref=\{composerBoxRef\}\s+className=\{`composer-box/, "the column measured is the composer card's own");
+  assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);/,
+    "every meter placement consumes the shared capacity result");
+  assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\}/g)?.length, 2,
+    "the preview header and the composer bar each place the meter once");
+  // The Reply shortcut's hint is a keycap in the idle, unfocused composer's placeholder row.
+  assert.match(detail, /const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && text === "" &&\s*!composerIdleCollapsed && !composerAnswerActive;/);
+  assert.match(detail, /\{composerReplyKeycap && \([\s\S]*<div className="composer-reply-hint" aria-hidden="true">\s*<kbd>\{shortcutDisplay\("session-reading-reply"\)\}<\/kbd>\s*<\/div>\s*\)\}\s*<textarea/,
+    "the keycap sits in a zero-height row directly above the textarea");
   // #781: the cost control remains distinct from the neighboring context meter.
   assert.doesNotMatch(detail, /of \$\{[a-zA-Z]+\} context|sessionPreviewUsage/,
-    "no combined context-and-cost summary may return to the status strip");
-  assert.doesNotMatch(detail, /follow-live-shortcut/,
-    "the strip hosts no edge-distributed or spacer-balanced shortcut hints");
-  assert.match(css, /\.transcript-status-strip\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto\s*minmax\(0,\s*1fr\);[^}]*flex:\s*none;[^}]*min-height:\s*42px;[^}]*padding:\s*6px 14px;[^}]*background:\s*var\(--bg\);/);
-  assert.doesNotMatch(css.match(/\.transcript-status-strip\s*\{[^}]*\}/)?.[0] ?? "", /border-top/,
-    "the reader status strip remains visually continuous with the transcript");
-  assert.match(css, /\.transcript-status-cluster\s*\{[^}]*display:\s*grid;[^}]*grid-column:\s*1 \/ -1;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto\s*minmax\(0,\s*1fr\);[^}]*column-gap:\s*8px;[^}]*width:\s*100%;/,
-    "equal side tracks keep the live-output control centered independently of usage widths");
-  assert.match(css, /\.transcript-status-context\s*\{[^}]*position:\s*relative;[^}]*grid-column:\s*1;[^}]*flex:\s*none;[^}]*justify-content:\s*flex-end;[^}]*width:\s*auto;[^}]*min-width:\s*44px;/,
-    "the context seat stays adjacent to the strip's center");
-  assert.match(css, /\.transcript-status-usage\s*\{[^}]*flex:\s*0 1 auto;[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
-    "cost remains bounded when the centered cluster approaches the pane width");
-  assert.match(css, /\.transcript-status-trailing\s*\{[^}]*display:\s*flex;[^}]*grid-column:\s*3;[^}]*justify-content:\s*space-between;[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;/,
-    "cost and Reply guidance share trailing slack without moving the center track");
-  assert.doesNotMatch(css, /\.cbar-usage/,
-    "the composer-bar cost styles retire with the control (#893)");
-  // A pane too narrow for all three tracks sheds the optional hint; engines without size queries
-  // still clip it inside its trailing grid track instead of allowing overlap with the cluster.
-  assert.match(css, /\.transcript-status-actions\s*\{[^}]*flex:\s*1 1000 auto;[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden;/,
-    "the optional hint stays bounded by the trailing grid track");
-  assert.match(css, /@container transcript-pane \(max-width: \d+px\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
-    "a plain-length cutoff retires the trailing actions in every engine with size container queries");
-  assert.match(css, /@container transcript-pane \(max-width: calc\([^)]*rem[^)]*\)\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
-    "and a font-relative cutoff retires them earlier when the reader has raised their text size");
+    "no combined context-and-cost summary may return");
+  assert.doesNotMatch(detail, /follow-live-shortcut/);
+  assert.doesNotMatch(css, /transcript-status-|transcript-pane/,
+    "the strip's rules, its container queries and the pane container they measured retire with it");
   assert.doesNotMatch(css, /follow-tail-|transcript-recovery-/,
     "the chip's and the recovery band's styles retire with them");
   assert.doesNotMatch(detail, /Preview Next|Preview Previous/);

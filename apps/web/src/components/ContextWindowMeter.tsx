@@ -1,6 +1,6 @@
 import { useId } from "react";
 import type { SessionView } from "@wollipog/protocol";
-import { compactionNote, computeContextFill } from "../context-meter.js";
+import { compactionNote, computeContextFill, type ContextFillTone } from "../context-meter.js";
 import type { ContextWindowCapacity } from "../context-window-capacity.js";
 import { contextWindowDiscrepancy, formatContextWindow } from "../context-window-options.js";
 import { formatTokens } from "../format.js";
@@ -9,10 +9,38 @@ import { useAnchoredPopover } from "./anchored-popover.js";
 const RING_RADIUS = 6;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
+/** The fill ring itself, shared by the trigger and the read-only Session Usage group. */
+export function ContextRing({ fillPct, size = 16 }: { fillPct: number; size?: number }) {
+  const dash = (fillPct / 100) * RING_CIRCUMFERENCE;
+  return (
+    <svg className="context-ring" viewBox="0 0 16 16" width={size} height={size} aria-hidden="true">
+      <circle className="context-ring-track" cx="8" cy="8" r={RING_RADIUS} />
+      {dash > 0 && (
+        <circle
+          className="context-ring-fill"
+          cx="8"
+          cy="8"
+          r={RING_RADIUS}
+          strokeDasharray={`${dash} ${RING_CIRCUMFERENCE}`}
+          transform="rotate(-90 8 8)"
+        />
+      )}
+    </svg>
+  );
+}
+
+/** The tone class the ring and its bar share (§11.6). */
+export function contextToneClass(tone: ContextFillTone): string {
+  return tone === "neutral" ? "" : ` t-${tone}`;
+}
+
 /**
- * Context-fill meter for the session status strip: a small ring that fills as the model's window
- * is consumed, and a click-to-open popover with the occupancy figures behind it — percent, used,
- * capacity and where that capacity came from, what is left, and how the driver compacts.
+ * Context-fill meter: a small ring that fills as the model's window is consumed, and a
+ * click-to-open popover with the occupancy figures behind it — percent, used, capacity and where
+ * that capacity came from, what is left, and how the driver compacts.
+ *
+ * `placement="bar"` is the composer bar's trailing trigger (#2166): a borderless small ghost button
+ * with a 14px ring. Without it the meter keeps the Sessions preview header's compact look.
  *
  * It answers one question only: how full is the model's CURRENT working context. Cumulative
  * session usage and cost are a different question and live in the neighbouring Session Usage
@@ -24,9 +52,10 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
  * window differs from what the selected model advertises, the popover says so instead of
  * silently metering against the wrong size.
  */
-export function ContextWindowMeter({ session, resolution }: {
+export function ContextWindowMeter({ session, resolution, placement }: {
   session: SessionView;
   resolution: ContextWindowCapacity;
+  placement?: "bar";
 }) {
   const contextWindow = resolution.capacity;
   const discrepancy = contextWindowDiscrepancy(resolution.advertised, resolution.served);
@@ -39,44 +68,33 @@ export function ContextWindowMeter({ session, resolution }: {
   const popover = useAnchoredPopover<HTMLSpanElement, HTMLButtonElement>({ width: 280, height: 220 });
   const panelId = useId();
 
-  if (!fill.known) return null;
-
   const used = session.contextTokensUsed ?? (session.tokensIn + session.tokensOut);
+  // The composer bar seats live usage only: a session that has processed nothing yet shows no ring
+  // and leaves no gap (#2166).
+  if (!fill.known || (placement === "bar" && used <= 0)) return null;
+
   const remaining = Math.max(0, contextWindow! - used);
-  const dash = (fill.fillPct / 100) * RING_CIRCUMFERENCE;
   const summary = `${used.toLocaleString()} / ${contextWindow!.toLocaleString()} context tokens (${fill.formatPct})`;
 
   return (
     <span
-      className={`context-control${fill.isFull ? " is-full" : ""}${popover.open ? " is-open" : ""}`}
+      className={`context-control${contextToneClass(fill.tone)}${popover.open ? " is-open" : ""}`}
       ref={popover.rootRef}
     >
       <button
         ref={popover.anchorRef}
         type="button"
-        className="context-ring-button"
+        className={placement === "bar" ? "btn sm ghost cbar-usage" : "context-ring-button"}
         aria-expanded={popover.open}
         aria-controls={panelId}
         aria-label={`Context Window ${fill.formatPct} Used`}
         title={summary}
-        // Click or keyboard only: the ring sits in a dense header, and a hover-opened panel was
+        // Click or keyboard only: the ring sits among dense controls, and a hover-opened panel was
         // getting in the way of pointer travel to neighbouring controls. Escape or an outside
         // pointer closes it as well.
         onClick={popover.toggle}
       >
-        <svg className="context-ring" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-          <circle className="context-ring-track" cx="8" cy="8" r={RING_RADIUS} />
-          {dash > 0 && (
-            <circle
-              className="context-ring-fill"
-              cx="8"
-              cy="8"
-              r={RING_RADIUS}
-              strokeDasharray={`${dash} ${RING_CIRCUMFERENCE}`}
-              transform="rotate(-90 8 8)"
-            />
-          )}
-        </svg>
+        <ContextRing fillPct={fill.fillPct} size={placement === "bar" ? 14 : 16} />
         <span className="context-ring-label">{fill.formatPct}</span>
       </button>
       {popover.open && (
@@ -91,7 +109,7 @@ export function ContextWindowMeter({ session, resolution }: {
             <strong>Context Window</strong>
             <span>{fill.formatPct}</span>
           </div>
-          <div className={`meter${fill.isFull ? " t-danger" : ""}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fill.fillPct)} aria-label="Context Window Usage">
+          <div className={`meter${contextToneClass(fill.tone)}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fill.fillPct)} aria-label="Context Window Usage">
             <span style={{ width: `${fill.fillPct}%` }} />
           </div>
           <dl className="context-popover-facts">

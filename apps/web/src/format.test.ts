@@ -56,6 +56,12 @@ test("formatCost: blank when zero, precise for small amounts", () => {
   assert.equal(formatCost(12.5), "$12.50");
 });
 
+test("formatCost groups thousands with currency formatting", () => {
+  assert.equal(formatCost(1234.56), "$1,234.56");
+  assert.equal(formatCost(12345.678), "$12,345.68");
+  assert.equal(formatCost(0.009), "$0.0090");
+});
+
 test("resolvedModelLabel formats live Claude model ids while preserving unknown ids", () => {
   assert.equal(resolvedModelLabel("claude-opus-5[1m]"), "Opus 5 (1M Context)");
   assert.equal(resolvedModelLabel("claude-haiku-4-5-20251001"), "Haiku 4.5");

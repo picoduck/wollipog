@@ -184,9 +184,13 @@ export function resolvedModelLabel(modelId: string): string {
 }
 
 /** Cost in USD, with enough precision to be meaningful for small amounts. */
+const COST = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const SUB_CENT_COST = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 4, maximumFractionDigits: 4 });
+
 export function formatCost(usd: number): string {
   if (usd <= 0) return "";
-  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+  // Grouped like every other figure ("$1,234.56"), so a large session total stays readable (#2166).
+  return usd < 0.01 ? SUB_CENT_COST.format(usd) : COST.format(usd);
 }
 
 /**

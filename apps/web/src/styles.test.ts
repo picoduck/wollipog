@@ -606,20 +606,22 @@ test("the tail control floats from a zero-height anchor and never takes the read
     "no short-pane mode remains: nothing below the reader needs to collapse");
 });
 
-test("the strip keeps context, cost and Reply inside a clipped reader column", () => {
-  // The cost and Reply cutoffs measure the pane, so it stays a size container.
-  assert.match(soleRuleBody(".detail-main"), /container:\s*transcript-pane \/ size;/);
-  assert.match(soleRuleBody(".transcript-status-strip"), /flex:\s*none;/);
-  const usage = soleRuleBody(".transcript-status-usage");
-  assert.match(usage, /min-width:\s*0;/);
-  assert.match(usage, /overflow:\s*hidden;/);
-  assert.match(usage, /text-overflow:\s*ellipsis;/);
-  assert.match(usage, /white-space:\s*nowrap;/);
-  assert.match(soleRuleBody(".transcript-status-context"), /position:\s*relative;[\s\S]*flex:\s*none;[\s\S]*min-width:\s*44px;/,
-    "the strip reserves a stable context seat");
+test("the reader extends to the composer, which seats context and cost in its bar (#2166)", () => {
+  // The status strip, its seat rules and the pane container its cutoffs measured are gone.
+  assert.doesNotMatch(css, /transcript-status-|transcript-pane/);
+  assert.doesNotMatch(soleRuleBody(".detail-main"), /container/);
+  // Both triggers are fixed seats in the trailing cluster: the bar never wraps, the model label
+  // is what truncates, and the triggers leave for Model Settings before the bar runs out of room.
+  assert.match(soleRuleBody(".cbar-right > :is(.context-control, .session-usage)"), /flex:\s*none;/);
+  assert.match(soleRuleBody(".btn.cbar-usage"), /font:\s*var\(--type-small\);/);
+  // The Reply keycap's row takes no height, so the textarea never moves when it comes and goes.
+  const hint = soleRuleBody(".composer-reply-hint");
+  assert.match(hint, /height:\s*0;/);
+  assert.match(hint, /margin-bottom:\s*calc\(-1 \* var\(--space-2\)\);/);
+  assert.match(soleRuleBody(".composer-box"), /gap:\s*8px;/, "the negative margin returns exactly this gap");
 
   // The reader region clips: in panes shorter than the scroller's own padding floor, the
-  // scroller would otherwise overflow the reader down over the strip and swallow its clicks.
+  // scroller would otherwise overflow the reader down over the composer and swallow its clicks.
   assert.match(soleRuleBody(".detail-reader"), /overflow:\s*clip;/,
     "nothing inside the reader may paint or intercept below its bounds");
 });

@@ -631,10 +631,10 @@ test("real Inbox reading hints and resume keys match preview and expanded follow
   const jump = page.locator(".transcript-tail-anchor > .transcript-tail-control");
   await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
   await expect(follow).toHaveAttribute("data-follow-tail-state", "following");
-  // #2153: at the tail nothing renders below the preview's last row — no chip, no pager hints and,
-  // with no context or cost in a preview, no strip either.
+  // #2153: at the tail nothing renders below the preview's last row — no chip, no pager hints and
+  // (#2166) no status strip.
   await expect(jump).toHaveCount(0);
-  await expect(page.locator(".transcript-status-strip")).toHaveCount(0);
+  await expect(page.locator("[class*='transcript-status']")).toHaveCount(0);
   await expect(page.locator(".detail-main [data-shortcut-hint]")).toHaveCount(0);
 
   await reader.focus();
@@ -676,8 +676,9 @@ test("real Inbox reading hints and resume keys match preview and expanded follow
   // drive the follow state but nothing offers to jump to it.
   await expect(page.getByText("No Activity Yet")).toBeVisible();
   await expect(jump).toHaveCount(0);
-  const reply = page.locator('.transcript-status-strip button.shortcut-hint-button[data-shortcut-hint="R"]');
-  await expect(reply).toBeVisible();
+  // The idle composer below the reader offers R, and still no strip sits between them (#2166).
+  await expect(page.locator(".composer-reply-hint kbd")).toHaveText("R");
+  await expect(page.locator("[class*='transcript-status']")).toHaveCount(0);
   await page.keyboard.press("Shift+G");
   await expect(follow).toHaveAttribute("data-follow-tail-state", "following");
 

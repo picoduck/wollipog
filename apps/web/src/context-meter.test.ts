@@ -50,6 +50,17 @@ test("computeContextFill: overflow clamps to 100% and flags full", () => {
   assert.equal(r.isFull, true);
 });
 
+test("computeContextFill: the tone is neutral below 75%, warning from 75% and danger from 90%", () => {
+  const tone = (used: number) => computeContextFill({ tokensIn: 0, tokensOut: 0, usedTokens: used, contextWindow: 200_000 }).tone;
+  assert.equal(tone(0), "neutral");
+  assert.equal(tone(149_999), "neutral");
+  assert.equal(tone(150_000), "warning");
+  assert.equal(tone(179_999), "warning");
+  assert.equal(tone(180_000), "danger");
+  assert.equal(tone(250_000), "danger");
+  assert.equal(computeContextFill({ tokensIn: 1, tokensOut: 1, contextWindow: 0 }).tone, "neutral");
+});
+
 test("compactionNote names automatic compaction for native harnesses and defers for ACP", () => {
   assert.match(compactionNote("claude-code"), /compacts automatically/);
   assert.match(compactionNote("codex-app-server"), /compacts automatically/);

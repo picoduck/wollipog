@@ -26,7 +26,7 @@ test("desktop: one Opus entry, a Context Window group, and catalog-sourced capac
   await page.screenshot({ path: `${SHOT}/desktop-menu.png` });
   await page.keyboard.press("Escape");
 
-  const ring = page.locator(".context-ring-button").first();
+  const ring = page.locator(".context-control > button").first();
   await expect(ring).toHaveAttribute("aria-label", /Context Window 15% Used/);
   await ring.click();
   const popover = page.locator(".context-popover").first();
@@ -38,7 +38,7 @@ test("desktop: one Opus entry, a Context Window group, and catalog-sourced capac
 test("desktop: a served 200K window against an advertised 1M is named in the popover", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&context=choice&used=150000&served=200000");
-  const ring = page.locator(".context-ring-button").first();
+  const ring = page.locator(".context-control > button").first();
   await expect(ring).toHaveAttribute("aria-label", /Context Window 75% Used/);
   await ring.click();
   const popover = page.locator(".context-popover").first();
@@ -58,7 +58,7 @@ test("no Context Window group when the catalog offers a single window for the ba
   await expect(page.getByRole("group", { name: "Model" })).toBeVisible();
   await expect(page.getByRole("group", { name: "Context Window" })).toHaveCount(0);
   // Sonnet's catalog entry states no window and nothing was served yet: no meter, no guess.
-  await expect(page.locator(".context-ring-button")).toHaveCount(0);
+  await expect(page.locator(".context-control > button")).toHaveCount(0);
   await page.screenshot({ path: `${SHOT}/desktop-menu-no-choice.png` });
 });
 
@@ -70,8 +70,11 @@ test("mobile: the Context Window group in the composer menu", async ({ page }) =
   await trigger.click();
   await expect(page.getByRole("group", { name: "Context Window" }).getByRole("menuitemradio", { name: "1M" })).toHaveAttribute("aria-checked", "true");
   await page.screenshot({ path: `${SHOT}/mobile-menu.png` });
+  // On a phone the bar has no room for the ring (#2166): the same sheet opens with the window's
+  // figures in its Session Usage group, ahead of the model choices.
+  const usage = page.getByRole("group", { name: "Session Usage" });
+  await expect(usage).toContainText("15%");
+  await expect(usage).toContainText("150K of 1M");
   await page.keyboard.press("Escape");
-  await page.locator(".context-ring-button").first().click();
-  await expect(page.locator(".context-popover").first()).toContainText("Model Catalog");
-  await page.screenshot({ path: `${SHOT}/mobile-popover.png` });
+  await expect(page.locator(".composer-bar .context-control")).toHaveCount(0);
 });

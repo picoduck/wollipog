@@ -31,15 +31,16 @@ function ProtocolUsageInfo({ detailId }: { detailId: string }) {
 /**
  * The session's cumulative cost, and the usage behind it (#781).
  *
- * The strip shows one figure — what this session has cost — because that is the only usage number
- * worth a permanent seat. Everything else (input and output tokens, the cache and reasoning
+ * The trigger shows one figure — what this session has cost — because that is the only usage number
+ * worth a permanent seat. `placement="bar"` is the composer bar's trailing trigger (#2166), a
+ * borderless small ghost button; without it the control keeps the Sessions preview header's look. Everything else (input and output tokens, the cache and reasoning
  * buckets, where the price came from, and the per-model split) lives in the popover the cost
  * opens. This is deliberately NOT the context meter: that answers "how full is the model's window
  * right now", this answers "what has this session accumulated", and neither repeats the other.
  *
  * Renders nothing for a session that has processed nothing.
  */
-export function SessionUsageControl({ session, className }: { session: SessionView; className?: string }) {
+export function SessionUsageControl({ session, placement }: { session: SessionView; placement?: "bar" }) {
   const api = useApi();
   const popover = useAnchoredPopover<HTMLSpanElement, HTMLButtonElement>({ width: 280, height: 340 });
   const [breakdown, setBreakdown] = useState<SessionUsageResponse | null>(null);
@@ -85,11 +86,11 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
     || (label.priced ? "$0.00" : "Not Priced");
 
   return (
-    <span className={`session-usage${popover.open ? " is-open" : ""}${className ? ` ${className}` : ""}`} ref={popover.rootRef}>
+    <span className={`session-usage${popover.open ? " is-open" : ""}`} ref={popover.rootRef}>
       <button
         ref={popover.anchorRef}
         type="button"
-        className={`session-cost-button${label.priced ? "" : " is-unpriced"}`}
+        className={`${placement === "bar" ? "btn sm ghost cbar-usage" : "session-cost-button"}${label.priced ? "" : " is-unpriced"}`}
         aria-expanded={popover.open}
         aria-controls={panelId}
         aria-label={label.ariaLabel}

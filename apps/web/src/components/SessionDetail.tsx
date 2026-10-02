@@ -52,6 +52,7 @@ import { useApi } from "../api-context.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
+import { COMPOSER_USAGE_MIN_COLUMN_PX, composerUsagePlacement, useNarrowerThan } from "../composer-usage-placement.js";
 import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { compareSessionNotices, SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
@@ -105,7 +106,7 @@ import {
   useOffscreenPendingPrompts,
   useRecoveryAnnouncement,
 } from "./TranscriptTailControl.js";
-import { ApprovalsControl, ModelEffortControl } from "./ComposerControls.js";
+import { ApprovalsControl, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
 import { PinnedSummaryDock } from "./PinnedSummaryDock.js";
@@ -176,6 +177,7 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
 import { resolveContextWindowCapacity } from "../context-window-capacity.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
+import { SessionUsageMenuGroup } from "./SessionUsageMenuGroup.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
 import {
   hasSavedFollowTailAnchor,
@@ -192,7 +194,6 @@ import {
   usePreviewNavigationRegistration,
   type PreviewNavigationControls,
 } from "./usePreviewNavigationRegistration.js";
-import { ShortcutHint } from "./ShortcutHint.js";
 import {
   conversationSteeringAvailability,
   queuedPromptEditingAvailability,
@@ -4056,7 +4057,6 @@ function SessionDetailLoaded({
   // provider wire shape stays unchanged until IDEA-004C adds transport-specific execution modes.
   const agentCaps = resolveCaps(runner, session);
   const contextWindow = resolveContextWindowCapacity(session, agentCaps?.models ?? []);
-  const hasContextWindow = contextWindow.known;
   // Plan mode is only safe where the driver actually advertises the `plan` approval mode (Claude).
   // Codex silently falls back to a writable sandbox for an unknown mode, so exposing it there would
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
@@ -4180,6 +4180,9 @@ function SessionDetailLoaded({
     !historyQuarantine && !queuedEdit && !error && !retitleFeedback && !dictation.recording &&
     !dragActive && !paletteOpen && !workspacePickerOpen;
   const composerIdlePreview = text.trim() ? text : composerPlaceholder;
+  // R focuses the composer from the reader; the idle, unfocused composer says so (#2166).
+  const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && text === "" &&
+    !composerIdleCollapsed && !composerAnswerActive;
   useEffect(() => {
     setActiveSlashCommandId((current) => retainActiveComposerCommandId(current, slashMatches));
   }, [slashMatches]);
@@ -4212,6 +4215,19 @@ function SessionDetailLoaded({
   // reason, and nothing is applied (#1857).
   const configRefusal = sessionCommandRefusal(session, "configure");
   const configRefusalId = `config-refusal-${session.id}`;
+  // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
+  // bar has no room for them (#2166).
+  const [composerBoxRef, composerColumnNarrow] = useNarrowerThan<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_PX);
+  const modelSettingsAvailable = useModelSettingsAvailable(
+    session,
+    () => pendingConfig.current.model,
+    () => pendingConfig.current.serviceTier,
+  );
+  const usagePlacement = composerUsagePlacement({
+    phone: isMobile,
+    narrowColumn: composerColumnNarrow,
+    modelSettingsOpenable: modelSettingsAvailable && configRefusal === null,
+  });
   const applyConfig = useCallback(
     (patch: Partial<SessionConfig>) => {
       if (configRefusal !== null) return;
@@ -5467,38 +5483,6 @@ function SessionDetailLoaded({
             />
             {/* The one polite live region for recovery, whatever the control is showing. */}
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
-            {/* Context, cost and Reply until #2166 moves them into the composer. The preview shows
-                none of them, so it has no strip at all. */}
-            {mode === "expanded" && (
-              <div className="transcript-status-strip" aria-label="Transcript Status">
-                <div className="transcript-status-cluster">
-                  {hasContextWindow && (
-                    <div className="transcript-status-context">
-                      <ContextWindowMeter session={session} resolution={contextWindow} />
-                    </div>
-                  )}
-                  <div className="transcript-status-trailing">
-                    {/* Cost only (#781): the neighboring context meter owns occupancy, while this
-                        control owns cumulative session spend. */}
-                    <SessionUsageControl session={session} className="transcript-status-usage" />
-                    {/* Contextual actions use the far end of the trailing track and yield in
-                        cramped panes. */}
-                    <div className="transcript-status-actions">
-                      {!isMobile && canPrompt && activePane === "reader" && (
-                        <ShortcutHint
-                          label="Reply"
-                          shortcut={shortcutDisplay("session-reading-reply")}
-                          title={`Reply (${shortcutDisplay("session-reading-reply")})`}
-                          ariaLabel="Reply"
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={focusComposerAtDraftEnd}
-                        />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
 
           {mode === "expanded" && (
@@ -5801,6 +5785,7 @@ function SessionDetailLoaded({
               </div>
             )}
             <div
+              ref={composerBoxRef}
               className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}`}
               onBlur={(event) => {
                 const blurredTarget = event.target as HTMLElement;
@@ -5900,6 +5885,14 @@ function SessionDetailLoaded({
               />
               {commandPreservesAttachedImages && (
                 <Notice tone="warning" compact role="status">{DURABLE_COMMAND_ATTACHMENT_NOTICE}</Notice>
+              )}
+              {composerReplyKeycap && (
+                /* The Reply shortcut's hint (§11.5): a keycap at the end of the idle composer's
+                   placeholder row. It takes no height, so it can come and go without moving the
+                   textarea; the global coarse-pointer rule hides the keycap itself. */
+                <div className="composer-reply-hint" aria-hidden="true">
+                  <kbd>{shortcutDisplay("session-reading-reply")}</kbd>
+                </div>
               )}
               <textarea
                 ref={inputRef}
@@ -6031,6 +6024,9 @@ function SessionDetailLoaded({
                     pendingEffort={() => pendingConfig.current.effort}
                     pendingServiceTier={() => pendingConfig.current.serviceTier}
                     disabledReason={configRefusal}
+                    sessionUsage={usagePlacement === "model-settings"
+                      ? <SessionUsageMenuGroup session={session} resolution={contextWindow} />
+                      : null}
                   />
                   {configRefusal !== null && planActive && (
                     <span className="sr-only" id={configRefusalId}>{configRefusal}</span>
@@ -6040,6 +6036,11 @@ function SessionDetailLoaded({
                   {cancelTurnRefusal !== null && (
                     <span className="sr-only" id={`stop-turn-refusal-${session.id}`}>{cancelTurnRefusal}</span>
                   )}
+                  {usagePlacement === "bar" && <>
+                    {/* Context, then cost (#781): occupancy and spend, each opening its own popover. */}
+                    <ContextWindowMeter session={session} resolution={contextWindow} placement="bar" />
+                    <SessionUsageControl session={session} placement="bar" />
+                  </>}
                   {dictation.supported && (
                     <button
                       type="button"

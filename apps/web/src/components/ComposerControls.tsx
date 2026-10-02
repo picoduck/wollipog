@@ -336,6 +336,35 @@ export function modelEffortControlLabel(selectedModel: MenuModelChoice | undefin
   return selectedModel?.displayName || modelVal || "Model";
 }
 
+/** Everything Model Settings offers for this session, and whether it has anything to offer. */
+function useModelSettings(
+  session: SessionView,
+  pendingModel?: () => string | undefined,
+  pendingServiceTier?: () => string | undefined,
+) {
+  const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
+  const capabilities = resolveEffectiveCaps(runner, session);
+  const config = useSessionConfig(session);
+  const serviceTierState = session.driver === "codex-app-server" && runnerSupportsProtocol(runner?.protocolVersion, "codexServiceTiers")
+    ? serviceTierChoices(
+        capabilities,
+        pendingModel?.() ?? session.model,
+        pendingServiceTier?.() ?? session.serviceTier,
+      )
+    : null;
+  const available = config.models.length > 0 || config.modelEfforts.length > 0 || serviceTierState !== null;
+  return { ...config, serviceTierState, available };
+}
+
+/** Whether the composer bar shows a Model Settings trigger for this session at all. */
+export function useModelSettingsAvailable(
+  session: SessionView,
+  pendingModel?: () => string | undefined,
+  pendingServiceTier?: () => string | undefined,
+): boolean {
+  return useModelSettings(session, pendingModel, pendingServiceTier).available;
+}
+
 export function ModelEffortControl(
   {
     session,
@@ -344,6 +373,7 @@ export function ModelEffortControl(
     pendingEffort,
     pendingServiceTier,
     disabledReason = null,
+    sessionUsage = null,
   }: {
     session: SessionView;
     apply: Apply;
@@ -352,19 +382,14 @@ export function ModelEffortControl(
     pendingModel?: () => string | undefined;
     pendingEffort?: () => string | undefined;
     pendingServiceTier?: () => string | undefined;
+    /** The read-only Session Usage group, while the composer bar has no room for its triggers (#2166). */
+    sessionUsage?: ReactNode;
   },
 ) {
-  const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
-  const capabilities = resolveEffectiveCaps(runner, session);
-  const { caps, models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal } = useSessionConfig(session);
-  const serviceTierState = session.driver === "codex-app-server" && runnerSupportsProtocol(runner?.protocolVersion, "codexServiceTiers")
-    ? serviceTierChoices(
-        capabilities,
-        pendingModel?.() ?? session.model,
-        pendingServiceTier?.() ?? session.serviceTier,
-      )
-    : null;
-  if (models.length === 0 && modelEfforts.length === 0 && !serviceTierState) return null;
+  const {
+    caps, models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal, serviceTierState, available,
+  } = useModelSettings(session, pendingModel, pendingServiceTier);
+  if (!available) return null;
   const pickerModel = models.find((model) => model.id === modelVal) ?? selectedModel;
   const selectedWindow = contextChoice?.options.find((option) => option.id === contextChoice.selectedId);
   const modelLabel = modelEffortControlLabel(pickerModel, modelVal);
@@ -388,7 +413,7 @@ export function ModelEffortControl(
       ariaLabel={`Model Settings: ${modelLabel}${effortSuffix ? `, ${effortSuffix}` : ""}`}
       disabledReason={disabledReason}
     >
-      {(close) => <ModelEffortMenuChoices
+      {(close) => <>{sessionUsage}<ModelEffortMenuChoices
         models={models}
         modelSource={modelSource}
         modelVal={modelVal}
@@ -401,7 +426,7 @@ export function ModelEffortControl(
         serviceTierState={serviceTierState}
         close={close}
         apply={apply}
-      />}
+      /></>}
     </BarMenu>
   );
 }

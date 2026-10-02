@@ -167,15 +167,15 @@ for (const banner of [false, true]) {
 for (const banner of [false, true]) {
   const variant = banner ? "with the page banner" : "without a page banner";
 
-  test(`the session strip's popovers stay on their triggers in a contained main column, ${variant}`, async ({ page }) => {
+  test(`the composer bar's usage popovers stay on their triggers in a contained main column, ${variant}`, async ({ page }) => {
     await page.goto(`/session-usage-e2e.html?width=1100&height=780&shell=1${banner ? "&banner=1" : ""}&composer=orchestrator`);
     if (banner) await expect(page.locator(".main > .notice.page-banner")).toBeVisible();
     const menu = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
     const cases = [
       {
         name: "context window",
-        open: async () => page.locator(".context-ring-button").first().click(),
-        trigger: page.locator(".context-ring-button").first(),
+        open: async () => page.locator(".context-control > button").first().click(),
+        trigger: page.locator(".context-control > button").first(),
         panel: page.locator(".context-popover").first(),
       },
       {

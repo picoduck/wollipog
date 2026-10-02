@@ -4,7 +4,8 @@ import { pinWidestFace } from "./font-geometry";
 /**
  * Session-level usage (#602, #781): per-turn tokens and cost on the user message, the context ring
  * with its occupancy-only popover, and the separate session-cost control whose Session Usage
- * popover owns cumulative tokens and the per-model breakdown. Screenshots land in
+ * popover owns cumulative tokens and the per-model breakdown. Both triggers live in the composer
+ * bar, or in Model Settings when the bar has no room for them (#2166). Screenshots land in
  * `test-results/session-usage/` as the PR's visual evidence.
  */
 
@@ -12,47 +13,32 @@ test.use({ reducedMotion: "reduce" });
 const SHOT = "test-results/session-usage";
 
 /**
- * Geometry of the transcript status strip, read in one pass so the boxes are mutually consistent.
- * Since #2153 the cluster's center track is empty; `gap` is the column gap on either side of it.
+ * The composer bar and its usage triggers, read in one pass so the boxes are mutually consistent.
+ * `rows` counts the distinct vertical centres of the bar's visible controls; `trailing` is the first
+ * control after the cost (the mic, or Send where dictation is unsupported).
  */
-const readStrip = (page: Page) =>
-  page.locator(".transcript-status-strip").evaluate((strip) => {
-    const rect = (selector: string) => {
-      const element = strip.querySelector(selector);
+const readBar = (page: Page) =>
+  page.locator(".composer-bar").evaluate((bar) => {
+    const box = (element: Element | null | undefined) => {
       if (!element) return null;
-      const box = element.getBoundingClientRect();
-      return { left: box.left, right: box.right, width: box.width };
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width };
     };
-    const box = strip.getBoundingClientRect();
-    const cluster = strip.querySelector(".transcript-status-cluster")!;
+    const controls = [...bar.querySelectorAll(":scope > * > *")]
+      .map((element) => element.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+    const cost = bar.querySelector(".session-usage");
+    let trailing = cost?.nextElementSibling ?? null;
+    while (trailing && trailing.getBoundingClientRect().width === 0) trailing = trailing.nextElementSibling;
     return {
-      strip: { left: box.left, right: box.right, center: box.left + box.width / 2 },
-      gap: parseFloat(getComputedStyle(cluster).columnGap),
-      cluster: rect(".transcript-status-cluster"),
-      meter: rect(".context-ring-button"),
-      actions: rect(".transcript-status-actions"),
-      cost: rect(".transcript-status-usage"),
-      overflows: strip.scrollWidth > strip.clientWidth,
+      box: box(bar)!,
+      meter: box(bar.querySelector(".context-control")),
+      cost: box(cost),
+      trailing: box(trailing),
+      rows: new Set(controls.map((rect) => Math.round(rect.top + rect.height / 2))).size,
+      overflow: bar.scrollWidth - bar.clientWidth,
     };
   });
-
-/**
- * Context and cost flank the strip's empty center (#2153): the meter ends one column gap left of
- * it and the cost begins one column gap right of it. Each is pinned to the center rather than to
- * the other, so neither indicator's presence or width can move its neighbour.
- */
-function expectFlanksCenter(geometry: Awaited<ReturnType<typeof readStrip>>, message?: string) {
-  const { center } = geometry.strip;
-  expect(geometry.gap, message).toBeGreaterThan(0);
-  if (geometry.meter) {
-    expect(geometry.meter.right, message).toBeLessThanOrEqual(center);
-    expect(center - geometry.meter.right, message).toBeLessThanOrEqual(geometry.gap + 0.5);
-  }
-  if (geometry.cost) {
-    expect(geometry.cost.left, message).toBeGreaterThanOrEqual(center);
-    expect(geometry.cost.left - center, message).toBeLessThanOrEqual(geometry.gap + 0.5);
-  }
-}
 
 test("desktop: Parent Control exposes five independent typed workflow authorities", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
@@ -117,7 +103,7 @@ test("desktop: per-turn usage, the ring popover with totals and the per-model sp
   await expect(turnUsage.nth(2)).not.toContainText("$");
   await page.screenshot({ path: `${SHOT}/desktop-turn-usage.png` });
 
-  const ring = page.locator(".context-ring-button").first();
+  const ring = page.locator(".context-control > button").first();
   await expect(ring).toHaveAttribute("aria-label", /Context Window 36% Used/);
   await ring.click();
   const popover = page.locator(".context-popover").first();
@@ -295,13 +281,13 @@ test("desktop: an unknown context window hides the ring and keeps the cost contr
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&window=none");
 
-  await expect(page.locator(".context-ring-button")).toHaveCount(0);
+  await expect(page.locator(".context-control > button")).toHaveCount(0);
   const cost = page.getByRole("button", { name: "Session Usage: $1.37" });
   await expect(cost).toBeVisible();
-  // With no meter the cost still takes its own seat just right of the strip's center.
-  const geometry = await readStrip(page);
+  // With no meter the cost alone keeps its seat before the mic, and no gap is left for the ring.
+  const geometry = await readBar(page);
   expect(geometry.meter).toBeNull();
-  expectFlanksCenter(geometry);
+  expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.trailing!.left);
   await cost.click();
   await expect(page.locator(".session-usage-popover").first()).toContainText("Total Processed");
   await page.screenshot({ path: `${SHOT}/desktop-unknown-context.png` });
@@ -310,10 +296,10 @@ test("desktop: an unknown context window hides the ring and keeps the cost contr
 test("the warning state above the threshold", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&used=186000&driver=claude-code");
-  const meter = page.locator(".context-control").first();
-  await expect(meter).toHaveClass(/is-full/);
-  await expect(page.locator(".context-ring-button").first()).toHaveAttribute("aria-label", /93% Used/);
-  await page.locator(".context-ring-button").first().click();
+  const meter = page.locator(".composer-bar .context-control");
+  await expect(meter).toHaveClass(/t-danger/);
+  await expect(page.locator(".context-control > button").first()).toHaveAttribute("aria-label", /93% Used/);
+  await page.locator(".context-control > button").first().click();
   await expect(page.locator(".context-popover").first()).toContainText("compacts automatically");
   await page.screenshot({ path: `${SHOT}/desktop-warning.png` });
   await page.keyboard.press("Escape");
@@ -358,270 +344,203 @@ test.describe("Answer Mode ownership", () => {
 });
 
 /**
- * Session accounting stays out of the message composer and joins context usage in the transcript
- * status strip. Since #2153 the strip's center track is empty \u2014 the follow state moved to the
- * floating Jump to Latest control \u2014 so these cases pin context and cost one column gap either side
- * of the strip's center across every cost label, while the action track consumes only its own side.
+ * Live usage sits in the composer bar's trailing cluster (#2166): the context ring, then the cost,
+ * just before the mic. The bar never wraps, so on a phone or in a composer column under 640px the
+ * two triggers leave it, and Model Settings opens with a read-only Session Usage group instead.
  */
-test.describe("desktop: context and cost flank the strip's empty center", () => {
-  /** Every shape `sessionCostLabel` can produce, widest to narrowest. */
-  const LABELS = [
-    { name: "a short priced", query: "", text: "$1.37" },
-    { name: "a long priced", query: "&cost=12345.67", text: "$12345.67" },
-    { name: "a sub-cent priced", query: "&cost=0.0007", text: "$0.0007" },
-    { name: "an unavailable", query: "&cost=none", text: "$\u2014" },
-  ];
+test.describe("desktop: context and cost sit in the composer bar before the mic", () => {
+  for (const viewport of [
+    { name: "1440", width: 1440, height: 900, frame: 1360 },
+    { name: "834", width: 834, height: 1000, frame: 774 },
+  ] as const) {
+    test(`at ${viewport.name}px both triggers open their popovers and Escape closes each`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`/session-usage-e2e.html?width=${viewport.frame}&height=${viewport.height - 40}&driver=claude-code`);
 
-  for (const label of LABELS) {
-    test(`${label.name} cost stays beside the strip's empty center`, async ({ page }) => {
-      await page.setViewportSize({ width: 1200, height: 820 });
-      await page.goto(`/session-usage-e2e.html?width=1180&height=780${label.query}`);
-
-      const cost = page.locator(".transcript-status-usage");
-      await expect(cost).toBeVisible();
-      await expect(cost).toHaveText(label.text);
-
-      // One seat, not two: the composer bar keeps outgoing-message controls only.
-      await expect(page.locator(".cbar-usage")).toHaveCount(0);
-      await expect(page.locator(".composer-bar").getByRole("button", { name: /^Session Usage/ })).toHaveCount(0);
+      const ring = page.locator(".composer-bar .cbar-right").getByRole("button", { name: "Context Window 36% Used" });
+      const cost = page.locator(".composer-bar .cbar-right").getByRole("button", { name: "Session Usage: $1.37" });
+      await expect(ring).toBeVisible();
+      await expect(cost).toHaveText("$1.37");
+      await expect(page.locator("[class*='transcript-status']")).toHaveCount(0);
+      // One seat each: the bar holds them, and Model Settings does not repeat them.
+      await expect(page.getByRole("button", { name: /^Context Window .* Used$/ })).toHaveCount(1);
       await expect(page.getByRole("button", { name: /^Session Usage: / })).toHaveCount(1);
 
-      const geometry = await readStrip(page);
-      // The contextual Reply hint is present, but occupies only trailing slack outside the cluster.
-      expect(geometry.actions!.width).toBeGreaterThan(0);
-      expect(geometry.meter).not.toBeNull();
-      expect(geometry.cost).not.toBeNull();
-      expectFlanksCenter(geometry);
-      expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
-      expect(geometry.cost!.width).toBeGreaterThan(0);
-      expect(geometry.overflows).toBe(false);
+      const bar = await readBar(page);
+      expect(bar.rows, "the bar's controls share one row").toBe(1);
+      expect(bar.overflow).toBeLessThanOrEqual(0);
+      expect(bar.meter!.right).toBeLessThanOrEqual(bar.cost!.left);
+      expect(bar.cost!.right).toBeLessThanOrEqual(bar.trailing!.left);
+      // Borderless small ghost buttons in the small type, dim until hovered.
+      const look = await ring.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { border: style.borderTopColor, fontSize: style.fontSize, fontWeight: style.fontWeight, height: element.getBoundingClientRect().height };
+      });
+      expect(look.border).toBe("rgba(0, 0, 0, 0)");
+      expect(look.fontSize).toBe("12px");
+      expect(look.fontWeight).toBe("400");
+      expect(look.height).toBe(28);
+      expect(await ring.locator("svg").getAttribute("width")).toBe("14");
+      await page.locator(".composer-box").screenshot({ path: `${SHOT}/composer-bar-${viewport.name}.png` });
 
-      await page.screenshot({ path: `${SHOT}/desktop-status-strip-${label.name.replace(/[^a-z]+/g, "-")}.png` });
+      await ring.click();
+      const context = page.locator(".context-popover");
+      await expect(context).toContainText("Capacity");
+      await page.keyboard.press("Escape");
+      await expect(context).toHaveCount(0);
+      // Escape closed only the popover (#1796): the session and its composer are still here.
+      await expect(ring).toHaveAttribute("aria-expanded", "false");
+      await expect(page.locator(".composer-box")).toBeVisible();
+
+      await cost.click();
+      const usage = page.locator(".session-usage-popover");
+      await expect(usage).toContainText("Total Processed");
+      // Opening upward from the bar, it stays on screen.
+      const usageBox = (await usage.boundingBox())!;
+      expect(usageBox.y).toBeGreaterThanOrEqual(0);
+      expect(usageBox.y + usageBox.height).toBeLessThanOrEqual(viewport.height);
+      await page.keyboard.press("Escape");
+      await expect(usage).toHaveCount(0);
+      await expect(cost).toHaveAttribute("aria-expanded", "false");
+      await expect(page.locator(".composer-box")).toBeVisible();
+
+      // While the bar shows them, Model Settings opens on its model choices with no usage group.
+      await page.getByRole("button", { name: /^Model Settings/ }).click();
+      const menu = page.getByRole("menu", { name: "Model Settings" });
+      await expect(menu).toBeVisible();
+      await expect(menu.getByRole("group", { name: "Session Usage" })).toHaveCount(0);
     });
   }
 
-  test("a trailing action appearing or disappearing never moves the cost", async ({ page }) => {
-    await page.setViewportSize({ width: 1200, height: 820 });
-    await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=12345.67");
-
-    const reply = page.locator(".transcript-status-actions").getByRole("button", { name: "Reply" });
-    await expect(reply).toBeVisible();
-    const withAction = await readStrip(page);
-
-    // The Reply hint is offered only while the transcript owns focus; giving the composer focus
-    // retires it. Because it lives outside the cluster, the cost must not shift by a pixel.
-    await page.locator(".composer-input").focus();
-    await expect(reply).toHaveCount(0);
-    const withoutAction = await readStrip(page);
-
-    expect(withoutAction.cost!.left).toBeCloseTo(withAction.cost!.left, 1);
-    expect(withoutAction.cost!.right).toBeCloseTo(withAction.cost!.right, 1);
-    expect(withoutAction.cluster!.left).toBeCloseTo(withAction.cluster!.left, 1);
-    expect(withoutAction.cluster!.right).toBeCloseTo(withAction.cluster!.right, 1);
-
-    // And the cost stays operable while the composer holds focus.
-    await page.getByRole("button", { name: /^Session Usage: / }).click();
-    await expect(page.locator(".session-usage-popover")).toHaveCount(1);
-  });
-
-  test("a cramped desktop pane keeps the cost readable by retiring the Reply hint", async ({ page }) => {
-    // A desktop session beside an open side panel: the viewport is well above the mobile
-    // breakpoint, but the transcript pane itself is narrow. The symmetric side tracks still hold
-    // both usage indicators.
-    await page.setViewportSize({ width: 900, height: 820 });
-    await page.goto("/session-usage-e2e.html?width=330&height=780&cost=12345.67");
-    await expect(page.locator(".transcript-status-usage")).toBeVisible();
-
-    // The trailing hint yields — its shortcut still works, and every cluster item stays readable.
-    await expect(page.locator(".transcript-status-actions")).toBeHidden();
-    const cost = page.locator(".transcript-status-usage .session-cost-button");
-    const legibility = await cost.evaluate((button) => ({
-      visible: button.getBoundingClientRect().width,
-      needed: button.scrollWidth,
-    }));
-    expect(legibility.visible).toBeGreaterThanOrEqual(legibility.needed - 0.5);
-
-    const geometry = await readStrip(page);
-    expectFlanksCenter(geometry);
-    expect(geometry.overflows).toBe(false);
-    await page.screenshot({ path: `${SHOT}/desktop-status-strip-cramped-pane.png` });
-  });
-
-  test("an enlarged root font retires the hint too, at a pane width that fits by pixels", async ({ page }) => {
-    // Type is in rem so the browser's font-size preference actually does something (styles.css
-    // "--- Type ---"). The hint and the cost both grow, so a pane wide enough at a 16px root can
-    // still be too narrow at 32px, and a pixel-only cutoff would leave the hint showing while the
-    // cost fell below its own scrollWidth.
-    await page.setViewportSize({ width: 1280, height: 820 });
-    await page.goto("/session-usage-e2e.html?width=520&height=780&cost=12345.67");
-    await page.addStyleTag({ content: "html { font-size: 32px; }" });
-    await expect(page.locator(".transcript-status-usage")).toBeVisible();
-
-    await expect(page.locator(".transcript-status-actions")).toBeHidden();
-    const legibility = await page.locator(".transcript-status-usage .session-cost-button").evaluate((button) => ({
-      visible: button.getBoundingClientRect().width,
-      needed: button.scrollWidth,
-    }));
-    expect(legibility.visible).toBeGreaterThanOrEqual(legibility.needed - 0.5);
-    const geometry = await readStrip(page);
-    expect(geometry.meter!.left).toBeGreaterThanOrEqual(geometry.cluster!.left - 0.5);
-    expect(geometry.overflows).toBe(false);
-  });
-
-  test("above the cutoff the Reply hint is offered and the cost stays legible", async ({ page }) => {
-    // A pane clearly above the cutoff, not just above it: the exact boundary is pinned against the
-    // stylesheet's own constants by `status-strip-budget.spec.ts`. Here the property is that, once
-    // the hint is offered, it takes only trailing slack and never pushes a wide cost below its own
-    // width or off its seat beside the strip's center.
-    await page.setViewportSize({ width: 1280, height: 820 });
-    await page.goto("/session-usage-e2e.html?width=760&height=780&cost=12345.67");
-
-    await expect(page.locator(".transcript-status-actions")).toBeVisible();
-    const legible = await page.locator(".transcript-status-usage .session-cost-button").evaluate((button) => ({
-      visible: button.getBoundingClientRect().width,
-      needed: button.scrollWidth,
-    }));
-    expect(legible.visible).toBeGreaterThanOrEqual(legible.needed - 0.5);
-
-    const geometry = await readStrip(page);
-    expectFlanksCenter(geometry);
-    expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
-    expect(geometry.overflows).toBe(false);
-  });
-
-  test("the trailing usage track protects cost from Reply where the cutoff cannot run", async ({ page }) => {
-    // Defence in depth, not a supported-engine requirement. When this was written the declared
-    // browser floor was below the first version with size container queries, so the cutoff was
-    // genuinely inert on a targeted engine; #914 has since raised the floor above it, and every
-    // engine the bundle is now compiled for runs the cutoff. The guarantee does not depend on that:
-    // whenever the cutoff does not apply — a future floor change, a rule lost to a stylesheet edit —
-    // the trailing grid cell must still clip its optional hint without extending left across the
-    // strip's center. Neutralising the cutoff is how that is exercised on its own.
-    await page.setViewportSize({ width: 1280, height: 820 });
-    await page.goto("/session-usage-e2e.html?width=440&height=780&cost=12345.67");
-    await page.addStyleTag({
-      content: "@container transcript-pane (max-width: 99999px) { .transcript-status-actions { display: flex !important; } }",
+  /** Every shape `sessionCostLabel` can produce, widest to narrowest. */
+  const LABELS = [
+    { name: "a short priced", query: "", text: "$1.37" },
+    { name: "a long priced", query: "&cost=12345.67", text: "$12,345.67" },
+    { name: "a sub-cent priced", query: "&cost=0.0007", text: "$0.0007" },
+    { name: "an unavailable", query: "&cost=none", text: "$—" },
+  ];
+  for (const label of LABELS) {
+    test(`${label.name} cost fits the bar beside the ring`, async ({ page }) => {
+      await page.setViewportSize({ width: 1200, height: 820 });
+      await page.goto(`/session-usage-e2e.html?width=1180&height=780${label.query}`);
+      const cost = page.locator(".composer-bar .cbar-usage").filter({ hasText: label.text });
+      await expect(cost).toHaveText(label.text);
+      const legible = await cost.evaluate((button) => ({ visible: button.clientWidth, needed: button.scrollWidth }));
+      expect(legible.visible).toBeGreaterThanOrEqual(legible.needed);
+      const bar = await readBar(page);
+      expect(bar.rows).toBe(1);
+      expect(bar.overflow).toBeLessThanOrEqual(0);
     });
-    await expect(page.locator(".transcript-status-usage")).toBeVisible();
+  }
 
-    const geometry = await page.locator(".transcript-status-strip").evaluate((strip) => {
-      const button = strip.querySelector(".transcript-status-usage .session-cost-button") as HTMLElement;
-      const actions = strip.querySelector(".transcript-status-actions") as HTMLElement;
-      return {
-        costRight: button.getBoundingClientRect().right,
-        actionsLeft: actions.getBoundingClientRect().left,
-        costVisible: button.getBoundingClientRect().width,
-        costNeeded: button.scrollWidth,
-        overflows: strip.scrollWidth > strip.clientWidth,
-      };
-    });
-    const costFraction = geometry.costVisible / geometry.costNeeded;
-    expect(costFraction).toBeGreaterThan(0.9);
-    expect(geometry.costRight).toBeLessThanOrEqual(geometry.actionsLeft + 0.5);
-    expect(geometry.overflows).toBe(false);
-    // The usage track keeps its seat one column gap right of the strip's center.
-    expectFlanksCenter(await readStrip(page));
-  });
-
-  test("an unpriced ledger keeps the placeholder and names itself in the popover", async ({ page }) => {
+  test("a session without usage yet shows neither trigger and leaves no gap", async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 820 });
-    await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=none");
-
-    const cost = page.getByRole("button", { name: "Session Usage: Cost Unavailable" });
-    await cost.click();
-    const usage = page.locator(".session-usage-popover").first();
-    await expect(usage).toContainText("Not Priced");
-    // The ledger has now answered "unpriced": the strip still refuses to invent a $0.00, and the
-    // control keeps its seat just right of the strip's center when the panel opens.
-    await expect(cost).toHaveText("$\u2014");
-    const geometry = await readStrip(page);
-    expectFlanksCenter(geometry);
-    expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.actions!.left + 0.5);
-    expect(geometry.overflows).toBe(false);
-
-    // The popover opens from the strip's right edge and still fits the viewport.
-    const usageBox = (await usage.boundingBox())!;
-    expect(usageBox.x).toBeGreaterThanOrEqual(0);
-    expect(usageBox.x + usageBox.width).toBeLessThanOrEqual(1200);
-    await page.screenshot({ path: `${SHOT}/desktop-status-strip-unpriced-popover.png` });
-
-    await page.keyboard.press("Escape");
-    await expect(page.locator(".session-usage-popover")).toHaveCount(0);
-    await expect(cost).toHaveAttribute("aria-expanded", "false");
+    await page.goto("/session-usage-e2e.html?width=1180&height=780&usage=absent&used=0");
+    await expect(page.locator(".composer-bar")).toBeVisible();
+    await expect(page.locator(".composer-bar :is(.context-control, .session-usage)")).toHaveCount(0);
+    const gap = await page.locator(".cbar-right").evaluate((cluster) => {
+      const first = [...cluster.children].find((child) => child.getBoundingClientRect().width > 0)!;
+      return first.getBoundingClientRect().left - cluster.getBoundingClientRect().left;
+    });
+    expect(gap).toBeCloseTo(0, 1);
   });
-});
 
-for (const viewport of [
-  { name: "desktop", width: 1200, pane: 1180, height: 820 },
-  { name: "mobile", width: 390, pane: 390, height: 844 },
-] as const) {
-  test(`${viewport.name}: usage presence and width never move the context meter or the cost`, async ({ page }) => {
-    await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    const contexts = [
-      { name: "known", query: "", present: true },
-      { name: "unknown", query: "&window=none", present: false },
-    ] as const;
-    const costs = [
-      { name: "priced", query: "", present: true },
-      { name: "wide priced", query: "&cost=12345.67", present: true },
-      { name: "unpriced", query: "&cost=none", present: true },
-      { name: "unavailable", query: "&cost=unavailable", present: true },
-      { name: "absent", query: "&usage=absent", present: false },
-    ] as const;
+  test("the reader runs to the composer card: nothing sits between them", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/session-usage-e2e.html?width=1360&height=860");
+    await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+    const [reader, composer] = await Promise.all([
+      page.locator(".detail-reader").boundingBox(),
+      page.locator(".composer").boundingBox(),
+    ]);
+    expect(composer!.y).toBeCloseTo(reader!.y + reader!.height, 0);
+  });
 
-    // The strip's center, and each indicator's seat beside it, are fixed by the pane alone.
-    const invariant: { center: number | null; meterRight: number | null; costLeft: number | null } = {
-      center: null,
-      meterRight: null,
-      costLeft: null,
-    };
-    for (const context of contexts) {
-      for (const cost of costs) {
-        await page.goto(
-          `/session-usage-e2e.html?width=${viewport.pane}&height=780${context.query}${cost.query}`,
-        );
-        const strip = page.locator(".transcript-status-strip");
-        const meter = strip.locator(".context-ring-button");
-        const usage = strip.locator(".transcript-status-usage");
-        await expect(meter, `${context.name} context capacity`).toHaveCount(context.present ? 1 : 0);
-        await expect(usage, `${cost.name} session cost`).toHaveCount(cost.present ? 1 : 0);
-
-        const geometry = await readStrip(page);
-        const message = `${context.name} context with ${cost.name} cost`;
-        expectFlanksCenter(geometry, message);
-        invariant.center ??= geometry.strip.center;
-        expect(geometry.strip.center, message).toBeCloseTo(invariant.center, 1);
-        if (geometry.meter) {
-          invariant.meterRight ??= geometry.meter.right;
-          expect(geometry.meter.right, message).toBeCloseTo(invariant.meterRight, 1);
-        }
-        if (geometry.cost) {
-          invariant.costLeft ??= geometry.cost.left;
-          expect(geometry.cost.left, message).toBeCloseTo(invariant.costLeft, 1);
-        }
-        expect(geometry.overflows, message).toBe(false);
-      }
-    }
-
-    // Reading away from the tail raises the floating Jump to Latest control over the reader, not a
-    // control in the strip, so neither indicator moves.
-    await page.goto(`/session-usage-e2e.html?width=${viewport.pane}&height=780`);
+  test("reading away from the tail never moves the triggers", async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=1180&height=780");
     const followState = page.locator(".detail-scroll[data-follow-tail-state]");
-    const tail = page.locator(".transcript-tail-anchor > .transcript-tail-control");
     await expect(followState).toHaveAttribute("data-follow-tail-state", "following");
-    await expect(tail).toHaveCount(0);
+    const following = await readBar(page);
     await page.locator(".detail-scroll").hover();
     await page.mouse.wheel(0, -900);
     await expect(followState).toHaveAttribute("data-follow-tail-state", "paused");
-    await expect(tail).toBeVisible();
-    await expect(tail).toHaveAccessibleName("Jump to Latest");
-    await expect(page.locator(".transcript-status-strip .transcript-tail-control")).toHaveCount(0);
-    const paused = await readStrip(page);
-    expectFlanksCenter(paused);
-    expect(paused.meter!.right).toBeCloseTo(invariant.meterRight!, 1);
-    expect(paused.cost!.left).toBeCloseTo(invariant.costLeft!, 1);
+    await expect(page.locator(".transcript-tail-anchor > .transcript-tail-control")).toBeVisible();
+    const paused = await readBar(page);
+    expect(paused.meter!.left).toBeCloseTo(following.meter!.left, 1);
+    expect(paused.cost!.left).toBeCloseTo(following.cost!.left, 1);
   });
-}
+});
+
+test.describe("a composer column under 640px moves the figures into Model Settings", () => {
+  test("at a desktop width, beside a narrow pane", async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=600&height=780&driver=claude-code");
+    await expect(page.locator(".composer-bar")).toBeVisible();
+    await expect(page.locator(".composer-bar :is(.context-control, .session-usage)")).toHaveCount(0);
+    const bar = await readBar(page);
+    expect(bar.rows).toBe(1);
+    expect(bar.overflow).toBeLessThanOrEqual(0);
+
+    await page.getByRole("button", { name: /^Model Settings/ }).click();
+    const menu = page.getByRole("menu", { name: "Model Settings" });
+    const group = menu.getByRole("group", { name: "Session Usage" });
+    await expect(group).toBeVisible();
+    await expect(group).toContainText("Context Window");
+    await expect(group).toContainText("36%");
+    await expect(group).toContainText("72K of 200K");
+    await expect(group).toContainText("Session Cost");
+    await expect(group).toContainText("$1.37");
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+  });
+
+  test("an agent without Model Settings keeps the figures in the bar", async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 820 });
+    await page.goto("/session-usage-e2e.html?width=600&height=780");
+    await expect(page.getByRole("button", { name: /^Model Settings/ })).toHaveCount(0);
+    await expect(page.locator(".composer-bar").getByRole("button", { name: "Session Usage: $1.37" })).toBeVisible();
+    const bar = await readBar(page);
+    expect(bar.rows).toBe(1);
+    expect(bar.overflow).toBeLessThanOrEqual(0);
+  });
+});
+
+test.describe("the Reply keycap with a fine pointer", () => {
+  test("the idle composer shows R, and R from the reader focuses the composer at the end of the draft", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/session-usage-e2e.html?width=1360&height=860");
+    const keycap = page.locator(".composer-reply-hint kbd");
+    const input = page.locator(".composer-input");
+    await expect(keycap).toHaveText("R");
+    // At the end of the placeholder's row, which it does not displace.
+    const [cap, field] = await Promise.all([keycap.boundingBox(), input.boundingBox()]);
+    expect(cap!.x + cap!.width).toBeCloseTo(field!.x + field!.width, 0);
+    expect(cap!.y).toBeGreaterThanOrEqual(field!.y);
+    expect(cap!.y + cap!.height).toBeLessThanOrEqual(field!.y + 24);
+    await expect(input).toHaveAttribute("placeholder", "Do anything");
+    await page.locator(".composer-box").screenshot({ path: `${SHOT}/composer-reply-keycap.png` });
+
+    await page.getByRole("region", { name: "Session Activity" }).focus();
+    await page.keyboard.press("r");
+    await expect(input).toBeFocused();
+    await expect(keycap).toHaveCount(0);
+  });
+
+  test("with a draft, R places the caret at its end", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/session-usage-e2e.html?width=1360&height=860&draft=Half%20a%20thought");
+    const input = page.locator(".composer-input");
+    await expect(input).toHaveValue("Half a thought");
+    // A draft replaces the placeholder, and with it the keycap.
+    await expect(page.locator(".composer-reply-hint")).toHaveCount(0);
+    await page.getByRole("region", { name: "Session Activity" }).focus();
+    await page.keyboard.press("r");
+    await expect(input).toBeFocused();
+    expect(await input.evaluate((field: HTMLTextAreaElement) => [field.selectionStart, field.selectionEnd]))
+      .toEqual([14, 14]);
+  });
+});
 
 test("mobile: the ring and per-turn usage stay reachable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -630,28 +549,46 @@ test("mobile: the ring and per-turn usage stay reachable", async ({ page }) => {
   await page.screenshot({ path: `${SHOT}/mobile-turn-usage.png` });
 });
 
-test("mobile: context and cost flank the strip's center, and cost opens Session Usage", async ({ page }) => {
+test("mobile: Model Settings opens with the Session Usage group, and the bar stays one row", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/session-usage-e2e.html?width=390&height=800&driver=claude-code");
+  await expect(page.locator(".composer-bar")).toBeVisible();
+  await expect(page.locator(".composer-bar :is(.context-control, .session-usage)")).toHaveCount(0);
+  // The idle phone composer is a pill; opening it shows Model Settings in the bar.
+  await page.getByRole("button", { name: /^Edit Message/ }).click();
+  const bar = await readBar(page);
+  expect(bar.rows, "the bar's controls share one row").toBe(1);
+  expect(bar.overflow).toBeLessThanOrEqual(0);
+
+  await page.getByRole("button", { name: /^Model Settings/ }).click();
+  const menu = page.getByRole("menu", { name: "Model Settings" });
+  const group = menu.getByRole("group", { name: "Session Usage" });
+  await expect(group).toBeVisible();
+  // First in the sheet, ahead of the model choices.
+  const order = await menu.evaluate((sheet) => [...sheet.querySelectorAll('[role="group"]')].map((element) => element.getAttribute("aria-label")));
+  expect(order[0]).toBe("Session Usage");
+  await expect(group.locator("dt")).toHaveText(["Context Window", "Session Cost"]);
+  await expect(group.locator("dd").first()).toHaveText("36%72K of 200K");
+  await expect(group.locator("dd").last()).toHaveText("$1.37");
+  await page.screenshot({ path: `${SHOT}/mobile-model-settings-usage.png` });
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+});
+
+test("mobile: without Model Settings the figures keep their bar seats, and cost opens Session Usage", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/session-usage-e2e.html?width=390&height=800");
 
-  const strip = page.locator(".transcript-status-strip").first();
-  const trailing = strip.locator(".transcript-status-usage");
-  await expect(trailing).toBeVisible();
-  await expect(trailing).toHaveText("$1.37");
+  const cost = page.locator(".composer-bar").getByRole("button", { name: "Session Usage: $1.37" });
+  await expect(cost).toHaveText("$1.37");
   // The cost remains its own control rather than repeating the context meter (#781).
-  await expect(trailing).not.toContainText("context");
-  await expect(strip.locator(".context-ring-button")).toBeVisible();
-  await page.screenshot({ path: `${SHOT}/mobile-status-strip.png` });
+  await expect(cost).not.toContainText("context");
+  await expect(page.locator(".composer-bar").getByRole("button", { name: /^Context Window/ })).toBeVisible();
+  const bar = await readBar(page);
+  expect(bar.rows).toBe(1);
+  expect(bar.overflow).toBeLessThanOrEqual(0);
 
-  // Context and cost directly flank the strip's empty center, which is the viewport's center.
-  const geometry = await readStrip(page);
-  expectFlanksCenter(geometry);
-  expect(Math.abs((geometry.cluster!.left + geometry.cluster!.right) / 2 - 195)).toBeLessThanOrEqual(1);
-  expect(Math.abs(geometry.strip.center - 195)).toBeLessThanOrEqual(1);
-  expect(geometry.meter!.left).toBeGreaterThan(8);
-  expect(geometry.cost!.right).toBeLessThan(382);
-
-  await trailing.locator("button").click();
+  await cost.click();
   const usage = page.locator(".session-usage-popover").first();
   await expect(usage).toBeVisible();
   await expect(usage).toContainText("Input");
@@ -673,6 +610,8 @@ test("mobile: context and cost flank the strip's center, and cost opens Session 
   expect(usageBox.x + usageBox.width).toBeLessThanOrEqual(390);
   expect(await usage.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(await usage.evaluate((element) => element.clientWidth));
   await page.screenshot({ path: `${SHOT}/mobile-session-usage.png` });
+  await page.keyboard.press("Escape");
+  await expect(usage).toHaveCount(0);
 });
 
 test.describe("with a touch pointer", () => {
@@ -681,7 +620,7 @@ test.describe("with a touch pointer", () => {
   test("mobile: the pricing source link is a 44px touch target inside the popover", async ({ page }) => {
     // #1799: an inline link gets a 44px band centred on its line from the one coarse-pointer block.
     await page.goto("/session-usage-e2e.html?width=390&height=800");
-    await page.locator(".transcript-status-strip").first().locator(".transcript-status-usage button").click();
+    await page.locator(".composer-bar").getByRole("button", { name: /^Session Usage: / }).click();
     const usage = page.locator(".session-usage-popover").first();
     const link = usage.getByRole("link", { name: "Estimated API Costs" });
     await expect(link).toBeVisible();
@@ -699,24 +638,28 @@ test.describe("with a touch pointer", () => {
     expect(band.reaches, "the link's hit area spans 44px around its line").toBe(true);
     expect(await usage.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(await usage.evaluate((element) => element.clientWidth));
   });
+
+  test("a coarse pointer shows no Reply keycap in the idle composer", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/session-usage-e2e.html?width=1360&height=860");
+    await expect(page.locator(".composer-input")).toBeVisible();
+    await expect(page.locator(".composer-reply-hint kbd")).toBeHidden();
+  });
 });
 
-test("mobile: widest status labels stay inside a 320px strip", async ({ page }) => {
+test("mobile: the widest figures stay inside a 320px composer bar", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await page.goto("/session-usage-e2e.html?width=320&height=800&cost=12345.67");
-  await pinWidestFace(page, page.locator(".transcript-status-strip"));
-
-  const geometry = await readStrip(page);
-  expect(geometry.cluster!.left).toBeGreaterThanOrEqual(geometry.strip.left - 0.5);
-  expect(geometry.cluster!.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
-  // At the narrowest phone the cluster's side gaps compact, but context and cost still flank the
-  // strip's empty center, every control remains fully inside the strip, and the page still has no
-  // horizontal overflow.
-  expect(geometry.meter!.left).toBeGreaterThanOrEqual(geometry.strip.left - 0.5);
-  expectFlanksCenter(geometry);
-  expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.strip.right + 0.5);
-  expect(geometry.cost!.width).toBeGreaterThan(0);
-  expect(geometry.overflows).toBe(false);
+  await pinWidestFace(page, page.locator(".composer-bar"));
+  const cost = page.locator(".composer-bar").getByRole("button", { name: "Session Usage: $12,345.67" });
+  await expect(cost).toBeVisible();
+  const legible = await cost.evaluate((button) => ({ visible: button.clientWidth, needed: button.scrollWidth }));
+  expect(legible.visible).toBeGreaterThanOrEqual(legible.needed);
+  const bar = await readBar(page);
+  expect(bar.rows).toBe(1);
+  expect(bar.overflow).toBeLessThanOrEqual(0);
+  expect(bar.meter!.left).toBeGreaterThanOrEqual(bar.box.left - 0.5);
+  expect(bar.cost!.right).toBeLessThanOrEqual(bar.box.right + 0.5);
 });
 
 test("mobile light theme: the estimated cost source stays compact", async ({ page }) => {
