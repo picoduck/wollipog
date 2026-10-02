@@ -10,6 +10,7 @@ import {
   readDesktopUpdateStatus,
   updateToastMessage,
   writeAutomaticUpdateChecks,
+  writePrereleaseUpdates,
   type DesktopUpdateRuntime,
 } from "./desktop-updates.js";
 
@@ -38,6 +39,7 @@ test("every command the dashboard invokes is one the shell registers", async () 
   await checkForDesktopUpdate(true, desktop);
   await installDesktopUpdate(false, desktop);
   await writeAutomaticUpdateChecks(false, desktop);
+  await writePrereleaseUpdates(true, desktop);
   await openReleasePage("https://github.com/picoduck/wollipog/releases/tag/v0.28.0", desktop);
   const handler = lib.slice(lib.indexOf("tauri::generate_handler!["), lib.indexOf("])", lib.indexOf("tauri::generate_handler![")));
   for (const { command } of calls) {
@@ -49,6 +51,7 @@ test("every command the dashboard invokes is one the shell registers", async () 
     { automatic: true },
     { confirmed: false },
     { enabled: false },
+    { enabled: true },
     { url: "https://github.com/picoduck/wollipog/releases/tag/v0.28.0" },
   ]);
 });

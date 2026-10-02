@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import {
   DESKTOP_UPDATE_CHECKED,
+  DESKTOP_UPDATE_CHANNEL_CHANGED,
   useDesktopUpdateSetting,
   type DesktopUpdateRuntime,
   type DesktopUpdateSetting,
@@ -90,5 +91,46 @@ test("a background check that finishes after Settings loaded still reaches Setti
 
   await act(async () => root.unmount());
   container.remove();
-  assert.equal(unlistened, 1, "the subscription is released with the hook");
+  assert.equal(unlistened, 2, "both subscriptions are released with the hook");
+});
+
+test("switching channels clears the offer and ignores an old-channel check arriving later", async () => {
+  const handlers = new Map<string, (payload: unknown) => void>();
+  const commands: Array<{ command: string; args?: Record<string, unknown> }> = [];
+  const prerelease = { state: "available" as const, version: "0.28.0-rc.1", releaseUrl: "https://example.test", checkedAt: 5, prereleaseUpdates: true };
+  const before = { ...status, prereleaseUpdates: true, lastCheck: prerelease };
+  const after = { ...status, prereleaseUpdates: false, lastCheck: null };
+  let finishCheck: (value: typeof prerelease) => void = () => undefined;
+  const desktop: DesktopUpdateRuntime = {
+    isTauri: () => true,
+    invoke: async <T,>(command: string, args?: Record<string, unknown>) => {
+      commands.push({ command, args });
+      if (command === "desktop_update_status") return before as T;
+      if (command === "check_for_desktop_update") return new Promise<T>((resolve) => { finishCheck = resolve as typeof finishCheck; });
+      if (command === "set_prerelease_updates") return after as T;
+      throw new Error(command);
+    },
+    listen: async (event, handler) => { handlers.set(event, handler); return () => undefined; },
+  };
+  let latest: DesktopUpdateSetting | undefined;
+  function Probe() { latest = useDesktopUpdateSetting(desktop); return null; }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<Probe />));
+  await act(async () => latest!.togglePrerelease());
+  assert.deepEqual(commands.at(-1), { command: "set_prerelease_updates", args: { enabled: false } });
+  assert.equal(latest!.status!.lastCheck, null);
+  // A second window changes the channel while the first window's earlier check is in flight.
+  await act(async () => handlers.get(DESKTOP_UPDATE_CHANNEL_CHANGED)!(before));
+  await act(async () => latest!.check());
+  await act(async () => handlers.get(DESKTOP_UPDATE_CHANNEL_CHANGED)!(after));
+  await act(async () => {
+    finishCheck(prerelease);
+    handlers.get(DESKTOP_UPDATE_CHECKED)!(prerelease);
+  });
+  assert.equal(latest!.status!.prereleaseUpdates, false);
+  assert.equal(latest!.status!.lastCheck, null);
+  await act(async () => root.unmount());
+  container.remove();
 });

@@ -62,6 +62,7 @@ function status(overrides: Partial<DesktopUpdateStatus> = {}): DesktopUpdateStat
     currentVersion: "0.27.0",
     install: { mode: "inPlace" },
     automaticChecks: true,
+    prereleaseUpdates: false,
     checksAllowed: true,
     releasesUrl: "https://github.com/picoduck/wollipog/releases",
     lastCheck: null,
@@ -78,11 +79,13 @@ function setting(overrides: Partial<DesktopUpdateSetting> = {}): DesktopUpdateSe
     checking: false,
     installing: false,
     savingAutomatic: false,
+    savingPrerelease: false,
     error: null,
     check: () => clicks.push("check"),
     install: () => clicks.push("install"),
     openRelease: () => clicks.push("open"),
     toggleAutomatic: () => clicks.push("automatic"),
+    togglePrerelease: () => clicks.push("prerelease"),
     ...overrides,
     clicks,
   };
@@ -179,4 +182,20 @@ test("checks can be run by hand, turned off, or disabled for the installation", 
   assert.match(view.text(), /Wollipog 0\.27\.0 is the latest release\. Checked /u);
   assert.ok(view.button("Check Again"));
   await view.unmount();
+});
+
+test("prerelease updates require an explicit switch and describe returning to stable", async () => {
+  const update = setting();
+  const view = await render(update);
+  const toggle = [...view.container.querySelectorAll<HTMLButtonElement>('[role="switch"]')]
+    .find((candidate) => candidate.textContent?.includes("Pre-Release Updates"))!;
+  assert.ok(toggle);
+  assert.equal(toggle.getAttribute("aria-checked"), "false");
+  assert.match(view.text(), /does not downgrade Wollipog/u);
+  await act(async () => toggle.click());
+  assert.deepEqual(update.clicks, ["prerelease"]);
+  await view.unmount();
+  const oldShell = await render(setting({ status: status({ prereleaseUpdates: undefined }) }));
+  assert.doesNotMatch(oldShell.text(), /Pre-Release Updates/u);
+  await oldShell.unmount();
 });

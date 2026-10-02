@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildUpdateManifest,
   desktopUpdaterArtifacts,
+  desktopUpdaterConfig,
   parseUpdaterPublicKey,
   UPDATE_MANIFEST_NAME,
   updaterReleaseAssetNames,
@@ -108,6 +109,41 @@ test("the release adds exactly one signature per package and the manifest", () =
   assert.ok(names.includes("Wollipog_aarch64.app.tar.gz.sig"));
   assert.ok(names.includes("Wollipog-0.28.0-1.aarch64.rpm.sig"));
   assert.throws(() => desktopUpdaterArtifacts("v0.28.0"), /invalid desktop version/u);
+});
+
+test("prerelease builds retain signed semantic identity and use a numeric MSI ProductVersion", async () => {
+  const key = updateKey();
+  const version = "0.30.0-rc.2";
+  const root = mkdtempSync(join(tmpdir(), "wollipog-prerelease-manifest-"));
+  try {
+    const config = desktopUpdaterConfig(version, key.publicKeyValue);
+    assert.equal(config.bundle.windows.wix.version, "0.30.0");
+    assert.equal(config.bundle.createUpdaterArtifacts, true);
+    assert.equal(config.plugins.updater.pubkey, key.publicKeyValue);
+    assert.equal(desktopUpdaterConfig("0.30.0", key.publicKeyValue).bundle.windows, undefined);
+    for (const { asset, signedAs } of desktopUpdaterArtifacts(version)) {
+      const bytes = Buffer.from(`prerelease package ${asset}`);
+      writeFileSync(join(root, asset), bytes);
+      writeFileSync(join(root, `${asset}.sig`), signPackage(bytes, key, trusted(signedAs, version)));
+    }
+    const manifest = JSON.parse(await verifiedUpdateManifest({
+      assetsDir: root, publicKeyValue: key.publicKeyValue, version, repo: REPO,
+      tag: `v${version}`, pubDate: "2026-10-02T00:00:00.000Z",
+    }));
+    assert.equal(manifest.version, version);
+    assert.match(manifest.platforms["windows-x86_64-msi"].url, /v0\.30\.0-rc\.2\/Wollipog_0\.30\.0-rc\.2_x64_en-US\.msi$/u);
+    assert.match(manifest.platforms["linux-x86_64-rpm"].url, /Wollipog-0\.30\.0-rc\.2-1\.x86_64\.rpm$/u);
+    assert.equal(Object.keys(manifest.platforms).length, 18);
+    // A stable package substituted into the prerelease fails the signed-version gate.
+    const { asset, signedAs } = desktopUpdaterArtifacts(version)[0];
+    writeFileSync(join(root, `${asset}.sig`), signPackage(readFileSync(join(root, asset)), key, trusted(signedAs, "0.30.0")));
+    await assert.rejects(verifiedUpdateManifest({
+      assetsDir: root, publicKeyValue: key.publicKeyValue, version, repo: REPO,
+      tag: `v${version}`, pubDate: "2026-10-02T00:00:00.000Z",
+    }), /signed for version 0\.30\.0/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a package signed by another key, or not matching its signature, fails the release", async () => {

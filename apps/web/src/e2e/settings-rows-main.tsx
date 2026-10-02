@@ -202,6 +202,7 @@ function updateFixture(state: UpdateState | null): DesktopUpdateSetting | undefi
       ? { mode: "releasePage", reason: "This app was installed from a .deb package. Install the new package from the release page." }
       : { mode: "inPlace" },
     automaticChecks: state !== "disabled",
+    prereleaseUpdates: false,
     checksAllowed: state !== "disabled",
     releasesUrl: "https://github.com/picoduck/wollipog/releases",
     lastCheck: state === "current"
@@ -215,11 +216,13 @@ function updateFixture(state: UpdateState | null): DesktopUpdateSetting | undefi
     checking: false,
     installing: false,
     savingAutomatic: false,
+    savingPrerelease: false,
     error: null,
     check: () => undefined,
     install: () => undefined,
     openRelease: () => undefined,
     toggleAutomatic: () => undefined,
+    togglePrerelease: () => undefined,
   };
 }
 

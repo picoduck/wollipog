@@ -4,7 +4,10 @@ import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { DesktopUpdateNotifier } from "../components/DesktopUpdateNotifier.js";
 import { DesktopExternalLinkRouter, EXTERNAL_URL_POLICY_ERROR_PREFIX, type ExternalLinkDesktop } from "../components/DesktopExternalLinkRouter.js";
 import { createCloseGuardLinks, type CloseGuardSession } from "../desktop-close-guard.js";
-import type { DesktopUpdateOutcome, DesktopUpdateRuntime, DesktopUpdateStatus } from "../desktop-updates.js";
+import { DESKTOP_UPDATE_CHANNEL_CHANGED, DESKTOP_UPDATE_CHECKED, useDesktopUpdateSetting, type DesktopUpdateOutcome, type DesktopUpdateRuntime, type DesktopUpdateStatus } from "../desktop-updates.js";
+import { AboutPanel } from "../components/SettingsView.js";
+import { ApiProvider } from "../api-context.js";
+import { createApiClient } from "../api.js";
 import "../styles.css";
 
 /**
@@ -34,9 +37,50 @@ const SESSIONS: Record<string, CloseGuardSession> = {
 /** A refused link several kilobytes long: its detail scrolls inside the toast. */
 const LONG_LINK = `https://example.com/report?filters=${Array.from({ length: 200 }, (_, index) => `session-${index}`).join(",")}`;
 
-type State = "in-place" | "release-page" | "link-failure" | "link-policy" | "link-long";
-const STATES: readonly State[] = ["in-place", "release-page", "link-failure", "link-policy", "link-long"];
+type State = "in-place" | "release-page" | "link-failure" | "link-policy" | "link-long" | "channels";
+const STATES: readonly State[] = ["in-place", "release-page", "link-failure", "link-policy", "link-long", "channels"];
 const LINK_STATES: readonly State[] = ["link-failure", "link-policy", "link-long"];
+
+/** Real Settings panel and hook; only the native command boundary is simulated. */
+function ChannelSettingsHarness() {
+  const [desktop] = useState<DesktopUpdateRuntime>(() => {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    const status: DesktopUpdateStatus = {
+      currentVersion: "0.29.1", install: { mode: "inPlace" }, automaticChecks: false,
+      prereleaseUpdates: localStorage.getItem("e2e-prerelease-updates") === "true",
+      checksAllowed: true, releasesUrl: "https://github.com/picoduck/wollipog/releases", lastCheck: null,
+    };
+    return {
+      isTauri: () => true,
+      listen: async (event, handler) => { handlers.set(event, handler); return () => { handlers.delete(event); }; },
+      invoke: async <T,>(command: string, args?: Record<string, unknown>) => {
+        if (command === "desktop_update_status") return { ...status } as T;
+        if (command === "set_prerelease_updates") {
+          status.prereleaseUpdates = args?.enabled === true;
+          localStorage.setItem("e2e-prerelease-updates", String(status.prereleaseUpdates));
+          status.lastCheck = null;
+          handlers.get(DESKTOP_UPDATE_CHANNEL_CHANGED)?.({ ...status });
+          return { ...status } as T;
+        }
+        if (command === "set_automatic_update_checks") return (status.automaticChecks = args?.enabled === true) as T;
+        if (command === "check_for_desktop_update") {
+          status.lastCheck = status.prereleaseUpdates
+            ? { state: "available", version: "0.30.0-rc.1", releaseUrl: "https://github.com/picoduck/wollipog/releases/tag/v0.30.0-rc.1", checkedAt: Date.now(), prereleaseUpdates: true }
+            : { state: "current", checkedAt: Date.now(), prereleaseUpdates: false };
+          handlers.get(DESKTOP_UPDATE_CHECKED)?.(status.lastCheck);
+          return status.lastCheck as T;
+        }
+        throw new Error(`The channel harness does not answer ${command}.`);
+      },
+    };
+  });
+  const [api] = useState(() => createApiClient({
+    instanceId: "channel-fixture", publicOrigin: window.location.origin, close() {},
+    request: async () => new Response(JSON.stringify({ appVersion: "0.29.1" }), { headers: { "content-type": "application/json" } }),
+  }));
+  const update = useDesktopUpdateSetting(desktop);
+  return <ApiProvider client={api}><main style={{ maxWidth: 800, margin: "24px auto", padding: 16 }}><AboutPanel update={update} /></main></ApiProvider>;
+}
 
 function Harness() {
   const params = new URLSearchParams(window.location.search);
@@ -117,6 +161,7 @@ function Harness() {
 
   return (
     <FeedbackProvider>
+      {state === "channels" && <ChannelSettingsHarness />}
       <DesktopExternalLinkRouter desktop={links} />
       <DesktopUpdateNotifier
         desktop={updates}

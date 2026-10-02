@@ -1,8 +1,9 @@
 //! #1646: update the desktop app in place from published GitHub releases.
 //!
-//! The manifest is `latest.json` on the latest PUBLISHED release. GitHub's `releases/latest` never
-//! resolves to a draft or a prerelease, so neither is ever offered here; the comparator below
-//! refuses a prerelease to a stable build as well, in case the manifest itself is wrong.
+//! Stable updates use `releases/latest/download/latest.json`. An explicit prerelease opt-in
+//! discovers published releases through GitHub's API and selects the highest semantic version
+//! carrying an update manifest. Both channels reject drafts and downgrades and use the same
+//! signature verification and work-in-flight guard.
 //!
 //! Three checks stand between a download and an install. The plugin verifies the package against
 //! the update public key compiled into this build, and `requireSignedVersion` makes it reject a
@@ -20,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::utils::config::BundleType;
 use tauri::{Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -45,6 +46,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// Emitted with the `UpdateCheck` whenever a check finishes, so an open Settings page shows the
 /// result of the background check too. Named here and in `apps/web/src/desktop-updates.ts`.
 pub(crate) const UPDATE_CHECKED_EVENT: &str = "wollipog://desktop-update-checked";
+pub(crate) const UPDATE_CHANNEL_CHANGED_EVENT: &str = "wollipog://desktop-update-channel-changed";
 
 /// Whether this installation can replace itself, and if not, why.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -94,9 +96,124 @@ pub(crate) fn install_mode(
 
 /// Whether `candidate` should be offered to a build running `current`.
 ///
-/// Newer only, and never a prerelease to a stable build.
-pub(crate) fn offers_update(current: &semver::Version, candidate: &semver::Version) -> bool {
-    candidate > current && (candidate.pre.is_empty() || !current.pre.is_empty())
+/// Newer only. A prerelease requires explicit opt-in regardless of the installed version.
+pub(crate) fn offers_update(
+    current: &semver::Version,
+    candidate: &semver::Version,
+    prerelease_updates: bool,
+) -> bool {
+    candidate.cmp_precedence(current).is_gt() && (candidate.pre.is_empty() || prerelease_updates)
+}
+
+#[derive(Deserialize)]
+struct PublishedRelease {
+    tag_name: String,
+    draft: bool,
+    prerelease: bool,
+    published_at: Option<String>,
+    assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Deserialize)]
+struct ReleaseAsset {
+    name: String,
+    state: String,
+    size: u64,
+}
+
+impl PublishedRelease {
+    fn update_version(&self, prerelease_updates: bool) -> Option<semver::Version> {
+        if self.draft || self.published_at.is_none() || (self.prerelease && !prerelease_updates) {
+            return None;
+        }
+        let version = semver::Version::parse(self.tag_name.strip_prefix('v')?).ok()?;
+        // Build metadata does not order updates and is not part of the release tag contract.
+        if !version.build.is_empty() || (!version.pre.is_empty() && !prerelease_updates) {
+            return None;
+        }
+        self.assets
+            .iter()
+            .any(|asset| asset.name == "latest.json" && asset.state == "uploaded" && asset.size > 0)
+            .then_some(version)
+    }
+}
+
+/// Do not trust API ordering: publishing an older maintenance release must not hide a newer RC.
+fn newest_release(
+    releases: &[PublishedRelease],
+    current: &semver::Version,
+    prerelease_updates: bool,
+) -> Option<semver::Version> {
+    releases
+        .iter()
+        .filter_map(|release| release.update_version(prerelease_updates))
+        .filter(|version| offers_update(current, version, prerelease_updates))
+        .max_by(semver::Version::cmp_precedence)
+}
+
+/// Discover every page within the check deadline. A truncated history is an error, never "current".
+async fn discover_release(
+    api_url: &str,
+    current: &semver::Version,
+    prerelease_updates: bool,
+) -> Result<Option<semver::Version>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(CHECK_TIMEOUT)
+        .user_agent("Wollipog-Desktop-Updater")
+        .build()
+        .map_err(|_| "Could not prepare release discovery.".to_string())?;
+    let mut newest: Option<semver::Version> = None;
+    for page in 1..=100 {
+        let mut endpoint = url::Url::parse(api_url)
+            .map_err(|_| "Could not prepare the release discovery URL.".to_string())?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("per_page", "100")
+            .append_pair("page", &page.to_string());
+        let mut response = client
+            .get(endpoint)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|_| "Could not reach GitHub to discover releases.".to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Could not discover releases: GitHub returned HTTP {}.",
+                response.status().as_u16()
+            ));
+        }
+        let has_next = response
+            .headers()
+            .get("link")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("rel=\"next\""));
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "Could not read GitHub releases.".to_string())?
+        {
+            if bytes.len() + chunk.len() > 16 * 1024 * 1024 {
+                return Err("GitHub release discovery exceeded the response size limit.".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let releases: Vec<PublishedRelease> = serde_json::from_slice(&bytes)
+            .map_err(|_| "GitHub returned invalid release metadata.".to_string())?;
+        if let Some(candidate) = newest_release(&releases, current, prerelease_updates) {
+            if newest
+                .as_ref()
+                .is_none_or(|previous| candidate.cmp_precedence(previous).is_gt())
+            {
+                newest = Some(candidate);
+            }
+        }
+        if !has_next {
+            return Ok(newest);
+        }
+    }
+    Err("GitHub release discovery exceeded the page limit.".into())
 }
 
 pub(crate) fn release_page_url(version: &str) -> String {
@@ -144,12 +261,15 @@ pub(crate) enum UpdateCheck {
     Current {
         #[serde(rename = "checkedAt")]
         checked_at: i64,
+        #[serde(rename = "prereleaseUpdates")]
+        prerelease_updates: bool,
     },
     #[serde(rename_all = "camelCase")]
     Available {
         version: String,
         release_url: String,
         checked_at: i64,
+        prerelease_updates: bool,
     },
 }
 
@@ -159,6 +279,7 @@ pub(crate) struct DesktopUpdateStatus {
     current_version: String,
     install: InstallMode,
     automatic_checks: bool,
+    prerelease_updates: bool,
     checks_allowed: bool,
     releases_url: &'static str,
     last_check: Option<UpdateCheck>,
@@ -194,6 +315,8 @@ struct PendingUpdate {
 #[derive(Default)]
 pub(crate) struct DesktopUpdater {
     last_check: Mutex<Option<UpdateCheck>>,
+    /// A channel change cannot race a check, download, or held install.
+    operation: tokio::sync::Mutex<()>,
     /// Held for a whole install attempt so two clicks cannot download or install twice.
     pending: tokio::sync::Mutex<Option<PendingUpdate>>,
     /// This gesture's own warning latch. Shared with the close guard's, deferring an install
@@ -215,21 +338,70 @@ fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-async fn fetch_update(app: &tauri::AppHandle) -> Result<Option<Update>, String> {
+async fn fetch_update(app: &tauri::AppHandle, entry_point: &str) -> Result<Option<Update>, String> {
     if !update_checks_allowed() {
         return Err(format!(
             "Update checks are turned off by {DISABLE_UPDATE_CHECK_ENV}."
         ));
     }
+    let prerelease_updates = read_settings_result(app)?.prerelease_updates;
+    let request_id = uuid::Uuid::new_v4();
+    let started = Instant::now();
+    let result = tokio::time::timeout(CHECK_TIMEOUT, fetch_channel_update(app, prerelease_updates))
+        .await
+        .unwrap_or_else(|_| Err("The update check timed out. Try again later.".into()));
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event": "desktop_update_check", "requestId": request_id, "entryPoint": entry_point,
+            "channel": if prerelease_updates { "prerelease" } else { "stable" },
+            "outcome": match &result { Ok(Some(_)) => "available", Ok(None) => "current", Err(_) => "failed" },
+            "candidateVersion": result.as_ref().ok().and_then(|update| update.as_ref()).map(|update| &update.version),
+            "durationMs": started.elapsed().as_millis(),
+        })
+    );
+    result
+}
+
+async fn fetch_channel_update(
+    app: &tauri::AppHandle,
+    prerelease_updates: bool,
+) -> Result<Option<Update>, String> {
+    let expected_version = if prerelease_updates {
+        let candidate = discover_release(
+            "https://api.github.com/repos/picoduck/wollipog/releases",
+            &app.package_info().version,
+            true,
+        )
+        .await?;
+        let Some(candidate) = candidate else {
+            return Ok(None);
+        };
+        Some(candidate)
+    } else {
+        None
+    };
+    let mismatch = std::sync::Arc::new(AtomicBool::new(false));
+    let comparator_mismatch = mismatch.clone();
+    let expected = expected_version.clone();
     // Windows: `install` launches the installer and exits this process directly, without
     // `RunEvent::Exit`. The installer would then find the control-plane and runner executables in
     // use, so stop them first, exactly as an ordinary exit does. This replaces the plugin's default
     // hook, which only runs Tauri's own cleanup, so that cleanup is called here too.
     let hook_app = app.clone();
-    let updater = app
+    let mut builder = app
         .updater_builder()
         .timeout(CHECK_TIMEOUT)
-        .version_comparator(|current, release| offers_update(&current, &release.version))
+        .version_comparator(move |current, release| {
+            if expected
+                .as_ref()
+                .is_some_and(|version| version != &release.version)
+            {
+                comparator_mismatch.store(true, Ordering::Relaxed);
+                return false;
+            }
+            offers_update(&current, &release.version, prerelease_updates)
+        })
         .on_before_exit(move || {
             hook_app
                 .state::<DesktopUpdater>()
@@ -237,24 +409,40 @@ async fn fetch_update(app: &tauri::AppHandle) -> Result<Option<Update>, String> 
                 .store(true, Ordering::Relaxed);
             crate::teardown_managed_processes(&hook_app);
             hook_app.cleanup_before_exit();
-        })
+        });
+    if let Some(version) = expected_version {
+        let endpoint = format!("{RELEASES_URL}/download/v{version}/latest.json")
+            .parse()
+            .map_err(|_| "Could not prepare the release manifest URL.".to_string())?;
+        builder = builder
+            .endpoints(vec![endpoint])
+            .map_err(|error| format!("Could not prepare the release endpoint: {error}"))?;
+    }
+    let updater = builder
         .build()
         .map_err(|error| format!("Could not prepare the update check: {error}"))?;
-    updater
+    let update = updater
         .check()
         .await
-        .map_err(|error| format!("Could not check for updates: {error}"))
+        .map_err(|error| format!("Could not check for updates: {error}"))?;
+    if mismatch.load(Ordering::Relaxed) {
+        return Err("The update manifest version does not match its release tag.".into());
+    }
+    Ok(update)
 }
 
 fn record_check(app: &tauri::AppHandle, update: Option<&Update>) -> UpdateCheck {
+    let prerelease_updates = read_settings(app).prerelease_updates;
     let check = match update {
         Some(update) => UpdateCheck::Available {
             version: update.version.clone(),
             release_url: release_page_url(&update.version),
             checked_at: now_millis(),
+            prerelease_updates,
         },
         None => UpdateCheck::Current {
             checked_at: now_millis(),
+            prerelease_updates,
         },
     };
     *app.state::<DesktopUpdater>().last_check.lock().unwrap() = Some(check.clone());
@@ -319,6 +507,7 @@ pub(crate) fn desktop_update_status(app: tauri::AppHandle) -> DesktopUpdateStatu
         current_version: app.package_info().version.to_string(),
         install: current_install_mode(&app),
         automatic_checks: read_settings(&app).automatic_update_checks,
+        prerelease_updates: read_settings(&app).prerelease_updates,
         checks_allowed: update_checks_allowed(),
         releases_url: RELEASES_URL,
         last_check: app
@@ -337,13 +526,66 @@ pub(crate) async fn check_for_desktop_update(
     app: tauri::AppHandle,
     automatic: Option<bool>,
 ) -> Result<Option<UpdateCheck>, String> {
+    let updater = app.state::<DesktopUpdater>();
+    let _operation = updater.operation.lock().await;
     if automatic.unwrap_or(false)
         && (!update_checks_allowed() || !read_settings(&app).automatic_update_checks)
     {
         return Ok(None);
     }
-    let update = fetch_update(&app).await?;
+    let update = fetch_update(
+        &app,
+        if automatic.unwrap_or(false) {
+            "background"
+        } else {
+            "manual"
+        },
+    )
+    .await?;
     Ok(Some(record_check(&app, update.as_ref())))
+}
+
+#[tauri::command]
+pub(crate) async fn set_prerelease_updates(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, InstanceRegistryState>,
+    enabled: bool,
+) -> Result<DesktopUpdateStatus, String> {
+    let updater = app.state::<DesktopUpdater>();
+    let _operation = updater.operation.lock().await;
+    let mut pending = updater.pending.lock().await;
+    if pending.as_ref().is_some_and(|update| update.installed) {
+        return Err(
+            "Restart to finish installing the update before changing update channels.".into(),
+        );
+    }
+    let _settings = registry.0.lock().await;
+    let task_app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let previous = read_settings_result(&task_app)?;
+        write_settings(
+            &task_app,
+            DesktopSettings {
+                prerelease_updates: enabled,
+                ..previous
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("Saving the update channel failed: {error}"))??;
+    *pending = None;
+    *updater.last_check.lock().unwrap() = None;
+    updater
+        .confirmation_requested
+        .store(false, Ordering::Relaxed);
+    *updater.warned_at.lock().unwrap() = None;
+    let status = desktop_update_status(app.clone());
+    let _ = app.emit(UPDATE_CHANNEL_CHANGED_EVENT, &status);
+    eprintln!(
+        "{}",
+        serde_json::json!({"event": "desktop_update_channel_changed", "requestId": uuid::Uuid::new_v4(), "entryPoint": "settings", "channel": if enabled { "prerelease" } else { "stable" }})
+    );
+    Ok(status)
 }
 
 #[tauri::command]
@@ -395,11 +637,12 @@ pub(crate) async fn install_desktop_update(
         return Err(reason);
     }
     let updater = app.state::<DesktopUpdater>();
+    let _operation = updater.operation.lock().await;
     let mut pending = updater.pending.lock().await;
 
     let installed = pending.as_ref().is_some_and(|held| held.installed);
     if !installed {
-        let update = fetch_update(&app).await?;
+        let update = fetch_update(&app, "install").await?;
         record_check(&app, update.as_ref());
         let Some(mut update) = update else {
             *pending = None;
@@ -559,16 +802,163 @@ mod tests {
     }
 
     #[test]
-    fn only_newer_releases_are_offered_and_never_a_prerelease_to_a_stable_build() {
-        assert!(offers_update(&version("0.27.0"), &version("0.28.0")));
-        assert!(!offers_update(&version("0.28.0"), &version("0.28.0")));
-        assert!(!offers_update(&version("0.28.0"), &version("0.27.0")));
-        assert!(!offers_update(&version("0.27.0"), &version("0.28.0-rc.1")));
+    fn stable_channel_requires_opt_in_even_when_running_a_prerelease() {
+        assert!(offers_update(&version("0.27.0"), &version("0.28.0"), false));
+        assert!(!offers_update(&version("0.28.0"), &version("0.28.0"), true));
+        assert!(!offers_update(&version("0.28.0"), &version("0.27.0"), true));
+        assert!(!offers_update(
+            &version("0.27.0"),
+            &version("0.28.0-rc.1"),
+            false
+        ));
+        assert!(offers_update(
+            &version("0.27.0"),
+            &version("0.28.0-rc.1"),
+            true
+        ));
+        assert!(!offers_update(
+            &version("0.28.0-rc.1"),
+            &version("0.28.0-rc.2"),
+            false
+        ));
+        assert!(offers_update(
+            &version("0.28.0-rc.2"),
+            &version("0.28.0-rc.10"),
+            true
+        ));
+        assert!(!offers_update(
+            &version("0.28.0-rc.10"),
+            &version("0.28.0-rc.2"),
+            true
+        ));
         assert!(offers_update(
             &version("0.28.0-rc.1"),
-            &version("0.28.0-rc.2")
+            &version("0.28.0"),
+            false
         ));
-        assert!(offers_update(&version("0.28.0-rc.1"), &version("0.28.0")));
+        assert!(!offers_update(
+            &version("0.28.0-rc.1"),
+            &version("0.27.9"),
+            false
+        ));
+        assert!(!offers_update(
+            &version("0.28.0+one"),
+            &version("0.28.0+two"),
+            true
+        ));
+    }
+
+    fn release(tag: &str, prerelease: bool) -> PublishedRelease {
+        PublishedRelease {
+            tag_name: tag.into(),
+            draft: false,
+            prerelease,
+            published_at: Some("2026-10-02T00:00:00Z".into()),
+            assets: vec![ReleaseAsset {
+                name: "latest.json".into(),
+                state: "uploaded".into(),
+                size: 100,
+            }],
+        }
+    }
+
+    #[test]
+    fn discovery_orders_versions_and_excludes_unpublished_or_unusable_releases() {
+        let mut draft = release("v9.0.0-rc.1", true);
+        draft.draft = true;
+        let mut unpublished = release("v8.0.0-rc.1", true);
+        unpublished.published_at = None;
+        let mut unsigned = release("v7.0.0-rc.1", true);
+        unsigned.assets.clear();
+        let mut empty = release("v6.0.0-rc.1", true);
+        empty.assets[0].size = 0;
+        let mut uploading = release("v5.0.0-rc.1", true);
+        uploading.assets[0].state = "new".into();
+        let releases = vec![
+            draft,
+            unpublished,
+            unsigned,
+            empty,
+            uploading,
+            release("v0.28.0", false),
+            release("v0.29.0-rc.10", true),
+            release("v0.29.0-rc.2", true),
+            release("v0.27.9", false),
+            release("v9.0.0+build", true),
+            release("invalid", false),
+            release("v0.0.0-test.999", true),
+        ];
+        assert_eq!(
+            newest_release(&releases, &version("0.27.0"), true),
+            Some(version("0.29.0-rc.10"))
+        );
+        assert_eq!(
+            newest_release(&releases, &version("0.27.0"), false),
+            Some(version("0.28.0"))
+        );
+        assert_eq!(
+            newest_release(&releases, &version("0.29.0-rc.10"), false),
+            None
+        );
+        let final_release = vec![release("v0.29.0-rc.10", true), release("v0.29.0", false)];
+        assert_eq!(
+            newest_release(&final_release, &version("0.29.0-rc.2"), true),
+            Some(version("0.29.0"))
+        );
+        // Even a mistakenly unmarked prerelease stays out of the stable channel.
+        assert_eq!(
+            newest_release(&[release("v1.0.0-rc.1", false)], &version("0.29.0"), false),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_follows_pages_and_reports_api_errors() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/releases", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (page, tag) in [(1, "v0.28.0"), (2, "v0.29.0-rc.2"), (1, "error")] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let count = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..count]);
+                assert!(request.contains(&format!("per_page=100&page={page}")));
+                let (status, body, link) = if tag == "error" {
+                    ("429 Too Many Requests", "{}".to_string(), "")
+                } else {
+                    (
+                        "200 OK",
+                        serde_json::json!([{
+                            "tag_name": tag, "draft": false, "prerelease": tag.contains('-'),
+                            "published_at": "2026-10-02T00:00:00Z",
+                            "assets": [{"name": "latest.json", "size": 100, "state": "uploaded"}],
+                        }])
+                        .to_string(),
+                        if page == 1 {
+                            "Link: <http://ignored.test/releases?page=2>; rel=\"next\"\r\n"
+                        } else {
+                            ""
+                        },
+                    )
+                };
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{link}\r\n{body}", body.len()).unwrap();
+            }
+        });
+        assert_eq!(
+            discover_release(&url, &version("0.27.0"), true)
+                .await
+                .unwrap(),
+            Some(version("0.29.0-rc.2"))
+        );
+        assert!(discover_release(&url, &version("0.27.0"), true)
+            .await
+            .unwrap_err()
+            .contains("HTTP 429"));
+        server.join().unwrap();
     }
 
     #[test]

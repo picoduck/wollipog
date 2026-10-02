@@ -1,13 +1,16 @@
 import { useEffect } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   checkForDesktopUpdate,
+  DESKTOP_UPDATE_CHANNEL_CHANGED,
   confirmHeldUpdate,
   errorMessage,
   installDesktopUpdate,
   openReleasePage,
   readDesktopUpdateStatus,
   updateToastMessage,
+  updateCheckMatchesStatus,
   type DesktopUpdateRuntime,
 } from "../desktop-updates.js";
 import { closeGuardLinks, type CloseGuardLinks } from "../desktop-close-guard.js";
@@ -18,7 +21,7 @@ export const FIRST_CHECK_DELAY_MS = 15_000;
 /** A window left open for days still hears about a release. */
 export const RECHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
-const shell: DesktopUpdateRuntime = { isTauri, invoke };
+const shell: DesktopUpdateRuntime = { isTauri, invoke, listen: (event, handler) => listen(event, (received) => handler(received.payload)) };
 
 /**
  * #1646 — tell a desktop user a newer release exists, and let them install it from the toast.
@@ -43,12 +46,15 @@ export function DesktopUpdateNotifier({
   firstCheckDelayMs?: number;
   recheckIntervalMs?: number;
 } = {}) {
-  const { confirm, showToast } = useFeedback();
+  const { confirm, showToast, dismissToast } = useFeedback();
 
   useEffect(() => {
     if (!desktop.isTauri()) return;
     let disposed = false;
     let announced: string | null = null;
+    let toastId: number | null = null;
+    let channelGeneration = 0;
+    let unlisten: (() => void) | undefined;
 
     const install = async (version: string): Promise<void> => {
       const result = await installDesktopUpdate(false, desktop);
@@ -58,17 +64,18 @@ export function DesktopUpdateNotifier({
     };
 
     const check = async () => {
+      const generation = channelGeneration;
       try {
         const result = await checkForDesktopUpdate(true, desktop);
         if (disposed || result?.state !== "available" || result.version === announced) return;
         const status = await readDesktopUpdateStatus(desktop);
-        if (disposed || !status) return;
+        if (disposed || !status || generation !== channelGeneration || !updateCheckMatchesStatus(result, status)) return;
         announced = result.version;
         const inPlace = status.install.mode === "inPlace";
         const action: ToastOptions["action"] = inPlace
           ? { label: "Install and Restart", progress: "Installing the update…", run: () => install(result.version), failureLabel: "Update failed", retryLabel: "Retry Install" }
           : { label: "Open Release Page", run: () => openReleasePage(result.releaseUrl, desktop) };
-        showToast(updateToastMessage(result.version, status.install), {
+        toastId = showToast(updateToastMessage(result.version, status.install), {
           tone: "info",
           durationMs: 0,
           detail: inPlace
@@ -83,14 +90,24 @@ export function DesktopUpdateNotifier({
       }
     };
 
+    void desktop.listen?.(DESKTOP_UPDATE_CHANNEL_CHANGED, () => {
+      if (disposed) return;
+      channelGeneration += 1;
+      announced = null;
+      if (toastId !== null) dismissToast(toastId);
+      toastId = null;
+      void check();
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+
     const first = window.setTimeout(() => void check(), firstCheckDelayMs);
     const repeat = window.setInterval(() => void check(), recheckIntervalMs);
     return () => {
       disposed = true;
       window.clearTimeout(first);
       window.clearInterval(repeat);
+      unlisten?.();
     };
-  }, [confirm, desktop, firstCheckDelayMs, links, recheckIntervalMs, showToast]);
+  }, [confirm, desktop, dismissToast, firstCheckDelayMs, links, recheckIntervalMs, showToast]);
 
   return null;
 }

@@ -16,6 +16,20 @@ import { fileURLToPath } from "node:url";
 export const UPDATE_MANIFEST_NAME = "latest.json";
 const PRODUCT = "Wollipog";
 
+/** Keep semantic prerelease identity while giving WiX its required numeric ProductVersion.
+ * Tauri's default MajorUpgrade allows same-version upgrades, so RC-to-RC and RC-to-final
+ * replacements work; the app's semantic comparator decides which version may be installed.
+ * The installer filename and signed version still use the full version. */
+export function desktopUpdaterConfig(version, publicKeyValue) {
+  desktopUpdaterArtifacts(version); // validate before generating bundler configuration
+  parseUpdaterPublicKey(publicKeyValue);
+  const bundle = { createUpdaterArtifacts: true };
+  if (version.includes("-")) {
+    bundle.windows = { wix: { version: version.split("-", 1)[0] } };
+  }
+  return { bundle, plugins: { updater: { pubkey: publicKeyValue } } };
+}
+
 /**
  * Every updater package a release publishes, and the manifest keys that select it.
  *

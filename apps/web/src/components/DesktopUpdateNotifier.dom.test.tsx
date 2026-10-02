@@ -8,6 +8,7 @@ import { Window } from "happy-dom";
 import { FeedbackContext, type ConfirmationOptions, type ToastOptions } from "./FeedbackProvider.js";
 import { DesktopUpdateNotifier } from "./DesktopUpdateNotifier.js";
 import type { DesktopUpdateCheck, DesktopUpdateOutcome, DesktopUpdateRuntime, DesktopUpdateStatus } from "../desktop-updates.js";
+import { DESKTOP_UPDATE_CHANNEL_CHANGED } from "../desktop-updates.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -49,17 +50,21 @@ function harness({
   const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
   const toasts: Array<{ message: string } & ToastOptions> = [];
   const confirmations: ConfirmationOptions[] = [];
+  const handlers = new Map<string, (payload: unknown) => void>();
+  const dismissed: number[] = [];
+  const channel = { prereleaseUpdates: false };
   const desktop: DesktopUpdateRuntime = {
     isTauri: () => isTauri,
+    listen: async (event, handler) => { handlers.set(event, handler); return () => { handlers.delete(event); }; },
     invoke: async <T,>(command: string, args?: Record<string, unknown>) => {
       calls.push({ command, args });
       if (command === "check_for_desktop_update") return check as T;
-      if (command === "desktop_update_status") return status(mode) as T;
+      if (command === "desktop_update_status") return { ...status(mode), ...channel } as T;
       if (command === "install_desktop_update") return (installs.shift() ?? { outcome: "restarting" }) as T;
       return undefined as T;
     },
   };
-  return { calls, toasts, confirmations, desktop };
+  return { calls, toasts, confirmations, desktop, handlers, dismissed, channel, setCheck: (next: DesktopUpdateCheck | null) => { check = next; } };
 }
 
 async function mount(h: ReturnType<typeof harness>) {
@@ -78,7 +83,7 @@ async function mount(h: ReturnType<typeof harness>) {
       return h.toasts.length;
     },
     showUndo: () => -1,
-    dismissToast: () => undefined,
+    dismissToast: (id: number) => { h.dismissed.push(id); },
   };
   await act(async () => {
     root.render(
@@ -104,6 +109,21 @@ test("a newer release is announced once, as an automatic check, with an install 
   assert.equal(h.toasts[0]!.durationMs, 0, "an update notice waits for the user");
   assert.equal(h.toasts[0]!.action?.label, "Install and Restart");
   await unmount();
+});
+
+test("changing back to stable dismisses the prerelease toast and checks the new channel", async () => {
+  const h = harness({ check: { ...available, prereleaseUpdates: true } });
+  h.channel.prereleaseUpdates = true;
+  const { unmount } = await mount(h);
+  assert.equal(h.toasts.length, 1);
+  h.channel.prereleaseUpdates = false;
+  h.setCheck({ state: "current", checkedAt: 2, prereleaseUpdates: false });
+  await act(async () => h.handlers.get(DESKTOP_UPDATE_CHANNEL_CHANGED)!({}));
+  assert.deepEqual(h.dismissed, [1]);
+  assert.equal(h.toasts.length, 1, "the earlier prerelease must not be announced again");
+  assert.equal(h.calls.filter(({ command }) => command === "check_for_desktop_update").length, 2);
+  await unmount();
+  assert.equal(h.handlers.size, 0);
 });
 
 test("installing while work is in flight asks with the held-update confirmation, never a toast", async () => {

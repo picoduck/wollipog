@@ -430,15 +430,16 @@ jobs:
         shell: bash
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_NEXT_PUBLIC_KEY || vars.TAURI_UPDATER_PUBLIC_KEY }}
+          DESKTOP_VERSION: ${{ needs.preflight.outputs.desktop_version }}
         run: |
-          node -e '
-            const { writeFileSync } = require("node:fs");
-            const { join } = require("node:path");
+          node --input-type=module -e '
+            import { writeFileSync } from "node:fs";
+            import { join } from "node:path";
+            import { desktopUpdaterConfig } from "./scripts/desktop-update-manifest.mjs";
             const overlay = join(process.env.RUNNER_TEMP, "tauri-updater.json");
-            writeFileSync(overlay, JSON.stringify({
-              bundle: { createUpdaterArtifacts: true },
-              plugins: { updater: { pubkey: process.env.TAURI_UPDATER_PUBLIC_KEY } },
-            }));
+            writeFileSync(overlay, JSON.stringify(desktopUpdaterConfig(
+              process.env.DESKTOP_VERSION, process.env.TAURI_UPDATER_PUBLIC_KEY,
+            )));
             process.stdout.write(`TAURI_UPDATER_CONFIG=${overlay.replace(/\\/g, "/")}\n`);
           ' >>"$GITHUB_ENV"
 

@@ -1669,7 +1669,7 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
       />
     );
   }
-  const busy = update.checking || update.installing;
+  const busy = update.checking || update.installing || update.savingPrerelease;
   const check = (label: string) => (
     <button type="button" className="btn ghost sm" disabled={busy} onClick={update.check}>
       {update.checking ? "Checking…" : label}
@@ -1699,7 +1699,9 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
   } else if (lastCheck?.state === "current") {
     description = (
       <>
-        Wollipog {status.currentVersion} is the latest release. Checked {formatCheckedAt(lastCheck.checkedAt)}.{" "}
+        {status.currentVersion.includes("-") || status.prereleaseUpdates
+          ? `No newer release is available on the ${status.prereleaseUpdates ? "pre-release" : "stable"} channel.`
+          : `Wollipog ${status.currentVersion} is the latest release.`} Checked {formatCheckedAt(lastCheck.checkedAt)}.{" "}
         {check("Check Again")}
       </>
     );
@@ -1727,6 +1729,14 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
         disabled={!status.checksAllowed}
         onClick={update.toggleAutomatic}
       />
+      {status.prereleaseUpdates !== undefined && <SwitchRow
+        title="Pre-Release Updates"
+        description="Include early versions that may be less reliable. Turning this off waits for a newer stable release; it does not downgrade Wollipog."
+        checked={status.prereleaseUpdates}
+        busy={update.savingPrerelease}
+        disabled={update.checking || update.installing}
+        onClick={update.togglePrerelease}
+      />}
     </>
   );
 }

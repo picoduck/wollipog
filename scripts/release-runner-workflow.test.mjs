@@ -86,7 +86,7 @@ test("release workflow signs update packages, writes latest.json once, and gates
   assert.match(preflight, /desktop_version=\$\(jq -r \.version apps\/desktop\/src-tauri\/tauri\.conf\.json\)/u);
 
   // The key reaches the bundler only through the CI overlay and the Tauri step's own environment.
-  assert.match(workflow, /bundle: \{ createUpdaterArtifacts: true \}/u);
+  assert.match(workflow, /desktopUpdaterConfig\(\s*process.env.DESKTOP_VERSION, process.env.TAURI_UPDATER_PUBLIC_KEY/u);
   // Rotation: the app embeds the next key while the current key signs and verifies this release.
   const overlayStep = workflow.slice(workflow.indexOf("- name: Configure updater signing"), workflow.indexOf("- name: Build & publish desktop bundles"));
   assert.match(overlayStep, /TAURI_UPDATER_PUBLIC_KEY: \$\{\{ vars\.TAURI_UPDATER_NEXT_PUBLIC_KEY \|\| vars\.TAURI_UPDATER_PUBLIC_KEY \}\}/u);

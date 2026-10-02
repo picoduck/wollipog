@@ -16,6 +16,25 @@ const FAILED_LINK = "https://github.com/picoduck/wollipog/pull/2040/files#diff-4
 const BLOCKED_LINK = "file:///Users/avery/Projects/wollipog/docs/design-system.md";
 const LONG_LINK = `https://example.com/report?filters=${Array.from({ length: 200 }, (_, index) => `session-${index}`).join(",")}`;
 
+test("Settings opts into prereleases, retains the choice on reload, and clears it when returning to stable", async ({ page }) => {
+  await page.goto("/desktop-updates-e2e.html?state=channels");
+  const channel = page.getByRole("switch", { name: "Pre-Release Updates", exact: true });
+  await expect(channel).toHaveAttribute("aria-checked", "false");
+  await page.getByRole("button", { name: "Check for Updates", exact: true }).click();
+  await expect(page.getByText("Wollipog 0.29.1 is the latest release.", { exact: false })).toBeVisible();
+  await channel.click();
+  await expect(channel).toHaveAttribute("aria-checked", "true");
+  await page.getByRole("button", { name: "Check for Updates", exact: true }).click();
+  await expect(page.getByText("Wollipog 0.30.0-rc.1 is available.", { exact: false })).toBeVisible();
+  await page.reload();
+  await expect(channel).toHaveAttribute("aria-checked", "true");
+  await channel.click();
+  await expect(channel).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("button", { name: "Install and Restart", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Check for Updates", exact: true }).click();
+  await expect(page.getByText("Wollipog 0.29.1 is the latest release.", { exact: false })).toBeVisible();
+});
+
 /** Every line of `text` is inside the toast and the viewport: it wraps, and nothing is cut off. */
 async function expectFullyVisible(toast: Locator, text: Locator) {
   const fit = await text.evaluate((element) => {

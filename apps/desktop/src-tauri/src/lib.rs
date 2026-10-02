@@ -47,7 +47,7 @@ use settings::{
 };
 use updates::{
     check_for_desktop_update, desktop_update_status, install_desktop_update,
-    set_automatic_update_checks, DesktopUpdater,
+    set_automatic_update_checks, set_prerelease_updates, DesktopUpdater,
 };
 
 const OWNERSHIP_LOCK_FILE: &str = "desktop-owner.lock";
@@ -3682,6 +3682,7 @@ pub fn run() {
             check_for_desktop_update,
             install_desktop_update,
             set_automatic_update_checks,
+            set_prerelease_updates,
             quit_after_confirmation
         ])
         .on_window_event(|window, event| {

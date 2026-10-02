@@ -26,6 +26,8 @@ pub(crate) struct DesktopSettings {
     pub(crate) pending_remote_deletions: Vec<String>,
     /// Check for a newer published release in the background (#1646). Manual checks ignore it.
     pub(crate) automatic_update_checks: bool,
+    /// Explicit opt-in, including for apps installed from a prerelease package.
+    pub(crate) prerelease_updates: bool,
 }
 
 impl Default for DesktopSettings {
@@ -37,6 +39,7 @@ impl Default for DesktopSettings {
             active_instance_id: crate::instances::LOCAL_INSTANCE_ID.to_string(),
             pending_remote_deletions: Vec::new(),
             automatic_update_checks: true,
+            prerelease_updates: false,
         }
     }
 }
@@ -152,6 +155,7 @@ mod tests {
         assert!(parsed.tailnet_access);
         // Settings written before #1646 have no update preference; they keep checking.
         assert!(parsed.automatic_update_checks);
+        assert!(!parsed.prerelease_updates);
         assert_eq!(
             parsed.active_instance_id,
             crate::instances::LOCAL_INSTANCE_ID
@@ -167,11 +171,13 @@ mod tests {
         fs::write(&path, br#"{"tailnet_access":false}"#).unwrap();
         let next = DesktopSettings {
             tailnet_access: true,
+            prerelease_updates: true,
             ..DesktopSettings::default()
         };
         write_settings_file(&path, &next).unwrap();
         let parsed = read_settings_file_result(&path).unwrap();
         assert!(parsed.tailnet_access);
+        assert!(parsed.prerelease_updates);
         assert_eq!(
             parsed.active_instance_id,
             crate::instances::LOCAL_INSTANCE_ID

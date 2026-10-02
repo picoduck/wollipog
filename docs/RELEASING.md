@@ -128,16 +128,34 @@ so SmartScreen can still warn until the certificate's download reputation builds
 
 ## In-place desktop updates
 
-The desktop app updates itself from the **latest published** release
+The desktop app updates itself from the **latest published stable** release by default
 ([#1646](https://github.com/picoduck/wollipog/issues/1646)). It reads
 `https://github.com/picoduck/wollipog/releases/latest/download/latest.json`, which GitHub never
-resolves to a draft or a prerelease, and it never offers a prerelease to a stable build. Settings →
+resolves to a draft or a prerelease. Settings →
 About shows the running version, whether a newer release exists, and an **Install and Restart**
 button. Installing restarts the app, so it goes through the same work-in-flight guard as closing the
 window. `.deb` and `.rpm` installs, and any build without an update key, report the new release and
 link to its page instead of installing. `WOLLIPOG_DISABLE_UPDATE_CHECK=1` in the app's environment
 turns off every update request; the **Check for Updates Automatically** switch turns off only the
 background check.
+
+**Pre-Release Updates** in Settings → About explicitly opts this installation into early releases.
+It defaults off, including when a prerelease was installed by hand, and persists across restarts.
+Opted-in checks enumerate published GitHub releases and select the newest semantic version with
+an uploaded, non-empty `latest.json`, whether stable or prerelease. Drafts and releases without an
+update manifest are excluded. The manifest must announce the selected tag's exact version, and
+the ordinary package signature and signed-version checks still apply. An API failure, timeout,
+or incomplete discovery reports a failed check rather than claiming the app is current.
+Turning the switch off clears the previous offer and any downloaded, uninstalled update. It does
+not downgrade: someone running `0.30.0-rc.2` waits for a newer stable version, such as `0.30.0`.
+The installation-wide disable switch still blocks both channels; automatic checks and manual
+checks use the same chosen channel. Browser/PWA clients update with their serving control plane,
+and managed SSH runners remain pinned to that control plane's matching release.
+
+Desktop stderr records `desktop_update_check` with request ID, entry point (`background`, `manual`,
+or `install`), channel, outcome, candidate version, and duration. `desktop_update_channel_changed`
+records preference changes. These answer which channel was checked, which version was offered,
+and whether discovery failed; they contain no tokens or release-response bodies.
 
 Update packages carry a second signature, separate from Developer ID and Authenticode: a minisign
 signature made with the **update key**. The app verifies it against the public key compiled into the
@@ -281,6 +299,26 @@ later, until a maintenance sweep noticed.
 gh api repos/picoduck/wollipog/security-advisories \
   --jq '.[] | select(.state == "published") | select(any(.vulnerabilities[]; .patched_versions == null)) | .ghsa_id'
 ```
+
+## Cut a prerelease
+
+Use the same reviewed release preparation and version gates with a semantic prerelease version,
+for example `0.30.0-rc.1`, in all six version fields and the Cargo lockfile. Tag that exact release
+commit as `v0.30.0-rc.1` and push the tag. The Release workflow already recognizes the suffix and
+creates a draft marked **Pre-release**, building the complete desktop, standalone control-plane,
+runner, and web inventory with the usual platform signing and updater signatures.
+
+Windows MSI ProductVersion must be numeric: the updater config overlay sets it to `0.30.0` for
+this example, while app metadata, artifact filenames, and signed update versions retain
+`0.30.0-rc.1`. Tauri's default same-version MSI upgrades allow RC-to-RC and RC-to-final replacement;
+Wollipog's semantic version comparison prevents equal-version installs and downgrades.
+
+Wait for every native build and final verification job to pass, review the release notes and all
+47 assets, and publish with **Pre-release** still selected. It must never be marked as the latest
+stable release. Only opted-in desktop installations discover it. A tag without a published
+release, or a draft release, is invisible to both channels. Use `-rc.2` for a subsequent candidate;
+to graduate to stable, prepare a new version-checked `v0.30.0` tag and build its artifacts again.
+Changing only the prerelease flag would leave the signed app version as an RC.
 
 ## Test build without tagging
 
