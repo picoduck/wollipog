@@ -13158,7 +13158,7 @@ export class SessionManager {
         const priorCapabilities = source.capabilities;
         const priorSessionSlashCommands = source.sessionSlashCommands;
         const launchPreparation = await this.prepareLaunch?.(source, { isCurrent: forkIsCurrent });
-        if (!forkIsCurrent()) throw new Error("conversation fork preparation was cancelled");
+        if (!forkIsCurrent()) throw new Error("conversation fork preparation was canceled");
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
         }
@@ -13251,7 +13251,7 @@ export class SessionManager {
         const priorSessionSlashCommands = source.sessionSlashCommands;
         const launchPreparation = this.prepareLaunch?.(source, { isCurrent: forkIsCurrent });
         if (launchPreparation) await launchPreparation;
-        if (!forkIsCurrent()) throw new Error("conversation fork preparation was cancelled");
+        if (!forkIsCurrent()) throw new Error("conversation fork preparation was canceled");
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
         }

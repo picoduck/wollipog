@@ -415,7 +415,7 @@ for (const interruption of ["cancel", "shutdown"] as const) test(`pending lease 
     directory: fx.root, command: "claude", args: [], context: { kind: "native" }, env: {}, persistAccount: false };
   try {
     const operation = fx.supervisor.startResolved(resolved);
-    const rejected = assert.rejects(operation, /cancelled before launch/);
+    const rejected = assert.rejects(operation, /canceled before launch/);
     assert.equal(fx.spawns.length, 0);
     await assert.rejects(fx.supervisor.startResolved(resolved), /already running/);
     if (interruption === "cancel") assert.equal(fx.supervisor.cancelAccount(resolved.accountId), true);

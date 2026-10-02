@@ -620,7 +620,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
           try {
             const result = await preparing;
             assert.equal(result.ok, false);
-            assert.match(result.error ?? "", /preparation was cancelled/);
+            assert.match(result.error ?? "", /preparation was canceled/);
             assert.equal(constructions, beforeConstructions);
             assert.equal(forkSources.length, beforeForks);
             assert.equal(store.has(targetId), false);

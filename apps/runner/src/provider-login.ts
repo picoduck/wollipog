@@ -406,7 +406,7 @@ export class ProviderLoginSupervisor {
       // Covers cancellation in the caller's continuation after an already accepted lease.
       await this.release(resolved.directory);
       this.pending.delete(resolved.accountId);
-      throw new Error("The provider sign-in was cancelled before launch.");
+      throw new Error("The provider sign-in was canceled before launch.");
     }
     const operationId = `login_${randomUUID()}`;
     const view: ProviderLoginView = {
