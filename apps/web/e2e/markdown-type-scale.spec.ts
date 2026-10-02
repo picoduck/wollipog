@@ -114,6 +114,9 @@ for (const width of [390, 1440]) {
       expect(buttonBox.y).toBeGreaterThanOrEqual(headBox.y - 0.5);
     }
 
+    // The buttons stay 8px apart, so each one's borrowed coarse-pointer hit area (§2.8) is its own.
+    expect((await box(copy)).x - (await box(wrapLines)).right).toBeGreaterThanOrEqual(8 - 0.5);
+
     await expect(wrapLines).toHaveAttribute("aria-pressed", "false");
     await wrapLines.click();
     await expect(wrapLines).toHaveAttribute("aria-pressed", "true");
