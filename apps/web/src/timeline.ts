@@ -200,7 +200,14 @@ export type TimelineItem =
   /** A content-safe policy-hook outcome. Current histories use the runner event sequence as `id`;
    * legacy histories synthesize a negative id from the audit and anchor it chronologically. */
   | { kind: "governance_decision"; id: number; decision: GovernanceDecision }
-  | { kind: "checkpoint"; id: number; turn: number }
+  | {
+      kind: "checkpoint";
+      id: number;
+      turn: number;
+      /** For an automatic continuation the runner started without a prompt: the runner-recorded
+       * time of its latest usage report, which would otherwise land on the earlier prompt. */
+      lastUsageAt?: number;
+    }
   | { kind: "checkpoint_restored"; id: number; turn: number }
   | { kind: "conversation_checkpoint"; id: number; turn: number }
   | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
@@ -597,6 +604,9 @@ export class TimelineBuilder {
   /** Kept independently from duration closure: terminal usage can arrive before the durable
    * conversation checkpoint that proves this user message completed and is fork-addressable. */
   private pendingConversationUserIndex: number | null = null;
+  /** The checkpoint opening an automatic continuation (resumed background work) that no prompt
+   * started. Its usage timing belongs to it, not to the earlier prompt that still owns usage. */
+  private continuationIndex: number | null = null;
   // ID-less providers retain the historical contiguous-only behavior. Identified provider items
   // may interleave, so they use a separate bounded LRU set until completion or a real boundary.
   private lastText: { kind: string; index: number; parent?: string } | null = null;
@@ -822,6 +832,7 @@ export class TimelineBuilder {
         if (p.deliveryIntent !== "steer") {
           this.activeUserIndex = userIndex;
           this.pendingConversationUserIndex = userIndex;
+          this.continuationIndex = null;
         }
         this.markDirty(userIndex);
         break;
@@ -992,6 +1003,13 @@ export class TimelineBuilder {
       }
       case "token_usage": {
         if (!p.parentToolUseId) {
+          const continuation = this.continuationIndex != null ? this.items[this.continuationIndex] : undefined;
+          const continued = continuation?.kind === "checkpoint";
+          if (continuation?.kind === "checkpoint" && Number.isFinite(ev.ts) &&
+              (continuation.lastUsageAt == null || ev.ts > continuation.lastUsageAt)) {
+            this.items[this.continuationIndex!] = { ...continuation, lastUsageAt: ev.ts };
+            this.markDirty(this.continuationIndex!);
+          }
           if (this.activeUserIndex != null) {
             const item = this.items[this.activeUserIndex];
             if (item?.kind === "user_message") {
@@ -1002,9 +1020,11 @@ export class TimelineBuilder {
                 Number.isFinite(ev.ts) && ev.ts >= item.createdAt
                 ? ev.ts - item.createdAt
                 : undefined;
-              const durationMs = item.durationMs == null ? (providerDuration ?? observedDuration) : undefined;
+              // A continuation's report still adds its usage to the prompt (as before), but not its
+              // timing: the prompt's own turn finished before the continuation began.
+              const durationMs = !continued && item.durationMs == null ? (providerDuration ?? observedDuration) : undefined;
               const turnUsage = turnUsageFrom(p);
-              const usageAt = Number.isFinite(ev.ts) && (item.lastUsageAt == null || ev.ts > item.lastUsageAt)
+              const usageAt = !continued && Number.isFinite(ev.ts) && (item.lastUsageAt == null || ev.ts > item.lastUsageAt)
                 ? ev.ts
                 : undefined;
               if (durationMs != null || turnUsage || usageAt != null) {
@@ -1175,10 +1195,14 @@ export class TimelineBuilder {
         }
         break;
       }
-      case "checkpoint":
+      case "checkpoint": {
         this.breakText();
-        this.markDirty(this.items.push({ kind: "checkpoint", id: ev.seq, turn: p.turn }) - 1);
+        const index = this.items.push({ kind: "checkpoint", id: ev.seq, turn: p.turn }) - 1;
+        // A prompt's own checkpoint directly follows it; any other opens an automatic continuation.
+        if (this.activeUserIndex == null || index - 1 !== this.activeUserIndex) this.continuationIndex = index;
+        this.markDirty(index);
         break;
+      }
       case "checkpoint_restored":
         this.breakText();
         this.markDirty(this.items.push({ kind: "checkpoint_restored", id: ev.seq, turn: p.turn }) - 1);

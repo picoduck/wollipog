@@ -276,6 +276,9 @@ function latestActivityAt(item: TimelineItem): number | undefined {
     case "user_message":
       candidates = [item.createdAt, item.lastUsageAt];
       break;
+    case "checkpoint":
+      candidates = [item.lastUsageAt];
+      break;
     case "turn_interrupted":
     case "artifact_attached":
     case "review_decision":
@@ -341,6 +344,7 @@ export function summarizeTimelineTurns(
       segment.conversationTurn = item.turn;
     } else if (item.kind === "checkpoint") {
       segment.fileTurn ??= item.turn;
+      if (item.lastUsageAt != null) segment.usageReported = true;
     } else if (item.kind !== "user_message" && !HISTORY_DIVIDER_KINDS.has(item.kind)) {
       segment.hasAgentContent = true;
     }

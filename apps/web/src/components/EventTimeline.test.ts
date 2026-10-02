@@ -1279,6 +1279,25 @@ test("an automatic continuation without a prompt is its own turn with its own fo
   assert.equal((html.match(/aria-label="Fork Conversation After This Turn"/g) ?? []).length, 2);
 });
 
+test("a continuation's usage report times the continuation, not the turn before it", () => {
+  const event = (seq: number, ts: number, payload: SessionEventPayload) => ({ id: seq, sessionId: "s", seq, ts, payload });
+  const items = deriveTimeline([
+    event(1, 0, { kind: "user_message", text: "Start it" }),
+    event(2, 1, { kind: "checkpoint", turn: 1, tree: "a" } as SessionEventPayload),
+    event(3, 2_000, { kind: "agent_message", text: "Started.", final: true }),
+    event(4, 3_000, { kind: "token_usage", inputTokens: 10, outputTokens: 2 }),
+    event(5, 3_001, { kind: "conversation_checkpoint", turn: 1 }),
+    event(6, 10_000, { kind: "stderr", text: "Runner resumed orphaned background work automatically." }),
+    event(7, 10_001, { kind: "checkpoint", turn: 2, tree: "b" } as SessionEventPayload),
+    event(8, 12_000, { kind: "agent_message", text: "Finished.", final: true }),
+    event(9, 14_000, { kind: "token_usage", inputTokens: 20, outputTokens: 4 }),
+    event(10, 14_001, { kind: "conversation_checkpoint", turn: 2 }),
+  ]);
+  const { segments } = summarizeTimelineTurns(items, assistantForkTurns(items));
+  assert.deepEqual(segments.slice(1).map((segment) => [segment.turn, segment.finishedAt]), [[1, 3_000], [2, 14_000]]);
+  assert.equal(segments[1]!.durationMs, 3_000, "the prompt's duration is its own turn's");
+});
+
 test("an empty terminal usage report settles a turn that produced nothing else", () => {
   const events = [
     { id: 1, sessionId: "s", seq: 1, ts: 1_000, payload: { kind: "user_message", text: "Anything?" } },
