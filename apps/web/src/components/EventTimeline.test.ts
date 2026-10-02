@@ -1269,6 +1269,34 @@ test("a turn finishes at its terminal usage report when that lands after the las
   assert.equal(summary.finishedAt, at(60));
   assert.match(turnSpanDescription(summary), /^Started \d{1,2}:00:00\s?[AP]M, finished \d{1,2}:01:00\s?[AP]M \(1m 0s\)$/,
     "the clock, the finish and the duration agree");
+
+  // Only the first report stamps the prompt's duration; a live mid-turn report must not hide the
+  // terminal one that follows the final reply.
+  const live = deriveTimeline([
+    event(1, at(0), { kind: "user_message", text: "Run it" }),
+    event(2, at(10), { kind: "token_usage", inputTokens: 5, outputTokens: 1 }),
+    event(3, at(30), { kind: "agent_message", text: "Done.", final: true }),
+    event(4, at(60), { kind: "token_usage", inputTokens: 10, outputTokens: 4 }),
+  ]);
+  assert.equal(summarizeTimelineTurns(live, new Map()).get(1)!.finishedAt, at(60));
+});
+
+test("a settled turn that produced only usage keeps its footer under the prompt", () => {
+  const events = [
+    { id: 1, sessionId: "s", seq: 1, ts: 1_000, payload: { kind: "user_message", text: "Compact the context" } },
+    { id: 2, sessionId: "s", seq: 2, ts: 1_001, payload: { kind: "checkpoint", turn: 4, tree: "t" } },
+    { id: 3, sessionId: "s", seq: 3, ts: 2_000, payload: { kind: "token_usage", inputTokens: 900, outputTokens: 10, costUsd: 0.01 } },
+    { id: 4, sessionId: "s", seq: 4, ts: 2_001, payload: { kind: "conversation_checkpoint", turn: 4 } },
+  ] as never[];
+  const settled = renderToStaticMarkup(React.createElement(EventTimeline, { items: deriveTimeline(events) }));
+  assert.equal((settled.match(/class="tl-turn-footer"/g) ?? []).length, 1);
+  assert.match(settled, /<span class="tl-turn-label">Turn 4<\/span>/);
+  assert.match(settled, /\$0\.01/);
+  const running = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: deriveTimeline(events.slice(0, 2)),
+    sessionActive: false,
+  }));
+  assert.doesNotMatch(running, /tl-turn-footer/, "a prompt with nothing settled yet has no footer");
 });
 
 test("replies no turn footer copies keep their own Copy", () => {

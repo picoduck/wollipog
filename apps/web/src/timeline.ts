@@ -80,6 +80,9 @@ export type TimelineItem =
       deliveryIntent?: "steer";
       /** The turn's provider-reported usage, stamped when its parentless token_usage lands. */
       turnUsage?: TurnUsage;
+      /** Runner-recorded time of the turn's latest usage report; a terminal report can land after
+       * the last visible row, and only the first report stamps `durationMs`. */
+      lastUsageAt?: number;
       commandInvocation?: {
         invocationId: string;
         submissionId: string;
@@ -1001,13 +1004,17 @@ export class TimelineBuilder {
                 : undefined;
               const durationMs = item.durationMs == null ? (providerDuration ?? observedDuration) : undefined;
               const turnUsage = turnUsageFrom(p);
-              if (durationMs != null || turnUsage) {
+              const usageAt = Number.isFinite(ev.ts) && (item.lastUsageAt == null || ev.ts > item.lastUsageAt)
+                ? ev.ts
+                : undefined;
+              if (durationMs != null || turnUsage || usageAt != null) {
                 this.items[this.activeUserIndex] = {
                   ...item,
                   ...(durationMs != null
                     ? { durationMs, durationSource: providerDuration != null ? "provider" as const : "observed" as const }
                     : {}),
                   ...(turnUsage ? { turnUsage: mergeTurnUsage(item.turnUsage, turnUsage) } : {}),
+                  ...(usageAt != null ? { lastUsageAt: usageAt } : {}),
                 };
                 this.markDirty(this.activeUserIndex);
               }

@@ -251,6 +251,8 @@ export interface TurnFooterSummary {
 
 interface TurnSegment extends TurnFooterSummary {
   hasAgentContent: boolean;
+  /** Agent rows, recorded usage or a conversation checkpoint: a turn that has something to settle. */
+  footerEligible: boolean;
   conversationTurn?: number;
   fileTurn?: number;
   responseParts: string[];
@@ -264,6 +266,8 @@ function latestActivityAt(item: TimelineItem): number | undefined {
   let candidates: Array<number | undefined>;
   switch (item.kind) {
     case "user_message":
+      candidates = [item.createdAt, item.lastUsageAt];
+      break;
     case "turn_interrupted":
     case "artifact_attached":
     case "review_decision":
@@ -296,12 +300,13 @@ export function summarizeTimelineTurns(
   forkTurns: ReadonlyMap<number, number>,
 ): Map<number | null, TurnSegment> {
   const segments = new Map<number | null, TurnSegment>();
-  let segment: TurnSegment = { hasAgentContent: false, responseParts: [] };
+  let segment: TurnSegment = { hasAgentContent: false, footerEligible: false, responseParts: [] };
   segments.set(null, segment);
   for (const item of items) {
     if (startsTurn(item) && item.kind === "user_message") {
       segment = {
         hasAgentContent: false,
+        footerEligible: false,
         responseParts: [],
         ...(item.turn != null ? { turn: item.turn } : {}),
         ...(Number.isFinite(item.createdAt) ? { startedAt: item.createdAt } : {}),
@@ -327,6 +332,7 @@ export function summarizeTimelineTurns(
     }
   }
   for (const value of segments.values()) {
+    value.footerEligible = value.hasAgentContent || value.usage !== undefined || value.conversationTurn !== undefined;
     value.turn = value.conversationTurn ?? value.fileTurn ?? value.turn;
     // The prompt's duration ends at the turn's terminal usage report, which can land after the last
     // visible row (Codex's turn.completed); the turn finished at whichever came later.
@@ -338,12 +344,12 @@ export function summarizeTimelineTurns(
 }
 
 /** Places one footer after the last row of every settled turn, before any trailing history
- * divider. A turn that is still running has none (the working indicator stands in for it), and
+ * divider; a turn that produced only usage keeps its footer under the prompt. A turn that is still running has none (the working indicator stands in for it), and
  * neither has activity before the first prompt unless a checkpoint names its turn — a subagent's
  * output or a partial page must not claim an unnumbered turn. */
 export function placeTurnFooters(
   rows: readonly TimelineRenderRow[],
-  segments: ReadonlyMap<number | null, TurnFooterSummary & { hasAgentContent: boolean }>,
+  segments: ReadonlyMap<number | null, TurnFooterSummary & { footerEligible: boolean }>,
   sessionActive: boolean,
 ): Map<string, TurnFooterSummary> {
   const footers = new Map<string, TurnFooterSummary>();
@@ -351,7 +357,7 @@ export function placeTurnFooters(
   let anchorKey: string | null = null;
   const close = (last: boolean) => {
     const segment = segments.get(segmentKey);
-    if (!segment?.hasAgentContent || anchorKey === null || (last && sessionActive)) return;
+    if (!segment?.footerEligible || anchorKey === null || (last && sessionActive)) return;
     if (segmentKey === null && segment.turn === undefined) return;
     footers.set(anchorKey, segment);
   };
