@@ -12,9 +12,8 @@ import {
   estimateTimelineRow,
   flattenTimelineRows,
   IncrementalTimelineRows,
-  placeTurnFooters,
+  layoutTurns,
   stabilizeTimelineRowKeys,
-  startsTimelineTurn,
   summarizeTimelineTurns,
   TIMELINE_ROW_GAP,
   TIMELINE_TURN_GAP,
@@ -76,6 +75,7 @@ test("auto-approved reviews expose an exact count and highest risk while expande
   assert.deepEqual(collapsed[0], {
     kind: "work_summary",
     key: workKey,
+    firstItemId: items[0]!.id,
     tools: 1,
     edits: 0,
     thoughts: 0,
@@ -1208,9 +1208,9 @@ test("turn summaries read the checkpoint number, span, usage, response and fork 
     { kind: "user_message", id: 10, text: "second", createdAt: 20_000, durationMs: 5_000 },
     { kind: "user_message", id: 11, text: "steer", deliveryIntent: "steer", createdAt: 21_000 },
   ];
-  const segments = summarizeTimelineTurns(items, assistantForkTurns(items));
-  assert.deepEqual([...segments.keys()], [null, 2, 10], "a steering message does not open a turn");
-  const first = segments.get(2)!;
+  const { segments } = summarizeTimelineTurns(items, assistantForkTurns(items));
+  assert.deepEqual(segments.map((segment) => segment.key), [null, 2, 10], "a steering message does not open a turn");
+  const first = segments[1]!;
   assert.equal(first.turn, 3);
   assert.equal(first.startedAt, 1_000);
   assert.equal(first.finishedAt, 9_000, "the latest recorded activity, nested work included");
@@ -1218,10 +1218,10 @@ test("turn summaries read the checkpoint number, span, usage, response and fork 
   assert.equal(first.forkTurn, 3);
   assert.equal(first.usage?.costUsd, 0.5);
   assert.equal(first.hasAgentContent, true);
-  const second = segments.get(10)!;
+  const second = segments[2]!;
   assert.equal(second.hasAgentContent, false, "a prompt and a steer are not agent work");
   assert.equal(second.finishedAt, 25_000, "the recorded duration outlasts the last visible row (the steer at 21s)");
-  assert.equal(segments.get(null)!.turn, undefined);
+  assert.equal(segments[0]!.turn, undefined);
 });
 
 test("one footer follows each settled turn, before trailing history dividers, and never a running one", () => {
@@ -1236,16 +1236,60 @@ test("one footer follows each settled turn, before trailing history dividers, an
     { kind: "tool_call", id: 8, toolCallId: "t", title: "Run", status: "completed", text: "" },
   ];
   const rows = flattenTimelineRows(groupTimeline(items), new Map());
-  const segments = summarizeTimelineTurns(items, assistantForkTurns(items));
-  const settled = placeTurnFooters(rows, segments, false);
-  assert.deepEqual([...settled.keys()], ["item:agent_message:3", "work:user_message:6"],
+  const turns = summarizeTimelineTurns(items, assistantForkTurns(items));
+  const settled = layoutTurns(rows, turns, false);
+  assert.deepEqual([...settled.footers.keys()], ["item:agent_message:3", "work:user_message:6"],
     "the first footer sits before the rewind divider; unnumbered pre-prompt output gets none");
-  assert.equal(settled.get("item:agent_message:3")!.turn, 1);
-  assert.deepEqual([...placeTurnFooters(rows, segments, true).keys()], ["item:agent_message:3"],
+  assert.equal(settled.footers.get("item:agent_message:3")!.turn, 1);
+  assert.deepEqual([...layoutTurns(rows, turns, true).footers.keys()], ["item:agent_message:3"],
     "the running turn has no footer");
 
-  const gaps = rows.map((_, index) => startsTimelineTurn(rows[index + 1]) ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP);
+  const gaps = rows.map((_, index) => settled.turnStarts.has(rows[index + 1]?.key ?? "") ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP);
   assert.deepEqual(gaps, [32, 12, 12, 32, 12, 12], "32px opens each new turn, 12px everywhere inside one");
+});
+
+test("an automatic continuation without a prompt is its own turn with its own footer and actions", () => {
+  // Resumed background work: the runner emits a notice and a new numbered checkpoint, no prompt.
+  const items: TimelineItem[] = [
+    { kind: "user_message", id: 1, text: "Start the migration" },
+    { kind: "checkpoint", id: 2, turn: 1 },
+    { kind: "agent_message", id: 3, text: "Started; it continues in the background." },
+    { kind: "conversation_checkpoint", id: 4, turn: 1 },
+    { kind: "stderr", id: 5, text: "Runner resumed orphaned background work automatically." },
+    { kind: "checkpoint", id: 6, turn: 2 },
+    { kind: "agent_message", id: 7, text: "The migration finished." },
+    { kind: "conversation_checkpoint", id: 8, turn: 2 },
+  ];
+  const turns = summarizeTimelineTurns(items, assistantForkTurns(items));
+  assert.deepEqual(turns.segments.map((segment) => [segment.key, segment.turn, segment.forkTurn]),
+    [[null, undefined, undefined], [1, 1, 1], [5, 2, 2]]);
+  const rows = flattenTimelineRows(groupTimeline(items), new Map());
+  const settled = layoutTurns(rows, turns, false);
+  assert.deepEqual([...settled.footers.values()].map((footer) => footer.turn), [1, 2]);
+  assert.deepEqual([...layoutTurns(rows, turns, true).footers.values()].map((footer) => footer.turn), [1],
+    "while the continuation runs, the earlier turn keeps its footer");
+  assert.ok(settled.turnStarts.has(rows.find((row) => row.kind === "work_summary")!.key),
+    "the continuation opens 32px below the earlier turn");
+
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items,
+    onFork: () => {},
+    forkAvailabilityByTurn: new Map([1, 2].map((turn) => [turn, { available: true as const, forkTurn: turn }])),
+  }));
+  assert.equal((html.match(/aria-label="Fork Conversation After This Turn"/g) ?? []).length, 2);
+});
+
+test("an empty terminal usage report settles a turn that produced nothing else", () => {
+  const events = [
+    { id: 1, sessionId: "s", seq: 1, ts: 1_000, payload: { kind: "user_message", text: "Anything?" } },
+    { id: 2, sessionId: "s", seq: 2, ts: 3_000, payload: { kind: "token_usage" } },
+  ] as never[];
+  const items = deriveTimeline(events);
+  const inactive = renderToStaticMarkup(React.createElement(EventTimeline, { items, sessionActive: false }));
+  assert.equal((inactive.match(/class="tl-turn-footer"/g) ?? []).length, 1);
+  assert.match(inactive, /\(2\.0s\)/);
+  const active = renderToStaticMarkup(React.createElement(EventTimeline, { items, sessionActive: true }));
+  assert.doesNotMatch(active, /tl-turn-footer/);
 });
 
 test("the footer tooltip names the start, finish and duration it has", () => {
@@ -1265,7 +1309,7 @@ test("a turn finishes at its terminal usage report when that lands after the las
     // Codex's turn.completed reports usage half a minute after the final reply.
     event(3, at(60), { kind: "token_usage", inputTokens: 10, outputTokens: 4 }),
   ]);
-  const summary = summarizeTimelineTurns(items, new Map()).get(1)!;
+  const summary = summarizeTimelineTurns(items, new Map()).segments[1]!;
   assert.equal(summary.finishedAt, at(60));
   assert.match(turnSpanDescription(summary), /^Started \d{1,2}:00:00\s?[AP]M, finished \d{1,2}:01:00\s?[AP]M \(1m 0s\)$/,
     "the clock, the finish and the duration agree");
@@ -1278,7 +1322,7 @@ test("a turn finishes at its terminal usage report when that lands after the las
     event(3, at(30), { kind: "agent_message", text: "Done.", final: true }),
     event(4, at(60), { kind: "token_usage", inputTokens: 10, outputTokens: 4 }),
   ]);
-  assert.equal(summarizeTimelineTurns(live, new Map()).get(1)!.finishedAt, at(60));
+  assert.equal(summarizeTimelineTurns(live, new Map()).segments[1]!.finishedAt, at(60));
 });
 
 test("a settled turn that produced only usage keeps its footer under the prompt", () => {

@@ -220,11 +220,6 @@ export function timelineItemRendersRow(item: TimelineItem): boolean {
 const startsTurn = (item: TimelineItem): boolean =>
   item.kind === "user_message" && item.deliveryIntent !== "steer";
 
-/** A canonical (non-steering) prompt opens a turn; everything up to the next one belongs to it. */
-export function startsTimelineTurn(row: TimelineRenderRow | undefined): boolean {
-  return row?.kind === "item" && row.depth === 0 && startsTurn(row.item);
-}
-
 /** History events keep their own dividers (#2184) and sit after a turn's footer, not inside it. */
 const HISTORY_DIVIDER_KINDS = new Set<TimelineItem["kind"]>([
   "checkpoint_restored",
@@ -249,13 +244,26 @@ export interface TurnFooterSummary {
   forkTurn?: number;
 }
 
-interface TurnSegment extends TurnFooterSummary {
+export interface TurnSegment extends TurnFooterSummary {
+  /** The item that opened the turn: its prompt, or the first item of an automatic continuation.
+   * `null` for activity before the window's first turn boundary. */
+  key: number | null;
+  /** Opened by a prompt, rather than by an automatic continuation or the window's head. */
+  prompted: boolean;
   hasAgentContent: boolean;
-  /** Agent rows, recorded usage or a conversation checkpoint: a turn that has something to settle. */
+  /** Agent rows, a usage report or a conversation checkpoint: the turn has something to settle. */
   footerEligible: boolean;
+  usageReported: boolean;
   conversationTurn?: number;
   fileTurn?: number;
   responseParts: string[];
+}
+
+export interface TimelineTurns {
+  /** In transcript order; the first holds activity before the window's first turn boundary. */
+  segments: TurnSegment[];
+  /** The segment index of every item id, nested subagent items included. */
+  segmentOf: Map<number, number>;
 }
 
 /** Copy's text: the turn's top-level replies, a blank line apart. */
@@ -293,28 +301,43 @@ function latestActivityAt(item: TimelineItem): number | undefined {
   return latest;
 }
 
-/** One pass over the flat items: each turn's number, span, usage, response text and fork point,
- * keyed by the id of the prompt that opened it (`null` for activity before the first prompt). */
+const emptySegment = (key: number | null, prompted: boolean): TurnSegment => ({
+  key, prompted, hasAgentContent: false, footerEligible: false, usageReported: false, responseParts: [],
+});
+
+/** One pass over the flat items: each turn's number, span, usage, response text and fork point.
+ * A canonical (non-steering) prompt opens a turn. So does an automatic continuation the runner
+ * starts without one (resumed background work): agent activity after a turn's conversation
+ * checkpoint, or a file checkpoint numbering a different turn. */
 export function summarizeTimelineTurns(
   items: readonly TimelineItem[],
   forkTurns: ReadonlyMap<number, number>,
-): Map<number | null, TurnSegment> {
-  const segments = new Map<number | null, TurnSegment>();
-  let segment: TurnSegment = { hasAgentContent: false, footerEligible: false, responseParts: [] };
-  segments.set(null, segment);
+): TimelineTurns {
+  let segment = emptySegment(null, false);
+  const segments = [segment];
+  const segmentOf = new Map<number, number>();
   for (const item of items) {
+    const continues = item.kind !== "user_message" && item.kind !== "conversation_checkpoint" &&
+      !HISTORY_DIVIDER_KINDS.has(item.kind) && !("parentToolUseId" in item && item.parentToolUseId) && (
+        segment.conversationTurn !== undefined ||
+        (item.kind === "checkpoint" && segment.fileTurn !== undefined && item.turn !== segment.fileTurn)
+      );
     if (startsTurn(item) && item.kind === "user_message") {
       segment = {
-        hasAgentContent: false,
-        footerEligible: false,
-        responseParts: [],
+        ...emptySegment(item.id, true),
         ...(item.turn != null ? { turn: item.turn } : {}),
         ...(Number.isFinite(item.createdAt) ? { startedAt: item.createdAt } : {}),
         ...(item.durationMs != null ? { durationMs: item.durationMs } : {}),
         ...(item.turnUsage ? { usage: item.turnUsage } : {}),
+        usageReported: item.lastUsageAt != null || item.durationMs != null,
       };
-      segments.set(item.id, segment);
-    } else if (item.kind === "conversation_checkpoint") {
+      segments.push(segment);
+    } else if (continues) {
+      segment = emptySegment(item.id, false);
+      segments.push(segment);
+    }
+    segmentOf.set(item.id, segments.length - 1);
+    if (item.kind === "conversation_checkpoint") {
       segment.conversationTurn = item.turn;
     } else if (item.kind === "checkpoint") {
       segment.fileTurn ??= item.turn;
@@ -331,8 +354,9 @@ export function summarizeTimelineTurns(
       segment.finishedAt = activity;
     }
   }
-  for (const value of segments.values()) {
-    value.footerEligible = value.hasAgentContent || value.usage !== undefined || value.conversationTurn !== undefined;
+  for (const value of segments) {
+    value.footerEligible = value.hasAgentContent || value.usage !== undefined || value.usageReported ||
+      value.conversationTurn !== undefined;
     value.turn = value.conversationTurn ?? value.fileTurn ?? value.turn;
     // The prompt's duration ends at the turn's terminal usage report, which can land after the last
     // visible row (Codex's turn.completed); the turn finished at whichever came later.
@@ -340,62 +364,77 @@ export function summarizeTimelineTurns(
       value.finishedAt = Math.max(value.finishedAt ?? value.startedAt, value.startedAt + value.durationMs);
     }
   }
-  return segments;
+  return { segments, segmentOf };
+}
+
+/** The item that places a row in a turn. A nested subagent row follows its parent, wherever its own
+ * event landed. */
+function rowItemId(row: TimelineRenderRow): number | undefined {
+  if (row.kind === "work_summary") return row.firstItemId;
+  if (row.depth > 0) return undefined;
+  return row.kind === "item" ? row.item.id : row.tool.id;
+}
+
+export interface TurnLayout {
+  /** The settled turn summary to render at the end of each row that closes a turn. */
+  footers: Map<string, TurnFooterSummary>;
+  /** Rows that open a turn, other than the first row: 32px above them instead of 12px. */
+  turnStarts: Set<string>;
+  /** Replies no turn footer will ever copy, which keep their own Copy: a subagent's replies, which
+   * a turn's Copy leaves out, and replies of an unnumbered turn no prompt opened (a subagent's
+   * own transcript in the Subagents panel). */
+  standaloneReplies: Set<string>;
 }
 
 /** Places one footer after the last row of every settled turn, before any trailing history
- * divider; a turn that produced only usage keeps its footer under the prompt. A turn that is still running has none (the working indicator stands in for it), and
- * neither has activity before the first prompt unless a checkpoint names its turn — a subagent's
- * output or a partial page must not claim an unnumbered turn. */
-export function placeTurnFooters(
+ * divider; a turn that produced only usage keeps its footer under its prompt. A turn that is still
+ * running has none (the working indicator stands in for it), and neither has a turn no prompt
+ * opened unless a checkpoint numbers it: a subagent's output or a partial page must not claim an
+ * unnumbered turn. */
+export function layoutTurns(
   rows: readonly TimelineRenderRow[],
-  segments: ReadonlyMap<number | null, TurnFooterSummary & { footerEligible: boolean }>,
+  turns: TimelineTurns,
   sessionActive: boolean,
-): Map<string, TurnFooterSummary> {
+): TurnLayout {
   const footers = new Map<string, TurnFooterSummary>();
-  let segmentKey: number | null = null;
+  const turnStarts = new Set<string>();
+  const standaloneReplies = new Set<string>();
+  const finalIndex = turns.segments.length - 1;
+  let current = 0;
   let anchorKey: string | null = null;
-  const close = (last: boolean) => {
-    const segment = segments.get(segmentKey);
-    if (!segment?.footerEligible || anchorKey === null || (last && sessionActive)) return;
-    if (segmentKey === null && segment.turn === undefined) return;
+  const close = () => {
+    const segment = turns.segments[current];
+    if (!segment?.footerEligible || anchorKey === null || (current === finalIndex && sessionActive)) return;
+    if (!segment.prompted && segment.turn === undefined) return;
     footers.set(anchorKey, segment);
   };
-  for (const row of rows) {
-    if (startsTimelineTurn(row) && row.kind === "item") {
-      close(false);
-      segmentKey = row.item.id;
-      anchorKey = row.key;
-    } else if (row.kind !== "item" || !HISTORY_DIVIDER_KINDS.has(row.item.kind)) {
-      anchorKey = row.key;
+  rows.forEach((row, index) => {
+    const itemId = rowItemId(row);
+    const segmentIndex = (itemId === undefined ? undefined : turns.segmentOf.get(itemId)) ?? current;
+    if (segmentIndex !== current) {
+      close();
+      current = segmentIndex;
+      anchorKey = null;
+      if (index > 0) turnStarts.add(row.key);
     }
-  }
-  close(true);
-  return footers;
-}
-
-/** Replies no turn footer will ever copy keep their own Copy: a subagent's replies, which a turn's
- * Copy leaves out, and output before the first prompt that no checkpoint numbers (a subagent's own
- * transcript in the Subagents panel). */
-export function standaloneReplyKeys(
-  rows: readonly TimelineRenderRow[],
-  segments: ReadonlyMap<number | null, TurnFooterSummary>,
-): Set<string> {
-  const keys = new Set<string>();
-  const unnumberedHead = segments.get(null)?.turn === undefined;
-  let inHead = true;
-  for (const row of rows) {
-    if (startsTimelineTurn(row)) inHead = false;
-    if (row.kind !== "item" || row.item.kind !== "agent_message") continue;
-    if (row.item.parentToolUseId || (inHead && unnumberedHead)) keys.add(row.key);
-  }
-  return keys;
+    if (row.kind !== "item" || !HISTORY_DIVIDER_KINDS.has(row.item.kind)) anchorKey = row.key;
+    if (row.kind === "item" && row.item.kind === "agent_message") {
+      const segment = turns.segments[current];
+      if (row.item.parentToolUseId || (segment && !segment.prompted && segment.turn === undefined)) {
+        standaloneReplies.add(row.key);
+      }
+    }
+  });
+  close();
+  return { footers, turnStarts, standaloneReplies };
 }
 
 export type TimelineRenderRow =
   | {
       kind: "work_summary";
       key: string;
+      /** The group's first item, which places the summary in its turn. */
+      firstItemId?: number;
       tools: number;
       edits: number;
       thoughts: number;
@@ -600,18 +639,15 @@ function EventTimelineBody({
   const forkTurns = useMemo(() => assistantForkTurns(items), [items]);
   const rewindTurns = useMemo(() => userRewindTurns(items), [items]);
   // Rows are patched in place between revisions, so the revision (not the array) keys this pass.
-  const { turnFooters, standaloneReplies } = useMemo(() => {
-    const segments = summarizeTimelineTurns(items, forkTurns);
-    return {
-      turnFooters: placeTurnFooters(rows, segments, sessionActive),
-      standaloneReplies: standaloneReplyKeys(rows, segments),
-    };
-  }, [rows, projection.revision, items, forkTurns, sessionActive]);
+  const { footers: turnFooters, turnStarts, standaloneReplies } = useMemo(
+    () => layoutTurns(rows, summarizeTimelineTurns(items, forkTurns), sessionActive),
+    [rows, projection.revision, items, forkTurns, sessionActive],
+  );
   // Read at call time: the projector extends `rows` in place, so the closure always sees the tail.
   const rowGap = useCallback(
     (_row: TimelineRenderRow, index: number) =>
-      startsTimelineTurn(rows[index + 1]) ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP,
-    [rows],
+      turnStarts.has(rows[index + 1]?.key ?? "") ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP,
+    [rows, turnStarts],
   );
   const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
   let pinnedQuestionRow: TimelineRenderRow | undefined;
@@ -783,7 +819,7 @@ function EventTimelineBody({
       {rows.map((row, index) => (
         <div
           key={row.key}
-          className={index > 0 && startsTimelineTurn(row) ? "tl-turn-start" : undefined}
+          className={turnStarts.has(row.key) ? "tl-turn-start" : undefined}
           role="listitem"
           aria-posinset={index + 1}
           aria-setsize={rows.length}
@@ -1763,7 +1799,9 @@ export function flattenTimelineRows(
         highestReviewRisk = higherReviewRisk(highestReviewRisk, item.riskLevel);
       }
     }
-    rows.push({ kind: "work_summary", key, tools, edits, thoughts, autoApproved, highestReviewRisk, open });
+    rows.push({
+      kind: "work_summary", key, firstItemId: group.items[0]?.id, tools, edits, thoughts, autoApproved, highestReviewRisk, open,
+    });
     if (open) rows.push(...flattenTimelineItemRows(group.items, disclosure, true, 0, toolIds));
   }
   return rows;
