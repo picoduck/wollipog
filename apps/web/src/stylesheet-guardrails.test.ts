@@ -964,13 +964,18 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   };
   const isConstant = (declaration: ts.Node): declaration is ts.VariableDeclaration =>
     ts.isVariableDeclaration(declaration) && Boolean(ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const);
-  /** The function a declaration names: itself, or what its constant holds, through `memo()` and `forwardRef()`. */
-  const functionOf = (declaration: ts.Node | "glyph" | undefined): SourceFunction | undefined => {
-    if (!declaration || declaration === "glyph") return undefined;
+  /**
+   * The function a declaration names: itself, or what its constant holds, through `memo()` and
+   * `forwardRef()`, whether they wrap the function or a name for it (`memo(WarningIconInner)`).
+   */
+  const functionOf = (declaration: ts.Node | "glyph" | undefined, seen = new Set<ts.Node>()): SourceFunction | undefined => {
+    if (!declaration || declaration === "glyph" || seen.has(declaration)) return undefined;
+    seen.add(declaration);
     if (isSourceFunction(declaration)) return declaration;
     if (!ts.isVariableDeclaration(declaration)) return undefined;
     let value = transparent(declaration.initializer);
     while (value && ts.isCallExpression(value)) value = transparent(value.arguments[0]);
+    if (value && (ts.isIdentifier(value) || ts.isPropertyAccessExpression(value))) return functionOf(declarationOf(value), seen);
     return isSourceFunction(value) ? value : undefined;
   };
   /** Whether a function is reached by name, so its call sites are all the values its parameters take. */
@@ -1067,6 +1072,10 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       return objectValues(node.expression).flatMap((value) => componentsOf(value, seen));
     }
     if (!ts.isIdentifier(node) && !ts.isPropertyAccessExpression(node)) return [];
+    // A component passed as a prop is whatever the call sites pass: LibraryIcon's `glyph`, however
+    // it is read — destructured in the signature, as `props.glyph`, or destructured from `props`.
+    const passed = propRead(node);
+    if (passed) return passedValues(passed.fn, passed.index, passed.prop).flatMap((value) => componentsOf(value, seen));
     const declaration = declarationOf(node);
     if (declaration === "glyph") return ["icon"];
     const fn = functionOf(declaration);
@@ -1075,13 +1084,47 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (isConstant(declaration)) return componentsOf(declaration.initializer, seen);
     if (ts.isPropertyAssignment(declaration)) return componentsOf(declaration.initializer, seen);
     if (ts.isShorthandPropertyAssignment(declaration)) return componentsOf(declaration.name, seen);
-    // A component passed as a prop is whatever the call sites pass: LibraryIcon's `glyph`.
+    return [];
+  };
+  /** The parameter prop a name or property access reads, when it reads one: `glyph`, `props.glyph`, or `const { glyph } = props`. */
+  const propRead = (node: ts.Identifier | ts.PropertyAccessExpression): { fn: SourceFunction; index: number; prop: string } | null => {
+    const wholeParameter = (base: ts.Node) => {
+      const declaration = declarationOf(base);
+      const parameter = declaration && declaration !== "glyph" ? parameterOf(declaration) : null;
+      return parameter && parameter.prop === null ? parameter : null;
+    };
+    if (ts.isPropertyAccessExpression(node)) {
+      const parameter = wholeParameter(node.expression);
+      return parameter ? { fn: parameter.fn, index: parameter.index, prop: node.name.text } : null;
+    }
+    const declaration = declarationOf(node);
+    if (!declaration || declaration === "glyph") return null;
     const parameter = parameterOf(declaration);
-    if (!parameter || parameter.rest || parameter.index !== 0 || parameter.prop === null) return [];
-    return (jsxSites.get(parameter.fn) ?? []).flatMap((site) => site.attributes.properties.flatMap((attribute) =>
-      ts.isJsxAttribute(attribute) && attribute.name.getText() === parameter.prop
-        && attribute.initializer && ts.isJsxExpression(attribute.initializer)
-        ? componentsOf(attribute.initializer.expression, seen) : []));
+    if (parameter && parameter.prop !== null) return { fn: parameter.fn, index: parameter.index, prop: parameter.prop };
+    const destructured = destructuredFrom(declaration);
+    const source = destructured?.key && transparent(destructured.from);
+    const base = source && ts.isIdentifier(source) ? wholeParameter(source) : null;
+    return base && destructured?.key ? { fn: base.fn, index: base.index, prop: destructured.key } : null;
+  };
+  /** The expressions a function's call sites pass for one prop of one parameter, through attributes and spread objects. */
+  const passedValues = (fn: SourceFunction, index: number, prop: string): ts.Node[] => {
+    const fromObject = (input: ts.Node | undefined, seen = new Set<ts.Node>()): ts.Node[] => {
+      const node = transparent(input);
+      if (!node || seen.has(node)) return [];
+      seen.add(node);
+      if (ts.isObjectLiteralExpression(node)) {
+        return node.properties.flatMap((property) => ts.isSpreadAssignment(property) ? fromObject(property.expression, seen)
+          : ts.isPropertyAssignment(property) && property.name.getText() === prop ? [property.initializer]
+            : ts.isShorthandPropertyAssignment(property) && property.name.text === prop ? [property.name] : []);
+      }
+      const declaration = ts.isIdentifier(node) ? declarationOf(node) : undefined;
+      return declaration && declaration !== "glyph" && isConstant(declaration) ? fromObject(declaration.initializer, seen) : [];
+    };
+    const fromElements = index !== 0 ? [] : (jsxSites.get(fn) ?? []).flatMap((site) => site.attributes.properties.flatMap((attribute) =>
+      ts.isJsxSpreadAttribute(attribute) ? fromObject(attribute.expression)
+        : attribute.name.getText() === prop && attribute.initializer && ts.isJsxExpression(attribute.initializer)
+          && attribute.initializer.expression ? [attribute.initializer.expression] : []));
+    return [...fromElements, ...(callSites.get(fn) ?? []).flatMap((call) => fromObject(call.arguments[index]))];
   };
   /** Every value an object can hold, for an access whose key is not known. */
   const objectValues = (input: ts.Node): ts.Node[] => {
@@ -1388,6 +1431,20 @@ function covers(counterpart: ParsedMember, context: string, subject: readonly st
   return expandedSubjects(counterpart.compounds.at(-1)!).some((parts) => parts.every((part) => subject.includes(part)));
 }
 
+/** One media query that is forced colors and nothing else. */
+const FORCED_ONLY = /^\(\s*forced-colors\s*:\s*active\s*\)$/i;
+/**
+ * Whether one media query matches only in forced colors: it requires `(forced-colors: active)`, and
+ * nothing negates that requirement. A `not` elsewhere — `(forced-colors: active) and (not (pointer:
+ * coarse))` — negates only its own condition; a query opening with `not` negates all of it, and one
+ * with `or` (Media Queries 4) can match without it.
+ */
+const requiresForcedColors = (query: string) => !/^\s*not\b|\bor\b/i.test(query)
+  && /(?<!\bnot\s*)\(\s*forced-colors\s*:\s*active\s*\)/i.test(query);
+/** Whether one media query can never match in forced colors: it requires `(forced-colors: none)` or `not (forced-colors: active)`. */
+const excludesForcedColors = (query: string) => !/^\s*not\b|\bor\b/i.test(query)
+  && (/(?<!\bnot\s*)\(\s*forced-colors\s*:\s*none\s*\)/i.test(query) || /\bnot\s*\(\s*forced-colors\s*:\s*active\s*\)/i.test(query));
+
 export interface SelfColouredIcon { rule: string; at: string; problem: string }
 
 /**
@@ -1411,14 +1468,12 @@ export function selfColouredIcons(sheet: postcss.Root, icons: ReadonlySet<string
       if (node.type === "atrule") atRules.push(node as postcss.AtRule);
     }
     if (atRules.some((atRule) => /keyframes$/i.test(atRule.name))) return;
-    const isMedia = (atRule: postcss.AtRule) => atRule.name.toLowerCase() === "media";
-    const forcedMedia = atRules.filter((atRule) => isMedia(atRule) && /\(\s*forced-colors\s*:\s*active\s*\)/i.test(atRule.params)
-      && !/\bnot\b/i.test(atRule.params));
+    const queries = (atRule: postcss.AtRule) => atRule.name.toLowerCase() === "media" ? topLevelSelectorMembers(atRule.params) : [];
+    const forcedMedia = atRules.filter((atRule) => queries(atRule).some(requiresForcedColors));
     // A query that adds a condition to forced colors (`… and (max-width: 760px)`) is still a condition.
-    const onlyForced = forcedMedia.filter((atRule) => /^\(\s*forced-colors\s*:\s*active\s*\)$/i.test(atRule.params.trim()));
+    const onlyForced = forcedMedia.filter((atRule) => queries(atRule).some((query) => FORCED_ONLY.test(query)));
     // Media that cannot match in forced colors never applies where the icon would keep its colour.
-    if (atRules.some((atRule) => isMedia(atRule) && !atRule.params.includes(",") && (/forced-colors\s*:\s*none/i.test(atRule.params)
-      || (/\bnot\b/i.test(atRule.params) && /forced-colors\s*:\s*active/i.test(atRule.params))))) return;
+    if (atRules.some((atRule) => queries(atRule).length > 0 && queries(atRule).every(excludesForcedColors))) return;
     entries.push({
       rule: target.rule,
       declaration,
@@ -1460,7 +1515,8 @@ export function selfColouredIcons(sheet: postcss.Root, icons: ReadonlySet<string
           return false;
         });
       });
-      if (subjects.every(undone)) continue;
+      // Each alternative of a functional selector left in the subject is an icon of its own to undo.
+      if (subjects.flatMap(expandedSubjects).every(undone)) continue;
       report(lighter
         ? `its forced-colors rule ${lighter} is lighter, so the icon keeps this colour`
         : "no later @media (forced-colors: active) rule sets this icon's color to inherit or a system colour");
@@ -2611,6 +2667,20 @@ test("icon classes are read from every way a class reaches an icon, and an unrea
   assert.deepEqual(scanOf({ "components/Icons.tsx": icons, "components/Row.tsx": row }),
     { classes: ["app-icon", "row-check", "row-stop", "row-tone"], unread: [] });
 
+  // A memoised name for a component, and a glyph prop read as `props.glyph` or destructured from
+  // `props` in the body, are followed like LibraryIcon's signature (#2387 review).
+  assert.deepEqual(scanOf({ "Wrapped.tsx": [
+    "import { memo } from \"react\";",
+    "import { Check, type LucideIcon } from \"lucide-react\";",
+    "function MarkInner(props: { className?: string }) { return <svg className={props.className} />; }",
+    "export const Mark = memo(MarkInner);",
+    "function ByAccess(props: { glyph: LucideIcon; className?: string }) { const Glyph = props.glyph; return <Glyph className={props.className} />; }",
+    "function ByBody(props: { glyph: LucideIcon; className?: string }) { const { glyph: Glyph, className } = props; return <Glyph className={className} />; }",
+    "export function Uses() {",
+    "  return <><Mark className=\"memo-mark\" /><ByAccess glyph={Check} className=\"by-access\" /><ByBody glyph={Check} className=\"by-body\" /></>;",
+    "}",
+  ].join("\n") }), { classes: ["by-access", "by-body", "memo-mark"], unread: [] });
+
   // A value the scan cannot follow is reported, alone or inside a composed name.
   assert.deepEqual(scanOf({ "A.tsx": "export function A(props: { data: { c: string } }) { return <svg className={props.data.c} />; }" }),
     { classes: [], unread: ["A.tsx:1 ${…}"] });
@@ -2634,6 +2704,8 @@ test("a rule that colours an icon needs a later forced-colors rule, at least as 
     ".mark { &:hover { color: var(--accent); } }", forced(".mark:hover { color: CanvasText; }"),
     "@media (max-width: 760px) { .tile svg { color: var(--accent); } }", forced(".tile svg { color: inherit; }"),
     ".hot .app-icon { color: var(--red) !important; }", forced(".hot .app-icon { color: inherit !important; }"),
+    // A functional selector left in the subject is undone by the same selector, alternative by alternative.
+    ".stat .mark:is(:hover, :focus-visible) { color: var(--accent); }", forced(".stat .mark:is(:hover, :focus-visible) { color: inherit; }"),
     // Media that never matches in forced colors needs no counterpart.
     "@media (forced-colors: none) { .cold .mark { color: var(--blue); } }",
   ].join("\n");
@@ -2663,6 +2735,14 @@ test("a rule that colours an icon needs a later forced-colors rule, at least as 
     ["@media (max-width: 760px) { .tile .app-icon { color: var(--amber); } }", ".tile .app-icon { color: var(--amber) }", "no later"],
     [".tile { .mark { color: var(--amber); } }", ":is(.tile) .mark { color: var(--amber) }", "no later"],
     [".tile .m\\61 rk { color: var(--amber); }", ".tile .m\\61 rk { color: var(--amber) }", "no later"],
+    // A counterpart for only one alternative leaves the other.
+    [`.tile .mark:is(:hover, :focus-visible) { color: var(--amber); }\n${forced(".tile .mark:hover { color: inherit; }")}`,
+      ".tile .mark:is(:hover, :focus-visible) { color: var(--amber) }", "no later"],
+    // A `not` that negates another condition still leaves the query in forced colors (#2387 review).
+    ["@media (forced-colors: active) and (not (pointer: coarse)) { .tile .mark { color: var(--amber); } }",
+      ".tile .mark { color: var(--amber) }", "inside forced colors"],
+    ["@media (max-width: 760px) and (not (pointer: coarse)) { .tile .mark { color: var(--amber); } }",
+      ".tile .mark { color: var(--amber) }", "no later"],
     // Inside forced colors an author colour cannot be undone at all.
     [forced(".tile .mark { color: var(--amber); }"), ".tile .mark { color: var(--amber) }", "inside forced colors"],
   ] as const) {
