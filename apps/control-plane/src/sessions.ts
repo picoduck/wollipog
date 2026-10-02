@@ -6660,6 +6660,14 @@ export class SessionsService {
         !canAccess(campaignSessionId) || !canAccess(child.id)) {
       return fail("campaign child not found", 404);
     }
+    // get_campaign projects the outermost campaign and counts only verifications keyed by it, so a
+    // nested Orchestrator verifies into the root too; keyed by its own id, the row was counted
+    // nowhere and the root could never complete (#1462). The root's live policy also governs, not
+    // the nested creation-time snapshot. Fails closed wherever the projection refuses the ancestry.
+    const rootId = this.db.resolvedCampaignSessionId(campaignSessionId);
+    const root = rootId ? this.db.getSession(rootId) : null;
+    if (!root?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
+    const completion = root.orchestratorPolicy.behavior.completion;
     // A requested stop, a guardrail Stop, a runner disconnect, and startup settlement all write
     // `stopped` before the runner confirms anything, so that row is not yet proof the child's last
     // report is final. Only a recorded confirmation is (#1466): it survives the runner going
@@ -6712,8 +6720,8 @@ export class SessionsService {
     const unfinishedDescendantId = this.db.campaignDescendantIds(child.id)
       .find((id) => {
         const candidate = this.db.getSession(id);
-        return !candidate || !this.db.campaignChildReportVerified(campaignSessionId, candidate.id) ||
-        (campaign.orchestratorPolicy!.behavior.completion === "stop_and_archive" &&
+        return !candidate || !this.db.campaignChildReportVerified(root.id, candidate.id) ||
+        (completion === "stop_and_archive" &&
           (!candidate.archived || !this.db.campaignChildWorktreesRetired(candidate.id)));
       });
     if (unfinishedDescendantId) {
@@ -6728,17 +6736,31 @@ export class SessionsService {
       }
     }
     if (spentApprovals.length > 0) this.hub.sessionChangedById(child.id);
-    this.db.verifyCampaignChildReport(campaignSessionId, child.id, request.reportEventSeq, now);
+    this.db.verifyCampaignChildReport(root.id, child.id, request.reportEventSeq, now);
     let updated = this.db.getSession(child.id)!;
-    if (campaign.orchestratorPolicy.behavior.completion === "stop_and_archive") {
+    if (completion === "stop_and_archive") {
       const archived = this.setArchived(child.id, true);
       if (!archived.ok || !archived.data) return failAs(archived, "campaign child archive failed");
       updated = archived.data;
       if (updated.archived) this.queueCampaignWorktreeRetirement(child.id);
     }
     const projection = this.db.campaignProjection(campaignSessionId)!;
-    this.hub.sessionChangedById(campaignSessionId);
+    this.campaignViewsChanged(root.id, child.id);
     return ok({ campaign: projection, child: updated }, updated.archiveStatus ? 202 : 200);
+  }
+
+  /** Refresh the root campaign and every nested Orchestrator between it and `sessionId`: each one's
+   * view embeds the same root-derived projection, so a nested caller's own view changed too. */
+  private campaignViewsChanged(rootId: string, sessionId: string): void {
+    this.hub.sessionChangedById(rootId);
+    const seen = new Set([rootId, sessionId]);
+    let parentId = this.db.getSession(sessionId)?.parentSessionId ?? null;
+    for (let depth = 0; parentId && !seen.has(parentId) && depth < 64; depth += 1) {
+      seen.add(parentId);
+      const parent = this.db.getSession(parentId);
+      if (parent?.orchestratorPolicy) this.hub.sessionChangedById(parent.id);
+      parentId = parent?.parentSessionId ?? null;
+    }
   }
 
   private campaignAssignment(
@@ -9939,7 +9961,7 @@ export class SessionsService {
             this.log.warn(`archive worktree retirement for ${sessionId} needs retry: ${String(error)}`);
           }
           this.hub.sessionChangedById(sessionId);
-          this.hub.sessionChangedById(campaignId!);
+          this.campaignViewsChanged(campaignId!, sessionId);
         }
       } finally {
         this.archiveWorktreeRetirements.delete(sessionId);
@@ -9974,7 +9996,7 @@ export class SessionsService {
     this.db.recordCampaignWorktreeCleanup(message.sessionId, message.path, message.worktreeId,
       "refused", message.reason.slice(0, 1050), Date.now());
     this.hub.sessionChangedById(message.sessionId);
-    this.hub.sessionChangedById(campaignId!);
+    this.campaignViewsChanged(campaignId!, message.sessionId);
   }
 
   /** Project bulk archive delegates every session to the same stop-and-archive primitive as the

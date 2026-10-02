@@ -2880,6 +2880,59 @@ test("campaign report verification and normalized follow-up deduplication surviv
   }
 });
 
+test("verifications a nested Orchestrator recorded under its own id move to the root campaign on open (#1462)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-nested-campaign-rekey-"));
+  const file = join(root, "control-plane.db");
+  try {
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    const initial = ControlPlaneDb.open(file);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" }, orchestratorPolicy: policy }));
+    initial.createSession(newSession({ id: "nested", parentSessionId: "campaign",
+      config: { permissionMode: "orchestrator" }, orchestratorPolicy: policy }));
+    for (const id of ["grandchild", "reverified"]) {
+      initial.createSession(newSession({ id, parentSessionId: "nested" }));
+      initial.updateSessionStatus(id, "idle", 999);
+    }
+    initial.createSession(newSession({ id: "orphan", config: { permissionMode: "orchestrator" }, orchestratorPolicy: policy }));
+    initial.createSession(newSession({ id: "orphan-child", parentSessionId: "orphan" }));
+    initial.updateSessionStatus("orphan-child", "idle", 999);
+    const grandchildReport = initial.appendEvent("grandchild", { kind: "agent_message", text: "Report", final: true }, 1_000);
+    const staleReport = initial.appendEvent("reverified", { kind: "agent_message", text: "Old report", final: true }, 1_000);
+    const orphanReport = initial.appendEvent("orphan-child", { kind: "agent_message", text: "Report", final: true }, 1_000);
+    // The keys a pre-#1462 control plane wrote: the nested caller's own id.
+    initial.verifyCampaignChildReport("nested", "grandchild", grandchildReport.seq, 1_001);
+    initial.verifyCampaignChildReport("nested", "reverified", staleReport.seq, 1_001);
+    const currentReport = initial.appendEvent("reverified", { kind: "agent_message", text: "New report", final: true }, 1_002);
+    initial.verifyCampaignChildReport("campaign", "reverified", currentReport.seq, 1_003);
+    initial.verifyCampaignChildReport("orphan", "orphan-child", orphanReport.seq, 1_001);
+    // A cyclic ancestry the projection refuses keeps its row unreachable rather than inventing a root.
+    initial.raw().prepare("UPDATE sessions SET parent_session_id='orphan-child' WHERE id='orphan'").run();
+    assert.equal(initial.campaignChildReportVerified("campaign", "grandchild"), false);
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(file);
+    const rows = reopened.raw().prepare(
+      `SELECT campaign_session_id, child_session_id, report_event_seq FROM orchestrator_campaign_child_reports
+       ORDER BY child_session_id`,
+    ).all();
+    assert.deepEqual(rows.map((row) => ({ ...row })), [
+      { campaign_session_id: "campaign", child_session_id: "grandchild", report_event_seq: grandchildReport.seq },
+      { campaign_session_id: "orphan", child_session_id: "orphan-child", report_event_seq: orphanReport.seq },
+      { campaign_session_id: "campaign", child_session_id: "reverified", report_event_seq: currentReport.seq },
+    ], "nested rows move to the root, the later verification wins a conflict, refused ancestry is untouched");
+    assert.equal(reopened.campaignChildReportVerified("campaign", "grandchild"), true);
+    assert.equal(reopened.campaignChildReportVerified("campaign", "reverified"), true);
+    assert.equal(reopened.campaignForVerifiedChild("grandchild"), "campaign");
+    assert.equal(reopened.campaignForVerifiedChild("orphan-child"), null,
+      "a row under a refused ancestry never names a campaign for cleanup");
+    assert.equal(reopened.campaignProjection("campaign")?.children.verified, 2);
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("verified campaign children survive an event cache reset without a history read", () => {
   const db = withRunner();
   try {

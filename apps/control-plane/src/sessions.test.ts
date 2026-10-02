@@ -3788,6 +3788,102 @@ test("PR merge action admission accepts only the canonical enqueue command", () 
   }).status, 400, "extra action fields fail closed");
 });
 
+test("a nested Orchestrator's verification counts toward the root campaign (#1462)", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const root = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" },
+    });
+    assert.ok(root.ok && root.data, root.error);
+    db.updateSessionStatus(root.data.id, "running", Date.now());
+    const createChild = (parentSessionId: string, title: string, nestedOrchestrator = false) => {
+      const request = {
+        runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, title,
+        agentId: nestedOrchestrator ? "test-orchestrator" : AGENT_ID,
+        ...(nestedOrchestrator ? { config: { permissionMode: "orchestrator" as const } } : {}),
+      };
+      let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+      if (created.status === 428) {
+        const spawnApproval = db.getSession(parentSessionId)!.pendingApproval!;
+        assert.ok(svc.approve(parentSessionId, spawnApproval.requestId, "allow").ok);
+        created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+      }
+      assert.ok(created.ok && created.data, created.error);
+      db.updateSessionStatus(created.data.id, "running", Date.now());
+      return created.data;
+    };
+    const nested = createChild(root.data.id, "Nested Orchestrator", true);
+    assert.ok(db.getSession(nested.id)?.orchestratorPolicy, "the nested Orchestrator carries a policy snapshot");
+    const grandchild = createChild(nested.id, "Grandchild");
+    const report = (sessionId: string, text: string) => {
+      svc.onSessionStatus(sessionId, "idle");
+      return db.appendEvent(sessionId, { kind: "agent_message", text, final: true }, Date.now()).seq;
+    };
+
+    hub.sessionChangedByIdCalls.length = 0;
+    const nestedVerification = svc.verifyCampaignChild(nested.id, {
+      childSessionId: grandchild.id, reportEventSeq: report(grandchild.id, "Grandchild report"),
+      followUpsAccounted: true,
+    });
+    assert.ok(nestedVerification.ok, nestedVerification.error);
+    assert.equal(db.campaignChildReportVerified(root.data.id, grandchild.id), true,
+      "a nested Orchestrator's verification is recorded where the root campaign reads it");
+    assert.equal(db.campaignChildReportVerified(nested.id, grandchild.id), false,
+      "no row is stranded under the nested Orchestrator's own id");
+    assert.equal(db.campaignProjection(root.data.id)?.children.verified, 1,
+      "the root projection counts the grandchild the nested Orchestrator verified");
+    assert.equal(nestedVerification.data?.campaign.children.verified, 1);
+    assert.ok(hub.sessionChangedByIdCalls.includes(root.data.id) &&
+      hub.sessionChangedByIdCalls.includes(nested.id),
+    "both campaign views embed the root projection, so both refresh");
+
+    const rootVerification = svc.verifyCampaignChild(root.data.id, {
+      childSessionId: nested.id, reportEventSeq: report(nested.id, "Nested campaign report"),
+      followUpsAccounted: true,
+    });
+    assert.ok(rootVerification.ok, rootVerification.error);
+    assert.equal(rootVerification.data?.campaign.status, "verified_complete",
+      "the root campaign completes once every descendant was verified by its controlling Orchestrator");
+
+    // The root's live behavior governs a nested verification, not the nested creation-time snapshot.
+    db.updateSessionOrchestratorBehavior(root.data.id, { completion: "stop_and_archive" }, Date.now());
+    assert.equal(db.getSession(nested.id)?.orchestratorPolicy?.behavior.completion, "retain");
+    db.updateSessionStatus(nested.id, "running", Date.now());
+    const laterGrandchild = createChild(nested.id, "Later Grandchild");
+    const archivedVerification = svc.verifyCampaignChild(nested.id, {
+      childSessionId: laterGrandchild.id, reportEventSeq: report(laterGrandchild.id, "Later report"),
+      followUpsAccounted: true,
+    });
+    assert.ok(archivedVerification.ok, archivedVerification.error);
+    assert.equal(archivedVerification.data?.child.archiveStatus, "stop_pending",
+      "the root campaign's Stop and Archive applies to a child the nested Orchestrator verified");
+
+    // Fail closed exactly where the projection refuses the ancestry, rather than writing a row
+    // keyed by the caller that no projection would ever count.
+    const cyclicGrandchild = createChild(nested.id, "Cyclic Grandchild");
+    const cyclicReport = report(cyclicGrandchild.id, "Cyclic report");
+    db.raw().prepare("UPDATE sessions SET parent_session_id=? WHERE id=?").run(nested.id, root.data.id);
+    assert.equal(db.resolvedCampaignSessionId(nested.id), null);
+    const refused = svc.verifyCampaignChild(nested.id, {
+      childSessionId: cyclicGrandchild.id, reportEventSeq: cyclicReport, followUpsAccounted: true,
+    });
+    assert.equal(refused.status, 404, refused.error);
+    assert.equal((db.raw().prepare(
+      "SELECT COUNT(*) AS count FROM orchestrator_campaign_child_reports WHERE child_session_id=?",
+    ).get(cyclicGrandchild.id) as { count: number }).count, 0, "a refused ancestry records no verification");
+  } finally {
+    db.close();
+  }
+});
+
 test("opt-in Parent Control resolves exact nested request occurrences with agent provenance", () => {
   const { db, svc, hub } = makeHarness();
   try {

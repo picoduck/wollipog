@@ -6021,6 +6021,7 @@ export class ControlPlaneDb {
       controlPlane.collectOrphanedEventPayloadArtifacts();
       controlPlane.migrateInlineSessionEventPayloads();
       controlPlane.collectWorkflowArtifactBlobs();
+      controlPlane.rekeyNestedCampaignChildReports();
       controlPlane.captureUnresetLegacyCampaignReports();
       controlPlane.seedUsageAggregationBaseline(Date.now());
       controlPlane.maintainUsageAggregation(Date.now());
@@ -15063,12 +15064,15 @@ export class ControlPlaneDb {
     return this.validCampaignChildReportIds(campaignSessionId, childSessionId).has(childSessionId);
   }
 
+  /** The root campaign whose verification of this child is current. Verifications are keyed by the
+   * resolved root (#1462); a row under any other id is one the projection never counts. */
   campaignForVerifiedChild(childSessionId: string): string | null {
     const row = this.stmt(
       `SELECT campaign_session_id AS id FROM orchestrator_campaign_child_reports
        WHERE child_session_id=? ORDER BY verified_at DESC LIMIT 1`,
     ).get(childSessionId) as { id: string } | undefined;
-    return row && this.campaignChildReportVerified(row.id, childSessionId) ? row.id : null;
+    return row && this.resolvedCampaignSessionId(row.id) === row.id &&
+      this.campaignChildReportVerified(row.id, childSessionId) ? row.id : null;
   }
 
   campaignReportRecoverySessionIds(campaignSessionId: string): string[] {
@@ -15578,6 +15582,33 @@ export class ControlPlaneDb {
    * counts them. Null whenever campaignProjection would refuse this session's ancestry. */
   resolvedCampaignSessionId(campaignSessionId: string): string | null {
     return this.resolvedCampaignSession(campaignSessionId)?.id ?? null;
+  }
+
+  /** Before #1462 a nested Orchestrator's verification was keyed by its own id, where no
+   * projection, completion gate, or cleanup lookup reads it. Move each such row to the root the
+   * projection resolves; when the root already holds a row for that child, the later verification
+   * wins, as a fresh write would. Rows under an ancestry the projection refuses stay unreachable. */
+  rekeyNestedCampaignChildReports(): void {
+    const campaigns = this.stmt("SELECT DISTINCT campaign_session_id AS id FROM orchestrator_campaign_child_reports")
+      .all() as Array<{ id: string }>;
+    for (const { id } of campaigns) {
+      const rootId = this.resolvedCampaignSessionId(id);
+      if (!rootId || rootId === id) continue;
+      this.atomic(() => {
+        this.stmt(
+          `INSERT INTO orchestrator_campaign_child_reports
+           (campaign_session_id, child_session_id, report_event_seq, verified_at, report_event_epoch, report_ts, report_digest)
+           SELECT ?, child_session_id, report_event_seq, verified_at, report_event_epoch, report_ts, report_digest
+           FROM orchestrator_campaign_child_reports WHERE campaign_session_id=?
+           ON CONFLICT(campaign_session_id, child_session_id) DO UPDATE SET
+             report_event_seq=excluded.report_event_seq, verified_at=excluded.verified_at,
+             report_event_epoch=excluded.report_event_epoch, report_ts=excluded.report_ts,
+             report_digest=excluded.report_digest
+           WHERE excluded.verified_at>orchestrator_campaign_child_reports.verified_at`,
+        ).run(rootId, id);
+        this.stmt("DELETE FROM orchestrator_campaign_child_reports WHERE campaign_session_id=?").run(id);
+      });
+    }
   }
 
   campaignWorktreeCleanup(sessionId: string): NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> {
