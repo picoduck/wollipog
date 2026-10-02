@@ -5,23 +5,51 @@ residue that concurrent issue work leaves behind.
 
 ## Ground Truth
 
-**Tracker against repository.** For each issue closed since the previous run of this job (the
-last successful execution's start time), up to 60, read its acceptance criteria and check each one
-against the merged code. Split the reading across read-only helper agents when the count is large;
-the 2026-09-25 run found 148 closures in a week and a fixed 30-issue window left 118 unchecked.
-Select by close date, not creation date:
+**Tracker against repository.** Review up to 60 closed issues per run against the merged
+code, including unfinished reviews carried forward from earlier runs. Split the reading across
+read-only helper agents when the count is large. The review cap bounds investigation, not the
+number of closures retained: the 2026-10-02 run found 281 closures and reviewed 60; selecting only
+the newest 60 and advancing the next run's window would permanently drop the other 221.
+
+**Record the window and retain the backlog.** At launch, write the actual UTC start time to
+`run-start.txt` in this run's scratch directory. Use the automation session's `createdAt` for a
+resumed run; never replace it with the resume time or infer it from scratch-file mtimes. Before
+the shared 30-day scratch prune, load the most recent earlier `closed-issue-audit.json` and carry
+its audit state into this run's scratch directory, so an old backlog survives the prune.
+The audit artifact records `harvestedThrough`, `pending`, and `reviewed`; each issue entry is
+keyed by both `number` and `closedAt`, so a reopened and reclosed issue receives another review.
+
+Harvest closures since the previous audit's `harvestedThrough` (inclusively), then merge them
+with its pending entries, preserve its reviewed keys, and exclude closures already reviewed
+under the same key. On the first run without an audit artifact,
+use the last successful run's recorded start time. If that marker is unavailable, establish the
+start from its session metadata or a verified earlier report and disclose the bootstrap boundary.
+Set `TRACKER_PREVIOUS_START` to that UTC lower bound. Select by close date, not creation date:
 
 ```
-gh issue list --state closed --limit 100 --json number,title,closedAt,body \
-  --jq 'sort_by(.closedAt) | reverse | .[0:30]'
+gh issue list --state closed --search "closed:>=${TRACKER_PREVIOUS_START}" --limit 300 \
+  --json number,title,closedAt,body --jq 'sort_by([.closedAt, .number])'
 ```
+
+Do not slice this inventory to 30 or 60 before saving it. If the result reaches 300, completeness
+is unproven: increase the retrieval limit or split the close-time window into smaller searches
+until every interval is accounted for. Do not advance `harvestedThrough` for an incomplete
+harvest. Keep the previous boundary and the retrieved pending entries for a later retry.
+For a complete harvest, advance the boundary only to this run's recorded start time; overlapping
+entries are harmless because of deduplication. Save the merged inventory before investigating.
+
+Review the oldest 60 pending entries first. Update the audit artifact after each completed review,
+moving only fully assessed entries to `reviewed`; interrupted or budget-limited entries remain
+pending. Fetch the issue's current state and criteria when reviewing a carried entry; record a
+reopened issue as superseded rather than judging it as still closed. Write artifact updates through
+a temporary sibling and atomic rename. Report the number reviewed, the remaining pending count,
+and the oldest pending close date. A partial run must never claim a complete reconciliation.
 
 `gh issue list --state closed --limit 30` on its own orders by creation, so an old issue closed
 this week falls outside the window while a young one crowds in. One run's window silently
-omitted eleven issues closed in the same three days, among them the one whose merged fix
-explained the entire hygiene backlog it was reporting. Partial delivery is the common failure: an
-issue closed by a PR that implemented most of the checklist. For each open issue, check whether it
-was already fixed incidentally by other work. When checking whether a symbol an issue names is
+omitted eleven issues closed in the same three days. Partial delivery is the common failure:
+an issue closed by a PR that implemented most of the checklist. For each open issue, check whether
+it was already fixed incidentally by other work. When checking whether a symbol an issue names is
 gone, never pipe `git grep` through `head`: alphabetical path order can fill the window with hits
 from an unrelated package and read as "already removed". Scope the grep to the paths the issue
 names, or count the matches.
@@ -47,6 +75,10 @@ names, or count the matches.
 
 - An acceptance criterion is unmet only when you can show the specific behavior is absent from the
   merged code. Reading the PR description is not sufficient; check the code.
+- Distinguish absent code behavior from process evidence. For screenshots or approval criteria,
+  inspect the issue and PR comments and the originating Wollipog session's evidence and approval
+  record when available. Screenshots absent from the PR body do not prove they were never captured
+  or approved. If the record cannot be inspected, report the evidence as unverified, not waived.
 - Never delete a branch or worktree. This job reports; the human decides. A worktree that looks
   abandoned may hold uncommitted work — check with `git -C <worktree> status --porcelain` and say
   what you found.
