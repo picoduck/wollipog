@@ -10,15 +10,15 @@ import fc from "fast-check";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { ProviderHomeLeaseRegistry, observeLeaseVerificationWorkForTest, verifyLeaseCheckpointForTest, verifyLeaseRetirementForTest } from "./provider-home-lease.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS } from "./provider-home-lease-checkpoint.js";
-import { observeLeaseIoWorkForTest, readLeaseIoSnapshot } from "./provider-home-lease-io.js";
+import { observeLeaseIoRunsForTest, observeLeaseIoWorkForTest, readLeaseIoSnapshot, type LeaseIoRun } from "./provider-home-lease-io.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
 
 const owner = "a".repeat(64);
 const nativeModule = new URL("./provider-home-lease.ts", import.meta.url).href;
 const boundaries = ["before-guard", "guard-temp-written", "guard-file-durable", "guard-published", "guard-durable", "before-candidate", "candidate-written", "candidate-file-durable", "candidate-durable", "before-selection", "selection-published", "selection-durable", "before-retire", "after-retire", "retirement-durable"];
 
-function fixture(t: Pick<TestContext, "after">, reapers: Array<() => Promise<void>> = []): string {
-  const home = fs.mkdtempSync(join(tmpdir(), "wollipog-canonical-checkpoint-"));
+function fixture(t: Pick<TestContext, "after">, reapers: Array<() => Promise<void>> = [], parent = tmpdir()): string {
+  const home = fs.mkdtempSync(join(parent, "wollipog-canonical-checkpoint-"));
   t.after(async () => {
     // Parent timeouts can start this hook before a child's async after-hook ends.
     // Share its idempotent reaper rather than depending on hook nesting order.
@@ -713,16 +713,43 @@ test("pending migration still withholds HOME after checkpoint selection until ex
   assert.equal(registry.acquireHome(home), true); assert.equal(registry.releaseHome(home), true);
 });
 
+/** Migration retires every legacy record with an unlink and a directory fsync, all inside one
+ * fixed-helper call. On a disk shared with other builds that fsync latency, not lease behavior,
+ * decided whether the call fit its 120-second deadline (#2335). tmpfs keeps every lease rule and
+ * makes the fsyncs free; the fallback stays correct, only slower. */
+function memoryBackedParent(): string {
+  try {
+    if (fs.statfsSync("/dev/shm").type === 0x01021994) { fs.accessSync("/dev/shm", fs.constants.W_OK | fs.constants.X_OK); return "/dev/shm"; }
+  } catch { /* fall back to the ordinary temporary directory */ }
+  return tmpdir();
+}
+
 test("bounded migration catches up legacy journals at the admission bound and refuses one above unchanged", { timeout: 300_000, skip: process.platform !== "linux" }, (t) => {
+  const parent = memoryBackedParent();
+  const pythonTimeoutMs = 120_000;
   for (const writer of ["native", "helper"] as const) for (const transitions of [64, 512, LIMITS.migrationEntries - 6]) {
-    const home = fixture(t); oldCanonicalJournal(home, transitions);
+    const home = fixture(t, [], parent); oldCanonicalJournal(home, transitions);
     const started = performance.now();
     const maximum = { records: 0, bytes: 0 };
-    if (writer === "native") {
-      observeLeaseVerificationWorkForTest((work) => { maximum.records = Math.max(maximum.records, work.records); maximum.bytes = Math.max(maximum.bytes, work.bytes); });
-      try { assert.deepEqual(nativePass(home, { onCheckpointFailureForTest: (error) => { throw error; } }).getDiagnostics(), []); } finally { observeLeaseVerificationWorkForTest(); }
-    } else {
-      const result = helperPass(home, `
+    // Every step reports its timing even when it fails, so a fixed-helper or Python-writer call
+    // killed at its deadline on a slow host reads differently from a missing helper.
+    const calls: LeaseIoRun[] = [];
+    let python: { durationMs: number; timeoutMs: number; status: number | null; signal: string | null; error?: string } | undefined;
+    let outcome = "failed";
+    observeLeaseIoRunsForTest((run) => calls.push(run));
+    try {
+      if (writer === "native") {
+        observeLeaseVerificationWorkForTest((work) => { maximum.records = Math.max(maximum.records, work.records); maximum.bytes = Math.max(maximum.bytes, work.bytes); });
+        try { assert.deepEqual(nativePass(home, { onCheckpointFailureForTest: (error) => { throw error; } }).getDiagnostics(), []); } finally { observeLeaseVerificationWorkForTest(); }
+      } else {
+        const pythonStarted = performance.now();
+        const finished = (exit: { status: number | null; signal: string | null; error?: string }) => {
+          python = { durationMs: Math.round(performance.now() - pythonStarted), timeoutMs: pythonTimeoutMs, ...exit };
+        };
+        let result: ReturnType<typeof helperPass>;
+        // The bounded spawnSync throws ETIMEDOUT instead of returning it; record the exit either way.
+        try {
+          result = helperPass(home, `
 original_spend = spend_verification_work
 maximum = {"records": 0, "bytes": 0}
 def measured_spend(records, byte_count):
@@ -731,18 +758,29 @@ def measured_spend(records, byte_count):
         for key in maximum: maximum[key] = max(maximum[key], verification_work[key])
 spend_verification_work = measured_spend
 import atexit
-atexit.register(lambda: print(json.dumps(maximum)))`, WSL_SKILLS_HELPER, 120_000);
-      assert.equal(result.status, 0, String(result.stderr)); Object.assign(maximum, JSON.parse(String(result.stdout)));
+atexit.register(lambda: print(json.dumps(maximum)))`, WSL_SKILLS_HELPER, pythonTimeoutMs);
+        } catch (error) { finished({ status: null, signal: null, error: (error as NodeJS.ErrnoException).code }); throw error; }
+        finished({ status: result.status, signal: result.signal, error: (result.error as NodeJS.ErrnoException | undefined)?.code });
+        assert.equal(result.status, 0, String(result.stderr)); Object.assign(maximum, JSON.parse(String(result.stdout)));
+      }
+      assert.ok(maximum.records > 0 && maximum.records <= LIMITS.verificationRecords);
+      assert.ok(maximum.bytes > 0 && maximum.bytes <= LIMITS.verificationBytes);
+      assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 4);
+      assert.ok(storage(home).records <= 5);
+      assert.equal(helperPass(home).status, 0); nativePass(home);
+      outcome = "passed";
+    } finally {
+      observeLeaseIoRunsForTest();
+      const slowest = calls.reduce<LeaseIoRun | undefined>((found, call) => (!found || call.durationMs > found.durationMs ? call : found), undefined);
+      t.diagnostic(JSON.stringify({ writer, legacyTransitions: transitions, outcome, fixtureParent: parent, durationMs: Math.round(performance.now() - started),
+        helperCalls: calls.length, helperDeadlinesExceeded: calls.filter((call) => call.error === "ETIMEDOUT").length,
+        slowestHelperCall: slowest && { ...slowest, durationMs: Math.round(slowest.durationMs) },
+        ...(python && { pythonWriter: { ...python, deadlineExceeded: python.error === "ETIMEDOUT" } }),
+        verificationWork: maximum, ...(outcome === "passed" && storage(home)) }));
     }
-    assert.ok(maximum.records > 0 && maximum.records <= LIMITS.verificationRecords);
-    assert.ok(maximum.bytes > 0 && maximum.bytes <= LIMITS.verificationBytes);
-    assert.equal(JSON.parse(fs.readFileSync(paths(home).anchor, "utf8")).version, 4);
-    assert.ok(storage(home).records <= 5);
-    assert.equal(helperPass(home).status, 0); nativePass(home);
-    t.diagnostic(JSON.stringify({ writer, legacyTransitions: transitions, durationMs: Math.round(performance.now() - started), verificationWork: maximum, ...storage(home) }));
   }
   for (const writer of ["native", "helper"] as const) {
-    const home = fixture(t); oldCanonicalJournal(home, LIMITS.migrationEntries - 5);
+    const home = fixture(t, [], parent); oldCanonicalJournal(home, LIMITS.migrationEntries - 5);
     const before = evidence(home);
     if (writer === "native") assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /storage cap/);
     else assert.notEqual(helperPass(home).status, 0);

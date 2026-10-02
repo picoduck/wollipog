@@ -10,12 +10,17 @@ const ASSET = "wollipog/provider-home-lease-io";
 export type LeaseIoWork = { records: number; bytes: number };
 let workObserver: ((work: LeaseIoWork) => void) | undefined;
 export function observeLeaseIoWorkForTest(observer?: (work: LeaseIoWork) => void): void { workObserver = observer; }
+/** One fixed-helper call, so a slow-host deadline is distinguishable from a missing helper. */
+export type LeaseIoRun = { durationMs: number; timeoutMs: number; error?: string; signal: NodeJS.Signals | null; status: number | null };
+let runObserver: ((run: LeaseIoRun) => void) | undefined;
+export function observeLeaseIoRunsForTest(observer?: (run: LeaseIoRun) => void): void { runObserver = observer; }
 let rejectProbeForTest: ((path: string) => boolean) | undefined;
 /** May only reject an otherwise successful fixed-helper probe; cannot bypass its checks. */
 export function refuseLeaseIoProbeForTest(predicate?: (path: string) => boolean): void { rejectProbeForTest = predicate; }
 const DEFAULT_BUDGET = { records: 131072, bytes: 268435456 };
 const IPC_BYTES = 64 * 1024 * 1024;
 const RECORD_BYTES = 2 * 1024 * 1024;
+const HELPER_TIMEOUT_MS = 120_000;
 const NAME = /^[a-z0-9._-]{1,255}$/u;
 const DECIMAL = /^(?:0|[1-9][0-9]{0,19})$/u;
 let executable: LeaseHelperArtifact | undefined;
@@ -157,7 +162,9 @@ function run(input: Buffer): Reader {
   let command: { command: string; args: string[] };
   try { command = process.platform === "win32" ? windowsLeaseIoCommand(stagingRoots(), ioOptions.providerHome) : { command: nativeExecutable(), args: [] }; }
   catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
-  const result = spawnSync(command.command, command.args, { input, timeout: 120_000, killSignal: "SIGKILL", maxBuffer: IPC_BYTES, windowsHide: true });
+  const started = performance.now();
+  const result = spawnSync(command.command, command.args, { input, timeout: HELPER_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: IPC_BYTES, windowsHide: true });
+  runObserver?.({ durationMs: performance.now() - started, timeoutMs: HELPER_TIMEOUT_MS, error: (result.error as NodeJS.ErrnoException | undefined)?.code, signal: result.signal, status: result.status });
   if (result.error) throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE);
   const reader = new Reader(result.stdout ?? Buffer.alloc(0));
   const tag = reader.u8();
