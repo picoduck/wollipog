@@ -154,7 +154,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     await confirmation.getByRole("button", { name: "Discard Copy" }).click();
     await expect(rows(build)).toHaveCount(1);
     await expect(entry).toContainText("2");
-    expect(requests).toEqual([
+    await expect.poll(() => requests).toEqual([
       { url: "preview", body: { kind: "kept_aside", id: keptId } },
       { url: "import", body: { acceptUpdate: false } },
       { url: "discard", body: { kind: "kept_aside", id: unidentifiedId, observedFingerprint: fingerprint, confirmation: "explicit" } },
@@ -324,7 +324,8 @@ for (const width of [1280, 390]) {
     await confirmation.getByRole("button", { name: "Discard Copy" }).click();
     await expect(dialog).toBeHidden();
     await expect(confirmation).toBeHidden();
-    expect(requests).toEqual([
+    // The review closes before the discard is sent (#2302), so wait for the routed request.
+    await expect.poll(() => requests).toEqual([
       { url: "preview", body: { kind: "kept_aside", id: keptId } },
       { url: "discard", body: { kind: "kept_aside", id: keptId, observedFingerprint: "7e1d".padEnd(64, "0"),
         observedDigest: "9b2e".padEnd(64, "0"), confirmation: "explicit" } },
