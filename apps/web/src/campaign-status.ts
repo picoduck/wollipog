@@ -139,6 +139,15 @@ export function campaignCostView(metric: CampaignMetric<CampaignCostValue> | und
   return { text, provenance: "Estimated API Cost", note: "Estimated from the model rate table.", priced: true };
 }
 
+/**
+ * A cost inline in a list of costs: the amount, plus its provenance whenever that is not already
+ * stated by `context` (the provenance of the figure it sits under). A lower bound always says so.
+ */
+export function costWithProvenance(view: CampaignCostView, context: string | null = null): string {
+  if (!view.priced || !view.provenance) return view.text;
+  return view.provenance === context && view.provenance !== "Partially Priced" ? view.text : `${view.text} (${view.provenance})`;
+}
+
 /** A duration metric: its value, a lower bound, or "Unavailable" with why. Zero is a real zero. */
 export function durationMetricView(metric: CampaignMetric<number> | undefined): { text: string; note: string | null } {
   if (!metric) return { text: UNAVAILABLE, note: metricGapNote("not_collected") };
@@ -332,10 +341,12 @@ export function campaignSummaryView(
   now: number,
 ): CampaignSummaryView {
   const cost = campaignCostView(work.cost?.total);
+  // Each bucket keeps its own provenance where it differs from the total's, so an estimated or
+  // partially priced bucket never reads as exact under a provider-reported total.
   const breakdown = work.cost && cost.priced ? [
-    { label: "Work Items", text: campaignCostView(work.cost.workItems).text },
-    { label: "Coordination", text: campaignCostView(work.cost.coordination).text },
-    { label: "Unattributed", text: campaignCostView(work.cost.unattributed).text },
+    { label: "Work Items", text: costWithProvenance(campaignCostView(work.cost.workItems), cost.provenance) },
+    { label: "Coordination", text: costWithProvenance(campaignCostView(work.cost.coordination), cost.provenance) },
+    { label: "Unattributed", text: costWithProvenance(campaignCostView(work.cost.unattributed), cost.provenance) },
   ] : [];
   const limits = campaign?.limits;
   return {

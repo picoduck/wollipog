@@ -33,7 +33,7 @@ import { AgentsPanel } from "./AgentsPanel.js";
 import { focusSessionRequest, standaloneApprovalForReview } from "./SessionApproval.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
-import { SessionRequestPanel, type DescendantRequestStatus } from "./SessionRequestPanel.js";
+import { SessionRequestPanel, sessionRequestPanelKey, type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { CampaignStatusPanel } from "./CampaignStatusPanel.js";
 import type { CampaignStatusAvailability } from "../campaign-status.js";
 
@@ -401,6 +401,9 @@ export function RightPanel({
     e.preventDefault();
   };
 
+  const requestsAvailable = descendantRequests.length > 0 ||
+    standaloneApprovalForReview(session.pendingApproval) !== null;
+
   /**
    * Every non-launcher mode owns a body. The switch is exhaustive on purpose: adding a mode to
    * RIGHT_PANEL_MODES without a body here is a compile error, which is what replaced the old
@@ -442,7 +445,16 @@ export function RightPanel({
             session={session}
             availability={campaignAvailability}
             onOpenSession={onOpenSession}
-            onOpenRequests={() => state.show("requests")}
+            onOpenRequests={requestsAvailable ? (occurrenceId) => {
+              // Select the blocker's request when this panel lists it; otherwise Requests keeps its own.
+              const descendant = occurrenceId ? descendantRequests.find((request) => request.occurrenceId === occurrenceId) : undefined;
+              const own = standaloneApprovalForReview(session.pendingApproval);
+              if (descendant) onSelectedRequestKeyChange(sessionRequestPanelKey(descendant.sessionId, descendant.occurrenceId));
+              else if (occurrenceId && own && (own.occurrenceId ?? own.requestId) === occurrenceId) {
+                onSelectedRequestKeyChange(sessionRequestPanelKey(session.id, occurrenceId));
+              }
+              state.show("requests");
+            } : undefined}
           />
         );
       case "review":
@@ -580,8 +592,7 @@ export function RightPanel({
               session.backgroundJobsAvailable === true ||
               session.backgroundWorkTracking != null || session.backgroundWorkState != null}
             governanceAvailable={governanceAvailable}
-            requestsAvailable={descendantRequests.length > 0 ||
-              standaloneApprovalForReview(session.pendingApproval) !== null}
+            requestsAvailable={requestsAvailable}
             campaignAvailability={campaignAvailability}
           />
         ) : (

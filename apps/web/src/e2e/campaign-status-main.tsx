@@ -17,6 +17,7 @@ import {
   type CampaignWorkItemDetail,
   type CampaignWorkItemSummary,
   type ControlPlaneToUi,
+  type DescendantRequestView,
   type SessionView,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
@@ -38,6 +39,8 @@ declare global {
       queries(): string[];
       /** The session a panel link opened, if any. */
       openedSession(): string | null;
+      /** The request Requests was asked to select, if any. */
+      selectedRequestKey(): string | null;
       /** Moves the ledger forward one revision, as a ledger write re-sending the root would. */
       bumpRevision(): void;
       /** Navigates the harness to another session, as the app does. */
@@ -214,8 +217,30 @@ function sessionsFor(rev: number): SessionView[] {
   return [root, child, unrelated];
 }
 
+/** The request the blocked item's recorded blocker names, pending on its child. */
+const descendantRequests: DescendantRequestView[] = scenario === "campaign" ? [{
+  sessionId: "s_child_3",
+  sessionTitle: "#2417 Slice 5: Read API",
+  runnerId: "runner-1",
+  runnerOnline: true,
+  eventEpoch: 1,
+  createdAt: NOW - 8 * MINUTE,
+  responseOwner: "human",
+  occurrenceId: "occ_1",
+  request: {
+    requestId: "req_1",
+    occurrenceId: "occ_1",
+    title: "Run gh pr merge for the storage pull request",
+    options: [
+      { optionId: "allow", name: "Allow", kind: "allow_once" },
+      { optionId: "reject", name: "Reject", kind: "reject_once" },
+    ],
+  },
+}] : [];
+
 const queries: string[] = [];
 let openedSession: string | null = null;
+let selectedRequestKey: string | null = null;
 
 const visibleItems = scenario === "planless" ? items.filter((item) => item.id === "cwi_2" || item.id === "cwi_3") : items;
 
@@ -356,6 +381,10 @@ function PanelForSession({ state, session, onOpenSession }: { state: RightPanelS
       items={[]}
       campaignAvailability={availability}
       onOpenSession={onOpenSession}
+      descendantRequests={session.orchestratorCampaign ? descendantRequests : []}
+      selectedRequestKey={selectedRequestKey}
+      onSelectedRequestKeyChange={(key) => { selectedRequestKey = key; }}
+      onSessionUpdate={() => {}}
     />
   );
 }
@@ -363,6 +392,7 @@ function PanelForSession({ state, session, onOpenSession }: { state: RightPanelS
 window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__ = {
   queries: () => [...queries],
   openedSession: () => openedSession,
+  selectedRequestKey: () => selectedRequestKey,
   bumpRevision: () => {
     revision += 1;
     for (const session of sessionsFor(revision)) pushToStore?.({ type: "session_upsert", session });

@@ -418,12 +418,17 @@ test("a member sees its campaign and its current assignment highlighted", async 
 });
 
 test("a new ledger revision reloads the list, and a stale cursor restarts from the first page", async () => {
+  // A server that honours `limit` and binds each cursor to the revision it was minted at.
+  const all = Array.from({ length: 60 }, (_, index) => item(`cwi_${index + 1}`, { queuePosition: index + 1 }));
   let revision = 1;
   const pages = (query: string): FixturePage | Error => {
-    if (query.includes("cursor=")) {
-      return revision === 2 ? new ApiError("revision changed", 409, "revision_changed") : { revision, items: [item("cwi_9")], nextCursor: null };
-    }
-    return { revision, items: [item("cwi_1"), item("cwi_2")], nextCursor: "next" };
+    const search = new URLSearchParams(query);
+    const [cursorRevision, offsetText] = (search.get("cursor") ?? `${revision}:0`).split(":");
+    if (Number(cursorRevision) !== revision) return new ApiError("revision changed", 409, "revision_changed");
+    const offset = Number(offsetText);
+    const limit = Number(search.get("limit"));
+    const next = offset + limit < all.length ? `${revision}:${offset + limit}` : null;
+    return { revision, items: all.slice(offset, offset + limit), nextCursor: next, total: all.length };
   };
   const { client, calls } = fakeClient(pages);
   const panel = await mount({ initial: rootSession, sessions: [rootSession], client });
@@ -431,13 +436,19 @@ test("a new ledger revision reloads the list, and a stale cursor restarts from t
     await act(async () => panel.state.show("campaign"));
     await settle();
     assert.equal(calls.list.length, 1);
-    await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({ revision: 2 })) }));
+    assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 50);
     revision = 2;
+    await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({ revision: 2 })) }));
     assert.equal(calls.list.length, 2, "a revision bump reloads the shown rows");
+    // The ledger moves again before this browser hears of it, so the next page is refused.
+    revision = 3;
     const more = [...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Show More")!;
     await click(more);
-    assert.equal(calls.list.length, 4, "the refused page is followed by a first-page reload");
+    assert.equal(calls.list.length, 4, "the refused page is followed by a reload from the first page");
+    assert.match(calls.list[2]!, /cursor=2%3A50/);
     assert.doesNotMatch(calls.list.at(-1)!, /cursor=/);
+    assert.match(calls.list.at(-1)!, /limit=100/, "the reload covers the shown rows and the page asked for");
+    assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 60);
     assertNoDomNode(panel.container.querySelector('[role="alert"]'), "a revision change is not an error");
   } finally {
     await panel.dispose();
@@ -459,6 +470,148 @@ test("Campaign Status controls carry Title Case accessible names", async () => {
     for (const name of names(body)) assert.equal(titleCaseLabel(name), name, name);
     await click(body.querySelector(".campaign-work-row")!);
     for (const name of names(body)) assert.equal(titleCaseLabel(name), name, name);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+/** A promise the test settles by hand, to put responses in a chosen order. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => { resolve = settle; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+test("a details response for an item already left behind never replaces the open item", async () => {
+  const items = [item("cwi_1"), item("cwi_2")];
+  const pending = new Map<string, ReturnType<typeof deferred<{ revision: number; item: CampaignWorkItemDetail }>>>();
+  const client = {
+    ...fakeClient(() => ({ revision: 1, items, nextCursor: null })).client,
+    // Ignores the abort signal, as a body already arriving does.
+    campaignWorkItem: (_id: string, itemId: string) => {
+      const response = deferred<{ revision: number; item: CampaignWorkItemDetail }>();
+      pending.set(itemId, response);
+      return response.promise;
+    },
+  } as ApiClient;
+  const panel = await mount({ initial: rootSession, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelectorAll(".campaign-work-row")[0]!);
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Back to Work Items")!);
+    await click(panel.container.querySelectorAll(".campaign-work-row")[1]!);
+    await act(async () => { pending.get("cwi_2")!.resolve({ revision: 1, item: detailOf(items[1]!) }); });
+    await settle();
+    await act(async () => { pending.get("cwi_1")!.resolve({ revision: 1, item: detailOf(items[0]!) }); });
+    await settle();
+    assert.equal(panel.container.querySelector("h3.campaign-detail-title")?.textContent, "Work cwi_2");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Show More waits for a reload of the shown rows instead of racing it", async () => {
+  let revision = 1;
+  const reloads: ReturnType<typeof deferred<CampaignWorkItemsPage>>[] = [];
+  const listCalls: string[] = [];
+  const client = {
+    ...fakeClient(() => ({ revision: 1, items: [], nextCursor: null })).client,
+    campaignWorkItems: (_id: string, query: string) => {
+      listCalls.push(query);
+      if (revision === 1) {
+        return Promise.resolve({ revision, items: [item("cwi_1"), item("cwi_2")], nextCursor: "next", total: 3 });
+      }
+      const reload = deferred<CampaignWorkItemsPage>();
+      reloads.push(reload);
+      return reload.promise;
+    },
+  } as ApiClient;
+  const panel = await mount({ initial: rootSession, sessions: [rootSession], client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    revision = 2;
+    await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({ revision: 2 })) }));
+    assert.equal(reloads.length, 1, "a new revision starts reloading the shown rows");
+    const callsBeforeReload = listCalls.length;
+    const more = [...panel.container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Show More"))!;
+    assert.equal(more.disabled, true, "paging is unavailable while the reload is pending");
+    await click(more);
+    assert.equal(listCalls.slice(callsBeforeReload).filter((query) => query.includes("cursor=")).length, 0, "no page is requested under a reload");
+    await act(async () => { reloads[0]!.resolve({ revision: 2, items: [item("cwi_1"), item("cwi_2"), item("cwi_3")], nextCursor: null, total: 3 }); });
+    await settle();
+    assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 3);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a new revision reloads every row already shown, past one request's page ceiling", async () => {
+  const all = Array.from({ length: 160 }, (_, index) => item(`cwi_${index + 1}`, { queuePosition: index + 1 }));
+  let revision = 1;
+  const limits: number[] = [];
+  const pages = (query: string): FixturePage => {
+    const search = new URLSearchParams(query);
+    const offset = Number(search.get("cursor") ?? 0);
+    const limit = Number(search.get("limit"));
+    limits.push(limit);
+    const slice = all.slice(offset, offset + limit);
+    return { revision, items: slice, nextCursor: offset + limit < all.length ? String(offset + limit) : null, total: all.length };
+  };
+  const { client } = fakeClient(pages);
+  const panel = await mount({ initial: rootSession, sessions: [rootSession], client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    for (let page = 0; page < 2; page += 1) {
+      await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent?.includes("Show More"))!);
+    }
+    assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 150);
+    limits.length = 0;
+    revision = 2;
+    await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({ revision: 2 })) }));
+    assert.deepEqual(limits, [100, 50], "the reload walks pages until the shown count is restored");
+    assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 150, "no shown row is dropped");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a held child links to its session, and a blocker's request opens that request", async () => {
+  const blocked = item("cwi_3", {
+    primaryState: "blocked",
+    stateCauses: ["recorded_blocker"],
+    currentAttempt: { id: "catt_3", sessionId: "s_child", sessionTitle: "Child One" },
+    blocker: { reason: "Waiting for a merge decision.", responsibleActor: "human", requestOccurrenceId: "occ_1", recordedAt: NOW, recordedBySessionId: "s_root" },
+  });
+  const held = item("cwi_4", { primaryState: "blocked", stateCauses: ["attempt_session_held"], currentAttempt: { id: "catt_4", sessionId: "s_held", sessionTitle: "Held Child" } });
+  const { client } = fakeClient(() => ({ revision: 1, items: [blocked, held], nextCursor: null }), {
+    cwi_3: detailOf(blocked),
+    cwi_4: detailOf(held),
+  });
+  const heldRoot = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      heldChildren: [{ sessionId: "s_held", holds: [{ kind: "provider_account_switch", holdId: "h1", since: NOW, reason: "Switching accounts.", recoveryAction: "Restart it when ready." }] }],
+    }),
+  });
+  const panel = await mount({ initial: heldRoot, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const buttons = () => [...panel.container.querySelectorAll("button")].map((button) => button.textContent);
+
+    await click(panel.container.querySelectorAll(".campaign-work-row")[1]!);
+    assert.match(panel.container.textContent ?? "", /Switching accounts\./);
+    assert.ok(buttons().includes("Open Child Session"));
+    assert.ok(!buttons().includes("Open Requests"), "a hold has nothing to answer");
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Back to Work Items")!);
+
+    // No request is reachable from this panel, so the child is the way to its request.
+    await click(panel.container.querySelectorAll(".campaign-work-row")[0]!);
+    assert.ok(!buttons().includes("Open Requests"));
+    assert.ok(buttons().includes("Open Child Session"));
   } finally {
     await panel.dispose();
   }

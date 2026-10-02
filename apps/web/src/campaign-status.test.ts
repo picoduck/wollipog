@@ -15,6 +15,7 @@ import {
   campaignStatusAvailability,
   campaignSummaryView,
   campaignWorkItemsQuery,
+  costWithProvenance,
   durationMetricView,
   elapsedMs,
   issueRefHref,
@@ -87,6 +88,25 @@ test("Cost labels distinguish provider-reported, estimated, partially priced, un
     assert.equal(view.priced, false);
   }
   assert.match(campaignCostView({ availability: "unavailable", reason: "not_authorized" }).note!, /cannot see the cost/);
+});
+
+test("Bucket and attempt costs keep their own provenance beside a total", () => {
+  const estimated = campaignCostView(knownCost(1.1, "modelPriced"));
+  assert.equal(costWithProvenance(estimated), "$1.10 (Estimated API Cost)");
+  assert.equal(costWithProvenance(estimated, "Estimated API Cost"), "$1.10", "the same provenance as its total is not repeated");
+  assert.equal(costWithProvenance(campaignCostView(knownCost(1, "modelPriced", 2)), "Partially Priced"), "$1.00 (Partially Priced)",
+    "a lower bound always says so");
+  assert.equal(costWithProvenance(campaignCostView(undefined)), "Unavailable");
+  const view = campaignSummaryView(workSummary(NOW, {
+    cost: {
+      total: knownCost(3),
+      workItems: { availability: "partial", value: { usd: 2, source: "modelPriced", unpricedRecords: 1 }, reason: "unpriced_usage" },
+      coordination: knownCost(1),
+      unattributed: knownCost(0),
+      attributedSince: null,
+    },
+  }), withWork, NOW);
+  assert.deepEqual(view.costBreakdown.map((row) => row.text), ["$2.00 (Partially Priced)", "$1.00", "$0.00"]);
 });
 
 test("Unrecorded durations read Unavailable, partial ones are lower bounds, and zero is real", () => {

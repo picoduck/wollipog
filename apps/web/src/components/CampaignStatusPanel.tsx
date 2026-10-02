@@ -29,6 +29,7 @@ import {
   UNAVAILABLE,
   campaignCostView,
   campaignSummaryView,
+  costWithProvenance,
   causeNeedsRequests,
   durationMetricView,
   filtersAreDefault,
@@ -86,7 +87,8 @@ export function CampaignStatusPanel({
   session: SessionView;
   availability: Exclude<CampaignStatusAvailability, { kind: "hidden" }>;
   onOpenSession: (sessionId: string) => void;
-  onOpenRequests: () => void;
+  /** Opens Requests on the named request; absent when no request is reachable from this session. */
+  onOpenRequests?: (occurrenceId: string | null) => void;
 }) {
   if (availability.kind === "unavailable") {
     return (
@@ -117,7 +119,7 @@ function AvailableCampaignStatus({
   session: SessionView;
   availability: AvailableCampaign;
   onOpenSession: (sessionId: string) => void;
-  onOpenRequests: () => void;
+  onOpenRequests?: (occurrenceId: string | null) => void;
 }) {
   const [memory, setMemoryState] = useState<CampaignListMemory>(() => listMemory.get(session.id) ?? {
     filters: DEFAULT_CAMPAIGN_WORK_FILTERS,
@@ -392,7 +394,7 @@ function CampaignWorkList({
         </ul>
         {list.hasMore && (
           <BusyButton className="btn ghost sm campaign-work-more" busy={list.loadingMore} progress="Loading more work items…"
-            disabled={list.loadingMore} onClick={data.loadMore}>
+            disabled={list.loadingMore || list.reloading} onClick={data.loadMore}>
             Show More
           </BusyButton>
         )}
@@ -578,7 +580,7 @@ function CampaignWorkItemDetailView({
   onBack: () => void;
   onRetry: () => void;
   onOpenSession: (sessionId: string) => void;
-  onOpenRequests: () => void;
+  onOpenRequests?: (occurrenceId: string | null) => void;
 }) {
   const detail = state?.detail ?? null;
   // One heading element for loading and loaded alike, at the same place in the tree, so the focus it
@@ -685,7 +687,7 @@ function CampaignWorkItemDetailView({
                         : <>{attempt.session.title || `Attempt ${attempt.ordinal}`}</>}
                       <span className="campaign-status-meta">
                         {attempt.endReason ? END_REASON_LABELS[attempt.endReason] : "Open"}
-                        {attempt.sessionId ? "" : ", Session Deleted"}, {attemptCost(attempt.id).text}
+                        {attempt.sessionId ? "" : ", Session Deleted"}, {costWithProvenance(attemptCost(attempt.id))}
                       </span>
                     </li>
                   ))}
@@ -740,9 +742,15 @@ function CampaignWorkItemDetailView({
             <div><dt>Responsible</dt><dd>{detail.blocker ? RESPONSIBLE_ACTOR_LABELS[detail.blocker.responsibleActor] : "None Recorded"}</dd></div>
             <div><dt>Next Action</dt><dd>{detail.nextAction ?? "None Recorded"}</dd></div>
           </DetailSection>
-          {(linksRequests || held || detail.primaryState === "blocked") && (
+          {/* A request is answered in Requests when this session can reach it; a hold has nothing to
+              answer, so a held child, like any request this session cannot see, is opened instead. */}
+          {(linksRequests || held || detail.primaryState === "blocked") && (onOpenRequests || currentSessionId) && (
             <div className="campaign-detail-actions">
-              {(linksRequests || held) && <button type="button" className="btn sm" onClick={onOpenRequests}>Open Requests</button>}
+              {linksRequests && onOpenRequests && (
+                <button type="button" className="btn sm" onClick={() => onOpenRequests(detail.blocker?.requestOccurrenceId ?? null)}>
+                  Open Requests
+                </button>
+              )}
               {currentSessionId && (
                 <button type="button" className="btn ghost sm" onClick={() => onOpenSession(currentSessionId)}>Open Child Session</button>
               )}

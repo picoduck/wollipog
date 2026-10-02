@@ -83,7 +83,7 @@ test("details separate reported stages from observations and never show missing 
   await expect(details.locator("dd", { hasText: "No runner has a signed-in GitHub CLI." })).toContainText("Unavailable");
   await expect(details.locator("dd", { hasText: "This server does not record it yet." })).toContainText("Unavailable");
   await expect(details).toContainText("At Least 9m 0s");
-  await expect(details).toContainText("Superseded, Session Deleted, $1.10");
+  await expect(details).toContainText("Superseded, Session Deleted, $1.10 (Estimated API Cost)");
   await page.getByRole("button", { name: "Back to Work Items" }).click();
 
   await workRows(page).filter({ hasText: "Ledger Read API" }).click();
@@ -92,6 +92,8 @@ test("details separate reported stages from observations and never show missing 
   await expect(page.getByRole("button", { name: "Open Requests" })).toBeVisible();
   await page.getByRole("button", { name: "Open Requests" }).click();
   await expect(page.locator(".rp-title")).toHaveText("Requests");
+  expect(await page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.selectedRequestKey()))
+    .toBe(JSON.stringify(["s_child_3", "occ_1"]));
 });
 
 test("a member sees its assignment, and leaving the campaign returns the open panel to the launcher", async ({ page }) => {
