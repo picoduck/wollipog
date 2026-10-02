@@ -42,7 +42,7 @@ async function expectDesktopPrependAnchor(page: Page, navigate: (reader: Locator
   const reader = page.locator(".detail-scroll");
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
   await reader.dispatchEvent("wheel", { deltaY: -40 });
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
   // Consume the native event from positioning the reader before the next input arms pagination.
   // Otherwise Chromium can deliver that stale event after pointerdown and clear the fresh intent.
   await settleReaderScrollTop(reader, 500);
@@ -63,7 +63,7 @@ async function expectDesktopPrependAnchor(page: Page, navigate: (reader: Locator
     return Math.abs(row.getBoundingClientRect().top - viewport.top - Number(offset));
   }, before.offset)).toBeLessThan(1);
   await expect(page.locator(".transcript-earlier-activity")).not.toBeInViewport();
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
   expect(consoleErrors.filter((message) => message.includes("same key"))).toEqual([]);
 }
 
@@ -85,7 +85,7 @@ test("an event-heavy desktop opening fills itself before exposing earlier activi
   expect(await fallback.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThanOrEqual(28);
   await expect(page.getByText("A response near the beginning of the loaded activity may be incomplete."))
     .toHaveCount(0);
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "following");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "following");
 });
 
 test("desktop wheel navigation preserves the earlier-page boundary", async ({ page }) => {
@@ -118,7 +118,7 @@ test("desktop direct scrollbar navigation preserves the earlier-page boundary", 
 async function positionPausedReader(page: Page, reader: Locator, scrollTop: number) {
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
   await reader.dispatchEvent("wheel", { deltaY: -40 });
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
   await page.waitForTimeout(250);
   await settleReaderScrollTop(reader, scrollTop);
   await page.waitForTimeout(250);
@@ -150,7 +150,7 @@ test("one reading key whose scroll stream starts above the trigger still loads w
     .not.toBe(String(before.total));
   await expect(page.locator(`[data-virtual-key='${before.key}']`)).toHaveCount(1);
   await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
   // The stream requested exactly one page; nothing else fires until the reader navigates again.
   await page.waitForTimeout(600);
   await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
@@ -179,7 +179,7 @@ test("upward wheel input at the head loads the next page without a scroll event"
     return Math.abs(row.getBoundingClientRect().top - viewport.top - Number(offset));
   }, before.offset)).toBeLessThan(1);
   await expect(page.locator(".transcript-earlier-activity")).not.toBeInViewport();
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
 });
 
 test("an upward reading key at the head loads the next page without a scroll event", async ({ page }) => {
@@ -193,7 +193,7 @@ test("an upward reading key at the head loads the next page without a scroll eve
   await page.keyboard.press("ArrowUp");
   await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
   await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
 });
 
 test("a failed automatic load exposes Retry and a successful retry restores the compact fallback", async ({ page }) => {

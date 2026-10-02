@@ -4625,9 +4625,9 @@ textarea {
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  /* Height-responsive container for the recovery slot's compact mode (issue #56). Size
-     containment is safe here: `flex: 1` resolves to basis 0%, so this pane's size is always
-     assigned by its parent and never depends on its own contents. */
+  /* The pane the status strip's cutoffs measure. Size containment is safe here: `flex: 1` resolves
+     to basis 0%, so this pane's size is always assigned by its parent and never depends on its own
+     contents. */
   container: transcript-pane / size;
 }
 /* The reader region: the scroller, and NOTHING below it. */
@@ -12537,30 +12537,6 @@ body.shell-dock-dragging * {
 .transcript-status-context .context-control {
   flex: none;
 }
-.transcript-status-context .transcript-recovery-strip-echo {
-  position: absolute;
-  top: 50%;
-  right: 0;
-  /* Use the intended readable width at ordinary phone sizes, but yield enough of the 320px
-     pane's leading quarter when the follow-state label consumes its widest compact shape. */
-  width: min(80px, calc(25cqw - 11px), 100%);
-  max-width: none;
-  transform: translateY(-50%);
-}
-.transcript-status-context-standalone {
-  grid-column: 1;
-  grid-row: 1;
-  justify-self: stretch;
-  width: 100%;
-  min-width: 0;
-  overflow: hidden;
-}
-.transcript-status-context-standalone .transcript-recovery-strip-echo {
-  position: static;
-  width: 100%;
-  max-width: 100%;
-  transform: none;
-}
 .transcript-status-usage {
   flex: 0 1 auto;
   min-width: 0;
@@ -12570,10 +12546,6 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .transcript-status-usage .session-cost-button { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.follow-tail-control {
-  grid-column: 2;
-  justify-self: center;
-}
 .transcript-status-trailing {
   display: flex;
   grid-column: 3;
@@ -12600,13 +12572,11 @@ body.shell-dock-dragging * {
    few pixels — or to nothing — while the hint kept its full width (#893).
 
    The threshold is the width at which the strip stops fitting, split into the part that scales
-   with the reader's text-size preference and the part that does not. The centered track carries
-   the context meter, the follow-state control in its WIDEST state, a wide cost, and their gaps;
-   each symmetric 1fr track must reserve the natural width of the Reply hint. The widest follow
-   state is `previewing` ("Previewing, Follow Live Output" plus its keycap), not the shorter
-   `paused` state. A fixed cutoff alone was inactive at wider panes with a 24px or 32px root, where
-   the enlarged labels could put the cost back below its own scrollWidth — the exact inversion this
-   rule exists to prevent.
+   with the reader's text-size preference and the part that does not. The context meter and the
+   cost flank the strip's empty center (#2153 retired the follow control that sat there), and each
+   symmetric 1fr track must reserve the larger side: a wide cost plus the Reply hint. A fixed cutoff
+   alone was inactive at wider panes with a 24px or 32px root, where the enlarged labels could put
+   the cost back below its own scrollWidth — the exact inversion this rule exists to prevent.
 
    Two rules rather than one calc(): the plain length parses in every engine that supports size
    container queries at all, while the calc() refinement, which an older engine may drop as
@@ -12615,110 +12585,23 @@ body.shell-dock-dragging * {
    These numbers are CHECKED, not just explained (#915). A container query cannot read a custom
    property, so the budget cannot be composed from the values it depends on — it has to be a
    literal. `apps/web/e2e/status-strip-budget.spec.ts` closes that loop from the other end: it parses
-   these rules back out of this file, measures what the follow-state control, the hint, and a wide
-   cost actually render at, and fails when the constants stop covering them. Retuning any control in
-   this strip therefore fails that spec rather than silently squeezing the cost. Change these numbers
-   only in response to a measurement, and let the spec confirm it. 618px and calc(186px + 27rem):
-   with every label in the strip on rem type (#2041), in the widest fallback face the strip
-   measured 608.6, 821.8 and 1039.1px at 16, 24 and 32px roots. Almost all of that now scales, so
-   the calc() carries the budget at every root and the plain length only matches it at 16px. */
-@container transcript-pane (max-width: 618px) {
+   these rules back out of this file, measures what the meter, the hint, and a wide cost actually
+   render at, and fails when the constants stop covering them. Retuning any control in this strip
+   therefore fails that spec rather than silently squeezing the cost. Change these numbers only in
+   response to a measurement, and let the spec confirm it. 342px and calc(150px + 12rem): the strip
+   measured 312, 356, 400 and 492px at 16, 20, 24 and 32px roots; the margin above that is for wider
+   fallback faces. The calc() carries the budget at every root and the plain length only matches it
+   at 16px. */
+@container transcript-pane (max-width: 342px) {
   .transcript-status-actions { display: none; }
 }
-@container transcript-pane (max-width: calc(186px + 27rem)) {
+@container transcript-pane (max-width: calc(150px + 12rem)) {
   .transcript-status-actions { display: none; }
 }
-/* The strip yields in a fixed order as the pane narrows: the Reply hint, then the follow control's
-   resume keycap, then the control's " · Follow Live Output" action text. Each is discoverability
-   for something that still works: the control's accessible name still reads "Paused, Follow Live
-   Output", its tooltip names the chord, and the Keyboard Shortcuts reference lists it. The cost is
-   never what yields.
-
-   The keycap's cutoff is the width the cluster needs WITH the keycap: 458.6, 633.8 and 811.1px at
-   16, 24 and 32px roots, measured with the widest follow label in the widest fallback face.
-
-   The action text's cutoff is the smaller of two lines. At the default root the first makes it
-   inert: 316px, below the narrowest supported pane, where the phone strip has its own compact rule
-   below. It climbs 1000px per root px, so a tenth of a px above 16 the second takes over and
-   covers what the cluster needs with the widest label and its action text: 401.8, 412.0, 469.2,
-   546.3 and 700.4px at 16.5, 17, 20, 24 and 32px roots. (Between 16 and 16.1px, a size no browser
-   setting produces, the label has grown by under a pixel.) A reader who enlarged their text
-   therefore keeps the cost whole at every width the label
-   used to allow. Below it the control keeps only its state word: the paused action text goes, the
-   keycap goes with it so the order above holds at any root, and "Following Live Output" keeps
-   "Following" with the rest visually hidden, so the live region still announces the whole label.
-
-   In the Inbox preview the control carries its Page Up and Page Down hints and there is no cost, so
-   the preview's first step is those hints, below the width the whole control needs with the widest
-   label and its keycap: 589, 703, 817 and 1045px at 16, 20, 24 and 32px roots. That cutoff sits
-   above the keycap's at every root, so the rest of the order is unchanged.
-
-   Like the cutoffs above, these are checked by `apps/web/e2e/status-strip-budget.spec.ts`. */
-@container transcript-pane (max-width: calc(142px + 28.5rem)) {
-  .follow-tail-control > .shortcut-hint { display: none; }
-}
-@container transcript-pane (max-width: calc(114px + 22rem)) {
-  .follow-tail-kbd { display: none; }
-}
-@container transcript-pane (max-width: min(calc(-15684px + 1000rem), calc(96px + 19.25rem))) {
-  .follow-tail-action,
-  .follow-tail-kbd { display: none; }
-  .follow-tail-label-rest {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-}
-/* At the narrowest supported phone width, compact both side gaps and the widest follow-state
-   chip's horizontal padding so fallback-font differences cannot make the context ring or cost
-   collide with it. The tracks stay symmetric, so this compression cannot move the centered
-   control. The chip keeps a px short of --space-2: a full 8px puts the context ring half a pixel
-   outside the 320px strip in the widest fallback face. */
+/* At the narrowest supported phone width, compact the side gaps so fallback-font differences cannot
+   make the context ring and the cost collide. */
 @container transcript-pane (max-width: 340px) {
   .transcript-status-cluster { column-gap: 4px; }
-  .transcript-status-cluster .follow-tail-chip { padding-inline: calc(var(--space-2) - 1px); }
-}
-/* Pager hints remain an inner group inside the centered status cluster. */
-.follow-tail-control {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.follow-tail-chip {
-  flex: none;
-  position: static;
-  padding: 5px var(--space-3);
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
-  background: var(--bg-elev-2);
-  color: var(--text);
-  /* The small type role (§2.3), like the Reply hint and cost beside it: the label grows with the
-     reader's text size in step with the keycap it carries, and the px line box keeps the control's
-     height fixed — body's 20px would outgrow the phone status strip (#2041). */
-  font: var(--type-small);
-  white-space: nowrap;
-  cursor: pointer;
-  box-shadow: var(--shadow);
-}
-.follow-tail-chip.following {
-  border-color: color-mix(in srgb, var(--teal) 55%, var(--border));
-  color: var(--positive-text);
-}
-.follow-tail-chip.paused { border-color: var(--accent); }
-.follow-tail-chip[data-follow-tail-state="previewing"] {
-  border-color: color-mix(in srgb, var(--accent) 75%, var(--teal));
-}
-.follow-tail-action::before {
-  content: " · ";
-  color: var(--text-faint);
-}
-.follow-tail-chip:hover {
-  background: var(--bg-elev-3);
-  border-color: var(--accent);
 }
 .shortcut-hint {
   display: inline-flex;
@@ -12731,12 +12614,6 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .shortcut-hint-label { white-space: nowrap; }
-/* The resume keycap lives INSIDE the follow-state control, after its "Follow Live Output"
-   action text; the control's tooltip carries the chord for assistive tech. */
-.follow-tail-kbd {
-  margin-left: 8px;
-  vertical-align: middle;
-}
 .shortcut-hint-button {
   padding: 3px 6px;
   border: 0;
@@ -13706,14 +13583,6 @@ body.shell-dock-dragging * {
   .transcript-status-strip {
     min-height: 36px;
     padding: 4px 8px;
-  }
-  /* Full-height phone Sessions use the same stable compact recovery presentation as previews and
-     height-constrained panes. The slot and echo stay in one mode whether recovery is active or
-     inactive, so the reader never changes dimensions and no empty band is reserved. */
-  .session-detail .transcript-recovery-slot { display: none; }
-  .session-detail .transcript-recovery-strip-echo { display: inline-flex; }
-  .session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-control {
-    visibility: hidden;
   }
 
   /* Right panel: a full-width overlay under the topbar instead of a side column.
@@ -15142,71 +15011,38 @@ body.shell-dock-dragging * {
 }
 .transcript-load-notice.error { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
 
-/* Reconnect recovery pill (issue #56): a permanently-present normal-flow slot at the LOWER edge
-   of the reader, between the scroller and the status strip, where users watching the newest
-   activity actually look. The pill markup is always mounted, so the slot's height is the pill's
-   real rendered height at the current pane width and font scale — a wrapped label or rem-scaled
-   text simply makes the slot taller. Activity toggles ONLY visibility (never display or any
-   layout property), so showing/hiding recovery cannot shift scroll position or follow state,
-   and the pill cannot overlap transcript content because it is not an overlay. */
-.transcript-recovery-slot { display: flex; flex: none; justify-content: center; padding: 6px 12px 10px; }
-.transcript-recovery-slot:not(.active) .transcript-recovery-notice { visibility: hidden; }
-.transcript-recovery-notice {
-  display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%;
-  padding: 6px 12px; border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border));
-  border-radius: var(--radius-pill); color: var(--text); font-size: var(--text-sm); font-weight: 600;
-  /* The --text-sm line box (§2.3), so the slot is no taller than one small line of pill. */
-  line-height: 16px;
-  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev));
-  box-shadow: var(--shadow);
+/* The floating tail control (#2153; docs/design-system.md §3.1, §13.2): one .btn.sm at the reader's
+   lower edge, where people watching the newest activity look (#56). Its anchor is a zero-height
+   flow box between the reader and the composer column, so the control floats over the reader
+   without taking any of its height: showing or hiding it cannot change the reader's size, its
+   scroll position or the follow state. It is centered on the pane, which is the reading column's
+   axis. Doubled classes outrank the coarse-pointer `position: relative` that `.btn.sm` takes for its
+   hit area. */
+.transcript-tail-anchor {
+  position: relative;
+  flex: none;
+  height: 0;
+  z-index: var(--z-sticky);
 }
-.transcript-recovery-dot {
-  flex: none; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--accent);
+.transcript-tail-anchor > .btn.transcript-tail-control {
+  position: absolute;
+  bottom: var(--space-3);
+  left: 50%;
+  max-width: calc(100% - var(--space-3) * 2);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--elev-2);
+  transform: translateX(-50%);
 }
-.transcript-recovery-slot.active .transcript-recovery-dot,
-.transcript-recovery-strip-echo.active .transcript-recovery-dot {
-  animation: transcript-recovery-pulse 1.2s ease-in-out infinite;
+.transcript-tail-anchor > .btn.transcript-tail-control.is-not-sent { color: var(--danger-text); }
+/* Recovery is a status, not an action: it keeps the control's look but never reacts to a pointer. */
+.transcript-tail-anchor > .btn.transcript-tail-control.is-recovering {
+  cursor: default;
+  font-weight: 400;
 }
-@keyframes transcript-recovery-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) {
-  .transcript-recovery-slot.active .transcript-recovery-dot,
-  .transcript-recovery-strip-echo.active .transcript-recovery-dot { animation: none; }
+.transcript-tail-anchor > .btn.transcript-tail-control.is-recovering:active { background: var(--bg-elev-2); }
+@media (hover: hover) {
+  .transcript-tail-anchor > .btn.transcript-tail-control.is-recovering:hover { background: var(--bg-elev-2); }
 }
-/* Compact echo of the recovery notice INSIDE the status strip's leading cell. Hidden in normal
-   panes; the height-constrained container query below swaps it in for the slot. Its activity
-   toggle is visibility-only, so neither mode ever changes layout when recovery starts or stops. */
-.transcript-recovery-strip-echo {
-  display: none; align-items: center; gap: 6px; width: 100%; min-width: 0; max-width: 100%;
-  color: var(--text); font-size: var(--text-xs); font-weight: 600;
-}
-.transcript-recovery-strip-echo:not(.active) { visibility: hidden; }
-.transcript-recovery-strip-echo > span:last-child {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-/* Height-constrained panes (short inbox preview rows at generous splitter positions): the pill
-   band would crowd out the status strip, and the STRIP must always survive — it carries the
-   follow-state control. Below this pane height the slot collapses entirely (independent of
-   activity, so toggling recovery still cannot change layout) and active recovery is echoed
-   inside the status strip instead — the strip is a persistent status surface and the only
-   non-overlapping placement left in a pane this short. The mode switches only on genuine pane
-   resizes, which the follow logic already owns through its ResizeObserver on the reader. */
-@container transcript-pane (max-height: 239px) {
-  .transcript-recovery-slot { display: none; }
-  .transcript-recovery-strip-echo { display: inline-flex; }
-  /* The context meter is a fixed-width neighbour that can be wider than the whole leading
-     track at phone widths, which starved the shrinkable echo down to zero visible label. While
-     recovery is ACTIVE the echo is the one thing this compact geometry exists to preserve —
-     the meter yields until recovery completes. */
-  .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-control { visibility: hidden; }
-}
-/* Inbox PREVIEW panes always use the compact presentation, whatever their height. A preview is
-   a secondary, splitter-resizable reading surface: the pill band would permanently spend ~47px
-   of its reader on a notice that the strip echo carries just as clearly at the same lower edge,
-   and shrinking the preview viewport measurably degrades page-up distances when the virtualizer
-   is still measuring freshly streamed rows. Mode-based (not activity-based), so recovery
-   toggles remain layout-free here too. */
-.session-detail.preview .transcript-recovery-slot { display: none; }
-.session-detail.preview .transcript-recovery-strip-echo { display: inline-flex; }
 .subagents-partial {
   margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--text-dim); background: var(--bg-elev); font-size: var(--text-sm);

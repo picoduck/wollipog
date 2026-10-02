@@ -29,7 +29,8 @@ import "../styles.css";
  * rejoins it. Without it the fixture answers like an older, synchronous control plane.
  * `?setup-step=1` has the setup phase name its step, as #1348 control planes report it;
  * `?offline=1` disconnects the fixture's Machine, `?machine=<name>` names it,
- * `?extra-worktrees=<n>` links n more worktrees to the session, and
+ * `?extra-worktrees=<n>` links n more worktrees to the session, `?not-sent=1` adds a message that
+ * failed to send, `window.appendFixtureEvents(n)` streams n new rows onto the tail, and
  * `?theme=light|dark` picks the theme. */
 const params = new URLSearchParams(window.location.search);
 // Only when asked, so the geometry specs keep the page they were measured on.
@@ -53,6 +54,7 @@ const phaseMs = Number(params.get("phase-ms") ?? "400");
 const reportSetupStep = params.get("setup-step") === "1";
 const machineOffline = params.get("offline") === "1";
 const extraWorktrees = Number(params.get("extra-worktrees") ?? "0");
+const notSentFixture = params.get("not-sent") === "1";
 
 const SESSION_ID = "recovery-e2e-session";
 
@@ -152,9 +154,23 @@ const session: SessionView = {
       canRetry: true,
     }],
   } : {}),
-  // A known context window makes the ContextWindowMeter render in the strip's leading cell,
-  // so the specs can prove the active recovery echo wins that cell in compact mode.
+  // A known context window makes the ContextWindowMeter render in the strip's leading cell.
   contextWindow: 200_000,
+  ...(notSentFixture ? {
+    pendingPrompts: [{
+      commandId: "prompt-not-sent",
+      text: "Please also update the changelog before you open the pull request.",
+      hasImages: false,
+      state: "failed" as const,
+      revision: 1,
+      attemptCount: 1,
+      error: "The machine went offline before this message was delivered.",
+      createdAt: 2,
+      updatedAt: 2,
+      canDismiss: true,
+      canRetry: true,
+    }],
+  } : {}),
 };
 
 const snapshotMessage: ControlPlaneToUi = {
@@ -190,6 +206,25 @@ class FixtureSocket implements UiSocket {
   send() {}
   close() {}
 }
+
+/** Streams `count` new agent rows onto the tail, as live activity would while someone reads back. */
+let appendedEvents = 0;
+(window as typeof window & { appendFixtureEvents?: (count: number) => void }).appendFixtureEvents = (count) => {
+  for (let index = 0; index < count; index += 1) {
+    appendedEvents += 1;
+    const seq = 10_000 + appendedEvents;
+    fixtureSocket?.onmessage?.({ data: JSON.stringify({
+      type: "session_event",
+      event: {
+        id: seq,
+        sessionId: SESSION_ID,
+        seq,
+        ts: seq,
+        payload: { kind: "agent_message", text: `new answer ${appendedEvents} arrived while reading back`, final: true },
+      },
+    } satisfies ControlPlaneToUi) });
+  }
+};
 
 if (worktreeRecoveryFixture) {
   (window as typeof window & { emitWorktreeRecoveryUpdate?: () => void }).emitWorktreeRecoveryUpdate = () => {

@@ -101,7 +101,7 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   await expect(shortcutDialog.getByText("Next Session (Grid)", { exact: true })).toBeVisible();
   await expect(shortcutDialog.getByText("Previous Session (Grid)", { exact: true })).toBeVisible();
   await expect(shortcutDialog.getByText("First Session (Grid)", { exact: true })).toBeVisible();
-  await expect(shortcutDialog.getByText("Last Session / Follow Live Output", { exact: true })).toBeVisible();
+  await expect(shortcutDialog.getByText("Last Session / Jump to Latest", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   // The modal owns global shortcuts until React has unmounted it. Refocusing the background and
   // sending F6 before that boundary settles races the app's intentional shortcut-layer guard on

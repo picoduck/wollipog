@@ -4,13 +4,9 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import {
-  FOLLOW_TAIL_LABELS,
   FOLLOW_TAIL_PROGRAMMATIC_SCROLL_SETTLE_MS,
   FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS,
-  followTailControlLabel,
-  followTailControlTooltip,
-  followTailLabelParts,
-  followTailSurfaceLabel,
+  countRowsAfter,
   isAtFollowTailBottom,
   hasSavedFollowTailAnchor,
   isFollowTailResumeKey,
@@ -21,27 +17,12 @@ import {
 } from "./useFollowTail.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "./viewport-intent.js";
 
-test("follow copy distinguishes live, paused, and previewing states", () => {
-  assert.equal(followTailSurfaceLabel("paused", "preview", false), "Paused");
-  assert.equal(followTailSurfaceLabel("paused", "expanded", false), "Paused");
-  assert.equal(followTailSurfaceLabel("paused", "expanded", true), "Paused");
-  assert.equal(followTailSurfaceLabel("previewing", "preview", false), "Previewing");
-  assert.equal(followTailSurfaceLabel("following", "preview", false), "Following Live Output");
-  assert.equal(followTailControlLabel("following"), "Following Live Output");
-  assert.equal(followTailControlLabel("paused"), "Paused, Follow Live Output");
-  assert.equal(followTailControlLabel("previewing"), "Previewing, Follow Live Output");
-  assert.equal(followTailControlTooltip("following", true, "Shift+G"), "Following Live Output");
-  assert.equal(followTailControlTooltip("paused", true, "Shift+G"), "Follow Live Output (Shift+G)");
-  assert.equal(followTailControlTooltip("previewing", false, "Shift+G"), "Follow Live Output",
-    "surfaces without active reading keys never advertise an inactive shortcut");
-  assert.equal(followTailControlTooltip("paused", false, "Shift+G"), "Follow Live Output",
-    "mobile expanded surfaces never advertise an inactive reading shortcut");
-});
-
-test("a cramped strip keeps each state's leading word", () => {
-  assert.deepEqual(followTailLabelParts(FOLLOW_TAIL_LABELS.following), { word: "Following", rest: " Live Output" });
-  assert.deepEqual(followTailLabelParts(FOLLOW_TAIL_LABELS.paused), { word: "Paused", rest: "" });
-  assert.deepEqual(followTailLabelParts(FOLLOW_TAIL_LABELS.previewing), { word: "Previewing", rest: "" });
+test("new rows are the ones after the detach point, never prepended history", () => {
+  const rows = [{ id: 4 }, { id: 5 }, { id: 9 }, { id: 10 }];
+  assert.equal(countRowsAfter(rows, 10), 0);
+  assert.equal(countRowsAfter(rows, 5), 2);
+  assert.equal(countRowsAfter([{ id: 1 }, { id: 2 }, ...rows], 5), 2, "earlier pages add older rows only");
+  assert.equal(countRowsAfter(rows, Number.NEGATIVE_INFINITY), 4, "an empty detach point counts every row");
 });
 
 test("resume-key matching excludes Inbox navigation and modified global shortcuts", () => {
@@ -89,12 +70,13 @@ interface HarnessProps {
   revision: number;
   mode: "preview" | "expanded";
   scope?: string;
+  rows?: readonly { id: number }[];
   onApi?: (api: FollowTailApi) => void;
 }
 
-function Harness({ sessionId, revision, mode, scope = "test", onApi }: HarnessProps) {
+function Harness({ sessionId, revision, mode, scope = "test", rows, onApi }: HarnessProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  const followTail = useFollowTail({ scrollRef, contentRevision: revision, sessionId, persistenceScope: scope });
+  const followTail = useFollowTail({ scrollRef, contentRevision: revision, sessionId, persistenceScope: scope, rows });
   const initialAnchor = followTail.getInitialAnchor();
   React.useLayoutEffect(() => onApi?.(followTail));
   return (
@@ -102,7 +84,7 @@ function Harness({ sessionId, revision, mode, scope = "test", onApi }: HarnessPr
       ref={scrollRef}
       data-mode={mode}
       data-state={followTail.state}
-      data-label={followTail.label}
+      data-new={followTail.newRowCount}
       data-anchor-key={initialAnchor?.key}
       data-anchor-offset={initialAnchor?.offset}
       onScroll={followTail.onScroll}
@@ -137,8 +119,6 @@ test("the state machine uses the inclusive 48px bottom threshold", () => {
   assert.equal(nextFollowTailState("following", "preview"), "previewing");
   assert.equal(nextFollowTailState("previewing", "pause"), "paused");
   assert.equal(nextFollowTailState("paused", "resume"), "following");
-  assert.equal(FOLLOW_TAIL_LABELS.paused, "Paused");
-  assert.equal(FOLLOW_TAIL_LABELS.previewing, "Previewing");
 });
 
 test("programmatic preview paging owns smooth-scroll frames until the requested direction settles", async () => {
@@ -206,6 +186,50 @@ test("programmatic preview paging owns smooth-scroll frames until the requested 
     await new Promise<void>((resolve) => setTimeout(resolve, FOLLOW_TAIL_PROGRAMMATIC_SCROLL_SETTLE_MS + 20));
   });
   assert.equal(transcript.dataset.state, "following", "settled Page Down at the actual bottom resumes follow");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("rows appended while the reader is away are counted until the reader returns to the tail", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const rows = (...ids: number[]) => ids.map((id) => ({ id }));
+  const render = (revision: number, ids: number[]) => act(async () => {
+    root.render(<Harness sessionId="new-rows" scope="new-rows" revision={revision} mode="expanded" rows={rows(...ids)} />);
+  });
+  await render(0, [1, 2, 3]);
+  const transcript = container.firstElementChild as HTMLElement;
+  setScrollMetrics(transcript, { scrollTop: 800, scrollHeight: 1_000, clientHeight: 200 });
+  transcript.scrollTo = (() => {}) as typeof transcript.scrollTo;
+  assert.equal(transcript.dataset.new, "0");
+
+  await render(1, [1, 2, 3, 4]);
+  assert.equal(transcript.dataset.new, "0", "rows that arrive while following are not new");
+
+  await act(async () => {
+    transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: -12, bubbles: true }) as never);
+  });
+  assert.equal(transcript.dataset.state, "paused");
+  assert.equal(transcript.dataset.new, "0", "leaving the tail starts from nothing new");
+
+  await render(2, [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(transcript.dataset.new, "3");
+  await render(3, [-1, 0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(transcript.dataset.new, "3", "an earlier page loaded above the reader is not new");
+
+  await act(async () => {
+    transcript.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }) as never);
+  });
+  assert.equal(transcript.dataset.state, "following");
+  assert.equal(transcript.dataset.new, "0", "returning to the tail clears the count");
+
+  await act(async () => {
+    transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: -12, bubbles: true }) as never);
+  });
+  await render(4, [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(transcript.dataset.new, "1", "a second detach counts from its own point");
 
   await act(async () => { root.unmount(); });
   container.remove();

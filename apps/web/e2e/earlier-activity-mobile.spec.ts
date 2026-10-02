@@ -21,7 +21,7 @@ test("the first native mobile touch traversal loads earlier activity", async ({ 
   await expect.poll(() => reader.evaluate((element) => element.scrollHeight - element.clientHeight))
     .toBeGreaterThan(400);
   await reader.dispatchEvent("wheel", { deltaY: -40 });
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
   await reader.evaluate((element) => {
     element.scrollTop = 320;
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
@@ -68,7 +68,7 @@ test("an event-heavy mobile opening fills itself before exposing earlier activit
   await expect(control.getByRole("button", { name: "Load Earlier Activity" })).toHaveCount(1);
   await expect(page.getByText("A response near the beginning of the loaded activity may be incomplete."))
     .toHaveCount(0);
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "following");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "following");
 });
 
 test("resolved earlier pages preserve the mobile reading boundary", async ({ page }) => {
@@ -82,7 +82,7 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
   const control = page.locator(".transcript-earlier-activity");
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
   await reader.dispatchEvent("wheel", { deltaY: -40 });
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
 
   const traverseToHead = async () => reader.evaluate((element) => {
     const dispatchTouch = (type: "touchstart" | "touchmove" | "touchend", clientY?: number) => {
@@ -190,7 +190,7 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
     expect(Math.max(...samples.map((sample) => Math.abs(sample.offset! - before.offset))), JSON.stringify(samples))
       .toBeLessThan(1);
     await expect(control).not.toBeInViewport();
-    await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+    await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
   }
   expect(consoleErrors.filter((message) => message.includes("same key"))).toEqual([]);
 });
@@ -202,7 +202,7 @@ test("a downward finger drag at the head loads the next page without a scroll ev
   const control = page.locator(".transcript-earlier-activity");
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
   await reader.dispatchEvent("wheel", { deltaY: -40 });
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
   await page.waitForTimeout(250);
   await reader.evaluate((element) => {
     element.scrollTop = 0;
@@ -236,5 +236,5 @@ test("a downward finger drag at the head loads the next page without a scroll ev
   await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
   await expect(control).toContainText("Loading earlier activity…");
   await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
 });

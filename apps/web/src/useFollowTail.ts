@@ -13,44 +13,22 @@ const FOLLOW_TAIL_SETTLE_FRAMES = 8;
 
 export type FollowTailState = "following" | "paused" | "previewing";
 
-export const FOLLOW_TAIL_LABELS: Readonly<Record<FollowTailState, string>> = {
-  following: "Following Live Output",
-  paused: "Paused",
-  previewing: "Previewing",
-};
-
-export function followTailControlLabel(state: FollowTailState, stateLabel = FOLLOW_TAIL_LABELS[state]): string {
-  return state === "following" ? stateLabel : `${stateLabel}, Follow Live Output`;
+/** One row of the transcript; `id` is the event sequence that created it, so it orders appends. */
+export interface FollowTailRow {
+  id: number;
 }
 
-export function followTailControlTooltip(
-  state: FollowTailState,
-  readingKeysActive: boolean,
-  followShortcut: string,
-): string {
-  if (state === "following") return FOLLOW_TAIL_LABELS.following;
-  return readingKeysActive ? `Follow Live Output (${followShortcut})` : "Follow Live Output";
+/** Rows newer than the reader's detach point. Prepended earlier history is older, never new. */
+export function countRowsAfter(rows: readonly FollowTailRow[], baseline: number): number {
+  let count = 0;
+  for (const row of rows) if (row.id > baseline) count += 1;
+  return count;
 }
 
-/**
- * A state label split into its leading state word and the rest ("Following" + " Live Output").
- * A cramped status strip keeps only the word and visually hides the rest (#2041), so the rest stays
- * in the live region's announcement and the control's accessible name is unchanged.
- */
-export function followTailLabelParts(label: string): { word: string; rest: string } {
-  const space = label.indexOf(" ");
-  return space < 0 ? { word: label, rest: "" } : { word: label.slice(0, space), rest: label.slice(space) };
-}
-
-export function followTailSurfaceLabel(
-  state: FollowTailState,
-  mode: "preview" | "expanded",
-  isMobile: boolean,
-): string {
-  if (state === "following") return FOLLOW_TAIL_LABELS.following;
-  if (state === "previewing") return FOLLOW_TAIL_LABELS.previewing;
-  if (isMobile) return FOLLOW_TAIL_LABELS.paused;
-  return mode === "preview" ? "Paused" : FOLLOW_TAIL_LABELS.paused;
+function newestRowId(rows: readonly FollowTailRow[]): number {
+  let newest = Number.NEGATIVE_INFINITY;
+  for (const row of rows) if (row.id > newest) newest = row.id;
+  return newest;
 }
 
 export interface FollowTailMetrics {
@@ -76,12 +54,15 @@ export interface UseFollowTailOptions {
   sessionId: string;
   /** Separates saved reader positions for the same session on different instances. */
   persistenceScope?: string;
+  /** The transcript's rows, for counting the ones that arrive while the reader is away. */
+  rows?: readonly FollowTailRow[];
 }
 
 export interface FollowTailApi {
   state: FollowTailState;
-  label: string;
   isFollowing: boolean;
+  /** Rows appended since the reader left the tail; 0 while following. */
+  newRowCount: number;
   pause: () => void;
   preview: () => void;
   /** Claims viewport movement before Inbox paging starts its programmatic scroll. */
@@ -177,6 +158,7 @@ export function useFollowTail({
   contentRevision,
   sessionId,
   persistenceScope = "default",
+  rows,
 }: UseFollowTailOptions): FollowTailApi {
   const initialKey = snapshotKey(persistenceScope, sessionId);
   const initialSnapshotRef = useRef<FollowTailSnapshot | undefined>(undefined);
@@ -185,6 +167,10 @@ export function useFollowTail({
   const stateRef = useRef<FollowTailState>(initialSnapshotRef.current.state);
   const anchorRef = useRef<VirtualScrollAnchor | null>(initialSnapshotRef.current.anchor);
   const activeKeyRef = useRef(initialKey);
+  const rowsRef = useRef<readonly FollowTailRow[]>([]);
+  rowsRef.current = rows ?? [];
+  /** The newest row id when the reader left the tail; null while following or not yet known. */
+  const detachBaselineRef = useRef<number | null>(null);
   const previousSessionIdRef = useRef(sessionId);
   const followFrameRef = useRef<number | null>(null);
   const followFramesRemainingRef = useRef(0);
@@ -204,6 +190,7 @@ export function useFollowTail({
     activeKeyRef.current = currentKey;
     stateRef.current = restored.state;
     anchorRef.current = restored.anchor;
+    detachBaselineRef.current = null;
   }
 
   const persist = useCallback(() => {
@@ -213,6 +200,12 @@ export function useFollowTail({
   const transition = useCallback((event: "pause" | "preview" | "resume") => {
     const next = nextFollowTailState(stateRef.current, event);
     if (next === stateRef.current) return;
+    if (next === "following") detachBaselineRef.current = null;
+    else if (stateRef.current === "following") {
+      // Everything on screen now has been seen; with no rows yet, every later row is new.
+      const rowsNow = rowsRef.current;
+      detachBaselineRef.current = rowsNow.length > 0 ? newestRowId(rowsNow) : Number.NEGATIVE_INFINITY;
+    }
     stateRef.current = next;
     setState(next);
     storeSnapshot(activeKeyRef.current, { state: next, anchor: anchorRef.current });
@@ -511,11 +504,19 @@ export function useFollowTail({
     stateRef.current === "following" ? null : anchorRef.current, []);
 
   const currentState = stateRef.current;
+  // A position restored away from the tail has no detach moment: its first loaded rows are the
+  // baseline, so reopening a session never reports its whole history as new.
+  if (currentState !== "following" && detachBaselineRef.current == null && rowsRef.current.length > 0) {
+    detachBaselineRef.current = newestRowId(rowsRef.current);
+  }
+  const newRowCount = currentState === "following" || detachBaselineRef.current == null
+    ? 0
+    : countRowsAfter(rowsRef.current, detachBaselineRef.current);
 
   return {
     state: currentState,
-    label: FOLLOW_TAIL_LABELS[currentState],
     isFollowing: currentState === "following",
+    newRowCount,
     pause,
     preview,
     beginProgrammaticScroll,

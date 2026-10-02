@@ -159,22 +159,21 @@ test("heartbeat activity feeds cards, preview, split/footer counts, and independ
   assert.match(css, /prefers-reduced-motion: reduce[\s\S]*activity-strip/);
 });
 
-test("live-follow status owns a reserved transcript strip with a compact centered control cluster", () => {
-  // Dogfooding IDEA-007/BUG-009 (2026-08-10): the pager hints flank the follow-state control
-  // inside ONE centered cluster, and the resume keycap lives INSIDE the control.
-  assert.match(detail, /className="transcript-status-strip"[\s\S]*className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>[\s\S]*className="follow-tail-control"[\s\S]*label="Page Up"[\s\S]*"follow-tail-chip following"[\s\S]*className="follow-tail-kbd"[\s\S]*label="Page Down"/,
-    "Page Up, the follow-state control with its resume keycap, and Page Down form one cluster");
-  assert.match(detail, /className="follow-tail-kbd"\s*aria-hidden="true"\s*data-shortcut-hint=\{shortcutDisplay\(mode === "preview" \? "inbox-follow-latest" : "session-reading-latest"\)\}/,
-    "the in-control keycap is decorative; the control's tooltip carries the chord for assistive tech");
+test("the transcript's lower edge has one floating tail control and a strip of context, cost and Reply", () => {
+  // #2153: no always-on chip and no reserved recovery band. A zero-height anchor between the reader
+  // and the strip carries the floating control; the strip keeps context, cost and Reply (#2166).
+  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>[\s\S]*\{mode === "expanded" && \(\s*<div className="transcript-status-strip"/,
+    "the anchor and the one recovery live region sit between the reader and the expanded-only strip");
+  assert.doesNotMatch(detail, /follow-tail-chip|follow-tail-control|transcript-recovery-slot|TranscriptRecoveryStripEcho|label="Page Up"|label="Page Down"/,
+    "the chip, its pager hints and the recovery band are gone");
+  assert.match(detail, /className="transcript-status-strip"[\s\S]*className="transcript-status-cluster"[\s\S]*hasContextWindow && \([\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>/);
   assert.match(detail, /activePane === "reader"[\s\S]*<ShortcutHint[\s\S]*label="Reply"[\s\S]*shortcut=\{shortcutDisplay\("session-reading-reply"\)\}/);
   assert.match(shortcutHint, /className="shortcut-hint-label"[\s\S]*<kbd aria-hidden=\{interactive \? "true" : undefined\}>[\s\S]*className=\{`shortcut-hint shortcut-hint-button/,
     "Reply and transcript discovery hints must share the same component and keycap markup");
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
-  assert.match(detail, /className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*className="follow-tail-control"[\s\S]*className="transcript-status-trailing"[\s\S]*mode === "expanded" && \(\s*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"/,
-    "context, live output, and the cost/actions track occupy independent symmetric grid seats");
-  assert.match(detail, /className="transcript-status-cluster"[\s\S]*mode === "expanded" && hasContextWindow \? \([\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter[\s\S]*className="transcript-status-context transcript-status-context-standalone"[\s\S]*<TranscriptRecoveryStripEcho[\s\S]*className="follow-tail-control"/,
-    "recovery without a context meter uses the cluster's leading grid seat without overlapping the centered control");
+  assert.match(detail, /className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*className="transcript-status-trailing"[\s\S]*<SessionUsageControl session=\{session\} className="transcript-status-usage" \/>[\s\S]*className="transcript-status-actions"[\s\S]*label="Reply"/,
+    "context and the cost/actions track occupy independent symmetric grid seats");
   assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);[\s\S]*const hasContextWindow = contextWindow\.known;/,
     "seat allocation consumes the shared capacity result");
   assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>/g)?.length, 2,
@@ -192,12 +191,7 @@ test("live-follow status owns a reserved transcript strip with a compact centere
   assert.match(css, /\.transcript-status-cluster\s*\{[^}]*display:\s*grid;[^}]*grid-column:\s*1 \/ -1;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto\s*minmax\(0,\s*1fr\);[^}]*column-gap:\s*8px;[^}]*width:\s*100%;/,
     "equal side tracks keep the live-output control centered independently of usage widths");
   assert.match(css, /\.transcript-status-context\s*\{[^}]*position:\s*relative;[^}]*grid-column:\s*1;[^}]*flex:\s*none;[^}]*justify-content:\s*flex-end;[^}]*width:\s*auto;[^}]*min-width:\s*44px;/,
-    "the context seat stays adjacent while its compact recovery echo overlays toward free space");
-  assert.match(css, /\.transcript-status-context \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*width:\s*min\(80px,\s*calc\(25cqw - 11px\),\s*100%\);[^}]*max-width:\s*none;/,
-    "the recovery echo may extend left without inserting a spacer between context and live output");
-  assert.match(css, /\.transcript-status-context-standalone\s*\{[^}]*grid-column:\s*1;[^}]*width:\s*100%;[^}]*overflow:\s*hidden;/);
-  assert.match(css, /\.transcript-status-context-standalone \.transcript-recovery-strip-echo\s*\{[^}]*position:\s*static;[^}]*width:\s*100%;[^}]*max-width:\s*100%;/,
-    "standalone recovery stays bounded in the leading grid track while visible controls stay centered");
+    "the context seat stays adjacent to the strip's center");
   assert.match(css, /\.transcript-status-usage\s*\{[^}]*flex:\s*0 1 auto;[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
     "cost remains bounded when the centered cluster approaches the pane width");
   assert.match(css, /\.transcript-status-trailing\s*\{[^}]*display:\s*flex;[^}]*grid-column:\s*3;[^}]*justify-content:\s*space-between;[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;/,
@@ -212,14 +206,8 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "a plain-length cutoff retires the trailing actions in every engine with size container queries");
   assert.match(css, /@container transcript-pane \(max-width: calc\([^)]*rem[^)]*\)\)\s*\{\s*\.transcript-status-actions\s*\{\s*display:\s*none;\s*\}/,
     "and a font-relative cutoff retires them earlier when the reader has raised their text size");
-  assert.match(css, /\.follow-tail-control\s*\{[^}]*display:\s*inline-flex;[^}]*gap:\s*8px;[^}]*min-width:\s*0;/,
-    "preview pager hints stay grouped immediately around the live-output control");
-  assert.doesNotMatch(css.match(/\.follow-tail-control\s*\{[^}]*\}/)?.[0] ?? "", /1fr|space-between/,
-    "no flexible tracks may push the pager hints toward the strip edges");
-  assert.match(css, /\.follow-tail-chip\s*\{[^}]*flex:\s*none;[^}]*position:\s*static;[^}]*white-space:\s*nowrap;/,
-    "the live-follow control must participate in the strip layout instead of covering transcript content");
-  assert.doesNotMatch(css.match(/\.follow-tail-kbd\s*\{[^}]*\}/)?.[0] ?? "", /font|border|padding|background/,
-    "the in-control resume keycap is a <kbd>, so it takes the one keycap recipe and only places itself");
+  assert.doesNotMatch(css, /follow-tail-|transcript-recovery-/,
+    "the chip's and the recovery band's styles retire with them");
   assert.doesNotMatch(detail, /Preview Next|Preview Previous/);
   assert.doesNotMatch(sessionHeader, /ContextWindowMeter|formatTokens|formatCost/,
     "expanded usage belongs with the composer controls rather than the session header");

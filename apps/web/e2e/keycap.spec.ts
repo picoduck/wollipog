@@ -78,23 +78,24 @@ async function openCreateMenu(page: Page): Promise<Locator> {
 test.describe("with a fine pointer at 1440px", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("an inline hint and the follow-output control draw the one keycap", async ({ page }) => {
+  test("an inline hint and the Jump to Latest control draw the one keycap", async ({ page }) => {
     await page.goto(PREVIEW);
-    const strip = page.locator(".transcript-status-strip");
-    const pageUp = strip.locator('.shortcut-hint[data-shortcut-hint="Shift+Space"]');
-    await expectKeycap(page, pageUp.locator("kbd"), "Page Up hint");
+    await page.locator(".inbox-list").focus();
+    await page.keyboard.press("Shift+Space");
+    await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "previewing");
+    await expectKeycap(page, page.locator(".transcript-tail-control kbd"), "Jump to Latest control");
+
+    await page.getByRole("button", { name: "Expand Session" }).click();
+    await page.getByRole("region", { name: "Session Activity" }).focus();
+    const reply = page.locator('.transcript-status-strip .shortcut-hint[data-shortcut-hint="R"]');
+    await expectKeycap(page, reply.locator("kbd"), "Reply hint");
     // The label beside the keycap is the small type token in --text-dim.
-    const label = await pageUp.locator(".shortcut-hint-label").evaluate((element) => {
+    const label = await reply.locator(".shortcut-hint-label").evaluate((element) => {
       const style = getComputedStyle(element);
       return { fontSize: style.fontSize, color: style.color };
     });
     expect(label.fontSize).toBe("12px");
     expect(label.color).toBe(await tokenColour(page, "--text-dim"));
-
-    await page.locator(".inbox-list").focus();
-    await page.keyboard.press("Shift+Space");
-    await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "previewing");
-    await expectKeycap(page, page.locator(".follow-tail-chip kbd.follow-tail-kbd"), "follow-output control");
   });
 
   test("the Keyboard Shortcuts reference draws the same keycap", async ({ page }) => {
@@ -172,9 +173,13 @@ for (const width of [390, 1440]) {
       await expect(page.locator(".inbox-search kbd.inbox-search-key")).toBeHidden();
       if (width === 1440) {
         await page.goto(PREVIEW);
-        const strip = page.locator(".transcript-status-strip");
-        await expect(page.locator(".follow-tail-chip")).toBeVisible();
-        await expect(strip.locator('.shortcut-hint[data-shortcut-hint="Shift+Space"]')).toBeHidden();
+        await page.locator(".inbox-list").focus();
+        await page.keyboard.press("Shift+Space");
+        // Jump to Latest keeps its label on a touch screen and drops its End keycap.
+        const jump = page.locator(".transcript-tail-control");
+        await expect(jump).toBeVisible();
+        await expect(jump).toHaveAccessibleName("Jump to Latest");
+        await expect(jump.locator("kbd")).toBeHidden();
         await expect(page.locator(".inbox-shortcut-rail button").first()).toBeVisible();
         await expect(page.locator(".inbox-shortcut-rail kbd").first()).toBeHidden();
       }

@@ -191,8 +191,8 @@ test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
   assert.equal(shortcut("inbox-grid-next").label, "Next Session (Grid)");
   assert.equal(shortcut("inbox-grid-previous").label, "Previous Session (Grid)");
   assert.equal(shortcut("inbox-grid-first").label, "First Session (Grid)");
-  assert.equal(shortcut("inbox-follow-latest").label, "Follow Live Output");
-  assert.equal(shortcut("inbox-follow-latest-end").label, "Last Session / Follow Live Output");
+  assert.equal(shortcut("inbox-follow-latest").label, "Jump to Latest");
+  assert.equal(shortcut("inbox-follow-latest-end").label, "Last Session / Jump to Latest");
 });
 
 test("Session Reading shortcuts are registered in their contextual reference group", () => {
@@ -208,8 +208,8 @@ test("Session Reading shortcuts are registered in their contextual reference gro
   assert.deepEqual(reading.map((item) => item.id), expected);
   assert.equal(reading.every((item) => item.group === "Session Reading"), true);
   assert.deepEqual(shortcut("session-reading-start").binding.sequence, ["g", "g"]);
-  assert.equal(shortcut("session-reading-latest").label, "Follow Live Output");
-  assert.equal(shortcut("session-reading-latest-end").label, "Follow Live Output (End)");
+  assert.equal(shortcut("session-reading-latest").label, "Jump to Latest");
+  assert.equal(shortcut("session-reading-latest-end").label, "Jump to Latest (End)");
   // F forks from the session page as it does from the Sessions list, whose entry stays (#2272).
   assert.equal(shortcut("session-reading-fork").label, shortcut("inbox-fork").label);
   assert.equal(shortcutDisplay("session-reading-fork", false), "F");
@@ -387,7 +387,7 @@ test("shared Session actions are listed once, in the first of the two groups, on
   const labelsOf = (groups: ReturnType<typeof shortcutReferenceGroups>, name: string) =>
     groups.find((group) => group.group === name)!.rows.map((row) => row.label);
   const shared = ["Approve Request", "Deny Request", "Snooze Session", "Fork Conversation", "Reply to Session", "Page Down", "Page Up",
-    "Follow Live Output"];
+    "Jump to Latest"];
 
   const onSessions = shortcutReferenceGroups({ scope: "Sessions List", availability: AVAILABLE, keys: referenceKeys });
   const inSession = shortcutReferenceGroups({ scope: "Session Reading", availability: AVAILABLE, keys: referenceKeys });

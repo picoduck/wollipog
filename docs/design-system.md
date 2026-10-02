@@ -1564,8 +1564,10 @@ keycap in its trailing slot (§9.1).
 Hidden on coarse pointers (`@media (pointer: coarse)`), never by viewport width, except in the
 Keyboard Shortcuts reference, which keeps its keycaps because it is where someone with a hardware
 keyboard on a touch device looks them up. Inline hints still hide there (§15.1). Inside a cramped
-pane a keycap may yield to the content it would squeeze, as the follow-output control's does below
-its measured transcript-pane width; its control's tooltip still names the chord.
+pane a hint may yield to the content it would squeeze, as the transcript strip's Reply hint does
+below its measured transcript-pane width; the shortcut keeps working and the reference lists it. The
+transcript's floating Jump to Latest control (#2153) carries the End keycap on fine pointers only;
+its tooltip names the chord.
 
 ### 11.6 Meter
 

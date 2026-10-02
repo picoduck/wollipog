@@ -575,137 +575,53 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
 });
 
 /**
- * The reconnect recovery pill (issue #56) sits in a permanently-present NORMAL-FLOW slot between
- * the transcript scroller and the status strip. Its non-overlap guarantee is structural, not
- * numeric: an earlier fixed-pixel reservation lost to label wrapping at narrow panes and to
- * rem-scaled root fonts. With the pill markup always mounted, the slot is exactly as tall as the
- * pill really renders at the current pane width and font scale, and activity may toggle only
- * visibility — so recovery can never overlap transcript content, shift a reader's viewport, or
- * flip follow state.
+ * The floating tail control (#2153) replaces the always-mounted recovery band and the follow chip.
+ * Its "never moves the reader" guarantee is structural: the control floats from a zero-height flow
+ * anchor below the reader, so whether it shows, and what it says, cannot change the reader's
+ * height, its scroll position or the follow state.
  */
-test("the recovery pill is a permanently-sized in-flow slot, never an overlay", () => {
-  // The full recovery notice must remain in flow. The compact status-strip echo is deliberately
-  // excluded: it overlays the fixed context seat inside an already reserved strip and therefore
-  // cannot cover the scroller or change reader geometry.
-  const positioned = declarationsOf(css, "position")
-    .filter(({ selector, value }) => selector.includes("transcript-recovery")
-      && !(selector === ".transcript-status-context .transcript-recovery-strip-echo"
-        && value === "absolute")
-      && !(selector === ".transcript-status-context-standalone .transcript-recovery-strip-echo"
-        && value === "static"));
-  assert.deepEqual(positioned, [],
-    "recovery rules must stay in normal flow so the slot's height is the pill's real rendered height");
+test("the tail control floats from a zero-height anchor and never takes the reader's height", () => {
+  const anchor = soleRuleBody(".transcript-tail-anchor");
+  assert.match(anchor, /position:\s*relative;/);
+  assert.match(anchor, /flex:\s*none;/);
+  assert.match(anchor, /height:\s*0;/, "the anchor reserves no band below the reader");
 
-  // The slot must not clamp its natural height: a wrapped label or rem-scaled text must be free
-  // to grow it. (Slot height then changes only on genuine pane/font reflows, which the follow
-  // logic already owns through its ResizeObserver on the reader.)
-  const slot = soleRuleBody(".transcript-recovery-slot");
-  assert.doesNotMatch(slot, /height|overflow/,
-    "the slot must size to the pill's rendered height, never clamp or clip it");
+  const control = soleRuleBody(".transcript-tail-anchor > .btn.transcript-tail-control");
+  assert.match(control, /position:\s*absolute;/, "the control is an overlay, never a flow box");
+  assert.match(control, /bottom:\s*var\(--space-3\);/);
+  assert.match(control, /left:\s*50%;[\s\S]*transform:\s*translateX\(-50%\);/, "centered on the reading column");
+  assert.match(control, /border-radius:\s*var\(--radius-sm\);/, "an action, so a control radius, never a pill");
+  assert.match(control, /box-shadow:\s*var\(--elev-2\);/);
 
-  // Inactivity hides through visibility ONLY. `display: none` — or any layout property — would
-  // collapse the slot on toggle and reintroduce the scroll shift the permanent slot prevents.
-  assert.equal(soleRuleBody(".transcript-recovery-slot:not(.active) .transcript-recovery-notice"),
-    "visibility: hidden;");
-
-  // Symmetrically, activation may only start the pulse animation. Every .active-conditioned
-  // recovery rule is checked so a future `display`, `margin`, or `height` cannot sneak a layout
-  // delta into the activity toggle. The one deliberate exception is the compact-mode meter
-  // yield (`:has(...)`): it toggles display INSIDE the fixed-height status strip only — reader
-  // geometry and scroll position cannot move — and it is pinned by its own assertion below.
-  const activeRules = [...css.matchAll(/([^{}]*transcript-recovery[^{}]*\.active[^{}]*)\{([^}]*)\}/g)]
-    .filter(([, selector]) => !selector!.includes(":not(") && !selector!.includes(":has("));
-  assert.ok(activeRules.length > 0, "the active state must exist");
-  for (const [, selector, body] of activeRules) {
-    const props = [...body!.matchAll(/([a-z-]+)\s*:/g)].map((match) => match[1]);
-    assert.deepEqual(props.filter((prop) => prop !== "animation"), [],
-      `${selector!.trim()} may only toggle the pulse animation, found: ${props.join(", ")}`);
+  // Its states restyle only paint: none may set a layout property.
+  for (const declaration of allDeclarations(css)) {
+    if (!declaration.selectors.some((selector) => /transcript-tail-control\.is-/.test(selector))) continue;
+    assert.ok(["color", "cursor", "font-weight", "background"].includes(declaration.prop),
+      `${declaration.selectors.join(", ")} sets ${declaration.prop}`);
   }
+
+  // The band and the chip are gone, with every rule that reserved or echoed them.
+  assert.doesNotMatch(css, /transcript-recovery-|follow-tail-/);
+  assert.doesNotMatch(css, /@container transcript-pane \(max-height:/,
+    "no short-pane mode remains: nothing below the reader needs to collapse");
 });
 
-/**
- * Two survival invariants a permanently-present slot must also honour (issue #56, round 3):
- *
- * STRIP SURVIVAL — an inbox preview pane can be arbitrarily short (a generous splitter position
- * on a short viewport left ~99px), where slot + strip simply do not fit and the slot's
- * unconditional height clipped the strip and its follow control out of the pane. The transcript
- * pane is therefore a height-queried container: below the threshold the slot collapses entirely
- * (independent of activity, so toggling recovery still cannot change layout) and active recovery
- * is echoed inside the status strip — the persistent status surface that must always survive.
- */
-test("short panes keep the status strip", () => {
-  // The pane is a size container so the compact switch keys on the PANE's own height (set by a
-  // splitter position), which no viewport media query can observe.
+test("the strip keeps context, cost and Reply inside a clipped reader column", () => {
+  // The cost and Reply cutoffs measure the pane, so it stays a size container.
   assert.match(soleRuleBody(".detail-main"), /container:\s*transcript-pane \/ size;/);
-
-  // The compact switch: one height-conditioned container query must collapse the slot and
-  // surface the strip echo. Collapsing by pane mode (not by activity) keeps toggles layout-free.
-  const compact = /@container transcript-pane \(max-height:\s*\d+px\)\s*\{([\s\S]*?)\n\}/.exec(css);
-  assert.ok(compact, "the height-constrained compact mode must exist");
-  assert.match(compact![1]!, /\.transcript-recovery-slot\s*\{\s*display:\s*none;\s*\}/,
-    "compact mode must collapse the slot so the strip always fits");
-  assert.match(compact![1]!, /\.transcript-recovery-strip-echo\s*\{\s*display:\s*inline-flex;\s*\}/,
-    "compact mode must surface the in-strip echo in the slot's place");
-  // While recovery is active, the context meter yields visually while retaining the exact seat
-  // width so the centered cluster cannot shift as activity toggles.
-  assert.match(compact![1]!,
-    /\.transcript-status-context:has\(> \.transcript-recovery-strip-echo\.active\) > \.context-control\s*\{\s*visibility:\s*hidden;\s*\}/,
-    "the meter must yield without resizing the active recovery echo's seat");
-
-  // The echo's own activity toggle is visibility-only, like the pill's.
-  assert.equal(soleRuleBody(".transcript-recovery-strip-echo:not(.active)"), "visibility: hidden;");
-  // The strip itself never flexes away beneath the slot.
   assert.match(soleRuleBody(".transcript-status-strip"), /flex:\s*none;/);
-  const mobileUsage = soleRuleBody(".transcript-status-usage");
-  assert.match(mobileUsage, /min-width:\s*0;/);
-  assert.match(mobileUsage, /overflow:\s*hidden;/);
-  assert.match(mobileUsage, /text-overflow:\s*ellipsis;/);
-  assert.match(mobileUsage, /white-space:\s*nowrap;/);
-
-  // Inbox preview panes always use the compact presentation: the pill band would permanently
-  // spend ~47px of a splitter-resizable reader, and shrinking the preview viewport measurably
-  // degrades virtualizer paging while freshly streamed rows are still measuring. Mode-based,
-  // not activity-based, so recovery toggles stay layout-free in previews too.
-  assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-slot"), /display:\s*none;/);
-  assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-strip-echo"), /display:\s*inline-flex;/);
-
-  // Full-height phone Sessions deliberately stay in this same compact mode. Both declarations are
-  // conditioned on layout, never recovery activity, so active/inactive transitions cannot resize
-  // the reader and normal operation reserves no empty slot outside the strip.
-  const phone = mediaBlocks(css).find((block) =>
-    block.maxWidths.includes(760) &&
-    block.containsSelector(".session-detail .transcript-recovery-slot"));
-  assert.ok(phone, "the phone layout must collapse the dedicated recovery slot");
-  assert.deepEqual(
-    phone.declarationsForSelector(".session-detail .transcript-recovery-slot").get("display"),
-    ["none"],
-  );
-  assert.deepEqual(
-    phone.declarationsForSelector(".session-detail .transcript-recovery-strip-echo").get("display"),
-    ["inline-flex"],
-  );
-  assert.deepEqual(
-    phone.declarationsForSelector(
-      ".session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-control",
-    ).get("visibility"),
-    ["hidden"],
-    "the meter must yield without shifting a full-height phone Session",
-  );
+  const usage = soleRuleBody(".transcript-status-usage");
+  assert.match(usage, /min-width:\s*0;/);
+  assert.match(usage, /overflow:\s*hidden;/);
+  assert.match(usage, /text-overflow:\s*ellipsis;/);
+  assert.match(usage, /white-space:\s*nowrap;/);
+  assert.match(soleRuleBody(".transcript-status-context"), /position:\s*relative;[\s\S]*flex:\s*none;[\s\S]*min-width:\s*44px;/,
+    "the strip reserves a stable context seat");
 
   // The reader region clips: in panes shorter than the scroller's own padding floor, the
   // scroller would otherwise overflow the reader down over the strip and swallow its clicks.
   assert.match(soleRuleBody(".detail-reader"), /overflow:\s*clip;/,
     "nothing inside the reader may paint or intercept below its bounds");
-
-  // The compact echo overlays toward free space from the context seat. Its preferred width leaves
-  // the adjacent Live Output gap unchanged, while the side-track bound keeps the inner label
-  // ellipsizing inside the strip when the widest centered label narrows that track.
-  assert.match(soleRuleBody(".transcript-status-context"), /position:\s*relative;[\s\S]*flex:\s*none;[\s\S]*min-width:\s*44px;/,
-    "the strip reserves a stable context seat beside Live Output");
-  assert.match(soleRuleBody(".transcript-status-context .transcript-recovery-strip-echo"),
-    /position:\s*absolute;[\s\S]*right:\s*0;[\s\S]*width:\s*min\(80px,\s*calc\(25cqw - 11px\),\s*100%\);[\s\S]*max-width:\s*none;/,
-    "the compact echo uses available side-track width without changing cluster spacing");
-  assert.match(soleRuleBody(".transcript-recovery-strip-echo > span:last-child"), /text-overflow:\s*ellipsis;/);
 });
 
 /**

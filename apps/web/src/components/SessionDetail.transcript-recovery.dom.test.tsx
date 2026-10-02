@@ -190,6 +190,7 @@ interface Fixture {
   root: Root;
   scroller: HTMLElement;
   events: SessionEvent[];
+  socket: FakeSocket;
   renderMode: (mode: "preview" | "expanded") => Promise<void>;
 }
 
@@ -203,15 +204,18 @@ async function mountFixture(
     pendingQuestion = false,
     pendingStandalone = false,
     mode = "expanded",
+    pendingPrompts,
   }: {
     pinnedOpen?: boolean;
     pendingQuestion?: boolean;
     pendingStandalone?: boolean;
     mode?: "preview" | "expanded";
+    pendingPrompts?: SessionView["pendingPrompts"];
   } = {},
 ): Promise<Fixture> {
   fixtureSequence += 1;
   const currentSession = session(`transcript-recovery-${fixtureSequence}`);
+  if (pendingPrompts) currentSession.pendingPrompts = pendingPrompts;
   if (pendingQuestion) {
     currentSession.status = "input_required";
     currentSession.pendingApproval = {
@@ -331,7 +335,7 @@ async function mountFixture(
   await flushAsyncWork();
   const scroller = container.querySelector(".detail-scroll") as HTMLElement | null;
   assert.ok(scroller, "the transcript reader is mounted");
-  return { container, root, scroller, events, renderMode };
+  return { container, root, scroller, events, socket, renderMode };
 }
 
 async function unmountFixture(fixture: Fixture) {
@@ -402,46 +406,53 @@ async function flushAsyncWork(delay = 0) {
   });
 }
 
-/** The slot is PERMANENTLY mounted between the scroller and the status strip; activity toggles
- * only its `active` class and the live-region text, never the mounted markup. */
-function recoverySlot(fixture: Fixture): HTMLElement {
-  const slot = fixture.container.querySelector(".transcript-recovery-slot") as HTMLElement | null;
-  assert.ok(slot, "the recovery slot is permanently mounted");
-  return slot;
+/** The zero-height anchor is PERMANENTLY mounted between the reader and the status strip; only its
+ * one floating child comes and goes. */
+function tailAnchor(fixture: Fixture): HTMLElement {
+  const anchor = fixture.container.querySelector(".transcript-tail-anchor") as HTMLElement | null;
+  assert.ok(anchor, "the tail anchor is permanently mounted");
+  return anchor;
+}
+
+/** The floating control, or null when the reader has nothing to say at its lower edge. */
+function tailControl(fixture: Fixture): HTMLElement | null {
+  return tailAnchor(fixture).querySelector(".transcript-tail-control");
 }
 
 function recoveryActive(fixture: Fixture): boolean {
-  return recoverySlot(fixture).classList.contains("active");
+  return tailControl(fixture)?.classList.contains("is-recovering") === true;
 }
 
 function recoveryStatusText(fixture: Fixture): string {
-  // The live region lives OUTSIDE the slot so the compact mode's `display: none` on the slot
-  // can never silence announcements; it is the slot's immediate sibling.
-  const status = recoverySlot(fixture).nextElementSibling;
+  const status = fixture.container.querySelector("[data-transcript-recovery-status]");
   assert.ok(status?.getAttribute("role") === "status" && status.classList.contains("sr-only"),
-    "the permanently-mounted sr-only live region sits beside the slot, not inside it");
+    "one permanently-mounted sr-only live region announces recovery");
   return status.textContent ?? "";
 }
 
-function recoveryStripEcho(fixture: Fixture): HTMLElement {
-  const echo = fixture.container.querySelector(".transcript-recovery-strip-echo") as HTMLElement | null;
-  assert.ok(echo, "the compact strip echo is permanently mounted inside the status strip");
-  return echo;
+function followState(fixture: Fixture): string | null {
+  return fixture.scroller.getAttribute("data-follow-tail-state");
 }
 
-/** The pill markup must ALWAYS be present — it is what sizes the slot to the pill's real
- * rendered height at the current pane width and font scale, active or not. */
-function assertSizingPillMounted(fixture: Fixture) {
-  const pill = recoverySlot(fixture).querySelector(".transcript-recovery-notice");
-  assert.ok(pill, "the sizing pill markup is always mounted inside the slot");
-  assert.ok(pill.textContent!.includes("Checking for Missed Activity…"),
-    "the sizing pill always carries the label that determines its height");
+async function pushEvent(fixture: Fixture, text: string) {
+  const seq = fixture.events.length + 1;
+  const event: SessionEvent = {
+    id: seq,
+    sessionId: fixture.events[0]!.sessionId,
+    seq,
+    ts: seq,
+    payload: { kind: "agent_message", text, final: true } as SessionEvent["payload"],
+  };
+  fixture.events.push(event);
+  await act(async () => fixture.socket.push({ type: "session_event", event }));
+  await flushAsyncWork();
 }
 
-function followChipState(fixture: Fixture): string | null {
-  const chip = fixture.container.querySelector(".follow-tail-chip");
-  assert.ok(chip, "the follow-state control is mounted");
-  return chip.getAttribute("data-follow-tail-state");
+async function settleRecovery(pages: ReturnType<typeof pageController>, fixture: Fixture) {
+  await act(async () => {
+    pages.releaseTail({ events: fixture.events, eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
+  });
+  await flushAsyncWork();
 }
 
 test("SessionDetail keeps the temporary question fallback until a virtual row is genuinely mounted", async () => {
@@ -504,63 +515,58 @@ test("SessionDetail places a standalone fallback after loaded timeline activity"
   }
 });
 
-test("recovery over a long cached transcript announces at the reader's lower edge while following live output", async () => {
+test("recovery over a long cached transcript shows at the reader's lower edge while following", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages);
   try {
     // The cached timeline (not a loading skeleton) is showing, and the reader follows the tail.
     assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"));
-    assert.equal(followChipState(fixture), "following");
+    assert.equal(followState(fixture), "following");
 
-    const slot = recoverySlot(fixture);
-    assert.equal(recoveryActive(fixture), true, "the slot is active while recovery is checking");
-    assertSizingPillMounted(fixture);
-    assert.equal(recoveryStatusText(fixture), "Checking for Missed Activity…",
+    const control = tailControl(fixture);
+    assert.ok(control, "recovery speaks even at the tail");
+    assert.equal(recoveryActive(fixture), true);
+    assert.equal(control.textContent, "Checking for missed activity…");
+    assert.equal(control.tagName, "DIV", "recovery is a status, not a control");
+    assert.equal(control.getAttribute("role"), "status");
+    assert.equal(control.getAttribute("aria-live"), "off", "the reader's one live region does the announcing");
+    assert.equal(control.hasAttribute("tabindex"), false, "the recovery status is not focusable");
+    assert.equal(recoveryStatusText(fixture), "Checking for missed activity…",
       "the live status region announces the active recovery");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "true");
 
-    // In normal flow at the LOWER edge: outside the reader region, immediately above the strip.
+    // At the LOWER edge, outside the reader region, on a zero-height anchor above the strip.
     const reader = fixture.container.querySelector(".detail-reader") as HTMLElement;
-    assert.ok(reader, "the reader region wraps the scroller");
+    const anchor = tailAnchor(fixture);
     assert.ok(reader.contains(fixture.scroller), "the scroller lives inside the reader region");
-    assert.equal(reader.contains(slot), false, "the slot must not live inside the reader region");
-    assert.equal(slot.previousElementSibling, reader);
-    // slot → sr-only live region → status strip.
-    assert.ok(slot.nextElementSibling?.nextElementSibling?.classList.contains("transcript-status-strip"));
+    assert.equal(reader.contains(anchor), false, "the anchor must not live inside the reader region");
+    assert.equal(anchor.previousElementSibling, reader);
+    // anchor → sr-only live region → status strip.
+    assert.ok(anchor.nextElementSibling?.nextElementSibling?.classList.contains("transcript-status-strip"));
 
-    // The compact strip echo is mounted (CSS decides when it shows), decorative, and active.
-    const echo = recoveryStripEcho(fixture);
-    assert.ok(fixture.container.querySelector(".transcript-status-strip")!.contains(echo));
-    assert.equal(echo.getAttribute("aria-hidden"), "true");
-    assert.equal(echo.classList.contains("active"), true);
-    assert.ok(echo.textContent!.includes("Checking for Missed Activity…"));
-
-    // The sticky-top pill no longer renders for active recovery.
+    // Neither the old band nor the chip render, and the top-of-reader notice stays away.
+    assertNoDomNode(fixture.container.querySelector(".transcript-recovery-slot"));
+    assertNoDomNode(fixture.container.querySelector(".follow-tail-chip"));
     assertNoDomNode(fixture.container.querySelector(".transcript-load-notice"));
   } finally {
     await unmountFixture(fixture);
   }
 });
 
-test("successful recovery removes the notice promptly without disturbing a follower", async () => {
+test("successful recovery leaves an idle tail with nothing below the last row and announces completion", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages);
   try {
     assert.equal(recoveryActive(fixture), true);
-    await act(async () => {
-      // The completed tail-first opening window: it defines the visible slice and reached the
-      // runner tail, so recovery is authoritatively done.
-      pages.releaseTail({ events: fixture.events, eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
-    });
-    await flushAsyncWork();
-    assert.equal(recoveryActive(fixture), false, "the pill deactivates once recovery completes");
-    assert.equal(recoveryStatusText(fixture), "", "the live region clears so AT hears the stop");
-    // The slot, sizing pill, and strip echo stay mounted: deactivation only toggles their
-    // `active` class, so it cannot change layout in either pane mode.
-    assertSizingPillMounted(fixture);
-    assert.equal(recoveryStripEcho(fixture).classList.contains("active"), false);
+    // The completed tail-first opening window: it defines the visible slice and reached the
+    // runner tail, so recovery is authoritatively done.
+    await settleRecovery(pages, fixture);
+    assertNoDomNode(tailControl(fixture), "an idle tail shows no control");
+    assert.equal(tailAnchor(fixture).childElementCount, 0);
+    assert.equal(recoveryStatusText(fixture), "Caught up on missed activity.",
+      "the live region announces the check's completion");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
-    assert.equal(followChipState(fixture), "following");
+    assert.equal(followState(fixture), "following");
     assertNoDomNode(fixture.container.querySelector(".transcript-load-notice"));
   } finally {
     await unmountFixture(fixture);
@@ -576,23 +582,157 @@ test("a reader away from the tail keeps their place through recovery and its com
       fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
     });
     await flushAsyncWork();
-    assert.equal(followChipState(fixture), "paused");
+    assert.equal(followState(fixture), "paused");
     fixture.scroller.scrollTop = 123;
 
-    assert.equal(recoveryActive(fixture), true, "the recovery pill is visible to a reader away from the tail");
-    assert.equal(fixture.scroller.contains(recoverySlot(fixture)), false);
-    assert.equal(fixture.scroller.scrollTop, 123, "showing the pill does not move the reader");
+    assert.equal(recoveryActive(fixture), true, "recovery outranks Jump to Latest");
+    assert.equal(fixture.scroller.scrollTop, 123, "showing the control does not move the reader");
 
-    await act(async () => {
-      pages.releaseTail({ events: fixture.events, eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
-    });
-    await flushAsyncWork();
-    assert.equal(recoveryActive(fixture), false);
-    assertSizingPillMounted(fixture);
-    assert.equal(fixture.scroller.scrollTop, 123, "hiding the pill does not move the reader");
-    assert.equal(followChipState(fixture), "paused", "completion must not force the reader back to the tail");
+    await settleRecovery(pages, fixture);
+    assert.equal(tailControl(fixture)?.childNodes[0]?.textContent, "Jump to Latest", "the reader is still away from the tail");
+    assert.equal(fixture.scroller.scrollTop, 123, "swapping the control does not move the reader");
+    assert.equal(followState(fixture), "paused", "completion must not force the reader back to the tail");
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+test("Jump to Latest appears only away from the tail, counts new rows, and returns to the tail", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    await settleRecovery(pages, fixture);
+    assertNoDomNode(tailControl(fixture));
+
+    await act(async () => {
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
+    });
+    await flushAsyncWork();
+    fixture.scroller.scrollTop = 200;
+    const jump = tailControl(fixture) as HTMLButtonElement | null;
+    assert.ok(jump, "leaving the tail shows the control");
+    assert.equal(jump.tagName, "BUTTON");
+    assert.equal(jump.classList.contains("btn") && jump.classList.contains("sm"), true);
+    assert.equal(jump.childNodes[0]!.textContent, "Jump to Latest");
+    assert.equal(jump.querySelector("kbd")?.textContent, "End", "the End keycap on a fine pointer");
+    assert.equal(jump.title, "Jump to Latest (End)");
+    assert.equal(fixture.scroller.scrollTop, 200, "showing the control does not move the reader");
+    assert.equal(followState(fixture), "paused", "showing the control does not change the follow state");
+
+    for (const text of ["new answer 1", "new answer 2", "new answer 3"]) await pushEvent(fixture, text);
+    const counted = tailControl(fixture)!;
+    assert.equal(counted.childNodes[0]!.textContent, "3 New");
+    assert.equal(counted.getAttribute("aria-label"), "3 New, Jump to Latest");
+    assert.equal(fixture.scroller.scrollTop, 200, "new rows do not move a reader who left the tail");
+
+    await act(async () => {
+      counted.focus();
+      counted.click();
+    });
+    await flushAsyncWork();
+    assert.equal(followState(fixture), "following");
+    assertNoDomNode(tailControl(fixture), "the tail hides the control");
+    assert.equal(domWindow.document.activeElement, fixture.scroller, "focus stays in the reader");
+
+    await act(async () => {
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
+    });
+    await flushAsyncWork();
+    assert.equal(tailControl(fixture)?.childNodes[0]!.textContent, "Jump to Latest",
+      "returning to the tail cleared the count");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("loading, empty and history-error transcripts render no follow control", async () => {
+  const pages = pageController();
+  const loading = await mountFixture(pages, 0);
+  try {
+    assert.ok(loading.container.querySelector(".transcript-skeleton"), "the transcript is loading");
+    assertNoDomNode(tailControl(loading), "loading has no tail");
+    assert.equal(recoveryStatusText(loading), "");
+
+    await act(async () => {
+      pages.releaseTail({ events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
+    });
+    await flushAsyncWork();
+    assert.ok(loading.container.textContent!.includes("No Activity Yet"), "the transcript is empty");
+    assertNoDomNode(tailControl(loading), "an empty transcript has no tail");
+  } finally {
+    await unmountFixture(loading);
+  }
+
+  const failing = await mountFixture(pages, 0);
+  try {
+    await act(async () => { pages.rejectTail(); });
+    await flushAsyncWork();
+    assert.ok(failing.container.textContent!.includes("Activity Unavailable"), "history failed to load");
+    assertNoDomNode(tailControl(failing), "a history error has no tail");
+    assertNoDomNode(failing.container.querySelector(".follow-tail-chip"));
+  } finally {
+    await unmountFixture(failing);
+  }
+});
+
+test("an off-screen message that was not sent outranks every other state and scrolls to itself", async () => {
+  const observed: Array<{ element: Element; callback: IntersectionObserverCallback }> = [];
+  const original = Object.getOwnPropertyDescriptor(globalThis, "IntersectionObserver");
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    configurable: true,
+    writable: true,
+    value: class {
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+      observe(element: Element) { observed.push({ element, callback: this.callback }); }
+      unobserve() {}
+      disconnect() {}
+    },
+  });
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 12, {
+    pendingPrompts: [{
+      commandId: "prompt-not-sent",
+      text: "Please also update the changelog.",
+      hasImages: false,
+      state: "failed",
+      revision: 1,
+      attemptCount: 1,
+      error: "The runner was offline.",
+      canRetry: true,
+      createdAt: 2,
+      updatedAt: 2,
+    }],
+  });
+  try {
+    assert.equal(recoveryActive(fixture), true, "while the message is on screen, recovery shows");
+    const target = observed.find(({ element }) =>
+      (element as HTMLElement).dataset.pendingPromptId === "prompt-not-sent");
+    assert.ok(target, "the undelivered message is watched for visibility");
+    await act(async () => {
+      target.callback([{ target: target.element, isIntersecting: false } as unknown as IntersectionObserverEntry],
+        {} as IntersectionObserver);
+    });
+    const control = tailControl(fixture) as HTMLButtonElement;
+    assert.equal(control.textContent, "1 Message Not Sent");
+    assert.equal(control.classList.contains("is-not-sent"), true, "danger text");
+    assert.equal(recoveryStatusText(fixture), "Checking for missed activity…",
+      "recovery is still announced while the control shows the undelivered message");
+
+    let scrolledTo: Element | null = null;
+    (target.element as HTMLElement).scrollIntoView = function (this: Element) { scrolledTo = this; };
+    await act(async () => { control.click(); });
+    assert.equal(scrolledTo, target.element, "the control scrolls to the message");
+    assert.equal(domWindow.document.activeElement?.textContent, "Retry", "focus lands on the message's action");
+
+    await act(async () => {
+      target.callback([{ target: target.element, isIntersecting: true } as unknown as IntersectionObserverEntry],
+        {} as IntersectionObserver);
+    });
+    assert.equal(recoveryActive(fixture), true, "once the message is on screen the control steps down");
+  } finally {
+    await unmountFixture(fixture);
+    if (original) Object.defineProperty(globalThis, "IntersectionObserver", original);
+    else delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
   }
 });
 

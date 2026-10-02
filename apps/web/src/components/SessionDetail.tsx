@@ -93,10 +93,18 @@ import { ImageStrip, usePastedImages } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
 import {
   hasNewPendingPrompt,
+  isPendingPromptShown,
+  isUndeliveredPrompt,
   PendingPromptBubbles,
   queuedPromptsWithControls,
   shouldShowOptimisticPrompt,
 } from "./PendingPromptBubbles.js";
+import {
+  TranscriptTailControl,
+  transcriptTailView,
+  useOffscreenPendingPrompts,
+  useRecoveryAnnouncement,
+} from "./TranscriptTailControl.js";
 import { ApprovalsControl, ModelEffortControl } from "./ComposerControls.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
@@ -169,10 +177,6 @@ import { resolveContextWindowCapacity } from "../context-window-capacity.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
 import {
-  followTailControlLabel,
-  followTailControlTooltip,
-  followTailLabelParts,
-  followTailSurfaceLabel,
   hasSavedFollowTailAnchor,
   isFollowTailResumeKey,
   isFollowTailUpwardReadingKey,
@@ -3097,6 +3101,7 @@ function SessionDetailLoaded({
     contentRevision: `${evs?.length ?? 0}:${items.length}:${pending?.text.length ?? 0}:${pending?.images.length ?? 0}:${session.status}`,
     sessionId,
     persistenceScope: instanceScope,
+    rows: items,
   });
 
   // A 200-event opening window is a transport budget, not a visual one: hundreds of streamed
@@ -3289,8 +3294,6 @@ function SessionDetailLoaded({
     composerAvailable: canPrompt,
     actions: readingActions,
   });
-  const followLabel = followTailSurfaceLabel(followTail.state, mode, isMobile);
-  const followLabelParts = followTailLabelParts(followLabel);
   // Fork also covers Edit in Fork, handoff and quarantine recovery, which share its route (#1864).
   const forkRefusal = sessionCommandRefusal(session, "fork");
   const rewindRefusal = sessionCommandRefusal(session, "rewind");
@@ -4017,6 +4020,39 @@ function SessionDetailLoaded({
     history: eventHistory,
     conn,
   });
+  // The floating tail control (#2153). Only a transcript with rows has a tail to jump to; loading,
+  // history-error and empty states show nothing there.
+  const transcriptHasTail = transcript.body === "timeline" ||
+    (transcript.body === "empty" && (session.pendingPrompts?.length ?? 0) > 0);
+  const undeliveredPromptIds = (session.pendingPrompts ?? [])
+    .filter((prompt) => isPendingPromptShown(prompt, deliveredPromptCommandIds) && isUndeliveredPrompt(prompt))
+    .map((prompt) => prompt.commandId);
+  const offscreenUndeliveredIds = useOffscreenPendingPrompts(scrollRef, undeliveredPromptIds, transcriptHasTail);
+  const recoveryAnnouncement = useRecoveryAnnouncement(transcript.notice, sessionId);
+  const tailView = transcriptTailView({
+    hasTail: transcriptHasTail,
+    offscreenNotSent: offscreenUndeliveredIds.length,
+    recovering: transcript.notice === "refreshing",
+    following: followTail.isFollowing,
+    newRows: followTail.newRowCount,
+  });
+  const jumpToLatest = useCallback((event: { currentTarget: HTMLElement }) => {
+    const control = event.currentTarget;
+    followTail.follow();
+    // The control leaves with the tail; keep keyboard focus in the reader rather than on the page.
+    if (control.ownerDocument.activeElement === control) scrollRef.current?.focus({ preventScroll: true });
+  }, [followTail.follow]);
+  const showFirstUndelivered = useCallback(() => {
+    const scroller = scrollRef.current;
+    const id = offscreenUndeliveredIds[0];
+    if (!scroller || id === undefined) return;
+    const row = [...scroller.querySelectorAll<HTMLElement>("[data-pending-prompt-id]")]
+      .find((candidate) => candidate.dataset.pendingPromptId === id);
+    if (!row) return;
+    row.scrollIntoView({ block: "nearest" });
+    const action = row.querySelector<HTMLButtonElement>(".pending-prompt-actions button:not(:disabled)");
+    (action ?? scroller).focus({ preventScroll: true });
+  }, [offscreenUndeliveredIds]);
 
   // The web registry owns app/provider identity, availability, collisions, and menu ranking. The
   // provider wire shape stays unchanged until IDEA-004C adds transport-specific execution modes.
@@ -5237,12 +5273,12 @@ function SessionDetailLoaded({
             }}
           >
             {/* The reader region: the scroller, and NOTHING below it. It clips, so in a pane
-                shorter than the scroller's padding floor nothing can paint over the recovery slot
-                or the status strip. */}
+                shorter than the scroller's padding floor nothing can paint over the status strip. */}
             <div className="detail-reader">
             <div
               className="detail-scroll measured-virtual-scroll"
               ref={scrollRef}
+              data-follow-tail-state={followTail.state}
               role="region"
               aria-label={mode === "expanded" ? "Session Activity" : "Session Preview Activity"}
               aria-busy={transcript.busy}
@@ -5419,93 +5455,51 @@ function SessionDetailLoaded({
               )}
             </div>
             </div>
-            {/* Reconnect recovery indicator lives at the LOWER edge of the reader — where the
-                newest activity is — not sticky-top inside the scroller (issue #56: users watching
-                the tail read a top-only notice as "frozen" or "fully caught up"). The slot is
-                ALWAYS mounted between the reader and the status strip, so toggling recovery
-                can never change layout, scroll position, or follow state. In height-constrained
-                panes CSS collapses the slot and surfaces the echo inside the status strip. */}
-            <TranscriptRecoveryNotice active={transcript.notice === "refreshing"} />
-            <div className="transcript-status-strip" aria-label="Transcript Status">
-              {/* The live-output control owns the invariant center track. Context and cost use
-                  equal-width tracks on either side, so either indicator can appear, disappear, or
-                  change width without moving the control. */}
-              <div className="transcript-status-cluster">
-                {mode === "expanded" && hasContextWindow ? (
-                  <div className="transcript-status-context">
-                    <ContextWindowMeter session={session} resolution={contextWindow} />
-                    <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
-                  </div>
-                ) : (
-                  /* Without a context meter, compact recovery uses the cluster's leading track.
-                     Sharing this grid keeps its right edge outside the centered control. */
-                  <div className="transcript-status-context transcript-status-context-standalone">
-                    <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
-                  </div>
-                )}
-                {/* Page Up · follow-state control (with its resume keycap inside) · Page Down.
-                    Preview pager hints stay directly beside the badge at the standard gap. */}
-                <div className="follow-tail-control">
-                  {mode === "preview" && !isMobile && (
-                    <ShortcutHint label="Page Up" shortcut={shortcutDisplay("inbox-page-up")} />
+            {/* The one floating control at the reader's lower edge (#2153), where the newest
+                activity is (#56: a top-only recovery notice read as "frozen"). Its anchor takes no
+                height, so the control can come and go without moving the reader. */}
+            <TranscriptTailControl
+              view={tailView}
+              shortcut={isMobile
+                ? null
+                : shortcutDisplay(mode === "preview" ? "inbox-follow-latest-end" : "session-reading-latest-end")}
+              onJump={jumpToLatest}
+              onShowNotSent={showFirstUndelivered}
+            />
+            {/* The one polite live region for recovery, whatever the control is showing. */}
+            <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
+            {/* Context, cost and Reply until #2166 moves them into the composer. The preview shows
+                none of them, so it has no strip at all. */}
+            {mode === "expanded" && (
+              <div className="transcript-status-strip" aria-label="Transcript Status">
+                <div className="transcript-status-cluster">
+                  {hasContextWindow && (
+                    <div className="transcript-status-context">
+                      <ContextWindowMeter session={session} resolution={contextWindow} />
+                    </div>
                   )}
-                  <button
-                    // Literal arms, so the stylesheet guard can see each state class rendered; previewing is
-                    // styled through data-follow-tail-state.
-                    className={followTail.state === "following"
-                      ? "follow-tail-chip following"
-                      : followTail.state === "paused" ? "follow-tail-chip paused" : "follow-tail-chip"}
-                    data-follow-tail-state={followTail.state}
-                    onClick={followTail.follow}
-                    aria-label={followTailControlLabel(followTail.state, followLabel)}
-                    title={followTailControlTooltip(
-                      followTail.state,
-                      !isMobile,
-                      shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest"),
-                    )}
-                  >
-                    <span aria-live="polite">
-                      {followLabelParts.word}
-                      {followLabelParts.rest && <span className="follow-tail-label-rest">{followLabelParts.rest}</span>}
-                    </span>
-                    {!followTail.isFollowing && <span className="follow-tail-action">Follow Live Output</span>}
-                    {!isMobile && !followTail.isFollowing && (
-                      <kbd
-                        className="follow-tail-kbd"
-                        aria-hidden="true"
-                        data-shortcut-hint={shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
-                      >
-                        {shortcutDisplay(mode === "preview" ? "inbox-follow-latest" : "session-reading-latest")}
-                      </kbd>
-                    )}
-                  </button>
-                  {mode === "preview" && !isMobile && !followTail.isFollowing && (
-                    <ShortcutHint label="Page Down" shortcut={shortcutDisplay("inbox-page-down")} shortcutFirst />
-                  )}
-                </div>
-                <div className="transcript-status-trailing">
-                  {/* Cost only (#781): the neighboring context meter owns occupancy, while this
-                      control owns cumulative session spend. Both stay adjacent to live output. */}
-                  {mode === "expanded" && (
+                  <div className="transcript-status-trailing">
+                    {/* Cost only (#781): the neighboring context meter owns occupancy, while this
+                        control owns cumulative session spend. */}
                     <SessionUsageControl session={session} className="transcript-status-usage" />
-                  )}
-                  {/* Contextual actions use the far end of the trailing track. Their presence is
-                      independent of the centered control and they yield in cramped panes. */}
-                  <div className="transcript-status-actions">
-                    {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
-                      <ShortcutHint
-                        label="Reply"
-                        shortcut={shortcutDisplay("session-reading-reply")}
-                        title={`Reply (${shortcutDisplay("session-reading-reply")})`}
-                        ariaLabel="Reply"
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={focusComposerAtDraftEnd}
-                      />
-                    )}
+                    {/* Contextual actions use the far end of the trailing track and yield in
+                        cramped panes. */}
+                    <div className="transcript-status-actions">
+                      {!isMobile && canPrompt && activePane === "reader" && (
+                        <ShortcutHint
+                          label="Reply"
+                          shortcut={shortcutDisplay("session-reading-reply")}
+                          title={`Reply (${shortcutDisplay("session-reading-reply")})`}
+                          ariaLabel="Reply"
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={focusComposerAtDraftEnd}
+                        />
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
 
           {mode === "expanded" && (
@@ -7319,45 +7313,5 @@ function TranscriptLoadNotice({
         <button className="btn ghost sm" type="button" disabled={!canRetry} onClick={onRetry}>Retry</button>
       )}
     </div>
-  );
-}
-
-/** Reconnect/reopen recovery pill in a permanently-present normal-flow slot immediately above
- * the transcript status strip. The pill markup is ALWAYS mounted so the slot's height is the
- * pill's real rendered height at the current pane width and font scale — a wrapped label or a
- * rem-scaled root font simply makes the slot taller. Activity toggles only visibility and the
- * live-region text, never layout: showing or hiding recovery cannot shift scroll position or
- * follow state by construction, and the pill can never overlap transcript content because it is
- * not an overlay. The visual pill stays decorative; the sr-only sibling owns the live status
- * semantics through a text swap, matching the follow chip's permanently-mounted live region.
- * The sr-only region deliberately lives OUTSIDE the slot: height-constrained panes collapse the
- * slot with `display: none` (see the transcript-pane container query), and the live region must
- * keep announcing identically in that compact mode. */
-function TranscriptRecoveryNotice({ active }: { active: boolean }) {
-  return (
-    <>
-      <div className={`transcript-recovery-slot${active ? " active" : ""}`}>
-        <div className="transcript-recovery-notice" aria-hidden="true">
-          <span className="transcript-recovery-dot" />
-          <span>Checking for Missed Activity…</span>
-        </div>
-      </div>
-      <span className="sr-only" role="status">{active ? "Checking for Missed Activity…" : ""}</span>
-    </>
-  );
-}
-
-/** Compact-mode echo of the recovery notice inside the status strip's leading cell. Hidden in
- * normal panes; a height-constrained transcript pane swaps it in for the collapsed slot via CSS
- * (the strip is a persistent status surface and the only non-overlapping placement left in a
- * pane too short for the pill band). Decorative like the pill — the sr-only live region in
- * TranscriptRecoveryNotice owns the announcements in both modes — and its activity toggle is
- * visibility-only, so neither mode ever changes layout when recovery starts or stops. */
-function TranscriptRecoveryStripEcho({ active }: { active: boolean }) {
-  return (
-    <span className={`transcript-recovery-strip-echo${active ? " active" : ""}`} aria-hidden="true">
-      <span className="transcript-recovery-dot" />
-      <span>Checking for Missed Activity…</span>
-    </span>
   );
 }

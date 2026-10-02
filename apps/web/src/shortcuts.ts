@@ -385,14 +385,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "inbox-follow-latest",
     group: "Sessions List",
-    label: "Follow Live Output",
+    label: "Jump to Latest",
     scope: "Sessions List",
     binding: { key: "g", shift: true, bare: true },
   },
   {
     id: "inbox-follow-latest-end",
     group: "Sessions List",
-    label: "Last Session / Follow Live Output",
+    label: "Last Session / Jump to Latest",
     scope: "Sessions List",
     binding: { key: "End", bare: true },
   },
@@ -434,14 +434,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "session-reading-latest",
     group: "Session Reading",
-    label: "Follow Live Output",
+    label: "Jump to Latest",
     scope: "Session Reading",
     binding: { key: "g", shift: true, bare: true },
   },
   {
     id: "session-reading-latest-end",
     group: "Session Reading",
-    label: "Follow Live Output (End)",
+    label: "Jump to Latest (End)",
     scope: "Session Reading",
     binding: { key: "End", bare: true },
   },

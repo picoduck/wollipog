@@ -127,7 +127,7 @@ async function pausePreviewAt(page: Page, ratio: number) {
     element.scrollTop = (element.scrollHeight - element.clientHeight) * position;
     element.dispatchEvent(new Event("scroll"));
   }, ratio);
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
   await settlePreviewLayout(page);
   const anchor = await previewVisibleAnchor(page);
   expect(anchor).not.toBeNull();
@@ -520,7 +520,7 @@ for (const scenario of [
 test("real Inbox preview paging keeps ownership while live output streams", async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
   const reader = page.getByRole("region", { name: "Session Preview Activity" });
-  const follow = page.locator(".follow-tail-chip");
+  const follow = page.locator(".detail-scroll[data-follow-tail-state]");
   await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
   await expect(follow).toHaveAttribute("data-follow-tail-state", "following");
   await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
@@ -598,7 +598,7 @@ test("real Inbox preview paging preserves ownership with reduced motion", async 
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
   const reader = page.getByRole("region", { name: "Session Preview Activity" });
-  const follow = page.locator(".follow-tail-chip");
+  const follow = page.locator(".detail-scroll[data-follow-tail-state]");
   await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
   await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
   await page.locator(".inbox-list").focus();
@@ -624,16 +624,15 @@ test("real Inbox preview paging preserves ownership with reduced motion", async 
 test("real Inbox reading hints and resume keys match preview and expanded follow state", async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
   let reader = page.getByRole("region", { name: "Session Preview Activity" });
-  const strip = page.locator(".transcript-status-strip");
-  const follow = page.locator(".follow-tail-chip");
-  const pageUp = strip.locator('[data-shortcut-hint="Shift+Space"]');
-  const pageDown = strip.locator('[data-shortcut-hint="Space"]');
-  const resume = strip.locator('[data-shortcut-hint="Shift+G"]');
+  const follow = page.locator(".detail-scroll[data-follow-tail-state]");
+  const jump = page.locator(".transcript-tail-anchor > .transcript-tail-control");
   await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
   await expect(follow).toHaveAttribute("data-follow-tail-state", "following");
-  await expect(pageUp).toHaveText("Page UpShift+Space");
-  await expect(pageDown).toHaveCount(0);
-  await expect(resume).toHaveCount(0);
+  // #2153: at the tail nothing renders below the preview's last row — no chip, no pager hints and,
+  // with no context or cost in a preview, no strip either.
+  await expect(jump).toHaveCount(0);
+  await expect(page.locator(".transcript-status-strip")).toHaveCount(0);
+  await expect(page.locator(".detail-main [data-shortcut-hint]")).toHaveCount(0);
 
   await reader.focus();
   await page.keyboard.press("k");
@@ -642,40 +641,19 @@ test("real Inbox reading hints and resume keys match preview and expanded follow
   await page.locator(".inbox-list").focus();
   await page.keyboard.press("Shift+Space");
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
-  await expect(pageDown).toHaveText("SpacePage Down");
-  await expect(pageDown).toBeVisible();
-  // The resume keycap renders INSIDE the follow-state control; the chord reaches assistive tech
-  // through the control's tooltip rather than a separate described-by hint.
-  await expect(resume).toHaveText("Shift+G");
-  await expect(resume).toBeVisible();
-  await expect(follow.locator('[data-shortcut-hint="Shift+G"]')).toHaveCount(1);
-  expect(await follow.getAttribute("title")).toContain("Shift+G");
-  // The whole pager cluster is centered in the strip, and its hints sit directly beside the
-  // control at the standard inter-control gap — bounded, not merely present (IDEA-007 2026-08-10).
-  const cluster = page.locator(".follow-tail-control");
-  const [stripBox, clusterBox, pageUpBox, followBox, pageDownBox] = await Promise.all([
-    strip.boundingBox(), cluster.boundingBox(), pageUp.boundingBox(), follow.boundingBox(), pageDown.boundingBox(),
-  ]);
-  expect(stripBox).not.toBeNull();
-  expect(clusterBox).not.toBeNull();
-  expect(pageUpBox).not.toBeNull();
-  expect(followBox).not.toBeNull();
-  expect(pageDownBox).not.toBeNull();
-  expect(Math.abs(
-    (clusterBox!.x + clusterBox!.width / 2) - (stripBox!.x + stripBox!.width / 2),
-  )).toBeLessThan(2);
-  const leadingGap = followBox!.x - (pageUpBox!.x + pageUpBox!.width);
-  const trailingGap = pageDownBox!.x - (followBox!.x + followBox!.width);
-  expect(leadingGap).toBeGreaterThanOrEqual(0);
-  expect(leadingGap).toBeLessThanOrEqual(24);
-  expect(trailingGap).toBeGreaterThanOrEqual(0);
-  expect(trailingGap).toBeLessThanOrEqual(24);
+  await expect(jump).toBeVisible();
+  await expect(jump).toHaveAccessibleName("Jump to Latest");
+  await expect(jump.locator("kbd")).toHaveText("End");
+  await expect(jump).toHaveAttribute("title", "Jump to Latest (End)");
+  // Centered on the reading column, floating --space-3 above the reader's lower edge.
+  const [readerBox, jumpBox] = await Promise.all([reader.boundingBox(), jump.boundingBox()]);
+  expect(Math.abs((jumpBox!.x + jumpBox!.width / 2) - (readerBox!.x + readerBox!.width / 2))).toBeLessThan(10);
+  expect(readerBox!.y + readerBox!.height - (jumpBox!.y + jumpBox!.height)).toBeCloseTo(12, 0);
 
   await page.keyboard.press("Shift+G");
   await expect(follow).toHaveAttribute("data-follow-tail-state", "following");
   await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
-  await expect(pageDown).toHaveCount(0);
-  await expect(resume).toHaveCount(0);
+  await expect(jump).toHaveCount(0);
 
   await page.keyboard.press("Shift+Space");
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
@@ -691,14 +669,12 @@ test("real Inbox reading hints and resume keys match preview and expanded follow
   await reader.focus();
   await page.keyboard.press("Shift+Space");
   await expect(follow).toHaveAttribute("data-follow-tail-state", "paused");
-  await expect(resume).toHaveText("Shift+G");
-  await expect(pageUp).toHaveCount(0);
-  const reply = strip.locator('button.shortcut-hint-button[data-shortcut-hint="R"]');
+  // This session has no activity yet: an empty transcript has no tail, so the reading keys still
+  // drive the follow state but nothing offers to jump to it.
+  await expect(page.getByText("No Activity Yet")).toBeVisible();
+  await expect(jump).toHaveCount(0);
+  const reply = page.locator('.transcript-status-strip button.shortcut-hint-button[data-shortcut-hint="R"]');
   await expect(reply).toBeVisible();
-  const [expandedResumeBox, replyBox] = await Promise.all([resume.boundingBox(), reply.boundingBox()]);
-  expect(expandedResumeBox).not.toBeNull();
-  expect(replyBox).not.toBeNull();
-  expect(expandedResumeBox!.x + expandedResumeBox!.width).toBeLessThan(replyBox!.x);
   await page.keyboard.press("Shift+G");
   await expect(follow).toHaveAttribute("data-follow-tail-state", "following");
 
@@ -712,7 +688,7 @@ test("real Inbox restores independent paused anchors after hidden streaming and 
   await page.goto("/command-inbox-projects-e2e.html?scenario=scroll-restore");
   await page.getByRole("tab", { name: /All/ }).click();
   const reader = page.getByRole("region", { name: "Session Preview Activity" });
-  const follow = page.locator(".follow-tail-chip");
+  const follow = page.locator(".detail-scroll[data-follow-tail-state]");
 
   await page.getByRole("row", { name: /Alpha Session/ }).click();
   await expect(page.locator("[data-session-surface-id='session-alpha']")).toBeVisible();
@@ -841,7 +817,7 @@ test("Session Reading movement owns an incomplete Inbox restore across an immedi
   // below carry the ownership guarantee; this bound pins the same reading neighbourhood without
   // re-encoding removed-notice geometry.
   await expect.poll(async () => Math.abs((await previewVisibleAnchor(page))!.offset - moved!.offset)).toBeLessThan(48);
-  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
 });
 
 test("Inbox titles keep one reading axis across row signals, widths, and densities", async ({ page }) => {

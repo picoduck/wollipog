@@ -18,6 +18,16 @@ export function pendingPromptStatus(prompt: PendingPromptView): StatusMeta {
     : statusMeta("queuedMessage", prompt.state);
 }
 
+/** A message the person sent that did not reach the agent (Delivery Failed or Not Sent, not Canceled). */
+export function isUndeliveredPrompt(prompt: PendingPromptView): boolean {
+  return prompt.state === "failed" && prompt.errorCode !== "COMMAND_CANCELLED";
+}
+
+/** The rows PendingPromptBubbles renders: delivery is proven by the runner's flushed user event. */
+export function isPendingPromptShown(prompt: PendingPromptView, deliveredCommandIds: ReadonlySet<string>): boolean {
+  return prompt.userEventSeq === undefined && !deliveredCommandIds.has(prompt.commandId);
+}
+
 export function shouldShowOptimisticPrompt(
   status: SessionStatus,
   durableProviderInvocation: boolean,
@@ -68,9 +78,7 @@ export function PendingPromptBubbles({
 }) {
   // userEventSeq comes from the runner only after the command-tagged user event is flushed. It is
   // therefore stronger delivery evidence than the currently loaded (possibly partial) timeline.
-  return prompts.filter((prompt) =>
-    prompt.userEventSeq === undefined && !deliveredCommandIds.has(prompt.commandId)
-  ).map((prompt) => {
+  return prompts.filter((prompt) => isPendingPromptShown(prompt, deliveredCommandIds)).map((prompt) => {
     const busy = pendingAction === prompt.commandId;
     const actionPending = pendingAction !== undefined;
     const cancelPending = prompt.canCancel === true;
@@ -95,6 +103,7 @@ export function PendingPromptBubbles({
       <div
         className="tl-row user"
         data-testid={`pending-prompt-${prompt.commandId}`}
+        data-pending-prompt-id={prompt.commandId}
         key={prompt.commandId}
       >
         <div className={`bubble user-bubble pending-prompt-bubble state-${prompt.state}`}>
