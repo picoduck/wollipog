@@ -1059,35 +1059,94 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     return [FORWARDED];
   };
 
-  /** The components an element's tag can be: functions in the sources, or `icon` for an svg or a glyph. */
-  const componentsOf = (input: ts.Node | undefined, seen = new Set<ts.Node>()): (SourceFunction | "icon")[] => {
+  /**
+   * What an element's tag can render: a function in the sources, `icon` for an svg or a glyph,
+   * `other` for a component whose props cannot reach an icon's class unread (another package's, or
+   * a class component, whose `this.props` reads are reported where they meet an icon), or `unknown`. An unknown tag is reported,
+   * because an icon behind a tag the scan cannot follow would carry classes nothing checks.
+   */
+  type Rendered = SourceFunction | "icon" | "other" | "unknown";
+  /** Whether a name is imported, at its root, from a package other than lucide-react. */
+  const fromLibrary = (node: ts.Node): boolean => {
+    let root: ts.Node = node;
+    while (ts.isPropertyAccessExpression(root)) root = root.expression;
+    if (!ts.isIdentifier(root)) return false;
+    const module = checker.getSymbolAtLocation(root)?.declarations?.map(moduleOf).find((name) => name !== null);
+    return typeof module === "string" && !module.startsWith(".") && module !== "lucide-react";
+  };
+  /** The expressions a function returns: its concise body, or each `return` that is its own. */
+  const returnedNodes = (fn: SourceFunction): ts.Node[] => {
+    if (!fn.body) return [];
+    if (!ts.isBlock(fn.body)) return [fn.body];
+    const out: ts.Node[] = [];
+    const visit = (node: ts.Node): void => {
+      if (isSourceFunction(node)) return;
+      if (ts.isReturnStatement(node)) { if (node.expression) out.push(node.expression); } else ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(fn.body, visit);
+    return out;
+  };
+  const componentsOf = (input: ts.Node | undefined, seen = new Set<ts.Node>()): Rendered[] => {
     const node = transparent(input);
-    if (!node || seen.has(node)) return [];
+    if (!node) return ["unknown"];
+    if (seen.has(node)) return [];
     seen.add(node);
+    // A tag that is a string names an element: `as="svg"`, or `` `h${level}` as "h1" | "h2" ``.
+    const names = literalsOf(checker.getTypeAtLocation(input!));
+    if (names) return names.includes("svg") ? ["icon"] : [];
+    if (ts.isStringLiteralLike(node)) return node.text === "svg" ? ["icon"] : [];
+    if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) return ["other"];
     if (ts.isConditionalExpression(node)) return [...componentsOf(node.whenTrue, seen), ...componentsOf(node.whenFalse, seen)];
-    if (ts.isBinaryExpression(node)) return [...componentsOf(node.left, seen), ...componentsOf(node.right, seen)];
+    if (ts.isBinaryExpression(node)) {
+      const kind = node.operatorToken.kind;
+      if (kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken) {
+        return [...componentsOf(node.left, seen), ...componentsOf(node.right, seen)];
+      }
+      return kind === ts.SyntaxKind.AmpersandAmpersandToken ? componentsOf(node.right, seen) : ["unknown"];
+    }
     if (isSourceFunction(node)) return [node];
     if (ts.isElementAccessExpression(node)) {
       // `ICONS[tone]` is any of the object's values.
-      return objectValues(node.expression).flatMap((value) => componentsOf(value, seen));
+      const values = objectValues(node.expression);
+      return values ? values.flatMap((value) => componentsOf(value, seen)) : ["unknown"];
     }
-    if (!ts.isIdentifier(node) && !ts.isPropertyAccessExpression(node)) return [];
-    // A component passed as a prop is whatever the call sites pass: LibraryIcon's `glyph`, however
-    // it is read — destructured in the signature, as `props.glyph`, or destructured from `props`.
+    if (ts.isCallExpression(node)) {
+      // `const Icon = iconFor(tone)` renders whatever the helper returns.
+      const fn = functionOf(declarationOf(node.expression));
+      if (fn) return returnedNodes(fn).flatMap((value) => componentsOf(value, seen));
+      return fromLibrary(node.expression) ? ["other"] : ["unknown"];
+    }
+    if (!ts.isIdentifier(node) && !ts.isPropertyAccessExpression(node)) return ["unknown"];
+    // A component passed as a prop is whatever the call sites pass, or its default: LibraryIcon's
+    // `glyph`, however it is read — destructured in the signature, as `props.glyph`, or from `props`.
     const passed = propRead(node);
-    if (passed) return passedValues(passed.fn, passed.index, passed.prop).flatMap((value) => componentsOf(value, seen));
+    if (passed) {
+      return [...passedValues(passed.fn, passed.index, passed.prop).flatMap((value) => value === "unknown" ? [value] : componentsOf(value, seen)),
+        ...(passed.fallback ? componentsOf(passed.fallback, seen) : [])];
+    }
     const declaration = declarationOf(node);
     if (declaration === "glyph") return ["icon"];
     const fn = functionOf(declaration);
     if (fn) return [fn];
-    if (!declaration) return [];
+    if (fromLibrary(node)) return ["other"];
+    if (declaration && (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration))) return ["other"];
+    if (!declaration && ts.isPropertyAccessExpression(node)) {
+      // `ThemeContext.Provider`: a member of another package's object is that package's component.
+      const owner = componentsOf(node.expression, seen);
+      if (owner.length > 0 && owner.every((component) => component === "other")) return ["other"];
+    }
+    if (!declaration) return ["unknown"];
     if (isConstant(declaration)) return componentsOf(declaration.initializer, seen);
     if (ts.isPropertyAssignment(declaration)) return componentsOf(declaration.initializer, seen);
     if (ts.isShorthandPropertyAssignment(declaration)) return componentsOf(declaration.name, seen);
-    return [];
+    return ["unknown"];
   };
-  /** The parameter prop a name or property access reads, when it reads one: `glyph`, `props.glyph`, or `const { glyph } = props`. */
-  const propRead = (node: ts.Identifier | ts.PropertyAccessExpression): { fn: SourceFunction; index: number; prop: string } | null => {
+  /**
+   * The parameter prop a name or property access reads, when it reads one — `glyph`, `props.glyph`,
+   * or `const { glyph } = props` — with the default a binding gives it.
+   */
+  const propRead = (node: ts.Identifier | ts.PropertyAccessExpression):
+    { fn: SourceFunction; index: number; prop: string; fallback?: ts.Expression } | null => {
     const wholeParameter = (base: ts.Node) => {
       const declaration = declarationOf(base);
       const parameter = declaration && declaration !== "glyph" ? parameterOf(declaration) : null;
@@ -1099,45 +1158,86 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     }
     const declaration = declarationOf(node);
     if (!declaration || declaration === "glyph") return null;
+    const fallback = ts.isBindingElement(declaration) ? declaration.initializer : undefined;
     const parameter = parameterOf(declaration);
-    if (parameter && parameter.prop !== null) return { fn: parameter.fn, index: parameter.index, prop: parameter.prop };
+    if (parameter && parameter.prop !== null) return { fn: parameter.fn, index: parameter.index, prop: parameter.prop, fallback };
     const destructured = destructuredFrom(declaration);
     const source = destructured?.key && transparent(destructured.from);
     const base = source && ts.isIdentifier(source) ? wholeParameter(source) : null;
-    return base && destructured?.key ? { fn: base.fn, index: base.index, prop: destructured.key } : null;
+    return base && destructured?.key ? { fn: base.fn, index: base.index, prop: destructured.key, fallback } : null;
   };
-  /** The expressions a function's call sites pass for one prop of one parameter, through attributes and spread objects. */
-  const passedValues = (fn: SourceFunction, index: number, prop: string): ts.Node[] => {
-    const fromObject = (input: ts.Node | undefined, seen = new Set<ts.Node>()): ts.Node[] => {
+  /**
+   * The expressions a function's call sites pass for one prop of one parameter: attributes, spread
+   * objects, and through a wrapper that spreads its own props, that wrapper's call sites. `unknown`
+   * stands for an object the scan cannot read that may hold the prop.
+   */
+  const passedValues = (fn: SourceFunction, index: number, prop: string, visited = new Set<string>()): (ts.Node | "unknown")[] => {
+    const key = `${where(fn)}#${fn.pos}|${index}`;
+    if (visited.has(key)) return [];
+    visited.add(key);
+    const fromObject = (input: ts.Node | undefined, seen = new Set<ts.Node>()): (ts.Node | "unknown")[] => {
       const node = transparent(input);
       if (!node || seen.has(node)) return [];
       seen.add(node);
       if (ts.isObjectLiteralExpression(node)) {
-        return node.properties.flatMap((property) => ts.isSpreadAssignment(property) ? fromObject(property.expression, seen)
-          : ts.isPropertyAssignment(property) && property.name.getText() === prop ? [property.initializer]
-            : ts.isShorthandPropertyAssignment(property) && property.name.text === prop ? [property.name] : []);
+        return node.properties.flatMap((property) => {
+          if (ts.isSpreadAssignment(property)) return fromObject(property.expression, seen);
+          if (ts.isShorthandPropertyAssignment(property)) return property.name.text === prop ? [property.name] : [];
+          if (!ts.isPropertyAssignment(property)) return [];
+          if (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) return property.name.text === prop ? [property.initializer] : [];
+          return ["unknown" as const];
+        });
       }
-      const declaration = ts.isIdentifier(node) ? declarationOf(node) : undefined;
-      return declaration && declaration !== "glyph" && isConstant(declaration) ? fromObject(declaration.initializer, seen) : [];
+      if (ts.isConditionalExpression(node)) return [...fromObject(node.whenTrue, seen), ...fromObject(node.whenFalse, seen)];
+      if (ts.isIdentifier(node)) {
+        const declaration = declarationOf(node);
+        if (declaration && declaration !== "glyph") {
+          if (isConstant(declaration)) return fromObject(declaration.initializer, seen);
+          const destructured = destructuredFrom(declaration);
+          if (destructured && destructured.key === null) {
+            return destructured.taken.includes(prop) ? [] : fromObject(destructured.from, seen);
+          }
+          const parameter = parameterOf(declaration);
+          if (parameter && parameter.prop === null) {
+            const taken = parameter.rest && ts.isObjectBindingPattern(declaration.parent) && declaration.parent.elements
+              .some((element) => !element.dotDotDotToken && (element.propertyName ?? element.name).getText() === prop);
+            return taken ? [] : passedValues(parameter.fn, parameter.index, prop, visited);
+          }
+        }
+      }
+      // An object of a known type without the prop cannot pass it.
+      const type = checker.getTypeAtLocation(node);
+      return type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) || type.getProperty(prop) ? ["unknown"] : [];
     };
-    const fromElements = index !== 0 ? [] : (jsxSites.get(fn) ?? []).flatMap((site) => site.attributes.properties.flatMap((attribute) =>
-      ts.isJsxSpreadAttribute(attribute) ? fromObject(attribute.expression)
-        : attribute.name.getText() === prop && attribute.initializer && ts.isJsxExpression(attribute.initializer)
-          && attribute.initializer.expression ? [attribute.initializer.expression] : []));
+    const fromElements = index !== 0 ? [] : (jsxSites.get(fn) ?? []).flatMap((site) => site.attributes.properties.flatMap((attribute) => {
+      if (ts.isJsxSpreadAttribute(attribute)) return fromObject(attribute.expression);
+      if (attribute.name.getText() !== prop || !attribute.initializer) return [];
+      if (ts.isStringLiteral(attribute.initializer)) return [attribute.initializer];
+      return ts.isJsxExpression(attribute.initializer) && attribute.initializer.expression ? [attribute.initializer.expression] : ["unknown" as const];
+    }));
     return [...fromElements, ...(callSites.get(fn) ?? []).flatMap((call) => fromObject(call.arguments[index]))];
   };
-  /** Every value an object can hold, for an access whose key is not known. */
-  const objectValues = (input: ts.Node): ts.Node[] => {
+  /** Every value an object can hold, for an access whose key is not known, or null when the object cannot be read. */
+  const objectValues = (input: ts.Node): ts.Node[] | null => {
     const node = transparent(input);
-    if (!node) return [];
+    if (!node) return null;
     if (ts.isObjectLiteralExpression(node)) {
-      return node.properties.flatMap((property) => ts.isPropertyAssignment(property) ? [property.initializer]
-        : ts.isShorthandPropertyAssignment(property) ? [property.name] : []);
+      const values: ts.Node[] = [];
+      for (const property of node.properties) {
+        if (ts.isPropertyAssignment(property)) values.push(property.initializer);
+        else if (ts.isShorthandPropertyAssignment(property)) values.push(property.name);
+        else if (ts.isSpreadAssignment(property)) {
+          const spread = objectValues(property.expression);
+          if (!spread) return null;
+          values.push(...spread);
+        }
+      }
+      return values;
     }
-    if (!ts.isIdentifier(node)) return [];
+    if (!ts.isIdentifier(node)) return null;
     const declaration = declarationOf(node);
     return declaration && declaration !== "glyph" && isConstant(declaration) && declaration.initializer
-      ? objectValues(declaration.initializer) : [];
+      ? objectValues(declaration.initializer) : null;
   };
 
   const memo = new Map<ts.Node, string[]>();
@@ -1211,7 +1311,7 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (narrowed) return narrowed;
     if (ts.isElementAccessExpression(node)) {
       const values = objectValues(node.expression);
-      return values.length > 0 ? values.flatMap(strings) : [UNREAD];
+      return values && values.length > 0 ? values.flatMap(strings) : [UNREAD];
     }
     if (ts.isPropertyAccessExpression(node)) {
       // `props.className`, or a prop of the rest.
@@ -1300,21 +1400,24 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
 
   // Which function each element renders, to a fixed point: a component passed as a prop is known
   // only once the call sites of the function taking it are.
-  const rendered = new Map<ts.JsxOpeningLikeElement, Set<SourceFunction | "icon">>();
+  const rendered = new Map<ts.JsxOpeningLikeElement, Set<Rendered>>();
   for (let changed = true; changed;) {
     changed = false;
     for (const element of elements) {
       const known = rendered.get(element) ?? new Set();
       rendered.set(element, known);
       const tag = element.tagName;
-      const found = ts.isIdentifier(tag) && /^[a-z]/.test(tag.text) ? (tag.text === "svg" ? ["icon" as const] : []) : componentsOf(tag);
+      const found: Rendered[] = ts.isIdentifier(tag) && /^[a-z]/.test(tag.text) ? (tag.text === "svg" ? ["icon"] : []) : componentsOf(tag);
       for (const component of found) {
         if (known.has(component)) continue;
         known.add(component);
         changed = true;
-        if (component !== "icon") jsxSites.set(component, [...(jsxSites.get(component) ?? []), element]);
+        if (typeof component !== "string") jsxSites.set(component, [...(jsxSites.get(component) ?? []), element]);
       }
     }
+  }
+  for (const [element, components] of rendered) {
+    if (components.has("unknown")) unread.add(`${where(element)} <${element.tagName.getText()}>`);
   }
   for (const [element, components] of rendered) {
     if (components.has("icon")) collect(elementProp(element, "className"), element);
@@ -2680,6 +2783,34 @@ test("icon classes are read from every way a class reaches an icon, and an unrea
     "  return <><Mark className=\"memo-mark\" /><ByAccess glyph={Check} className=\"by-access\" /><ByBody glyph={Check} className=\"by-body\" /></>;",
     "}",
   ].join("\n") }), { classes: ["by-access", "by-body", "memo-mark"], unread: [] });
+
+  // A glyph forwarded through a wrapper's spread, a glyph prop's default, and a tag a helper returns.
+  assert.deepEqual(scanOf({ "Relay.tsx": [
+    "import { Check } from \"lucide-react\";",
+    "type P = { glyph?: typeof Check; className?: string };",
+    "function GlyphSlot({ glyph: Glyph = Check, className }: P) { return <Glyph className={className} />; }",
+    "function Relay(props: P) { return <GlyphSlot {...props} />; }",
+    "function pick(warning: boolean) { return warning ? Check : GlyphSlot; }",
+    "export function Uses({ warning }: { warning: boolean }) {",
+    "  const Picked = pick(warning);",
+    "  return <><Relay glyph={Check} className=\"relay-icon\" /><GlyphSlot className=\"default-icon\" /><Picked className=\"picked-icon\" /></>;",
+    "}",
+  ].join("\n") }), { classes: ["default-icon", "picked-icon", "relay-icon"], unread: [] });
+
+  // A tag the scan cannot resolve is reported, since an icon behind it would go unchecked; one from
+  // another package, a context provider, a class component or an element name is not.
+  assert.deepEqual(scanOf({ "Dynamic.tsx": [
+    "import { createContext, Suspense } from \"react\";",
+    "import { Component } from \"react\";",
+    "declare const makeIcon: () => unknown;",
+    "const Theme = createContext(null);",
+    "class Boundary extends Component { render() { return null; } }",
+    "function Slot({ Icon }: { Icon: any }) { return <Icon className=\"dynamic-icon\" />; }",
+    "export function Uses({ level }: { level: 1 | 2 }) {",
+    "  const Heading = `h${level}` as \"h1\" | \"h2\";",
+    "  return <Theme.Provider value={null}><Suspense><Boundary><Heading /><Slot Icon={makeIcon()} /></Boundary></Suspense></Theme.Provider>;",
+    "}",
+  ].join("\n") }), { classes: [], unread: ["Dynamic.tsx:6 <Icon>"] });
 
   // A value the scan cannot follow is reported, alone or inside a composed name.
   assert.deepEqual(scanOf({ "A.tsx": "export function A(props: { data: { c: string } }) { return <svg className={props.data.c} />; }" }),
