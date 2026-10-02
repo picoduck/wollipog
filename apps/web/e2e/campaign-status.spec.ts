@@ -121,7 +121,7 @@ test("a campaign without a recorded plan says so", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=planless");
   const notice = page.locator(".campaign-status-summary .notice");
   await expect(notice).toContainText("Plan Not Recorded");
-  await expect(notice).toContainText("2 child sessions without a work item are not counted below.");
+  await expect(notice).toContainText("2 child sessions without a work item are not counted");
   await expect(page.locator(".campaign-status-summary")).not.toContainText("$0.00");
 });
 

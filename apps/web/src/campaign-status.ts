@@ -305,23 +305,22 @@ function childCount(count: number): string {
 }
 
 function planNoticeFor(work: CampaignWorkSummary): CampaignSummaryView["planNotice"] {
+  // Two sentences at most (§13.2): what is missing, then which gaps the counts below carry.
   const untracked = work.coverage.untrackedChildren;
-  const untrackedSentence = untracked > 0
-    ? ` ${childCount(untracked)} without a work item ${untracked === 1 ? "is" : "are"} not counted below.`
-    : "";
-  const historySentence = work.coverage.predatesLedger ? " Work from before the ledger existed may be missing." : "";
+  const untrackedPhrase = untracked > 0
+    ? `${childCount(untracked)} without a work item ${untracked === 1 ? "is" : "are"} not counted`
+    : null;
+  const gaps = untrackedPhrase && work.coverage.predatesLedger
+    ? ` ${untrackedPhrase}, and work from before the ledger existed may be missing.`
+    : untrackedPhrase ? ` ${untrackedPhrase} below.`
+      : work.coverage.predatesLedger ? " Work from before the ledger existed may be missing." : "";
   if (work.planState === "not_recorded") {
-    return {
-      title: "Plan Not Recorded",
-      body: `The Orchestrator has not recorded a plan, so this may not be the whole campaign.${untrackedSentence}${historySentence}`,
-    };
+    return { title: "Plan Not Recorded", body: `The Orchestrator has not recorded a plan, so this may not be the whole campaign.${gaps}` };
   }
-  if (work.planState === "partial" || untracked > 0 || work.coverage.predatesLedger) {
+  if (work.planState === "partial" || gaps) {
     return {
       title: "Partial Coverage",
-      body: (work.planState === "partial"
-        ? "The Orchestrator has recorded only part of its plan."
-        : "Some campaign work is not in the plan.") + untrackedSentence + historySentence,
+      body: (work.planState === "partial" ? "The Orchestrator has recorded only part of its plan." : "Some campaign work is not in the plan.") + gaps,
     };
   }
   return null;

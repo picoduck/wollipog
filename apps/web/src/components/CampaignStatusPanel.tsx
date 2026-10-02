@@ -54,6 +54,7 @@ import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { useCampaignStatus, type CampaignStatusData } from "./useCampaignStatus.js";
 
@@ -236,7 +237,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
     <section className="campaign-status-summary" aria-labelledby={headingId}>
       <h3 id={headingId} className="campaign-status-heading">Summary</h3>
       {view.planNotice && (
-        <Notice tone="info" title={view.planNotice.title} compact>
+        <Notice tone="info" title={view.planNotice.title}>
           {view.planNotice.body}
         </Notice>
       )}
@@ -390,9 +391,10 @@ function CampaignWorkList({
           ))}
         </ul>
         {list.hasMore && (
-          <button type="button" className="btn ghost sm campaign-work-more" disabled={list.loadingMore} onClick={data.loadMore}>
-            {list.loadingMore ? "Loading…" : "Show More"}
-          </button>
+          <BusyButton className="btn ghost sm campaign-work-more" busy={list.loadingMore} progress="Loading more work items…"
+            disabled={list.loadingMore} onClick={data.loadMore}>
+            Show More
+          </BusyButton>
         )}
       </>
     );
@@ -447,12 +449,12 @@ function CampaignWorkRow({
     >
       <span className="campaign-work-row-line">
         <span className="campaign-work-row-title">{workItemTitle(item)}</span>
+        {assignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
         <StatusBadge meta={statusMeta("campaignWork", item.primaryState)} inline />
       </span>
       <span className="campaign-work-row-line campaign-work-row-meta">
         <span>{workItemOriginLabel(item)}</span>
         {item.issue && item.title && <span>{issueRefLabel(item.issue)}</span>}
-        {assignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
         <span className="campaign-work-row-trail">
           <span title={time.label}>{time.text}</span>
           {cost.priced && <span title={cost.provenance ?? "Cost"}>{cost.text}</span>}
