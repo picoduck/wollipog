@@ -239,6 +239,19 @@ test("a field stacks 8px apart, its helper or error 4px under the control, and i
 });
 
 /**
+ * #2365: the dim rule for a field's later spans takes only BARE spans. As `.field > span` its
+ * (0,1,1) out-ranked `.form-error` and `.muted`, so a field error read dim instead of red and a note
+ * took the label's 12px/500. e2e/field-tone-spans.spec.ts reads the result in both dialogs.
+ */
+test("a field's dim later-span rule leaves classed spans their own colour, size and weight", () => {
+  assert.match(soleRuleBody(".field > span:not([class]),\n.field-label"), /color: var\(--text-dim\);/);
+  const unscoped = postcss.parse(css).nodes.filter((node) => node.type === "rule" &&
+    node.selectors.some((selector) => /^\.field\s*>\s*span$/.test(selector.trim())));
+  assert.deepEqual(unscoped.map((node) => (node as postcss.Rule).selector), [],
+    "no top-level rule styles every direct span of a .field");
+});
+
+/**
  * The invalid field (docs/design-system.md §8.5): one `.field-error` recipe, and one rule that turns
  * the edge of any invalid control in a `.field` red. The rule sets only the edge, so the ring the
  * focus rule above draws (an outline in --focus) is the same on an invalid field.

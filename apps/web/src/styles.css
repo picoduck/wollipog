@@ -9676,15 +9676,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex-direction: column;
   gap: var(--space-2);
 }
-.field > span,
+/* Only a bare span: a classed one (`.form-error`, `.muted`, `.project-location-reason`) keeps its
+   own colour, size and weight, which this rule's (0,2,1) would otherwise out-rank (#2365). */
+.field > span:not([class]),
 .field-label {
   font-size: var(--text-sm);
   color: var(--text-dim);
   font-weight: 500;
 }
 /* The field's label (§8.1) is --type-label in --text: a bare first span, a `.field-label` or
-   `.new-session-field-label`, or the first item of a `.field-head` row (below). Later spans in a
-   field keep the dim rule above. */
+   `.new-session-field-label`, or the first item of a `.field-head` row (below). Later bare spans in
+   a field keep the dim rule above. */
 .field > span:first-child,
 .field > .field-label,
 .new-session-field-label {

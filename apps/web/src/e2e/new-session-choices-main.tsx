@@ -4,12 +4,15 @@ import {
   PROTOCOL_VERSION,
   type AgentHarnessDefaultsView,
   type CreateSessionRequest,
+  type ProjectLocationView,
   type ProjectView,
   type RunnerView,
   type UiSnapshotMessage,
+  type WorkflowDefinition,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { NewRunDialog } from "../components/NewRunDialog.js";
 import { NewSessionDialog } from "../components/NewSessionDialog.js";
 import { Select } from "../components/ui/ChoiceControls.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -42,6 +45,24 @@ const emailAccounts = fixtureParams.get("emailAccounts") === "1";
 
 /** #1695: host and container execution targets, so target-specific copy can be inspected. */
 const containerTargets = fixtureParams.get("containerTargets") === "1";
+
+/**
+ * #2365: the saved permission defaults' three states under Session Role. `error` shows the field's
+ * `span.form-error`, `pending` its "Loading…" `span.muted`, and `orchestrator` the `span.muted` that
+ * names a saved Orchestrator default.
+ */
+const savedDefaults = fixtureParams.get("defaults");
+
+/**
+ * #2365: `?dialog=run` mounts the real New Multi-Agent Run dialog on the same snapshot, plus three
+ * Projects whose Location field shows each of its notes: no Locations, none available, and two to
+ * choose between.
+ */
+const runDialog = fixtureParams.get("dialog") === "run";
+
+/** `?theme=light|dark` pins the theme; without it the page keeps the app's own default. */
+const fixtureTheme = fixtureParams.get("theme");
+if (fixtureTheme === "light" || fixtureTheme === "dark") document.documentElement.setAttribute("data-theme", fixtureTheme);
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -151,13 +172,14 @@ const runner: RunnerView = {
   } satisfies Partial<RunnerView> : {}),
 };
 
-const project: ProjectView = {
-  id: "project-1",
-  name: "Wollipog",
-  hidden: false,
-  locations: [{
-    id: "location-1",
-    projectId: "project-1",
+function fixtureLocation(
+  projectId: string,
+  id: string,
+  overrides: Partial<ProjectLocationView> = {},
+): ProjectLocationView {
+  return {
+    id,
+    projectId,
     runnerId: "runner-1",
     workspaceId: "workspace-1",
     name: "Wollipog",
@@ -167,13 +189,36 @@ const project: ProjectView = {
     isDefault: true,
     createdAt: 1,
     updatedAt: 1,
-  }],
-  activeSessionCount: 0,
-  unarchivedSessionCount: 0,
-  totalSessionCount: 0,
-  createdAt: 1,
-  updatedAt: 1,
-};
+    ...overrides,
+  };
+}
+
+function fixtureProject(id: string, name: string, locations: ProjectLocationView[]): ProjectView {
+  return {
+    id,
+    name,
+    hidden: false,
+    locations,
+    activeSessionCount: 0,
+    unarchivedSessionCount: 0,
+    totalSessionCount: 0,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
+
+const project = fixtureProject("project-1", "Wollipog", [fixtureLocation("project-1", "location-1")]);
+
+const runProjects: ProjectView[] = runDialog ? [
+  fixtureProject("project-empty", "No Locations Yet", []),
+  fixtureProject("project-offline", "Offline Location", [
+    fixtureLocation("project-offline", "location-offline", { availability: "runner_offline" }),
+  ]),
+  fixtureProject("project-two", "Two Locations", [
+    fixtureLocation("project-two", "location-two-a", { isDefault: false }),
+    fixtureLocation("project-two", "location-two-b", { isDefault: false, name: "Docs", path: "/repos/docs" }),
+  ]),
+] : [];
 
 const snapshot: UiSnapshotMessage = {
   type: "snapshot",
@@ -182,10 +227,12 @@ const snapshot: UiSnapshotMessage = {
     boundedDelivery: false,
     paginatedSessionHistory: false,
     projects: true,
+    // The saved Orchestrator default's note appears only when the control plane takes the role.
+    ...(savedDefaults === "orchestrator" ? { orchestratorRole: true } : {}),
   },
   runners: [runner],
   boxes: [],
-  projects: [project],
+  projects: [project, ...runProjects],
   sessions: [],
   runs: [],
   pods: [],
@@ -220,11 +267,24 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
-const defaults: AgentHarnessDefaultsView = { defaults: [] };
+const defaults: AgentHarnessDefaultsView = {
+  defaults: savedDefaults === "orchestrator" ? [{
+    agentId: "claude",
+    driver: "claude-code",
+    context: { kind: "native" },
+    name: "Claude Code",
+    installations: [],
+    compatibleInstallations: 1,
+    preference: { permissionMode: "orchestrator" },
+  }] : [],
+};
 
 const client = {
   ...api,
-  agentHarnessDefaults: async () => defaults,
+  agentHarnessDefaults: () => savedDefaults === "error"
+    ? Promise.reject(new Error("Saved defaults are unavailable."))
+    : savedDefaults === "pending" ? new Promise<AgentHarnessDefaultsView>(() => undefined) : Promise.resolve(defaults),
+  workflowDefinitions: async (): Promise<WorkflowDefinition[]> => [],
   createSession: async (request: CreateSessionRequest) => {
     const documentRoot = document.documentElement;
     const count = Number(documentRoot.dataset.createSessionCount ?? "0") + 1;
@@ -280,6 +340,7 @@ function Harness() {
   const [dialogOpen, setDialogOpen] = React.useState(!keyboardFixture);
   if (!ready) return null;
   if (fixtureParams.get("probe") === "select") return <SelectProbe />;
+  if (runDialog) return <NewRunDialog onClose={() => undefined} />;
   if (keyboardFixture) return (
     <>
       <button type="button" onClick={() => setDialogOpen(true)}>New Session</button>
