@@ -685,3 +685,50 @@ test("a phone opened from Edit in Groups… starts on that group", async () => {
     await view.unmount();
   }
 });
+
+test("on a phone, Back from the keyboard returns focus to the chosen group's row, so a second Enter never closes (#2368)", async () => {
+  phone = true;
+  const view = await mount();
+  try {
+    const dialog = view.dialog();
+    // Choose Platform Tools, not the first row, so the chosen row is told apart from the first.
+    await click(listRows(dialog)[1]!);
+    const back = button(dialog, "Back to Groups");
+    assert.ok(active() === back, "focus is on Back on the group step");
+    await click(back);
+    assert.equal(listRows(dialog).length, 4);
+    assert.equal(active()?.getAttribute("aria-label"), null, "focus is not on the header button, now Close");
+    assert.equal(active()?.dataset.groupId, "platform", "focus is on the chosen group's row");
+    // The second Enter acts on that row: it opens the group again and the dialog stays open.
+    await click(active()!);
+    assert.equal(dialog.querySelector(".skill-groups-name")?.textContent, "Platform Tools");
+    assert.equal(view.closed(), 0);
+  } finally {
+    phone = false;
+    await view.unmount();
+  }
+});
+
+test("on a phone, Back while a change runs keeps focus in the dialog, then hands it to the chosen row (#2368)", async () => {
+  phone = true;
+  const view = await mount();
+  try {
+    const dialog = view.dialog();
+    await click(listRows(dialog)[0]!);
+    view.api.state.hold = true;
+    await click(dialog.querySelector<HTMLButtonElement>('.skill-assignment [role="switch"]')!);
+    assert.deepEqual(view.api.writes, [["update-rule", "review", "rule-1", { enabled: false }]]);
+    await click(button(dialog, "Back to Groups"));
+    // Every row is disabled while the change runs, so the dialog holds focus, not Close.
+    assert.ok(listRows(dialog).every((row) => row.disabled));
+    assert.ok(active() === dialog, `the dialog holds focus, not ${active()?.getAttribute("aria-label") ?? active()?.tagName}`);
+    await view.api.release();
+    view.api.state.hold = false;
+    assert.ok(listRows(dialog).every((row) => !row.disabled));
+    assert.equal(active()?.dataset.groupId, "review", "focus moves to the chosen row once it is enabled");
+    assert.equal(view.closed(), 0);
+  } finally {
+    phone = false;
+    await view.unmount();
+  }
+});

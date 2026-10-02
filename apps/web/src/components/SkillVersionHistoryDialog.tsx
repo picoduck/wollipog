@@ -146,7 +146,9 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
   // A phone shows one pane at a time, so choosing a row, or crossing the breakpoint, can unmount the
   // control that has focus, which drops it on the page behind the sheet. Keep it in the dialog: on
   // Back when the version shows, on the chosen row (or the first) when the list does, else on the
-  // dialog itself. The dialog is found through whichever pane is shown.
+  // dialog itself. Back takes focus to the chosen row too, as Import from Machine does (#2300): the
+  // header button it stays on is Close on the list step. The dialog is found through whichever pane
+  // is shown.
   const listRef = useRef<HTMLDivElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
@@ -155,19 +157,25 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
   });
   const panes = `${listStep}:${detailStep}`;
   const shownPanes = useRef(panes);
+  const backToList = useRef(false);
   useLayoutEffect(() => {
     // Only a change of pane: opening the dialog places focus itself (Modal, §7.2).
     if (shownPanes.current === panes) return;
     shownPanes.current = panes;
-    if (document.activeElement && document.activeElement !== document.body) return;
+    const back = backToList.current && listStep;
+    if (listStep) backToList.current = false;
     const dialog = dialogRef.current;
     if (!dialog?.isConnected) return;
-    const target = detailStep
+    const active = document.activeElement;
+    if (!(back && dialog.contains(active)) && active && active !== document.body) return;
+    const target = detailStep && !back
       ? dialog.querySelector<HTMLElement>('button[aria-label="Back to Versions"]')
-      : listRef.current?.querySelector<HTMLElement>('[aria-current="true"]') ?? listRef.current?.querySelector<HTMLElement>("button");
+      : listRef.current?.querySelector<HTMLElement>('[aria-current="true"]')
+        ?? listRef.current?.querySelector<HTMLElement>('[aria-label="Versions"] > button') ?? listRef.current?.querySelector<HTMLElement>("button");
     target?.focus();
-    // A row disabled while a restore runs refuses focus; the dialog takes it then.
-    if (!dialog.contains(document.activeElement)) dialog.focus();
+    // A row disabled while a restore runs refuses focus; the dialog takes it then, never the header
+    // button Back left it on, which is Close now.
+    if (!target || document.activeElement !== target) dialog.focus();
   }, [panes]);
 
   const list = pages.loading ? <div className="skill-version-loading" role="status">
@@ -239,7 +247,7 @@ export function SkillVersionHistoryDialog({ skillId, machineName, onClose, onRes
   </>;
 
   return <Modal title="Version History" size="lg" className="skill-version-history" onClose={() => { if (!restoring) onClose(); }}
-    back={phone && step === "detail" ? { label: "Back to Versions", onBack: () => setStep("list") } : undefined}
+    back={phone && step === "detail" ? { label: "Back to Versions", onBack: () => { backToList.current = true; setStep("list"); } } : undefined}
     footer={<>
       {conflict && shown?.version.id
         ? <ReviewConflict busy={restoring} onPreviewAgain={() => void read(shown.version.id!)} />

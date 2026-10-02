@@ -213,3 +213,44 @@ test("the selected version's diff beside the list offers only Unified at 1440×9
   await expect(dialog.getByRole("radiogroup", { name: "Diff Layout" })).toHaveCount(0);
   await expect(dialog.locator(".diff-split-row")).toHaveCount(0);
 });
+
+test("at 390 Back from the keyboard returns focus to the chosen version, and to the dialog while a restore runs (#2368)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await routeVersions(page, () => [v3, v2, v1]);
+  await page.route("**/api/skills/skill-1/restore", async (route) => {
+    await held;
+    await route.fulfill({ json: { version: { ...v2, id: "skillv_d4d4d4d4d4d4d4d4d4d4", versionNumber: 4 } } });
+  });
+  const dialog = await openHistory(page);
+  const rows = dialog.getByRole("group", { name: "Versions" }).getByRole("button");
+  const back = dialog.getByRole("button", { name: "Back to Versions", exact: true });
+  // Choosing v2 from the keyboard shows the version with focus on Back; Back returns it to v2, so the
+  // second Enter shows v2 again rather than closing the dialog through the header button, now Close.
+  await rows.nth(1).focus();
+  await page.keyboard.press("Enter");
+  await expect(back).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(1)).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByRole("heading", { name: "Changes If You Restore v2" })).toBeVisible();
+  await expect(back).toBeFocused();
+
+  // While the restore runs every row is disabled: Back leaves focus on the dialog, and Enter there
+  // closes nothing.
+  const foot = dialog.locator(".modal-foot");
+  await foot.getByRole("checkbox", { name: "Deploy to machines that track the latest version", exact: true }).check();
+  await foot.getByRole("button", { name: "Restore v2", exact: true }).click();
+  await back.focus();
+  await page.keyboard.press("Enter");
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(1)).toBeDisabled();
+  await expect(dialog).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(dialog).toBeVisible();
+  release();
+  await expect(dialog.getByRole("status").filter({ hasText: "Restored v2." })).toBeVisible();
+  await expect(dialog).toBeVisible();
+});

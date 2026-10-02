@@ -639,3 +639,51 @@ test("Version History keeps focus in the dialog when the chosen row is disabled 
     await unmount();
   } finally { phoneWidth = false; }
 });
+
+test("on a phone, Back from the keyboard returns focus to the chosen version, so a second Enter never closes (#2368)", async () => {
+  const restoring = deferred<void>();
+  let closed = 0;
+  const client = {
+    ...api,
+    listSkillVersions: async () => ({ versions: [
+      { id: "skillv_3", versionNumber: 3, digest: "c" }, { id: "skillv_2", versionNumber: 2, digest: "b" }, { id: "skillv_1", versionNumber: 1, digest: "a" },
+    ], nextCursor: null }),
+    previewSkillVersion: async (_id: string, versionId: string): Promise<SkillVersionPreview> => ({
+      version: { id: versionId, versionNumber: Number(versionId.slice(7)), digest: versionId.padEnd(64, "0"), files: [file(versionId)] },
+      currentVersion: { id: "skillv_3", versionNumber: 3, digest: "skillv_3", files: [file("current")] },
+    }),
+    restoreSkillVersion: () => restoring.promise,
+  } as unknown as ApiClient;
+  const back = () => dialog().querySelector<HTMLButtonElement>('button[aria-label="Back to Versions"]')!;
+  const header = () => dialog().querySelector<HTMLButtonElement>(".modal-head .icon-btn")!;
+  phoneWidth = true;
+  try {
+    const unmount = await mount(client, <SkillVersionHistoryDialog skillId="skill-1" onClose={() => { closed += 1; }} onRestored={async () => undefined} />);
+    // Choose v2, not the first row, so the chosen row is told apart from the first.
+    await act(async () => { rows()[1]!.focus(); });
+    await click(rows()[1]!);
+    assert.ok(document.activeElement === back(), "focus is on Back on the version step");
+    await act(async () => { back().focus(); });
+    await click(back());
+    assert.equal(rows().length, 3);
+    assert.equal(header().getAttribute("aria-label"), "Close");
+    assert.ok(document.activeElement !== header(), "focus is not on the header button, now Close");
+    assert.ok(document.activeElement === rows()[1], "focus is on the chosen version");
+    // The second Enter acts on that row: it shows the version again and the dialog stays open.
+    await click(document.activeElement as HTMLButtonElement);
+    assert.equal(heading(), "Changes If You Restore v2");
+    assert.equal(closed, 0);
+
+    // Back while a restore runs: every row is disabled, so the dialog holds focus, not Close.
+    await click(dialog().querySelector<HTMLInputElement>('.review-consent input[type="checkbox"]')!);
+    await click([...dialog().querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Restore v2")!);
+    await act(async () => { back().focus(); });
+    await click(back());
+    assert.ok(rows().every((row) => row.disabled));
+    assert.ok(document.activeElement === dialog(), `the dialog holds focus, not ${document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName}`);
+    assert.equal(closed, 0);
+    await act(async () => { restoring.resolve(); });
+    await settle();
+    await unmount();
+  } finally { phoneWidth = false; }
+});

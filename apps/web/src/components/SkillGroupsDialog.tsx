@@ -156,7 +156,8 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
   // group, a phone pane) would drop focus on the page behind the sheet. After every commit, focus
   // that was lost from this dialog moves to the next control the change names, or the default one;
   // while that control is disabled by the running change, the dialog holds it. Focus that is
-  // somewhere is never moved.
+  // somewhere is never moved, except by a phone's Back: the header button it stays on is Close on
+  // the list, so focus goes to the chosen group's row, as in Import from Machine (#2300).
   const listRef = useRef<HTMLDivElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -164,6 +165,7 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
   const focusInside = useRef(false);
   const rescuing = useRef(false);
   const nextFocus = useRef<(() => HTMLElement | null | undefined) | null>(null);
+  const backToList = useRef(false);
   useLayoutEffect(() => {
     dialogRef.current = bodyRef.current?.closest<HTMLElement>('[role="dialog"]') ?? dialogRef.current;
   });
@@ -183,14 +185,25 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
   };
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
+    // Taken by the commit that shows the list, not one that was already on its way.
+    const backPressed = backToList.current && showList;
+    if (showList) backToList.current = false;
     if (!dialog?.isConnected) return;
     const active = document.activeElement;
     // A focused control that a change disabled (Add Skill once no skill is left to add) loses focus
     // at the browser's next focus fixup, with no event to say so: treat it as lost now.
     const lost = !active || active === document.body || !active.isConnected || (active as HTMLButtonElement).disabled === true;
     if (lost && focusInside.current) rescuing.current = true;
+    const back = backPressed && dialog.contains(active);
+    if (back) {
+      rescuing.current = true;
+      // A phone marks no row as chosen, so the chosen group's row is found by its id.
+      const chosen = selected?.id;
+      nextFocus.current = () => [...listRef.current?.querySelectorAll<HTMLElement>(".skill-groups-list > .row") ?? []]
+        .find((row) => row.dataset.groupId === chosen);
+    }
     if (rescuing.current) {
-      if (!lost && active !== dialog) {
+      if (!back && !lost && active !== dialog) {
         rescuing.current = false;
       } else {
         const target = nextFocus.current?.() ?? defaultFocus();
@@ -459,7 +472,7 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
         {groups.map((group) => {
           const count = skills.filter((skill) => skill.groupId === group.id).length;
           const isSelected = !phone && group.id === selected?.id;
-          return <button key={group.id} type="button" className={`row${isSelected ? " is-selected" : ""}`}
+          return <button key={group.id} type="button" className={`row${isSelected ? " is-selected" : ""}`} data-group-id={group.id}
             aria-current={isSelected || undefined} disabled={busy} onClick={() => choose(group)}>
             <span className="row-body"><span className="row-title" title={group.name}>{group.name}</span></span>
             <span className="row-trail">{group.scope ? (count ? plural(count, "skill") : "No skills") : "No owner"}</span>
@@ -496,7 +509,7 @@ export function SkillGroupsDialog({ runners, machineLabels, initialGroupId, onCl
 
   return <>
     <Modal title="Manage Groups" size="lg" className="skill-groups" onClose={close}
-      back={phone && !showList ? { label: "Back to Groups", onBack: () => setStep("list") } : undefined}
+      back={phone && !showList ? { label: "Back to Groups", onBack: () => { backToList.current = true; setStep("list"); } } : undefined}
       footer={<button type="button" className="btn" disabled={busy} onClick={close}>Done</button>}>
       <div className="skill-groups-body" ref={bodyRef}>
         {content}

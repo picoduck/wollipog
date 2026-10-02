@@ -331,3 +331,52 @@ test("at 390px the list and the group are two steps of one sheet, with Back and 
   await back.click();
   await expect(dialog.locator(".skill-groups-list > .row")).toHaveCount(4);
 });
+
+test("at 390px Back from the keyboard returns focus to the chosen group, and to the dialog while a change runs (#2368)", async ({ page }) => {
+  await installSkillGroupsFixture(page, { library: "full" });
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/skills/skill-2", async route => {
+    if (route.request().method() === "PUT") await held;
+    await route.fallback();
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/skills-removals-e2e.html?groups=1");
+  await choosePageAction(page, "Manage Groups…");
+  const dialog = manageGroups(page);
+  const rows = dialog.locator(".skill-groups-list > .row");
+  const back = dialog.getByRole("button", { name: "Back to Groups", exact: true });
+  // Choosing Platform Tools from the keyboard shows the group with focus on Back; Back returns it to
+  // that row, so the second Enter opens the group again rather than closing the dialog through the
+  // header button, now Close.
+  await rows.nth(1).focus();
+  await page.keyboard.press("Enter");
+  await expect(back).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(rows).toHaveCount(4);
+  await expect(rows.nth(1)).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(dialog.locator(".skill-groups-name")).toHaveText("Platform Tools");
+  await expect(back).toBeFocused();
+
+  // While a change runs every row is disabled: Back leaves focus on the dialog, and Enter there
+  // closes nothing. Once the change lands, focus moves to the chosen row.
+  await page.keyboard.press("Enter");
+  await rows.first().focus();
+  await page.keyboard.press("Enter");
+  await expect(dialog.locator(".skill-groups-name")).toHaveText("Review Team");
+  await dialog.locator(".skill-groups-members .row", { hasText: "lint-fix" }).getByRole("button", { name: "Remove…", exact: true }).click();
+  await confirmation(page, "Remove Skill from Group").getByRole("button", { name: "Remove Skill", exact: true }).click();
+  await expect(dialog.locator("[aria-busy='true']")).toHaveCount(1);
+  await back.focus();
+  await page.keyboard.press("Enter");
+  await expect(rows).toHaveCount(4);
+  await expect(rows.first()).toBeDisabled();
+  await expect(dialog).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(dialog).toBeVisible();
+  release();
+  await expect(rows.first()).toBeEnabled();
+  await expect(rows.first()).toBeFocused();
+  await expect(dialog).toBeVisible();
+});
