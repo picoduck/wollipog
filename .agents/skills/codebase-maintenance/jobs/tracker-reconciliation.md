@@ -60,6 +60,32 @@ gone, never pipe `git grep` through `head`: alphabetical path order can fill the
 from an unrelated package and read as "already removed". Scope the grep to the paths the issue
 names, or count the matches.
 
+**Assess every criterion before completing a review.** Give each helper the complete issue
+body and acceptance criteria, including referenced requirements needed for the verdict. Do not
+truncate them to fit a batch: reduce the batch or provide complete files instead. Count helper
+tool use alongside the coordinator's tool use against the existing aggregate run budget; track
+the combined usage before assigning more work and leave unfinished criteria pending when it runs
+out.
+
+Keep a per-criterion assessment with its exact requirement, status, merged revision, evidence and
+reasoning. Every code criterion needs supported evidence: inspect the implementation and relevant
+call sites, and explain how their behavior satisfies or fails the requirement, using focused
+tests or other ground-truth checks where applicable. A script proving a cited line exists only
+checks the reference; it does not prove that code meets the criterion. A helper's `complete` flag
+cannot override a missing criterion, an uninvestigated criterion or unsupported evidence. Such an
+entry stays pending until the coordinator validates full criterion coverage and support.
+
+Completed assessment and delivered behavior are different: a fully investigated issue may have
+unmet criteria. Record verified approved deviations with their decision evidence, and deliberate
+later replacements with the merged change that superseded the original behavior; do not report
+either as accidental delivery drift. Unknown approval is not an approved deviation. Keep the
+separate unverified-process category from the Gate below rather than claiming missing process
+evidence proves missing behavior or approval.
+
+For epics, assess the full epic criteria as well as the child requirements. Reuse supported child
+code assessments and inspect unresolved pieces in merged code, including cross-child behavior.
+Closed checkboxes, merged commit subjects and child closure alone cannot certify epic delivery.
+
 **Repository hygiene.** Check for the residue of the issue workflow:
 
 - merged or deleted remote branches still present locally — `git branch -vv | grep ': gone]'`.
