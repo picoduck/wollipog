@@ -5,7 +5,14 @@ import {
   type SteeringReceiptPresentation as ReceiptPresentation,
 } from "../conversation-steering.js";
 import type { TimelineItem } from "../timeline.js";
-import { ReceiptAttachmentChip, ReceiptLine, ReceiptRow, receiptRowId, type ReceiptBubbleVariant } from "./TranscriptReceipt.js";
+import {
+  RECEIPT_ROW_ATTRIBUTE,
+  ReceiptAttachmentChip,
+  ReceiptLine,
+  ReceiptRow,
+  receiptRowId,
+  type ReceiptBubbleVariant,
+} from "./TranscriptReceipt.js";
 
 export const MAX_VISIBLE_STEERING_RECEIPTS = 50;
 export const MAX_RECENT_PREVIOUS_TURN_RECEIPTS = 5;
@@ -138,6 +145,8 @@ interface SteeringReceiptCardProps {
   actionRefusal?: string | null;
   onQueueAgain: (submissionId: string) => void;
   onDismiss: (submissionId: string) => void | Promise<void>;
+  /** False inside a folded group, whose row is the one the floating control watches. */
+  tracked?: boolean;
 }
 
 function SteeringReceiptCard({
@@ -146,6 +155,7 @@ function SteeringReceiptCard({
   actionRefusal = null,
   onQueueAgain,
   onDismiss,
+  tracked = true,
 }: SteeringReceiptCardProps) {
   const refusalId = `steering-refusal-${attempt.submissionId}`;
   const refusalDescription = actionRefusal !== null ? refusalId : undefined;
@@ -164,7 +174,7 @@ function SteeringReceiptCard({
   const hasActions = recoverable || dismissible;
   return (
     <ReceiptRow
-      receiptId={receiptRowId.steering(attempt.submissionId)}
+      receiptId={tracked ? receiptRowId.steering(attempt.submissionId) : undefined}
       testId={`steering-attempt-${attempt.submissionId}`}
       rowProps={{
         "data-submission-id": attempt.submissionId,
@@ -243,7 +253,10 @@ function SteeringReceiptGroup({
   const refusalId = `${listId}-refusal`;
   return (
     <div className="steering-terminal-receipts" data-terminal-status={kind}>
-      <div className="tl-row user tl-receipt-row">
+      <div
+        className="tl-row user tl-receipt-row"
+        {...{ [RECEIPT_ROW_ATTRIBUTE]: receipts.map(({ attempt }) => receiptRowId.steering(attempt.submissionId)).join(" ") }}
+      >
         <div className="tl-message-stack user">
           <ReceiptLine
             status={kind === "rejected" ? "not_accepted" : "queued"}
@@ -295,6 +308,7 @@ function SteeringReceiptGroup({
               actionRefusal={actionRefusal}
               onQueueAgain={onQueueAgain}
               onDismiss={onDismiss}
+              tracked={false}
             />
           ))}
         </div>

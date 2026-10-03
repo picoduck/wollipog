@@ -4,8 +4,14 @@ import { statusMeta } from "../status-meta.js";
 import { Spinner } from "./common.js";
 import { StatusBadge } from "./StatusBadge.js";
 
-/** The attribute every receipt row carries, so the floating control can watch a failed one (#2153). */
+/** The attribute every receipt row carries, so the floating control can watch a failed one (#2153).
+ * A row that stands for several messages (a folded group) lists their ids, separated by spaces. */
 export const RECEIPT_ROW_ATTRIBUTE = "data-receipt-id";
+
+/** The receipt ids a row stands for. */
+export function receiptRowIds(row: Element): string[] {
+  return (row.getAttribute(RECEIPT_ROW_ATTRIBUTE) ?? "").split(" ").filter(Boolean);
+}
 
 /** The ids receipt rows carry, one namespace per kind so a prompt and a steer never collide. */
 export const receiptRowId = {
@@ -110,7 +116,8 @@ export function ReceiptRow({
   children,
   rowProps,
 }: {
-  receiptId: string;
+  /** Absent for a row inside a folded group, whose group row is watched instead. */
+  receiptId?: string;
   testId: string;
   bubble?: ReactNode;
   bubbleVariant?: ReceiptBubbleVariant;
@@ -123,7 +130,7 @@ export function ReceiptRow({
   return (
     <div
       className="tl-row user tl-receipt-row"
-      {...{ [RECEIPT_ROW_ATTRIBUTE]: receiptId }}
+      {...(receiptId ? { [RECEIPT_ROW_ATTRIBUTE]: receiptId } : {})}
       data-testid={testId}
       {...rowProps}
     >

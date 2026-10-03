@@ -204,7 +204,7 @@ import {
 } from "../conversation-steering.js";
 import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId } from "./TranscriptReceipt.js";
+import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId, receiptRowIds } from "./TranscriptReceipt.js";
 import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, InfoIcon, MicIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
@@ -4063,7 +4063,7 @@ function SessionDetailLoaded({
     ? visibleSessionCommandReceipts(session.commandInvocations ?? [], items, historyPartial)
     : [];
   const hasTranscriptReceipts = (session.pendingPrompts?.length ?? 0) > 0 || steeringReceipts.length > 0 ||
-    commandReceipts.length > 0 || retitleFeedback !== null;
+    commandReceipts.length > 0 || (mode === "expanded" && retitleFeedback !== null);
   // The floating tail control (#2153). Only a transcript with rows has a tail to jump to; loading,
   // history-error and empty states show nothing there.
   const transcriptHasTail = transcript.body === "timeline" ||
@@ -4098,7 +4098,7 @@ function SessionDetailLoaded({
     const id = offscreenUndeliveredIds[0];
     if (!scroller || id === undefined) return;
     const row = [...scroller.querySelectorAll<HTMLElement>(`[${RECEIPT_ROW_ATTRIBUTE}]`)]
-      .find((candidate) => candidate.getAttribute(RECEIPT_ROW_ATTRIBUTE) === id);
+      .find((candidate) => receiptRowIds(candidate).includes(id));
     if (!row) return;
     row.scrollIntoView({ block: "nearest" });
     const action = row.querySelector<HTMLButtonElement>(".tl-receipt-buttons button:not(:disabled)");
@@ -5143,6 +5143,88 @@ function SessionDetailLoaded({
     />
   ) : null;
 
+  // Receipts for messages already sent (#2171), shown by the full session view only: the Inbox
+  // preview never had the composer they used to sit above. They are recovery work, so they stay
+  // reachable while the history is still loading or failed to load.
+  const sentMessageReceipts = mode === "expanded" ? (
+    <>
+      <SessionCommandReceipts
+        invocations={session.commandInvocations ?? []}
+        timelineItems={items}
+        historyPartial={historyPartial}
+        agentLabel={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
+        isSkillInvocation={isSkillInvocation}
+      />
+      <SteeringReceipts
+        attempts={session.steeringAttempts ?? []}
+        timelineItems={items}
+        activeTurnId={session.activeTurnId}
+        historyPartial={historyPartial}
+        pendingActions={steeringResolutionPending}
+        actionRefusal={queueRefusal}
+        onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
+        onDismiss={(submissionId) => resolveSteeringAttempt(submissionId, "dismiss")}
+      />
+      {retitleFeedback && (
+        <div
+          ref={retitleReceiptRef}
+          className="tl-row user tl-receipt-row"
+          data-status={retitleFeedback.state}
+          role="region"
+          aria-label="Rename Session Status"
+          tabIndex={-1}
+        >
+          <div className="tl-message-stack user">
+            <ReceiptLine
+              status={retitleFeedback.state === "running" ? "sending" : "rename_failed"}
+              progress={retitleFeedback.state === "running" ? "Renaming session…" : undefined}
+              reason={retitleFeedback.state === "failed" ? "Couldn't rename this session." : undefined}
+              detailsId={`retitle-details-${session.id}`}
+              details={retitleFeedback.state === "failed" && retitleFeedback.message
+                ? <p className="tl-receipt-raw">{retitleFeedback.message}</p>
+                : undefined}
+              actions={retitleFeedback.state === "failed" ? (
+                <span className="tl-receipt-buttons">
+                  <button
+                    type="button"
+                    className="btn sm"
+                    disabled={renameRefusal !== null}
+                    title={renameRefusal ?? undefined}
+                    aria-describedby={renameRefusal !== null ? `retitle-refusal-${session.id}` : undefined}
+                    onPointerDown={() => {
+                      retitleRetryPointerActivationRef.current = true;
+                    }}
+                    onPointerCancel={() => {
+                      retitleRetryPointerActivationRef.current = false;
+                    }}
+                    onKeyDown={() => {
+                      retitleRetryPointerActivationRef.current = false;
+                    }}
+                    onClick={(event) => {
+                      const input = inputRef.current;
+                      const keyboardActivation = event.detail === 0
+                        && !retitleRetryPointerActivationRef.current;
+                      retitleRetryPointerActivationRef.current = false;
+                      const composerFocus = keyboardActivation && input
+                        ? captureComposerFocus(input)
+                        : undefined;
+                      retitleReceiptRef.current?.focus();
+                      void requestSessionRetitle(composerFocus);
+                    }}
+                  >
+                    Retry Rename
+                  </button>
+                </span>
+              ) : undefined}
+            />
+            {retitleFeedback.state === "failed" && renameRefusal !== null && (
+              <p className="tl-receipt-refusal" id={`retitle-refusal-${session.id}`}>{renameRefusal}</p>
+            )}
+          </div>
+        </div>
+      )}    </>
+  ) : null;
+
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
       {mode === "expanded" ? (
@@ -5532,85 +5614,7 @@ function SessionDetailLoaded({
                       </div>
                     </div>
                   )}
-                  {mode === "expanded" && (
-                    <>
-                      <SessionCommandReceipts
-                        invocations={session.commandInvocations ?? []}
-                        timelineItems={items}
-                        historyPartial={historyPartial}
-                        agentLabel={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
-                        isSkillInvocation={isSkillInvocation}
-                      />
-                      <SteeringReceipts
-                        attempts={session.steeringAttempts ?? []}
-                        timelineItems={items}
-                        activeTurnId={session.activeTurnId}
-                        historyPartial={historyPartial}
-                        pendingActions={steeringResolutionPending}
-                        actionRefusal={queueRefusal}
-                        onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
-                        onDismiss={(submissionId) => resolveSteeringAttempt(submissionId, "dismiss")}
-                      />
-                    </>
-                  )}
-                  {retitleFeedback && (
-                    <div
-                      ref={retitleReceiptRef}
-                      className="tl-row user tl-receipt-row"
-                      data-status={retitleFeedback.state}
-                      role="region"
-                      aria-label="Rename Session Status"
-                      tabIndex={-1}
-                    >
-                      <div className="tl-message-stack user">
-                        <ReceiptLine
-                          status={retitleFeedback.state === "running" ? "sending" : "rename_failed"}
-                          progress={retitleFeedback.state === "running" ? "Renaming session…" : undefined}
-                          reason={retitleFeedback.state === "failed" ? "Couldn't rename this session." : undefined}
-                          detailsId={`retitle-details-${session.id}`}
-                          details={retitleFeedback.state === "failed" && retitleFeedback.message
-                            ? <p className="tl-receipt-raw">{retitleFeedback.message}</p>
-                            : undefined}
-                          actions={retitleFeedback.state === "failed" ? (
-                            <span className="tl-receipt-buttons">
-                              <button
-                                type="button"
-                                className="btn sm"
-                                disabled={renameRefusal !== null}
-                                title={renameRefusal ?? undefined}
-                                aria-describedby={renameRefusal !== null ? `retitle-refusal-${session.id}` : undefined}
-                                onPointerDown={() => {
-                                  retitleRetryPointerActivationRef.current = true;
-                                }}
-                                onPointerCancel={() => {
-                                  retitleRetryPointerActivationRef.current = false;
-                                }}
-                                onKeyDown={() => {
-                                  retitleRetryPointerActivationRef.current = false;
-                                }}
-                                onClick={(event) => {
-                                  const input = inputRef.current;
-                                  const keyboardActivation = event.detail === 0
-                                    && !retitleRetryPointerActivationRef.current;
-                                  retitleRetryPointerActivationRef.current = false;
-                                  const composerFocus = keyboardActivation && input
-                                    ? captureComposerFocus(input)
-                                    : undefined;
-                                  retitleReceiptRef.current?.focus();
-                                  void requestSessionRetitle(composerFocus);
-                                }}
-                              >
-                                Retry Rename
-                              </button>
-                            </span>
-                          ) : undefined}
-                        />
-                        {retitleFeedback.state === "failed" && renameRefusal !== null && (
-                          <p className="tl-receipt-refusal" id={`retitle-refusal-${session.id}`}>{renameRefusal}</p>
-                        )}
-                      </div>
-                    </div>
-                  )}
+                  {sentMessageReceipts}
                   {activeTurnVisible && (
                     <WorkingIndicator
                       label={workingLabel}
@@ -5623,6 +5627,8 @@ function SessionDetailLoaded({
                   {transcript.body === "timeline" && standaloneRequestCard}
                 </>
               )}
+              {/* Without a history to sit under, recovery receipts still keep their actions. */}
+              {(transcript.body === "skeleton" || transcript.body === "unavailable") && sentMessageReceipts}
             </div>
             </div>
             {/* The one floating control at the reader's lower edge (#2153), where the newest

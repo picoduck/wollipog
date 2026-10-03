@@ -181,6 +181,7 @@ interface Fixture {
   container: HTMLDivElement;
   root: Root;
   retitles: string[];
+  renderMode: (mode: "preview" | "expanded") => Promise<void>;
 }
 
 async function flushAsyncWork() {
@@ -190,8 +191,12 @@ async function flushAsyncWork() {
   });
 }
 
-async function mountFixture(options: { draft?: string } = {}): Promise<Fixture> {
+async function mountFixture(options: {
+  draft?: string;
+  steeringAttempts?: SessionView["steeringAttempts"];
+} = {}): Promise<Fixture> {
   const currentSession = session("transcript-receipts");
+  if (options.steeringAttempts) currentSession.steeringAttempts = options.steeringAttempts;
   const retitles: string[] = [];
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -226,7 +231,7 @@ async function mountFixture(options: { draft?: string } = {}): Promise<Fixture> 
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => {
+  const renderMode = async (mode: "preview" | "expanded") => act(async () => {
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
@@ -236,6 +241,7 @@ async function mountFixture(options: { draft?: string } = {}): Promise<Fixture> 
           ] as SessionEvent["payload"][]} />
           <SessionDetail
             sessionId={currentSession.id}
+            mode={mode}
             rightPanel={rightPanel}
             onOpenTerminal={() => {}}
             composerDraftLoader={async () => options.draft === undefined
@@ -246,6 +252,7 @@ async function mountFixture(options: { draft?: string } = {}): Promise<Fixture> 
       </ApiProvider>,
     );
   });
+  await renderMode("expanded");
   await act(async () => {
     socket.push({
       type: "snapshot",
@@ -264,7 +271,7 @@ async function mountFixture(options: { draft?: string } = {}): Promise<Fixture> 
     });
   });
   await flushAsyncWork();
-  return { container, root, retitles };
+  return { container, root, retitles, renderMode };
 }
 
 async function unmountFixture(fixture: Fixture) {
@@ -367,5 +374,82 @@ test("a steer the agent did not accept, scrolled off-screen, raises 1 Message No
     await unmountFixture(fixture);
     if (original) Object.defineProperty(globalThis, "IntersectionObserver", original);
     else delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+  }
+});
+
+/** An IntersectionObserver stand-in that records what it watches, so a test can report rows off-screen. */
+function recordIntersections() {
+  const observed: Array<{ element: Element; callback: IntersectionObserverCallback }> = [];
+  const original = Object.getOwnPropertyDescriptor(globalThis, "IntersectionObserver");
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    configurable: true,
+    writable: true,
+    value: class {
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+      observe(element: Element) { observed.push({ element, callback: this.callback }); }
+      unobserve() {}
+      disconnect() {}
+    },
+  });
+  return {
+    observed,
+    restore() {
+      if (original) Object.defineProperty(globalThis, "IntersectionObserver", original);
+      else delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+    },
+  };
+}
+
+test("folded rejected steers still raise Message Not Sent when their group is off-screen", async () => {
+  const intersections = recordIntersections();
+  const rejected = (submissionId: string, updatedAt: number) => ({
+    submissionId, turnId: "turn-previous", source: "direct" as const, text: `Steer ${submissionId}`,
+    state: "rejected" as const, reason: "provider_rejected" as const, createdAt: updatedAt, updatedAt,
+  });
+  const fixture = await mountFixture({ steeringAttempts: [rejected("fold-a", 3), rejected("fold-b", 4)] });
+  try {
+    const group = fixture.container.querySelector('[data-terminal-status="rejected"]');
+    assert.ok(group, "two rejections fold into one group");
+    const target = intersections.observed.find(({ element }) =>
+      element.getAttribute("data-receipt-id") === "steering:fold-a steering:fold-b");
+    assert.ok(target, "the group row is watched for both of its messages");
+    await act(async () => {
+      target.callback([{ target: target.element, isIntersecting: false } as unknown as IntersectionObserverEntry],
+        {} as IntersectionObserver);
+    });
+    const control = fixture.container.querySelector(".transcript-tail-control") as HTMLButtonElement | null;
+    assert.equal(control?.textContent, "2 Messages Not Sent");
+    (target.element as HTMLElement).scrollIntoView = () => {};
+    await act(async () => { control!.click(); });
+    assert.equal(domWindow.document.activeElement?.textContent, "Show All", "focus lands on the group's first action");
+
+    // Expanding the group does not add a second watched row for the same messages.
+    await act(async () => { (domWindow.document.activeElement as unknown as HTMLButtonElement).click(); });
+    assert.equal(fixture.container.querySelectorAll('[data-receipt-id~="steering:fold-a"]').length, 1);
+  } finally {
+    await unmountFixture(fixture);
+    intersections.restore();
+  }
+});
+
+test("a failed rename stays with the full session view and does not follow the session into the Inbox preview", async () => {
+  const fixture = await mountFixture({ draft: "/rename-session" });
+  try {
+    const send = fixture.container.querySelector('button[aria-label="Send"]') as HTMLButtonElement | null;
+    assert.ok(send);
+    await act(async () => { send.click(); });
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector('[aria-label="Rename Session Status"]'), "the failed rename shows expanded");
+    await fixture.renderMode("preview");
+    await flushAsyncWork();
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Rename Session Status"]'),
+      "the preview has no composer, so it offers no Retry Rename");
+    assertNoDomNode(fixture.container.querySelector('[data-testid="steering-attempt-steer-rejected"]'),
+      "steering receipts stay with the full session view too");
+    await fixture.renderMode("expanded");
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector('[aria-label="Rename Session Status"]'), "and return with it");
+  } finally {
+    await unmountFixture(fixture);
   }
 });

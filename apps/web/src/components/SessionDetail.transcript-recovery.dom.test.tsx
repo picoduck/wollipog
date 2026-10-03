@@ -205,17 +205,20 @@ async function mountFixture(
     pendingStandalone = false,
     mode = "expanded",
     pendingPrompts,
+    steeringAttempts,
   }: {
     pinnedOpen?: boolean;
     pendingQuestion?: boolean;
     pendingStandalone?: boolean;
     mode?: "preview" | "expanded";
     pendingPrompts?: SessionView["pendingPrompts"];
+    steeringAttempts?: SessionView["steeringAttempts"];
   } = {},
 ): Promise<Fixture> {
   fixtureSequence += 1;
   const currentSession = session(`transcript-recovery-${fixtureSequence}`);
   if (pendingPrompts) currentSession.pendingPrompts = pendingPrompts;
+  if (steeringAttempts) currentSession.steeringAttempts = steeringAttempts;
   if (pendingQuestion) {
     currentSession.status = "input_required";
     currentSession.pendingApproval = {
@@ -1848,6 +1851,28 @@ test("a nested scroller that can still move upward consumes head input instead o
     });
     await flushAsyncWork();
     assert.equal(pages.tailCalls.length, 2, "once the output cannot move, the same gesture reaches the transcript head");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a steering receipt keeps its actions while the history is loading or failed to load (#2171)", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, {
+    steeringAttempts: [{
+      submissionId: "steer-uncertain", turnId: "turn-previous", source: "direct", text: "Stop after the build.",
+      state: "uncertain", reason: "transport_uncertain", createdAt: 2, updatedAt: 3,
+    }],
+  });
+  const receipt = () => fixture.scroller.querySelector('[data-testid="steering-attempt-steer-uncertain"]');
+  try {
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"), "the transcript is loading");
+    assert.ok(receipt(), "the receipt is in the reader while history loads");
+    await act(async () => { pages.rejectTail(); });
+    await flushAsyncWork();
+    assert.ok(fixture.container.textContent!.includes("Couldn't Load the Full Conversation"), "history failed to load");
+    const buttons = [...(receipt()?.querySelectorAll("button") ?? [])].map((button) => button.textContent);
+    assert.deepEqual(buttons, ["Queue Again", "Dismiss"], "its recovery actions stay reachable");
   } finally {
     await unmountFixture(fixture);
   }

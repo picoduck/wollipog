@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Spinner } from "./common.js";
-import { RECEIPT_ROW_ATTRIBUTE } from "./TranscriptReceipt.js";
+import { RECEIPT_ROW_ATTRIBUTE, receiptRowIds } from "./TranscriptReceipt.js";
 
 export const JUMP_TO_LATEST_LABEL = "Jump to Latest";
 export const RECOVERY_CHECKING_TEXT = "Checking for missed activity…";
@@ -66,8 +66,8 @@ export function useRecoveryAnnouncement(
 /**
  * The ids among `ids` whose receipt row (`[data-receipt-id]` inside the scroller) is not on screen.
  * Visibility is the browser's own intersection with the scroller, so it tracks scrolling, resizing
- * and late layout without the reader's scroll handler doing any measuring. An id with no row (a
- * receipt folded into a group) is never counted.
+ * and late layout without the reader's scroll handler doing any measuring. A folded group's row
+ * stands for each message in it.
  */
 export function useOffscreenReceipts(
   scrollRef: RefObject<HTMLElement | null>,
@@ -85,8 +85,7 @@ export function useOffscreenReceipts(
     const visible = new Map<string, boolean>();
     const observer = new IntersectionObserver((entries) => {
       for (const entry of entries) {
-        const id = entry.target.getAttribute(RECEIPT_ROW_ATTRIBUTE);
-        if (id != null) visible.set(id, entry.isIntersecting);
+        for (const id of receiptRowIds(entry.target)) visible.set(id, entry.isIntersecting);
       }
       const next = ids.filter((id) => visible.get(id) === false);
       setOffscreen((current) => current.length === next.length && current.every((id, index) => id === next[index])
@@ -94,7 +93,7 @@ export function useOffscreenReceipts(
         : next);
     }, { root });
     for (const row of root.querySelectorAll<HTMLElement>(`[${RECEIPT_ROW_ATTRIBUTE}]`)) {
-      if (ids.includes(row.getAttribute(RECEIPT_ROW_ATTRIBUTE) ?? "")) observer.observe(row);
+      if (receiptRowIds(row).some((id) => ids.includes(id))) observer.observe(row);
     }
     return () => observer.disconnect();
     // `idsKey` stands in for `ids`, whose identity changes on every render.
