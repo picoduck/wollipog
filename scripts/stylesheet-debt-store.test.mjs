@@ -156,7 +156,8 @@ test("a missing or linked inventory directory is refused before anything is read
     mkdirSync(target);
     writeFileSync(join(target, "keep.txt"), "not debt\n");
     const linked = join(root, "linked");
-    symlinkSync(target, linked, "dir");
+    // A junction needs no symlink privilege on Windows, and lstat reports it as a link all the same.
+    symlinkSync(target, linked, process.platform === "win32" ? "junction" : "dir");
     assert.throws(() => writeInventory({}, linked), /is not a directory \(a link is refused\)/);
     assert.throws(() => readInventory(linked), /is not a directory \(a link is refused\)/);
     assert.equal(readFileSync(join(target, "keep.txt"), "utf8"), "not debt\n", "nothing behind the link was pruned");
