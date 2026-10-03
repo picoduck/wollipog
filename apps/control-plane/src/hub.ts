@@ -435,14 +435,18 @@ export class Hub {
     return msg;
   }
 
+  private syncSessionArtifactUploads(session: SessionView, userId?: string): void {
+    const owner = this.db.sessionOwnerUser(session.id);
+    if (userId && owner?.userId !== userId) return;
+    if (!runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "artifactSessionGuidance")) return;
+    this.sendToRunner(session.runnerId, { type: "set_session_artifact_uploads", sessionId: session.id,
+      preference: this.db.artifactUploadPreference(owner?.userId) });
+  }
+
   syncArtifactUploads(userId?: string, runnerId?: string): void {
     for (const session of this.db.listSessions({ includeArchived: true })) {
       if (runnerId && session.runnerId !== runnerId) continue;
-      const owner = this.db.sessionOwnerUser(session.id);
-      if (userId && owner?.userId !== userId) continue;
-      if (!runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "artifactSessionGuidance")) continue;
-      this.sendToRunner(session.runnerId, { type: "set_session_artifact_uploads", sessionId: session.id,
-        preference: this.db.artifactUploadPreference(owner?.userId) });
+      this.syncSessionArtifactUploads(session, userId);
     }
   }
 
@@ -1011,9 +1015,12 @@ export class Hub {
   }
 
   syncProjectMemory(projectId?: string, runnerId?: string): void {
-    if (runnerId) this.syncArtifactUploads(undefined, runnerId);
     for (const session of this.db.listSessions({ includeArchived: true })) {
-      if (projectId && session.projectId !== projectId || runnerId && session.runnerId !== runnerId) continue;
+      if (runnerId && session.runnerId !== runnerId) continue;
+      // Reconnect already hydrates every retained session; share that scan so artifact metadata
+      // does not add another synchronous full inventory before credential handshakes can run.
+      if (runnerId) this.syncSessionArtifactUploads(session);
+      if (projectId && session.projectId !== projectId) continue;
       this.syncSessionProjectMemory(session);
     }
   }
