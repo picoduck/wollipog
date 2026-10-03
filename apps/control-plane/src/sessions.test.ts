@@ -12754,7 +12754,7 @@ test("an occurrence-less older request matches its own answer, but never a settl
     "the answer waits, unbound, for its own occurrence");
 });
 
-test("an older runner's snapshot-parked answer attaches to its occurrence-less request, live or from history (#2188)", async () => {
+test("an older runner's snapshot-parked answer attaches to its occurrence-less request live, and history never guesses (#2188)", async () => {
   const { db, hub, svc } = makeHarness();
   const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
   const request = { kind: "question_request" as const, requestId: "legacy", questions };
@@ -12776,8 +12776,9 @@ test("an older runner's snapshot-parked answer attaches to its occurrence-less r
   assert.deepEqual(summaries(live).map((summary) => [summary.questionEventSeq, summary.answers[0]!.selected]),
     [[db.listEvents(live)[0]!.seq, ["Yes"]]]);
 
-  // From history, a page holding a settled earlier use of the same request id and the answered one
-  // binds the answer to the newest request only.
+  // History can arrive before the answered request does (paged, or the legacy path), and an
+  // occurrence-less request cannot say which use of a reused id it is, so history never binds the
+  // answer: the row keeps the older-runner fallback rather than risk another question's answer.
   const hydrated = seedSession(svc, hub);
   db.reconcileRunnerHistory(hydrated, 1, 0);
   parkAndAnswer(hydrated, "No");
@@ -12791,9 +12792,11 @@ test("an older runner's snapshot-parked answer attaches to its occurrence-less r
     ],
     page: { logEpoch: 1, throughSeq: 4, nextAfterSeq: 4, hasMore: false } });
   await svc.hydrateHistory(hydrated);
-  const newest = db.listEvents(hydrated).filter((event) => event.payload.kind === "question_request").at(-1)!;
-  assert.deepEqual(summaries(hydrated).map((summary) => [summary.questionEventSeq, summary.answers[0]!.selected]),
-    [[newest.seq, ["No"]]]);
+  assert.deepEqual(summaries(hydrated), []);
+  db.clearSessionEvents(hydrated);
+  db.reconcileRunnerHistory(hydrated, 1, 4);
+  await svc.hydrateHistory(hydrated);
+  assert.deepEqual(summaries(hydrated), [], "a cache reset does not guess either");
 });
 
 test("restoring a stored answer never moves the session's last activity backward (#2188)", async () => {

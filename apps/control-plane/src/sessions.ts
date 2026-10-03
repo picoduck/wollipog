@@ -12880,7 +12880,7 @@ export class SessionsService {
       this.hub.sessionEvent(ev, suppressRequestReminder ? { suppressReminderWake: true } : undefined);
       // A reconnect snapshot may have parked this occurrence, and it may have been answered, before
       // this frame arrived; its stored answer belongs right after it.
-      const answer = this.restoreQuestionAnswerSummary(ev, { unboundOnly: true });
+      const answer = this.restoreQuestionAnswerSummary(ev, { unboundOnly: true, live: true });
       if (answer) this.hub.sessionEvent(answer);
       this.db.setPendingApproval(
         sessionId,
@@ -13551,7 +13551,7 @@ export class SessionsService {
 
   /** Restore a stored answer summary (#2188) after a runner-history cache reset, or bind one that
    * was answered before its question's request event arrived. */
-  private restoreQuestionAnswerSummary(event: SessionEvent, options?: { unboundOnly?: boolean }): SessionEvent | null {
+  private restoreQuestionAnswerSummary(event: SessionEvent, options?: { unboundOnly?: boolean; live?: boolean }): SessionEvent | null {
     if (event.payload.kind !== "question_request") return null;
     const stored = this.db.restorableQuestionAnswerSummary(event, options);
     if (!stored) return null;
