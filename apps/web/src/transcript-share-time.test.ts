@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { shareCreatedLabel, shareDisplayStatus, shareExpiryLabel, shareMoment } from "./transcript-share-time.js";
+import {
+  shareCreatedLabel,
+  shareDisplayStatus,
+  shareExpiryLabel,
+  shareMoment,
+  sharePageExpiryLabel,
+} from "./transcript-share-time.js";
 
 // Local wall-clock times, so the expectations hold in every time zone the suite runs in.
 const at = (month: number, day: number, hour: number, minute: number, year = 2026) =>
@@ -45,4 +51,10 @@ test("the creation time reads today, yesterday or the date", () => {
   assert.equal(shareCreatedLabel(at(9, 29, 21, 5), NOW), "Created yesterday at 9:05 PM");
   assert.equal(shareCreatedLabel(at(9, 20, 13, 0), NOW), "Created Sep 20 at 1:00 PM");
   assert.equal(shareCreatedLabel(at(12, 31, 23, 0, 2025), NOW), "Created Dec 31, 2025 at 11:00 PM");
+});
+
+test("the shared page names its expiry by date and clock time, without seconds", () => {
+  assert.equal(sharePageExpiryLabel(at(9, 26, 0, 49) + 58_000, NOW), "Link expires Sep 26, 12:49 AM");
+  assert.equal(sharePageExpiryLabel(at(10, 2, 13, 5), NOW), "Link expires Oct 2, 1:05 PM");
+  assert.equal(sharePageExpiryLabel(at(1, 3, 9, 0, 2027), NOW), "Link expires Jan 3, 2027, 9:00 AM", "another year names it");
 });

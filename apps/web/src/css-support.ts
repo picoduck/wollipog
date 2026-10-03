@@ -208,7 +208,7 @@ export const CSS_SURFACE = {
   ],
   /** Function names appearing in declaration values. */
   functions: [
-  "attr", "calc", "clamp", "color-mix", "conic-gradient", "counter",
+  "attr", "calc", "color-mix", "conic-gradient", "counter",
   "cubic-bezier", "env", "format", "inset", "linear-gradient", "max", "min", "minmax", "rect",
   "repeat", "rgb", "rgba", "rotate", "scale", "scaley", "translatex", "translatey", "url", "var",
   ],

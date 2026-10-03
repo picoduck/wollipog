@@ -72,6 +72,12 @@ export function shareExpiryLabel(share: Pick<TranscriptShareView, "status" | "ex
   return `Expires in ${plural(Math.round(hours / 24), "day")}`;
 }
 
+/** The shared page's meta line (#2173): "Link expires Sep 26, 12:49 AM", without seconds. */
+export function sharePageExpiryLabel(expiresAt: number, now: number): string {
+  const date = new Date(expiresAt);
+  return `Link expires ${day(date, new Date(now))}, ${clock(date)}`;
+}
+
 /** Line two of a link row: "Created today at 12:26 AM". */
 export function shareCreatedLabel(createdAt: number, now: number): string {
   return `Created ${relativeMoment(createdAt, now)}`;
