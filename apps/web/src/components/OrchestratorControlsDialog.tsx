@@ -104,10 +104,20 @@ function policyRevision(session: SessionView): number {
   return session.parentControlPolicy?.revision ?? -1;
 }
 
+/** How long a failed change waits for the session to reload before the next queued change runs. A
+ * reload that never answers must not hold every later change on the session. */
+export const ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS = 10_000;
+
+/** Keeps the newer of the queue's session and `session`: a reply or a reload that arrives after a
+ * newer revision was already seen must not send the next change on the older one. */
+function observe(saves: SessionSaves, session: SessionView) {
+  if (policyRevision(session) >= policyRevision(saves.latest)) saves.latest = session;
+}
+
 /** A newer copy of the session, rendered while changes are queued, becomes the one they are sent against. */
 function noteSession(session: SessionView) {
   const entry = saveQueues.get(session.id);
-  if (entry && policyRevision(session) >= policyRevision(entry.latest)) entry.latest = session;
+  if (entry) observe(entry, session);
 }
 
 function sessionSaves(session: SessionView): SessionSaves {
@@ -117,8 +127,17 @@ function sessionSaves(session: SessionView): SessionSaves {
     saveQueues.set(session.id, created);
     return created;
   }
-  if (policyRevision(session) >= policyRevision(entry.latest)) entry.latest = session;
+  observe(entry, session);
   return entry;
+}
+
+/** Settles with `promise`, or after `ms`, whichever is first. */
+function within(promise: Promise<unknown>, ms: number): Promise<void> {
+  let timer: number | undefined;
+  return Promise.race([
+    promise.then(() => undefined),
+    new Promise<void>((resolve) => { timer = window.setTimeout(resolve, ms); }),
+  ]).finally(() => window.clearTimeout(timer));
 }
 
 function enqueueSave(saves: SessionSaves, run: () => Promise<void>) {
@@ -195,7 +214,7 @@ export function OrchestratorControlsDialog({
     enqueueSave(saves, async () => {
       try {
         const next = await write(saves.latest);
-        saves.latest = next;
+        observe(saves, next);
         onSessionChanged(next);
         if (mounted.current && newest()) {
           showSaved(key);
@@ -210,11 +229,12 @@ export function OrchestratorControlsDialog({
           });
           setSaved(null);
         }
-        // The stored value comes back with the session, so the choice shown returns to it.
-        await api.session(session.id).then(({ session: fresh }) => {
-          saves.latest = fresh;
+        // The stored value comes back with the session, so the choice shown returns to it. A late
+        // reload still lands, but the queue does not wait for it past the timeout.
+        await within(api.session(session.id).then(({ session: fresh }) => {
+          observe(saves, fresh);
           onSessionChanged(fresh);
-        }, () => undefined);
+        }, () => undefined), ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS);
       } finally {
         if (mounted.current) {
           setPending((prior) => {

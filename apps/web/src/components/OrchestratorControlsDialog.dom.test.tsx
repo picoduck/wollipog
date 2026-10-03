@@ -19,6 +19,7 @@ import { withScopedClockOverrides } from "./test-clock-overrides.js";
 import { fireDomEvent } from "./test-dom-events.js";
 import {
   ORCHESTRATOR_CONTROLS_CONFLICT,
+  ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS,
   OrchestratorControlsDialog,
   orchestratorControlsSummary,
   workflowDecisionsSummary,
@@ -517,6 +518,67 @@ test("a gate that failed and then saves retires its failure notice", async () =>
   await flush();
   assertNoDomNode(dialog.querySelector(".notice.t-danger"), "the newest change saved, so the failure is gone");
   assert.ok(gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".ui-row-saved"));
+});
+
+test("a reply older than a revision the dialog has already seen does not send the next change on it", async () => {
+  const replies: Array<(view: SessionView) => void> = [];
+  const revisions: number[] = [];
+  const harness = await open(orchestrator(), {
+    setParentControlPolicy: (_id: string, _decisions: ParentControlDecisionPolicy, revision: number) => {
+      revisions.push(revision);
+      return new Promise<SessionView>((resolve) => replies.push(resolve));
+    },
+  });
+  const dialog = harness.dialog();
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
+  await act(async () => fireDomEvent.click(option(gate(dialog, "Merged Branch Deletion"), "Orchestrator")));
+  await flush();
+  // A change elsewhere reaches the dialog first: revision 5, while its own save made revision 4.
+  await harness.rerender(orchestrator({ parentControlPolicy: { revision: 5, decisions: { ...HUMAN_ONLY, pr_merge: "orchestrator" } } }));
+  await act(async () => replies[0]!(orchestrator({ parentControlPolicy: { revision: 4, decisions: { ...HUMAN_ONLY, pr_merge: "orchestrator" } } })));
+  await flush();
+  assert.deepEqual(revisions, [3, 5], "the second change is sent on the newest revision seen");
+  await act(async () => replies[1]!(orchestrator({ parentControlPolicy: { revision: 6, decisions: { ...HUMAN_ONLY } } })));
+  await flush();
+});
+
+test("a reload that never answers holds the next change only until its timeout", async () => {
+  const timers = new Map<number, () => void>();
+  let nextTimer = 1;
+  await withScopedClockOverrides(domWindow, {
+    setTimeout: (callback: () => void, ms: number) => {
+      const id = nextTimer++;
+      if (ms === ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS) timers.set(id, callback);
+      return id;
+    },
+    clearTimeout: (id: number) => { timers.delete(id); },
+  }, async () => {
+    const sent: WorkflowDecisionAuthority[] = [];
+    const first = await open(orchestrator(), {
+      setParentControlPolicy: async (_id: string, decisions: ParentControlDecisionPolicy, revision: number) => {
+        sent.push(decisions.pr_merge);
+        if (sent.length === 1) throw new ApiError("Parent Control policy revision is stale", 409);
+        return orchestrator({ parentControlPolicy: { revision: revision + 1, decisions } });
+      },
+      session: () => new Promise<never>(() => {}),
+    });
+    await act(async () => fireDomEvent.click(option(gate(first.dialog(), "PR Merge Approval"), "Orchestrator")));
+    await flush();
+    await first.unmount();
+    const second = await open(orchestrator(), {
+      setParentControlPolicy: async (_id: string, decisions: ParentControlDecisionPolicy, revision: number) => {
+        sent.push(decisions.pr_merge);
+        return orchestrator({ parentControlPolicy: { revision: revision + 1, decisions } });
+      },
+    });
+    await act(async () => fireDomEvent.click(option(gate(second.dialog(), "Merged Branch Deletion"), "Orchestrator")));
+    await flush();
+    assert.equal(sent.length, 1, "the next change waits for the reload");
+    assert.equal(timers.size, 1, "for a bounded time");
+    await act(async () => { for (const callback of timers.values()) callback(); });
+    await flush();
+    assert.equal(sent.length, 2, "then it is sent");
+  });
 });
 
 test("any other failure says the change wasn't saved, with the server's words behind Show Details", async () => {
