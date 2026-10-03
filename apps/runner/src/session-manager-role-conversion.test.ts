@@ -16,15 +16,15 @@ function fixture(driver: AgentDriverKind = "codex-app-server", close?: () => Pro
   const root = mkdtempSync(join(tmpdir(), "wollipog-role-"));
   const store = new SessionStore(join(root, "sessions"));
   const messages: RunnerToControlPlane[] = [];
-  const launches: Array<{ resumeId?: string; orchestrator?: unknown; config?: unknown; args?: string[]; env?: Record<string, string> }> = [];
+  const launches: Array<{ resumeId?: string; orchestrator?: unknown; config?: unknown; args?: string[]; env?: Record<string, string>; artifactGuidance?: string }> = [];
   const registrations: { control: string[]; hooks: string[] } = { control: [], hooks: [] };
   const controlDir = join(root, "control");
   const hookDir = join(root, "hooks");
   const localLaunch = { command: "agent", args: ["user-arg"], env: {} };
   let disposed = 0;
   const manager = new SessionManager((message) => messages.push(message), () => {}, store, "r", () => localLaunch,
-    ((_driver: unknown, opts: { resumeId?: string; orchestrator?: unknown; config?: unknown; args: string[]; env: Record<string, string> }) => {
-      launches.push({ resumeId: opts.resumeId, orchestrator: opts.orchestrator, config: opts.config, args: [...opts.args], env: { ...opts.env } });
+    ((_driver: unknown, opts: { resumeId?: string; orchestrator?: unknown; config?: unknown; args: string[]; env: Record<string, string>; artifactGuidance?: string }) => {
+      launches.push({ resumeId: opts.resumeId, orchestrator: opts.orchestrator, config: opts.config, args: [...opts.args], env: { ...opts.env }, artifactGuidance: opts.artifactGuidance });
       return {
         pid: 1000 + launches.length, initialize: async () => {}, newSession: async () => {},
         prompt: async () => "end_turn", cancel() {}, dispose() { disposed++; }, setConfig: async () => {},
@@ -94,6 +94,45 @@ for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const
         assert.equal(h.registrations.hooks.length, 3);
         assert.equal(new Set(h.registrations.hooks).size, 3, "policy hooks must also rotate on both transitions");
       }
+    } finally { await h.cleanup(); }
+  });
+}
+
+for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const) {
+  test(driver + " refuses protocol201 prepare and commit without retirement or credential mutation", async () => {
+    const h = fixture(driver);
+    try {
+      assert.equal(await h.manager.start(h.spec), true);
+      h.store.patchMeta("s", { agentSessionId: "same-provider-conversation" });
+      const setPeer = (version: number) => {
+        (h.manager as unknown as { controlPlaneProtocolVersion: () => number }).controlPlaneProtocolVersion = () => version;
+      };
+      setPeer(201);
+      let revoked = 0;
+      for (const role of ["normal", "orchestrator"] as const) {
+        h.store.patchMeta("s", { orchestrator: role === "orchestrator" ? { strictProjectIsolation: false, integrationIsolation: false } : undefined });
+        const before = structuredClone(h.store.readMeta("s")!);
+        const command = role === "normal" ? h.command() : {
+          ...h.command("demotion"), expectedRole: role, targetRole: "normal" as const, orchestrator: undefined,
+        };
+        assert.equal((await h.manager.prepareSessionRole(command, () => revoked++)).ok, false);
+        assert.equal(h.manager.commitSessionRole({ type: "commit_session_role", requestId: "old-commit", sessionId: "s", conversionId: command.conversionId }).ok, false);
+        assert.deepEqual(h.store.readMeta("s"), before);
+        assert.equal(h.disposed(), 0);
+        assert.equal(revoked, 0);
+        assert.equal(h.launches.length, 1);
+      }
+      h.store.patchMeta("s", { orchestrator: undefined });
+      setPeer(202);
+      assert.equal((await h.manager.prepareSessionRole(h.command(), () => revoked++)).ok, true);
+      const prepared = structuredClone(h.store.readMeta("s")!);
+      setPeer(201);
+      const commit = { type: "commit_session_role" as const, requestId: "commit", sessionId: "s", conversionId: "promotion" };
+      assert.equal(h.manager.commitSessionRole(commit).ok, false);
+      assert.deepEqual(h.store.readMeta("s"), prepared);
+      assert.equal(revoked, 1);
+      setPeer(202);
+      assert.equal(h.manager.commitSessionRole(commit).ok, true);
     } finally { await h.cleanup(); }
   });
 }
@@ -209,7 +248,7 @@ for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const
       execFileSync("git", ["-C", h.root, "worktree", "add", "--quiet", "-b", "agent/s", worktree]);
       h.store.patchMeta("s", { agentSessionId: "same-provider-conversation", worktreePath: worktree,
         providerAccountId: "account", providerAccountLabel: "Account", providerCredentialHome: h.root,
-        providerConversationHome: h.root, roleConversion: undefined });
+        providerConversationHome: h.root, roleConversion: undefined, artifactUploads: "wollipog_automatic" });
       h.store.appendEvent("s", { kind: "user_message", text: "History remains" });
       const before = structuredClone(h.store.readMeta("s")!);
       let revoked = 0;
@@ -222,13 +261,14 @@ for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const
       assert.equal(h.manager.commitSessionRole({ type: "commit_session_role", requestId: "wrong", sessionId: "s", conversionId: "stale" }).ok, false);
       assert.equal(h.manager.commitSessionRole({ type: "commit_session_role", requestId: "commit", sessionId: "s", conversionId: "promotion" }).ok, true);
       const after = h.store.readMeta("s")!;
-      for (const key of ["agentSessionId", "providerAccountId", "providerCredentialHome", "providerConversationHome", "worktreePath", "repoPath", "workspaceId", "createdAt"] as const) assert.equal(after[key], before[key], key);
+      for (const key of ["agentSessionId", "providerAccountId", "providerCredentialHome", "providerConversationHome", "worktreePath", "repoPath", "workspaceId", "createdAt", "artifactUploads"] as const) assert.equal(after[key], before[key], key);
       assert.deepEqual(after.config, before.config);
       assert.deepEqual(after.orchestrator, { strictProjectIsolation: false, integrationIsolation: false });
       assert.equal(h.manager.prompt("s", "Continue the same conversation"), true);
       await settle(() => h.launches.length === 2 && h.store.readMeta("s")?.status === "idle", () => JSON.stringify(h.messages));
       assert.equal(h.launches[1]!.resumeId, "same-provider-conversation");
       assert.ok(h.launches[1]!.orchestrator);
+      assert.match(h.launches[1]!.artifactGuidance!, /Artifact Uploads: Use Wollipog Automatically/);
       const demote = { ...h.command("demotion"), expectedRole: "orchestrator" as const, targetRole: "normal" as const, orchestrator: undefined };
       const demotion = await h.manager.prepareSessionRole(demote, () => revoked++);
       assert.equal(demotion.ok, true, demotion.error ?? "demotion failed");
@@ -238,6 +278,8 @@ for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const
       await settle(() => h.launches.length === 3 && h.store.readMeta("s")?.status === "idle");
       assert.equal(h.launches[2]!.resumeId, "same-provider-conversation");
       assert.equal(h.launches[2]!.orchestrator, undefined);
+      assert.equal(h.store.readMeta("s")!.artifactUploads, "wollipog_automatic");
+      assert.match(h.launches[2]!.artifactGuidance!, /Artifact Uploads: Use Wollipog Automatically/);
       assert.equal(revoked, 2);
       assert.ok(h.store.readEvents("s").some((event) => event.payload.kind === "user_message" && event.payload.text === "History remains"));
     } finally { await h.cleanup(); }

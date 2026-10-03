@@ -60,6 +60,7 @@ for (const scenario of ["busy", "children", "older-runner", "strict", "viewer"])
     const dialog = await openRoleDialog(page);
     await expect(dialog.getByRole("button", { name: /^Change to / })).toBeDisabled();
     await expect(dialog.locator(".notice")).toBeVisible();
+    if (scenario === "older-runner") await expect(dialog.locator(".notice")).toContainText("protocol v202 or later");
     expect(await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.calls())).toBe(0);
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(dialog).toBeHidden();
