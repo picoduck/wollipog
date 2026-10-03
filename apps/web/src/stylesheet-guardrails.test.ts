@@ -941,10 +941,11 @@ const isSourceFunction = (node: ts.Node | undefined): node is SourceFunction =>
  * #2394 found that could hide an icon class is followed, reported or accepted":
  *
  * 1. A component called rather than rendered — `RENDERERS[k](props)`, a member, a constant, a prop
- *    — is followed to what the call hands it, and a call through a key the scan cannot list that
- *    hands it props is reported.
+ *    — is followed to what the call hands it, and a call that hands it props through a key the scan
+ *    cannot list, or through a member of a constant map replaced after it is bound, is reported.
  * 2. A component whose class comes from its caller, handed to another package's component, is
- *    reported: the package renders it with props the scan never sees.
+ *    reported: the package renders it with props the scan never sees. So is a constant written after
+ *    it is bound and handed there, when its type can hold a function (#2458).
  * 3. An object written after it is bound — through a constant, a parameter, a member of either, a
  *    helper, hook or child it is handed to — and a name assigned again are reported where they are
  *    read. A constant handed on in any way but a spread or a reading call counts as written, as
@@ -1417,10 +1418,12 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   };
   /** Whether a binding is assigned again, so what it holds is not only what it was bound to. */
   const reassigned = (declaration: ts.Node | "glyph" | undefined) => isBinding(declaration) && !unasked(declaration) && writesTo(declaration).reassigned;
-  /** `obj.key` whose object has `key` written after it is bound. */
+  /** `obj.key`, or `(obj).key`, whose object has `key` written after it is bound. */
   const writtenMember = (node: ts.Node) => {
-    if (!ts.isPropertyAccessExpression(node) || !ts.isIdentifier(node.expression)) return false;
-    const base = declarationOf(node.expression);
+    if (!ts.isPropertyAccessExpression(node)) return false;
+    const object = transparent(node.expression)!;
+    if (!ts.isIdentifier(object)) return false;
+    const base = declarationOf(object);
     return isBinding(base) && written(base, node.name.text);
   };
   /** What a prop of an object type can hold: its literals when every non-nullish member names it, or null when that cannot be told. */
@@ -1991,14 +1994,22 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     }
     return isConstant(declaration) || (parameter !== null && parameter.prop !== null) || propRead(callee) !== null;
   };
-  /** A callee read through a key the scan cannot list: `map[key]`, directly or through a constant. */
-  const computedCallee = (call: ts.CallExpression): boolean => {
+  /**
+   * A callee whose values the scan cannot list: one read through a key (`map[key]`), or a member of a
+   * constant map replaced after it is bound (`M.a = pick()`; #2458), directly or through a constant.
+   */
+  const unlistedCallee = (call: ts.CallExpression): boolean => {
     let callee = transparent(call.expression);
     if (callee && ts.isIdentifier(callee)) {
       const declaration = declarationOf(callee);
       if (declaration && declaration !== "glyph" && isConstant(declaration)) callee = transparent(declaration.initializer);
     }
-    return callee !== undefined && ts.isElementAccessExpression(callee);
+    if (!callee || ts.isElementAccessExpression(callee)) return callee !== undefined;
+    if (!ts.isPropertyAccessExpression(callee)) return false;
+    const base = declarationOf(transparent(callee.expression)!);
+    if (!isBinding(base) || !isConstant(base)) return false;
+    const map = transparent(base.initializer);
+    return map !== undefined && ts.isObjectLiteralExpression(map) && written(base, callee.name.text);
   };
   // Which calls go through a value is a matter of shape, not of what is written: read without writes.
   ignoringWrites = true;
@@ -2051,10 +2062,11 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
   for (const [element, components] of rendered) {
     if (components.has("unknown")) unread.add(`${where(element)} <${element.tagName.getText()}>`);
   }
-  // A call through a key the scan cannot list may call any component stored with the others, and
-  // hand it a class. One with no arguments hands it none (`actions[action]()`).
+  // A call through a key the scan cannot list, or a member replaced after it is bound, may call any
+  // component stored with the others, and hand it a class. One with no arguments hands it none
+  // (`actions[action]()`).
   for (const [call, components] of called) {
-    if (components.has("unknown") && computedCallee(call) && call.arguments.length > 0) {
+    if (components.has("unknown") && unlistedCallee(call) && call.arguments.length > 0) {
       unread.add(`${where(call)} ${call.expression.getText()}() calls a value the scan cannot follow`);
     }
   }
@@ -2154,9 +2166,49 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       }
       return ts.isCallExpression(parent) && parent.arguments[0] === use && parent.expression.getText() === "Object.assign";
     });
+  /** `T[]`, `readonly T[]`, `Array<T>` or `ReadonlyArray<T>` as written: its element type. */
+  const elementTypeNode = (node: ts.Node | undefined): ts.TypeNode | undefined => {
+    if (!node) return undefined;
+    if (ts.isParenthesizedTypeNode(node) || (ts.isTypeOperatorNode(node) && node.operator === ts.SyntaxKind.ReadonlyKeyword)) return elementTypeNode(node.type);
+    if (ts.isArrayTypeNode(node)) return node.elementType;
+    return ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && ["Array", "ReadonlyArray"].includes(node.typeName.text)
+      && node.typeArguments?.length === 1 ? node.typeArguments[0] : undefined;
+  };
+  /**
+   * Whether a value of a type can be a function, or hold one at any depth: `any` or `unknown`, an
+   * `object` or a type parameter, something callable, or an object with such a member or index
+   * signature (#2458). `{}` can hold a function too, and so reads as one; but without the library,
+   * the checker reads every array as `{}`, so one whose type or literal is written where it is
+   * declared (`declared`) is judged by its elements instead.
+   */
+  const holdsFunction = (type: ts.Type, declared: ts.Node | undefined, seen = new Set<ts.Type>()): boolean =>
+    (type.isUnion() ? type.types : [type]).some((member) => {
+      if (member.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.NonPrimitive | ts.TypeFlags.TypeParameter)) return true;
+      if (!(member.flags & (ts.TypeFlags.Object | ts.TypeFlags.Intersection))) return false;
+      if (member.getCallSignatures().length > 0 || member.getConstructSignatures().length > 0) return true;
+      const properties = checker.getPropertiesOfType(member);
+      const indexes = checker.getIndexInfosOfType(member);
+      if (properties.length === 0 && indexes.length === 0) {
+        // `{}`: an array only if its type is written as one, or, with no type written, its value is.
+        const written = declared === undefined ? undefined : ts.isTypeNode(declared) ? declared
+          : ts.isVariableDeclaration(declared) || ts.isPropertySignature(declared) ? declared.type : undefined;
+        if (written) {
+          const element = elementTypeNode(written);
+          return !element || holdsFunction(checker.getTypeFromTypeNode(element), element, seen);
+        }
+        const value = declared && (ts.isVariableDeclaration(declared) || ts.isPropertyAssignment(declared)) ? transparent(declared.initializer) : declared;
+        return !value || !ts.isArrayLiteralExpression(value) || value.elements.length === 0
+          || value.elements.some((item) => ts.isSpreadElement(item) || holdsFunction(checker.getTypeAtLocation(item), item, seen));
+      }
+      if (seen.has(member)) return false;
+      seen.add(member);
+      return properties.some((property) => holdsFunction(checker.getTypeOfSymbol(property), property.valueDeclaration, seen))
+        || indexes.some((index) => holdsFunction(index.type, index.declaration?.type, seen));
+    });
   /**
    * The functions a value hands on: itself, or those it holds in an object or array, literal or
-   * constant; `unlisted` for a constant one written after it is bound, whose values cannot be listed.
+   * constant; `unlisted` for a constant one written after it is bound, whose values cannot be listed,
+   * when its type can hold a function.
    */
   const handed = (input: ts.Node | undefined, seen = new Set<ts.Node>()): (SourceFunction | "unlisted")[] => {
     const node = transparent(input);
@@ -2167,9 +2219,11 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       : ts.isShorthandPropertyAssignment(property) ? property.name : ts.isSpreadAssignment(property) ? property.expression : undefined, seen));
     if (ts.isIdentifier(node)) {
       const declaration = declarationOf(node);
-      const value = declaration && declaration !== "glyph" && isConstant(declaration) ? transparent(declaration.initializer) : undefined;
-      if (value && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))) {
-        return rewritten(declaration as ts.VariableDeclaration) ? ["unlisted"] : handed(value, seen);
+      const value = isBinding(declaration) && isConstant(declaration) ? transparent(declaration.initializer) : undefined;
+      if (isBinding(declaration) && isConstant(declaration) && value && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))) {
+        // Only a function could be a component, so one written into an object that cannot hold one hands nothing on.
+        const unlisted = rewritten(declaration) && holdsFunction(checker.getTypeAtLocation(declaration.name), declaration);
+        return unlisted ? ["unlisted"] : handed(value, seen);
       }
     }
     // Read without writes: a replaced prop then yields what its callers pass, more to check, never less.
@@ -3811,6 +3865,70 @@ test("every route #2394 found that could hide an icon class is followed, reporte
     unread: [
       "Rewritten.tsx:7 <Slot items> hands another package an object written after it is bound, so what it holds cannot be listed",
       "Rewritten.tsx:7 M[\"b\"]() calls a value the scan cannot follow",
+    ],
+  });
+  // A call through a member of a constant map that is replaced after it is bound is reported too,
+  // directly, in parentheses or through a constant, as a computed call through a written map is (#2458).
+  // A member of a constant that is not a map, one aliasing a prop and handed on, is not one the scan
+  // lists, and stays as it was (SessionDetail's `reportBodyWidth`).
+  assert.deepEqual(scanOf({ "Reassigned.tsx": [
+    "function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
+    "function Fixed() { return <svg className=\"fixed-icon\" />; }",
+    "function pick() { return Icon; }",
+    "const M = { a: Fixed, b: Fixed };",
+    "M.a = pick();",
+    "const f = M.a;",
+    "export const Uses = () => <>",
+    "  <Icon className=\"seen-icon\" />{M.a({ className: \"hidden-icon\" })}{(M).a({ className: \"paren-icon\" })}{f({ className: \"alias-icon\" })}{M.b()}",
+    "</>;",
+    "declare function keep(value: unknown): void;",
+    "export function Host({ api }: { api?: { report: (width: number) => void } }) {",
+    "  const held = api;",
+    "  keep(held);",
+    "  const report = held?.report;",
+    "  if (report) report(1);",
+    "  return null;",
+    "}",
+  ].join("\n") }), {
+    classes: ["fixed-icon", "seen-icon"],
+    unread: [
+      "Reassigned.tsx:8 (M).a() calls a value the scan cannot follow",
+      "Reassigned.tsx:8 M.a() calls a value the scan cannot follow",
+      "Reassigned.tsx:8 f() calls a value the scan cannot follow",
+    ],
+  });
+  // A written constant handed to another package is reported only when its type can hold a function,
+  // the one thing in it that could be a component: a callable member, at any depth, or `any`. One
+  // that holds only data is not (#2458).
+  assert.deepEqual(scanOf({ "Written.tsx": [
+    "import { Slot } from \"some-package\";",
+    "function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
+    "function pick() { return Icon; }",
+    "const style = { color: \"red\", size: { width: 1 } };",
+    "style.color = \"blue\";",
+    "const list: string[] = [\"a\"];",
+    "list.push(\"b\");",
+    "const names = [\"a\", [\"b\"]];",
+    "names.push(\"c\");",
+    "const actions: { label: string; draw?: typeof Icon } = { label: \"x\" };",
+    "actions.label = \"y\";",
+    "const nested: { inner: { draw?: typeof Icon } } = { inner: {} };",
+    "nested.inner = { draw: pick() };",
+    "const draws: (typeof Icon)[] = [];",
+    "draws.push(pick());",
+    "const bag: any = {};",
+    "bag.k = pick();",
+    "export const Uses = () => <>",
+    "  <Icon className=\"seen-icon\" /><Slot style={style} /><Slot items={list} /><Slot names={names} />",
+    "  <Slot actions={actions} /><Slot nested={nested} /><Slot draws={draws} /><Slot bag={bag} />",
+    "</>;",
+  ].join("\n") }), {
+    classes: ["seen-icon"],
+    unread: [
+      "Written.tsx:20 <Slot actions> hands another package an object written after it is bound, so what it holds cannot be listed",
+      "Written.tsx:20 <Slot bag> hands another package an object written after it is bound, so what it holds cannot be listed",
+      "Written.tsx:20 <Slot draws> hands another package an object written after it is bound, so what it holds cannot be listed",
+      "Written.tsx:20 <Slot nested> hands another package an object written after it is bound, so what it holds cannot be listed",
     ],
   });
   // An object handed to a function in the sources is followed into it, which never calls the icon.
