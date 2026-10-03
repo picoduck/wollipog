@@ -130,6 +130,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `TranscriptHitIcon` | Lucide | `FileText` | A transcript search hit in the command palette. |
 | `JobsIcon` | Lucide | `ListChecks` | Background job list with per-job state. |
 | `CampaignIcon` | Lucide | `ChartGantt` | An issue campaign's work items: Campaign Status in the right panel. |
+| `ChildSessionRequestsIcon` | Lucide | `Network` | Who answers an Orchestrator's child session requests: the Pinned Summary's Child Session Requests row. |
+| `WorkflowDecisionsIcon` | Lucide | `Route` | Where an Orchestrator's workflow gates are decided: the Pinned Summary's Workflow Decisions row. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
 | `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion. |
 | `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows. |

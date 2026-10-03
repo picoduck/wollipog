@@ -34,14 +34,10 @@ import {
   type SessionConfig,
   type DescendantBlockedChildView,
   type DescendantRequestView,
-  type ParentControlMode,
-  type WorkflowDecisionAuthority,
-  type DelegatableWorkflowDecisionCategory,
   type SessionHoldView,
   type SessionReminderView,
   sessionRole,
   type SessionView,
-  usesOrchestratorPresetPermissions,
   type SourceLocation,
   type WorkspaceReference,
   type WorkspaceReferenceCandidate,
@@ -64,9 +60,7 @@ import { unarchiveSession } from "../session-unarchive.js";
 import { TranscriptSkeleton, transcriptLoadingSentence } from "./TranscriptSkeleton.js";
 import { TranscriptEmptyState, TranscriptHistoryNotice, transcriptEmptyKind } from "./TranscriptReadingStates.js";
 import { clearRoutedSessionLookup, setRoutedSessionLookup, useRoutedSessionLookup } from "../routed-session-lookup.js";
-import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
-import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
 import { MoveToProjectDialog, MoveToWorkspaceDialog, NewWorkspaceDialog } from "./SessionMoveDialogs.js";
 import {
   advanceAutomaticAccountSwitchNotice,
@@ -143,7 +137,7 @@ import {
 } from "../history-recovery.js";
 import { routedSessionPlaceholder, shouldHydrateRoutedSession } from "../detail-placeholder.js";
 import { transcriptPresentation, transcriptRendersRequestRow } from "../transcript-presentation.js";
-import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
+import { OrchestratorControlsDialog, orchestratorControlsSummary } from "./OrchestratorControlsDialog.js";
 import {
   acquireSessionFork,
   canStopActiveTurn,
@@ -250,7 +244,6 @@ import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
 import { workerRoster, isCurrentWorker } from "../worker-roster.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
-import { Select } from "./ui/ChoiceControls.js";
 import {
   clearDurableQueuedEditRecoveriesForAccount,
   clearDurableQueuedEditRecovery,
@@ -4518,6 +4511,14 @@ function SessionDetailLoaded({
   // reason, and nothing is applied (#1857).
   const configRefusal = sessionCommandRefusal(session, "configure");
   const configRefusalId = `config-refusal-${session.id}`;
+  // Orchestrator Controls (#2192) opens from the + menu and from the Pinned Summary's Orchestrator
+  // rows, and returns focus to whichever opened it.
+  const [orchestratorControlsOpen, setOrchestratorControlsOpen] = useState(false);
+  const orchestratorControlsReturnFocusRef = useRef<HTMLElement | null>(null);
+  const openOrchestratorControls = useCallback((returnFocus: HTMLElement | null) => {
+    orchestratorControlsReturnFocusRef.current = returnFocus;
+    setOrchestratorControlsOpen(true);
+  }, []);
   // A composer the session cannot send from reads as paused (#2154): its permission, Plan and model
   // controls stay in the bar, disabled, with the reason it cannot send. Each refusal is per command,
   // so a person refused only prompts keeps the configuration they are allowed (#1857).
@@ -5418,6 +5419,9 @@ function SessionDetailLoaded({
       onOpenReview={fromSummary(() => rightPanel.show("review"))}
       onOpenBackgroundWork={fromSummary(() => rightPanel.show("background"))}
       onOpenSourceLocation={fromSummary(openSourceLocation)}
+      onOpenOrchestratorControls={() => openOrchestratorControls(
+        document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      )}
       skillsUnavailableReason={skillsUnavailable
         ? skillsUnavailableSentence(runnerDisp.name, skillsUnavailable.adapter, null)
         : null}
@@ -6374,21 +6378,7 @@ function SessionDetailLoaded({
                     onTogglePlan={togglePlan}
                     onSaveGuardrails={saveGuardrails}
                     configRefusal={configRefusal}
-                    onSetParentControl={(mode) => {
-                      void api.setParentControl(sessionId, mode).then(loadSession, (cause) => {
-                        setError((cause as Error).message);
-                      });
-                    }}
-                    onSetParentControlPolicy={(category, authority) => {
-                      const policy = session.parentControlPolicy;
-                      if (!policy) return;
-                      void api.setParentControlPolicy(sessionId, {
-                        ...policy.decisions,
-                        [category]: authority,
-                      }, policy.revision).then(loadSession, (cause) => {
-                        setError((cause as Error).message);
-                      });
-                    }}
+                    onOpenOrchestratorControls={openOrchestratorControls}
                     disabled={!canPrompt}
                     {...(promptUnavailableReason !== null ? { disabledReason: promptUnavailableReason } : {})}
                     imageMimeTypes={allowedImageMimeTypes}
@@ -6605,6 +6595,15 @@ function SessionDetailLoaded({
         >
           {pinnedSummaryContent}
         </Modal>
+      )}
+      {orchestratorControlsOpen && sessionRole(session) === "orchestrator" && (
+        <OrchestratorControlsDialog
+          session={session}
+          onClose={() => setOrchestratorControlsOpen(false)}
+          onSessionChanged={loadSession}
+          refusal={configRefusal}
+          returnFocusRef={orchestratorControlsReturnFocusRef}
+        />
       )}
       {mode === "expanded" && inspectedWorkspaceReference && (
         <Modal
@@ -7133,8 +7132,7 @@ export function ComposerPlusMenu({
   onTogglePlan,
   onSaveGuardrails,
   configRefusal = null,
-  onSetParentControl,
-  onSetParentControlPolicy,
+  onOpenOrchestratorControls,
   disabled,
   disabledReason = "This session cannot accept a prompt right now.",
   imageMimeTypes,
@@ -7147,11 +7145,12 @@ export function ComposerPlusMenu({
   onTogglePlan: (on?: boolean) => void;
   /** Sends the Guardrails dialog's changes in one configuration request; rejects on failure. */
   onSaveGuardrails: (patch: Partial<SessionConfig>) => Promise<void>;
-  /** Why this person may not change the session's configuration (#1857): Plan Mode and the
-   * Orchestrator controls are disabled with it, and Guardrails opens read-only. */
+  /** Why this person may not change the session's configuration (#1857): Plan Mode is disabled
+   * with it, and Guardrails opens read-only. */
   configRefusal?: string | null;
-  onSetParentControl?: (mode: ParentControlMode) => void;
-  onSetParentControlPolicy?: (category: DelegatableWorkflowDecisionCategory, authority: WorkflowDecisionAuthority) => void;
+  /** Opens Orchestrator Controls (#2192), returning focus to `returnFocus` when it closes. It opens
+   * on a paused composer too: the dialog's controls refuse for a person refused configuration. */
+  onOpenOrchestratorControls?: (returnFocus: HTMLElement | null) => void;
   /** The composer cannot send. The menu still opens, so Guardrails can be read and changed while
    * the session is paused, stopped or read-only; only Attach Image and Plan Mode refuse. */
   disabled: boolean;
@@ -7222,7 +7221,7 @@ export function ComposerPlusMenu({
         <PlusIcon size={16} />
       </ComposerButton>
       {open && (
-        // Menu-shaped, but it holds the Orchestrator selects too, so it is a dialog rather than a menu.
+        // Menu-shaped, and still a dialog until #2203 makes the + button a plain menu.
         <MenuSurface
           surfaceRef={popover.panelRef}
           anchor={{ trigger: popover.triggerRef }}
@@ -7283,99 +7282,21 @@ export function ComposerPlusMenu({
           >
             Guardrails…
           </MenuItem>
-          {sessionRole(session) === "orchestrator" && (
-            <div className="plus-orchestrator">
-              <span className="plus-orchestrator-prefix" aria-hidden="true">↯</span>
-              <div className="parent-control-settings">
-                {session.orchestratorPolicy && <section className="active-campaign-policy" aria-label="Active Campaign Behavior">
-                  <strong>Campaign Behavior</strong>
-                  <span className="muted">This campaign keeps its stored policy when account defaults change.</span>
-                  <dl>
-                    {session.orchestratorCampaign && <div><dt>Campaign Status</dt><dd>{session.orchestratorCampaign.status === "waiting_human" ? "Waiting for Human" : titleCaseLabel(session.orchestratorCampaign.status.replaceAll("_", " "))}<small>Policy Revision {session.orchestratorCampaign.policyRevision}</small></dd></div>}
-                    <div><dt>Child Harness</dt><dd>{session.orchestratorPolicy.behavior.childHarness
-                      ? agentHarnessIdentityLabel(session.orchestratorPolicy.behavior.childHarness)
-                      : "Automatic"}<small>{titleCaseLabel((session.orchestratorPolicy.sources.behavior.childHarness ?? "legacy_session").replaceAll("_", " "))}</small></dd></div>
-                    <div><dt>Child Model</dt><dd>{session.orchestratorPolicy.behavior.childModel ?? "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childModel.replaceAll("_", " "))}</small></dd></div>
-                    <div><dt>Child Effort</dt><dd>{session.orchestratorPolicy.behavior.childEffort ? titleCaseLabel(session.orchestratorPolicy.behavior.childEffort) : "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childEffort.replaceAll("_", " "))}</small></dd></div>
-                    <div><dt>Maximum Concurrent Children</dt><dd>{session.orchestratorPolicy.behavior.maximumConcurrentChildren}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.maximumConcurrentChildren.replaceAll("_", " "))}</small></dd></div>
-                    <div><dt>Follow-Ups</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.followUps.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.followUps.replaceAll("_", " "))}</small></dd></div>
-                    <div><dt>Completion</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.completion.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.completion.replaceAll("_", " "))}</small></dd></div>
-                    {/* An older control plane publishes no execution block at all, and one between
-                        v144 and v164 publishes it without this field. Read both defensively and
-                        fall back the same way the stored policy's own migration does: a strict
-                        policy is only ever delivered by a preset launch, which carries no user
-                        integration. */}
-                    {(() => {
-                      // A pre-v164 payload has no field. Derive it in the same order the
-                      // control-plane migration does, and for the same reason: EVERY coupled
-                      // preset launch replaces the provider surface and so carries no user
-                      // integration, including the non-strict Claude and Codex preset shapes,
-                      // where `strictProjectIsolation` is false. Reading strictness first would
-                      // report those as Disabled even though they removed the integrations.
-                      const enabled = session.orchestratorPolicy!.execution?.integrationIsolation ??
-                        (usesOrchestratorPresetPermissions(session) ||
-                          (session.orchestratorPolicy!.execution?.strictProjectIsolation ?? true));
-                      // A preset launch is not the additive launch minus integrations, so it
-                      // gets its own sentence instead of the per-harness "kept" list.
-                      const copy = integrationIsolationDisclosure(session.driver);
-                      const disclosure = usesOrchestratorPresetPermissions(session)
-                        ? ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE
-                        : `${copy.removed} ${copy.kept}`;
-                      return <div title={enabled ? disclosure : undefined}>
-                        <dt>Integration Isolation</dt>
-                        <dd>{enabled ? "Enabled" : "Disabled"}<small>{titleCaseLabel(
-                          (session.orchestratorPolicy!.sources.execution?.integrationIsolation ?? "legacy_session")
-                            .replaceAll("_", " "))}</small></dd>
-                      </div>;
-                    })()}
-                    {session.orchestratorCampaign && <>
-                      <div><dt>Children</dt><dd>{session.orchestratorCampaign.children.total}<small>{session.orchestratorCampaign.children.verified} Verified · {session.orchestratorCampaign.children.active} Active · {session.orchestratorCampaign.children.waitingHuman} Waiting for Human · {session.orchestratorCampaign.children.blocked} Blocked</small></dd></div>
-                      <div><dt>Follow-Up Recommendations</dt><dd>{session.orchestratorCampaign.followUps.unique}<small>{session.orchestratorCampaign.followUps.duplicates} Duplicates Skipped</small></dd></div>
-                    </>}
-                  </dl>
-                  {session.orchestratorCampaign?.uiEvidenceReview.status === "unavailable" && <span className="muted" role="status">UI Evidence Approval is assigned to the Orchestrator but is routed to a human. {session.orchestratorCampaign.uiEvidenceReview.reason ?? "This Orchestrator client cannot inspect the evidence bytes."}</span>}
-                  {session.orchestratorCampaign?.uiEvidenceReview.status === "available" && session.orchestratorCampaign.uiEvidenceReview.effectiveOwner === "orchestrator" && <span className="muted" role="status">The Orchestrator reviews image evidence attached as Session artifacts. Video normally goes to a human; one operator-enabled short-frame validation campaign may delegate it. Externally stored evidence goes to a human.</span>}
-                </section>}
-                <div className="parent-control-setting">
-                  <span className="parent-control-setting-label">Descendant Requests</span>
-                  <Select<ParentControlMode>
-                    label="Parent Control"
-                    disabled={configRefusal !== null}
-                    value={session.parentControl ?? "off"}
-                    onChange={(value) => onSetParentControl?.(value)}
-                    options={[
-                      { value: "off", label: "Human", description: "Keep descendant requests human-owned." },
-                      { value: "questions", label: "Questions", description: "Delegate non-secret descendant questions." },
-                      { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
-                    ]}
-                  />
-                </div>
-                {session.parentControlPolicy && ([
-                  ["implementation_question", "Implementation Questions"],
-                  ["pr_merge", "PR Merge Approval"],
-                  ["merged_branch_deletion", "Merged Branch Deletion"],
-                  ["follow_up_issue_publication", "Follow-Up Issue Publication"],
-                  ["ui_evidence_approval", "UI Evidence Approval"],
-                ] as Array<[DelegatableWorkflowDecisionCategory, string]>).map(([category, label]) => (
-                  <div className="parent-control-setting" key={category}>
-                    <span className="parent-control-setting-label">{label}</span>
-                    <Select<WorkflowDecisionAuthority>
-                      label={label}
-                      disabled={configRefusal !== null}
-                      value={session.parentControlPolicy!.decisions[category]}
-                      onChange={(value) => onSetParentControlPolicy?.(category, value)}
-                      options={[
-                        { value: "human", label: "Human", description: "Require a human decision for this exact workflow gate." },
-                        { value: "orchestrator", label: "Orchestrator", description: "Let the controlling Orchestrator review this typed gate." },
-                      ]}
-                    />
-                    {category === "ui_evidence_approval" && <span className="muted parent-control-help">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</span>}
-                  </div>
-                ))}
-                {configRefusal !== null && <span className="muted parent-control-help">{configRefusal}</span>}
-                <span className="muted parent-control-help">Only an authenticated human can change these assignments. Existing unconsumed approvals are revoked when the policy changes. Secrets, authentication, persistent grants, governance, budgets, and tool guardrails remain human-only.</span>
-              </div>
-            </div>
+          {sessionRole(session) === "orchestrator" && onOpenOrchestratorControls && (
+            <>
+              <MenuLabel>Orchestrator</MenuLabel>
+              <MenuItem
+                role="button"
+                description={orchestratorControlsSummary(session)}
+                onClick={() => {
+                  // The row goes with the menu, so the dialog returns focus to + instead.
+                  popover.close(false);
+                  onOpenOrchestratorControls(popover.triggerRef.current);
+                }}
+              >
+                Orchestrator Controls…
+              </MenuItem>
+            </>
           )}
         </MenuSurface>
       )}

@@ -584,8 +584,6 @@
     "|.outbound-event-subscription|gap|8px",
     "|.outbound-events-heading,.outbound-event-subscription-head|gap|12px",
     "|.pairing-controls|gap|8px",
-    "|.parent-control-settings|gap|6px",
-    "|.parent-control-setting|gap|8px",
     "|.permission-mode-details-copy|gap|12px",
     "|.pod-context-entry>span|gap|5px",
     "|.pod-context-entry|gap|9px",
