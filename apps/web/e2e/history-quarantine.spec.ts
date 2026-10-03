@@ -17,9 +17,9 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     const banner = page.locator('[aria-label="Conversation Quarantined"]');
     await expect(banner).toContainText("Conversation Quarantined");
     await expect(banner).toContainText("new messages can’t be sent here");
-    await expect(banner).not.toContainText("turn 1");
+    await expect(banner).not.toContainText("Turn 1");
     await banner.getByRole("button", { name: "Show Details" }).click();
-    await expect(banner).toContainText("turn 1");
+    await expect(banner).toContainText("after Turn 1");
     // The provider's own bounded account of the rejection, in a mono well.
     await expect(banner.locator(".code-well")).toContainText("history position 675");
     await expect(banner).not.toContainText("/compact");
@@ -35,7 +35,9 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await page.screenshot({ path: test.info().outputPath("quarantined-session.png"), fullPage: true });
 
     await page.getByRole("button", { name: "Recover Session", exact: true }).click();
-    await expect(page.getByRole("dialog")).toContainText("left untouched for inspection");
+    // #2185: the confirmation names the turn and says the session stays to be inspected.
+    await expect(page.getByRole("dialog")).toContainText("This session stays as it is so you can inspect it.");
+    await expect(page.getByRole("dialog")).toContainText("Turn 1");
     await page.screenshot({ path: test.info().outputPath("recovery-confirm.png") });
     await page.getByRole("dialog").getByRole("button", { name: "Recover Session", exact: true }).click();
 
@@ -57,7 +59,8 @@ test("a quarantine without a safe provider fork recovers through a fresh convers
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
   await page.getByRole("button", { name: "Recover Session", exact: true }).click();
-  await expect(page.getByRole("dialog")).toContainText("fresh provider conversation");
+  // #2185: one turn is named as "Turn 1", not a range.
+  await expect(page.getByRole("dialog")).toContainText("starts a fresh conversation from a summary of Turn 1, with the files");
   await page.getByRole("dialog").getByRole("button", { name: "Recover Session", exact: true }).click();
   await expect(page.locator(".composer-input")).toHaveValue(/Summarize the release notes/);
   expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.recoveryRequests()))

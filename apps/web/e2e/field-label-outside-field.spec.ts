@@ -9,8 +9,9 @@ import { dialogMotionSettled } from "./dialog-motion.js";
  * Automations editor (and the Outbound Events form on its grid): each grid label's own text, each
  * `.automation-field`'s `.field-label`, and its fieldset legends; a grid label's helper stays dim,
  * 4px under the control. The labels that open
- * redesigns own (Snooze #2181, Rename Project #2199, the message-action form #2185) keep the older
- * dim rule until those land; whichever lands first drops its case below.
+ * redesigns own (Snooze #2181, Rename Project #2199) keep the older dim rule until those land;
+ * whichever lands first drops its case below. The message-action form went with #2185, which loads
+ * Edit as a New Turn straight into the composer.
  */
 
 type Theme = "dark" | "light";
@@ -186,19 +187,6 @@ for (const theme of ["dark", "light"] as const) {
       const dialog = page.getByRole("dialog", { name: "Rename Project" });
       await dialogMotionSettled(page);
       await expectUnchanged(page, dialog.locator(".field-label"), "0px 0px 6px");
-    });
-
-    test("the message-action form (#2185) keeps its label", async ({ page }) => {
-      const url = "/command-inbox-projects-e2e.html?scenario=edit-in-fork";
-      await page.goto(url);
-      await page.evaluate(() => localStorage.clear());
-      await page.goto(url);
-      await setTheme(page, theme);
-      await page.getByRole("button", { name: /Alpha Session/ }).click();
-      const expand = page.getByRole("button", { name: "Expand Session" });
-      if (await expand.isVisible()) await expand.click();
-      await page.getByRole("button", { name: "Edit as a New Turn" }).last().click();
-      await expectUnchanged(page, page.getByRole("dialog").locator(".field-label"), "0px 0px 6px");
     });
   });
 }
