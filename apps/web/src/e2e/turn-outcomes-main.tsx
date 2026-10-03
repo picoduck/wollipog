@@ -3,13 +3,17 @@ import { createRoot } from "react-dom/client";
 import type { SessionEvent } from "@wollipog/protocol";
 import { TimelineBuilder } from "../timeline.js";
 import { EventTimeline } from "../components/EventTimeline.js";
+import { TURN_RETRY_FRESH_RESTART_REASON } from "../turn-retry.js";
 import "../styles.css";
 
 /** A settled turn, a stopped turn and a failed turn whose provider error arrives twice (#2169),
  * built from runner events so the transcript sees exactly what a session would. */
 const params = new URLSearchParams(location.search);
 document.documentElement.dataset.theme = params.get("theme") ?? "dark";
-const runnerOffline = params.get("runner") === "offline";
+// `?runner=offline` and `?restart=fresh` show two of the reasons Retry Turn names when it cannot run.
+const unavailableReason = params.get("runner") === "offline" ? "Runner is offline."
+  : params.get("restart") === "fresh" ? TURN_RETRY_FRESH_RESTART_REASON
+  : undefined;
 
 const start = Date.UTC(2026, 9, 2, 0, 12, 0);
 const minute = 60_000;
@@ -68,7 +72,7 @@ function Fixture() {
               setPending(prompt.id);
               setTimeout(() => setPending(undefined), 400);
             },
-            ...(runnerOffline ? { unavailableReason: "Runner is offline." } : {}),
+            ...(unavailableReason !== undefined ? { unavailableReason } : {}),
             ...(pending !== undefined ? { pendingPromptId: pending } : {}),
           }}
         />

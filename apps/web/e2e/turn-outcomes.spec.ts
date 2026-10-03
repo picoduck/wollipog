@@ -63,3 +63,14 @@ test("with the runner offline Retry Turn is disabled with a visible reason it re
   await expect(reason).toHaveText("Runner is offline.");
   await expect(retry).toHaveAccessibleDescription("Runner is offline.");
 });
+
+test("where a restart would start a new conversation, Retry Turn says so instead", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/turn-outcomes-e2e.html?restart=fresh");
+  const retry = turnFailed(page).getByRole("button", { name: "Retry Turn" });
+  await expect(retry).toBeDisabled();
+  await expect(retry).toHaveAccessibleDescription(
+    "Restarting starts a new conversation. Restart the session, then send the message again.");
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow, "the reason wraps inside the phone column").toBe(0);
+});
