@@ -89,7 +89,8 @@ import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
 import { sessionArchivedAtRest, statusMeta } from "../status-meta.js";
 import { shownWatchdogDelivery } from "../background-delivery-status.js";
-import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest } from "./EventTimeline.js";
+import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest, type TurnRetryControl } from "./EventTimeline.js";
+import { turnRetryPlan } from "../turn-retry.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
@@ -3634,6 +3635,38 @@ function SessionDetailLoaded({
       }
     }
   }, [api, busy, composerRestartOffered, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
+  // Retry Turn on a failed turn's notice (#2169): the turn's prompt again, as a new turn. A failed
+  // or stopped session restarts first, since the control plane admits no prompt to it until then.
+  const retryPlan = turnRetryPlan({
+    status: session.status,
+    runnerOnline,
+    promptRefusal,
+    restartRefusal,
+    sessionNoticeReason,
+    policyPaused,
+    stopFailed: session.stopOperation?.status === "stop_failed",
+  });
+  const [retryingTurnPromptId, setRetryingTurnPromptId] = useState<number>();
+  const retryTurn = useCallback(async (prompt: Extract<TimelineItem, { kind: "user_message" }>) => {
+    if (retryingTurnPromptId !== undefined || retryPlan.kind === "unavailable") return;
+    const generation = viewGenerationRef.current;
+    setError(null);
+    setRetryingTurnPromptId(prompt.id);
+    try {
+      if (retryPlan.kind === "restart_then_prompt") loadSession(await api.restart(session.id));
+      await api.prompt(session.id, prompt.text, prompt.images ?? []);
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+    } finally {
+      if (viewGenerationRef.current === generation) setRetryingTurnPromptId(undefined);
+    }
+  }, [api, loadSession, retryPlan.kind, retryingTurnPromptId, session.id]);
+  const retryPlanReason = retryPlan.kind === "unavailable" ? retryPlan.reason : undefined;
+  const turnRetry = useMemo<TurnRetryControl>(() => ({
+    onRetry: (prompt) => void retryTurn(prompt),
+    ...(retryPlanReason !== undefined ? { unavailableReason: retryPlanReason } : {}),
+    ...(retryingTurnPromptId !== undefined ? { pendingPromptId: retryingTurnPromptId } : {}),
+  }), [retryTurn, retryPlanReason, retryingTurnPromptId]);
   const failedSetupWorktree = session.worktrees?.find((worktree) => worktree.setup?.status === "failed");
   const { creation: recoveryCreation, create: createRecoveryWorktreeWithProgress } =
     useRecoveryWorktreeCreation({ api, session, onSession: loadSession });
@@ -5786,6 +5819,7 @@ function SessionDetailLoaded({
                       rewindUnavailableReason={rewindUnavailableReason}
                       onFork={mode === "expanded" ? onFork : undefined}
                       handoff={mode === "expanded" ? handoffControls : undefined}
+                      turnRetry={mode === "expanded" ? turnRetry : undefined}
                       onEditAndResend={mode === "expanded" ? openResendAction : undefined}
                       editAndResendUnavailableReason={promptUnavailableReason ?? undefined}
                       onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
