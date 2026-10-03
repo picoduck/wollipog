@@ -17,6 +17,7 @@ import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { readTranscriptAction } from "../dom-test-transcript-actions.js";
+import type { ComposerDraft } from "../composer-drafts.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
@@ -150,13 +151,15 @@ async function flush(delay = 0) {
   });
 }
 
-async function mount(current: SessionView, { online = true, client: overrides = {}, events, unarchiveAndRestart = false }: {
+async function mount(current: SessionView, { online = true, client: overrides = {}, events, unarchiveAndRestart = false, draftLoader }: {
   online?: boolean;
   client?: Partial<ApiClient>;
   /** Transcript events, delivered live once the session is in the store. */
   events?: SessionEvent["payload"][];
   /** The control plane owns one preflighted Unarchive and Restart. */
   unarchiveAndRestart?: boolean;
+  /** The stored-draft load; none by default. */
+  draftLoader?: () => Promise<ComposerDraft | null>;
 } = {}) {
   const toasts: string[] = [];
   const undos: string[] = [];
@@ -193,7 +196,7 @@ async function mount(current: SessionView, { online = true, client: overrides = 
         <StoreProvider connection={connection} navigation={navigation}>
           {events && <EventSeeder sessionId={current.id} payloads={events} />}
           <SessionDetail sessionId={current.id} mode="expanded" rightPanel={rightPanel}
-            onOpenTerminal={() => {}} composerDraftLoader={async () => null} />
+            onOpenTerminal={() => {}} composerDraftLoader={draftLoader ?? (async () => null)} />
         </StoreProvider>
       </FeedbackContext.Provider>
     </ApiProvider>,
@@ -1015,6 +1018,29 @@ test("loading a queued message into the composer clears the notices about the dr
     await flush(1);
     assert.equal(composerInput(fixture.container).value, "Queued exact content");
     assertNoDomNode(fixture.slot(), "the attachment notice was about the replaced draft");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a stored draft that loads late keeps a failure raised while it loaded", async () => {
+  let loadDraft: ((draft: ComposerDraft | null) => void) | undefined;
+  const fixture = await mount(sessionView({ status: "running", activeTurnId: "turn-1" }), {
+    client: { cancelTurn: () => Promise.reject(new ApiError("the runner refused the stop", 409)) } as Partial<ApiClient>,
+    draftLoader: () => new Promise((resolve) => { loadDraft = resolve; }),
+  });
+  try {
+    const stop = fixture.container.querySelector('button[aria-label="Stop Turn"]') as HTMLButtonElement | null;
+    assert.ok(stop, "the running turn can be stopped");
+    await act(async () => { stop.click(); });
+    await flush();
+    assert.equal(fixture.notices()[0]?.getAttribute("aria-label"), "Turn Not Stopped");
+    assert.ok(loadDraft, "the stored draft is still loading");
+    await act(async () => { loadDraft!({ text: "Stored draft", images: [], updatedAt: 1 }); });
+    await flush();
+    assert.equal(composerInput(fixture.container).value, "Stored draft");
+    assert.equal(fixture.notices()[0]?.getAttribute("aria-label"), "Turn Not Stopped",
+      "loading the stored draft replaced nothing the person wrote");
   } finally {
     await fixture.unmount();
   }

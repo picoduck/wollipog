@@ -1661,6 +1661,9 @@ function SessionDetailLoaded({
     next: string,
     caret = next.length,
     preservePendingFocusRestore = false,
+    /** Loading the stored draft into the composer replaces nothing the person wrote, so a failure
+     * raised while it loaded (a Stop Turn that failed) stays. */
+    hydration = false,
   ) => {
     if (!preservePendingFocusRestore) pendingComposerFocusRestoreRef.current = null;
     draftState.current = { ...draftState.current, text: next };
@@ -1670,7 +1673,7 @@ function SessionDetailLoaded({
     // Every replaced draft (a queued edit, Edit as a New Turn, a slash command, history recall) is
     // a new message, so the composer's notices about the old one go with it. A caller that has a
     // notice for the new draft sets it afterwards.
-    clearComposerErrors();
+    if (!hydration) clearComposerErrors();
   }, [clearComposerErrors, updateComposerSelection]);
   const persistQueuedPromptEditRecovery = useCallback((recovery: QueuedPromptEditRecovery): boolean =>
     queuedEditRecoveryScope !== null &&
@@ -1846,7 +1849,7 @@ function SessionDetailLoaded({
         // value. Promise settlement and animation-frame ordering cannot prove that React has
         // written the hydrated text to the DOM yet.
         pendingHydrationCommitRef.current = { sessionId, expectedText: draft.text };
-        setProgrammaticComposerText(draft.text, draft.text.length, true);
+        setProgrammaticComposerText(draft.text, draft.text.length, true, true);
         replace(draft.images);
         commandSubmissionRetryRef.current = draft.commandSubmission ?? null;
         consumeComposerDraftHandoff(sessionId, draft, instanceScope);
@@ -2149,7 +2152,7 @@ function SessionDetailLoaded({
         return;
       }
       revealOrdinaryComposerRef.current("answer-owned");
-      setProgrammaticComposerText(restored.text);
+      setProgrammaticComposerText(restored.text, restored.text.length, false, true);
       replace(restored.images);
       commandSubmissionRetryRef.current = restored.commandSubmission ?? null;
       if (draft) consumeComposerDraftHandoff(sessionId, draft, instanceScope);
