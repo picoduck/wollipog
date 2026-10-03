@@ -74,6 +74,7 @@ for (const [name, value] of Object.entries({
   Element: domWindow.Element,
   HTMLElement: domWindow.HTMLElement,
   HTMLTextAreaElement: domWindow.HTMLTextAreaElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
   File: domWindow.File,
@@ -649,6 +650,109 @@ test("attaching a workspace result restores composer focus in its captured frame
       assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
     });
   } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+/** Opens + and activates Reference a File… (#2203). */
+async function referenceAFile(fixture: Fixture) {
+  const plus = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Attach and Settings"]');
+  assert.ok(plus, "the + button is mounted");
+  await act(async () => fireDomEvent.click(plus));
+  const row = ([...domWindow.document.querySelectorAll('[role="menu"] [role="menuitem"]')] as unknown as HTMLButtonElement[])
+    .find((item) => item.querySelector(".menu-text")?.textContent === "Reference a File…");
+  assert.ok(row, "the menu offers Reference a File…");
+  await act(async () => {
+    fireDomEvent.click(row);
+    await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+  });
+}
+
+function workspacePickerShown(fixture: Fixture): boolean {
+  const listboxId = fixture.composer.getAttribute("aria-controls");
+  return fixture.composer.getAttribute("aria-expanded") === "true" && Boolean(listboxId) &&
+    domWindow.document.getElementById(listboxId!) !== null &&
+    fixture.container.querySelector('[role="listbox"][aria-label="Workspace Paths"]') !== null;
+}
+
+for (const { name, draftText, caret, expected, expectedCaret } of [
+  { name: "an empty draft", draftText: "", caret: 0, expected: "@", expectedCaret: 1 },
+  { name: "the end of a word", draftText: "look at", caret: 7, expected: "look at @", expectedCaret: 9 },
+  { name: "after a space mid-draft", draftText: "see  please", caret: 4, expected: "see @ please", expectedCaret: 5 },
+]) {
+  test(`Reference a File… inserts @ at the caret in ${name} and opens the @ picker with the composer focused (#2203)`, async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, {
+      runnerProtocolVersion: 106,
+      client: { searchWorkspaceReferences: async () => ({ results: [], truncated: false }) },
+    });
+    try {
+      await resolveDraft(draft, draftText);
+      await focusRequestedComposer(fixture);
+      await act(async () => {
+        fixture.composer.setSelectionRange(caret, caret);
+        fireDomEvent.select(fixture.composer);
+      });
+      assert.equal(workspacePickerShown(fixture), false, "no picker before the row");
+      await referenceAFile(fixture);
+      assert.equal(fixture.composer.value, expected);
+      assert.equal(fixture.composer.selectionStart, expectedCaret, "the caret follows the @");
+      assert.equal(domWindow.document.activeElement, fixture.composer, "the composer has focus");
+      assert.ok(workspacePickerShown(fixture), "the @ picker is open");
+      assertNoDomNode(domWindow.document.querySelector('[role="menu"][aria-label="Attach and Settings"]'),
+        "the menu closed");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+}
+
+test("a runner without workspace references has no Reference a File… row (#2203)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    const plus = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Attach and Settings"]')!;
+    await act(async () => fireDomEvent.click(plus));
+    const labels = [...domWindow.document.querySelectorAll('[role="menu"] .menu-text')].map((node) => node.textContent);
+    assert.ok(labels.includes("Guardrails…"), "the menu opened");
+    assert.equal(labels.includes("Reference a File…"), false);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("one tap on Reference a File… expands a collapsed phone composer and focuses it inside the tap (#2203)", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px") || query.includes("pointer: coarse"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 106,
+    client: { searchWorkspaceReferences: async () => ({ results: [], truncated: false }) },
+  });
+  try {
+    await resolveDraft(draft, "");
+    const box = () => fixture.container.querySelector(".composer-box");
+    assert.equal(box()?.classList.contains("idle-collapsed"), true, "the phone composer starts as the capsule");
+    // No animation frame runs: iOS opens the keyboard only for focus inside the activating gesture.
+    await withCapturedAnimationFrames(domWindow, async () => {
+      await referenceAFile(fixture);
+      assert.equal(box()?.classList.contains("idle-collapsed"), false, "the composer expanded");
+      assert.equal(domWindow.document.activeElement, fixture.composer, "and has focus without waiting a frame");
+      assert.equal(fixture.composer.value, "@");
+      assert.ok(workspacePickerShown(fixture), "the @ picker is open");
+    });
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
     await unmountFixture(fixture);
   }
 });
@@ -3353,7 +3457,7 @@ test("phone composer controls survive a pointer click when the browser does not 
     await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
     await focusRequestedComposer(fixture);
     const plusTrigger = fixture.container.querySelector(
-      'button[aria-label="Add and Modes"]',
+      'button[aria-label="Attach and Settings"]',
     ) as HTMLButtonElement | null;
     assert.ok(plusTrigger);
 
@@ -3365,7 +3469,7 @@ test("phone composer controls survive a pointer click when the browser does not 
     });
 
     assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false);
-    assert.ok(domWindow.document.querySelector('.menu[aria-label="Session Attachments, Modes, and Guardrails"]'),
+    assert.ok(domWindow.document.querySelector('.menu[aria-label="Attach and Settings"]'),
       "the original pointer activation must still open the composer menu (portalled to <body>)");
   } finally {
     domWindow.matchMedia = priorMatchMedia;
@@ -3391,7 +3495,7 @@ test("a keyboard-opened composer menu keeps the phone composer expanded around i
     await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
     await focusRequestedComposer(fixture);
     const plusTrigger = fixture.container.querySelector(
-      'button[aria-label="Add and Modes"]',
+      'button[aria-label="Attach and Settings"]',
     ) as HTMLButtonElement | null;
     assert.ok(plusTrigger);
     await act(async () => { plusTrigger.focus(); });
@@ -3401,7 +3505,7 @@ test("a keyboard-opened composer menu keeps the phone composer expanded around i
       plusTrigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
       await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
     });
-    const menu = domWindow.document.querySelector('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
+    const menu = domWindow.document.querySelector('.menu[aria-label="Attach and Settings"]');
     assert.ok(menu, "ArrowDown opens the composer menu");
     assert.ok(menu.contains(domWindow.document.activeElement), "the menu takes focus");
     assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false,
@@ -5534,11 +5638,11 @@ for (const [status, reason] of [
       assert.ok(plus);
       assert.equal(plus.disabled, false, "+ opens while the composer is paused");
       await act(async () => fireDomEvent.click(plus));
-      const menu = domWindow.document.querySelector('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
+      const menu = domWindow.document.querySelector('.menu[aria-label="Attach and Settings"]');
       assert.ok(menu, "+ opens its menu on a paused composer");
       const row = (label: string) => ([...menu.querySelectorAll("button.menu-item")] as unknown as HTMLButtonElement[])
         .find((item) => item.querySelector(".menu-text")?.textContent === label);
-      const attach = row("Attach Image");
+      const attach = row("Attach Image…");
       assert.equal(attach?.disabled, true, "Attach Image refuses on a paused composer");
       assert.equal(attach?.querySelector(".menu-desc")?.textContent, reason, "Attach Image says why");
       const guardrails = row("Guardrails…");
@@ -5582,7 +5686,7 @@ test("every composer bar control is a ComposerButton that keeps the composer foc
       }
     };
 
-    expectComposerButtons("idle with Plan on", ["Add and Modes", "Plan", "Hold to Dictate", "Send"]);
+    expectComposerButtons("idle with Plan on", ["Attach and Settings", "Plan", "Hold to Dictate", "Send"]);
     const plan = fixture.container.querySelector<HTMLButtonElement>(".plan-toggle");
     assert.equal(plan?.getAttribute("aria-pressed"), "true", "Plan is a pressed toggle");
     assert.equal(plan?.textContent, "Plan", "Plan has an icon and a word, not a text glyph");

@@ -81,11 +81,11 @@ async function expectFocusSettlesIn(page: Page, layer: Locator) {
 }
 
 test.describe("with the composer focused, one tap", () => {
-  test("opens the Add and Modes menu", async ({ page }) => {
+  test("opens the Attach and Settings menu", async ({ page }) => {
     await openSession(page);
     await focusComposer(page);
-    await tapOnce(page, page.getByRole("button", { name: "Add and Modes" }));
-    await expectFocusSettlesIn(page, page.getByRole("dialog", { name: "Session Attachments, Modes, and Guardrails" }));
+    await tapOnce(page, page.getByRole("button", { name: "Attach and Settings" }));
+    await expectFocusSettlesIn(page, page.getByRole("menu", { name: "Attach and Settings" }));
   });
 
   test("opens the permission-mode menu", async ({ page }) => {

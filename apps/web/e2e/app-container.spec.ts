@@ -170,7 +170,7 @@ for (const banner of [false, true]) {
   test(`the composer bar's usage popovers stay on their triggers in a contained main column, ${variant}`, async ({ page }) => {
     await page.goto(`/session-usage-e2e.html?width=1100&height=780&shell=1${banner ? "&banner=1" : ""}&composer=orchestrator`);
     if (banner) await expect(page.locator(".main > .notice.page-banner")).toBeVisible();
-    const menu = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
+    const menu = page.locator('.menu[aria-label="Attach and Settings"]');
     const cases = [
       {
         name: "context window",

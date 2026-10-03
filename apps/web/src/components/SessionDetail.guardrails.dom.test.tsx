@@ -20,6 +20,7 @@ import {
   DESCENDANT_REQUEST_POLL_TIMEOUT_MS,
   useDescendantRequestPolling,
 } from "./SessionDetail.js";
+import { modelRefusesImagesSentence } from "./images.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -29,6 +30,7 @@ const globals: Record<string, unknown> = {
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
   HTMLInputElement: domWindow.HTMLInputElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
   InputEvent: domWindow.InputEvent,
@@ -220,7 +222,7 @@ function guardrailsDialog(): HTMLElement | null {
 
 async function openGuardrails(): Promise<HTMLElement> {
   if (!menuRow("Guardrails…")) {
-    await act(async () => fireDomEvent.click(page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!));
+    await act(async () => fireDomEvent.click(page().querySelector<HTMLButtonElement>('[aria-label="Attach and Settings"]')!));
   }
   await act(async () => fireDomEvent.click(menuRow("Guardrails…")!));
   const dialog = guardrailsDialog();
@@ -260,11 +262,11 @@ async function saveGuardrails() {
 test("the + menu has a Guardrails… row that summarizes the limits and holds no field (#2175)", async () => {
   const fixture = await mountGuardrails();
   try {
-    await act(async () => fireDomEvent.click(page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!));
+    await act(async () => fireDomEvent.click(page().querySelector<HTMLButtonElement>('[aria-label="Attach and Settings"]')!));
     const row = menuRow("Guardrails…");
     assert.ok(row, "the menu offers Guardrails…");
     assert.equal(row.querySelector(".menu-desc")?.textContent, "No limits set.");
-    const menu = page().querySelector('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
+    const menu = page().querySelector('.menu[aria-label="Attach and Settings"]');
     assert.ok(menu);
     assert.equal(menu.querySelectorAll("input").length, 0, "no guardrail input remains in the menu");
     assert.equal(menu.querySelectorAll('[aria-label^="About "]').length, 0, "no ⓘ buttons remain");
@@ -282,7 +284,7 @@ test("the Guardrails dialog shows four labeled fields with their help visible an
   try {
     await fixture.render({ costCheckpointApprovedUsd: 2, maxToolCalls: 50, toolCallCount: 12 });
     const dialog = await openGuardrails();
-    assertNoDomNode(page().querySelector('.menu[aria-label="Session Attachments, Modes, and Guardrails"]'),
+    assertNoDomNode(page().querySelector('.menu[aria-label="Attach and Settings"]'),
       "the menu closes as the dialog opens");
     const expected: Array<[string, string]> = [
       ["Recurring Cost Threshold", "Pauses when spend reaches this amount. Continue allows another equal amount. $1.25 spent so far."],
@@ -487,10 +489,10 @@ test("a Viewer reads the guardrails read-only, with Save disabled and the refusa
   try {
     // A Viewer is refused prompts too, so the composer is paused: + still opens (#2175).
     await fixture.render({ costBudgetUsd: 5 }, { configRefusal: refusal, disabled: true });
-    const plus = page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!;
+    const plus = page().querySelector<HTMLButtonElement>('[aria-label="Attach and Settings"]')!;
     assert.equal(plus.disabled, false, "+ opens on a paused composer");
     await act(async () => fireDomEvent.click(plus));
-    assert.equal(menuRow("Attach Image")?.disabled, true);
+    assert.equal(menuRow("Attach Image…")?.disabled, true);
     assert.equal(menuRow("Plan Mode")?.disabled, true, "Plan Mode refuses for a paused composer");
     await openGuardrails();
     for (const label of ["Recurring Cost Threshold", "Cost Checkpoints", "Tool-Call Threshold", "Live Child Limit"]) {
@@ -514,11 +516,11 @@ test("a person refused only configuration sees Plan Mode disabled with the refus
   const fixture = await mountGuardrails();
   try {
     await fixture.render({}, { configRefusal: refusal });
-    await act(async () => fireDomEvent.click(page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!));
+    await act(async () => fireDomEvent.click(page().querySelector<HTMLButtonElement>('[aria-label="Attach and Settings"]')!));
     const plan = menuRow("Plan Mode");
     assert.equal(plan?.disabled, true);
     assert.equal(plan?.querySelector(".menu-desc")?.textContent, refusal);
-    assert.equal(menuRow("Attach Image")?.disabled, false, "attaching belongs to a prompt, which this person may send");
+    assert.equal(menuRow("Attach Image…")?.disabled, false, "attaching belongs to a prompt, which this person may send");
   } finally {
     await unmountGuardrails(fixture);
   }
@@ -553,7 +555,7 @@ test("the + menu offers one Orchestrator Controls row, only on an Orchestrator s
     .find((item) => item.querySelector(".menu-text")?.textContent === "Orchestrator Controls…");
   await act(async () => render("default"));
   try {
-    const trigger = page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!;
+    const trigger = page().querySelector<HTMLButtonElement>('[aria-label="Attach and Settings"]')!;
     await act(async () => fireDomEvent.click(trigger));
     assert.equal(row(), undefined, "a session that is not an Orchestrator has no such row");
 
@@ -598,7 +600,7 @@ test("a paused composer's + menu still opens Orchestrator Controls for a person 
     onAttachImages={() => {}}
   />));
   try {
-    await act(async () => fireDomEvent.click(page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!));
+    await act(async () => fireDomEvent.click(page().querySelector<HTMLButtonElement>('[aria-label="Attach and Settings"]')!));
     const row = [...page().querySelectorAll<HTMLButtonElement>(".menu-item")]
       .find((item) => item.querySelector(".menu-text")?.textContent === "Orchestrator Controls…");
     assert.ok(row, "the paused menu keeps the row");
@@ -613,6 +615,173 @@ test("a paused composer's + menu still opens Orchestrator Controls for a person 
     container.remove();
   }
 });
+
+/** Renders the + menu with every row on offer, recording what each row did (#2203). */
+async function mountPlusMenu(props: Partial<React.ComponentProps<typeof ComposerPlusMenu>> = {}) {
+  const calls: string[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = async (next: Partial<React.ComponentProps<typeof ComposerPlusMenu>> = {}) => {
+    await act(async () => root.render(<ComposerPlusMenu
+      session={{ ...GUARDRAIL_SESSION, permissionMode: "orchestrator", role: "orchestrator", parentControl: "off" } as unknown as SessionView}
+      planActive={false}
+      planSupported
+      onTogglePlan={() => calls.push("plan")}
+      onSaveGuardrails={async () => {}}
+      onOpenOrchestratorControls={() => calls.push("orchestrator")}
+      onReferenceFile={() => calls.push("reference")}
+      disabled={false}
+      imageMimeTypes={["image/png", "image/jpeg", "image/gif", "image/webp"]}
+      onAttachImages={() => {}}
+      {...props}
+      {...next}
+    />));
+  };
+  await render();
+  const trigger = () => page().querySelector<HTMLButtonElement>('[aria-label="Attach and Settings"]')!;
+  const menu = () => page().querySelector<HTMLElement>('[role="menu"][aria-label="Attach and Settings"]');
+  const unmount = async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  };
+  return { calls, render, trigger, menu, unmount };
+}
+
+test("the + button is Attach and Settings and opens a plain menu of five rows (#2203)", async () => {
+  const fixture = await mountPlusMenu();
+  try {
+    const trigger = fixture.trigger();
+    assert.ok(trigger, "+ is named Attach and Settings");
+    assert.equal(trigger.title, "Attach and Settings", "its tooltip is the same name");
+    assert.equal(trigger.getAttribute("aria-haspopup"), "menu");
+    await act(async () => fireDomEvent.click(trigger));
+    const menu = fixture.menu();
+    assert.ok(menu, "+ opens an element with role=menu");
+    assert.equal(trigger.getAttribute("aria-controls"), menu.id);
+    assert.equal(menu.querySelector(".menu-head")?.textContent, "Attach and Settings", "the phone sheet's title");
+    assertNoDomNode(menu.querySelector("input, select, textarea, .menu-label"), "no field, select or section label");
+    const rows = [...menu.querySelectorAll<HTMLElement>("button")];
+    assert.deepEqual(rows.map((row) => row.getAttribute("role")),
+      ["menuitem", "menuitem", "menuitemcheckbox", "menuitem", "menuitem"], "only menu items");
+    assert.deepEqual(rows.map((row) => row.querySelector(".menu-text")?.textContent),
+      ["Attach Image…", "Reference a File…", "Plan Mode", "Guardrails…", "Orchestrator Controls…"]);
+    assert.ok(rows.every((row) => row.querySelector(".menu-icon svg")), "every row has a leading icon");
+    assert.equal(menu.querySelectorAll('[role="separator"]').length, 2,
+      "separators group adding to the message, the mode and the session's limits");
+    assert.equal(rows[0]!.querySelector(".menu-desc")?.textContent, "PNG, JPEG, GIF or WebP, up to 6 images.");
+    assert.equal(rows[2]!.querySelector(".menu-desc")?.textContent,
+      "Research and propose a plan without editing files. Or type /plan.");
+    for (const row of rows) {
+      assert.doesNotMatch(row.querySelector(".menu-desc")?.textContent ?? "", /·|\s\+\s/u, "no meta strings");
+    }
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("the + menu leaves out Reference a File…, Plan Mode and Orchestrator Controls… when they don't apply (#2203)", async () => {
+  const fixture = await mountPlusMenu({
+    onReferenceFile: undefined,
+    planSupported: false,
+    session: { ...GUARDRAIL_SESSION, permissionMode: "default" } as SessionView,
+  });
+  try {
+    await act(async () => fireDomEvent.click(fixture.trigger()));
+    const labels = [...fixture.menu()!.querySelectorAll(".menu-text")].map((node) => node.textContent);
+    assert.deepEqual(labels, ["Attach Image…", "Guardrails…"]);
+    assert.equal(fixture.menu()!.querySelectorAll('[role="separator"]').length, 1);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("with a model that can't read images, Attach Image… is disabled with the drop target's sentence (#2203)", async () => {
+  const sentence = modelRefusesImagesSentence("Tiny Model");
+  const fixture = await mountPlusMenu({ imageMimeTypes: [], imagesRefusedReason: sentence });
+  try {
+    await act(async () => fireDomEvent.click(fixture.trigger()));
+    const attach = [...fixture.menu()!.querySelectorAll<HTMLButtonElement>(".menu-item")]
+      .find((row) => row.querySelector(".menu-text")?.textContent === "Attach Image…")!;
+    assert.equal(attach.disabled, true);
+    assert.equal(attach.querySelector(".menu-desc")?.textContent,
+      "Tiny Model can't read images. Choose another model in Model Settings to attach them.");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("Plan Mode shows a trailing check when on and toggles in one activation (#2203)", async () => {
+  const fixture = await mountPlusMenu();
+  try {
+    await act(async () => fireDomEvent.click(fixture.trigger()));
+    const plan = () => fixture.menu()?.querySelector<HTMLButtonElement>('[role="menuitemcheckbox"]') ?? null;
+    assert.equal(plan()!.getAttribute("aria-checked"), "false");
+    assertNoDomNode(plan()!.querySelector(".menu-check"), "no check while off");
+    await act(async () => fireDomEvent.click(plan()!));
+    assert.deepEqual(fixture.calls, ["plan"], "one activation toggles Plan Mode");
+    assertNoDomNode(fixture.menu(), "and closes the menu");
+
+    await fixture.render({ planActive: true });
+    await act(async () => fireDomEvent.click(fixture.trigger()));
+    assert.equal(plan()!.getAttribute("aria-checked"), "true");
+    assert.ok(plan()!.querySelector(".menu-trail .menu-check"), "a trailing check while on");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("Reference a File… hands the composer the @ trigger without returning focus to + (#2203)", async () => {
+  const fixture = await mountPlusMenu();
+  try {
+    await act(async () => fireDomEvent.click(fixture.trigger()));
+    const row = [...fixture.menu()!.querySelectorAll<HTMLButtonElement>(".menu-item")]
+      .find((item) => item.querySelector(".menu-text")?.textContent === "Reference a File…")!;
+    assert.equal(row.querySelector(".menu-desc")?.textContent, "Attach a workspace file or folder. Or type @.");
+    await act(async () => {
+      fireDomEvent.click(row);
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+    assert.deepEqual(fixture.calls, ["reference"]);
+    assertNoDomNode(fixture.menu());
+    assert.notEqual(domWindow.document.activeElement, fixture.trigger(), "the composer keeps the focus it was given");
+
+    await fixture.render({ disabled: true, disabledReason: "The session is stopped." });
+    await act(async () => fireDomEvent.click(fixture.trigger()));
+    const paused = [...fixture.menu()!.querySelectorAll<HTMLButtonElement>(".menu-item")]
+      .find((item) => item.querySelector(".menu-text")?.textContent === "Reference a File…")!;
+    assert.equal(paused.disabled, true, "a paused composer refuses it");
+    assert.equal(paused.querySelector(".menu-desc")?.textContent, "The session is stopped.");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+for (const key of ["Enter", " ", "ArrowDown"]) {
+  test(`${key === " " ? "Space" : key} on + focuses the first enabled item, even with Plan Mode on, and Escape returns to + (#2203)`, async () => {
+    const fixture = await mountPlusMenu({ planActive: true, imageMimeTypes: [] });
+    try {
+      const trigger = fixture.trigger();
+      await act(async () => { trigger.focus(); });
+      await act(async () => {
+        trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }) as never);
+        // A native button turns Enter and Space into a click.
+        if (key !== "ArrowDown") fireDomEvent.click(trigger);
+      });
+      const active = domWindow.document.activeElement as unknown as HTMLElement;
+      assert.equal(active.querySelector(".menu-text")?.textContent, "Reference a File…",
+        "Attach Image… is disabled, so the first enabled item is Reference a File…");
+      await act(async () => {
+        active.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+        await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+      });
+      assertNoDomNode(fixture.menu());
+      assert.equal(domWindow.document.activeElement, trigger);
+    } finally {
+      await fixture.unmount();
+    }
+  });
+}
 
 interface Deferred<T> {
   promise: Promise<T>;

@@ -21,8 +21,8 @@ async function openFixture(page: Page, width: number, height: number, extra = ""
 }
 
 async function openControls(page: Page): Promise<Locator> {
-  await page.getByRole("button", { name: "Add and Modes" }).click();
-  await page.getByRole("button", { name: "Orchestrator Controls…" }).click();
+  await page.getByRole("button", { name: "Attach and Settings" }).click();
+  await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
   const dialog = page.getByRole("dialog", { name: "Orchestrator Controls" });
   await expect(dialog).toBeVisible();
   // Captures show the settled dialog, not its fade-in.
@@ -36,9 +36,9 @@ for (const viewport of [
 ] as const) {
   test(`${viewport.name}: the + menu has one Orchestrator Controls row and does not scroll`, async ({ page }) => {
     await openFixture(page, viewport.width, viewport.height);
-    await page.getByRole("button", { name: "Add and Modes" }).click();
-    const menu = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
-    const row = menu.getByRole("button", { name: "Orchestrator Controls…" });
+    await page.getByRole("button", { name: "Attach and Settings" }).click();
+    const menu = page.locator('.menu[aria-label="Attach and Settings"]');
+    const row = menu.getByRole("menuitem", { name: "Orchestrator Controls…" });
     await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
     await row.scrollIntoViewIfNeeded();
     await expect(row).toBeInViewport();

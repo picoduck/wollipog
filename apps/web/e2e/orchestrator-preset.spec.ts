@@ -358,8 +358,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
   test(`Orchestrator Controls reports a revision conflict in place at ${viewport.width} (#2192)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto(`/session-usage-e2e.html?width=${viewport.width}&height=${viewport.height}&composer=orchestrator&policy-conflict=1`);
-    await page.getByRole("button", { name: "Add and Modes" }).click();
-    await page.getByRole("button", { name: "Orchestrator Controls…" }).click();
+    await page.getByRole("button", { name: "Attach and Settings" }).click();
+    await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
     const dialog = page.getByRole("dialog", { name: "Orchestrator Controls" });
     const merge = dialog.getByRole("radiogroup", { name: "PR Merge Approval" });
     await merge.scrollIntoViewIfNeeded();

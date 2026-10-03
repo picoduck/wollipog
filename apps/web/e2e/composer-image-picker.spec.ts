@@ -36,11 +36,11 @@ async function openSession(page: Page, supportsImages = true) {
   await expect(page.locator(".composer-input")).toBeEnabled();
 }
 
-const attachAction = (page: Page) => page.getByRole("button", { name: "Attach Image", exact: true });
+const attachAction = (page: Page) => page.getByRole("menuitem", { name: "Attach Image…", exact: true });
 
 async function openPlusMenu(page: Page) {
-  await page.getByRole("button", { name: "Add and Modes" }).click();
-  await expect(page.getByRole("dialog", { name: "Session Attachments, Modes, and Guardrails" })).toBeVisible();
+  await page.getByRole("button", { name: "Attach and Settings" }).click();
+  await expect(page.getByRole("menu", { name: "Attach and Settings" })).toBeVisible();
 }
 
 /** Tap Attach Image and hand the intercepted chooser the files a device picker would return. */
@@ -59,7 +59,7 @@ test("the action opens a native multi-select chooser scoped to the session's ima
 
   const action = attachAction(page);
   await expect(action).toBeEnabled();
-  await expect(action).toHaveAccessibleName("Attach Image");
+  await expect(action).toHaveAccessibleName("Attach Image…");
 
   const [chooser] = await Promise.all([page.waitForEvent("filechooser"), action.click()]);
   expect(chooser.isMultiple()).toBe(true);
@@ -304,7 +304,7 @@ test("a model that can't read images refuses the drop in the bar and attaches no
   const dropped = page.locator(".session-notice-slot").getByRole("alert", { name: "Images Not Supported" });
   await expect(dropped.locator(".notice-body")).toHaveText(dropSentence!);
   await openPlusMenu(page);
-  await expect(page.getByRole("dialog", { name: "Session Attachments, Modes, and Guardrails" })
+  await expect(page.getByRole("menu", { name: "Attach and Settings" })
     .getByText(dropSentence!, { exact: true })).toBeVisible();
 });
 
@@ -328,16 +328,16 @@ test("a picked image can be removed with the keyboard", async ({ page }) => {
   await expect(thumbnails(page)).toHaveCount(0);
 });
 
-test("the Add and Modes icon stays centered independently of font metrics", async ({ page }) => {
+test("the Attach and Settings icon stays centered independently of font metrics", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openSession(page);
-  const trigger = page.getByRole("button", { name: "Add and Modes" });
+  const trigger = page.getByRole("button", { name: "Attach and Settings" });
 
   const expectCentered = async (state: string) => {
     const geometry = await trigger.evaluate((element) => {
       const button = element.getBoundingClientRect();
       const icon = element.querySelector("svg")?.getBoundingClientRect();
-      if (!icon) throw new Error("Add and Modes must render a font-independent SVG icon");
+      if (!icon) throw new Error("Attach and Settings must render a font-independent SVG icon");
       return {
         button: { width: button.width, height: button.height },
         icon: { width: icon.width, height: icon.height },

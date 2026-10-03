@@ -355,6 +355,12 @@ if (composerFixture) {
   session.contextWindow = 1_000_000;
 }
 if (params.get("plan") === "1") session.permissionMode = "plan";
+// A model that can't read images: the + menu's Attach Image… row refuses with its reason (#2203).
+if (params.get("images") === "none") {
+  for (const agent of runner.agents) {
+    if (agent.capabilities) agent.capabilities.supportsImages = false;
+  }
+}
 if (params.get("action") === "stop") {
   session.status = "running";
   session.activeTurnId = "turn-1";

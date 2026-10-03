@@ -17,8 +17,8 @@ async function openSession(page: Page) {
 }
 
 async function openGuardrails(page: Page) {
-  await page.getByRole("button", { name: "Add and Modes" }).click();
-  await page.getByRole("button", { name: "Guardrails…" }).click();
+  await page.getByRole("button", { name: "Attach and Settings" }).click();
+  await page.getByRole("menuitem", { name: "Guardrails…" }).click();
   const dialog = page.getByRole("dialog", { name: "Guardrails" });
   await expect(dialog).toBeVisible();
   return dialog;
@@ -33,9 +33,9 @@ test("the Guardrails dialog saves the live-child limit, keeps it when emptied, a
   await page.setViewportSize({ width: 1280, height: 860 });
   await openSession(page);
 
-  await page.getByRole("button", { name: "Add and Modes" }).click();
-  const menu = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
-  await expect(menu.getByRole("button", { name: "Guardrails…" })).toHaveAccessibleDescription("Up to 6 live children.");
+  await page.getByRole("button", { name: "Attach and Settings" }).click();
+  const menu = page.locator('.menu[aria-label="Attach and Settings"]');
+  await expect(menu.getByRole("menuitem", { name: "Guardrails…" })).toHaveAccessibleDescription("Up to 6 live children.");
   await expect(menu.locator("input")).toHaveCount(0);
   await expect(menu.getByRole("button", { name: /^About / })).toHaveCount(0);
   await page.keyboard.press("Escape");
@@ -63,8 +63,8 @@ test("the Guardrails dialog saves the live-child limit, keeps it when emptied, a
   await dialog.getByRole("button", { name: "Save Guardrails" }).click();
   await expect(dialog).toHaveCount(0);
   await expect.poll(() => liveChildLimit(page)).toBe(0);
-  await page.getByRole("button", { name: "Add and Modes" }).click();
-  await expect(page.getByRole("button", { name: "Guardrails…" })).toHaveAccessibleDescription("New children paused.");
+  await page.getByRole("button", { name: "Attach and Settings" }).click();
+  await expect(page.getByRole("menuitem", { name: "Guardrails…" })).toHaveAccessibleDescription("New children paused.");
 });
 
 test("a typo keeps the Guardrails dialog open with the error in place of the helper", async ({ page }) => {
@@ -122,8 +122,8 @@ test.describe("on a coarse pointer", () => {
     await openSession(page);
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches),
       "this emulation must report the coarse pointer the rule is keyed on").toBe(true);
-    await page.getByRole("button", { name: "Add and Modes" }).tap();
-    await page.getByRole("button", { name: "Guardrails…" }).tap();
+    await page.getByRole("button", { name: "Attach and Settings" }).tap();
+    await page.getByRole("menuitem", { name: "Guardrails…" }).tap();
     const dialog = page.getByRole("dialog", { name: "Guardrails" });
     await expect(dialog).toBeVisible();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));

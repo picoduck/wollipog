@@ -174,7 +174,7 @@ function useMenuPlacement(
         gap,
       });
       const style: Placement = { top: next.top, bottom: next.bottom, left: next.left, maxHeight: next.maxHeight };
-      // Taller than the room on either side (the composer's + menu): open on the roomier side and
+      // Taller than the room on either side: open on the roomier side and
       // scroll there, rather than fitting the menu to the viewport over the trigger it came from.
       const below = window.innerHeight - VIEWPORT_MARGIN - rect.bottom - gap;
       const above = rect.top - gap - VIEWPORT_MARGIN;
@@ -231,7 +231,7 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
   label: string;
   /** A visible title row shown at every width, replacing the phone-only one (Model Settings). */
   head?: ReactNode;
-  /** `dialog` for a menu-shaped surface that also holds form fields (the composer's + menu). */
+  /** `dialog` for a popover of detail or form fields (Session Status); never for a list of actions. */
   role?: "menu" | "dialog";
   /** A popover shares the menu's container with 16px of padding, for inline detail and forms. */
   kind?: "menu" | "popover";
@@ -326,8 +326,7 @@ export function MenuSurface({
 }
 
 export interface MenuItemProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "role"> {
-  /** `button` for a plain action inside a menu-shaped dialog (the composer's + menu). */
-  role?: "menuitem" | "menuitemradio" | "menuitemcheckbox" | "checkbox" | "button";
+  role?: "menuitem" | "menuitemradio" | "menuitemcheckbox";
   /** The leading 16px icon slot. */
   icon?: ReactNode;
   /** A second line: an option's description, or why a disabled item is unavailable (§9.1). */
@@ -361,14 +360,14 @@ export function MenuItem({
   const id = useId().replace(/:/g, "");
   const labelId = `${id}-label`;
   const descriptionId = givenDescriptionId ?? `${id}-description`;
-  const checkable = role !== "menuitem" && role !== "button";
+  const checkable = role !== "menuitem";
   const describedBy = [button["aria-describedby"], description ? descriptionId : null].filter(Boolean).join(" ");
   const classes = ["menu-item", danger ? "danger" : "", className ?? ""].filter(Boolean).join(" ");
   return (
     <button
       type="button"
       {...button}
-      role={role === "button" ? undefined : role}
+      role={role}
       aria-checked={checkable ? Boolean(checked) : undefined}
       aria-labelledby={button["aria-labelledby"] ?? (description && !button["aria-label"] ? labelId : undefined)}
       aria-describedby={describedBy || undefined}

@@ -440,8 +440,11 @@ export function useAccessibleMenu(
       return;
     }
     const items = menuItems(menuRef.current, reachUnavailable);
+    // A checked menuitemcheckbox is a setting, not the menu's current choice (the + menu's Plan
+    // Mode): opening still lands on the first item.
     const selected = items.find(
-      (item) => item.getAttribute("aria-checked") === "true" || item.getAttribute("aria-current") === "page",
+      (item) => (item.getAttribute("aria-checked") === "true" && item.getAttribute("role") !== "menuitemcheckbox") ||
+        item.getAttribute("aria-current") === "page",
     );
     const target = selected ?? (initialFocus.current === "last" ? items.at(-1) : items[0]);
     // A menu whose every item is unavailable takes focus itself when it can (`tabIndex={-1}`), so

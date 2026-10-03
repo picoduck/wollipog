@@ -4,6 +4,7 @@ import {
   ArrowDown as LucideArrowDown,
   ArrowRightLeft as LucideArrowRightLeft,
   ArrowUp as LucideArrowUp,
+  AtSign as LucideAtSign,
   Ban as LucideBan,
   BookOpen as LucideBookOpen,
   Bot as LucideBot,
@@ -39,6 +40,7 @@ import {
   FileSearch as LucideFileSearch,
   FileText as LucideFileText,
   Files as LucideFiles,
+  Fence as LucideFence,
   FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
   FolderInput as LucideFolderInput,
@@ -103,6 +105,7 @@ import {
   Users as LucideUsers,
   UsersRound as LucideUsersRound,
   WandSparkles as LucideWandSparkles,
+  Waypoints as LucideWaypoints,
   Workflow as LucideWorkflow,
   Wrench as LucideWrench,
   WrapText as LucideWrapText,
@@ -451,6 +454,10 @@ export function PaperclipIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePaperclip} {...props} />;
 }
 
+export function AtSignIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideAtSign} {...props} />;
+}
+
 export function ChainIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideGitCommitVertical} {...props} />;
 }
@@ -702,6 +709,14 @@ export function ChildSessionRequestsIcon(props: IconProps) {
 
 export function WorkflowDecisionsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideRoute} {...props} />;
+}
+
+export function GuardrailsIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFence} {...props} />;
+}
+
+export function OrchestratorControlsIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideWaypoints} {...props} />;
 }
 
 export function ExternalLinkIcon(props: IconProps) {

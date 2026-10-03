@@ -313,7 +313,7 @@ test("a session that is not an Orchestrator has no Orchestrator rows in its Pinn
 
 test("the composer's + menu opens Orchestrator Controls from its one Orchestrator row (#2192)", async () => {
   await withSession({ phone: false, session: ORCHESTRATOR }, async (container) => {
-    const plus = container.querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]');
+    const plus = container.querySelector<HTMLButtonElement>('[aria-label="Attach and Settings"]');
     assert.ok(plus && !plus.disabled, "+ is available");
     await act(async () => plus.click());
     const item = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>(".menu-item")]

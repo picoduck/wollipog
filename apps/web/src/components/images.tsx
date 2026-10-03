@@ -72,6 +72,13 @@ function imageTypeList(mimeTypes: readonly string[]): string {
   return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
 }
 
+/** The + menu's Attach Image… second line: "PNG, JPEG, GIF or WebP, up to 6 images." */
+export function attachImageDescription(mimeTypes: readonly string[], limit: number): string {
+  const types = imageTypeList(mimeTypes);
+  const count = `up to ${limit} ${limit === 1 ? "image" : "images"}.`;
+  return types ? `${types}, ${count}` : `Up to ${limit} ${limit === 1 ? "image" : "images"}.`;
+}
+
 /** The one sentence for a model without image input, shared by the composer notice, the drop target
  * and the + menu's Attach Image row. */
 export function modelRefusesImagesSentence(modelName: string | null | undefined): string {

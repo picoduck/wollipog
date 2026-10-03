@@ -96,7 +96,7 @@ import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useDiffFileFocus } from "../review-focus.js";
 import { useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
-import { describeAttachmentProblem, ImageStrip, modelRefusesImagesSentence, usePastedImages, type AttachmentProblem } from "./images.js";
+import { attachImageDescription, describeAttachmentProblem, ImageStrip, modelRefusesImagesSentence, usePastedImages, type AttachmentProblem } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
 import {
   hasNewPendingPrompt,
@@ -195,7 +195,7 @@ import { WorktreeRecoveryCard } from "./WorktreeRecoveryCard.js";
 import { useRecoveryWorktreeCreation } from "../recovery-worktree-creation.js";
 import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
+import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Markdown } from "./Markdown.js";
 import { useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
@@ -229,7 +229,7 @@ import {
 import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
 import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId, receiptRowIds } from "./TranscriptReceipt.js";
-import { ArrowUpIcon, ChevronDownIcon, FolderIcon, ImageIcon, ImageOffIcon, MicIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, AtSignIcon, ChevronDownIcon, FolderIcon, GuardrailsIcon, ImageIcon, ImageOffIcon, MicIcon, OrchestratorControlsIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   durableCommandAttachmentNote,
   buildComposerCommandRegistry,
@@ -4453,6 +4453,27 @@ function SessionDetailLoaded({
       kind: candidate.isDirectory ? "directory" : "file",
     });
   };
+  // The + menu's Reference a File… (#2203): type the "@" for the person, which opens the @ picker.
+  // Runs inside the menu row's activation, so expanding a collapsed phone composer and focusing it
+  // happen in the same gesture and the software keyboard is allowed to open.
+  const insertWorkspaceReferenceTrigger = () => {
+    const input = inputRef.current;
+    if (!input || !canPrompt) return;
+    const start = Math.min(composerSelection.start, text.length);
+    const end = Math.min(Math.max(composerSelection.end, start), text.length);
+    const before = text.slice(0, start);
+    // The trigger needs the start of the message or whitespace before "@".
+    const inserted = before === "" || /\s$/u.test(before) ? "@" : " @";
+    const caret = start + inserted.length;
+    markDraftDirty();
+    flushSync(() => {
+      setComposerExpanded(true);
+      setProgrammaticComposerText(before + inserted + text.slice(end), caret);
+      setWorkspaceDismissedFor(null);
+    });
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(caret, caret);
+  };
   const slashMatches = useMemo(() => {
     if (!slashTrigger) return [];
     const ranked = rankComposerCommands(composerCommandsForTrigger(composerCommands, slashTrigger), slashTrigger.query)
@@ -6388,6 +6409,7 @@ function SessionDetailLoaded({
                     onSaveGuardrails={saveGuardrails}
                     configRefusal={configRefusal}
                     onOpenOrchestratorControls={openOrchestratorControls}
+                    {...(workspaceReferencesSupported ? { onReferenceFile: insertWorkspaceReferenceTrigger } : {})}
                     disabled={!canPrompt}
                     {...(promptUnavailableReason !== null ? { disabledReason: promptUnavailableReason } : {})}
                     imageMimeTypes={allowedImageMimeTypes}
@@ -7004,8 +7026,10 @@ export function CampaignContinuationNotice({
   );
 }
 
-/** Codex-style "+" menu in the composer: Attach Image, Plan mode, and Guardrails…, which opens the
- * Guardrails dialog (#2175). */
+/** The composer's + button: Attach and Settings, a plain menu (#2203). It adds to the message
+ * (Attach Image…, Reference a File…), sets the mode (Plan Mode), and opens the session's limits
+ * (Guardrails…, #2175) and an Orchestrator's controls (Orchestrator Controls…, #2192). Every row is a
+ * menu item: the forms live in those dialogs, so the menu holds no field. */
 export function ComposerPlusMenu({
   session,
   planActive,
@@ -7014,6 +7038,7 @@ export function ComposerPlusMenu({
   onSaveGuardrails,
   configRefusal = null,
   onOpenOrchestratorControls,
+  onReferenceFile,
   disabled,
   disabledReason = "This session cannot accept a prompt right now.",
   imageMimeTypes,
@@ -7032,8 +7057,13 @@ export function ComposerPlusMenu({
   /** Opens Orchestrator Controls (#2192), returning focus to `returnFocus` when it closes. It opens
    * on a paused composer too: the dialog's controls refuse for a person refused configuration. */
   onOpenOrchestratorControls?: (returnFocus: HTMLElement | null) => void;
+  /** Inserts "@" at the composer's caret and focuses it, which opens the @ picker. Present only when
+   * the runner supports workspace references; called inside the activating gesture, so a phone
+   * keeps its keyboard. */
+  onReferenceFile?: () => void;
   /** The composer cannot send. The menu still opens, so Guardrails can be read and changed while
-   * the session is paused, stopped or read-only; only Attach Image and Plan Mode refuse. */
+   * the session is paused, stopped or read-only; only the rows that change the message or the mode
+   * refuse. */
   disabled: boolean;
   /** Why the composer cannot send, shown under the rows that refuse while `disabled`. */
   disabledReason?: string;
@@ -7046,21 +7076,21 @@ export function ComposerPlusMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [guardrailsOpen, setGuardrailsOpen] = useState(false);
-  const popover = useDismissiblePopover(open, setOpen, "composer-modes-popover");
+  const menu = useAccessibleMenu(open, setOpen, "composer-plus-menu");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imagesSupported = imageMimeTypes.length > 0;
   // Plan Mode changes the configuration, so it refuses for the same reasons the bar's Plan toggle
   // does: a composer that cannot send, or a person refused configuration.
   const planRefusal = disabled ? disabledReason : configRefusal;
   // Attachment follows the composer, exactly as paste (a disabled textarea) and drop (its own
-  // `canPrompt` guard) already do. `disabled` can flip while the panel — or the native chooser —
-  // is already open, so the item and the change handler are gated separately.
+  // `canPrompt` guard) already do. `disabled` can flip while the menu — or the native chooser — is
+  // already open, so the item and the change handler are gated separately.
   const canAttach = !disabled && imagesSupported;
   return (
     <div className="composer-plus">
       {/*
         The one image ingress that works on a phone: paste and drag-and-drop have no reliable
-        mobile equivalent. Mounted OUTSIDE the `open &&` panel so activating the item can close the
+        mobile equivalent. Mounted OUTSIDE the `open &&` menu so activating the item can close the
         menu without unmounting the input the native chooser is attached to, and clipped rather
         than `display: none`, which some browsers refuse to open a picker for.
       */}
@@ -7088,63 +7118,73 @@ export function ComposerPlusMenu({
         }}
       />
       <ComposerButton
-        ref={popover.triggerRef}
+        ref={menu.triggerRef}
         square
         className="plus-btn"
-        aria-label="Add and Modes"
-        aria-haspopup="dialog"
+        aria-label="Attach and Settings"
+        aria-haspopup="menu"
         aria-expanded={open}
-        aria-controls={popover.panelId}
-        title="Attach, Modes & Budget"
-        onClick={popover.toggle}
-        onKeyDown={popover.onTriggerKeyDown}
+        aria-controls={menu.menuId}
+        title="Attach and Settings"
+        onClick={menu.toggle}
+        onKeyDown={menu.onTriggerKeyDown}
       >
         <PlusIcon size={16} />
       </ComposerButton>
       {open && (
-        // Menu-shaped, and still a dialog until #2203 makes the + button a plain menu.
         <MenuSurface
-          surfaceRef={popover.panelRef}
-          anchor={{ trigger: popover.triggerRef }}
-          id={popover.panelId}
-          role="dialog"
-          label="Session Attachments, Modes, and Guardrails"
-          // Where a coarse pointer's focus lands when the first enabled control is a field.
-          tabIndex={-1}
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="Attach and Settings"
           width={320}
           boundary=".composer-box"
-          onDismiss={() => popover.close(true)}
-          onKeyDown={popover.onPanelKeyDown}
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
         >
-          <MenuLabel>Attach</MenuLabel>
           <MenuItem
-            role="button"
             icon={<ImageIcon size={16} />}
             description={!imagesSupported
               ? imagesRefusedReason
               : disabled
                 ? disabledReason
-                : `Photos, camera, or files · up to ${MAX_PROMPT_IMAGES}`}
+                : attachImageDescription(imageMimeTypes, MAX_PROMPT_IMAGES)}
             disabled={!canAttach}
             onClick={() => {
               fileInputRef.current?.click();
-              popover.close(true);
+              menu.close(true);
             }}
           >
-            Attach Image
+            Attach Image…
           </MenuItem>
+          {onReferenceFile && (
+            <MenuItem
+              icon={<AtSignIcon size={16} />}
+              description={disabled ? disabledReason : <>Attach a workspace file or folder. Or type <code>@</code>.</>}
+              disabled={disabled}
+              onClick={() => {
+                // The composer takes focus here, inside the tap, so the menu must not hand it back
+                // to +.
+                onReferenceFile();
+                menu.close(false);
+              }}
+            >
+              Reference a File…
+            </MenuItem>
+          )}
 
           {planSupported && (
             <>
-              <MenuLabel>Modes</MenuLabel>
+              <MenuSeparator />
               <MenuItem
-                role="checkbox"
+                role="menuitemcheckbox"
+                icon={<PlanIcon size={16} />}
                 checked={planActive}
-                description={planRefusal ?? <>Research + propose a plan, no edits. Or type <code>/plan</code>.</>}
+                description={planRefusal ?? <>Research and propose a plan without editing files. Or type <code>/plan</code>.</>}
                 disabled={planRefusal !== null}
                 onClick={() => {
                   onTogglePlan();
-                  popover.close(true);
+                  menu.close(true);
                 }}
               >
                 Plan Mode
@@ -7152,32 +7192,29 @@ export function ComposerPlusMenu({
             </>
           )}
 
-          <MenuLabel>Guardrails</MenuLabel>
+          <MenuSeparator />
           <MenuItem
-            role="button"
+            icon={<GuardrailsIcon size={16} />}
             description={guardrailSummary(session)}
             onClick={() => {
-              popover.close(false);
+              menu.close(false);
               setGuardrailsOpen(true);
             }}
           >
             Guardrails…
           </MenuItem>
           {sessionRole(session) === "orchestrator" && onOpenOrchestratorControls && (
-            <>
-              <MenuLabel>Orchestrator</MenuLabel>
-              <MenuItem
-                role="button"
-                description={orchestratorControlsSummary(session)}
-                onClick={() => {
-                  // The row goes with the menu, so the dialog returns focus to + instead.
-                  popover.close(false);
-                  onOpenOrchestratorControls(popover.triggerRef.current);
-                }}
-              >
-                Orchestrator Controls…
-              </MenuItem>
-            </>
+            <MenuItem
+              icon={<OrchestratorControlsIcon size={16} />}
+              description={orchestratorControlsSummary(session)}
+              onClick={() => {
+                // The row goes with the menu, so the dialog returns focus to + instead.
+                menu.close(false);
+                onOpenOrchestratorControls(menu.triggerRef.current);
+              }}
+            >
+              Orchestrator Controls…
+            </MenuItem>
           )}
         </MenuSurface>
       )}
@@ -7187,7 +7224,7 @@ export function ComposerPlusMenu({
           configRefusal={configRefusal}
           onSave={onSaveGuardrails}
           onClose={() => setGuardrailsOpen(false)}
-          returnFocusRef={popover.triggerRef}
+          returnFocusRef={menu.triggerRef}
         />
       )}
     </div>

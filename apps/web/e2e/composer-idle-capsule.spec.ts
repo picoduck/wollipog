@@ -171,7 +171,7 @@ test.describe("a touch capsule (#2174)", () => {
       await expect(composer).toHaveClass(/idle-collapsed/);
       const capsule = await composer.evaluate((card) => {
         const cardBox = card.getBoundingClientRect();
-        const controls = ["Add and Modes", "Hold to Dictate", "Send"].map((name) => {
+        const controls = ["Attach and Settings", "Hold to Dictate", "Send"].map((name) => {
           const control = card.querySelector<HTMLElement>(`button[aria-label="${name}"]`)!;
           const box = control.getBoundingClientRect();
           const centerX = box.left + box.width / 2;
@@ -238,10 +238,10 @@ test.describe("touch dismissal", () => {
 
 test("Plus and every primary capsule action work with one activation", async ({ page }) => {
   await openComposer(page, 393);
-  const plus = page.getByRole("button", { name: "Add and Modes" });
+  const plus = page.getByRole("button", { name: "Attach and Settings" });
   await plus.click();
   await expect(plus).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]')).toBeVisible();
+  await expect(page.locator('.menu[aria-label="Attach and Settings"]')).toBeVisible();
 
   await openComposer(page, 393, "&draft=Ship%20it");
   await expect(page.locator(".composer-box")).toHaveClass(/idle-collapsed/);

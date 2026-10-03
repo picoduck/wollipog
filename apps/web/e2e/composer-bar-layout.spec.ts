@@ -371,7 +371,7 @@ for (const { name, query, reason } of [
       await expect(page.locator(".composer-input")).toHaveAttribute("placeholder", reason);
       // + stays openable on a paused composer (#2175), so Guardrails can still be read; the menu's
       // rows that act refuse with the reason instead.
-      const plus = page.getByRole("button", { name: "Add and Modes" });
+      const plus = page.getByRole("button", { name: "Attach and Settings" });
       await expect(plus).toBeEnabled();
       const controls = [
         page.getByRole("button", { name: /^Permission Mode:/ }),
@@ -471,7 +471,7 @@ for (const { name, width, height, touch } of [
 
       const controls = await readBarControls(page);
       const names = controls.map((control) => control.name);
-      for (const expected of ["Add and Modes", /^Permission Mode:/, /^Model Settings:/, "Plan", "Hold to Dictate", "Send"]) {
+      for (const expected of ["Attach and Settings", /^Permission Mode:/, /^Model Settings:/, "Plan", "Hold to Dictate", "Send"]) {
         expect(names.some((controlName) => typeof expected === "string" ? controlName === expected : expected.test(controlName)),
           `${String(expected)} is in the bar: ${names.join(", ")}`).toBe(true);
       }
@@ -578,7 +578,7 @@ async function disabledInk(page: Page): Promise<string> {
 
 test("controls disabled while open or unrestricted take the disabled ink (#2174)", async ({ page }) => {
   await openFixture(page, 1440, "codex", "&unsafe=1");
-  const plus = page.getByRole("button", { name: "Add and Modes" });
+  const plus = page.getByRole("button", { name: "Attach and Settings" });
   await plus.click();
   await expect(plus).toHaveAttribute("aria-expanded", "true");
   // The runner drops while the menu is open: + stays enabled with its menu still showing (#2175),
