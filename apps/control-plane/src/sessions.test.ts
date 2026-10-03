@@ -76,8 +76,8 @@ import {
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
 
-test("a reconciled session on an older runner cannot abort unrelated registration or live updates", async () => {
-  const { db, svc } = makeHarness();
+for (const scenario of ["downgrade", "revision-ahead", "stopped", "archived"]) test(`unsupported reconciled snapshot isolates its session and preserves enforcement: ${scenario}`, async () => {
+  const { db, hub, svc } = makeHarness();
   const now = Date.now();
   try {
     for (const id of ["corrected", "ordinary"]) db.createSession({ id, runnerId: RUNNER_ID, workspaceId: null,
@@ -96,17 +96,26 @@ test("a reconciled session on an older runner cannot abort unrelated registratio
     applyClaudeReconciliation(db, principal, evidence, previewClaudeReconciliation(db, principal, evidence).digest);
     db.updateSessionStatus("corrected", "completed", now + 2);
     db.updateSessionStatus("ordinary", "completed", now + 2);
-    db.registerRunner(runnerMeta(), now + 3, 197);
+    db.registerRunner(runnerMeta(), now + 3, scenario === "revision-ahead" ? 199 : 198);
     const snapshots = [
-      snapshot({ id: "corrected", status: "completed", costUsd: 0.03, seq: 2, historyEpoch: 1 }),
+      snapshot({ id: "corrected", status: scenario === "stopped" || scenario === "archived" ? "running" : "completed",
+        costUsd: 0.03, seq: 2, historyEpoch: 1, ...(scenario === "revision-ahead" ? { costReconciliationRevision: 2 } : {}) }),
       snapshot({ id: "ordinary", title: "Updated Ordinary", status: "completed", costUsd: 0.004, seq: 0 }),
     ];
+    if (scenario === "stopped") { db.updateSessionStatus("corrected", "running", now + 4); assert.ok(svc.stop("corrected").ok); }
+    if (scenario === "archived") db.raw().exec("UPDATE sessions SET archived=1 WHERE id='corrected'");
+    hub.sentToRunner.length = 0;
     assert.equal(await svc.hydrateRunnerSessionsCooperatively(RUNNER_ID, snapshots, { isCurrent: () => true }), true);
     assert.equal(db.sessionCostUsd("corrected"), 0.02);
     assert.equal(db.getSession("ordinary")?.title, "Updated Ordinary");
     assert.equal(db.sessionCostUsd("ordinary"), 0.004);
+    if (scenario === "stopped" || scenario === "archived") {
+      assert.ok(hub.sentOfType("stop_session").some((frame) => frame.sessionId === "corrected"));
+      hub.sentToRunner.length = 0;
+    }
     assert.doesNotThrow(() => svc.applySessionRuntimeUpdate(RUNNER_ID, snapshots[0]!));
     assert.equal(db.sessionCostUsd("corrected"), 0.02);
+    if (scenario === "stopped" || scenario === "archived") assert.ok(hub.sentOfType("stop_session").some((frame) => frame.sessionId === "corrected"));
   } finally { db.close(); }
 });
 

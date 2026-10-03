@@ -13133,7 +13133,7 @@ export class SessionsService {
     for (let offset = 0; offset < snapshots.length; offset += 32) {
       const chunk = snapshots.slice(offset, offset + 32);
       const unsupportedCostSessions = new Set(chunk.filter((snap) =>
-        this.unsupportedCostReconciliation(runnerId, snap.id)).map((snap) => snap.id));
+        this.unsupportedCostReconciliation(runnerId, snap)).map((snap) => snap.id));
       const stopIntentIds = new Set(this.db.sessionStopIntentIds(runnerId));
       // Retained terminal sessions dominate reconnect snapshots. Their reconciliation is normally
       // read-only outside updateSessionFromSnapshot, but committing every unchanged row separately
@@ -13169,7 +13169,6 @@ export class SessionsService {
       }
       for (const [snapshotIndex, snap] of chunk.entries()) {
         if (terminalBatchIndexes.has(snapshotIndex)) continue;
-        if (unsupportedCostSessions.has(snap.id)) continue;
         // A session the user deleted must not be recreated — re-issue the delete to the (now online)
         // runner and skip it. The tombstone is pruned below once the box stops reporting the id.
         if (this.db.isTombstoned(snap.id)) {
@@ -13204,6 +13203,7 @@ export class SessionsService {
             continue;
           }
         }
+        if (unsupportedCostSessions.has(snap.id)) continue;
         if (existing) {
           // Only the owning runner may mutate an existing session row.
           if (existing.runnerId !== runnerId) {
@@ -13319,9 +13319,9 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot, batch?: RunnerAttentionBatch): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
-    if (this.unsupportedCostReconciliation(runnerId, snapshot.id)) return;
+    const unsupportedCost = this.unsupportedCostReconciliation(runnerId, snapshot);
     const unacknowledgedRevision = snapshot.costReconciliationRevision ?? 0;
-    snapshot = normalizeReconciledSnapshot(this.db, snapshot);
+    snapshot = unsupportedCost ? { ...snapshot, costUsd: existing.costUsd } : normalizeReconciledSnapshot(this.db, snapshot);
     const runtimeSnapshot = snapshot.costUsd < existing.costUsd
       ? { ...snapshot, costUsd: existing.costUsd }
       : snapshot;
@@ -13353,6 +13353,7 @@ export class SessionsService {
         return;
       }
     }
+    if (unsupportedCost) return;
     const now = Date.now();
     if (isTerminal(runtimeSnapshot.status)) {
       this.revokeUnconsumedWorkflowDecisionsForSession(snapshot.id, "provider-session-ended");
@@ -13387,10 +13388,16 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(campaignBefore, batch);
   }
 
-  private unsupportedCostReconciliation(runnerId: string, sessionId: string): boolean {
-    if (runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "costReconciliation") ||
-        this.db.getSession(sessionId)?.runnerId !== runnerId || reconciliationRevision(this.db, sessionId) === 0) return false;
-    this.log.warn(JSON.stringify({ event: "cost_reconciliation_runner_upgrade_required", runnerId, sessionId }));
+  private unsupportedCostReconciliation(runnerId: string, snapshot: SessionSnapshot): boolean {
+    const sessionId = snapshot.id;
+    if (this.db.getSession(sessionId)?.runnerId !== runnerId) return false;
+    const revision = reconciliationRevision(this.db, sessionId);
+    const acknowledged = snapshot.costReconciliationRevision ?? 0;
+    const revisionUnavailable = !Number.isSafeInteger(acknowledged) || acknowledged < 0 || acknowledged > revision;
+    if (!revisionUnavailable && (revision === 0 || runnerSupportsProtocol(
+      this.db.getRunner(runnerId)?.protocolVersion, "costReconciliation"))) return false;
+    this.log.warn(JSON.stringify({ event: revisionUnavailable ? "cost_reconciliation_revision_unavailable" :
+      "cost_reconciliation_runner_upgrade_required", runnerId, sessionId }));
     return true;
   }
 

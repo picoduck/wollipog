@@ -116,13 +116,16 @@ in one SQLite transaction. A retry with the exact evidence and approved digest i
 Unresolved records remain unchanged; tokens, cache savings, unrelated costs, replay watermarks,
 provider baselines, checkpoint approvals, and existing approval cards remain intact.
 
-The session's runner must support protocol 198 before a correction can apply. Its durable
+The session's runner must support protocol 199 before a correction can apply. Its durable
 `costReconciliationRevision` and cumulative correction delta let a newer acknowledged amount decrease once without allowing an
 old snapshot to resurrect the overcount or apply the same subtraction twice. Applying the delta
 relative to the runner's acknowledged correction preserves usage accrued before delivery. A disconnected runner
 produces `synchronized: false` after a successful commit; reconnect or retry the exact apply to
 resend the latest revision and total. Do not downgrade a runner managing a reconciled session:
-an older runner's snapshots are rejected until it is upgraded.
+an older runner's cost snapshots for the affected session are fenced until it is upgraded.
+Unrelated sessions still reconcile, and Stop/archive enforcement remains active. A runner
+acknowledging a revision ahead of a restored control-plane database is fenced per session too,
+rather than guessing the missing correction. New forks start with their own correction identity.
 
 Corrected totals feed subsequent session/checkpoint/daily budget checks. Proven excess historical
 child charges are released, while active child reservations remain. Applying a correction does

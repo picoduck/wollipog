@@ -5681,6 +5681,8 @@ export class SessionManager {
       contextTokensUsed: priorResumeId ? prior?.contextTokensUsed : undefined,
       contextWindow: priorResumeId ? prior?.contextWindow : undefined,
       costUsd: priorResumeId ? (prior?.costUsd ?? 0) : 0,
+      costReconciliationRevision: priorResumeId ? prior?.costReconciliationRevision : undefined,
+      costReconciliationDeltaUsd: priorResumeId ? prior?.costReconciliationDeltaUsd : undefined,
       preview: priorResumeId ? (prior?.preview ?? null) : null,
       pendingApproval: null,
       // Manager-driven: a continued session is no longer a pristine transcript, so it isn't
@@ -13426,6 +13428,8 @@ export class SessionManager {
         tokensIn: 0,
         tokensOut: 0,
         costUsd: 0,
+        costReconciliationRevision: undefined,
+        costReconciliationDeltaUsd: undefined,
         preview: null,
         pendingApproval: null,
         providerCredentialScopeId: undefined,

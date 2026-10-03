@@ -224,7 +224,7 @@ function plan(db: ControlPlaneDb, principal: HumanPrincipal, evidence: Evidence)
         if (Number(bucket.cost_microusd) < originalMicro || Number(bucket.provider_reported_records) < 1) unresolved("retained bucket lacks the original priced contribution");
       } else unresolved("original aggregate contribution is no longer retained");
     }
-    if ((db.getRunner(String(session.runner_id))?.protocolVersion ?? 0) < 198) unresolved("runner upgrade is required for revision-aware cost synchronization");
+    if ((db.getRunner(String(session.runner_id))?.protocolVersion ?? 0) < 199) unresolved("runner upgrade is required for revision-aware cost synchronization");
     const model = sql.prepare("SELECT cost_microusd, provider_reported_records FROM usage_session_models WHERE session_id=? AND model=?").get(evidence.sessionId, record.model);
     if (!model || Number(model.cost_microusd) < originalMicro || Number(model.provider_reported_records) < 1) unresolved("per-model ledger lacks the original priced contribution");
     dependencies.push(event, receipt ?? null, model ?? null);
@@ -316,7 +316,7 @@ export function normalizeReconciledSnapshot(db: ControlPlaneDb, snapshot: Sessio
   const revision = reconciliationRevision(db, snapshot.id);
   if (!revision) return snapshot;
   const session = db.getSession(snapshot.id);
-  if (session && (db.getRunner(session.runnerId)?.protocolVersion ?? 0) < 198) {
+  if (session && (db.getRunner(session.runnerId)?.protocolVersion ?? 0) < 199) {
     throw new Error("reconciled costs require a revision-aware runner; upgrade before synchronizing this session");
   }
   const acknowledged = snapshot.costReconciliationRevision ?? 0;

@@ -23,6 +23,18 @@ import {
   type SessionMeta,
 } from "./session-store.js";
 
+test("restart keeps the acknowledged correction with its carried cumulative cost", async () => {
+  const h = harness({ costUsd: 2, costReconciliationRevision: 1, costReconciliationDeltaUsd: -1 });
+  try {
+    assert.equal(await h.manager.start(launchSpec(h.root)), true);
+    assert.equal(h.store.readMeta("resume-session")!.costReconciliationRevision, 1);
+    assert.equal(h.store.readMeta("resume-session")!.costReconciliationDeltaUsd, -1);
+    h.store.patchMeta("resume-session", { costUsd: 3 });
+    h.manager.syncPricedSessionCost("resume-session", 2, 1, -1);
+    assert.equal(h.store.readMeta("resume-session")!.costUsd, 3, "already applied corrections cannot discard usage after restart");
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
 test("restart recovers exact unresolved child questions as dismiss-only and drops stale callbacks", () => {
   const a = { requestId: "a", ownerToolUseId: "tool-a", kind: "question" as const,
     title: "Choose A", options: [], questions: [{ id: "a", question: "Choose A" }] };

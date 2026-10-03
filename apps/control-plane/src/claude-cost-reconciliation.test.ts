@@ -18,7 +18,7 @@ const principal: HumanPrincipal = {
 
 function fixture(path = ":memory:") {
   const db = ControlPlaneDb.open(path);
-  db.registerRunner({ runnerId: "runner", hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, Date.now(), 198);
+  db.registerRunner({ runnerId: "runner", hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, Date.now(), 199);
   const now = Date.now();
   db.createSession({ id: "session", runnerId: "runner", workspaceId: null, agentId: "claude",
     driver: "claude-code", title: "Fixture", useWorktree: false, config: { model: "claude-test" }, now });
@@ -109,7 +109,7 @@ for (const scenario of ["missing-receipt", "ambiguous-prefix", "wrong-scope", "p
         db.raw().prepare("UPDATE session_events SET payload=json_set(payload, ?, ?) WHERE id=?").run(
           scenario === "parent-included" ? "$.parentToolUseId" : "$.costIsEstimate", scenario === "parent-included" ? "parent" : 1, second.id);
       }
-      if (scenario === "stale-runner") db.raw().exec("UPDATE runners SET protocol_version=197");
+      if (scenario === "stale-runner") db.raw().exec("UPDATE runners SET protocol_version=198");
       if (scenario === "pruned") db.maintainUsageAggregation(now + 366 * 86_400_000);
       if (scenario === "wrong-scope") assert.throws(() => previewClaudeReconciliation(db, principal, evidence), /scope/);
       else {
@@ -171,7 +171,7 @@ test("old and acknowledged snapshots reconcile without resurrecting or subtracti
     db.updateSessionFromSnapshot("session", { ...snapshot, costUsd: 0.02, costReconciliationRevision: 1 }, now + 2);
     assert.equal(db.sessionCostUsd("session"), 0.02);
     assert.equal(db.raw().prepare("SELECT covered_through_seq AS seq FROM usage_session_state").get()?.seq, 2);
-    db.raw().exec("UPDATE runners SET protocol_version=197");
+    db.raw().exec("UPDATE runners SET protocol_version=198");
     assert.throws(() => db.updateSessionFromSnapshot("session", snapshot, now + 3), /revision-aware runner/);
     assert.equal(db.sessionCostUsd("session"), 0.02);
   } finally { db.close(); }

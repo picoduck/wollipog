@@ -179,6 +179,8 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       env: {},
       context: { kind: "native" },
       agentSessionId: "thread-source",
+      costReconciliationRevision: 1,
+      costReconciliationDeltaUsd: -1,
       status: "idle",
       title: "source",
       config: {},
@@ -295,6 +297,10 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     assert.equal(result.ok, true, result.error);
     const target = store.readMeta("s_target")!;
     assert.equal(target.agentSessionId, "thread-forked");
+    assert.equal(target.costReconciliationRevision, undefined, "a fork has its own accounting ledger");
+    assert.equal(target.costReconciliationDeltaUsd, undefined);
+    manager.syncPricedSessionCost("s_target", 0.01);
+    assert.equal(store.readMeta("s_target")!.costUsd, 0.01, "ordinary priced acknowledgements are accepted by the fork");
     assert.equal(target.preview, null);
     assert.equal(target.pendingProviderAccountId, undefined,
       "a fork never inherits the source's account-switch request");

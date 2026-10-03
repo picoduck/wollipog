@@ -78,7 +78,7 @@ The response carries `totals`, `series`, `seriesByDriver` (the same buckets spli
 
 The Usage view provides accessible summary terms, a canonical UTC table, bounded dimension breakdowns, coverage and privacy notices, and responsive range/retention controls. Range requests are generation-guarded so a slower earlier response cannot relabel stale totals as a newer period.
 
-## Provider accounting contracts (v198)
+## Provider accounting contracts (v199)
 
 Claude Code 2.1.277 changed `total_cost_usd` and `modelUsage` to restore persisted conversation totals on resume and fork. The driver subtracts raw per-model baselines, not Wollipog's lifetime cost. Baselines are journaled on the last usage event and flushed with runner metadata and a dedicated accounting cursor. Generic event-cursor repair cannot hide an unflushed cost checkpoint; recovery pages only the uncovered accounting suffix. A resumed process first runs the local, zero-inference `/context` command to read the prefix it will restore. A lower restored prefix after a crash becomes the next process's baseline without subtracting already counted spending; a higher prefix contributes previously unobserved work once. Forks seed their inherited prefix without charging it to the new Wollipog session. Older CLI versions reset process-scoped baselines on each spawn. Conversation-reset messages clear the baseline; zeroed crash results mark incomplete usage rather than erasing it.
 
@@ -89,6 +89,11 @@ Codex native threads accumulate their own requests, including cache reads within
 Historical Claude rows produced by the old path retain their original amounts until an explicitly approved [accounting reconciliation](claude-cost-reconciliation.md). They can overcount restored spending. The old events discarded raw cumulative provider totals and per-model usage, so subtracting a guessed prefix or repricing main-loop tokens would invent precision and omit delegated work. Reconciliation requires trustworthy accounting evidence at the original boundaries and original observation attribution; missing proof remains unresolved. Unpriced historical Codex records likewise stay unpriced until an explicit recovery can preserve attribution and rate provenance; a rate refresh alone does not rewrite them.
 
 After Codex reattachment, an optional bounded `thread/read` with `includeTurns: false` recovers a loaded child's own configured model. The returned model is current configuration, not past execution telemetry: metadata arriving after a turn starts can price only a later turn. Unloaded persisted settings, mismatched identities, failed reads, and stale responses remain unpriced. Settings notifications supersede in-flight reads, and duplicate turn-start notifications preserve the turn's original accounting snapshot.
+
+Codex 0.160 usage supplies both a per-response `last` and cumulative `total`. A stale positive
+cumulative suffix spanning turn/model boundaries stays unpriced while the next valid total retains
+its tokens. Compatibility notifications containing only `last` from an older turn are treated as
+replays; they cannot establish an unseen additive suffix.
 
 Primary contracts: [Claude cost and usage](https://code.claude.com/docs/en/agent-sdk/cost-tracking), [SDK changelog](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md), [Codex 0.160.0 thread usage](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/core/src/session/mod.rs), and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing). The ccusage loader and pricing implementations were cross-checked for cumulative deltas, cache splitting, deduplication, and request tiers. Its precomputed-cost display mode does not turn SDK estimates into authoritative billing.
 
