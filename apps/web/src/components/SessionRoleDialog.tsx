@@ -1,15 +1,10 @@
-import { useEffect, useState } from "react";
-import { WORKFLOW_DECISION_CATEGORIES, sessionRole, type SessionRoleConversionPreview, type SessionView } from "@wollipog/protocol";
+import { useEffect, useRef, useState } from "react";
+import { sessionRole, type OrchestratorDefaults, type SessionRoleConversionPreview, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions } from "../store.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
-
-const DECISION_LABELS = {
-  implementation_question: "Implementation Questions", pr_merge: "PR Merge",
-  merged_branch_deletion: "Merged Branch Deletion", follow_up_issue_publication: "Follow-Up Publication",
-  ui_evidence_approval: "UI Evidence Approval",
-};
+import { roleSettingsError, SessionRoleSettings } from "./SessionRoleSettings.js";
 
 export function SessionRoleDialog({ session, supported, onClose, returnFocusRef }: {
   session: SessionView;
@@ -25,22 +20,33 @@ export function SessionRoleDialog({ session, supported, onClose, returnFocusRef 
   const [preview, setPreview] = useState<SessionRoleConversionPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState<OrchestratorDefaults | null>(null);
+  const dirty = useRef(false);
   useEffect(() => {
     if (!supported) return;
     let active = true;
     setPreview(null);
     setError(null);
     void api.sessionRolePreview(session.id, target).then((value) => {
-      if (active) setPreview(value);
+      if (active) {
+        setPreview(value);
+        if (value.orchestratorPolicy && (!dirty.current || session.roleConversion)) {
+          const { behavior, delegation, execution } = value.orchestratorPolicy;
+          setDraft(structuredClone({ behavior, delegation, execution }));
+        }
+      }
     }, (cause) => { if (active) setError((cause as Error).message); });
     return () => { active = false; };
   }, [api, session.id, current, session.status, session.roleConversion?.phase, supported, target]);
+  const settingsError = draft ? roleSettingsError(draft, preview?.orchestratorCapabilities) : null;
+  const canChange = Boolean(preview && (preview.canRetry ||
+    ((preview.available || (preview.policyError && !preview.policyInherited)) && !settingsError && (target !== "orchestrator" || draft))));
   const change = async () => {
-    if (busy || !supported || (!preview?.available && !preview?.canRetry)) return;
+    if (busy || !supported || !canChange) return;
     setBusy(true);
     setError(null);
     try {
-      loadSession(await api.changeSessionRole(session.id, target, expected));
+      loadSession(await api.changeSessionRole(session.id, target, expected, target === "orchestrator" && !session.roleConversion && draft && !preview?.policyInherited ? draft : undefined));
       onClose();
     } catch (cause) {
       setError((cause as Error).message);
@@ -54,28 +60,24 @@ export function SessionRoleDialog({ session, supported, onClose, returnFocusRef 
   return <Modal title="Change Session Role" onClose={busy ? () => {} : onClose} returnFocusRef={returnFocusRef}
     footer={<>
       <button className="btn" disabled={busy} onClick={onClose}>Cancel</button>
-      <button className="btn primary" disabled={busy || !supported || (!preview?.available && !preview?.canRetry)}
+      <button className="btn primary" disabled={busy || !supported || !canChange}
         onClick={() => void change()}>{busy ? "Changing Role…" : session.roleConversion ? "Retry Role Change" : `Change to ${targetLabel}`}</button>
     </>}>
     <p>Current Role: <strong>{current === "orchestrator" ? "Orchestrator" : "Standard"}</strong></p>
     <p>The idle provider will close. Its existing conversation resumes with the new role's tools and instructions when you send the next message. Your conversation history, account, project, and worktree stay with this session.</p>
     <p>Provider permissions stay unchanged{preview?.permissionMode ? ` (${preview.permissionMode})` : ""}.</p>
     {target === "orchestrator"
-      ? <p>Orchestrator adds scoped child-management tools and applies your current Orchestrator defaults, or the controlling campaign's policy.</p>
+      ? <p>Orchestrator adds scoped child-management tools. Settings start from your current defaults, or the controlling campaign's policy; review them below before confirming.</p>
       : <p>Standard removes Orchestrator tools and delegated authority. Completed children keep their links and remain accessible to you. Live children and unsettled decisions prevent conversion.</p>}
-    {preview?.orchestratorPolicy && <dl>
-      <div><dt>Live Child Limit</dt><dd>{preview.orchestratorPolicy.behavior.maximumConcurrentChildren}</dd></div>
-      <div><dt>Descendant Requests</dt><dd>{preview.orchestratorPolicy.delegation.parentControl === "off" ? "Human" : "Orchestrator"}</dd></div>
-      <div><dt>Integration Isolation</dt><dd>{preview.orchestratorPolicy.execution.integrationIsolation ? "Enabled" : "Disabled"}</dd></div>
-      {WORKFLOW_DECISION_CATEGORIES.map((category) => <div key={category}>
-        <dt>{DECISION_LABELS[category]}</dt>
-        <dd>{preview.orchestratorPolicy!.delegation.decisions[category] === "orchestrator" ? "Orchestrator" : "Human"}</dd>
-      </div>)}
-    </dl>}
+    {target === "orchestrator" && draft && <SessionRoleSettings value={draft}
+      capabilities={preview?.orchestratorCapabilities} disabled={busy || Boolean(preview?.policyInherited) || Boolean(session.roleConversion) || (!preview?.available && !preview?.policyError)}
+      onChange={(value) => { dirty.current = true; setDraft(value); }} />}
+    {preview?.policyInherited && <Notice>These settings are fixed by the controlling campaign and cannot be overridden by this session.</Notice>}
+    {settingsError && <Notice tone="warning" role="alert">{settingsError}</Notice>}
     {!supported && <Notice tone="warning">Update the control plane before changing an existing session's role.</Notice>}
     {supported && !preview && !error && <p role="status">Checking role compatibility…</p>}
-    {preview?.reason && <Notice tone="warning">{preview.reason}</Notice>}
-    {session.roleConversion && <Notice>Role conversion is in progress. Retry to reconcile its recorded state.</Notice>}
+    {preview?.reason && !preview.policyError && <Notice tone="warning">{preview.reason}</Notice>}
+    {session.roleConversion && <Notice>Role conversion is in progress. These settings are already recorded and cannot change during retry. Retry to reconcile the same selection.</Notice>}
     {error && <Notice tone="danger" role="alert">{error}</Notice>}
   </Modal>;
 }

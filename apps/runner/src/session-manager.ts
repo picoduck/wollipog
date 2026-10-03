@@ -11283,12 +11283,14 @@ export class SessionManager {
         command.orchestrator?.strictProjectIsolation) {
       return reply(false, "The provider role, permissions, installation, or resumable conversation changed. Reload the session and choose a compatible configuration.");
     }
+    if (meta.adoptedProviderState?.cleanupContext) return reply(false,
+      "Managed Pi transcript cleanup is pending. Restart this session to retry cleanup before changing roles.");
     const entry = this.active.get(sessionId);
     if (hasLiveNativeTui()) return reply(false, "Close the Native TUI before changing roles so the previous provider tools can be retired safely.");
     const resumingRetirement = prior?.state === "retiring" && prior.command.conversionId === conversionId;
     if (!resumingRetirement && this.closing.has(sessionId)) return reply(false,
       "Wait for the previous provider to finish closing before changing roles.");
-    if (resumingRetirement && prior.runnerPid !== process.pid && prior.providerPid !== null) {
+    if (resumingRetirement && prior.runnerOwner !== this.lockOwner && prior.providerPid !== null) {
       let providerMayBeAlive = true;
       if (prior.providerPid) {
         try { process.kill(prior.providerPid, 0); }
@@ -11312,7 +11314,7 @@ export class SessionManager {
     if (!this.store.acquireLock(sessionId, this.lockOwner)) return reply(false, "Another runner owns this provider. Retry after it releases the session.");
     try {
       this.store.patchMeta(sessionId, { roleConversion: resumingRetirement ? prior : {
-        command, state: "retiring", runnerPid: process.pid, providerPid: entry ? entry.client.pid : null,
+        command, state: "retiring", runnerOwner: this.lockOwner, runnerPid: process.pid, providerPid: entry ? entry.client.pid : null,
       } });
       this.store.flush(sessionId);
       if (entry) {
@@ -11360,6 +11362,10 @@ export class SessionManager {
         return { ...reply, pending: true, error: "Wait for provider retirement before applying the role change." };
       }
       let args = [...conversion.command.args];
+      const adopted = this.store.readMeta(sessionId)?.adoptedProviderState;
+      if (adopted?.driver === "pi" && !adopted.cleanupContext) {
+        args.push("--session-dir", adopted.sessionDir);
+      }
       if (conversion.command.claudeMutableSystemPromptFlag) {
         args = this.mutableClaudeRoleArgs(args, conversion.command.claudeMutableSystemPromptFlag);
       }

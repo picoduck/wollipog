@@ -3,7 +3,7 @@
 import { createRoot } from "react-dom/client";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, sessionRole,
-  type ControlPlaneToUi, type OrchestratorCampaignPolicy, type SessionView,
+  type ControlPlaneToUi, type OrchestratorCampaignPolicy, type OrchestratorSettingsCapabilities, type SessionView,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -18,6 +18,14 @@ const params = new URLSearchParams(window.location.search);
 const scenario = params.get("scenario") ?? "normal";
 document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
 const policy = { version: 1, ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS), sources: {} } as OrchestratorCampaignPolicy;
+const capabilities: OrchestratorSettingsCapabilities = {
+  models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available",
+  harnesses: [{ agentId: "codex-app", driver: "codex-app-server", context: { kind: "native" }, name: "Codex App",
+    installations: 1, models: [{ id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol" }], effortLevels: ["high"],
+    supportedPairs: [{ modelId: "gpt-6.1-sol", effortLevels: ["high"] }] }],
+};
+if (scenario === "strict") policy.execution.strictProjectIsolation = true;
+let pendingPolicy: OrchestratorCampaignPolicy | undefined;
 let session = {
   id: "same-session", title: "Session Role Conversion", runnerId: "machine", workspaceId: "workspace",
   agentId: "codex-app", driver: "codex-app-server", role: "normal", status: "idle", adopted: false,
@@ -57,8 +65,8 @@ const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push() 
 const reasons: Record<string, string> = {
   busy: "Resume this session and wait until it is idle before changing its role. Finish or stop active work first.",
   children: "Finish or stop the live child sessions before changing this role. Completed children keep their links and remain accessible to you.",
-  "older-runner": "Update this Machine's runner to protocol v197 or later before changing the session role.",
-  strict: "Your Orchestrator defaults enable Strict Project Isolation, which requires the coupled preset. Disable it in Orchestrator settings before converting with these provider permissions.",
+  "older-runner": "Update this Machine's runner to protocol v198 or later before changing the session role.",
+  strict: "Strict Project Isolation requires the coupled preset. Disable it here to preserve these provider permissions.",
   viewer: "Your Viewer role is read-only.",
 };
 const client: ApiClient = {
@@ -69,12 +77,24 @@ const client: ApiClient = {
   sessionRolePreview: async (_id, role) => ({ currentRole: sessionRole(session), targetRole: role,
     permissionMode: session.permissionMode, available: !reasons[scenario],
     ...(reasons[scenario] ? { reason: reasons[scenario] } : {}),
-    ...(role === "orchestrator" ? { orchestratorPolicy: policy } : {}),
+    ...(scenario === "strict" ? { policyError: reasons.strict } : {}),
+    ...(scenario === "inherited" ? { policyInherited: true } : {}),
+    ...(session.roleConversion ? { canRetry: true } : {}),
+    ...(role === "orchestrator" ? { orchestratorPolicy: pendingPolicy ?? policy, orchestratorCapabilities: capabilities } : {}),
   }),
-  changeSessionRole: async (id, role, expectedRole) => {
-    if (id !== session.id || sessionRole(session) !== expectedRole || reasons[scenario]) throw new Error("Session changed; reload before converting.");
+  changeSessionRole: async (id, role, expectedRole, selected) => {
+    if (id !== session.id || sessionRole(session) !== expectedRole || (reasons[scenario] && scenario !== "strict")) throw new Error("Session changed; reload before converting.");
     calls++;
-    session = { ...session, role, orchestratorPolicy: role === "orchestrator" ? policy : undefined };
+    const chosen = pendingPolicy ?? (selected ? { ...policy, ...selected, behavior: { ...policy.behavior, ...selected.behavior },
+      delegation: { ...policy.delegation, ...selected.delegation, decisions: { ...policy.delegation.decisions, ...selected.delegation?.decisions } },
+      execution: { ...policy.execution, ...selected.execution } } : policy);
+    if (scenario === "lost-reply" && !pendingPolicy) {
+      pendingPolicy = structuredClone(chosen);
+      session = { ...session, roleConversion: { targetRole: role, phase: "preparing" } };
+      push?.({ type: "session_upsert", session });
+      throw new Error("Reply lost; retry the recorded selection.");
+    }
+    session = { ...session, role, roleConversion: undefined, orchestratorPolicy: role === "orchestrator" ? chosen : undefined };
     push?.({ type: "session_upsert", session });
     return session;
   },

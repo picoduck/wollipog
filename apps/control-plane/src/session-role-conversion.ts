@@ -1,14 +1,15 @@
+import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
 import {
   advertisesOrchestratorAdditiveRole, isTerminal, pendingRequests,
   runnerSupportsProtocol, sessionRole, usesOrchestratorPresetPermissions,
-  type OrchestratorCampaignPolicy, type OrchestratorSettingsView, type PrepareSessionRoleMessage,
+  type OrchestratorCampaignOverrides, type OrchestratorCampaignPolicy, type OrchestratorSettingsView, type PrepareSessionRoleMessage,
   type SessionRole, type SessionRoleConversionPreview, type SessionSnapshot,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import { launchForRestart } from "./sessions.js";
-import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
+import { parseOrchestratorOverrides, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { HumanPrincipal } from "./identity.js";
 import { withSessionCommandPermissions } from "./session-command-permissions.js";
@@ -28,25 +29,36 @@ export function registerSessionRoleRoutes(app: FastifyInstance, deps: {
     const role = (req.query as { role?: unknown }).role;
     if (role !== "normal" && role !== "orchestrator") return reply.code(400).send({ error: "role must be normal or orchestrator" });
     const preview = deps.conversions.preview(id, role, deps.defaultsFor(human), (policy) => deps.validatePolicy(human, policy));
-    return human.role === "viewer" ? { ...preview, available: false, canRetry: false, reason: "Your Viewer role is read-only." } : preview;
+    return human.role === "viewer" ? { ...preview, available: false, canRetry: false, policyError: undefined, reason: "Your Viewer role is read-only." } : preview;
   });
   app.post("/api/sessions/:id/role", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const human = deps.requestHuman(req);
     if (!human || human.role === "viewer") return reply.code(403).send({ error: "only an authenticated human with write access may change session roles" });
     if (!deps.db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
-    const body = req.body as { role?: unknown; expectedRole?: unknown } | undefined;
+    const body = req.body as { role?: unknown; expectedRole?: unknown; orchestrator?: unknown } | undefined;
     if ((body?.role !== "normal" && body?.role !== "orchestrator") ||
         (body.expectedRole !== "normal" && body.expectedRole !== "orchestrator")) {
       return reply.code(400).send({ error: "role and expectedRole must be normal or orchestrator" });
     }
+    if (Object.keys(body).some((key) => !["role", "expectedRole", "orchestrator"].includes(key))) {
+      return reply.code(400).send({ error: "Role conversion preserves provider configuration; only role, expectedRole, and Orchestrator settings are accepted." });
+    }
+    const overrides = parseOrchestratorOverrides(body.orchestrator);
+    if (!overrides || (body.role === "normal" && body.orchestrator !== undefined)) {
+      return reply.code(400).send({ error: "Orchestrator settings must be valid promotion overrides." });
+    }
     try {
-      await deps.conversions.change(id, body.role, body.expectedRole, deps.defaultsFor(human), (policy) => deps.validatePolicy(human, policy));
+      await deps.conversions.change(id, body.role, body.expectedRole, deps.defaultsFor(human), (policy) => deps.validatePolicy(human, policy), overrides);
       return withSessionCommandPermissions(deps.db, human, deps.db.getSession(id)!);
     } catch (error) {
       return reply.code(409).send({ error: (error as Error).message });
     }
   });
+}
+
+function samePolicySettings(left: OrchestratorCampaignPolicy, right: OrchestratorCampaignPolicy): boolean {
+  return isDeepStrictEqual([left.behavior, left.delegation, left.execution], [right.behavior, right.delegation, right.execution]);
 }
 
 /** Human intent is the authority; a runner can only attest preparation of that exact intent. */
@@ -56,7 +68,7 @@ export class SessionRoleConversions {
     private readonly log: (event: string, fields: Record<string, unknown>) => void = () => {}) {}
 
   preview(id: string, targetRole: SessionRole, defaults: OrchestratorSettingsView,
-    validate: (policy: OrchestratorCampaignPolicy) => string | null): SessionRoleConversionPreview {
+    validate: (policy: OrchestratorCampaignPolicy) => string | null, overrides: OrchestratorCampaignOverrides = {}): SessionRoleConversionPreview {
     const session = this.db.getSession(id);
     if (!session) throw new Error("session not found");
     const currentRole = sessionRole(session);
@@ -67,11 +79,12 @@ export class SessionRoleConversions {
     const runner = this.db.getRunner(session.runnerId);
     if (!this.hub.isRunnerOnline(session.runnerId)) return refuse("Connect this session's Machine before changing its role.");
     if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionRoleConversion")) {
-      return refuse("Update this Machine's runner to protocol v197 or later before changing the session role.");
+      return refuse("Update this Machine's runner to protocol v198 or later before changing the session role.");
     }
     const pending = this.db.sessionRoleConversion(id);
     if (pending && pending.state !== "applied") return {
       ...result, canRetry: pending.command.targetRole === targetRole,
+      ...(pending.policy ? { orchestratorPolicy: structuredClone(pending.policy), orchestratorCapabilities: defaults.capabilities } : {}),
       reason: "A role change is already in progress. Retry it to finish reconciliation.",
     };
     if (this.db.roleConversionBlocksSession(id)) return refuse("Wait for the parent session's role change to finish.");
@@ -117,29 +130,40 @@ export class SessionRoleConversions {
       const root = this.db.campaignAncestryRoot(id);
       if (root === "refused") return refuse("The session ancestry is malformed. Repair its parent links before changing roles.");
       const inherited = typeof root === "object" ? this.db.getSession(root.id)?.orchestratorPolicy : undefined;
-      const policy = inherited ? structuredClone(inherited)
-        : resolveOrchestratorCampaignPolicy(defaults.defaults, defaults.source, {});
-      if (policy.execution.strictProjectIsolation) {
-        return refuse("Your Orchestrator defaults enable Strict Project Isolation, which requires the coupled preset. Disable it in Orchestrator settings before converting with these provider permissions.");
+      const selected = resolveOrchestratorCampaignPolicy(inherited ?? defaults.defaults,
+        inherited ? "active_campaign" : defaults.source, overrides);
+      const policy = inherited ? structuredClone(inherited) : selected;
+      result.policyInherited = Boolean(inherited);
+      if (inherited && !samePolicySettings(selected, inherited)) {
+        return refuse("These settings are fixed by the controlling campaign and cannot be overridden by this session.");
       }
-      const error = validate(policy);
-      if (error) return refuse(error);
       result.orchestratorPolicy = policy;
+      result.orchestratorCapabilities = defaults.capabilities;
+      const error = policy.execution.strictProjectIsolation
+        ? "Strict Project Isolation requires the coupled preset. Disable it here to preserve these provider permissions."
+        : validate(policy);
+      if (error) return { ...refuse(error), policyError: error };
     }
     return { ...result, available: true };
   }
 
   async change(id: string, role: SessionRole, expectedRole: SessionRole, defaults: OrchestratorSettingsView,
-    validate: (policy: OrchestratorCampaignPolicy) => string | null): Promise<void> {
+    validate: (policy: OrchestratorCampaignPolicy) => string | null, overrides: OrchestratorCampaignOverrides = {}): Promise<void> {
     const existing = this.db.sessionRoleConversion(id);
     if (existing && existing.state !== "applied") {
       if (existing.command.targetRole !== role || existing.command.expectedRole !== expectedRole) {
         throw new Error("Finish the existing role change before requesting another one.");
       }
+      if (existing.policy && Object.keys(overrides).length) {
+        const requested = resolveOrchestratorCampaignPolicy(existing.policy, "active_campaign", overrides);
+        if (!samePolicySettings(requested, existing.policy)) {
+          throw new Error("The pending role change already recorded its settings. Retry without changing them.");
+        }
+      }
       await this.advance(id);
       return;
     }
-    const preview = this.preview(id, role, defaults, validate);
+    const preview = this.preview(id, role, defaults, validate, overrides);
     if (preview.currentRole !== expectedRole) throw new Error("The session role changed. Reload it before trying again.");
     if (!preview.available) throw new Error(preview.reason);
     const session = this.db.getSession(id)!;
@@ -175,7 +199,7 @@ export class SessionRoleConversions {
     const session = this.db.getSession(id);
     if (!intent || !session || intent.state === "applied") return;
     if (!runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "sessionRoleConversion")) {
-      throw new Error("Update this Machine's runner to protocol v197 or later to finish the role change.");
+      throw new Error("Update this Machine's runner to protocol v198 or later to finish the role change.");
     }
     const command = intent.state === "preparing" ? { ...intent.command, requestId: randomUUID() }
       : { type: "commit_session_role" as const, requestId: randomUUID(), sessionId: id, conversionId: intent.command.conversionId };
@@ -218,8 +242,7 @@ export class SessionRoleConversions {
     if (!intent || intent.state === "applied") return;
     const session = this.db.getSession(snapshot.id);
     if (!session || session.runnerId !== runnerId || !intent ||
-        !runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "sessionRoleConversion") ||
-        (snapshot.roleConversionReceipt && snapshot.roleConversionReceipt.conversionId !== intent.command.conversionId)) return;
+        !runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "sessionRoleConversion")) return;
     this.acceptReceipt(runnerId, snapshot);
     if (!this.db.sessionRoleConversionPending(snapshot.id) || this.advancing.has(snapshot.id)) return;
     void this.advance(snapshot.id).catch(() => {

@@ -17260,3 +17260,11 @@ body.shell-dock-dragging * {
     font-size: 16px;
   }
 }
+
+/* Existing-session promotion has a session-scoped policy draft. */
+.session-role-settings { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 16px; margin: 16px 0; padding: 16px; border: 1px solid var(--border); border-radius: 8px; min-width: 0; }
+.session-role-settings legend { font-weight: 600; }
+.session-role-settings label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.session-role-settings select, .session-role-settings input { width: 100%; min-width: 0; }
+.session-role-settings p { grid-column: 1 / -1; margin: 0; }
+@media (max-width: 600px) { .session-role-settings { grid-template-columns: minmax(0, 1fr); padding: 12px; } }

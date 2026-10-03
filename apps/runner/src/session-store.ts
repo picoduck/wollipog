@@ -89,6 +89,8 @@ export interface SessionMeta {
     state: "retiring" | "prepared" | "applied";
     /** A restarted runner must not mistake an unconfirmed old provider for a retired one. */
     runnerPid?: number;
+    /** Instance nonce: PIDs can be reused after runner replacement. */
+    runnerOwner?: string;
     providerPid?: number | null;
   };
   agentId: string | null;

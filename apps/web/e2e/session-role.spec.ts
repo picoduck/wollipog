@@ -19,11 +19,24 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await expect(dialog.getByRole("button", { name: "Change to Orchestrator", exact: true })).toBeEnabled();
       await expect(dialog).toContainText("Provider permissions stay unchanged (auto)");
       await expect(dialog).toContainText("PR Merge");
+      await dialog.getByRole("combobox", { name: "Child Harness", exact: true }).selectOption({ index: 1 });
+      await dialog.getByRole("combobox", { name: "Child Model", exact: true }).selectOption("gpt-6.1-sol");
+      await dialog.getByRole("combobox", { name: "Child Effort", exact: true }).selectOption("high");
+      await dialog.getByLabel("Maximum Concurrent Children", { exact: true }).fill("7");
+      await dialog.getByRole("combobox", { name: "Follow-Ups", exact: true }).selectOption("execute_approved");
+      await dialog.getByRole("combobox", { name: "Completion", exact: true }).selectOption("retain");
+      await dialog.getByRole("combobox", { name: "Descendant Requests", exact: true }).selectOption("questions");
+      await dialog.getByRole("combobox", { name: "PR Merge", exact: true }).selectOption("orchestrator");
+      await dialog.getByRole("combobox", { name: "Integration Isolation", exact: true }).selectOption("enabled");
       await dialog.getByRole("button", { name: "Change to Orchestrator", exact: true }).click();
       await expect(dialog).toBeHidden();
       await expect(page.getByTestId("session-role")).toHaveText("Orchestrator");
       await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.reconnect());
       await expect(page.getByTestId("session-role")).toHaveText("Orchestrator");
+      const promoted = await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.session());
+      expect(promoted.orchestratorPolicy?.behavior).toMatchObject({ childModel: "gpt-6.1-sol", childEffort: "high", maximumConcurrentChildren: 7, followUps: "execute_approved", completion: "retain" });
+      expect(promoted.orchestratorPolicy?.delegation).toMatchObject({ parentControl: "questions", decisions: { pr_merge: "orchestrator" } });
+      expect(promoted.orchestratorPolicy?.execution.integrationIsolation).toBe(true);
       const demotion = await openRoleDialog(page);
       await expect(demotion).toContainText("Live children and unsettled decisions prevent conversion");
       await demotion.getByRole("button", { name: "Change to Standard", exact: true }).click();
@@ -55,4 +68,45 @@ test("an older control plane disables the role action with upgrade guidance", as
   await expect(item).toBeDisabled();
   await expect(page.getByText("Update the control plane before changing an existing session's role.")).toBeVisible();
   expect(await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.calls())).toBe(0);
+});
+
+test("a lost reply locks and restores the selected promotion settings before exact retry", async ({ page }) => {
+  await page.goto("/session-role-e2e.html?scenario=lost-reply");
+  const dialog = await openRoleDialog(page);
+  await dialog.getByLabel("Maximum Concurrent Children", { exact: true }).fill("9");
+  await dialog.getByRole("combobox", { name: "PR Merge", exact: true }).selectOption("orchestrator");
+  await dialog.getByRole("combobox", { name: "Integration Isolation", exact: true }).selectOption("enabled");
+  await dialog.getByRole("button", { name: "Change to Orchestrator", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Retry Role Change", exact: true })).toBeEnabled();
+  await expect(dialog.getByLabel("Maximum Concurrent Children", { exact: true })).toBeDisabled();
+  await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.reconnect());
+  await expect(dialog.getByLabel("Maximum Concurrent Children", { exact: true })).toHaveValue("9");
+  await expect(dialog.getByRole("combobox", { name: "PR Merge", exact: true })).toHaveValue("orchestrator");
+  await dialog.getByRole("button", { name: "Retry Role Change", exact: true }).click();
+  await expect(page.getByTestId("session-role")).toHaveText("Orchestrator");
+  const policy = await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.session().orchestratorPolicy);
+  expect(policy?.behavior.maximumConcurrentChildren).toBe(9);
+  expect(policy?.delegation.decisions.pr_merge).toBe("orchestrator");
+  expect(policy?.execution.integrationIsolation).toBe(true);
+});
+
+test("strict defaults can be corrected in the promotion dialog without changing provider permissions", async ({ page }) => {
+  await page.goto("/session-role-e2e.html?scenario=strict");
+  const dialog = await openRoleDialog(page);
+  await expect(dialog.getByRole("button", { name: "Change to Orchestrator", exact: true })).toBeDisabled();
+  await dialog.getByRole("combobox", { name: "Strict Project Isolation", exact: true }).selectOption("disabled");
+  await expect(dialog.getByRole("button", { name: "Change to Orchestrator", exact: true })).toBeEnabled();
+  await dialog.getByRole("button", { name: "Change to Orchestrator", exact: true }).click();
+  const session = await page.evaluate(() => window.__WOLLIPOG_ROLE_E2E__.session());
+  expect(session.permissionMode).toBe("auto");
+  expect(session.orchestratorPolicy?.execution.strictProjectIsolation).toBe(false);
+});
+
+test("nested promotion shows its inherited campaign settings without allowing policy overrides", async ({ page }) => {
+  await page.goto("/session-role-e2e.html?scenario=inherited");
+  const dialog = await openRoleDialog(page);
+  await expect(dialog.getByRole("combobox", { name: "Child Harness", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("combobox", { name: "PR Merge", exact: true })).toBeDisabled();
+  await expect(dialog).toContainText("fixed by the controlling campaign");
+  await expect(dialog.getByRole("button", { name: "Change to Orchestrator", exact: true })).toBeEnabled();
 });

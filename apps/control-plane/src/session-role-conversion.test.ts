@@ -90,11 +90,11 @@ test("conversion is human-only: neither agent role can call the role routes", ()
 });
 
 test("unsupported peers and incompatible permissions/isolation fail before dispatch or state change", async () => {
-  const h = harness("normal", 196);
+  const h = harness("normal", 197);
   try {
     const before = h.db.getSession("s");
-    assert.match(h.conversions.preview("s", "orchestrator", h.defaults, () => null).reason!, /protocol v197/);
-    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v197/);
+    assert.match(h.conversions.preview("s", "orchestrator", h.defaults, () => null).reason!, /protocol v198/);
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v198/);
     assert.deepEqual(h.db.getSession("s"), before);
     assert.equal(h.commands.length, 0);
   } finally { h.db.close(); }
@@ -162,17 +162,118 @@ test("a lost prepare reply remains fenced and reconciles only the exact runner r
     assert.equal(h.svc.restart("s").ok, false);
     assert.equal(h.svc.setConfig("s", { permissionMode: "default" }).ok, false);
     const snapshot = { id: "s", roleConversionReceipt: { conversionId: prepared!.conversionId, state: "prepared" } } as SessionSnapshot;
-    h.hub.requestFromRunner = normalRequest;
     h.conversions.reconcile("wrong-runner", snapshot);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(h.db.getSession("s")!.role, "normal");
     h.conversions.reconcile("r", { ...snapshot, roleConversionReceipt: { conversionId: "stale", state: "prepared" } });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(h.db.getSession("s")!.role, "normal");
+    h.hub.requestFromRunner = normalRequest;
     h.conversions.reconcile("r", snapshot);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(h.db.getSession("s")!.role, "orchestrator");
     assert.equal(h.db.sessionRoleConversionPending("s"), false);
+  } finally { h.db.close(); }
+});
+
+test("human-selected promotion settings survive lost preparation, defaults changes and a replacement coordinator", async () => {
+  const h = harness();
+  try {
+    const selection = {
+      behavior: { maximumConcurrentChildren: 7, followUps: "execute_approved" as const, completion: "retain" as const },
+      delegation: { parentControl: "questions" as const, decisions: { pr_merge: "orchestrator" as const } },
+      execution: { integrationIsolation: true, strictProjectIsolation: false },
+    };
+    const normalRequest = h.hub.requestFromRunner.bind(h.hub);
+    h.hub.requestFromRunner = async () => { throw new Error("prepare never arrived"); };
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null, selection), /never arrived/);
+    const intent = h.db.sessionRoleConversion("s")!;
+    assert.equal(intent.policy!.behavior.maximumConcurrentChildren, 7);
+    assert.equal(intent.policy!.delegation.decisions.pr_merge, "orchestrator");
+    assert.equal(intent.command.orchestrator!.integrationIsolation, true);
+    assert.equal(intent.policy!.sources.behavior.maximumConcurrentChildren, "session_override");
+    h.defaults.defaults.behavior.maximumConcurrentChildren = 1;
+    h.defaults.defaults.execution.integrationIsolation = false;
+    const replacement = new SessionRoleConversions(h.db, h.hub);
+    assert.deepEqual(replacement.preview("s", "orchestrator", h.defaults, () => null).orchestratorPolicy, intent.policy);
+    await assert.rejects(replacement.change("s", "orchestrator", "normal", h.defaults, () => null,
+      { behavior: { maximumConcurrentChildren: 2 } }), /already recorded/);
+    assert.deepEqual(h.db.sessionRoleConversion("s"), intent);
+    h.hub.requestFromRunner = normalRequest;
+    // The stale receipt belongs to a previous role change; only fresh correlated replies count.
+    replacement.reconcile("r", { id: "s", roleConversionReceipt: { conversionId: "previous", state: "applied" } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.db.getSession("s")!.role, "orchestrator");
+    assert.deepEqual(h.db.getSession("s")!.orchestratorPolicy, intent.policy);
+    assert.deepEqual((h.commands[0] as PrepareSessionRoleMessage).orchestrator, intent.command.orchestrator);
+    assert.equal(h.db.getSession("s")!.permissionMode, "auto");
+  } finally { h.db.close(); }
+});
+
+test("promotion can correct strict defaults and refuses incompatible selected policy before retirement", async () => {
+  const h = harness();
+  try {
+    h.defaults.defaults.execution.strictProjectIsolation = true;
+    const preview = h.conversions.preview("s", "orchestrator", h.defaults, () => null);
+    assert.equal(preview.orchestratorPolicy!.execution.strictProjectIsolation, true);
+    assert.match(preview.policyError!, /coupled preset/);
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => "incompatible fixed pair",
+      { execution: { strictProjectIsolation: false } }), /incompatible fixed pair/);
+    assert.equal(h.commands.length, 0);
+    assert.equal(h.db.sessionRoleConversion("s"), null);
+    await h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null,
+      { execution: { strictProjectIsolation: false, integrationIsolation: true } });
+    assert.equal(h.db.getSession("s")!.orchestratorPolicy!.execution.strictProjectIsolation, false);
+  } finally { h.db.close(); }
+});
+
+test("runtime hydration and an existing attention batch preserve committed role and selected campaign policy", async () => {
+  const h = harness();
+  try {
+    h.hub.requestFromRunner = async () => { throw new Error("disconnected"); };
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null,
+      { behavior: { maximumConcurrentChildren: 5 } }), /disconnected/);
+    const intent = h.db.sessionRoleConversion("s")!;
+    const snapshot: SessionSnapshot = {
+      id: "s", workspaceId: "w", agentId: "claude", title: "Preserved", status: "idle", driver: "claude-code",
+      useWorktree: true, worktreePath: "/repos/test/worktree", config: { permissionMode: "auto", model: "opus", effort: "high" },
+      preview: "", pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 1, createdAt: 10, updatedAt: 20,
+      roleConversionReceipt: { conversionId: intent.command.conversionId, state: "prepared" },
+    };
+    const batch = h.svc.beginRunnerAttentionBatch("r");
+    h.conversions.reconcile("r", snapshot);
+    h.svc.applySessionRuntimeUpdate("r", snapshot, batch);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.db.getSession("s")!.role, "orchestrator");
+    assert.deepEqual(h.db.getSession("s")!.orchestratorPolicy, intent.policy);
+    assert.equal(h.db.getSession("s")!.roleConversion!.phase, "committing");
+    snapshot.roleConversionReceipt!.state = "applied";
+    h.conversions.reconcile("r", snapshot);
+    h.svc.applySessionRuntimeUpdate("r", snapshot, batch);
+    assert.equal(h.db.getSession("s")!.roleConversion, undefined);
+    assert.equal(h.db.getSession("s")!.role, "orchestrator");
+    assert.deepEqual(h.db.getSession("s")!.orchestratorPolicy, intent.policy);
+  } finally { h.db.close(); }
+});
+
+test("nested promotion preserves its controlling campaign policy and refuses settings that would shadow it", async () => {
+  const h = harness("orchestrator");
+  try {
+    h.db.createSession({ id: "nested", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Nested",
+      driver: "claude-code", config: { permissionMode: "auto" }, useWorktree: false, now: 20, parentSessionId: "s" });
+    h.db.updateSessionStatus("nested", "idle", 21);
+    const policy = h.db.getSession("s")!.orchestratorPolicy!;
+    h.defaults.defaults.behavior.maximumConcurrentChildren = 1;
+    const preview = h.conversions.preview("nested", "orchestrator", h.defaults, () => null);
+    assert.equal(preview.available, true);
+    assert.equal(preview.policyInherited, true);
+    assert.deepEqual(preview.orchestratorPolicy, policy);
+    await assert.rejects(h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null,
+      { behavior: { maximumConcurrentChildren: 7 } }), /controlling campaign/);
+    assert.equal(h.commands.length, 0);
+    await h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null);
+    assert.deepEqual(h.db.getSession("nested")!.orchestratorPolicy, policy);
+    assert.equal(h.db.getSession("nested")!.parentSessionId, "s");
   } finally { h.db.close(); }
 });
 
@@ -203,9 +304,17 @@ test("the actual human role routes enforce write authority, session scope and st
     assert.equal(h.commands.length, 0);
     assert.equal((await app.inject({ method: "GET", url: "/api/sessions/s/role?role=orchestrator", headers: { authorization: "owner" } })).json().available, true);
     assert.equal((await app.inject({ method: "POST", url: "/api/sessions/s/role", payload: { role: "other" }, headers: { authorization: "owner" } })).statusCode, 400);
-    const success = await app.inject({ method: "POST", url: "/api/sessions/s/role", payload, headers: { authorization: "owner" } });
+    for (const invalid of [{ execution: { strictProjectIsolation: "no" } }, { behavior: { maximumConcurrentChildren: 65 } },
+      { delegation: { decisions: { authentication: "orchestrator" } } }, { behavior: { childHarness: { agentId: "bad" } } }]) {
+      assert.equal((await app.inject({ method: "POST", url: "/api/sessions/s/role", payload: { ...payload, orchestrator: invalid }, headers: { authorization: "owner" } })).statusCode, 400);
+    }
+    assert.equal((await app.inject({ method: "POST", url: "/api/sessions/s/role", payload: { ...payload, permissionMode: "bypass" }, headers: { authorization: "owner" } })).statusCode, 400);
+    const success = await app.inject({ method: "POST", url: "/api/sessions/s/role",
+      payload: { ...payload, orchestrator: { behavior: { maximumConcurrentChildren: 6 }, delegation: { decisions: { pr_merge: "orchestrator" } } } }, headers: { authorization: "owner" } });
     assert.equal(success.statusCode, 200, success.body);
     assert.equal(success.json().role, "orchestrator");
+    assert.equal(success.json().orchestratorPolicy.behavior.maximumConcurrentChildren, 6);
+    assert.equal(success.json().orchestratorPolicy.delegation.decisions.pr_merge, "orchestrator");
     const stale = await app.inject({ method: "POST", url: "/api/sessions/s/role", payload, headers: { authorization: "owner" } });
     assert.equal(stale.statusCode, 409);
     assert.equal(h.commands.length, 2);
@@ -221,9 +330,9 @@ test("an interrupted conversion cannot retry or reconcile through an older peer"
       throw new Error("disconnected");
     };
     await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /disconnected/);
-    h.db.registerRunner(h.metadata, Date.now(), 196);
+    h.db.registerRunner(h.metadata, Date.now(), 197);
     h.conversions.reconcile("r", { id: "s", roleConversionReceipt: { conversionId: command!.conversionId, state: "prepared" } });
-    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v197/);
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v198/);
     assert.equal(h.db.getSession("s")!.role, "normal");
     assert.equal(h.db.sessionRoleConversionPending("s"), true);
   } finally { h.db.close(); }
