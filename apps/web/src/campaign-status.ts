@@ -131,21 +131,28 @@ export function campaignCostView(metric: CampaignMetric<CampaignCostValue> | und
   if (metric.availability === "known" && value.records === 0) {
     return { text, provenance: null, note: "No usage was recorded.", priced: true };
   }
-  if (metric.availability === "partial" || value.source === "unpriced" || value.unpricedRecords > 0) {
+  const unpriced = value.source === "unpriced" || value.unpricedRecords > 0 ||
+    (metric.availability === "partial" && metric.reason === "unpriced_usage");
+  if (unpriced) {
     const records = value.unpricedRecords === 1 ? "1 record" : `${value.unpricedRecords} records`;
     return {
       text,
       provenance: "Partially Priced",
       note: value.unpricedRecords > 0
         ? `${records} could not be priced, so this cost is a lower bound.`
-        : metric.availability === "partial" ? metricGapNote(metric.reason) : metricGapNote("unpriced_usage"),
+        : metricGapNote("unpriced_usage"),
       priced: true,
     };
   }
-  if (value.source === "providerReported") {
-    return { text, provenance: "Provider-Reported", note: "Cost as reported by the provider.", priced: true };
+  const provenance = value.source === "providerReported" ? "Provider-Reported" : "Estimated API Cost";
+  // Every recorded amount is priced, but part of its history was never recorded: a lower bound
+  // that keeps its real provenance, as a partial duration reads "At least".
+  if (metric.availability === "partial") {
+    return { text: `At least ${text}`, provenance, note: metricGapNote(metric.reason), priced: true };
   }
-  return { text, provenance: "Estimated API Cost", note: "Estimated from the model rate table.", priced: true };
+  return provenance === "Provider-Reported"
+    ? { text, provenance, note: "Cost as reported by the provider.", priced: true }
+    : { text, provenance, note: "Estimated from the model rate table.", priced: true };
 }
 
 /** Provenance labels as they read inside sentence-case helper text. */
@@ -160,10 +167,12 @@ const PROVENANCE_IN_SENTENCE: Record<string, string> = {
  * stated by `context` (the provenance of the figure it sits under). A lower bound always says so.
  */
 export function costWithProvenance(view: CampaignCostView, context: string | null = null): string {
-  if (!view.priced || !view.provenance) return view.text;
+  // Inline costs sit in sentence-case helper text, so a lower bound reads "at least" there.
+  const text = view.text.replace(/^At least /u, "at least ");
+  if (!view.priced || !view.provenance) return text;
   return view.provenance === context && view.provenance !== "Partially Priced"
-    ? view.text
-    : `${view.text} (${PROVENANCE_IN_SENTENCE[view.provenance] ?? view.provenance})`;
+    ? text
+    : `${text} (${PROVENANCE_IN_SENTENCE[view.provenance] ?? view.provenance})`;
 }
 
 /** A duration metric: its value, a lower bound, or "Unavailable" with why. Zero is a real zero. */

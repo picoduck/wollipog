@@ -133,9 +133,11 @@ its verifications. The state is never stored. The first matching rule wins:
    1. a recorded blocker → **blocked** (`recorded_blocker`);
    2. a dependency is `blocked`, `cancelled`, or `removed` → **blocked** (`dependency_blocked`); a
       dependency cycle is treated the same way;
-   3. `dispatchState` is `queued` → **queued** (also `dependency_unfinished` when a dependency is
-      unfinished);
+   3. `dispatchState` is `queued` → **queued**;
    4. otherwise → **planned**.
+
+   In both of the last two cases the item also carries the cause `dependency_unfinished` while any
+   dependency is unfinished, so a planned item says what it is waiting on just as a queued one does.
 
 `delivered` therefore requires a work-item verification with outcome `delivered`. An idle session,
 a closed issue, a successful command, a reported `merged` stage, or a pull request in the merge
