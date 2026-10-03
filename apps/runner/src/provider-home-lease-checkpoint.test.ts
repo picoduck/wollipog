@@ -566,8 +566,8 @@ test("compaction preserves partial historical evidence and both readers refuse a
   assert.deepEqual(evidence(home), before);
 });
 
-test("selected checkpoints refuse damaged guards, proofs, resurrected identities, links, and exhausted storage", { skip: process.platform !== "linux" }, (t) => {
-  for (const mutation of ["guard-bytes", "guard-missing", "guard-link", "proof", "new-version", "retired-inode", "retired-link", "storage", "oversized-stage"]) {
+test("selected checkpoints refuse damaged guards, proofs, resurrected identities, links, and exhausted storage", { skip: process.platform !== "linux" }, async (t) => {
+  for (const mutation of ["guard-bytes", "guard-missing", "guard-link", "proof", "new-version", "retired-inode", "retired-link", "storage", "oversized-stage"]) await t.test(mutation, (t) => {
     const home = fixture(t);
     seed(home, 9);
     const { root, lock, anchor } = paths(home);
@@ -578,21 +578,32 @@ test("selected checkpoints refuse damaged guards, proofs, resurrected identities
     if (mutation === "guard-link") { fs.renameSync(guard, join(home, "guard")); fs.symlinkSync(join(home, "guard"), guard); }
     if (mutation === "proof") { value.checkpoint.historyHash = "f".repeat(64); fs.writeFileSync(anchor, JSON.stringify(value)); }
     if (mutation === "new-version") { value.version = 5; fs.writeFileSync(anchor, JSON.stringify(value)); }
-    if (mutation === "retired-inode" || mutation === "retired-link") {
-      const entry = value.checkpoint.retired.find((entry: { directory: string }) => entry.directory === "root");
+    if (mutation === "retired-link") fs.symlinkSync(anchor, join(root, value.checkpoint.retired.find((entry: { directory: string }) => entry.directory === "root").name));
+    if (mutation === "retired-inode") {
+      // Resurrect the retired previous tip with its exact bytes, so only the inode can refuse it.
+      // The filesystem may hand that freed inode number straight back (#2485), which would make
+      // this a genuine identity rather than damage. Hold any reused number while a fresh inode
+      // takes the name.
+      const entry = value.checkpoint.retired.find((entry: { directory: string; hash: string }) => entry.directory === "root" && entry.hash === value.checkpoint.previousTipHash);
       const path = join(root, entry.name);
-      if (mutation === "retired-link") fs.symlinkSync(anchor, path);
-      else fs.writeFileSync(path, value.checkpoint.previousTip, { mode: 0o600 });
+      fs.writeFileSync(path, value.checkpoint.previousTip, { mode: 0o600 });
+      const reused = (stat: fs.Stats) => String(stat.dev) === entry.device && String(stat.ino) === entry.inode;
+      if (reused(fs.statSync(path))) {
+        const fresh = join(home, "resurrected-tip");
+        fs.writeFileSync(fresh, value.checkpoint.previousTip, { mode: 0o600 });
+        fs.renameSync(fresh, path);
+      }
+      assert.equal(reused(fs.statSync(path)), false);
     }
     if (mutation === "storage") for (let i = 0; i < LIMITS.directoryEntries; i++) {
       fs.writeFileSync(join(root, `.provider-home-lease-${randomUUID()}.tmp`), "{}", { mode: 0o600 });
     }
     if (mutation === "oversized-stage") fs.writeFileSync(join(root, ".mutable-home.checkpoint.pending"), "x".repeat(LIMITS.checkpointBytes + 1), { mode: 0o600 });
     const before = evidence(home);
-    assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /unsafe|unexpected|limit|cap|verified/);
+    assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /unsafe|unexpected|limit|cap|verified/, mutation);
     assert.notEqual(helperPass(home).status, 0, mutation);
     assert.deepEqual(evidence(home), before, mutation);
-  }
+  });
 });
 
 test("same-PID registries cannot adopt checkpoint cleanup authority and metadata ancestry links refuse", { skip: process.platform !== "linux" }, (t) => {
