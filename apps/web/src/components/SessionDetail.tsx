@@ -3636,9 +3636,11 @@ function SessionDetailLoaded({
     }
   }, [api, busy, composerRestartOffered, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
   // Retry Turn on a failed turn's notice (#2169): the turn's prompt again, as a new turn. A failed
-  // or stopped session restarts first, since the control plane admits no prompt to it until then.
+  // or stopped session restarts first, since the control plane admits no prompt to it until then,
+  // but only where the restart resumes the provider conversation.
   const retryPlan = turnRetryPlan({
     status: session.status,
+    driver: session.driver,
     runnerOnline,
     promptRefusal,
     restartRefusal,

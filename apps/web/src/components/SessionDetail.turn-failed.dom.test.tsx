@@ -254,7 +254,31 @@ const disabledCases: Array<{ name: string; options: FixtureOptions; reason: stri
     reason: "Retry the failed Stop before retrying this turn.",
   },
   { name: "another turn is running", options: { status: "running" }, reason: "The agent is working on another turn." },
+  {
+    name: "a failed Claude Code session's restart would start a new conversation",
+    options: { status: "failed", overrides: { driver: "claude-code" } },
+    reason: "Restarting starts a new conversation. Restart the session, then send the message again.",
+  },
+  {
+    name: "a stopped exec Codex session's restart would start a new conversation",
+    options: { status: "stopped", overrides: { driver: "codex", agentId: "codex", agentName: "Codex" } },
+    reason: "Restarting starts a new conversation. Restart the session, then send the message again.",
+  },
 ];
+
+test("a failed Pi session also restarts, resuming its conversation, before the prompt", async () => {
+  await withFailedTurn({ status: "failed", overrides: { driver: "pi", agentId: "pi", agentName: "Pi" } }, async ({ id, calls, retry }) => {
+    await click(retry()!);
+    assert.deepEqual(calls, [`restart:${id}`, `prompt:${id}:Summarize the release notes:0`]);
+  });
+});
+
+test("an idle Claude Code session's Retry Turn prompts directly", async () => {
+  await withFailedTurn({ status: "idle", overrides: { driver: "claude-code" } }, async ({ id, calls, retry }) => {
+    await click(retry()!);
+    assert.deepEqual(calls, [`prompt:${id}:Summarize the release notes:0`]);
+  });
+});
 
 for (const { name, options, reason } of disabledCases) {
   test(`Retry Turn is disabled with a visible reason when ${name}`, async () => {
