@@ -1536,10 +1536,10 @@ questions in one request name every header), line 2 in `--type-small` `--text-fa
 answer, "Policy: <name>" after a policy's answer), then the clock time and the inline `question`
 status above. Both lines clip at the end. The body shows each question once, its options with a 14px
 success check on the chosen ones, free text in quotes, and one faint sentence saying who settled it:
-"Answered by you at 12:31 AM", the policy, or the parent session. The answer comes from the summary
-the control plane stores when it accepts an answer (`question_answered`, or `answers` on
-`question_policy_answered`); a dismissal stores none, and an answer recorded before the summary
-existed reads "Answered" with no second line. Shared transcripts exclude every question event.
+"Answered by you at 12:31 AM", the policy, or the parent session. The answer is the content-safe
+summary the control plane sends with it, which the runner records as `answers` on that request's
+`question_resolved`; a dismissal records none, and an answer from an older runner or control plane
+reads "Answered" with no second line. Shared transcripts exclude every question event.
 
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;

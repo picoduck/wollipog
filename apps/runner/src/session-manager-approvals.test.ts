@@ -501,6 +501,41 @@ test("explicit question dismissal records cancelled telemetry and a dismissed li
   }
 });
 
+test("a submitted answer records the control plane's summary on its own resolution, and a dismissal none (#2188)", () => {
+  const summary = [{ questionId: "target", selected: ["Production"] }];
+  for (const action of ["submit", "dismiss"] as const) {
+    const { sm, sent, cleanup } = makeHarness(true);
+    try {
+      (sm as any).emitEvent("s_perm", {
+        kind: "question_request", requestId: "question-summary",
+        questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }], required: false }],
+      });
+      sm.answerQuestion("s_perm", "question-summary", action === "submit" ? { target: "Production" } : {}, action,
+        undefined, undefined, summary);
+      const resolved = (eventsOf(sent, "question_resolved")[0] as { payload: { answers?: unknown } }).payload;
+      assert.deepEqual(resolved.answers, action === "submit" ? summary : undefined, action);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test("an async answer records the control plane's summary on its resolution (#2188)", () => {
+  const { sm, sent, cleanup } = makeHarness(true);
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:summary", occurrenceId: "request_async_summary",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    sm.answerQuestion("s_perm", "codex-async:summary", { "0": "Patch" }, "submit", undefined, undefined,
+      [{ questionId: "0", selected: ["Patch"] }]);
+    assert.deepEqual((eventsOf(sent, "question_resolved")[0] as { payload: { answers?: unknown } }).payload.answers,
+      [{ questionId: "0", selected: ["Patch"] }]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("Codex async question stays actionable while running and queues its answer as user input", () => {
   const { sm, sent, store, cleanup } = makeHarness(true);
   try {
@@ -700,15 +735,18 @@ test("a durably queued async answer stops presenting its question while the turn
       queued: () => {}, started: () => {}, completed: () => {},
       failed: (error) => { assert.fail(error); }, uncertain: (error) => { assert.fail(error); },
     };
-    sm.answerRecoveredQuestion("s_perm", "codex-async:queued", recoveryId, { "0": "Patch" }, lifecycle);
+    sm.answerRecoveredQuestion("s_perm", "codex-async:queued", recoveryId, { "0": "Patch" }, lifecycle, undefined,
+      [{ questionId: "0", selected: ["Patch"] }]);
     assert.equal((sm as any).active.get("s_perm").queue.length, 1);
     assert.equal(store.readMeta("s_perm")?.pendingApproval, null,
       "a queued answer must keep its exact question occurrence out of the response form");
     const resolution = eventsOf(sent, "question_resolved") as Array<{
-      payload: { commandId?: string; startsTurn?: boolean; occurrenceId: string };
+      payload: { commandId?: string; startsTurn?: boolean; occurrenceId: string; answers?: unknown };
     }>;
     assert.equal(resolution.length, 1);
     assert.equal(resolution[0]!.payload.occurrenceId, recoveryId);
+    assert.deepEqual(resolution[0]!.payload.answers, [{ questionId: "0", selected: ["Patch"] }],
+      "the accepted async answer records its summary (#2188)");
     assert.equal(resolution[0]!.payload.commandId, undefined);
     assert.equal(resolution[0]!.payload.startsTurn, undefined);
     sm.reconcileStore();
@@ -1439,6 +1477,8 @@ test("a durable recovered answer records one resolution before one provider cont
       "question:1:8",
       { target: "Production" },
       lifecycle,
+      undefined,
+      [{ questionId: "target", selected: ["Production"] }],
     );
     for (let attempt = 0; attempt < 20 && !transitions.includes("completed"); attempt += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1455,6 +1495,7 @@ test("a durable recovered answer records one resolution before one provider cont
       answered: true,
       resolutionReason: "submitted",
       commandId: "answer_command_1",
+      answers: [{ questionId: "target", selected: ["Production"] }],
     });
     assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
     assert.equal(store.readMeta("s_perm")?.status, "idle");

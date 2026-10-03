@@ -1150,9 +1150,10 @@ Wollipog supports the stable MCP `form` and `url` modes. It does not advertise t
 Enum display labels map back to their provider-native values, booleans remain booleans, and numeric
 text is converted back to a finite number only after shared validation succeeds. Secret answers live
 only in the request-keyed dashboard draft and the direct response path, and are excluded from the
-durable audit digest. The answer summary the control plane stores for the transcript
-(`question_answered`, #2188) records only that a secret or `email` answer was given; other free text
-is redacted like transcript text and kept to 500 characters. Free text is bounded at 4000 characters
+durable audit digest. The answer summary the control plane sends with an answer, which the runner
+records as `answers` on that request's `question_resolved` (#2188), records only that a secret or
+`email` answer was given; other free text is redacted like transcript text and kept to 500
+characters. Free text is bounded at 4000 characters
 (`DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH`) whenever a provider declares no smaller `maxLength`, and
 provider-controlled values are truncated before they reach a diagnostic.
 

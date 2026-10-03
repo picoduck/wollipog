@@ -41,6 +41,7 @@ import type {
   InvokeSessionCommandMessage,
   InterruptTurnResultReason,
   PendingApproval,
+  QuestionAnswerSummaryEntry,
   PromptImage,
   PromptImageInput,
   PromptImageReference,
@@ -443,6 +444,8 @@ interface QueuedPrompt {
     recoveryId: string;
     answers: Record<string, string | string[]>;
     resolvedByParentSessionId?: string;
+    /** The control plane's content-safe summary, recorded on this answer's resolution (#2188). */
+    answerSummary?: QuestionAnswerSummaryEntry[];
     /** Exact recovered card validated when the answer entered the queue. Authentication recovery
      * may project its own card until replay reaches the durable no-replay boundary. */
     pendingQuestion: PendingApproval;
@@ -12298,6 +12301,7 @@ export class SessionManager {
             ? { resolvedByParentSessionId: recoveredQuestion.resolvedByParentSessionId }
             : {}),
           ...(durable ? { commandId: durable.commandId } : {}),
+          ...(recoveredQuestion.answerSummary ? { answers: recoveredQuestion.answerSummary } : {}),
         }, durable)
       : syntheticRecovery
       ? this.emitEvent(sessionId, {
@@ -14753,6 +14757,7 @@ export class SessionManager {
     action?: "submit" | "dismiss",
     resolvedByParentSessionId?: string,
     occurrenceId?: string,
+    answerSummary?: QuestionAnswerSummaryEntry[],
   ): void {
     const entry = this.active.get(sessionId);
     const asyncQuestion = pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
@@ -14770,6 +14775,7 @@ export class SessionManager {
         ...(asyncQuestion.occurrenceId ? { occurrenceId: asyncQuestion.occurrenceId } : {}),
         resolutionReason: submitted ? "submitted" : "dismissed",
         ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+        ...(submitted && answerSummary ? { answers: answerSummary } : {}),
       });
       return;
     }
@@ -14792,6 +14798,7 @@ export class SessionManager {
         answered,
         resolutionReason: answered ? "submitted" : "dismissed",
         ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+        ...(answered && answerSummary ? { answers: answerSummary } : {}),
       });
       return;
     }
@@ -14836,6 +14843,7 @@ export class SessionManager {
     answers: Record<string, string | string[]>,
     durable: DurableCommandLifecycle,
     resolvedByParentSessionId?: string,
+    answerSummary?: QuestionAnswerSummaryEntry[],
   ): void {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -14893,6 +14901,7 @@ export class SessionManager {
         recoveryId,
         answers,
         ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+        ...(answerSummary ? { answerSummary } : {}),
         pendingQuestion,
       };
     }
@@ -14934,6 +14943,7 @@ export class SessionManager {
       kind: "question_resolved", requestId, occurrenceId: recoveryId, answered: true,
       resolutionReason: "submitted",
       ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+      ...(recoveredQuestion.answerSummary ? { answers: recoveredQuestion.answerSummary } : {}),
     })) return;
     this.store.flush(sessionId);
 

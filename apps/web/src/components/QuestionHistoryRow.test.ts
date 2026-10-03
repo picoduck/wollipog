@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { AgentQuestion, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
+import type { AgentQuestion, QuestionAnswerSummaryEntry, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 import { deriveTimeline, type TimelineItem } from "../timeline.js";
 import { QuestionHistoryRow, questionAnswerLine, questionOutcome } from "./QuestionHistoryRow.js";
 
@@ -51,17 +51,17 @@ function render(item: QuestionItem, open = false): string {
 
 const visibleText = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
+/** The runner's resolution of a submitted answer, carrying the control plane's summary. */
+function answered(answers: QuestionAnswerSummaryEntry[] | undefined, extra: Partial<Extract<SessionEventPayload, { kind: "question_resolved" }>> = {}, requestId = "ask"): SessionEvent {
+  return event({
+    kind: "question_resolved", requestId, answered: true, resolutionReason: "submitted",
+    ...(answers ? { answers } : {}), ...extra,
+  }, ANSWERED);
+}
+
 test("a single-choice answer reads on line 2 from the stored event (#2188)", () => {
-  const request = ask([destination]);
-  const item = questionFrom([
-    request,
-    event({
-      kind: "question_answered", requestId: "ask", questionEventSeq: request.seq,
-      answers: [{ questionId: "destination", selected: ["Destination 1 (Production)"] }], answeredBy: { kind: "person" },
-    }, ANSWERED),
-    event({ kind: "question_resolved", requestId: "ask", answered: true }, ANSWERED + 500),
-  ]);
-  assert.equal(item.resolvedAt, ANSWERED, "the stored answer's time, not the runner's later resolution");
+  const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }])]);
+  assert.equal(item.resolvedAt, ANSWERED);
   assert.equal(questionOutcome(item), "answered");
   const html = render(item);
   assert.match(html, /<span class="tl-step-title">Destination<\/span><span class="tl-step-detail">Answer: Destination 1 \(Production\)<\/span>/);
@@ -74,14 +74,7 @@ test("a single-choice answer reads on line 2 from the stored event (#2188)", () 
 });
 
 test("a multi-select answer lists every chosen label, and its body checks them under the question shown once", () => {
-  const request = ask([checks]);
-  const item = questionFrom([
-    request,
-    event({
-      kind: "question_answered", requestId: "ask", questionEventSeq: request.seq,
-      answers: [{ questionId: "checks", selected: ["Unit Tests", "Smoke Test"] }], answeredBy: { kind: "person" },
-    }, ANSWERED),
-  ]);
+  const item = questionFrom([ask([checks]), answered([{ questionId: "checks", selected: ["Unit Tests", "Smoke Test"] }])]);
   const html = render(item, true);
   assert.match(html, /<span class="tl-step-detail">Answer: Unit Tests, Smoke Test<\/span>/);
   assert.equal((visibleText(html).match(/Pick every one you need\./g) ?? []).length, 1, "the question text appears once");
@@ -92,19 +85,11 @@ test("a multi-select answer lists every chosen label, and its body checks them u
 });
 
 test("several questions in one request are one row listing every answer, free text in quotes and a secret not shown", () => {
-  const request = ask([destination, note, token]);
-  const item = questionFrom([
-    request,
-    event({
-      kind: "question_answered", requestId: "ask", questionEventSeq: request.seq,
-      answers: [
-        { questionId: "destination", selected: ["Destination 2 (Staging)"] },
-        { questionId: "note", text: "Ship after the freeze" },
-        { questionId: "token", withheld: true },
-      ],
-      answeredBy: { kind: "person" },
-    }, ANSWERED),
-  ]);
+  const item = questionFrom([ask([destination, note, token]), answered([
+    { questionId: "destination", selected: ["Destination 2 (Staging)"] },
+    { questionId: "note", text: "Ship after the freeze" },
+    { questionId: "token", withheld: true },
+  ])]);
   const html = render(item, true);
   assert.match(html, /<span class="tl-step-title">Destination, Note, Token<\/span>/);
   assert.match(html, /<span class="tl-step-detail">Answers: Destination 2 \(Staging\) · “Ship after the freeze” · \(not shown\)<\/span>/);
@@ -114,14 +99,7 @@ test("several questions in one request are one row listing every answer, free te
 });
 
 test("a secret answer reads Answer not shown and never shows its content", () => {
-  const request = ask([token]);
-  const item = questionFrom([
-    request,
-    event({
-      kind: "question_answered", requestId: "ask", questionEventSeq: request.seq,
-      answers: [{ questionId: "token", withheld: true }], answeredBy: { kind: "person" },
-    }, ANSWERED),
-  ]);
+  const item = questionFrom([ask([token]), answered([{ questionId: "token", withheld: true }])]);
   assert.equal(questionAnswerLine(item), "Answer not shown");
   assert.match(render(item), /<span class="tl-step-detail">Answer not shown<\/span>/);
 });
@@ -134,20 +112,11 @@ test("a dismissed question reads Dismissed in the neutral tone with no answer li
   assert.match(visibleText(html), /Dismissed at /);
 });
 
-test("a later dismissal drops an answer summary, and a summary never revives a dismissed question", () => {
-  const request = ask([destination]);
-  const answer: SessionEventPayload = {
-    kind: "question_answered", requestId: "ask", questionEventSeq: request.seq,
-    answers: [{ questionId: "destination", selected: ["Destination 1 (Production)"] }], answeredBy: { kind: "person" },
-  };
-  const dismissedAfter = questionFrom([request, event(answer, ANSWERED), event({ kind: "question_resolved", requestId: "ask", answered: false }, ANSWERED)]);
-  assert.equal(dismissedAfter.answers, undefined);
-  assert.equal(questionAnswerLine(dismissedAfter), null);
-  const second = ask([destination]);
-  const dismissedBefore = questionFrom([second, event({ kind: "question_resolved", requestId: "ask", answered: false }, ANSWERED),
-    event({ ...answer, questionEventSeq: second.seq }, ANSWERED + 1)]);
-  assert.equal(dismissedBefore.answered, false);
-  assert.equal(dismissedBefore.answers, undefined);
+test("a later dismissal drops an earlier answer", () => {
+  const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }]),
+    event({ kind: "question_resolved", requestId: "ask", answered: false, resolutionReason: "replaced" }, ANSWERED + 1)]);
+  assert.equal(item.answers, undefined);
+  assert.equal(questionAnswerLine(item), null);
 });
 
 test("a policy answer reads Answered by Policy with the policy's name and its answer", () => {
@@ -157,9 +126,8 @@ test("a policy answer reads Answered by Policy with the policy's name and its an
     event({
       kind: "question_policy_answered", requestId: "ask", questionEventSeq: request.seq,
       policies: [{ policyId: "routine", name: "Routine Deploys" }],
-      answers: [{ questionId: "destination", selected: ["Destination 2 (Staging)"] }],
     }, ANSWERED),
-    event({ kind: "question_resolved", requestId: "ask", answered: true }, ANSWERED),
+    answered([{ questionId: "destination", selected: ["Destination 2 (Staging)"] }]),
   ]);
   const html = render(item, true);
   assert.match(html, /<span class="tl-step-detail">Answer: Destination 2 \(Staging\) · Policy: Routine Deploys<\/span>/);
@@ -168,15 +136,8 @@ test("a policy answer reads Answered by Policy with the policy's name and its an
 });
 
 test("a Parent Control answer reads Answered by Parent", () => {
-  const request = ask([destination]);
-  const item = questionFrom([
-    request,
-    event({
-      kind: "question_answered", requestId: "ask", questionEventSeq: request.seq,
-      answers: [{ questionId: "destination", selected: ["Destination 1 (Production)"] }],
-      answeredBy: { kind: "parent", sessionId: "parent-session-1" },
-    }, ANSWERED),
-  ]);
+  const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }],
+    { resolvedByParentSessionId: "parent-session-1" })]);
   assert.equal(item.resolvedByParentSessionId, "parent-session-1");
   assert.equal(questionOutcome(item), "answered_by_parent");
   assert.match(visibleText(render(item, true)), /Answered by parent session parent-sessi… at /);
@@ -200,37 +161,15 @@ test("an unanswered question keeps the Awaiting Answer warning status", () => {
   assert.doesNotMatch(html, /tl-step-detail|tl-question-resolution/);
 });
 
-test("a summary restored after the runner's resolution still attaches to its own question", () => {
-  const first = ask([destination]);
-  const second = ask([destination]);
+test("a resolution names its occurrence, so a reused request id never moves an answer to another row", () => {
+  const first = event({ kind: "question_request", requestId: "reused", occurrenceId: "request_first", questions: [destination] }, ASKED);
+  const second = event({ kind: "question_request", requestId: "reused", occurrenceId: "request_second", questions: [destination] }, ASKED + 1);
   const items = deriveTimeline([
-    first,
-    event({ kind: "question_resolved", requestId: "ask", answered: true }, ANSWERED),
-    second,
-    event({
-      kind: "question_answered", requestId: "ask", questionEventSeq: first.seq,
-      answers: [{ questionId: "destination", selected: ["Destination 2 (Staging)"] }], answeredBy: { kind: "person" },
-    }, ANSWERED),
+    first, second,
+    answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }], { occurrenceId: "request_first" }, "reused"),
   ]).filter((item): item is QuestionItem => item.kind === "question");
-  assert.deepEqual(items.map((item) => item.answers?.[0]?.selected), [["Destination 2 (Staging)"], undefined]);
-  assert.equal(items[1]!.answered, undefined, "an identical later request stays pending");
-});
-
-test("a summary without its question's sequence never overwrites a settled occurrence of a reused request id", () => {
-  const old = ask([destination], "reused");
-  const items = deriveTimeline([
-    old,
-    event({
-      kind: "question_answered", requestId: "reused", questionEventSeq: old.seq,
-      answers: [{ questionId: "destination", selected: ["Destination 1 (Production)"] }], answeredBy: { kind: "person" },
-    }, ANSWERED),
-    event({ kind: "question_resolved", requestId: "reused", answered: true }, ANSWERED),
-    event({
-      kind: "question_answered", requestId: "reused", occurrenceId: "request_new",
-      answers: [{ questionId: "destination", selected: ["Destination 2 (Staging)"] }], answeredBy: { kind: "person" },
-    }, ANSWERED + 1),
-  ]).filter((item): item is QuestionItem => item.kind === "question");
-  assert.deepEqual(items.map((item) => item.answers?.[0]?.selected), [["Destination 1 (Production)"]]);
+  assert.deepEqual(items.map((item) => [item.answered, item.answers?.[0]?.selected]),
+    [[true, ["Destination 1 (Production)"]], [undefined, undefined]]);
 });
 
 test("replaced, expired and provider-resolved questions keep their outcome words", () => {

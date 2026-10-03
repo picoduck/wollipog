@@ -620,7 +620,12 @@
 //      through the runner's existing `gh` login, and the runner answers with status data only.
 //      Older runners are never asked; their campaigns show `unavailable{runner_unsupported}`.
 // 199: revision-aware historical cost corrections survive runner replay and reconnect.
-export const PROTOCOL_VERSION = 199;
+// 200: answer summaries (#2188): the control plane sends a content-safe `answerSummary` with
+//      `answer_question` and `answer_recovered_question`, and the runner records it as `answers`
+//      on the `question_resolved` it emits for exactly that request. Secret and email answers keep
+//      no content. Additive + optional: older runners ignore the field and older control planes
+//      send none, so the transcript row shows its status without an answer.
+export const PROTOCOL_VERSION = 200;
 export const PROJECT_MEMORY_MIN_PROTOCOL = 195;
 /** Only Claude versions whose directory override we have verified are advertised as supported.
  * Codex native memory combines projects in a database and cannot be shared project by project. */
@@ -3935,13 +3940,6 @@ export function summarizeQuestionAnswers(
   return entries;
 }
 
-/** Who answered a question, as its stored summary records it. A policy answer is recorded on
- * `question_policy_answered` instead, which names the policies. */
-export type QuestionAnswerResolver =
-  | { kind: "person" }
-  /** The controlling parent session, through Parent Control. */
-  | { kind: "parent"; sessionId: string };
-
 export type ApprovalKind =
   | "permission"
   | "authentication"
@@ -5062,28 +5060,7 @@ export type SessionEventPayload =
       resolvedByParentSessionId?: string;
     }
   | { kind: "question_request"; requestId: string; occurrenceId?: string; questions: AgentQuestion[]; ownerToolUseId?: string; async?: boolean }
-  | {
-      kind: "question_policy_answered";
-      requestId: string;
-      questionEventSeq?: number;
-      policies: { policyId: string; name: string }[];
-      /** The policy's answer (#2188). Absent from older control planes. */
-      answers?: QuestionAnswerSummaryEntry[];
-    }
-  /**
-   * Control-plane-authored summary of a submitted answer (#2188), written when the control plane
-   * accepts it and correlated to its `question_request` by `questionEventSeq`, else by request and
-   * occurrence id. Older control planes never write it; a dismissal never does. Shared transcripts
-   * exclude it like every question event.
-   */
-  | {
-      kind: "question_answered";
-      requestId: string;
-      occurrenceId?: string;
-      questionEventSeq?: number;
-      answers: QuestionAnswerSummaryEntry[];
-      answeredBy: QuestionAnswerResolver;
-    }
+  | { kind: "question_policy_answered"; requestId: string; questionEventSeq?: number; policies: { policyId: string; name: string }[] }
   | {
       kind: "question_resolved";
       requestId: string;
@@ -5097,6 +5074,10 @@ export type SessionEventPayload =
       resolvedByParentSessionId?: string;
       /** Durable recovery-command identity when provider continuation replaced a lost callback. */
       commandId?: string;
+      /** What was answered (#2188): the control plane's content-safe summary, delivered with the
+       * answer and recorded by the runner for exactly this request. Absent for a dismissal and from
+       * older runners and control planes. Shared transcripts exclude it like every question event. */
+      answers?: QuestionAnswerSummaryEntry[];
     }
   | { kind: "checkpoint"; turn: number; tree: string }
   | { kind: "checkpoint_restored"; turn: number }
@@ -8485,6 +8466,8 @@ export interface AnswerRecoveredQuestionCommand {
   answers: Record<string, string | string[]>;
   /** Present only for a delegated descendant resolution authorized by the control plane. */
   resolvedByParentSessionId?: string;
+  /** v200: the content-safe summary the runner records on this answer's `question_resolved`. */
+  answerSummary?: QuestionAnswerSummaryEntry[];
 }
 
 /** Attempt to incorporate direct input or one existing queue item into the exact active turn.
@@ -8778,6 +8761,8 @@ export interface AnswerQuestionMessage {
   action?: "submit" | "dismiss";
   /** Present only for a delegated descendant resolution authorized by the control plane. */
   resolvedByParentSessionId?: string;
+  /** v200: the content-safe summary the runner records on this answer's `question_resolved`. */
+  answerSummary?: QuestionAnswerSummaryEntry[];
 }
 
 /** Restore a worktree session's FILES to the checkpoint taken before `turn` (T3-style rewind).

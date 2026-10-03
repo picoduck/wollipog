@@ -2381,6 +2381,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             msg.command.answers,
             lifecycle,
             msg.command.resolvedByParentSessionId,
+            msg.command.answerSummary,
           );
         } catch (error) {
           lifecycle.failed(`recovered answer acceptance failed: ${errText(error)}`);
@@ -2476,7 +2477,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "answer_question":
       sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers, msg.action, msg.resolvedByParentSessionId,
-        msg.occurrenceId);
+        msg.occurrenceId, msg.answerSummary);
       break;
     case "rewind_session": {
       // Serialize behind the same per-session queue as mutating git actions: a rewind

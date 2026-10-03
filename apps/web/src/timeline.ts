@@ -200,6 +200,8 @@ export type TimelineItem =
       kind: "question";
       id: number;
       requestId: string;
+      /** The runner's identity for this exact use of the request id. */
+      occurrenceId?: string;
       questions: AgentQuestion[];
       /** When the agent asked. */
       createdAt?: number;
@@ -208,8 +210,8 @@ export type TimelineItem =
       answeredByPolicies?: string[];
       resolutionReason?: StructuredRequestResolutionReason;
       resolvedByParentSessionId?: string;
-      /** What was answered (#2188), from the control plane's stored summary. Absent for a dismissal
-       * and for an answer an older control plane recorded. */
+      /** What was answered (#2188), recorded on the runner's resolution. Absent for a dismissal and
+       * for an answer an older runner or control plane recorded. */
       answers?: QuestionAnswerSummaryEntry[];
       /** When it was answered or otherwise resolved. */
       resolvedAt?: number;
@@ -1266,6 +1268,7 @@ export class TimelineBuilder {
             kind: "question",
             id: ev.seq,
             requestId: p.requestId,
+            ...(p.occurrenceId ? { occurrenceId: p.occurrenceId } : {}),
             questions: p.questions,
             ...(Number.isFinite(ev.ts) ? { createdAt: ev.ts } : {}),
           }) - 1;
@@ -1273,26 +1276,14 @@ export class TimelineBuilder {
         this.markDirty(i);
         break;
       }
-      case "question_policy_answered":
-      case "question_answered": {
+      case "question_policy_answered": {
         const idx = p.questionEventSeq !== undefined
           ? this.items.findIndex((item) => item.kind === "question" && item.id === p.questionEventSeq && item.requestId === p.requestId)
           : this.permIndex.get(p.requestId);
         if (idx != null && idx >= 0 && this.items[idx]?.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
           if (it.answered === false) break;
-          // Without its question's sequence, a provider's reused request id cannot tell occurrences
-          // apart, so only a question still waiting can take the answer; a settled one keeps its own.
-          if (p.questionEventSeq === undefined && it.answered !== undefined) break;
-          this.items[idx] = {
-            ...it,
-            answered: true,
-            ...(p.kind === "question_policy_answered"
-              ? { answeredByPolicies: p.policies.map((policy) => policy.name) }
-              : p.answeredBy.kind === "parent" ? { resolvedByParentSessionId: p.answeredBy.sessionId } : {}),
-            ...(p.answers ? { answers: p.answers } : {}),
-            ...(Number.isFinite(ev.ts) ? { resolvedAt: ev.ts } : {}),
-          };
+          this.items[idx] = { ...it, answered: true, answeredByPolicies: p.policies.map((policy) => policy.name) };
           this.markDirty(idx);
         }
         break;
@@ -1301,14 +1292,25 @@ export class TimelineBuilder {
         // An async answer can start the next provider turn with no prompt or checkpoint
         // (turn-progress.ts reads the same boundary).
         if (p.startsTurn) this.endTurnPlan();
-        const idx = this.permIndex.get(p.requestId);
+        let idx = this.permIndex.get(p.requestId);
+        // A provider may reuse a request id; the runner's occurrence names the exact question.
+        if (p.occurrenceId && idx != null && (this.items[idx] as { occurrenceId?: string }).occurrenceId !== p.occurrenceId) {
+          for (let index = this.items.length - 1; index >= 0; index -= 1) {
+            const item = this.items[index]!;
+            if (item.kind === "question" && item.requestId === p.requestId && item.occurrenceId === p.occurrenceId) {
+              idx = index;
+              break;
+            }
+          }
+        }
         if (idx != null && this.items[idx]!.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
           this.items[idx] = { ...it, answered: p.answered, resolutionReason: p.resolutionReason,
             ...(p.resolvedByParentSessionId
               ? { resolvedByParentSessionId: p.resolvedByParentSessionId }
               : {}),
-            ...(it.resolvedAt === undefined && Number.isFinite(ev.ts) ? { resolvedAt: ev.ts } : {}),
+            ...(Number.isFinite(ev.ts) ? { resolvedAt: ev.ts } : {}),
+            ...(p.answered && p.answers ? { answers: p.answers } : {}),
             ...(!p.answered ? { answeredByPolicies: undefined, answers: undefined } : {}) };
           this.markDirty(idx);
         }

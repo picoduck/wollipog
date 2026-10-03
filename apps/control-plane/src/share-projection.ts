@@ -246,7 +246,6 @@ function publicMessages(
       case "permission_resolved":
       case "question_request":
       case "question_policy_answered":
-      case "question_answered":
       case "question_resolved":
       case "checkpoint":
       case "checkpoint_restored":

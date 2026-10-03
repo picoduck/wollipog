@@ -1,4 +1,4 @@
-import type { AgentQuestion, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
+import type { AgentQuestion, QuestionAnswerSummaryEntry, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 import { EventTimeline } from "../components/EventTimeline.js";
 import { deriveTimeline } from "../timeline.js";
 
@@ -55,14 +55,11 @@ function add(payload: SessionEventPayload, minute: number): SessionEvent {
 function answered(
   requestId: string,
   questions: AgentQuestion[],
-  answers: Extract<SessionEventPayload, { kind: "question_answered" }>["answers"],
+  answers: QuestionAnswerSummaryEntry[],
   minute: number,
 ): void {
-  const request = add({ kind: "question_request", requestId, questions }, minute);
-  add({
-    kind: "question_answered", requestId, questionEventSeq: request.seq, answers, answeredBy: { kind: "person" },
-  } as SessionEventPayload, minute + 1);
-  add({ kind: "question_resolved", requestId, answered: true }, minute + 1);
+  add({ kind: "question_request", requestId, questions }, minute);
+  add({ kind: "question_resolved", requestId, answered: true, resolutionReason: "submitted", answers }, minute + 1);
 }
 
 answered("single", [destination], [{ questionId: "destination", selected: ["Destination 1 (Production)"] }], 0);
@@ -75,14 +72,14 @@ answered("several", [destination, checks, note], [
   { questionId: "note", text: "Hold production until QA signs off." },
 ], 8);
 add({ kind: "question_request", requestId: "dismissed", questions: [destination] }, 10);
-add({ kind: "question_resolved", requestId: "dismissed", answered: false }, 11);
+add({ kind: "question_resolved", requestId: "dismissed", answered: false, resolutionReason: "dismissed" }, 11);
 const policy = add({ kind: "question_request", requestId: "policy", questions: [proceed] }, 12);
 add({
   kind: "question_policy_answered", requestId: "policy", questionEventSeq: policy.seq,
   policies: [{ policyId: "routine", name: "Review Sharing and Retries" }],
-  answers: [{ questionId: "review", selected: ["Proceed"] }],
-} as SessionEventPayload, 12);
-add({ kind: "question_resolved", requestId: "policy", answered: true }, 12);
+}, 12);
+add({ kind: "question_resolved", requestId: "policy", answered: true, resolutionReason: "submitted",
+  answers: [{ questionId: "review", selected: ["Proceed"] }] }, 12);
 add({ kind: "question_request", requestId: "awaiting", questions: [checks] }, 14);
 
 export function QuestionRowGallery() {
