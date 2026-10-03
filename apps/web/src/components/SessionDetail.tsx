@@ -6678,11 +6678,19 @@ function SessionDetailLoaded({
           onClose={() => setInspectedWorkspaceReference(null)}
           returnFocusRef={workspaceReferenceReturnFocusRef}
           onRemove={() => {
+            // The chip goes with the reference, so focus moves to the message instead (#1913). On a
+            // phone, removing the last attachment would collapse the idle composer and hide that
+            // textarea, so the close commits with the composer revealed and the message takes focus
+            // inside this click: the composer's pointer-transfer check, which runs after it, then
+            // finds focus in the composer and keeps it open.
             const index = images.indexOf(inspectedWorkspaceReference);
-            if (index !== -1) remove(index);
-            // The chip goes with the reference, so focus returns to the message instead (#1913).
             workspaceReferenceReturnFocusRef.current = inputRef.current;
-            setInspectedWorkspaceReference(null);
+            flushSync(() => {
+              setComposerExpanded(true);
+              if (index !== -1) remove(index);
+              setInspectedWorkspaceReference(null);
+            });
+            inputRef.current?.focus({ preventScroll: true });
           }}
           onOpenInFiles={inspectedWorkspaceReference.kind === "file" || inspectedWorkspaceReference.kind === "lines"
             ? () => {

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { devices, expect, test, type Page } from "@playwright/test";
 import { openSessionWithTray, TRAY_REFERENCE_FINGERPRINT } from "./fixtures/composer-tray.js";
 
 test("workspace paths and exact diff lines become inspectable prompt attachments", async ({ page }) => {
@@ -149,4 +149,39 @@ test("at 390×844 the File Reference dialog is a bottom sheet with both footer a
   for (const name of ["Remove from Message", "Open in Files"]) {
     await expect(dialog.locator(".modal-foot").getByRole("button", { name })).toBeInViewport({ ratio: 1 });
   }
+});
+
+test.describe("on a phone with a coarse pointer (#2177)", () => {
+  test.use({
+    viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, reducedMotion: "reduce",
+    userAgent: devices["Pixel 7"].userAgent,
+  });
+
+  test("Remove from Message on the only attachment returns focus to the composer it revealed", async ({ page }) => {
+    // With nothing else attached and a one-line draft, removing the reference would collapse the idle
+    // phone composer and hide the textarea the dialog returns focus to.
+    await openSessionWithTray(page, { referenceOnly: true });
+    await chip(page).tap();
+    await fileReference(page).getByRole("button", { name: "Remove from Message" }).tap();
+    await expect(fileReference(page)).toHaveCount(0);
+    await expect(page.locator(".composer-attachments")).toHaveCount(0);
+    await expect(page.locator(".composer-input")).toBeVisible();
+    await expect(page.locator(".composer-input")).toBeFocused();
+  });
+
+  test("a tap on the end of the path inspects the reference; the remove's hit area stays off the text", async ({ page }) => {
+    await openSessionWithTray(page);
+    const suffix = page.locator(".composer-attachments .ref-chip-suffix");
+    const box = (await suffix.boundingBox())!;
+    // Every pixel of the text, to its last, belongs to the open half.
+    const owner = ({ x, y }: { x: number; y: number }) =>
+      document.elementFromPoint(x, y)?.closest("button")?.getAttribute("aria-label");
+    expect(await page.evaluate(owner, { x: box.x + box.width - 1, y: box.y + box.height / 2 }))
+      .toBe("Inspect Reference src/session.ts:18-21");
+    // A tap on the line range inspects. (A tap within a pixel or two of the edge is the browser's touch
+    // adjustment to call between two neighbouring targets, as it is for any two buttons.)
+    await page.touchscreen.tap(box.x + box.width - 6, box.y + box.height / 2);
+    await expect(fileReference(page)).toBeVisible();
+    await expect(page.locator(".composer-attachments .ref-chip")).toHaveCount(1);
+  });
 });

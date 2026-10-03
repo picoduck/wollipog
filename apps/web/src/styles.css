@@ -6516,6 +6516,10 @@ textarea,
   font: inherit;
 }
 .ref-chip-open:hover { color: var(--accent-on-tint); }
+@media (pointer: coarse) {
+  /* The remove's 44px hit area reaches 12px back into the chip: keep it on padding, off the path. */
+  .ref-chip-open { padding-right: var(--space-3); }
+}
 .ref-chip > .attach-remove { margin-right: var(--space-1); }
 /* A long path keeps its end, where the file name is, and loses its start. */
 .ref-chip-path {

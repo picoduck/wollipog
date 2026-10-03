@@ -7,22 +7,22 @@ export const TRAY_REFERENCE_FINGERPRINT = "3f9a2c71d04e".padEnd(64, "0");
 /**
  * Opens Alpha Session in the project inbox harness with a line reference (src/session.ts:18-21)
  * between two images, left in the session's draft, as the composer's attachment tray shows it (#2177).
+ * `referenceOnly` leaves the reference alone in the draft.
  */
-export async function openSessionWithTray(page: Page) {
+export async function openSessionWithTray(page: Page, { referenceOnly = false } = {}) {
   await page.goto("/command-inbox-projects-e2e.html");
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await page.evaluate(async ({ png, fingerprint }) => {
-    await window.__WOLLIPOG_PROJECT_INBOX_E2E__.seedComposerDraft("session-alpha", "", [
-      { mimeType: "image/png", data: png },
-      {
-        artifactId: "workspace:lines", mimeType: "application/vnd.wollipog.workspace-reference+json", sizeBytes: 0,
-        sha256: fingerprint, referenceVersion: 1, kind: "lines", path: "src/session.ts",
-        rootFingerprint: "b".repeat(64), targetFingerprint: fingerprint, startLine: 18, endLine: 21,
-      } as never,
-      { mimeType: "image/png", data: png },
-    ]);
-  }, { png: DECODABLE_PNG_BASE64, fingerprint: TRAY_REFERENCE_FINGERPRINT });
+  await page.evaluate(async ({ png, fingerprint, referenceOnly }) => {
+    const reference = {
+      artifactId: "workspace:lines", mimeType: "application/vnd.wollipog.workspace-reference+json", sizeBytes: 0,
+      sha256: fingerprint, referenceVersion: 1, kind: "lines", path: "src/session.ts",
+      rootFingerprint: "b".repeat(64), targetFingerprint: fingerprint, startLine: 18, endLine: 21,
+    } as never;
+    const image = { mimeType: "image/png", data: png };
+    await window.__WOLLIPOG_PROJECT_INBOX_E2E__.seedComposerDraft("session-alpha", "",
+      referenceOnly ? [reference] : [image, reference, image]);
+  }, { png: DECODABLE_PNG_BASE64, fingerprint: TRAY_REFERENCE_FINGERPRINT, referenceOnly });
   // A session already open read its draft before the seed; a reload reads the stored one.
   await page.reload();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], [], { supportsImages: true }));
