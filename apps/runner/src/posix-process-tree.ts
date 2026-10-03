@@ -390,10 +390,10 @@ export class PosixProcessBoundary {
   }
 
   releaseFromMonitor(table: PosixProcessTable): void {
-    // A post-close marker scan is authoritative. Do not let a concurrent shared refresh retire the
-    // boundary from its older ownership snapshot while that scan is still in flight.
+    // A shared monitor read can predate the post-close marker scan even if it finishes afterward.
+    // Its empty tracked set is only a reason to check again, never proof that marked work is gone.
     if (!this.rootClosed || this.releaseCheck || this.terminating || this.released || liveOwned(this.owned, table).length > 0) return;
-    this.release();
+    void this.releaseIfEmpty();
   }
 
   private release(): void {

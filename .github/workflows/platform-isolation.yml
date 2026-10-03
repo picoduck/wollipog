@@ -10,6 +10,11 @@ on:
       - "apps/runner/**"
       - ".github/workflows/platform-isolation.yml"
   workflow_dispatch:
+    inputs:
+      retained_disposal_validation:
+        description: Run ten consecutive focused retained-process disposal tests on macOS.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -44,6 +49,30 @@ jobs:
 
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify Retained Process Disposal Ten Times
+        if: github.event_name == 'workflow_dispatch' && inputs.retained_disposal_validation && matrix.os == 'macos-latest'
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 10); do
+            echo "Retained process disposal run $attempt of 10"
+            status=0
+            output=$(node --import tsx --test --test-reporter=tap --test-name-pattern='^normal provider exit preserves owned background work until session disposal$' apps/runner/src/spawn.test.ts < /dev/null) || status=$?
+            printf '%s\n' "$output"
+            if [ "$status" -ne 0 ]; then exit "$status"; fi
+            if ! printf '%s\n' "$output" | grep -Eq '^ok [0-9]+ - normal provider exit preserves owned background work until session disposal$'; then
+              echo "the exact focused disposal test did not execute" >&2
+              exit 1
+            fi
+            for expected in '# pass 1' '# fail 0' '# cancelled 0' '# skipped 0'; do
+              if ! printf '%s\n' "$output" | grep -qx "$expected"; then
+                echo "the focused disposal test must execute exactly once without skipping" >&2
+                exit 1
+              fi
+            done
+          done
 
       - name: Verify Native Isolation Adapter
         run: node --import tsx --test apps/runner/src/execution-isolation.test.ts apps/runner/src/runner-data-dir.test.ts apps/runner/src/spawn.test.ts

@@ -149,6 +149,40 @@ test("marker-backed boundaries isolate exact session and runner markers", async 
   assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
 });
 
+test("a stale monitor snapshot cannot retire retained work discovered by a post-close marker scan", async (t) => {
+  const owner = {};
+  const retained = { pid: 101, ppid: 1, state: "S", startedAt: "retained-start" };
+  const runtime = scriptedRuntime([
+    processTable(retained),
+    processTable(retained),
+    processTable(retained),
+    processTable(retained),
+    processTable(),
+    processTable(),
+  ]);
+  runtime.listMarkers = async () => new Map([["owner-a", new Set([retained.pid])]]);
+  const boundary = new PosixProcessBoundary(root.pid, owner, "owner-a", runtime);
+  t.after(async () => { await Promise.all(terminatePosixProcessBoundaries(owner)); });
+  boundary.markRootExited();
+
+  // The shared monitor began enumerating before the detached child existed. Its result
+  // arrives only after the fresh post-close scan has discovered that child by marker.
+  let finishMonitor!: (table: PosixProcessTable) => void;
+  const monitor = new Promise<PosixProcessTable>((resolve) => { finishMonitor = resolve; }).then((table) => {
+    boundary.extend(table);
+    boundary.releaseFromMonitor(table);
+  });
+  assert.equal(await boundary.releaseIfEmpty(), false, "the post-close scan retains live work");
+  finishMonitor(processTable());
+  await monitor;
+
+  const disposal = terminatePosixProcessBoundaries(owner);
+  assert.equal(disposal.length, 1, "stale monitor results must preserve the session's disposal boundary");
+  assert.deepEqual(await Promise.all(disposal), [true]);
+  assert.ok(runtime.signals.some(([pid, signal]) => pid === retained.pid && signal === "SIGTERM"),
+    "session disposal signals the retained original identity");
+});
+
 async function assertRetryableFailure(
   firstAttempt: ProcessStep[],
   options: {

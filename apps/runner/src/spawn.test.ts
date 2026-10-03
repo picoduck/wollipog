@@ -832,6 +832,11 @@ test("normal provider exit preserves owned background work until session disposa
   t.after(async () => {
     try {
       await terminateOriginalProcess(escapedIdentity);
+      if (escapedIdentity) {
+        const survivor = await waitForOriginalProcessToStop(escapedIdentity);
+        t.diagnostic(`Retained work cleanup: ${JSON.stringify({ original: escapedIdentity, survivor: survivor ?? null })}`);
+        assert.equal(survivor, undefined, "fixture cleanup stops the original retained work");
+      }
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
@@ -870,6 +875,7 @@ test("normal provider exit preserves owned background work until session disposa
   assert.doesNotThrow(() => process.kill(escapedPid!, 0), "normal provider exit preserves background work");
   escapedIdentity = await captureLiveProcess(escapedPid!);
   assert.ok(escapedIdentity, "retained background work is running before disposal");
+  t.diagnostic(`Retained work before disposal: ${JSON.stringify(escapedIdentity)}`);
 
   let finishGracefulStop!: () => void;
   trackPendingKill(new Promise<void>((resolve) => { finishGracefulStop = resolve; }));
@@ -883,7 +889,9 @@ test("normal provider exit preserves owned background work until session disposa
     "a still-running child fails the post-disposal check");
   finishGracefulStop();
   assert.equal(await waitForPendingKills(8_000), true);
-  assert.equal(await waitForOriginalProcessToStop(escapedIdentity), undefined, "session disposal stops retained work");
+  const survivor = await waitForOriginalProcessToStop(escapedIdentity);
+  t.diagnostic(`Retained work after disposal: ${JSON.stringify({ original: escapedIdentity, survivor: survivor ?? null })}`);
+  assert.equal(survivor, undefined, "session disposal stops retained work");
 });
 
 test("a durable worktree marker reclaims an escaped descendant after its provider exits", {
