@@ -890,7 +890,7 @@ test.describe("on a phone", () => {
     };
 
     // The idle phone composer is a one-line capsule; a tap opens it.
-    const idlePreview = page.getByRole("button", { name: /^Edit Message:/ });
+    const idlePreview = page.locator(".composer-idle-preview");
     if (await idlePreview.isVisible()) await idlePreview.tap();
     await composer.focus();
     await composer.fill("/");
