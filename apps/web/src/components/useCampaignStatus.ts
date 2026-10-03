@@ -399,32 +399,53 @@ export function useCampaignStatus({
   // above it would otherwise keep their older cost. The fresh rows replace the shown ones only when
   // nothing else changed the list meanwhile; when something did, this runs again on the settled list.
   // A refusal (the ledger moved, which reloads anyway) or a failure leaves the shown rows as they are.
+  // A further cost change never cancels a re-read in flight, or a walk slower than the window would
+  // never land while usage streams: it is gathered behind that re-read, which re-reads once more on
+  // landing. Only a change to the list itself (or going offline) abandons it.
+  const quietRead = useRef<{ controller: AbortController; shown: typeof list } | null>(null);
   useEffect(() => {
     if (costReads !== seenCostReads.current) {
       seenCostReads.current = costReads;
       rowsStale.current = true;
     }
-    if (!rowsStale.current || !online) return;
+    const inFlight = quietRead.current;
+    if (inFlight && (inFlight.shown !== list || !online)) {
+      inFlight.controller.abort();
+      quietRead.current = null;
+    }
+    if (quietRead.current || !rowsStale.current || !online) return;
     const shown = list;
     if (shown.key !== listKey || shown.state.status !== "ready" || shown.state.loadingMore || reloading.current) return;
     const controller = new AbortController();
+    const current = { controller, shown };
+    quietRead.current = current;
+    const tick = seenCostReads.current;
     const live = () => !controller.signal.aborted && listRef.current === shown;
+    const settled = () => { if (quietRead.current === current) quietRead.current = null; };
     readRows(shown.state.items.length, controller.signal, live).then((read) => {
+      settled();
       if (!read || !live()) return;
-      rowsStale.current = false;
+      // Cost changes that arrived while this read was in flight leave the rows stale, so the list
+      // this sets re-runs the effect and reads once more.
+      rowsStale.current = seenCostReads.current !== tick;
       setList({ key: listKey, state: { ...shown.state, items: read.rows, total: read.total, hasMore: read.cursor !== null }, cursor: read.cursor });
     }).catch(() => {
+      settled();
       // The shown rows stay; a new revision, a settled page, or the next cost change re-reads them.
     });
-    return () => controller.abort();
   }, [costReads, list, listKey, online, readRows]);
+  useEffect(() => () => {
+    quietRead.current?.controller.abort();
+    quietRead.current = null;
+  }, []);
 
   /* ---------------------------------------------------------------- detail */
   const detailKey = selectedItemId ? `${session.id}:${selectedItemId}` : null;
   const [detail, setDetail] = useState<{ key: string; state: CampaignDetailState } | null>(null);
   /** Completed forge reads; each one reloads the shown details (see the forge refresh below). */
   const [forgeReads, setForgeReads] = useState(0);
-  // Details apply in the order their reads were issued, whether a load or a cost re-read issued them.
+  // Every outcome (details, missing, or an error) applies in the order its read was issued, whether
+  // a load or a cost re-read issued it, so an older answer never replaces a newer one.
   const detailOrder = useRef({ issued: 0, applied: 0 });
   useEffect(() => {
     if (!selectedItemId || !detailKey || !online) return;
@@ -437,7 +458,9 @@ export function useCampaignStatus({
       detailOrder.current.applied = sequence;
       setDetail({ key: detailKey, state: { status: "ready", detail: response.item, error: null } });
     }).catch((cause: unknown) => {
-      if (cancelled || isAbort(cause)) return;
+      // An older failure never replaces what a newer read already showed.
+      if (cancelled || isAbort(cause) || sequence < detailOrder.current.applied) return;
+      detailOrder.current.applied = sequence;
       if (cause instanceof ApiError && cause.status === 404) {
         setDetail({ key: detailKey, state: { status: "missing", detail: null, error: null } });
         return;

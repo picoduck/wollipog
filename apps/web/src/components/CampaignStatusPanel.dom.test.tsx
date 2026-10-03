@@ -1072,15 +1072,36 @@ function costServer(initialUsd: number, rows = 1) {
   const refreshDetails = () => { for (const id of ids) details[id] = detailOf(summaryOf(id)); };
   refreshDetails();
   const base = fakeClient(() => ({ revision: state.revision, items: ids.map(summaryOf), nextCursor: null }), details);
-  const calls = Object.assign(base.calls, { aborted: 0 });
-  /** While set, detail reads wait for it, as a slow server would. */
-  const slow: { hold: Promise<void> | null } = { hold: null };
+  const calls = Object.assign(base.calls, { aborted: 0, rowsAborted: 0, rowsIssued: 0 });
+  /**
+   * While `hold` is set, detail reads wait for it, and row reads wait for `rows`, as a slow server
+   * would. While `manual` is set, each detail read waits until the test settles it from `pending`,
+   * in any order, with the details as they stand then or with an error.
+   */
+  const slow: {
+    hold: Promise<void> | null;
+    rows: Promise<void> | null;
+    manual: boolean;
+    pending: Array<(outcome?: Error) => void>;
+  } = { hold: null, rows: null, manual: false, pending: [] };
   const client = {
     ...base.client,
+    campaignWorkItems: async (id: string, query: string, signal?: AbortSignal) => {
+      calls.rowsIssued += 1;
+      signal?.addEventListener("abort", () => { calls.rowsAborted += 1; });
+      const held = slow.rows;
+      if (held) await held;
+      return base.client.campaignWorkItems(id, query, signal);
+    },
     campaignWorkItem: async (id: string, itemId: string, signal?: AbortSignal) => {
       base.calls.detail.push(`${id}/${itemId}`);
       signal?.addEventListener("abort", () => { calls.aborted += 1; });
-      if (slow.hold) await slow.hold;
+      if (slow.manual) {
+        const outcome = await new Promise<Error | undefined>((settle) => { slow.pending.push(settle); });
+        if (outcome) throw outcome;
+      } else if (slow.hold) {
+        await slow.hold;
+      }
       if (signal?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
       const found = details[itemId];
       if (!found) throw new ApiError("not found", 404);
@@ -1196,6 +1217,79 @@ test("details slower than the window still land while usage streams, with no rea
     assert.equal(server.calls.detail.length, detailed + 2, "the gathered changes cost one more re-read once it lands");
     assert.match(detailCost(panel.container), /\$4\.00/, "and the details show the latest cost");
   } finally {
+    await panel.dispose();
+  }
+});
+
+test("rows slower than the window still land while usage streams, with no re-read cancelled", async () => {
+  const server = costServer(1);
+  const panel = await mount({ initial: rootSession, client: server.client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const rowCost = () => /\$\d+\.\d{2}/u.exec(panel.container.querySelector(".campaign-work-row")?.textContent ?? "")?.[0];
+    assert.equal(rowCost(), "$1.00");
+    const listed = server.calls.rowsIssued;
+    // The server now answers row reads only when released, while costs keep moving.
+    let release!: () => void;
+    server.slow.rows = new Promise<void>((done) => { release = done; });
+    for (const usd of [2, 3, 4]) {
+      await panel.setSession(server.use(usd));
+      await pause(CAMPAIGN_COST_REFRESH_MS + 100);
+    }
+    assert.equal(server.calls.rowsIssued, listed + 1, "one quiet re-read in flight; later changes wait for it");
+    assert.equal(server.calls.rowsAborted, 0, "no row re-read is cancelled by a later cost change");
+    server.slow.rows = null;
+    await act(async () => { release(); });
+    await settle();
+    assert.equal(server.calls.rowsIssued, listed + 2, "the gathered changes cost one more re-read once it lands");
+    assert.equal(rowCost(), "$4.00", "and the rows show the latest cost");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("detail outcomes apply in the order their reads were issued, whichever path issued them", async () => {
+  const server = costServer(1);
+  const panel = await mount({ initial: rootSession, client: server.client });
+  const text = () => panel.container.querySelector(".rp-body")?.textContent ?? panel.container.textContent ?? "";
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    assert.match(detailCost(panel.container), /\$1\.00/);
+    server.slow.manual = true;
+
+    // An older load's failure lands after a newer cost re-read: the newer details stay.
+    await panel.setSession(server.use(2, 2));
+    const olderLoad = server.slow.pending.length - 1;
+    await panel.setSession(server.use(3, 2));
+    const newerCostRead = server.slow.pending.length - 1;
+    assert.ok(newerCostRead > olderLoad, "the cost re-read was issued after the revision's load");
+    await act(async () => { server.slow.pending[newerCostRead]!(); });
+    await settle();
+    assert.match(detailCost(panel.container), /\$3\.00/);
+    await act(async () => { server.slow.pending[olderLoad]!(new ApiError("unavailable", 503)); });
+    await settle();
+    assertNoDomNode(panel.container.querySelector('[role="alert"]'), "an older failure never replaces newer details");
+    assert.match(detailCost(panel.container), /\$3\.00/);
+
+    // An older cost re-read lands after a newer load found the item gone: it stays gone.
+    await pause(CAMPAIGN_COST_REFRESH_MS + 100);
+    await panel.setSession(server.use(4, 2));
+    const olderCostRead = server.slow.pending.length - 1;
+    await panel.setSession(server.use(4, 3));
+    const newerLoad = server.slow.pending.length - 1;
+    assert.ok(newerLoad > olderCostRead);
+    await act(async () => { server.slow.pending[newerLoad]!(new ApiError("not found", 404)); });
+    await settle();
+    assert.match(text(), /Work Item Not Found/u);
+    await act(async () => { server.slow.pending[olderCostRead]!(); });
+    await settle();
+    assert.match(text(), /Work Item Not Found/u, "an older answer never brings back an item a newer read found gone");
+  } finally {
+    server.slow.manual = false;
+    for (const settleRead of server.slow.pending) settleRead();
     await panel.dispose();
   }
 });
