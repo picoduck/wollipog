@@ -968,6 +968,34 @@ test("Retry sends the kept draft once, and an accepted send clears the slot", as
   }
 });
 
+test("a send that fails after the draft was edited offers no Retry, so it never sends the newer draft", async () => {
+  const prompts: string[] = [];
+  let reject: ((cause: Error) => void) | undefined;
+  const fixture = await mount(sessionView({}), {
+    client: {
+      prompt: (_id: string, text: string) => {
+        prompts.push(text);
+        return new Promise<never>((_resolve, fail) => { reject = fail; });
+      },
+    } as Partial<ApiClient>,
+  });
+  try {
+    await typeDraft(fixture.container, "first draft");
+    await sendDraft(fixture.container);
+    await typeDraft(fixture.container, "different draft");
+    await act(async () => { reject!(new TypeError("Failed to fetch")); });
+    await flush();
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Message Not Sent");
+    assert.equal(notice.querySelector(".notice-body p")?.textContent,
+      "Couldn't send your message. Build Box stopped responding.", "no kept draft to promise");
+    assert.equal(fixture.button("Retry"), undefined, "Retry would send a draft that never failed");
+    assert.deepEqual(prompts, ["first draft"]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a server refusal keeps its words behind Show Details, not in the sentence", async () => {
   const fixture = await mount(sessionView({}), {
     client: { prompt: () => Promise.reject(new ApiError("session is not accepting prompts", 409)) } as Partial<ApiClient>,

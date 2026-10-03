@@ -24,6 +24,7 @@ import {
   validatePromptImageInputs,
   isPolicyApproval,
   pendingRequests,
+  isPromptImageReference,
   isWorkspaceReference,
   isTerminal,
   runnerCapabilityRequirement,
@@ -558,30 +559,48 @@ interface ComposerError {
   message: string;
   /** The server's own words, behind Show Details rather than in the sentence (§17.2). */
   detail?: string;
-  /** The action Retry repeats with the kept draft: a failed send, or a failed direct steer. */
-  retry?: "send" | "steer";
+  /** What Retry repeats: a failed send or direct steer, and the exact draft that failed. Retry is
+   * offered only while the composer still holds that draft, so it never sends a different one. */
+  retry?: ComposerRetry;
+}
+interface ComposerRetry {
+  action: "send" | "steer";
+  draft: { text: string; images: PromptImageInput[] };
 }
 /** A failed send or another composer action, or an attachment that did not land. */
 type ComposerErrorSource = "action" | "attachment";
 type ComposerErrors = Partial<Record<ComposerErrorSource, ComposerError>>;
 
+/** The composer still holds the draft a Retry would repeat. Attachments are compared by what they
+ * carry, since a submission clones each one. */
+function composerHoldsDraft(
+  current: { text: string; images: readonly PromptImageInput[] },
+  draft: ComposerRetry["draft"],
+): boolean {
+  const identity = (image: PromptImageInput) => isPromptImageReference(image) ? image.artifactId : image.data;
+  return current.text === draft.text && current.images.length === draft.images.length &&
+    current.images.every((image, index) => identity(image) === identity(draft.images[index]!));
+}
+
 /** "Couldn't send your message." with what happened, for a send the server did not accept. A request
  * that never got an answer is the machine not responding; any other refusal keeps the server's
- * reason behind Show Details. */
-function messageNotSent(cause: unknown, machineName: string | undefined, retry: "send" | "steer"): ComposerError {
+ * reason behind Show Details. Without `retry` the draft was changed while the send was in flight, so
+ * there is no kept draft to retry. */
+function messageNotSent(cause: unknown, machineName: string | undefined, retry?: ComposerRetry): ComposerError {
+  const kept = retry ? " Your draft is kept." : "";
   if (!(cause instanceof ApiError) || cause.status === 502 || cause.status === 503 || cause.status === 504) {
     return {
       title: "Message Not Sent",
-      message: `Couldn't send your message. ${machineName ? `${machineName} stopped responding` : "The runner stopped responding"}. Your draft is kept.`,
-      retry,
+      message: `Couldn't send your message. ${machineName ? `${machineName} stopped responding` : "The runner stopped responding"}.${kept}`,
+      ...(retry ? { retry } : {}),
     };
   }
   const detail = cause.message.trim();
   return {
     title: "Message Not Sent",
-    message: "Couldn't send your message. Your draft is kept.",
+    message: `Couldn't send your message.${kept}`,
     ...(detail ? { detail } : {}),
-    retry,
+    ...(retry ? { retry } : {}),
   };
 }
 
@@ -1067,7 +1086,7 @@ function SessionDetailLoaded({
           setQueuedEdit(null);
           setQueuedEditBusy(false);
           setQueuedEditRecovered(false);
-          setError(null);
+          clearComposerErrors();
         }
         queuedEditAccountKeyRef.current = nextAccountKey;
         setQueuedEditAccountKey(nextAccountKey);
@@ -1142,7 +1161,7 @@ function SessionDetailLoaded({
     setComposerErrors((current) => Object.keys(current).length ? {} : current);
   }, []);
   // What a composer error's Retry repeats, assigned once `send` and `steerDraft` exist below.
-  const composerRetryRef = useRef<Record<NonNullable<ComposerError["retry"]>, () => Promise<void>> | null>(null);
+  const composerRetryRef = useRef<Record<ComposerRetry["action"], () => Promise<void>> | null>(null);
   /** A composer action's error, in one sentence that says what to do; null clears it. */
   const setError = useCallback((message: string | null, title = "Action Failed") => {
     showComposerError("action", message === null ? null : { title, message });
@@ -2099,7 +2118,7 @@ function SessionDetailLoaded({
       setQueuedEdit(null);
       setQueuedEditRecovered(false);
       setQueuedEditBusy(false);
-      setError(null);
+      clearComposerErrors();
       draftState.current = { text: "", images: [] };
       setProgrammaticComposerText("", 0);
       replace([]);
@@ -3794,7 +3813,7 @@ function SessionDetailLoaded({
     setProgrammaticComposerText(draft.text);
     replace(draft.images);
     setHistIdx(-1);
-    setError(null);
+    clearComposerErrors();
     messageActionReturnFocusRef.current = inputRef.current;
     closeMessageAction(false);
   }, [canPrompt, closeMessageAction, replace, setProgrammaticComposerText]);
@@ -4338,6 +4357,9 @@ function SessionDetailLoaded({
   const composerErrorEntries = Object.entries(composerErrors) as [ComposerErrorSource, ComposerError][];
   for (const [source, composerError] of composerErrorEntries) {
     const retry = composerError.retry;
+    // A failed send is about the draft that failed. Once the composer holds another one (a slash
+    // command or Edit as a New Turn replaced it), the entry and its Retry no longer apply.
+    if (retry && !composerHoldsDraft({ text, images }, retry.draft)) continue;
     const retryRefusal = retry ? promptUnavailableReason : null;
     const refusalId = `composer-${source}-retry-refusal`;
     sessionNotices.push({
@@ -4355,7 +4377,10 @@ function SessionDetailLoaded({
               className="btn primary sm"
               disabled={composerRequestBusy || retryRefusal !== null}
               aria-describedby={retryRefusal !== null ? refusalId : undefined}
-              onClick={() => void composerRetryRef.current?.[retry]()}
+              onClick={() => {
+                if (!composerHoldsDraft(draftState.current, retry.draft)) return;
+                void composerRetryRef.current?.[retry.action]();
+              }}
             >
               Retry
             </button>
@@ -4705,7 +4730,8 @@ function SessionDetailLoaded({
           consumedDraftsRef.current.delete(mutationKey);
         }
         if (viewGenerationRef.current === generation) {
-          showComposerError("action", messageNotSent(e, runnerDisp.name || undefined, "send"));
+          showComposerError("action", messageNotSent(e, runnerDisp.name || undefined,
+            composerDraftVersionRef.current === submissionVersion ? { action: "send", draft: submittedDraft } : undefined));
           setPending(null); // send failed — retract the optimistic bubble
         }
       }
@@ -4809,7 +4835,8 @@ function SessionDetailLoaded({
           consumedDraftsRef.current.delete(mutationKey);
         }
         if (viewGenerationRef.current === generation) {
-          showComposerError("action", messageNotSent(cause, runnerDisp.name || undefined, "steer"));
+          showComposerError("action", messageNotSent(cause, runnerDisp.name || undefined,
+            composerDraftVersionRef.current === submissionVersion ? { action: "steer", draft: submittedDraft } : undefined));
         }
       }
     } finally {
@@ -5116,7 +5143,7 @@ function SessionDetailLoaded({
 
   const commitSlashCommand = (command: ComposerCommand) => {
     if (!command.available) {
-      setError(command.disabledReason ?? "This command is unavailable.");
+      setError(command.disabledReason ?? "This command isn't available in this session.", "Command Not Run");
       return;
     }
     const exactTypedCommand = slashTrigger?.raw.toLowerCase() === command.label.toLowerCase();
