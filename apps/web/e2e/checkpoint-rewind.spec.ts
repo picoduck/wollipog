@@ -228,7 +228,7 @@ test.describe("turn action flows on a whole session (#2185)", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(composer).toHaveValue(SECOND_PROMPT);
     await expect(composer).toBeFocused();
-    await expect(page.locator(".composer .image-thumb")).toHaveCount(1);
+    await expect(page.locator(".composer .attach-thumb")).toHaveCount(1);
     const notice = editingCopyNotice(page);
     await expect(notice).toHaveClass(/\bcompact\b/);
     await expect(notice).toHaveClass(/\bt-info\b/);
@@ -265,7 +265,7 @@ test.describe("turn action flows on a whole session (#2185)", () => {
 
     await editingCopyNotice(page).getByRole("button", { name: "Discard Edit" }).click();
     await expect(composer).toHaveValue(draft);
-    await expect(page.locator(".composer .image-thumb")).toHaveCount(0);
+    await expect(page.locator(".composer .attach-thumb")).toHaveCount(0);
     await expect(editingCopyNotice(page)).toHaveCount(0);
     await expect(composer).toBeFocused();
   });

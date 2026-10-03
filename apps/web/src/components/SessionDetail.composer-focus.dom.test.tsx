@@ -4523,7 +4523,7 @@ test("Edit as a New Turn loads an empty composer without a dialog, names the tur
 
     assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'), "an empty composer needs no confirmation");
     assert.equal(fixture.composer.value, "original prompt");
-    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1, "the message's attachments come with it");
+    assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1, "the message's attachments come with it");
     assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer, "the composer has focus");
     assert.deepEqual(
       [fixture.composer.selectionStart, fixture.composer.selectionEnd],
@@ -4551,7 +4551,7 @@ test("Edit as a New Turn over a draft asks Replace Draft first, and Discard Edit
   try {
     await resolveComposerDraft(draft, { text: "my own draft\nwith two lines", images: [{ mimeType: "image/png", data: "bWluZQ==" }], updatedAt: 1 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
-    const thumbs = () => [...fixture.container.querySelectorAll(".image-thumb")].map((thumb) => thumb.outerHTML);
+    const thumbs = () => [...fixture.container.querySelectorAll(".attach-thumb")].map((thumb) => thumb.outerHTML);
     const draftThumbs = thumbs();
     assert.equal(draftThumbs.length, 1);
 
@@ -4622,7 +4622,7 @@ test("Discard Edit over an empty composer clears it, and Send stays disabled wit
     await act(async () => { discard?.click(); });
     await act(async () => { flushFrames(); });
     assert.equal(fixture.composer.value, "");
-    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+    assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 0);
     assert.equal(sendButton(fixture).disabled, true, "an empty composer cannot send");
     assertNoDomNode(fixture.container.querySelector('.session-notice-slot [role="alert"]'), "and says nothing more about it");
     assertNoDomNode(fixture.container.querySelector(".form-error"));
@@ -4681,7 +4681,7 @@ test("a reload keeps Discard Edit and the draft it puts back (#2185)", async () 
     await act(async () => { flushFrames(); });
     const composer = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")!;
     assert.equal(composer.value, "my own draft");
-    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1);
     assertNoDomNode(editingCopyNotice(fixture));
   } finally {
     await unmountFixture(fixture);
