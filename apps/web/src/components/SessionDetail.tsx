@@ -3647,26 +3647,37 @@ function SessionDetailLoaded({
     stopFailed: session.stopOperation?.status === "stop_failed",
   });
   const [retryingTurnPromptId, setRetryingTurnPromptId] = useState<number>();
+  const [turnRetryError, setTurnRetryError] = useState<{ promptId: number; message: string }>();
+  // One retry at a time, decided synchronously: a second click before the pending state renders
+  // must not submit the prompt twice.
+  const turnRetryInFlightRef = useRef(false);
   const retryTurn = useCallback(async (prompt: Extract<TimelineItem, { kind: "user_message" }>) => {
-    if (retryingTurnPromptId !== undefined || retryPlan.kind === "unavailable") return;
+    if (turnRetryInFlightRef.current || retryPlan.kind === "unavailable") return;
+    turnRetryInFlightRef.current = true;
     const generation = viewGenerationRef.current;
-    setError(null);
+    setTurnRetryError(undefined);
     setRetryingTurnPromptId(prompt.id);
     try {
+      // A refused restart throws here, so the prompt is never sent into a session that did not
+      // restart.
       if (retryPlan.kind === "restart_then_prompt") loadSession(await api.restart(session.id));
       await api.prompt(session.id, prompt.text, prompt.images ?? []);
     } catch (cause) {
-      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+      if (viewGenerationRef.current === generation) {
+        setTurnRetryError({ promptId: prompt.id, message: (cause as Error).message });
+      }
     } finally {
+      turnRetryInFlightRef.current = false;
       if (viewGenerationRef.current === generation) setRetryingTurnPromptId(undefined);
     }
-  }, [api, loadSession, retryPlan.kind, retryingTurnPromptId, session.id]);
+  }, [api, loadSession, retryPlan.kind, session.id]);
   const retryPlanReason = retryPlan.kind === "unavailable" ? retryPlan.reason : undefined;
   const turnRetry = useMemo<TurnRetryControl>(() => ({
     onRetry: (prompt) => void retryTurn(prompt),
     ...(retryPlanReason !== undefined ? { unavailableReason: retryPlanReason } : {}),
     ...(retryingTurnPromptId !== undefined ? { pendingPromptId: retryingTurnPromptId } : {}),
-  }), [retryTurn, retryPlanReason, retryingTurnPromptId]);
+    ...(turnRetryError ? { error: turnRetryError } : {}),
+  }), [retryTurn, retryPlanReason, retryingTurnPromptId, turnRetryError]);
   const failedSetupWorktree = session.worktrees?.find((worktree) => worktree.setup?.status === "failed");
   const { creation: recoveryCreation, create: createRecoveryWorktreeWithProgress } =
     useRecoveryWorktreeCreation({ api, session, onSession: loadSession });

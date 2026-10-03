@@ -539,6 +539,8 @@ export interface TurnRetryControl {
   unavailableReason?: string;
   /** The prompt a retry is being submitted for. */
   pendingPromptId?: number;
+  /** Why the last retry of this prompt failed (a refused restart sends no prompt). */
+  error?: { promptId: number; message: string };
 }
 const TurnRetryContext = createContext<TurnRetryControl | undefined>(undefined);
 export const EventTimeline = memo(function EventTimeline({
@@ -2893,6 +2895,9 @@ function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserM
     >
       <p>{describeTurnError(message)}</p>
       {actions && reason !== undefined && <p className="notice-meta" id={reasonId}>{reason}</p>}
+      {prompt !== undefined && retry?.error?.promptId === prompt.id && (
+        <p className="notice-meta" role="alert">Couldn't retry the turn: {retry.error.message}</p>
+      )}
     </Notice>
   );
 }

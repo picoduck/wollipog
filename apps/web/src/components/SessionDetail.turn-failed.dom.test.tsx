@@ -72,8 +72,16 @@ async function flush(delay = 0) {
 }
 
 let sequence = 0;
+interface FixtureOptions {
+  status: SessionView["status"];
+  runnerStatus?: RunnerView["status"];
+  overrides?: Partial<SessionView>;
+  /** Replaces the default restart, which resolves at once with a starting session. */
+  restart?: (session: SessionView) => Promise<SessionView>;
+}
+
 async function withFailedTurn(
-  { status, runnerStatus = "online" }: { status: SessionView["status"]; runnerStatus?: RunnerView["status"] },
+  { status, runnerStatus = "online", overrides = {}, restart }: FixtureOptions,
   check: (view: { id: string; container: HTMLElement; calls: string[]; retry: () => HTMLButtonElement | undefined }) => Promise<void>,
 ) {
   sequence += 1;
@@ -84,6 +92,7 @@ async function withFailedTurn(
     useWorktree: false, worktreePath: null, archived: false, createdAt: 1, updatedAt: 1, lastEventAt: null,
     messageCount: 2, eventEpoch: 0, preview: null, pendingApproval: null, driver: "claude-code", model: null,
     effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
+    ...overrides,
   } as SessionView;
   const events: SessionEvent[] = ([
     { kind: "user_message", text: "Summarize the release notes", images: [] },
@@ -100,7 +109,7 @@ async function withFailedTurn(
     getSessionEventTailPage: () => new Promise<SessionEventsResponse>((resolve) => { tail.push(resolve); }),
     restart: async (sessionId: string) => {
       calls.push(`restart:${sessionId}`);
-      return { ...session, status: "starting" as const };
+      return restart ? restart(session) : { ...session, status: "starting" as const };
     },
     prompt: async (sessionId: string, text: string, images: unknown[]) => {
       calls.push(`prompt:${sessionId}:${text}:${images.length}`);
@@ -151,37 +160,113 @@ async function withFailedTurn(
   }
 }
 
-test("a failed session's tail is one Turn Failed notice, and Retry Turn restarts it and submits the prompt", async () => {
-  await withFailedTurn({ status: "failed" }, async ({ id, container, calls, retry }) => {
+const resumable = { driver: "codex-app-server", agentId: "codex", agentName: "Codex" } as const;
+const click = (button: HTMLButtonElement) =>
+  act(async () => { button.click(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+const reasonOf = (button: HTMLButtonElement) =>
+  domWindow.document.getElementById(button.getAttribute("aria-describedby") ?? "");
+
+test("a failed session's tail is one Turn Failed notice, and Retry Turn restarts it and then submits the prompt", async () => {
+  await withFailedTurn({ status: "failed", overrides: resumable }, async ({ id, container, calls, retry }) => {
     const titles = [...container.querySelectorAll(".notice-title")].map((title) => title.textContent);
     assert.deepEqual(titles.filter((title) => title === "Turn Failed"), ["Turn Failed"]);
     const rows = [...container.querySelectorAll(".timeline [data-virtual-row], .timeline [role='listitem']")];
-    assert.ok(rows.at(-1)?.querySelector(".notice-title")?.textContent === "Turn Failed",
+    assert.equal(rows.at(-1)?.querySelector(".notice-title")?.textContent, "Turn Failed",
       "the last transcript row is the notice");
     const button = retry();
     assert.ok(button);
     assert.equal(button.disabled, false);
-    await act(async () => { button.click(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+    await click(button);
     assert.deepEqual(calls, [`restart:${id}`, `prompt:${id}:Summarize the release notes:0`]);
   });
 });
 
 test("an idle session's Retry Turn submits the prompt without restarting", async () => {
   await withFailedTurn({ status: "idle" }, async ({ id, calls, retry }) => {
-    await act(async () => { retry()!.click(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+    await click(retry()!);
     assert.deepEqual(calls, [`prompt:${id}:Summarize the release notes:0`]);
   });
 });
 
-test("with the runner offline Retry Turn is disabled and names why in a visible line", async () => {
-  await withFailedTurn({ status: "failed", runnerStatus: "offline" }, async ({ calls, retry }) => {
-    const button = retry();
-    assert.ok(button);
-    assert.equal(button.disabled, true);
-    const reason = domWindow.document.getElementById(button.getAttribute("aria-describedby") ?? "");
-    assert.equal(reason?.textContent, "Runner is offline.");
-    assert.ok(reason?.closest(".notice-body"));
-    await act(async () => button.click());
-    assert.deepEqual(calls, []);
+test("a refused restart shows its error in the notice and sends no prompt", async () => {
+  await withFailedTurn({
+    status: "failed",
+    overrides: resumable,
+    restart: async () => { throw new Error("the parent session has 0 remaining live child slots"); },
+  }, async ({ id, container, calls, retry }) => {
+    await click(retry()!);
+    assert.deepEqual(calls, [`restart:${id}`], "the prompt is never sent after a failed restart");
+    const notice = retry()!.closest(".notice")!;
+    assert.equal(notice.querySelector('[role="alert"]')?.textContent,
+      "Couldn't retry the turn: the parent session has 0 remaining live child slots");
+    assert.equal(retry()!.disabled, false, "the person can try again");
+    assert.doesNotMatch(container.querySelector(".composer")?.textContent ?? "", /live child slots/u,
+      "the error belongs to the notice, not the composer");
   });
 });
+
+test("Retry Turn stays busy until restart and prompt both settle, and a second click submits nothing", async () => {
+  let finishRestart: (() => void) | undefined;
+  await withFailedTurn({
+    status: "failed",
+    overrides: resumable,
+    restart: (session) => new Promise((resolve) => { finishRestart = () => resolve({ ...session, status: "starting" }); }),
+  }, async ({ id, calls, retry }) => {
+    const button = retry()!;
+    await click(button);
+    await click(button);
+    assert.deepEqual(calls, [`restart:${id}`]);
+    assert.equal(retry()!.getAttribute("aria-busy"), "true");
+    assert.equal(retry()!.getAttribute("aria-disabled"), "true");
+    await act(async () => { finishRestart!(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+    assert.deepEqual(calls, [`restart:${id}`, `prompt:${id}:Summarize the release notes:0`], "one restart, one prompt");
+    assert.equal(retry()!.getAttribute("aria-busy"), null);
+  });
+});
+
+const viewerReason = "Your Viewer role is read-only.";
+const disabledCases: Array<{ name: string; options: FixtureOptions; reason: string }> = [
+  { name: "the runner is offline", options: { status: "failed", runnerStatus: "offline", overrides: resumable }, reason: "Runner is offline." },
+  {
+    name: "a Viewer may not prompt",
+    options: { status: "idle", overrides: { commandPermissions: { prompt: { allowed: false, reason: viewerReason } } as SessionView["commandPermissions"] } },
+    reason: viewerReason,
+  },
+  {
+    name: "a Viewer may not restart a failed session",
+    options: { status: "failed", overrides: { ...resumable, commandPermissions: { restart: { allowed: false, reason: viewerReason } } as SessionView["commandPermissions"] } },
+    reason: viewerReason,
+  },
+  {
+    name: "the conversation is quarantined",
+    options: { status: "idle", overrides: { historyQuarantine: { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork" } as SessionView["historyQuarantine"] } },
+    reason: "Conversation quarantined. Recover this session to continue.",
+  },
+  {
+    name: "the worktree needs recovery",
+    options: { status: "idle", overrides: { worktreeRecovery: { recoveryId: "worktree-recovery:test", detectedAt: 2, selectedPath: "/repo/missing", detail: "The selected worktree is no longer registered." } as SessionView["worktreeRecovery"] } },
+    reason: "Worktree recovery is required before sending another message.",
+  },
+  { name: "the session is archived", options: { status: "stopped", overrides: { ...resumable, archived: true } }, reason: "Unarchive the session to send a message." },
+  {
+    name: "a Stop failed",
+    options: { status: "stopped", overrides: { ...resumable, stopOperation: { operationId: "stop-1", status: "stop_failed", requestedAt: 1, lastAttemptAt: 1, attemptCount: 1 } as SessionView["stopOperation"] } },
+    reason: "Retry the failed Stop before retrying this turn.",
+  },
+  { name: "another turn is running", options: { status: "running" }, reason: "The agent is working on another turn." },
+];
+
+for (const { name, options, reason } of disabledCases) {
+  test(`Retry Turn is disabled with a visible reason when ${name}`, async () => {
+    await withFailedTurn(options, async ({ calls, retry }) => {
+      const button = retry();
+      assert.ok(button, "the notice keeps Retry Turn, disabled");
+      assert.equal(button.disabled, true);
+      const line = reasonOf(button);
+      assert.equal(line?.textContent, reason);
+      assert.ok(line?.closest(".notice-body"), "the reason is a visible line in the notice");
+      await act(async () => button.click());
+      assert.deepEqual(calls, []);
+    });
+  });
+}
