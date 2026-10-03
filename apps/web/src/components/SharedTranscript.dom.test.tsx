@@ -20,7 +20,7 @@ for (const [name, value] of Object.entries({
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
 // The control plane's address is read from `window` when config loads, so import after the window.
-const { SharedTranscript, sharedMessageCount } = await import("./SharedTranscript.js");
+const { SharedTranscript, sharedMessageCount, sharedTranscriptTitle } = await import("./SharedTranscript.js");
 
 const TOKEN = "q7Lr2xVb9KcT4mWn8PzY3sHd6FgJ1aEu5oRi0tXkQwB";
 const realFetch = globalThis.fetch;
@@ -236,4 +236,50 @@ test("the message count leaves out interruptions and says one message in the sin
   assert.equal(sharedMessageCount([{ role: "user", text: "Hi" }, { role: "assistant", text: "[Turn interrupted]" }]), "1 message");
   assert.equal(sharedMessageCount([{ role: "user", text: "[Turn interrupted]" }, { role: "assistant", text: "Hi" }]), "2 messages",
     "only the projection's own assistant marker is an interruption");
+});
+
+test("a link the sharer gave the session title shows it as the heading, under a Shared Transcript bar (#2189)", async () => {
+  serve(() => json({ ...share([{ role: "user", text: "hello" }]), title: "Fix the flaky login test" }));
+  const view = await mount();
+  try {
+    assert.equal(view.container.querySelector("h1")?.textContent, "Fix the flaky login test");
+    assert.equal(view.container.querySelector(".share-bar-title")?.textContent, "Shared Transcript");
+    assert.equal(view.container.querySelector("main")?.getAttribute("aria-labelledby"),
+      view.container.querySelector("h1")?.id, "the page's landmark is named by the title");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a response without a title, as from a link created without the opt-in or an older control plane, keeps Shared Transcript", async () => {
+  for (const body of [
+    share([{ role: "user", text: "hello" }]),
+    { ...share([{ role: "user", text: "hello" }]), title: "" },
+    { ...share([{ role: "user", text: "hello" }]), title: "   " },
+    { ...share([{ role: "user", text: "hello" }]), title: 42 },
+    { ...share([{ role: "user", text: "hello" }]), title: { text: "object" } },
+  ]) {
+    serve(() => json(body));
+    const view = await mount();
+    try {
+      assert.equal(view.container.querySelector("h1")?.textContent, "Shared Transcript", JSON.stringify(body));
+      assert.equal(view.container.querySelector(".share-bar-title")?.textContent, "Shared Transcript");
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("a title is plain text, never markup", async () => {
+  const title = "<img src=x onerror=alert(1)> **bold**";
+  assert.equal(sharedTranscriptTitle({ ...share([]), title }), title);
+  serve(() => json({ ...share([{ role: "user", text: "hello" }]), title }));
+  const view = await mount();
+  try {
+    const heading = view.container.querySelector("h1");
+    assert.equal(heading?.textContent, title);
+    assertNoDomNode(heading?.querySelector("img, strong") ?? null, "the title renders no element");
+  } finally {
+    await view.unmount();
+  }
 });

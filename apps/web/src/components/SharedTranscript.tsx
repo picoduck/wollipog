@@ -27,6 +27,13 @@ export function sharedMessageCount(messages: readonly OperationalTranscriptMessa
   return `${count.toLocaleString("en-US")} ${count === 1 ? "message" : "messages"}`;
 }
 
+/** The title the sharer opted to include (#2189), or null. A response without one, from a link created
+ * without the opt-in or from an older control plane, keeps the page's own heading. */
+export function sharedTranscriptTitle(share: PublicTranscriptShare): string | null {
+  const title: unknown = share.title;
+  return typeof title === "string" && title.trim() !== "" ? title : null;
+}
+
 /**
  * One projected message in the transcript's own recipes (#2151, #2152): a person's message is a
  * right-aligned bubble with the inline profile, a reply is unframed document markdown, and an
@@ -59,6 +66,8 @@ function SharedMessage({ message }: { message: OperationalTranscriptMessage }) {
  * The page a transcript share link opens (#2173, docs/design-system.md §4.4, §12, §13.2): a 48px bar
  * with the product mark, the page title with the message count and expiry, one warning notice, and
  * the messages. It runs outside the authenticated shell, so it reads nothing but the public share.
+ * The heading is "Shared Transcript" unless the sharer included the session title (#2189); the bar
+ * keeps "Shared Transcript" either way.
  */
 export function SharedTranscript({ token }: { token: string | null }) {
   const [state, setState] = useState<ShareState>({ kind: "loading" });
@@ -91,6 +100,7 @@ export function SharedTranscript({ token }: { token: string | null }) {
   }, [attempt, token]);
 
   const messages = state.kind === "ready" ? state.value.transcript.messages : [];
+  const title = state.kind === "ready" ? sharedTranscriptTitle(state.value) : null;
   return (
     <div className="share-page">
       <header className="share-bar">
@@ -99,7 +109,7 @@ export function SharedTranscript({ token }: { token: string | null }) {
       </header>
       <main className="share-main" aria-labelledby="shared-transcript-title">
         <div className="share-head">
-          <h1 className="share-title" id="shared-transcript-title">Shared Transcript</h1>
+          <h1 className="share-title" id="shared-transcript-title">{title ?? "Shared Transcript"}</h1>
           {state.kind === "ready" && (
             <>
               <p className="share-meta">

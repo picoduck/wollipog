@@ -21,7 +21,7 @@ import {
   deployToAssignmentsConsent,
   switchAgentsConsent,
 } from "./components/ReviewConsent.js";
-import { copyShortcutHelper, TRANSCRIPT_SHARE_COPY } from "./components/TranscriptShareDialog.js";
+import { copyShortcutHelper, includeTitleHelper, TRANSCRIPT_SHARE_COPY } from "./components/TranscriptShareDialog.js";
 import {
   CHOOSE_DESTINATION_LABEL,
   DESTINATION_MENU_LABEL,
@@ -689,8 +689,15 @@ test("Share Transcript's titles, labels and buttons are Title Case, and its sent
   const titles = ["title", "expiryLabel", "create", "linkLabel", "copy", "unavailableTitle", "linksTitle", "loadErrorTitle",
     "createErrorTitle", "revoke"] as const;
   const sentences = ["description", "expiryHelper", "creating", "linkHelper", "copied", "unavailableBody", "loading", "empty",
-    "loadErrorBody", "revoking", "revoked"] as const;
-  assert.deepEqual([...titles, ...sentences].sort(), Object.keys(TRANSCRIPT_SHARE_COPY).sort(), "every string is classified");
+    "loadErrorBody", "revoking", "revoked", "untitled"] as const;
+  // The title consent label (§8.4) and the link row's fact (#2189) are sentence case without a period.
+  const phrases = ["includeTitle", "includesTitle"] as const;
+  assert.deepEqual([...titles, ...sentences, ...phrases].sort(), Object.keys(TRANSCRIPT_SHARE_COPY).sort(),
+    "every string is classified");
+  for (const key of phrases) {
+    const value = TRANSCRIPT_SHARE_COPY[key];
+    assert.ok(isSentenceCase(value) && !isTitleCase(value) && !/[.!?…]$/.test(value), `${key}: ${JSON.stringify(value)}`);
+  }
   for (const key of titles) {
     const value = TRANSCRIPT_SHARE_COPY[key];
     assert.ok(isTitleCase(value) && !/[.!?]$/.test(value), `${key}: ${JSON.stringify(value)}`);
@@ -701,6 +708,8 @@ test("Share Transcript's titles, labels and buttons are Title Case, and its sent
     isSentenceCase(part.split(/\s+/).map((word, index) => index > 0 && names.has(word.replace(/\W+$/, "")) ? "name" : word).join(" ")));
   for (const key of sentences) assert.ok(sentence(TRANSCRIPT_SHARE_COPY[key]), `${key}: ${JSON.stringify(TRANSCRIPT_SHARE_COPY[key])}`);
   for (const mac of [true, false]) assert.ok(sentence(copyShortcutHelper(mac)), copyShortcutHelper(mac));
+  // The quoted session title is user content; the sentence around it is checked with a lowercase one.
+  assert.ok(sentence(includeTitleHelper("“fix login”")), includeTitleHelper("“fix login”"));
 
   // The rows and the Revoke… name are built from times: line one is a title-like label, line two a
   // sentence-case fact, and the button's accessible name is Title Case like its visible label.

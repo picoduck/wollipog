@@ -96,3 +96,26 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     });
   });
 }
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test.describe(`session title at ${viewport.width}px (#2189)`, () => {
+    test.use({ viewport });
+
+    test("an included title is the heading, the bar keeps Shared Transcript, and the longest one wraps", async ({ page }) => {
+      await page.clock.setFixedTime(NOW);
+      await page.goto("/shared-transcript-e2e.html?title=1");
+      await expect(page.getByRole("heading", { level: 1 })).toHaveText("Fix the flaky login test on CI");
+      await expect(page.locator(".share-bar")).toHaveText("Shared Transcript");
+      await expect(page.getByRole("main")).toHaveAccessibleName("Fix the flaky login test on CI");
+
+      await page.goto("/shared-transcript-e2e.html?title=long");
+      const heading = page.getByRole("heading", { level: 1 });
+      await expect(heading).toHaveText(/…$/);
+      await expect(page.locator(".timeline")).toBeVisible();
+      const { left, right, overflow } = await edges(page);
+      expect(overflow).toBe(0);
+      expect(left).toBeGreaterThanOrEqual(16);
+      expect(right).toBeGreaterThanOrEqual(16);
+    });
+  });
+}

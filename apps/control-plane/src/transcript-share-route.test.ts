@@ -148,6 +148,19 @@ test("the real public share route enforces capability lifecycle, headers, origin
   assert.equal(success.body.includes("route-session"), false);
   assert.equal(success.body.includes("Never public"), false);
 
+  // Only a link whose sharer opted in carries the title, beside the same least-data fields (#2189).
+  const titled = createAuthorizedTranscriptShare(
+    db, principal, "route-session", { expiresInSeconds: 3600, includeTitle: true }, now,
+  );
+  assert.equal(titled.ok, true);
+  if (!titled.ok) return;
+  const titledSuccess = await app.inject({ method: "GET", url: "/api/public/transcript-share", remoteAddress: "10.0.0.8",
+    headers: { authorization: `Wollipog-Share ${titled.value.token}` } });
+  assert.equal(titledSuccess.statusCode, 200);
+  assert.deepEqual(Object.keys(titledSuccess.json()), ["expiresAt", "title", "transcript"]);
+  assert.equal(titledSuccess.json().title, "Never public");
+  assert.equal(titledSuccess.body.includes("route-session"), false);
+
   const wollipogSuccess = await app.inject({
     method: "GET",
     url: "/api/public/transcript-share",

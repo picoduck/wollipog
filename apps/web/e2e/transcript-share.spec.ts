@@ -56,7 +56,7 @@ test.describe("desktop", () => {
       .toBeLessThanOrEqual(await dialog.locator(".modal-title").evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)));
     await expect(rows(dialog).locator(".row-title")).toHaveText(["Expires in 7 days", "Revoked", "Expired on Sep 21"]);
     await expect(rows(dialog).locator(".status.inline")).toHaveText(["Active", "Revoked", "Expired"]);
-    await expect(rows(dialog).locator(".row-sub")).toHaveText(["Created today at 12:26 PM", "Created Sep 27 at 2:26 PM", "Created Sep 20 at 2:26 PM"]);
+    await expect(rows(dialog).locator(".row-sub > span:first-child")).toHaveText(["Created today at 12:26 PM", "Created Sep 27 at 2:26 PM", "Created Sep 20 at 2:26 PM"]);
     for (const text of await rows(dialog).allTextContents()) expect(text).not.toMatch(/\d{1,2}\/\d{1,2}\/\d{4}/);
     for (const row of await rows(dialog).all()) expect(await height(row)).toBe(56);
     // Only the active link can be revoked.
@@ -165,3 +165,52 @@ test.describe("phone", () => {
     await expect(revoke).toBeFocused();
   });
 });
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test.describe(`session title at ${viewport.width}px (#2189)`, () => {
+    test.use({ viewport });
+
+    test("the title checkbox sits above Link Expires, unchecked, and a link that includes the title says so on line two", async ({ page }) => {
+      const dialog = await open(page);
+      const box = dialog.getByRole("checkbox", { name: "Include the session title on the shared page" });
+      await expect(box).not.toBeChecked();
+      await expect(box).toHaveAccessibleDescription("The page shows “Fix the flaky login test on CI” as its title, with any secrets removed.");
+      const boxTop = (await dialog.locator("label.checkbox").boundingBox())!.y;
+      const groupTop = (await dialog.getByRole("radiogroup", { name: "Link Expires" }).boundingBox())!.y;
+      expect(boxTop).toBeLessThan(groupTop);
+      // The whole row is the target (§8.4).
+      expect(await height(dialog.locator("label.checkbox"))).toBeGreaterThanOrEqual(32);
+
+      // The fact follows the creation time on the same line, and only on the link that includes it.
+      const meta = rows(dialog).first().locator(".share-link-meta > span");
+      await expect(meta).toHaveText(["Created today at 12:26 PM", "Includes session title"]);
+      const [created, fact] = [await meta.nth(0).boundingBox(), await meta.nth(1).boundingBox()];
+      expect(Math.abs(created!.y - fact!.y)).toBeLessThanOrEqual(1);
+      expect(fact!.x).toBeGreaterThan(created!.x + created!.width);
+      // On a narrow row the creation time shortens; the fact is never cut.
+      expect(await meta.nth(1).evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      const rowBody = await rows(dialog).first().locator(".row-body").boundingBox();
+      expect(fact!.x + fact!.width).toBeLessThanOrEqual(rowBody!.x + rowBody!.width + 0.5);
+      await expect(rows(dialog).nth(1).locator(".share-link-meta > span")).toHaveCount(1);
+
+      await dialog.locator("label.checkbox").click();
+      await expect(box).toBeChecked();
+      await dialog.getByRole("button", { name: "Create Link" }).click();
+      await expect(rows(dialog).first().locator(".share-link-meta > span").nth(1)).toHaveText("Includes session title");
+      expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+
+      // Closing and opening again starts unchecked.
+      await dialog.getByRole("button", { name: "Done" }).click();
+      await page.getByRole("button", { name: "Share" }).click();
+      const reopened = page.getByRole("dialog", { name: "Share Transcript" });
+      await expect(reopened.getByRole("checkbox", { name: "Include the session title on the shared page" })).not.toBeChecked();
+    });
+
+    test("an untitled session's checkbox is disabled and says why", async ({ page }) => {
+      const dialog = await open(page, "?untitled=1");
+      const box = dialog.getByRole("checkbox", { name: "Include the session title on the shared page" });
+      await expect(box).toBeDisabled();
+      await expect(box).toHaveAccessibleDescription("This session has no title to include.");
+    });
+  });
+}

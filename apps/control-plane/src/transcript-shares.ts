@@ -13,7 +13,7 @@ import {
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
-import { DEFAULT_OPERATIONAL_TRANSCRIPT_MAX_UTF8_BYTES } from "./share-projection.js";
+import { DEFAULT_OPERATIONAL_TRANSCRIPT_MAX_UTF8_BYTES, sharedTranscriptTitle } from "./share-projection.js";
 import { buildAuthorizedSessionTranscriptExport } from "./session-exports.js";
 
 export const MIN_TRANSCRIPT_SHARE_TTL_SECONDS = 5 * 60;
@@ -45,6 +45,13 @@ function validatedTtl(request: unknown): number | null {
     Number(ttl) <= MAX_TRANSCRIPT_SHARE_TTL_SECONDS
     ? Number(ttl)
     : null;
+}
+
+/** Only an explicit `true` opts in; absent means off, and any other value is refused (#2189). */
+function validatedIncludeTitle(request: unknown): boolean | null {
+  const includeTitle = (request as Partial<CreateTranscriptShareRequest> | null)?.includeTitle;
+  if (includeTitle === undefined) return false;
+  return typeof includeTitle === "boolean" ? includeTitle : null;
 }
 
 function newTranscriptShareToken(): string {
@@ -118,6 +125,10 @@ export function createAuthorizedTranscriptShare(
       code: "invalid_expiry",
     };
   }
+  const includeTitle = validatedIncludeTitle(request);
+  if (includeTitle === null) {
+    return { ok: false, status: 400, error: "includeTitle must be a boolean", code: "invalid_include_title" };
+  }
   if (!db.canAccessSession(principal, sessionId)) {
     return { ok: false, status: 404, error: "session not found", code: "not_found" };
   }
@@ -126,6 +137,9 @@ export function createAuthorizedTranscriptShare(
   // canonical persisted projection and can never observe later events or session metadata.
   const exported = buildAuthorizedSessionTranscriptExport(db, principal, sessionId, "json");
   if (!exported.ok) return exported;
+  // Frozen with the projection: a later rename never reaches an existing link.
+  const session = includeTitle ? db.getSession(sessionId) : null;
+  const title = session ? sharedTranscriptTitle(session.title, db.sessionSensitivePaths(sessionId)) : null;
 
   const token = newTranscriptShareToken();
   const share = db.createTranscriptShare({
@@ -140,6 +154,7 @@ export function createAuthorizedTranscriptShare(
     schemaVersion: exported.projection.schemaVersion,
     createdAt: now,
     expiresAt: now + ttlSeconds * 1_000,
+    title,
   }, MAX_ACTIVE_TRANSCRIPT_SHARES_PER_SESSION, MAX_ACTIVE_TRANSCRIPT_SHARE_BYTES_PER_SESSION,
   MAX_ACTIVE_TRANSCRIPT_SHARE_BYTES_PER_ORGANIZATION);
   if (share === "count_limit") {
@@ -234,8 +249,14 @@ export function loadPublicTranscriptShare(
   capability: PublicTranscriptShareCapability,
   now = Date.now(),
 ): PublicTranscriptShare | null {
-  const raw = db.transcriptShareContentById(capability.shareId, now);
-  if (raw === null) return null;
-  const transcript = parsePersistedProjection(raw, capability.schemaVersion);
-  return transcript ? { expiresAt: capability.expiresAt, transcript } : null;
+  const stored = db.transcriptShareContentById(capability.shareId, now);
+  if (stored === null) return null;
+  const transcript = parsePersistedProjection(stored.projectionJson, capability.schemaVersion);
+  if (!transcript) return null;
+  // The field exists only for a link whose sharer opted in; every other link omits it entirely.
+  return {
+    expiresAt: capability.expiresAt,
+    ...(stored.title ? { title: stored.title } : {}),
+    transcript,
+  };
 }

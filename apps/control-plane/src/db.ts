@@ -2154,7 +2154,9 @@ CREATE INDEX IF NOT EXISTS idx_session_ownership_scope
   ON session_ownership(organization_id, owner_kind, owner_id, session_id);
 
 -- Immutable, least-data transcript snapshots addressed by hashed bearer capabilities. Revocation
--- and expiry erase projection_json while retaining small management/audit metadata.
+-- and expiry erase projection_json while retaining small management/audit metadata. title is the
+-- redacted session title a sharer opted into (#2189); it can exist only beside the projection, so
+-- every path that erases the projection must erase it too.
 CREATE TABLE IF NOT EXISTS transcript_shares (
   share_id           TEXT PRIMARY KEY,
   token_hash         TEXT NOT NULL UNIQUE,
@@ -2168,6 +2170,7 @@ CREATE TABLE IF NOT EXISTS transcript_shares (
   created_at         INTEGER NOT NULL,
   expires_at         INTEGER NOT NULL,
   revoked_at         INTEGER,
+  title              TEXT CHECK (title IS NULL OR (projection_json IS NOT NULL AND LENGTH(title) BETWEEN 1 AND 200)),
   CHECK (LENGTH(token_hash) = 64),
   CHECK (schema_version >= 1),
   CHECK (expires_at > created_at),
@@ -4334,6 +4337,8 @@ export interface CreateTranscriptShareRecordInput {
   schemaVersion: number;
   createdAt: number;
   expiresAt: number;
+  /** The redacted, bounded session title the sharer opted into; absent or null when they did not (#2189). */
+  title?: string | null;
 }
 
 export interface SessionNamingHarnessTargetRecord {
@@ -5202,9 +5207,17 @@ export class ControlPlaneDb {
         throw error;
       }
     }
+    // Additive (#2189): links created before the opt-in existed carry no title, with no backfill.
+    const transcriptShareColumns = new Set((db.prepare("PRAGMA table_info(transcript_shares)")
+      .all() as unknown as Array<{ name: string }>).map((column) => column.name));
+    if (!transcriptShareColumns.has("title")) {
+      db.exec(
+        "ALTER TABLE transcript_shares ADD COLUMN title TEXT CHECK (title IS NULL OR (projection_json IS NOT NULL AND LENGTH(title) BETWEEN 1 AND 200))",
+      );
+    }
     const sharePruneNow = Date.now();
     db.prepare(
-      "UPDATE transcript_shares SET projection_json=NULL WHERE projection_json IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at<=?)",
+      "UPDATE transcript_shares SET projection_json=NULL, title=NULL WHERE projection_json IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at<=?)",
     ).run(sharePruneNow);
     db.prepare(
       `DELETE FROM transcript_shares WHERE share_id IN (
@@ -21459,6 +21472,7 @@ export class ControlPlaneDb {
     created_at: number;
     expires_at: number;
     revoked_at: number | null;
+    has_title: number | boolean;
   }, now: number): TranscriptShareView {
     return {
       shareId: row.share_id,
@@ -21468,6 +21482,7 @@ export class ControlPlaneDb {
       expiresAt: Number(row.expires_at),
       status: row.revoked_at !== null ? "revoked" : Number(row.expires_at) <= now ? "expired" : "active",
       ...(row.revoked_at !== null ? { revokedAt: Number(row.revoked_at) } : {}),
+      ...(row.has_title ? { includesTitle: true as const } : {}),
     };
   }
 
@@ -21485,7 +21500,7 @@ export class ControlPlaneDb {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.stmt(
-        "UPDATE transcript_shares SET projection_json=NULL WHERE projection_json IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at<=?)",
+        "UPDATE transcript_shares SET projection_json=NULL, title=NULL WHERE projection_json IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at<=?)",
       ).run(input.createdAt);
       this.stmt(
         `DELETE FROM transcript_shares WHERE share_id IN (
@@ -21514,8 +21529,8 @@ export class ControlPlaneDb {
       this.stmt(
         `INSERT INTO transcript_shares
          (share_id, token_hash, session_id, organization_id, created_by_user_id, projection_json, projection_bytes,
-          snapshot_through_seq, schema_version, created_at, expires_at, revoked_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+          snapshot_through_seq, schema_version, created_at, expires_at, revoked_at, title)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
       ).run(
         input.shareId,
         input.tokenHash,
@@ -21528,6 +21543,7 @@ export class ControlPlaneDb {
         input.schemaVersion,
         input.createdAt,
         input.expiresAt,
+        input.title ?? null,
       );
       this.db.exec("COMMIT");
       return this.transcriptShareView({
@@ -21537,6 +21553,7 @@ export class ControlPlaneDb {
         created_at: input.createdAt,
         expires_at: input.expiresAt,
         revoked_at: null,
+        has_title: Boolean(input.title),
       }, input.createdAt);
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -21546,10 +21563,10 @@ export class ControlPlaneDb {
 
   listTranscriptShares(sessionId: string, now: number): TranscriptShareView[] {
     this.stmt(
-      "UPDATE transcript_shares SET projection_json=NULL WHERE session_id=? AND projection_json IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at<=?)",
+      "UPDATE transcript_shares SET projection_json=NULL, title=NULL WHERE session_id=? AND projection_json IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at<=?)",
     ).run(sessionId, now);
     const rows = this.stmt(
-      `SELECT share_id, session_id, created_by_user_id, created_at, expires_at, revoked_at
+      `SELECT share_id, session_id, created_by_user_id, created_at, expires_at, revoked_at, title IS NOT NULL AS has_title
        FROM transcript_shares WHERE session_id=?
        ORDER BY CASE WHEN revoked_at IS NULL AND expires_at>? THEN 0 ELSE 1 END,
                 created_at DESC, share_id DESC LIMIT ?`,
@@ -21560,6 +21577,7 @@ export class ControlPlaneDb {
       created_at: number;
       expires_at: number;
       revoked_at: number | null;
+      has_title: number;
     }>;
     return rows.map((row) => this.transcriptShareView(row, now));
   }
@@ -21578,8 +21596,9 @@ export class ControlPlaneDb {
     } | undefined;
     if (!row) return null;
     const revokedAt = row.revoked_at ?? now;
+    // Revocation erases the title with the projection, so the returned view no longer carries it.
     this.stmt(
-      "UPDATE transcript_shares SET revoked_at=?, projection_json=NULL WHERE share_id=? AND session_id=?",
+      "UPDATE transcript_shares SET revoked_at=?, projection_json=NULL, title=NULL WHERE share_id=? AND session_id=?",
     ).run(revokedAt, shareId, sessionId);
     this.stmt(
       `DELETE FROM transcript_shares WHERE share_id IN (
@@ -21588,7 +21607,7 @@ export class ControlPlaneDb {
          ORDER BY created_at DESC, share_id DESC LIMIT -1 OFFSET ?
        )`,
     ).run(sessionId, now, TRANSCRIPT_SHARE_TERMINAL_RETENTION_PER_SESSION);
-    return this.transcriptShareView({ ...row, revoked_at: revokedAt }, now);
+    return this.transcriptShareView({ ...row, revoked_at: revokedAt, has_title: false }, now);
   }
 
   /** Metadata-only capability lookup. Large projection bytes are fetched only after rate admission. */
@@ -21610,7 +21629,7 @@ export class ControlPlaneDb {
     if (!row) return null;
     if (row.revoked_at !== null || Number(row.expires_at) <= now || !row.has_projection) {
       if (row.has_projection) {
-        this.stmt("UPDATE transcript_shares SET projection_json=NULL WHERE share_id=?").run(row.share_id);
+        this.stmt("UPDATE transcript_shares SET projection_json=NULL, title=NULL WHERE share_id=?").run(row.share_id);
       }
       return null;
     }
@@ -21621,13 +21640,14 @@ export class ControlPlaneDb {
     };
   }
 
-  /** Repeat lifecycle predicates while loading bytes so a revoke/expiry can never fall through. */
-  transcriptShareContentById(shareId: string, now: number): string | null {
+  /** Repeat lifecycle predicates while loading bytes so a revoke/expiry can never fall through. The
+   * opted-in title is read under the same predicates, so it is never returned without its projection. */
+  transcriptShareContentById(shareId: string, now: number): { projectionJson: string; title: string | null } | null {
     const row = this.stmt(
-      `SELECT projection_json FROM transcript_shares
+      `SELECT projection_json, title FROM transcript_shares
        WHERE share_id=? AND revoked_at IS NULL AND expires_at>? AND projection_json IS NOT NULL`,
-    ).get(shareId, now) as { projection_json: string } | undefined;
-    return row?.projection_json ?? null;
+    ).get(shareId, now) as { projection_json: string; title: string | null } | undefined;
+    return row ? { projectionJson: row.projection_json, title: row.title ?? null } : null;
   }
 
   /* -------------------------- Review findings --------------------------- */

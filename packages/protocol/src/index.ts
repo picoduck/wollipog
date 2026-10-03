@@ -5637,10 +5637,19 @@ export interface TranscriptShareView {
   expiresAt: number;
   status: TranscriptShareStatus;
   revokedAt?: number;
+  /** True while the link's public page carries the session title (#2189). Absent when the sharer
+   * did not opt in, once revocation or expiry erased the title, and from older control planes. */
+  includesTitle?: true;
 }
+
+/** Bound on the frozen session title a sharer may opt into, in Unicode code points. */
+export const TRANSCRIPT_SHARE_TITLE_MAX_CHARS = 200;
 
 export interface CreateTranscriptShareRequest {
   expiresInSeconds: number;
+  /** Opt in to freezing the session's redacted, bounded display title onto this link (#2189).
+   * Off when absent; older control planes ignore it. */
+  includeTitle?: boolean;
 }
 
 export interface CreateTranscriptShareResult {
@@ -5652,6 +5661,9 @@ export interface CreateTranscriptShareResult {
 /** Least-data response available to the bearer of an active share capability. */
 export interface PublicTranscriptShare {
   expiresAt: number;
+  /** The session title frozen and redacted at creation, present only when the sharer opted in for
+   * this link. Older pages ignore it; links created without the opt-in never carry it. */
+  title?: string;
   transcript: OperationalTranscriptProjection;
 }
 

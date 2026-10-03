@@ -5,6 +5,7 @@ import { CONTROL_PLANE_HTTP, hasSameOriginMarker } from "../config.js";
 import { useInstances } from "../instances-context.js";
 import { isMacPlatform } from "../shortcuts.js";
 import { statusMeta } from "../status-meta.js";
+import { quotedSessionTitle } from "../session-confirmation-copy.js";
 import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcript-share-client.js";
 import { shareCreatedLabel, shareDisplayStatus, shareExpiryLabel, shareMoment } from "../transcript-share-time.js";
 import { CopyButton } from "./common.js";
@@ -13,7 +14,7 @@ import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { Checkbox, SegmentedControl } from "./ui/ChoiceControls.js";
 
 type ShareExpiry = "hour" | "day" | "week" | "month";
 
@@ -36,6 +37,9 @@ const SHARE_EXPIRY_SECONDS: Record<ShareExpiry, number> = {
 export const TRANSCRIPT_SHARE_COPY = {
   title: "Share Transcript",
   description: "Anyone with the link can read this conversation until it expires or you revoke it.",
+  includeTitle: "Include the session title on the shared page",
+  untitled: "This session has no title to include.",
+  includesTitle: "Includes session title",
   expiryLabel: "Link Expires",
   expiryHelper: "The link shows a redacted copy of the transcript as it is now. It can still include secrets or source code.",
   create: "Create Link",
@@ -56,6 +60,12 @@ export const TRANSCRIPT_SHARE_COPY = {
   revoking: "Revoking the link…",
   revoked: "Link revoked.",
 } as const;
+
+/** The helper under the title checkbox: the quoted one-line title the page would show, which the
+ * server redacts before it is stored. */
+export function includeTitleHelper(quotedTitle: string): string {
+  return `The page shows ${quotedTitle} as its title, with any secrets removed.`;
+}
 
 /** What the helper under New Link says once copying failed and the link is selected instead. */
 export function copyShortcutHelper(mac = isMacPlatform()): string {
@@ -100,12 +110,15 @@ const SKELETON_ROWS = 3;
  * Links section. Its footer is Cancel and Create Link until a link exists or sharing is unavailable,
  * and a single Done after.
  *
- * Room for one later row: a consent checkbox (include the session title, #2189) goes in the form
- * column above Link Expires, and its "Includes session title" fact joins `.share-link-meta` on line two
- * of a link row, after the creation time.
+ * Above Link Expires, a consent checkbox puts the session title on the shared page (#2189). It is
+ * unchecked each time the dialog opens, and only a link the server says carries the title shows the
+ * "Includes session title" fact on line two of its row, after the creation time, so an older control
+ * plane that ignored the request never shows it.
  */
-export function TranscriptShareDialog({ sessionId, onClose, returnFocusRef }: {
+export function TranscriptShareDialog({ sessionId, sessionTitle, onClose, returnFocusRef }: {
   sessionId: string;
+  /** The session's stored title; the checkbox's helper shows its one-line display form. */
+  sessionTitle?: string | null;
   onClose: () => void;
   returnFocusRef?: { current: HTMLElement | null };
 }) {
@@ -122,6 +135,8 @@ export function TranscriptShareDialog({ sessionId, onClose, returnFocusRef }: {
   };
   const [loadError, setLoadError] = useState<string | null>(null);
   const [expiry, setExpiry] = useState<ShareExpiry>("day");
+  const [includeTitle, setIncludeTitle] = useState(false);
+  const quotedTitle = quotedSessionTitle(sessionTitle);
   const [link, setLink] = useState<{ shareId: string; url: string } | null>(null);
   const [copyFailed, setCopyFailed] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -180,7 +195,10 @@ export function TranscriptShareDialog({ sessionId, onClose, returnFocusRef }: {
     setCreating(true);
     setCreateError(null);
     try {
-      const result = await api.createTranscriptShare(sessionId, { expiresInSeconds: SHARE_EXPIRY_SECONDS[expiry] });
+      const result = await api.createTranscriptShare(sessionId, {
+        expiresInSeconds: SHARE_EXPIRY_SECONDS[expiry],
+        ...(includeTitle && quotedTitle ? { includeTitle: true } : {}),
+      });
       if (!mounted.current) return;
       setLink({ shareId: result.share.shareId, url: transcriptShareUrl(shareOrigin, result.token) });
       setCopyFailed(false);
@@ -329,17 +347,27 @@ export function TranscriptShareDialog({ sessionId, onClose, returnFocusRef }: {
           </p>
         </div>
       ) : (
-        <div className="field">
-          <div className="field-head"><span id={`${ids}-expiry`}>{TRANSCRIPT_SHARE_COPY.expiryLabel}</span></div>
-          <SegmentedControl<ShareExpiry>
-            className="block"
-            label={TRANSCRIPT_SHARE_COPY.expiryLabel}
-            options={SHARE_EXPIRY_OPTIONS}
-            value={expiry}
-            onChange={setExpiry}
+        <>
+          <Checkbox
+            consent
+            checked={includeTitle && quotedTitle !== null}
+            disabled={quotedTitle === null}
+            label={TRANSCRIPT_SHARE_COPY.includeTitle}
+            helper={quotedTitle ? includeTitleHelper(quotedTitle) : TRANSCRIPT_SHARE_COPY.untitled}
+            onChange={setIncludeTitle}
           />
-          <p className="field-helper">{TRANSCRIPT_SHARE_COPY.expiryHelper}</p>
-        </div>
+          <div className="field">
+            <div className="field-head"><span id={`${ids}-expiry`}>{TRANSCRIPT_SHARE_COPY.expiryLabel}</span></div>
+            <SegmentedControl<ShareExpiry>
+              className="block"
+              label={TRANSCRIPT_SHARE_COPY.expiryLabel}
+              options={SHARE_EXPIRY_OPTIONS}
+              value={expiry}
+              onChange={setExpiry}
+            />
+            <p className="field-helper">{TRANSCRIPT_SHARE_COPY.expiryHelper}</p>
+          </div>
+        </>
       )}
 
       <section className="section share-links" aria-labelledby={linksTitleId}>
@@ -386,6 +414,7 @@ export function TranscriptShareDialog({ sessionId, onClose, returnFocusRef }: {
                     </span>
                     <span className="row-sub share-link-meta">
                       <span>{shareCreatedLabel(share.createdAt, now)}</span>
+                      {share.includesTitle === true && <span>{TRANSCRIPT_SHARE_COPY.includesTitle}</span>}
                     </span>
                   </span>
                   {status === "active" && (

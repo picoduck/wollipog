@@ -837,7 +837,7 @@ export function SessionHeader({
             <div className="topbar-actions">{topbarControls}</div>
           </>
         )}
-        {shareDialogOpen && <TranscriptShareDialog sessionId={session.id} onClose={closeShareDialog} returnFocusRef={shareMenu.triggerRef} />}
+        {shareDialogOpen && <TranscriptShareDialog sessionId={session.id} sessionTitle={session.title} onClose={closeShareDialog} returnFocusRef={shareMenu.triggerRef} />}
         {renameDialogOpen && (
           <RenameSessionDialog
             session={session}

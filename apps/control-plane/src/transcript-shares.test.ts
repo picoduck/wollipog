@@ -350,3 +350,237 @@ test("share creation translates the retained snapshot byte quota rejection", () 
     code: "share_storage_limit",
   });
 });
+
+const FAKE_TITLE_TOKEN = ["gh", "p_", "b".repeat(30)].join("");
+
+test("a link created without the title opt-in has no title field in its public response (#2189)", () => {
+  const { db, principal } = fixture();
+  db.appendEvent("session-share", { kind: "user_message", text: "shared" }, 2);
+  for (const request of [{ expiresInSeconds: 3600 }, { expiresInSeconds: 3600, includeTitle: false }]) {
+    const created = createAuthorizedTranscriptShare(db, principal, "session-share", request, 10_000);
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    assert.equal("includesTitle" in created.value.share, false);
+    const shared = resolvePublicTranscriptShare(db, `Wollipog-Share ${created.value.token}`, 10_001);
+    assert.ok(shared);
+    assert.equal(Object.hasOwn(shared, "title"), false, "the field is omitted, not empty");
+    assert.equal(JSON.stringify(shared).includes("Private title"), false);
+    assert.equal(rawDb(db).prepare("SELECT title FROM transcript_shares WHERE share_id=?")
+      .get(created.value.share.shareId)?.title, null);
+  }
+  const listed = listAuthorizedTranscriptShares(db, principal, "session-share", 10_002);
+  assert.equal(listed.ok, true);
+  if (!listed.ok) return;
+  assert.ok(listed.value.every((share) => !("includesTitle" in share)));
+});
+
+test("an opted-in link freezes the redacted display title at creation; a rename does not change it", () => {
+  const { db, principal } = fixture();
+  db.appendEvent("session-share", { kind: "user_message", text: "shared" }, 2);
+  db.setSessionTitle("session-share", "Fix the  login bug.\nSecond line is not the name", 3, "user");
+  const created = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, 10_000,
+  );
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  assert.equal(created.value.share.includesTitle, true);
+  const authorization = `Wollipog-Share ${created.value.token}`;
+  assert.equal(resolvePublicTranscriptShare(db, authorization, 10_001)?.title, "Fix the login bug");
+
+  db.setSessionTitle("session-share", "Renamed afterwards", 10_002, "user");
+  assert.equal(resolvePublicTranscriptShare(db, authorization, 10_003)?.title, "Fix the login bug");
+  const listed = listAuthorizedTranscriptShares(db, principal, "session-share", 10_004);
+  assert.equal(listed.ok, true);
+  if (!listed.ok) return;
+  assert.equal(listed.value.find((share) => share.shareId === created.value.share.shareId)?.includesTitle, true);
+});
+
+test("an opted-in title is redacted like message text and bounded to 200 characters", () => {
+  const { db, principal } = fixture();
+  db.appendEvent("session-share", { kind: "user_message", text: "shared" }, 2);
+  db.setSessionTitle("session-share", `Rotate ${FAKE_TITLE_TOKEN} in /private/repo/config.ts`, 3, "user");
+  const secret = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, 10_000,
+  );
+  assert.equal(secret.ok, true);
+  if (!secret.ok) return;
+  const title = resolvePublicTranscriptShare(db, `Wollipog-Share ${secret.value.token}`, 10_001)?.title;
+  assert.equal(title, "Rotate <redacted-secret> in <redacted-path>");
+
+  db.setSessionTitle("session-share", "é".repeat(300), 4, "user");
+  const long = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, 10_000,
+  );
+  assert.equal(long.ok, true);
+  if (!long.ok) return;
+  const bounded = resolvePublicTranscriptShare(db, `Wollipog-Share ${long.value.token}`, 10_001)?.title;
+  assert.equal(Array.from(bounded ?? "").length, 200);
+  assert.ok(bounded?.endsWith("…"));
+
+  // A title that trimming leaves empty is not stored, so the page keeps its own heading.
+  db.setSessionTitle("session-share", "  \n ", 5, "user");
+  const blank = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, 10_000,
+  );
+  assert.equal(blank.ok, true);
+  if (!blank.ok) return;
+  assert.equal("includesTitle" in blank.value.share, false);
+  const blankShared = resolvePublicTranscriptShare(db, `Wollipog-Share ${blank.value.token}`, 10_001);
+  assert.ok(blankShared);
+  assert.equal(Object.hasOwn(blankShared, "title"), false);
+});
+
+test("a non-boolean includeTitle is refused before anything is stored", () => {
+  const { db, principal } = fixture();
+  db.appendEvent("session-share", { kind: "user_message", text: "shared" }, 2);
+  for (const includeTitle of ["true", 1, null, {}]) {
+    assert.deepEqual(
+      createAuthorizedTranscriptShare(db, principal, "session-share", { expiresInSeconds: 3600, includeTitle }, 10_000),
+      { ok: false, status: 400, error: "includeTitle must be a boolean", code: "invalid_include_title" },
+    );
+  }
+  assert.equal(rawDb(db).prepare("SELECT COUNT(*) AS count FROM transcript_shares").get()?.count, 0);
+});
+
+test("revoking or expiring an opted-in link erases its stored title with the projection", () => {
+  const { db, principal } = fixture();
+  db.appendEvent("session-share", { kind: "user_message", text: "shared" }, 2);
+  const stored = (shareId: string) => ({
+    ...rawDb(db).prepare(
+      "SELECT title, projection_json IS NULL AS erased FROM transcript_shares WHERE share_id=?",
+    ).get(shareId),
+  });
+
+  const revoked = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, 10_000,
+  );
+  assert.equal(revoked.ok, true);
+  if (!revoked.ok) return;
+  assert.deepEqual(stored(revoked.value.share.shareId), { title: "Private title", erased: 0 });
+  const revocation = revokeAuthorizedTranscriptShare(db, principal, "session-share", revoked.value.share.shareId, 10_001);
+  assert.equal(revocation.ok, true);
+  if (!revocation.ok) return;
+  assert.equal("includesTitle" in revocation.value, false);
+  assert.deepEqual(stored(revoked.value.share.shareId), { title: null, erased: 1 });
+
+  const expiring = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 300, includeTitle: true }, 20_000,
+  );
+  assert.equal(expiring.ok, true);
+  if (!expiring.ok) return;
+  assert.equal(resolvePublicTranscriptShare(db, `Wollipog-Share ${expiring.value.token}`, 320_000), null);
+  assert.deepEqual(stored(expiring.value.share.shareId), { title: null, erased: 1 });
+
+  // Listing erases an expired link's title too, so its row stops saying it includes one.
+  const listedExpiry = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 300, includeTitle: true }, 400_000,
+  );
+  assert.equal(listedExpiry.ok, true);
+  if (!listedExpiry.ok) return;
+  const listed = listAuthorizedTranscriptShares(db, principal, "session-share", 700_000);
+  assert.equal(listed.ok, true);
+  if (!listed.ok) return;
+  const expiredRow = listed.value.find((share) => share.shareId === listedExpiry.value.share.shareId);
+  assert.ok(expiredRow);
+  assert.equal("includesTitle" in expiredRow, false);
+  assert.deepEqual(stored(listedExpiry.value.share.shareId), { title: null, erased: 1 });
+
+  // The schema refuses a title without its projection, so a future erase path cannot forget it.
+  const live = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, 800_000,
+  );
+  assert.equal(live.ok, true);
+  if (!live.ok) return;
+  assert.throws(
+    () => rawDb(db).prepare("UPDATE transcript_shares SET projection_json=NULL WHERE share_id=?")
+      .run(live.value.share.shareId),
+    /CHECK constraint failed/,
+  );
+});
+
+/** transcript_shares as it was before #2189 added the title column. */
+const LEGACY_TRANSCRIPT_SHARES_SCHEMA = `CREATE TABLE legacy_transcript_shares (
+  share_id           TEXT PRIMARY KEY,
+  token_hash         TEXT NOT NULL UNIQUE,
+  session_id         TEXT NOT NULL,
+  organization_id    TEXT NOT NULL,
+  created_by_user_id TEXT NOT NULL,
+  projection_json    TEXT,
+  projection_bytes   INTEGER NOT NULL CHECK (projection_bytes >= 0 AND projection_bytes <= 8388608),
+  snapshot_through_seq INTEGER NOT NULL,
+  schema_version     INTEGER NOT NULL,
+  created_at         INTEGER NOT NULL,
+  expires_at         INTEGER NOT NULL,
+  revoked_at         INTEGER,
+  CHECK (LENGTH(token_hash) = 64),
+  CHECK (schema_version >= 1),
+  CHECK (expires_at > created_at),
+  CHECK (projection_json IS NULL OR LENGTH(CAST(projection_json AS BLOB)) = projection_bytes),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (created_by_user_id) REFERENCES identity_users(user_id)
+)`;
+
+test("links that existed before the title column gain no title after the migration", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-transcript-share-legacy-"));
+  let reopened: ControlPlaneDb | null = null;
+  t.after(() => {
+    reopened?.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  const path = join(root, "control-plane.db");
+  const now = Date.now();
+  const initial = fixture(path);
+  initial.db.appendEvent("session-share", { kind: "user_message", text: "legacy message" }, now);
+  const legacy = createAuthorizedTranscriptShare(
+    initial.db, initial.principal, "session-share", { expiresInSeconds: 3600 }, now,
+  );
+  assert.equal(legacy.ok, true);
+  if (!legacy.ok) return;
+  initial.db.close();
+
+  // Rebuild the table in its pre-#2189 shape, keeping the existing link's row.
+  const raw = new DatabaseSync(path);
+  raw.exec("PRAGMA foreign_keys=OFF");
+  raw.exec(LEGACY_TRANSCRIPT_SHARES_SCHEMA);
+  raw.exec(`INSERT INTO legacy_transcript_shares SELECT share_id, token_hash, session_id, organization_id,
+    created_by_user_id, projection_json, projection_bytes, snapshot_through_seq, schema_version, created_at,
+    expires_at, revoked_at FROM transcript_shares`);
+  raw.exec("DROP TABLE transcript_shares");
+  raw.exec("ALTER TABLE legacy_transcript_shares RENAME TO transcript_shares");
+  const legacyColumns = raw.prepare("PRAGMA table_info(transcript_shares)").all() as Array<{ name: string }>;
+  assert.equal(legacyColumns.some((column) => column.name === "title"), false);
+  raw.close();
+
+  reopened = ControlPlaneDb.open(path);
+  const migrated = reopened;
+  const columns = rawDb(migrated).prepare("PRAGMA table_info(transcript_shares)").all() as Array<{ name: string }>;
+  assert.ok(columns.some((column) => column.name === "title"), "the migration adds the column");
+  const shared = resolvePublicTranscriptShare(migrated, `Wollipog-Share ${legacy.value.token}`, now + 1_000);
+  assert.ok(shared);
+  assert.deepEqual(shared.transcript.messages, [{ role: "user", text: "legacy message" }]);
+  assert.equal(Object.hasOwn(shared, "title"), false);
+  assert.equal(JSON.stringify(shared).includes("Private title"), false);
+  const listed = listAuthorizedTranscriptShares(migrated, initial.principal, "session-share", now + 1_000);
+  assert.equal(listed.ok, true);
+  if (!listed.ok) return;
+  assert.ok(listed.value.every((share) => !("includesTitle" in share)));
+
+  // The migrated table enforces the same invariant and accepts a new opted-in link.
+  const optedIn = createAuthorizedTranscriptShare(
+    migrated, initial.principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, now + 2_000,
+  );
+  assert.equal(optedIn.ok, true);
+  if (!optedIn.ok) return;
+  assert.equal(resolvePublicTranscriptShare(migrated, `Wollipog-Share ${optedIn.value.token}`, now + 3_000)?.title,
+    "Private title");
+  assert.throws(
+    () => rawDb(migrated).prepare("UPDATE transcript_shares SET projection_json=NULL WHERE share_id=?")
+      .run(optedIn.value.share.shareId),
+    /CHECK constraint failed/,
+  );
+  assert.equal(revokeAuthorizedTranscriptShare(migrated, initial.principal, "session-share", optedIn.value.share.shareId,
+    now + 4_000).ok, true);
+  assert.equal(rawDb(migrated).prepare("SELECT title FROM transcript_shares WHERE share_id=?")
+    .get(optedIn.value.share.shareId)?.title, null);
+});

@@ -10,7 +10,9 @@ import "../styles.css";
  *
  * `?state=` picks what the public endpoint answers: `ready` (the default: markdown, a table, a fenced
  * block, media links and an interrupted turn), `empty`, `loading` (it never answers), `unavailable`
- * (404) or `network` (the request fails). `?theme=light` switches theme.
+ * (404) or `network` (the request fails). `?theme=light` switches theme, and `?title=1` answers with
+ * the session title a sharer opted into (#2189); `?title=long` with the longest one, 200 characters
+ * with no space to break at.
  */
 
 const params = new URLSearchParams(window.location.search);
@@ -53,6 +55,8 @@ const messages: OperationalTranscriptMessage[] = [
 
 const share: PublicTranscriptShare = {
   expiresAt: new Date(2026, 8, 26, 0, 49, 58).getTime(),
+  ...(params.get("title") === "1" ? { title: "Fix the flaky login test on CI" } : {}),
+  ...(params.get("title") === "long" ? { title: `${"Refactor_the_session_store_".repeat(8).slice(0, 199)}…` } : {}),
   transcript: {
     schemaVersion: 1,
     source: "control-plane-cache",

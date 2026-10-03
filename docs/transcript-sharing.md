@@ -13,7 +13,8 @@ can create and revoke them; viewers remain read-only. Agent session credentials 
 The authenticated routes are:
 
 - `GET /api/sessions/:id/transcript-shares`
-- `POST /api/sessions/:id/transcript-shares` with an integer `expiresInSeconds`
+- `POST /api/sessions/:id/transcript-shares` with an integer `expiresInSeconds` and an optional
+  boolean `includeTitle`
 - `DELETE /api/sessions/:id/transcript-shares/:shareId`
 
 Expiry must be between five minutes and 30 days. Creation synchronously freezes the current SQLite
@@ -22,6 +23,29 @@ bounds, and persists the canonical projection exactly once. Later events, rename
 ownership changes cannot alter the issued view. Deleting the source session or organization
 invalidates its shares. A new owner can revoke existing shares; a former owner who loses session
 access cannot manage them.
+
+### Including the session title
+
+A link carries no session title unless the sharer opts in for that link. Share Transcript offers an
+"Include the session title on the shared page" checkbox, unchecked each time the dialog opens; its
+helper shows the title that would be shared. Checking it sends `includeTitle: true` with the create
+request. Any value other than a boolean is refused with `400 invalid_include_title`, and an absent
+or `false` value stores nothing.
+
+With the opt-in, creation freezes the session's current title beside the projection: the whole
+stored title is redacted exactly as message text is, then reduced to the one-line form the app names
+the session with (first non-empty line, whitespace collapsed, one trailing period dropped) and bounded
+to 200 characters with an ellipsis. A title that is empty after this is not stored. A later rename
+does not change an issued link. The public response then includes an optional `title`, which the page
+shows as its heading under a "Shared Transcript" bar; without it the heading is "Shared Transcript".
+The management list marks such a link with `includesTitle: true`, shown as "Includes session title" on
+its row.
+
+The stored title is erased together with the projection on revocation, expiry, and every other path
+that erases projection bytes; a database constraint refuses a title without its projection. Links
+created before this option existed, or without the opt-in, never return a `title`. A control plane
+without this support ignores `includeTitle`, so its links never carry a title and their rows are not
+marked; a page without this support ignores `title`.
 
 The 256-bit plaintext capability is returned once and stored only as a SHA-256 hash. The UI creates
 one of four finite expiries and lists active, expired, and revoked metadata. Revocation is one-way

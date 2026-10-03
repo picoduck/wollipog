@@ -4,7 +4,7 @@ import test, { afterEach } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { CreateTranscriptShareResult, TranscriptShareView } from "@wollipog/protocol";
+import type { CreateTranscriptShareRequest, CreateTranscriptShareResult, TranscriptShareView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -85,9 +85,11 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-function backend(initial: TranscriptShareView[] = []) {
+/** `legacy` answers like a control plane from before #2189, which ignores `includeTitle`. */
+function backend(initial: TranscriptShareView[] = [], { legacy = false }: { legacy?: boolean } = {}) {
   let shares = [...initial];
   const created: number[] = [];
+  const bodies: CreateTranscriptShareRequest[] = [];
   const revoked: string[] = [];
   const loads: Array<Deferred<{ shares: TranscriptShareView[] }>> = [];
   let manualLoads = false;
@@ -99,10 +101,15 @@ function backend(initial: TranscriptShareView[] = []) {
       loads.push(load);
       return load.promise;
     },
-    createTranscriptShare: async (_id: string, body: { expiresInSeconds: number }): Promise<CreateTranscriptShareResult> => {
+    createTranscriptShare: async (_id: string, body: CreateTranscriptShareRequest): Promise<CreateTranscriptShareResult> => {
       created.push(body.expiresInSeconds);
+      bodies.push(body);
       const now = Date.now();
-      const next = share(`share-${created.length}`, { createdAt: now, expiresAt: now + body.expiresInSeconds * 1000 });
+      const next = share(`share-${created.length}`, {
+        createdAt: now,
+        expiresAt: now + body.expiresInSeconds * 1000,
+        ...(body.includeTitle === true && !legacy ? { includesTitle: true as const } : {}),
+      });
       shares = [next, ...shares];
       return { share: next, token: TOKEN };
     },
@@ -114,7 +121,7 @@ function backend(initial: TranscriptShareView[] = []) {
     },
   };
   return {
-    client, created, revoked, loads,
+    client, created, bodies, revoked, loads,
     holdLoads() { manualLoads = true; },
   };
 }
@@ -123,7 +130,11 @@ const settle = async () => {
   await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 5)); });
 };
 
-async function mount(client: ApiClient, instances: InstanceManager = reachable) {
+async function mount(
+  client: ApiClient,
+  instances: InstanceManager = reachable,
+  sessionTitle: string | null = "Fix the flaky login test.\nThen run the suite",
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -133,7 +144,7 @@ async function mount(client: ApiClient, instances: InstanceManager = reachable) 
       <ApiProvider client={client}>
         <InstancesContextProvider value={instances}>
           <FeedbackProvider>
-            <TranscriptShareDialog sessionId="s_1" onClose={() => { closed += 1; }} />
+            <TranscriptShareDialog sessionId="s_1" sessionTitle={sessionTitle} onClose={() => { closed += 1; }} />
           </FeedbackProvider>
         </InstancesContextProvider>
       </ApiProvider>,
@@ -149,11 +160,13 @@ async function mount(client: ApiClient, instances: InstanceManager = reachable) 
   return {
     dialogs, share, text, buttonIn,
     closed: () => closed,
+    titleCheckbox: () => share().querySelector<HTMLInputElement>('input[type="checkbox"]'),
     footerButtons: () => [...share().querySelectorAll<HTMLButtonElement>(".modal-foot button")].map((button) => button.textContent?.trim()),
     rows: () => [...share().querySelectorAll(".share-links .row[data-share-id]")].map((row) => ({
       expiry: text(row.querySelector(".row-title")),
       badge: text(row.querySelector(".status")),
-      created: text(row.querySelector(".row-sub")),
+      created: text(row.querySelector(".row-sub > span:first-child")),
+      meta: [...row.querySelectorAll(".share-link-meta > span")].map((span) => text(span)),
       revoke: row.querySelector<HTMLButtonElement>("button")?.getAttribute("aria-label") ?? null,
     })),
     async click(button: HTMLElement | undefined) {
@@ -456,4 +469,62 @@ test("a failed create shows a danger notice above the footer and keeps Create Li
   const notice = view.share().querySelector(".modal-body > .notice.t-danger:last-child");
   assert.match(view.text(notice), /^Couldn't Create the Link/);
   assert.deepEqual(view.footerButtons(), ["Cancel", "Create Link"]);
+});
+
+test("the title checkbox is unchecked when the dialog opens and names the title it would share (#2189)", async () => {
+  const view = await mount(backend().client);
+  const box = view.titleCheckbox();
+  assert.ok(box);
+  assert.equal(box.checked, false);
+  assert.equal(box.disabled, false);
+  const row = box.closest("label.checkbox")!;
+  assert.equal(view.text(row.querySelector(".checkbox-label")), "Include the session title on the shared page");
+  assert.equal(view.text(row.querySelector(".checkbox-helper")),
+    "The page shows “Fix the flaky login test” as its title, with any secrets removed.");
+  const order = [...view.share().querySelectorAll("label.checkbox, [role=\"radiogroup\"]")];
+  assert.ok(order[0]?.matches("label.checkbox") && order[1]?.matches("[role=\"radiogroup\"]"), "the checkbox sits above Link Expires");
+});
+
+test("Create Link leaves includeTitle out unless the box is checked, and a reopened dialog starts unchecked", async () => {
+  const server = backend();
+  const first = await mount(server.client);
+  await first.click(first.buttonIn(first.share(), "Create Link"));
+  assert.deepEqual(server.bodies, [{ expiresInSeconds: 24 * 60 * 60 }]);
+  assert.deepEqual(first.rows()[0]!.meta, [first.rows()[0]!.created], "an untitled link says nothing about a title");
+  await unmounts.pop()!();
+
+  const second = await mount(server.client);
+  assert.equal(second.titleCheckbox()?.checked, false);
+  await act(async () => { second.titleCheckbox()!.click(); });
+  assert.equal(second.titleCheckbox()?.checked, true);
+  await second.click(second.buttonIn(second.share(), "Create Link"));
+  assert.deepEqual(server.bodies[1], { expiresInSeconds: 24 * 60 * 60, includeTitle: true });
+  const rows = second.rows();
+  assert.deepEqual(rows[0]!.meta, [rows[0]!.created, "Includes session title"]);
+  assert.deepEqual(rows[1]!.meta, [rows[1]!.created]);
+  await unmounts.pop()!();
+
+  const third = await mount(server.client);
+  assert.equal(third.titleCheckbox()?.checked, false, "the choice is never remembered between openings");
+});
+
+test("a session without a title cannot opt in", async () => {
+  const server = backend();
+  const view = await mount(server.client, reachable, " \n ");
+  const box = view.titleCheckbox();
+  assert.equal(box?.disabled, true);
+  assert.equal(box?.checked, false);
+  assert.equal(view.text(box!.closest("label.checkbox")!.querySelector(".checkbox-helper")), "This session has no title to include.");
+  await view.click(view.buttonIn(view.share(), "Create Link"));
+  assert.deepEqual(server.bodies, [{ expiresInSeconds: 24 * 60 * 60 }]);
+});
+
+test("a link marks the title only when the server says it carries one, so an older control plane shows no mark", async () => {
+  const server = backend([share("titled", { includesTitle: true }), share("plain", { createdAt: Date.now() - 2 * HOUR })], { legacy: true });
+  const view = await mount(server.client);
+  assert.deepEqual(view.rows().map((row) => row.meta.slice(1)), [["Includes session title"], []]);
+  await act(async () => { view.titleCheckbox()!.click(); });
+  await view.click(view.buttonIn(view.share(), "Create Link"));
+  assert.deepEqual(server.bodies, [{ expiresInSeconds: 24 * 60 * 60, includeTitle: true }]);
+  assert.deepEqual(view.rows()[0]!.meta.slice(1), [], "the older server ignored the request, and the row says so by omission");
 });

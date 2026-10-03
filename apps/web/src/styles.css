@@ -3625,7 +3625,7 @@ textarea {
   gap: var(--space-1);
   margin-bottom: var(--space-8);
 }
-.share-title { margin: 0; font: var(--type-page-title); }
+.share-title { margin: 0; font: var(--type-page-title); overflow-wrap: anywhere; }
 .share-meta {
   margin: 0;
   color: var(--text-dim);
@@ -3658,8 +3658,12 @@ textarea {
 }
 /* Copy Link takes the link field's control height beside it. */
 .share-link-controls > .btn { flex: none; }
-/* Line two's facts sit 12px apart (§5.2): the creation time now, and room for one more. */
-.share-link-meta > span + span { margin-left: var(--space-3); }
+/* Line two's facts sit 12px apart on its one line (§5.2). When a phone row is too narrow for both,
+   the creation time is what shortens: "Includes session title" (#2189) says what a stranger can
+   read, so it is never cut. */
+.share-link-meta { display: flex; column-gap: var(--space-3); }
+.share-link-meta > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.share-link-meta > span + span { flex: none; }
 .share-links-empty {
   margin: 0;
   color: var(--text-dim);
