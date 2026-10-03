@@ -6979,12 +6979,10 @@ export class SessionsService {
   }
 
   /** An observed change or an attempt session's deletion moved the campaign's ledger revision
-   * (campaign-work-observation.ts): re-send the root and every nested Orchestrator in the campaign,
-   * since each one's view embeds the root's summary. A deleted session's ancestry is gone by then,
-   * so the campaign, not the changed session, names what to refresh. */
+   * (campaign-work-observation.ts): re-send the root, the only view that carries the summary. A
+   * deleted session's ancestry is gone by then, so the campaign names what to refresh. */
   campaignWorkObserved(rootId: string): void {
     this.hub.sessionChangedById(rootId);
-    for (const id of this.db.campaignNestedOrchestratorIds(rootId)) this.hub.sessionChangedById(id);
   }
 
   /** Refresh the root campaign and every nested Orchestrator between it and `sessionId`: each one's

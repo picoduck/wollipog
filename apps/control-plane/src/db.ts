@@ -4712,21 +4712,6 @@ export class ControlPlaneDb {
     };
   }
 
-  /** Orchestrators below the root that resolve to it; each one's view embeds the root's summary. */
-  campaignNestedOrchestratorIds(rootId: string): string[] {
-    return (this.stmt(`
-      WITH RECURSIVE descendants(id) AS (
-        SELECT id FROM sessions WHERE parent_session_id=?
-        UNION
-        SELECT child.id FROM sessions child JOIN descendants parent ON child.parent_session_id=parent.id
-      ) SELECT sessions.id, sessions.orchestrator_policy FROM sessions JOIN descendants USING (id)
-        WHERE sessions.orchestrator_policy IS NOT NULL ORDER BY sessions.id
-    `).all(rootId) as Array<{ id: string; orchestrator_policy: string }>)
-      .filter((row) => orchestratorCampaignPolicyFromJson(row.orchestrator_policy) &&
-        this.resolvedCampaignSessionId(row.id) === rootId)
-      .map((row) => row.id);
-  }
-
   /** Observed facts are as current as the runner connection that reports them. */
   private campaignAttemptObservationFreshness(sessionId: string): { fresh: boolean; updatedAt: number } | null {
     const row = this.stmt("SELECT runner_id, updated_at FROM sessions WHERE id=?").get(sessionId) as
@@ -16039,14 +16024,15 @@ export class ControlPlaneDb {
       },
       ...(stalled ? { stalled } : {}),
       ...continuation,
-      // The ledger summary rides on every campaign view; it is cached under the ledger revision and
-      // the open attempts' observed status, so an unchanged campaign re-reads almost nothing (#2417).
-      work: this.campaignWorkLedger.summary(resolvedCampaignId, {
+      // The ledger summary rides on the root's own view only: a nested Orchestrator's reader may not
+      // be allowed the root, and reaches the summary through its membership instead. It is cached
+      // under the ledger revision and the open attempts' observed status (#2417).
+      ...(resolvedCampaignId === campaignSessionId ? { work: this.campaignWorkLedger.summary(resolvedCampaignId, {
         campaignCreatedAt: campaign.created_at,
         complete: status === "verified_complete",
         childSessionIds: childIds,
         cleanupPending,
-      }),
+      }) } : {}),
     };
   }
 

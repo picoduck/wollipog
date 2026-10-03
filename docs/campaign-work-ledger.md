@@ -200,7 +200,10 @@ attribution lands, the `cost` sort falls back to queue order.
   `planState`, coverage, committed/delivered/original/follow-up/cancelled/removed counts,
   per-state counts, recommendation counts by disposition, outstanding verification, adjudication,
   publication, and cleanup obligations, campaign `elapsed`, and (slice 6) `cost`. It stays small
-  enough to ride on existing session updates. Any ledger write re-sends the root session.
+  enough to ride on existing session updates. Any ledger write re-sends the root session. Only the
+  root's own view carries it: a nested Orchestrator's projection omits `work`, because a reader of
+  the nested session may not be allowed the root; that session reads the summary as a member, through
+  the root-authorized routes.
 - **Plan state**: `not_recorded` until the first `record_campaign_plan`; `partial` while the latest
   plan call said `planComplete: false`; `recorded` after `planComplete: true`. Coverage separately
   counts campaign children that have no attempt on any item and flags campaigns whose history
@@ -226,8 +229,8 @@ attribution lands, the `cost` sort falls back to queue order.
 
 ### Summary Cost
 
-The summary is built inside the campaign projection, so it is recomputed on every upsert of the
-root and of every nested Orchestrator view. It is therefore cached per campaign under a key made of
+The summary is built inside the root's campaign projection, so it is recomputed on every upsert of
+the root. It is therefore cached per campaign under a key made of
 the ledger revision and the observed status of every open attempt's session, which together
 determine everything the ledger part of the summary derives. Checking the key costs one query plus
 one observation per open attempt (bounded by the live-child limit); only a changed key reads the
@@ -249,13 +252,12 @@ mechanism (`apps/control-plane/src/campaign-work-observation.ts`):
   nothing. An attempt not yet observed by this process counts as changed once, since it may have
   changed after assignment or across a restart.
 - Changes are coalesced per campaign for one second: a burst of child status changes costs one
-  revision increment and one refresh of the root and of every nested Orchestrator in the campaign,
-  since each of their views embeds the root's summary. Re-sending those views does not feed back
-  into another increment.
+  revision increment and one refresh of the root, the only view that carries the summary.
+  Re-sending it does not feed back into another increment.
 - Deleting an attempt's session (open or closed) increments the revision in the database itself (a
   trigger on the foreign key's `SET NULL`), whichever deletion path ran, and queues the campaign in
   `campaign_work_deleted_attempt_sessions`. Every session removal the hub broadcasts drains that
-  queue, so the views are refreshed even when this process never observed the attempt and the
+  queue, so the root is refreshed even when this process never observed the attempt and the
   deleted session's ancestry is gone.
 - A ledger write, or a delivered verification, that opens, closes, or replaces a session's open
   attempt also re-sends that session, whose `campaignMembership` names it.
@@ -375,8 +377,9 @@ budget. Forecasts and ETA are out of scope.
 
 - Control planes before v196 omit `OrchestratorCampaignProjection.work` and
   `SessionView.campaignMembership`. Clients present that absence as an availability explanation,
-  never as an empty or unrecorded plan. A v196 control plane always sends `work` for an
-  Orchestrator, with `planState: "not_recorded"` when nothing was recorded.
+  never as an empty or unrecorded plan. A control plane with the Read API always sends `work` on a
+  root campaign Orchestrator's own view, with `planState: "not_recorded"` when nothing was recorded,
+  and `campaignMembership` on every descendant, nested Orchestrators included.
 - The browser needs no separate UI protocol constant: the presence of `work` is the capability
   signal, and the control plane accepts every browser version.
 - Optional fields owned by later slices (`cost`, `times`, `attemptCosts`, `observed.pullRequests`)
@@ -432,3 +435,6 @@ starting contract. This document refines it as follows:
     a member's reader learns the root it resolved to.
 21. **No new protocol version for slice 5.** The browser detects the Read API by the presence of
     `work` on the projection, and no runner consumes these routes.
+22. **Only the root's view carries `work`.** The posted plan put the summary on the projection
+    every campaign view embeds; a nested Orchestrator's reader may not be allowed the root, so its
+    view omits the summary and reaches it through membership.

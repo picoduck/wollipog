@@ -178,8 +178,9 @@ test("campaign views carry the ledger summary and descendants carry their member
     assert.deepEqual(db.getSession(plain)!.campaignMembership,
       { campaignSessionId: root, currentWorkItemId: null, currentAttemptId: null });
     assert.equal(db.getSession(nested)!.campaignMembership?.campaignSessionId, root, "a nested Orchestrator is a member");
-    assert.equal(db.getSession(nested)!.orchestratorCampaign?.work?.planState, "not_recorded",
-      "a nested Orchestrator's view embeds the root's summary");
+    assert.ok(db.getSession(nested)!.orchestratorCampaign, "a nested Orchestrator still has its campaign projection");
+    assert.equal(db.getSession(nested)!.orchestratorCampaign?.work, undefined,
+      "but not the root's summary: its reader may not be allowed the root");
     assert.equal(db.getSession(grandchild)!.campaignMembership?.campaignSessionId, root, "membership resolves to the root");
 
     const plan = svc.recordCampaignPlan(root, { items: [{ key: "a" }, { key: "b" }], planComplete: true });
@@ -289,7 +290,7 @@ test("observed status changes are coalesced into one revision per campaign and r
     observations.flush();
     assert.equal(db.campaignWorkLedger.revision(root), revision + 1);
     assert.deepEqual(refreshed.filter((id) => id === root).length, 1, "the root is re-sent once");
-    assert.ok(refreshed.includes(nested), "the nested Orchestrator embedding the summary is re-sent");
+    assert.equal(refreshed.includes(nested), false, "only the root carries the summary");
     assert.equal(db.getSession(root)!.orchestratorCampaign!.work!.revision, revision + 1);
     // Re-sending views does not feed back into another revision.
     observations.flush();
@@ -322,14 +323,15 @@ test("deleting an attempt's session refreshes every view of its campaign, observ
     observations.sessionChanged(worker);
     observations.flush();
 
-    // An observed open attempt: the root and both nested Orchestrators embed the summary.
+    // An observed open attempt below two nested Orchestrators: the root carries the summary.
     let revision = db.campaignWorkLedger.revision(root);
     db.deleteSession(worker);
     observations.sessionRemoved(worker);
     refreshed.length = 0;
     observations.flush();
     assert.equal(db.campaignWorkLedger.revision(root), revision + 1, "the deletion is one revision, not two");
-    for (const id of [root, nested, deeper]) assert.ok(refreshed.includes(id), `${id} is re-sent`);
+    assert.ok(refreshed.includes(root), "the root is re-sent");
+    assert.equal(db.getSession(deeper)!.orchestratorCampaign?.work, undefined);
 
     // A closed attempt this process never observed, deleted on a path that publishes nothing else.
     revision = db.campaignWorkLedger.revision(root);
