@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { artifactGuidance, appendArtifactSystemPrompt } from "./artifact-guidance.js";
+import { makeDriver, type DriverOptions } from "./drivers/factory.js";
 import type { SessionMeta } from "./session-store.js";
 
 const meta = { driver: "codex-app-server" as const, env: { WOLLIPOG_CLI: "/private/cli", SECRET: "never-print-me" },
@@ -53,11 +51,16 @@ test("append instructions retain user and Orchestrator instructions without chan
 });
 
 
-test("Pi file-based append prompts remain instructions after artifact guidance is added", () => {
-  const directory = mkdtempSync(join(tmpdir(), "artifact-pi-prompt-"));
-  try {
-    writeFileSync(join(directory, "user-prompt.txt"), "user instructions from file");
-    const args = appendArtifactSystemPrompt(["--append-system-prompt", "user-prompt.txt"], "artifact guidance", { cwd: directory });
-    assert.equal(args.at(-1), "user instructions from file\n\nartifact guidance");
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+test("Pi launch preserves repeatable, file and extension append arguments in every context", () => {
+  const args = ["--append-system-prompt", "team rules", "--append-system-prompt", "orchestrator governance",
+    "--append-system-prompt", "prompt.md", "--append-system-prompt=extension-owned", "--no-skills"];
+  for (const context of [{ kind: "native" as const }, { kind: "wsl" as const, distro: "Ubuntu" }]) {
+    const opts: DriverOptions = { command: "pi", args: [...args], cwd: "/unreadable-provider-cwd", env: {},
+      config: {}, context, artifactGuidance: "artifact guidance" };
+    const driver = makeDriver("pi", opts, { onEvent: () => {}, onStderr: () => {}, onExit: () => {} });
+    // The launch must leave file resolution to Pi, including large files and native Windows.
+    const effective = (driver as unknown as { opts: DriverOptions }).opts;
+    assert.deepEqual(effective.args, [...args, "--append-system-prompt", "artifact guidance"]);
+    assert.deepEqual(opts.args, args, "shared agent definition arguments are never mutated");
+  }
 });
