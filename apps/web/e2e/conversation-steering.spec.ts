@@ -763,10 +763,50 @@ test.describe("on a coarse pointer", () => {
     await expect(strip).toHaveCount(0);
   });
 
-  // The tray docks on the card, so the strip's actions sit just under the last queued row's. Their
-  // touch areas must not meet (§2.8): a tap meant for the row would otherwise cancel the edit.
+  /**
+   * Every visible control in the composer column with the area it answers to: its border box, grown
+   * by a `::after` hit area, which is placed from the padding edge, so the border is added back.
+   */
+  async function composerTouchAreas(page: Page) {
+    return page.locator(".composer button").evaluateAll((buttons) => buttons
+      .filter((button) => (button as HTMLElement).offsetParent !== null)
+      .map((button) => {
+        const box = button.getBoundingClientRect();
+        const style = getComputedStyle(button);
+        const after = getComputedStyle(button, "::after");
+        const grow = (inset: string, border: string) =>
+          after.content === "none" ? 0 : Math.max(0, -(Number.parseFloat(inset) || 0) - Number.parseFloat(border));
+        return {
+          name: button.getAttribute("aria-label") ?? button.textContent?.trim() ?? "",
+          inStrip: button.closest(".composer-mode") !== null,
+          top: box.top - grow(after.top, style.borderTopWidth),
+          bottom: box.bottom + grow(after.bottom, style.borderBottomWidth),
+          left: box.left - grow(after.left, style.borderLeftWidth),
+          right: box.right + grow(after.right, style.borderRightWidth),
+        };
+      }));
+  }
+
+  /** The strip's actions each answer to at least 44px, and to no area another control answers to. */
+  async function expectStripTouchAreasOwnTheirTaps(page: Page) {
+    const areas = await composerTouchAreas(page);
+    const strip = areas.filter((area) => area.inStrip);
+    expect(strip.length).toBeGreaterThan(0);
+    for (const action of strip) {
+      expect(action.bottom - action.top, `${action.name} keeps a 44px touch area`).toBeGreaterThanOrEqual(44);
+      for (const other of areas) {
+        if (other === action) continue;
+        const overlap = Math.min(action.bottom, other.bottom) - Math.max(action.top, other.top) > 0.01 &&
+          Math.min(action.right, other.right) - Math.max(action.left, other.left) > 0.01;
+        expect(overlap, `${action.name}'s touch area overlaps ${other.name}'s`).toBe(false);
+      }
+    }
+  }
+
+  // The tray docks on the card above the strip, and a pending question's Respond can sit just below
+  // it. A tap meant for either must never cancel the edit (§2.8).
   for (const width of [1000, 390]) {
-    test(`at ${width}px Cancel Edit's touch area stays clear of the last queued row's (#2194)`, async ({ page }) => {
+    test(`at ${width}px the strip's touch areas stay clear of the queued row above and Respond below (#2194)`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await seedEditableQueue(page);
       if (width <= 760) {
@@ -777,21 +817,28 @@ test.describe("on a coarse pointer", () => {
         await page.getByTestId("queued-prompt-queue-edit").getByRole("button", { name: "Edit Queued Message" }).click();
       }
       await expect(page.locator(".composer-box > .composer-mode")).toBeVisible();
-      // Each control's reach: its box, extended by a negative-inset `::after` hit area.
-      const reaches = (buttons: Element[]) => buttons.map((button) => {
-        const box = button.getBoundingClientRect();
-        const after = getComputedStyle(button, "::after");
-        const top = after.content === "none" ? 0 : Number.parseFloat(after.top) || 0;
-        const bottom = after.content === "none" ? 0 : Number.parseFloat(after.bottom) || 0;
-        return { top: box.top + Math.min(top, 0), bottom: box.bottom - Math.min(bottom, 0) };
+      await expectStripTouchAreasOwnTheirTaps(page);
+
+      await page.evaluate(() => {
+        localStorage.setItem("wollipog.question-response-style", "composer");
+        window.dispatchEvent(new Event("wollipog:question-response-style-change"));
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+          pendingApproval: {
+            requestId: "question:steering:1",
+            kind: "question",
+            title: "Choose a release target",
+            options: [],
+            questions: [{
+              id: "target",
+              question: "Which environment should receive the release?",
+              options: [{ label: "Staging" }, { label: "Production" }],
+            }],
+          },
+        });
       });
-      const rowLowest = Math.max(...(await page.getByTestId("queued-prompt-queue-other").locator("button")
-        .evaluateAll(reaches)).map((reach) => reach.bottom));
-      const [cancel] = await page.getByRole("button", { name: "Cancel Edit", exact: true })
-        .evaluateAll(reaches);
-      if (!cancel) throw new Error("Cancel Edit is missing");
-      expect(cancel.top, "Cancel Edit's touch area starts below the row's").toBeGreaterThanOrEqual(rowLowest);
-      expect(cancel.bottom - cancel.top, "Cancel Edit keeps a 44px touch area").toBeGreaterThanOrEqual(44);
+      await expect(page.getByRole("button", { name: "Respond", exact: true })).toBeVisible();
+      await expect(page.locator(".composer-box > .composer-mode")).toBeVisible();
+      await expectStripTouchAreasOwnTheirTaps(page);
     });
   }
 
@@ -810,7 +857,12 @@ test.describe("on a coarse pointer", () => {
       strip.locator(".composer-mode-actions").boundingBox(),
     ]);
     expect((actions?.x ?? 0) + (actions?.width ?? 0)).toBeLessThanOrEqual((card?.x ?? 0) + (card?.width ?? 0));
+    // Side by side, under the sentence, or on the strip's first row: no action shares a tap.
+    await expectStripTouchAreasOwnTheirTaps(page);
     await page.screenshot({ path: test.info().outputPath("queued-edit-recovered-phone.png") });
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await expect(strip.locator(".composer-mode-actions")).toBeVisible();
+    await expectStripTouchAreasOwnTheirTaps(page);
   });
 });
 

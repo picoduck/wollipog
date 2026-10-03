@@ -5406,15 +5406,12 @@ textarea {
   background: color-mix(in srgb, var(--tone) 7%, var(--bg-elev));
 }
 .composer-mode.is-recovered .composer-mode-icon { color: var(--tone); }
-/* The queue tray docks on the card, so the row above already borrows the strip's top edge for its
-   own touch area. On a coarse pointer the strip's actions borrow their 8px downward instead, into
-   the gap above the textarea: still 44px, never overlapping the row's (§2.8). The 1px is the
-   border's padding-edge offset. */
+/* The queue tray docks on the card, so the row above sits close to the strip. On a coarse pointer the
+   strip's actions take the strip's bottom edge: 8px from the row's actions above and 9px from
+   whatever the card shows below (a question's Respond), so every 44px touch area stays its own
+   (§2.8). */
 @media (pointer: coarse) {
-  .composer-mode .btn.sm::after {
-    top: -1px;
-    bottom: -9px;
-  }
+  .composer-mode-actions { align-self: end; }
 }
 /* A phone can't fit the recovered title and both actions on one line: the actions follow the
    sentence on their own row, their labels lined up with it. */
