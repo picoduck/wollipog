@@ -69,7 +69,9 @@ function userText(message) {
   const content = message?.message?.content;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content.map((part) => typeof part === "string" ? part : part?.text ?? "").join("\n");
+  // The task is the first text block; later blocks can carry separate capability guidance.
+  const task = content.find((part) => typeof part === "string" || typeof part?.text === "string");
+  return typeof task === "string" ? task : task?.text ?? "";
 }
 
 function recoveredPayload(message) {
