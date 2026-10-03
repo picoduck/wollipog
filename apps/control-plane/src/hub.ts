@@ -283,6 +283,9 @@ function permissionsKey(session: SessionView): string {
     session.commandPermissions,
     holdAdviceOf(session),
     (session.orchestratorCampaign?.heldChildren ?? []).map((child) => child.sessionId),
+    // The campaign work summary is shown to some principals and not others (#2417), so two
+    // clients may share one serialized view only when both see it or neither does.
+    session.orchestratorCampaign?.work !== undefined,
   ]);
 }
 

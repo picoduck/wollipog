@@ -16,6 +16,7 @@ import {
   type CampaignRecommendationsPage,
   type CampaignWorkSummary,
   type CampaignWorkSummaryResponse,
+  type ControlPlaneToUi,
   type RunnerMetadata,
   type SessionView,
 } from "@wollipog/protocol";
@@ -27,7 +28,7 @@ import {
 } from "./campaign-status-routes.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { ControlPlaneDb } from "./db.js";
-import type { Hub } from "./hub.js";
+import { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { withSessionCommandPermissions } from "./session-command-permissions.js";
 import { SessionsService } from "./sessions.js";
@@ -486,6 +487,42 @@ test("Campaign Status routes authorize humans by the root and Orchestrators by t
     }
   } finally {
     await app.close();
+    db.close();
+  }
+});
+
+test("live upserts never share one serialized root view between readers who may and may not see the summary (#2417)", () => {
+  const { db, root, child, createRoot } = campaignFixture();
+  try {
+    const nested = child(root, "Nested", true);
+    const otherRoot = createRoot("Other Campaign");
+    // A real hub: it serializes a session upsert once per distinct permission verdict.
+    const hub = new Hub(db);
+    const observe = (principal: AuthPrincipal) => {
+      const messages: ControlPlaneToUi[] = [];
+      hub.addUiClient({ send: (data: string) => messages.push(JSON.parse(data) as ControlPlaneToUi) },
+        { deviceId: null, principal, close: () => {} });
+      return () => messages.filter((message) => message.type === "session_upsert" && message.session.id === root)
+        .map((message) => message.type === "session_upsert" ? message.session.orchestratorCampaign?.work : undefined);
+    };
+    // Two Orchestrator credentials, neither able to command the root, so their verdicts on it match
+    // and the hub could share one payload: one belongs to this campaign, the other does not.
+    const reader = agent(nested, true);
+    const outsider = agent(otherRoot, true);
+    const verdict = (principal: AuthPrincipal) =>
+      JSON.stringify(withSessionCommandPermissions(db, principal, db.getSession(root)!).commandPermissions);
+    assert.equal(verdict(reader), verdict(outsider), "the two could share one serialized payload");
+    // Either order: the first client's serialization must never be reused for the other.
+    for (const order of [[reader, outsider], [outsider, reader]] as const) {
+      const seen = order.map((principal) => observe(principal));
+      hub.sessionChangedById(root);
+      const [first, second] = seen.map((upserts) => upserts().at(-1));
+      const readerWork = order[0] === reader ? first : second;
+      const outsiderWork = order[0] === reader ? second : first;
+      assert.ok(readerWork, "this campaign's nested Orchestrator receives the summary");
+      assert.equal(outsiderWork, undefined, "another campaign's Orchestrator never receives it");
+    }
+  } finally {
     db.close();
   }
 });
