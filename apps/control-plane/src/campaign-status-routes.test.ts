@@ -29,6 +29,7 @@ import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
+import { withSessionCommandPermissions } from "./session-command-permissions.js";
 import { SessionsService } from "./sessions.js";
 
 const RUNNER_ID = "campaign-status-runner";
@@ -466,6 +467,18 @@ test("Campaign Status routes authorize humans by the root and Orchestrators by t
     assert.equal((await get("orchestrator", `/api/sessions/${root}/campaign/recommendations`)).status, 200);
     assert.equal((await get("otherOrchestrator", summaryOf(root))).status, 403, "never another campaign");
     assert.equal((await get("childAgent", summaryOf(member))).status, 403, "a child has no ledger access");
+    // Session reads and broadcasts project views per principal: the summary on the root's own view
+    // follows the same rule as the routes, while the rest of the projection is unchanged.
+    const rootView = db.getSession(root)!;
+    assert.ok(rootView.orchestratorCampaign?.work);
+    const viewFor = (principal: AuthPrincipal) => withSessionCommandPermissions(db, principal, rootView).orchestratorCampaign;
+    assert.ok(viewFor(human("alice"))?.work, "a human reader of the root sees the summary");
+    assert.ok(viewFor(agent(root, true))?.work, "the campaign's Orchestrator sees it");
+    for (const who of [agent(member, false), agent(otherRoot, true)]) {
+      const campaign = viewFor(who);
+      assert.ok(campaign, "the projection itself is still served");
+      assert.equal(campaign.work, undefined, "no other agent reads the ledger through a session view");
+    }
     for (const path of ["summary", "work-items", "work-items/:itemId", "recommendations"]) {
       const route = `/api/sessions/:id/campaign/${path}`;
       assert.equal(isAgentControlApiRouteAllowed("GET", route, "orchestrator"), true, route);

@@ -297,6 +297,10 @@ only the open attempt.
   in `ORCHESTRATOR_API_ROUTES` and refuse with `403` unless the credential's session resolves to the
   same root as `:id`. A nested Orchestrator's campaign is the root. Children and other agents have
   no ledger access (the routes are not in the general agent allowlist).
+- The summary on the root's own view follows the same rule wherever that view is served (session
+  reads, lists, and live upserts, through `withSessionCommandPermissions`): an agent sees `work` only
+  when its credential is an Orchestrator resolving to that campaign; every other agent receives the
+  projection without it.
 - Cost follows the existing session-cost rule, which is session access. A per-attempt cost is shown
   only when the principal can access that attempt's session (or the session was deleted and the
   principal can access the root). A campaign bucket is `unavailable{not_authorized}` when the

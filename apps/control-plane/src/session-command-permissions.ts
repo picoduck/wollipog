@@ -243,6 +243,28 @@ export interface SessionCommandPermissionSource {
   /** The records behind a projection's holds, read for every held child it lists. */
   sessionHoldRecords(ids: readonly string[]): Map<string,
     Pick<SessionView, "orchestratorPolicy" | "worktreeRecovery" | "queueHold"> & { parentSessionId: string | null }>;
+  /** The root campaign an Orchestrator session resolves to (#2417). Without it, no agent sees a
+   * campaign work summary. */
+  resolvedCampaignSessionId?(sessionId: string): string | null;
+}
+
+/** The campaign work summary is ledger data. An agent may read it only as an Orchestrator of that
+ * campaign; any other agent able to read the root session sees the projection without it, as the
+ * Campaign Status routes refuse it (docs/campaign-work-ledger.md). It rides only on the root's own
+ * view, so the campaign is the session itself. */
+function withCampaignWorkFor<T extends SessionView>(
+  source: SessionCommandPermissionSource,
+  principal: AuthPrincipal,
+  session: T,
+): T {
+  const campaign = session.orchestratorCampaign;
+  if (!campaign?.work || principal.kind !== "agent") return session;
+  const own = principal.orchestrator && principal.credentialSessionId
+    ? source.resolvedCampaignSessionId?.(principal.credentialSessionId) ?? null
+    : null;
+  if (own === session.id) return session;
+  const { work: _hidden, ...withoutWork } = campaign;
+  return { ...session, orchestratorCampaign: withoutWork };
 }
 
 function permissionFacts(
@@ -378,6 +400,7 @@ export function withSessionCommandPermissions<T extends SessionView>(
   session: T,
 ): T {
   if (!principal) return session;
+  session = withCampaignWorkFor(source, principal, session);
   const commandPermissions = sessionCommandPermissions(principal, session, permissionFacts(source, principal, session.id));
   return withSessionHoldAdviceFor(source, principal, { ...session, commandPermissions },
     session.holds?.length ? holdAdviceReader(commandPermissions) : undefined);
