@@ -55,6 +55,8 @@ interface QueuedRow {
   status: StatusMeta | null;
   /** Steering works for this row, so desktop shows Steer. */
   steerShown: boolean;
+  /** Why steering does not work for this row, when it does not. */
+  steerUnavailable: string | null;
   steer: QueuedMessageAction;
   edit: QueuedMessageAction;
   /** Cancel for work that may still run; Dismiss for a settled receipt. */
@@ -136,7 +138,8 @@ export function QueuedMessages({
 }: QueuedMessagesProps) {
   const phone = useIsMobile();
   const trayRef = useRef<HTMLElement>(null);
-  const focusRemoved = useRemovedFocus(trayRef);
+  // A phone row's action sheet is portalled to <body>, so focus in it is tracked by its marker.
+  const focusRemoved = useRemovedFocus(trayRef, "[data-queue-sheet]");
   useLayoutEffect(() => {
     if (focusRemoved()) onFocusLost?.();
   });
@@ -196,6 +199,7 @@ export function QueuedMessages({
       terminal,
       status: rowStatus(prompt, locallyPromoting),
       steerShown: !terminal && !locallyPromoting && availability.available,
+      steerUnavailable: availability.available ? null : availability.reason,
       steer: { reason: steerReason },
       edit: { reason: editReason },
       remove,
@@ -255,6 +259,11 @@ export function QueuedMessages({
           const editing = editingPromptId === prompt.id;
           const ownCancelReason = row.remove.kind === "cancel" && row.remove.reason !== null &&
             refusal === null && sharedCancelReason === null ? row.remove.reason : null;
+          // Where rows differ, an ordinary row that cannot steer says why on its own line; a row with
+          // a status is explained by it, and a reason every row shares is in the header.
+          const ownSteerReason = !row.terminal && row.status === null && steeringNote === null && !held
+            ? row.steerUnavailable
+            : null;
           return (
             <li
               key={prompt.id}
@@ -328,6 +337,7 @@ export function QueuedMessages({
                       </button>
                     )}
                   </div>
+                  {ownSteerReason !== null && <span className="queue-reason">{ownSteerReason}</span>}
                   {ownCancelReason !== null && (
                     <span className="queue-reason" id={`queued-cancel-reason-${prompt.id}`}>{ownCancelReason}</span>
                   )}
@@ -393,6 +403,7 @@ function QueuedMessageActionMenu({ row, onSteer, onEdit, onCancel, onDismiss }: 
           surfaceRef={menu.menuRef}
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
+          data-queue-sheet=""
           label={label}
           align="end"
           tabIndex={-1}

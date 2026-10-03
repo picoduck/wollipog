@@ -156,14 +156,17 @@ test("steering unavailable for the whole session is said once, and no row offers
     });
     assert.deepEqual(tray.notes(), ["This agent waits for the turn to end."]);
 
-    // Rows that differ keep their own reasons, and only the eligible row offers Steer.
+    // Rows that differ keep their own reasons, visible on the row, and only the eligible row offers
+    // Steer.
     await tray.draw({
       steering: STEERING,
       prompts: [queued("a", { steerable: false, steerDisabledReason: "Not this one." }), queued("b")],
     });
     assert.deepEqual(tray.notes(), []);
     assertNoDomNode(tray.button(tray.row("a"), "Steer Queued Message"));
+    assert.equal(tray.row("a").querySelector(".queue-reason")?.textContent, "Not this one.");
     assert.ok(tray.button(tray.row("b"), "Steer Queued Message"));
+    assertNoDomNode(tray.row("b").querySelector(".queue-reason"));
   } finally {
     await tray.unmount();
   }
@@ -306,6 +309,25 @@ test("on a phone each row is its text and one Queued Message Actions button whos
     await act(async () => { items[1]!.click(); });
     assert.deepEqual(tray.calls.edit, ["b"]);
     assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "choosing closes the sheet");
+  } finally {
+    phone = false;
+    await tray.unmount();
+  }
+});
+
+test("focus in a phone row's open action sheet returns to the composer when the row leaves", async () => {
+  phone = true;
+  let lost = 0;
+  const tray = await render({ prompts: [queued("a")], onFocusLost: () => { lost += 1; } });
+  try {
+    await act(async () => { tray.button(tray.row("a"), "Queued Message Actions")!.click(); });
+    const item = domWindow.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement;
+    await act(async () => { item.focus(); });
+    assert.equal(domWindow.document.activeElement, item as never);
+    // The runner takes the message while its sheet is open.
+    await tray.draw({ prompts: [], onFocusLost: () => { lost += 1; } });
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
+    assert.equal(lost, 1, "the tray hands focus on once");
   } finally {
     phone = false;
     await tray.unmount();
