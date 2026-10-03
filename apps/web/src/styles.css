@@ -7172,9 +7172,21 @@ textarea,
   flex: none;
   margin-inline-start: auto;
 }
-/* A phone keeps the name readable: the role (also in the Agents panel) yields to it. */
+/* A phone gives the name the line: it takes the whole first line beside the chevron and icon, and
+   the role, step count and status wrap to a second line under it. Open stays at the trailing edge. */
 @media (max-width: 760px) {
-  .tl-agent-role { display: none; }
+  .tl-agent > .tl-agent-toggle {
+    flex-wrap: wrap;
+    row-gap: 0;
+    padding-block: var(--space-0-5);
+  }
+  .tl-agent-name {
+    flex: 1 1 calc(100% - var(--icon-sm) - var(--icon) - 2 * var(--space-2) - 1px);
+  }
+  .tl-agent-meta {
+    margin-inline-start: calc(var(--icon-sm) + var(--icon) + 2 * var(--space-2));
+  }
+  .tl-agent-status { margin-inline-start: 0; }
 }
 .tl-plan {
   min-width: 0;

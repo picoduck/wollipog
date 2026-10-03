@@ -1503,9 +1503,10 @@ has scrolled out of view raises "1 Message Not Sent" in the floating tail contro
 **Agent rows** (#2183). Each agent a turn spawned is one `.tl-agent` row on the work rule, built
 like a step: the §5.5 chevron on a `button.disclosure-trigger[aria-expanded]`, a `Bot` icon, the
 spawning call's name ("Coordinate Release Audit"), then `--type-small` meta (the role when the
-provider gave one, hidden below 760px, and "N Steps"), the status from the Subagent row above
+provider gave one, and "N Steps"), the status from the Subagent row above
 (Running a pulsing info badge, every other state inline), and Open, a sibling `.btn.sm.ghost` named
-"Open {name}". The spawning call has no step row of its own; its output, when it has any, is a
+"Open {name}". Below 760px the name takes the whole first line and the meta and status wrap to a second
+line under it, so a phone never trades the name for the counts. The spawning call has no step row of its own; its output, when it has any, is a
 collapsed Result step after the agent's steps ("Result of {name}"), in the quiet output well with a
 failure's lines in the danger colour. A nested agent's steps add one rule under its chevron.
 

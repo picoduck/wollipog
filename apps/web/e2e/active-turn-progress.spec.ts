@@ -175,21 +175,28 @@ test.describe("on a coarse pointer at 390px", () => {
       expect(hit.visual).toBe(36);
       expect(hit.visual - hit.top - hit.bottom, "the ::after hit area borrows past the visual edge").toBeGreaterThanOrEqual(44);
     }
-    // The name gives way: the step count and status stay whole inside the disclosure, the name
-    // ellipsizes, and Open stays inside the reader.
+    // A phone gives the name the line: it runs from the icon to the disclosure's end, and the role,
+    // step count and status wrap to a second line under it. Open stays at the trailing edge.
     const fits = await agents.evaluateAll((rows) => rows.map((row) => {
-      const toggle = row.querySelector(".tl-agent-toggle")!.getBoundingClientRect();
-      const name = row.querySelector<HTMLElement>(".tl-agent-name")!;
+      const toggle = row.querySelector<HTMLElement>(".tl-agent-toggle")!;
+      const end = toggle.getBoundingClientRect().right - Number.parseFloat(getComputedStyle(toggle).paddingRight);
+      const icon = row.querySelector(".tl-step-icon")!.getBoundingClientRect();
+      const name = row.querySelector(".tl-agent-name")!.getBoundingClientRect();
       const meta = row.querySelector(".tl-agent-meta")!.getBoundingClientRect();
       const status = row.querySelector(".tl-agent-status")!.getBoundingClientRect();
       const open = row.querySelector(".btn")!.getBoundingClientRect();
       return {
-        whole: meta.right <= toggle.right && status.right <= toggle.right,
-        named: name.getBoundingClientRect().width >= 40,
-        inside: open.right <= document.documentElement.clientWidth,
+        nameHasTheLine: name.right >= end - 2 && name.left - icon.right <= 9,
+        factsUnderName: meta.top >= name.bottom - 1 && status.top >= name.bottom - 1 && Math.abs(meta.left - name.left) <= 1,
+        factsWhole: meta.right <= end + 1 && status.right <= end + 1,
+        openTrailing: open.left >= end && open.right <= document.documentElement.clientWidth,
       };
     }));
-    expect(fits).toEqual(Array.from({ length: 3 }, () => ({ whole: true, named: true, inside: true })));
+    expect(fits).toEqual(Array.from({ length: 3 }, () =>
+      ({ nameHasTheLine: true, factsUnderName: true, factsWhole: true, openTrailing: true })));
+    await expect(agents.locator(".tl-agent-name").first()).toHaveText("Coordinate Release Audit");
+    expect(await agents.locator(".tl-agent-name").evaluateAll((names) =>
+      names.filter((name) => name.scrollWidth > name.clientWidth + 1).length), "every fixture name fits whole at 390px").toBe(0);
     await expectNoHorizontalOverflow(page);
     await agents.first().getByRole("button", { name: "Open Coordinate Release Audit" }).tap();
     await expect(page.getByTestId("opened-subagent")).toHaveText("release-audit-agent");
