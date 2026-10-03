@@ -2078,13 +2078,14 @@ function SubagentSummary({ tool, open, onToggle, onOpen }: {
 }
 
 /** The spawning call's own output, last in an open agent's body: the result it returned, or why it
- * failed. Collapsed to one quiet line, as a step's output is. */
+ * failed, in the quiet output well with a failure's lines in the danger colour. Collapsed to one
+ * line, as a step's output is; its name ties it to the agent. */
 function SubagentOutput({ tool, open, onToggle }: { tool: ToolItem; open: boolean; onToggle: () => void }) {
   return (
     <ToolStep
       icon={toolIcon()}
-      verb="Output"
-      label={`Output of ${subagentName(tool)}`}
+      verb="Result"
+      label={`Result of ${subagentName(tool)}`}
       open={open}
       onToggle={onToggle}
     >

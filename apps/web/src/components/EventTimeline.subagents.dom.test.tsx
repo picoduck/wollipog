@@ -155,24 +155,47 @@ test("a nested agent's steps sit on the work rule, with no inline margin on any 
   assert.equal(container.querySelectorAll("[style*='margin']").length, 0);
 });
 
-test("the hidden call's output follows the agent's steps as one collapsed Output row", async () => {
+test("the hidden call's output follows the agent's steps as one collapsed Result row named for the agent", async () => {
   const { container, root } = await mount();
   await act(async () => root.render(<EventTimeline items={turn} sessionActive />));
   await openWork(container);
   const gates = agentRow(container, "Check Compatibility Gates")!;
   await act(async () => gates.querySelector<HTMLButtonElement>(".tl-agent-toggle")!.click());
 
-  const outputs = [...container.querySelectorAll<HTMLDetailsElement>("details.tl-step")]
-    .filter((step) => step.querySelector(".tl-step-title")?.textContent === "Output");
-  assert.equal(outputs.length, 1, "only the agent whose call reported output has an Output row");
-  const output = outputs[0]!;
-  assert.equal(output.querySelector("summary")?.getAttribute("aria-label"), "Output of Check Compatibility Gates");
-  assert.equal(output.open, false, "the output starts collapsed, as a step's output does");
+  const results = () => [...container.querySelectorAll<HTMLDetailsElement>("details.tl-step")]
+    .filter((step) => step.querySelector(".tl-step-title")?.textContent === "Result");
+  assert.equal(results().length, 1, "only the agent whose call reported output has a Result row");
+  const result = results()[0]!;
+  assert.equal(result.querySelector("summary")?.getAttribute("aria-label"), "Result of Check Compatibility Gates",
+    "the accessible name ties the result to its agent and starts with the visible label");
+  assert.equal(result.open, false, "the result starts collapsed, as a step's output does");
   const order = [...container.querySelectorAll(".tl-agent-name, .tl-step-object, details.tl-step > summary .tl-step-title")]
     .map((element) => element.textContent);
   assert.deepEqual(order.slice(order.indexOf("Check Compatibility Gates"), order.indexOf("Check Compatibility Gates") + 3),
-    ["Check Compatibility Gates", "gates.ts", "Output"], "the output comes after the agent's steps");
-  await act(async () => output.querySelector<HTMLElement>("summary")!.click());
-  assert.equal(output.querySelector(".tl-step-error")?.textContent, "Agent failed: quota exhausted",
+    ["Check Compatibility Gates", "gates.ts", "Result"], "the result comes after the agent's steps");
+  await act(async () => result.querySelector<HTMLElement>("summary")!.click());
+  const well = result.querySelector(".tl-step-output");
+  assert.ok(well, "the result sits in the quiet output well");
+  assert.equal(well.querySelector(".tl-step-error")?.textContent, "Agent failed: quota exhausted",
     "a failed agent's reason reads in the danger colour");
+
+  await act(async () => gates.querySelector<HTMLButtonElement>(".tl-agent-toggle")!.click());
+  assert.equal(results().length, 0, "collapsing the agent hides its result with its steps");
+});
+
+test("a completed agent's result reads in the neutral well, with no danger lines", async () => {
+  const { container, root } = await mount();
+  const items: TimelineItem[] = [
+    { kind: "user_message", id: 1, text: "Draft the notes" },
+    agent(2, "notes", "Draft Release Notes", "completed", { text: "Drafted the v0.30 release notes." }),
+    read(3, "CHANGELOG.md", "notes"),
+  ];
+  await act(async () => root.render(<EventTimeline items={items} sessionActive />));
+  await openWork(container);
+  const result = [...container.querySelectorAll<HTMLDetailsElement>("details.tl-step")]
+    .find((step) => step.querySelector("summary")?.getAttribute("aria-label") === "Result of Draft Release Notes");
+  assert.ok(result, "an open agent shows its result row");
+  await act(async () => result.querySelector<HTMLElement>("summary")!.click());
+  assert.equal(result.querySelector(".tl-step-output")?.textContent, "Drafted the v0.30 release notes.");
+  assertNoDomNode(result.querySelector(".tl-step-error"), "a completed result has no danger lines");
 });

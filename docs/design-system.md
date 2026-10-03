@@ -1506,7 +1506,8 @@ spawning call's name ("Coordinate Release Audit"), then `--type-small` meta (the
 provider gave one, hidden below 760px, and "N Steps"), the status from the Subagent row above
 (Running a pulsing info badge, every other state inline), and Open, a sibling `.btn.sm.ghost` named
 "Open {name}". The spawning call has no step row of its own; its output, when it has any, is a
-collapsed Output step after the agent's steps. A nested agent's steps add one rule under its chevron.
+collapsed Result step after the agent's steps ("Result of {name}"), in the quiet output well with a
+failure's lines in the danger colour. A nested agent's steps add one rule under its chevron.
 
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;
