@@ -4704,6 +4704,56 @@ for (const outcome of ["fails", "lands"] as const) {
   });
 }
 
+test("an older send landing after a remount keeps a newer copy loaded in the new view (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const sends: Array<Deferred<void>> = [];
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: EDITABLE_TURN,
+    client: {
+      prompt: async () => {
+        const pending = deferred<void>();
+        sends.push(pending);
+        await pending.promise;
+        return undefined as never;
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "my own draft");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    await clickEdit(fixture);
+    await replaceDraft();
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+    assert.equal(sends.length, 1);
+
+    // The view remounts while the copy is in flight; there the person writes a new draft and edits
+    // over it.
+    const composer = await fixture.remountWithDraftLoader(async () => ({ text: "original prompt", images: [submittedImage], updatedAt: 2 }));
+    await flushAsyncWork();
+    await act(async () => {
+      composer.value = "written in the new view";
+      fireDomEvent.change(composer);
+    });
+    await clickEdit(fixture);
+    await replaceDraft();
+    const newer = loadComposerEditCopy(fixture.sessionId, fixture.instanceScope);
+    assert.equal(newer?.previous?.text, "written in the new view");
+
+    await act(async () => { sends[0]!.resolve(); });
+    await flushAsyncWork();
+    assert.deepEqual(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), newer,
+      "the older send landing leaves the newer copy stored");
+    const discard = discardEditButton(fixture);
+    assert.ok(discard, "and its Discard Edit");
+    await act(async () => { discard.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "written in the new view");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("Use as New Message for a recovered queued edit ends the copy it displaced (#2185)", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft, {

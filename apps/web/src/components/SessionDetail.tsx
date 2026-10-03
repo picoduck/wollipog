@@ -4692,11 +4692,15 @@ function SessionDetailLoaded({
   };
 
   /** A send or steer of a copy settled. The stored edit ends only when the send was accepted and no
-   * newer copy has replaced it; this view follows the store. */
+   * newer copy has replaced it. This view then follows the store and never writes it: by now it may
+   * be an unmounted view whose idea of the copy is older than the store's. */
   const settleSentEditCopy = (copy: ComposerEditCopy | null, accepted: boolean) => {
     if (!copy) return;
     finishComposerEditCopySend(sessionId, instanceScope, copy.id, accepted);
-    if (accepted && editCopyRef.current?.id === copy.id) updateEditCopy(null);
+    if (!accepted || editCopyRef.current?.id !== copy.id) return;
+    const stored = loadComposerEditCopy(sessionId, instanceScope);
+    editCopyRef.current = stored;
+    setEditCopyState(stored);
   };
   const send = async () => {
     if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || retitleInFlightRef.current) return;
