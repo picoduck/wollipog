@@ -114,7 +114,10 @@ test("Unrecorded durations read Unavailable, partial ones are lower bounds, and 
   assert.equal(measuredDuration(Number.NaN), "Unavailable");
   assert.equal(measuredDuration(0), "0s");
   // One format everywhere: at most two units, no zero unit, seconds only under a minute.
-  assert.equal(measuredDuration(400), "<1s");
+  for (const ms of [400, 499, 500, 999]) assert.equal(measuredDuration(ms), "<1s", `${ms}ms`);
+  assert.equal(measuredDuration(1_000), "1s");
+  assert.equal(measuredDuration(59_400), "59s");
+  assert.equal(measuredDuration(59_600), "1m", "rounding up to a full minute changes the unit");
   assert.equal(measuredDuration(45_000), "45s");
   assert.equal(measuredDuration(50 * MINUTE + 20_000), "50m");
   assert.equal(measuredDuration(95 * MINUTE), "1h 35m");

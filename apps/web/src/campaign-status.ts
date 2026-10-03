@@ -175,8 +175,9 @@ export function durationMetricView(metric: CampaignMetric<number> | undefined): 
 export function measuredDuration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 0) return UNAVAILABLE;
   if (ms === 0) return "0s";
+  // Checked before rounding, so 500–999ms still reads as under a second rather than "1s".
+  if (ms < 1_000) return "<1s";
   const seconds = Math.round(ms / 1_000);
-  if (seconds < 1) return "<1s";
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
