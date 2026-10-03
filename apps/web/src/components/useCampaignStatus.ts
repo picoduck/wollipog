@@ -207,6 +207,9 @@ export function useCampaignStatus({
   // abort arrived too late to stop it (the transport stops listening for aborts once headers land).
   const listGeneration = useRef(0);
   const reloading = useRef(false);
+  // How many rows the reload in flight is loading. A reload that replaces it keeps that count, so
+  // rows it was fetching (a refused page's retry, a remembered position) are not dropped.
+  const reloadTarget = useRef<{ key: string; rows: number } | null>(null);
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
   const loadedCountRef = useRef(0);
@@ -224,11 +227,13 @@ export function useCampaignStatus({
     const generation = ++listGeneration.current;
     const controller = new AbortController();
     const live = () => generation === listGeneration.current && !controller.signal.aborted;
+    const superseded = reloading.current && reloadTarget.current?.key === listKey ? reloadTarget.current.rows : 0;
+    const want = Math.max(CAMPAIGN_WORK_PAGE_SIZE, target, superseded);
+    reloadTarget.current = { key: listKey, rows: want };
     reloading.current = true;
     setList((current) => current.key === listKey
       ? { ...current, state: { ...current.state, reloading: true } }
       : { key: listKey, state: { ...EMPTY_LIST, reloading: true }, cursor: null });
-    const want = Math.max(CAMPAIGN_WORK_PAGE_SIZE, target);
     void (async () => {
       for (let restarts = 0; ; restarts += 1) {
         try {

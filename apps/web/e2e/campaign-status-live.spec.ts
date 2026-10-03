@@ -53,13 +53,15 @@ async function stopChild(child: ChildProcess): Promise<void> {
 /** Write to the live database beside the running control plane, retrying a momentary lock. */
 async function withLiveDb<T>(databasePath: string, write: (db: ControlPlaneDb) => T): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
-    const db = ControlPlaneDb.open(databasePath);
+    let db: ControlPlaneDb | null = null;
     try {
+      // Opening writes too (schema checks), so it can meet the server's lock as well.
+      db = ControlPlaneDb.open(databasePath);
       return write(db);
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes("database is locked") || attempt === 49) throw error;
     } finally {
-      db.close();
+      db?.close();
     }
     await delay(20);
   }
@@ -464,7 +466,9 @@ test("Show More still loads its page when the ledger changes while that page is 
   const total = (await stack.orchestrator<{ page: { total: number } }>("GET", "work-items?limit=1")).page.total;
   expect(total).toBeGreaterThan(pageSize);
 
-  // Hold the next page until a ledger write has committed, so it reaches the server stale.
+  // Hold the next page until a ledger write has committed and the browser has started the reload
+  // that write's revision triggers, so the page reaches the server stale after the reload began.
+  // (The opposite order, a refusal before the revision, is pinned by the DOM tests.)
   const refusals: string[] = [];
   page.on("response", async (response) => {
     if (response.url().includes("cursor=") && response.status() === 409) {
@@ -475,14 +479,17 @@ test("Show More still loads its page when the ledger changes while that page is 
   await page.route(/\/campaign\/work-items\?.*cursor=/u, async (route) => {
     if (!held) {
       held = true;
+      const revisionReload = page.waitForRequest((request) =>
+        request.url().includes("/campaign/work-items?") && !request.url().includes("cursor="));
       await stack.updateItem(stack.seeded.readApiItemId, { nextAction: "Rebase onto main once storage merges, then retest." });
+      await revisionReload;
     }
     await route.continue();
   });
   await page.getByRole("button", { name: "Show More" }).click();
   await expect(workRows(page)).toHaveCount(total, { timeout: 15_000 });
   expect(held).toBe(true);
-  expect(refusals).toEqual(["revision_changed"]);
+  await expect.poll(() => refusals).toEqual(["revision_changed"]);
   await expect(page.locator('.campaign-status [role="alert"]')).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Show More" })).toHaveCount(0);
   const keys = await workRows(page).evaluateAll((rows) => rows.map((row) => row.textContent));
