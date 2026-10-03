@@ -405,6 +405,13 @@ export function isCollapsibleWorkItem(item: TimelineItem): boolean {
     (item.kind === "governance_decision" && item.decision.tone === "allowed");
 }
 
+const PROMPT_FAILED_PREFIX = /^prompt failed:\s*/i;
+
+/** The provider's message without the runner's "prompt failed:" lead-in. */
+export function withoutPromptFailedPrefix(message: string): string {
+  return message.replace(PROMPT_FAILED_PREFIX, "");
+}
+
 export function timelineBoundaryKey(item: TimelineItem): string {
   if (item.kind === "agent_message" || item.kind === "agent_thought" ||
       item.kind === "command_output" || item.kind === "stderr") {
@@ -624,6 +631,8 @@ export class TimelineBuilder {
   private readonly planIndex = new Map<string, number>();
   private readonly pendingSubagentRollups = new Map<string, SubagentRollup>();
   private activeUserIndex: number | null = null;
+  /** The current turn's latest error, which a repeat of the same failure merges into. */
+  private lastErrorIndex: number | null = null;
 
   private turnActivitySinceCompletion(): boolean {
     if (this.usageOwnerCompletedAt == null) return false;
@@ -883,6 +892,7 @@ export class TimelineBuilder {
           this.pendingConversationUserIndex = userIndex;
           this.usageOwner = { kind: "prompt" };
           this.usageOwnerCompletedAt = null;
+          this.lastErrorIndex = null;
         }
         this.markDirty(userIndex);
         break;
@@ -1309,10 +1319,24 @@ export class TimelineBuilder {
           ...(p.automatic ? { automatic: true } : {}),
         }) - 1);
         break;
-      case "error":
+      case "error": {
         this.breakText();
-        this.markDirty(this.items.push({ kind: "error", id: ev.seq, message: p.message }) - 1);
+        // The runner reports a failed prompt as "prompt failed: X" and the driver often reports the
+        // same X on its own; the turn failed once, so the second merges into the first, keeping
+        // the provider's own wording.
+        const previous = this.lastErrorIndex == null ? undefined : this.items[this.lastErrorIndex];
+        if (previous?.kind === "error" && withoutPromptFailedPrefix(previous.message) === withoutPromptFailedPrefix(p.message)) {
+          const message = withoutPromptFailedPrefix(p.message);
+          if (previous.message !== message) {
+            this.items[this.lastErrorIndex!] = { ...previous, message };
+            this.markDirty(this.lastErrorIndex!);
+          }
+          break;
+        }
+        this.lastErrorIndex = this.items.push({ kind: "error", id: ev.seq, message: p.message }) - 1;
+        this.markDirty(this.lastErrorIndex);
         break;
+      }
       case "turn_interrupted":
         this.breakText();
         this.markDirty(this.items.push({ kind: "turn_interrupted", id: ev.seq, createdAt: ev.ts }) - 1);

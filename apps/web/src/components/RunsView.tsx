@@ -1,4 +1,5 @@
 import { RunsIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
@@ -334,7 +335,7 @@ function RunDetailContent({ runId }: { runId: string }) {
             </div>
             {workflow && <StatusBadge meta={statusMeta("workflow", workflow.status)} />}
           </div>
-          {workflowError && <div className="tl-error">{workflowError}</div>}
+          {workflowError && <Notice tone="danger" compact>{workflowError}</Notice>}
           {workflow && (
             <div className="workflow-node-grid">
               {workflow.nodeStates.map((state) => {
@@ -353,7 +354,7 @@ function RunDetailContent({ runId }: { runId: string }) {
                     </div>
                     {state.outcome && <div className="workflow-node-outcome">Outcome: {titleCaseLabel(state.outcome.replace("_", " "))}</div>}
                     {latest && <div className="muted sm">Latest Attempt: {latest.status === "cancelled" ? "Canceled" : titleCaseLabel(latest.status.replace("_", " "))}</div>}
-                    {state.error && <div className="tl-error">{state.error}</div>}
+                    {state.error && <Notice tone="danger" compact>{state.error}</Notice>}
                     {node.kind === "agent" && state.status === "ready" && (
                       <button className="btn primary sm" disabled={Boolean(workflowBusy) || retryDelayed} onClick={() => void dispatchNode(node.nodeId, state.attemptCount)}>
                         {workflowBusy === node.nodeId ? "Dispatching…" : retryDelayed ? `Retry ${relativeTime(state.readyAt!)}` : "Dispatch Step"}
@@ -376,7 +377,7 @@ function RunDetailContent({ runId }: { runId: string }) {
       {(artifacts.length > 0 || artifactError) && (
         <section className="run-artifacts" aria-label="Workflow Artifacts">
           <div className="run-artifacts-head">Artifacts <span className="column-count">{artifacts.length}</span></div>
-          {artifactError && <div className="tl-error">{artifactError}</div>}
+          {artifactError && <Notice tone="danger" compact>{artifactError}</Notice>}
           <div className="run-artifact-list">
             {artifacts.map((artifact) => (
               <button key={artifact.artifactId} className="run-artifact-card" onClick={() => setSelectedArtifact(artifact)}>

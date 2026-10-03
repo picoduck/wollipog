@@ -1,4 +1,5 @@
 import { PodsIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
@@ -823,7 +824,7 @@ function PodDetailContent({ podId }: { podId: string }) {
           </div>
           <span className="muted sm">{targets.length}/{pod.members.length} Targets</span>
         </div>
-        {error && <div className="tl-error">{error}</div>}
+        {error && <Notice tone="danger" compact>{error}</Notice>}
         {receipts.length > 0 && (
           <div className="pod-receipts" aria-label="Relay Delivery Receipts">
             {receipts.map((receipt) => (

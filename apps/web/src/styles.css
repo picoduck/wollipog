@@ -6746,6 +6746,9 @@ textarea,
 .tl-turn-label,
 .tl-turn-usage { white-space: nowrap; }
 .tl-turn-time { position: relative; white-space: nowrap; }
+/* A stopped turn (#2169): the 14px square leads "Stopped at …" in place of the finish time. */
+.tl-turn-stopped { display: inline-flex; align-items: center; gap: var(--space-1); }
+.tl-turn-stopped > svg { flex: none; }
 .tl-turn-actions { margin-inline-start: auto; }
 
 /* Tooltip (§9.3): supplementary only; the same words are the time's accessible description. */
@@ -7322,26 +7325,6 @@ textarea,
   font-weight: 700;
   letter-spacing: .05em;
   text-transform: uppercase;
-}
-.tl-error {
-  min-width: 0;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  background: color-mix(in srgb, var(--red) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
-  color: var(--danger-text);
-  padding: 10px 13px;
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-}
-.tl-interrupted {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  padding: 7px 0;
 }
 .tl-perm {
   display: flex;

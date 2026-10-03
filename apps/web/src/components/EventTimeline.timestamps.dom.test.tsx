@@ -184,7 +184,7 @@ test("quiet active sessions keep the shared clock advancing", async () => {
   const root = createRoot(container);
   try {
     await act(async () => {
-      root.render(<EventTimeline items={[{ kind: "turn_interrupted", id: 30, createdAt: startedAt }]} sessionActive />);
+      root.render(<EventTimeline items={[{ kind: "review_decision", id: 30, reviewId: "point", reviewer: { kind: "policy" }, outcome: "denied", createdAt: startedAt }]} sessionActive />);
     });
     assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "just now");
     assert.ok(tick, "an active session owns the clock even when all current rows are point-in-time records");
@@ -211,13 +211,13 @@ test("clock ticks update timestamp consumers without rerendering general timelin
     writable: true,
     value: ((callback: () => void) => { tick = callback; return 304; }) as unknown as typeof setInterval,
   });
-  const countedItem = { id: 40, createdAt: startedAt } as unknown as TimelineItem;
+  const countedItem = { id: 40, reviewId: "point", reviewer: { kind: "policy" }, outcome: "denied", createdAt: startedAt } as unknown as TimelineItem;
   Object.defineProperty(countedItem, "kind", {
     configurable: true,
     enumerable: true,
     get: () => {
       kindReads += 1;
-      return "turn_interrupted";
+      return "review_decision";
     },
   });
   const countedItems = [countedItem];
@@ -284,7 +284,7 @@ test("the shared clock starts when enabled, pauses while hidden, republishes on 
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  const pointItem: TimelineItem[] = [{ kind: "turn_interrupted", id: 31, createdAt: startedAt }];
+  const pointItem: TimelineItem[] = [{ kind: "review_decision", id: 31, reviewId: "point", reviewer: { kind: "policy" }, outcome: "denied", createdAt: startedAt }];
   try {
     await act(async () => root.render(<EventTimeline items={pointItem} sessionActive={false} />));
     assert.equal(intervalStarts, 0, "disabled timelines do not subscribe");
@@ -405,12 +405,6 @@ test("live point-in-time rows remain one Recorded timestamp, and a prompt carrie
     assert.equal(container.querySelectorAll("time").length, 0, "the turn footer, not the prompt, carries its time");
     assert.doesNotMatch(container.textContent ?? "", /Recorded|Started|Last Activity/);
 
-    await act(async () => root.render(<EventTimeline
-      items={[{ kind: "turn_interrupted", id: 35, createdAt: startedAt }]}
-      sessionActive
-    />));
-    assert.equal(container.querySelectorAll(".tl-interrupted time").length, 1);
-    assert.equal(container.querySelector(".tl-interrupted .tl-timestamp-label")?.textContent, "Recorded");
   } finally {
     await act(async () => root.unmount());
     container.remove();

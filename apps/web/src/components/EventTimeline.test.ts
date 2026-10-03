@@ -201,14 +201,12 @@ test("semantic reveal identity survives streamed replacement and expires with hi
   assert.equal(projector.resolveRevealTarget(7), null);
 });
 
-test("turn interruption renders a timestamped Interrupted outcome without error styling", () => {
+test("a turn interruption renders no row of its own and no error styling", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [{ kind: "turn_interrupted", id: 1, createdAt: Date.UTC(2026, 7, 4, 12, 0, 0) }],
   }));
-  assert.match(html, /class="tl-interrupted"/);
-  assert.match(html, />Interrupted</);
-  assert.match(html, /Recorded/);
-  assert.doesNotMatch(html, /tl-error/);
+  assert.doesNotMatch(html, /Interrupted/);
+  assert.doesNotMatch(html, /t-danger/);
 });
 
 test("historical transcript error rows are not assertive live regions", () => {
@@ -216,7 +214,8 @@ test("historical transcript error rows are not assertive live regions", () => {
     items: [{ kind: "error", id: 1, message: "Worktree verification failed" }],
   }));
   assert.equal((html.match(/role="alert"/g) ?? []).length, 0);
-  assert.match(html, /Worktree verification failed/);
+  assert.match(html, /Turn Failed/);
+  assert.doesNotMatch(html, /Worktree verification failed/, "the raw message waits behind Show Details");
 });
 
 test("a canonical accepted steer keeps one quiet Steered the Current Turn fact under its bubble", () => {

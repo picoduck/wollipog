@@ -259,6 +259,33 @@ test("turn interruption is a standalone non-error transcript outcome with record
   assert.deepEqual(groupTimeline(items).map((group) => group.kind), ["item", "item", "item"]);
 });
 
+test("a failure reported as \"prompt failed: X\" and as X merges into one error in the provider's words", () => {
+  const errors = (events: SessionEventPayload[]) => deriveTimeline(events.map(ev))
+    .flatMap((item) => item.kind === "error" ? [item.message] : []);
+  assert.deepEqual(errors([
+    { kind: "user_message", text: "go" },
+    { kind: "error", message: "prompt failed: Rate limit reached" },
+    { kind: "error", message: "Rate limit reached" },
+  ]), ["Rate limit reached"]);
+  assert.deepEqual(errors([
+    { kind: "user_message", text: "go" },
+    { kind: "error", message: "Rate limit reached" },
+    { kind: "agent_message", text: "late output" },
+    { kind: "error", message: "prompt failed: Rate limit reached" },
+  ]), ["Rate limit reached"], "the preceding error of the same turn, whatever lies between");
+  assert.deepEqual(errors([
+    { kind: "user_message", text: "go" },
+    { kind: "error", message: "prompt failed: Rate limit reached" },
+    { kind: "error", message: "Connection reset" },
+  ]), ["prompt failed: Rate limit reached", "Connection reset"], "different failures stay separate");
+  assert.deepEqual(errors([
+    { kind: "user_message", text: "go" },
+    { kind: "error", message: "prompt failed: Rate limit reached" },
+    { kind: "user_message", text: "again" },
+    { kind: "error", message: "prompt failed: Rate limit reached" },
+  ]), ["prompt failed: Rate limit reached", "prompt failed: Rate limit reached"], "each turn's failure is its own");
+});
+
 test("streamed response completion evidence stays hidden and does not duplicate content", () => {
   const items = deriveTimeline([
     ev({ kind: "agent_message", text: "streamed answer" }),
