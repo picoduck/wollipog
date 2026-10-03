@@ -56,6 +56,9 @@ import {
   parseMessage,
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   validateQuestionAnswers,
+  summarizeQuestionAnswers,
+  type AgentQuestion,
+  QUESTION_ANSWER_SUMMARY_TEXT_MAX_LENGTH,
   validateQuestionFreeText,
   validatePromptImageInputs,
   providerSupportsConversationFork,
@@ -1315,6 +1318,34 @@ test("parseMessage returns null for invalid JSON and never throws", () => {
     });
     assert.equal(result, null, `${JSON.stringify(bad)} should parse to null`);
   }
+});
+
+test("summarizeQuestionAnswers keeps chosen labels and bounded free text, never secret or email content (#2188)", () => {
+  const questions: AgentQuestion[] = [
+    { id: "pick", question: "Pick one", options: [{ label: "A" }, { label: "B" }] },
+    { id: "many", question: "Pick several", multiSelect: true, options: [{ label: "X" }, { label: "Y" }, { label: "Z" }] },
+    { id: "other", question: "Or type", options: [{ label: "A" }], allowOther: true },
+    { id: "secret", question: "Token", options: [{ label: "Use Saved" }], allowOther: true, secret: true },
+    { id: "email", question: "Email", options: [], allowOther: true, inputFormat: "email" },
+    { id: "long", question: "Long", options: [], allowOther: true },
+    { id: "skipped", question: "Optional", options: [], allowOther: true, required: false },
+  ];
+  const long = "😀".repeat(QUESTION_ANSWER_SUMMARY_TEXT_MAX_LENGTH + 10);
+  const summary = summarizeQuestionAnswers(questions, {
+    many: ["Z", "X"], pick: "B", other: "my own words", secret: "Use Saved", email: "a@example.com", long,
+  }, (text) => text.replace("own", "[hidden]"));
+  assert.deepEqual(summary.slice(0, 5), [
+    { questionId: "pick", selected: ["B"] },
+    { questionId: "many", selected: ["Z", "X"] },
+    { questionId: "other", text: "my [hidden] words" },
+    { questionId: "secret", withheld: true },
+    { questionId: "email", withheld: true },
+  ]);
+  assert.equal(summary[5]!.truncated, true);
+  assert.equal(Array.from(summary[5]!.text!).length, QUESTION_ANSWER_SUMMARY_TEXT_MAX_LENGTH,
+    "the bound counts characters, never splitting a surrogate pair");
+  assert.equal(summary.length, 6, "an unanswered optional question has no entry");
+  assert.deepEqual(summarizeQuestionAnswers(questions, {}), []);
 });
 
 test("validateQuestionAnswers accepts valid, empty (dismiss), rejects unknown/unoffered/wrong-shape", () => {
