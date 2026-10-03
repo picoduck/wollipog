@@ -1712,6 +1712,7 @@ export class CodexAppServerDriver implements Driver {
 
     peer.onNotification("skills/changed", () => this.refreshSkillCatalog());
     peer.onNotification("warning", (params: Json) => {
+      if (this.disposed || this.peer !== peer) return;
       if (params?.threadId && params.threadId !== this.threadId) return;
       if (codexHttpFallbackWarning(params?.message)) this.reportInferenceHttpFallback();
     });

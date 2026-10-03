@@ -120,6 +120,9 @@ test("structured fallback warnings are sanitized, scoped, deduplicated, and rese
     await h.driver.initialize();
     await h.driver.newSession("/project");
     assert.equal(JSON.parse(h.diagnostics[2]!).observedTransport, "unverified");
+    h.servers[0]!.notify("warning", { threadId: "thread", message: warning });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.diagnostics.length, 3, "a previous process cannot report fallback for the current launch");
     h.servers[1]!.notify("warning", { threadId: "thread", message: warning });
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(JSON.parse(h.diagnostics[3]!).launch, 2);
