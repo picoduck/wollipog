@@ -11,7 +11,7 @@ function Fixture() {
   const [requested, setRequested] = useState<string | null>(null);
   return (
     <main className="app" style={{ minHeight: "100vh", background: "var(--bg)", padding: 32 }}>
-      <section style={{ maxWidth: 760, margin: "0 auto" }}>
+      <section style={{ width: "100%", maxWidth: 760, margin: "0 auto" }}>
         <EventTimeline
           items={[
             { kind: "user_message", id: 1, text: "Inspect the checkpoint controls." },
