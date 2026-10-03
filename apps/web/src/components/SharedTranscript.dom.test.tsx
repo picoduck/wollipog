@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
+import test, { afterEach, beforeEach, mock } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -24,7 +24,13 @@ const { SharedTranscript, sharedMessageCount } = await import("./SharedTranscrip
 
 const TOKEN = "q7Lr2xVb9KcT4mWn8PzY3sHd6FgJ1aEu5oRi0tXkQwB";
 const realFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = realFetch; });
+// A fixed wall clock in the expiry's year, so the label never gains a year when the suite runs later.
+const NOW = new Date(2026, 8, 20, 12, 0).getTime();
+beforeEach(() => { mock.method(Date, "now", () => NOW); });
+afterEach(() => {
+  globalThis.fetch = realFetch;
+  mock.restoreAll();
+});
 
 function share(messages: OperationalTranscriptMessage[], expiresAt = new Date(2026, 8, 26, 0, 49, 58).getTime()): PublicTranscriptShare {
   return {

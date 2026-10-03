@@ -6,7 +6,11 @@ import { expect, test, type Page } from "@playwright/test";
  * bubbles and unframed replies, inside the reader's gutters at every width.
  */
 
+// The harness's link expires Sep 26, 2026; a fixed clock in that year keeps the label yearless.
+const NOW = new Date(2026, 8, 20, 12, 0);
+
 async function open(page: Page, query = ""): Promise<void> {
+  await page.clock.setFixedTime(NOW);
   await page.goto(`/shared-transcript-e2e.html${query}`);
   await expect(page.getByRole("heading", { level: 1, name: "Shared Transcript" })).toBeVisible();
 }
