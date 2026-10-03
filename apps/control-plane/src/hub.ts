@@ -922,7 +922,16 @@ export class Hub {
     this.broadcast({ type: "box_removed", boxId });
   }
 
+  /** Observers of every session upsert and removal, such as the campaign work ledger's observed-
+   * status invalidation (#2417). They must be cheap and must not throw. */
+  private readonly sessionObservers: Array<{ changed(sessionId: string): void; removed(sessionId: string): void }> = [];
+
+  observeSessions(observer: { changed(sessionId: string): void; removed(sessionId: string): void }): void {
+    this.sessionObservers.push(observer);
+  }
+
   sessionChanged(session: SessionView, refreshProject = true): void {
+    for (const observer of this.sessionObservers) observer.changed(session.id);
     const previousState = this.sessionProjectState.get(session.id);
     const nextState = this.projectStateKey(session);
     this.sessionProjectState.set(session.id, nextState);
@@ -1067,6 +1076,7 @@ export class Hub {
   }
 
   sessionRemoved(sessionId: string, refreshProject = true): void {
+    for (const observer of this.sessionObservers) observer.removed(sessionId);
     const previousState = this.sessionProjectState.get(sessionId);
     this.sessionProjectState.delete(sessionId);
     this.sessionParentCapacityState.delete(sessionId);

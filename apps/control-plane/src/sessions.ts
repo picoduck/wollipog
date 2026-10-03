@@ -6962,6 +6962,22 @@ export class SessionsService {
     return ok(response);
   }
 
+  /** An observed change moved the campaign's ledger revision (campaign-work-observation.ts): re-send
+   * the root once and every nested Orchestrator above the changed attempt sessions. */
+  campaignWorkObserved(rootId: string, sessionIds: readonly string[]): void {
+    this.hub.sessionChangedById(rootId);
+    const refreshed = new Set([rootId]);
+    for (const sessionId of sessionIds) {
+      let parentId = this.db.getSession(sessionId)?.parentSessionId ?? null;
+      for (let depth = 0; parentId && !refreshed.has(parentId) && depth < 64; depth += 1) {
+        refreshed.add(parentId);
+        const parent = this.db.getSession(parentId);
+        if (parent?.orchestratorPolicy) this.hub.sessionChangedById(parent.id);
+        parentId = parent?.parentSessionId ?? null;
+      }
+    }
+  }
+
   /** Refresh the root campaign and every nested Orchestrator between it and `sessionId`: each one's
    * view embeds the same root-derived projection, so a nested caller's own view changed too. */
   private campaignViewsChanged(rootId: string, sessionId: string): void {

@@ -150,6 +150,8 @@ import {
   type OrchestratorCampaignProjection,
   type OrchestratorFollowUpRecord,
   type CampaignAttemptBoundary,
+  type CampaignMembershipView,
+  type CampaignObservedCleanup,
   type OrchestratorDefaults,
   type WorkflowDecisionAuthority,
   type WorkflowDecisionStatus,
@@ -4668,10 +4670,69 @@ export class ControlPlaneDb {
   get campaignWorkLedger(): CampaignWorkLedgerStore {
     this.campaignWorkLedgerStore ??= new CampaignWorkLedgerStore(this.db, {
       observeSession: (sessionId) => this.campaignAttemptSessionObservation(sessionId),
+      observationFreshness: (sessionId) => this.campaignAttemptObservationFreshness(sessionId),
+      observeCleanup: (sessionId) => this.campaignAttemptCleanupObservation(sessionId),
       boundary: (sessionId) => this.campaignAttemptBoundary(sessionId),
       atomic: (work) => this.atomic(work),
     });
     return this.campaignWorkLedgerStore;
+  }
+
+  /** The root campaign any member resolves to: an Orchestrator's own resolved campaign, otherwise
+   * the campaign of its nearest Orchestrator ancestor. Null outside every campaign. */
+  campaignRootForMember(sessionId: string): string | null {
+    const own = this.resolvedCampaignSessionId(sessionId);
+    if (own) return own;
+    const seen = new Set([sessionId]);
+    let parentId = (this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(sessionId) as
+      { parent_session_id: string | null } | undefined)?.parent_session_id ?? null;
+    for (let depth = 0; parentId && !seen.has(parentId) && depth < 64; depth += 1) {
+      seen.add(parentId);
+      const parent = this.stmt("SELECT parent_session_id, orchestrator_policy FROM sessions WHERE id=?").get(parentId) as
+        { parent_session_id: string | null; orchestrator_policy: string | null } | undefined;
+      if (!parent) return null;
+      if (orchestratorCampaignPolicyFromJson(parent.orchestrator_policy)) return this.resolvedCampaignSessionId(parentId);
+      parentId = parent.parent_session_id;
+    }
+    return null;
+  }
+
+  /** `SessionView.campaignMembership` (#2417): every descendant of a campaign, including a nested
+   * Orchestrator, names the root and its own open attempt there. The root itself has none. */
+  campaignMembership(sessionId: string, parentSessionId: string | null): CampaignMembershipView | undefined {
+    if (!parentSessionId) return undefined;
+    const campaignSessionId = this.campaignRootForMember(sessionId);
+    if (!campaignSessionId || campaignSessionId === sessionId) return undefined;
+    const assignment = this.campaignWorkLedger.currentAssignment(sessionId);
+    const current = assignment?.campaignSessionId === campaignSessionId ? assignment : null;
+    return {
+      campaignSessionId,
+      currentWorkItemId: current?.workItemId ?? null,
+      currentAttemptId: current?.attemptId ?? null,
+    };
+  }
+
+  /** Observed facts are as current as the runner connection that reports them. */
+  private campaignAttemptObservationFreshness(sessionId: string): { fresh: boolean; updatedAt: number } | null {
+    const row = this.stmt("SELECT runner_id, updated_at FROM sessions WHERE id=?").get(sessionId) as
+      { runner_id: string; updated_at: number } | undefined;
+    if (!row) return null;
+    return { fresh: this.getRunner(row.runner_id)?.status === "online", updatedAt: row.updated_at };
+  }
+
+  /** The existing campaign cleanup state of each held worktree, plus `retired` for a recorded
+   * worktree the session no longer holds. */
+  private campaignAttemptCleanupObservation(sessionId: string): CampaignObservedCleanup["worktrees"] | null {
+    if (!this.stmt("SELECT 1 FROM sessions WHERE id=?").get(sessionId)) return null;
+    const held = this.campaignWorktreeCleanup(sessionId)
+      .map(({ path, status, reason }) => ({ path, status, reason }));
+    const heldPaths = new Set(held.map((worktree) => worktree.path));
+    const retired = (this.stmt(
+      "SELECT path FROM orchestrator_campaign_worktree_cleanup WHERE child_session_id=? ORDER BY path",
+    ).all(sessionId) as Array<{ path: string }>)
+      .filter((row) => !heldPaths.has(row.path))
+      .map((row) => ({ path: row.path, status: "retired" as const, reason: null }));
+    return [...held, ...retired];
   }
 
   /** Read from the raw row: a SessionView embeds the campaign projection, which would recurse. */
@@ -15963,6 +16024,14 @@ export class ControlPlaneDb {
       },
       ...(stalled ? { stalled } : {}),
       ...continuation,
+      // The ledger summary rides on every campaign view; it is cached under the ledger revision and
+      // the open attempts' observed status, so an unchanged campaign re-reads almost nothing (#2417).
+      work: this.campaignWorkLedger.summary(resolvedCampaignId, {
+        campaignCreatedAt: campaign.created_at,
+        complete: status === "verified_complete",
+        childSessionIds: childIds,
+        cleanupPending,
+      }),
     };
   }
 
@@ -20334,6 +20403,10 @@ export class ControlPlaneDb {
           ? this.campaignProjection(row.id)
           : null;
         return campaign ? { orchestratorCampaign: campaign } : {};
+      })(),
+      ...(() => {
+        const membership = this.campaignMembership(row.id, row.parent_session_id ?? null);
+        return membership ? { campaignMembership: membership } : {};
       })(),
       useWorktree: row.use_worktree === 1,
       worktreePath: row.worktree_path,

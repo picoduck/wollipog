@@ -171,6 +171,8 @@ import {
   parseBoxLifecycleForce,
 } from "./box-lifecycle.js";
 import { registerBoxLegacyAdoptionRoute } from "./box-legacy-adoption-route.js";
+import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
+import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
@@ -953,6 +955,19 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
+registerCampaignStatusRoutes(app, { db, requestPrincipal });
+
+// An attempt session's observed status moves its work item without a ledger write; give such
+// changes a coalesced ledger revision so Campaign Status lists and details reload (#2417).
+const campaignWorkObservations = new CampaignWorkObservations({
+  db,
+  refresh: (campaignSessionId, sessionIds) => svc.campaignWorkObserved(campaignSessionId, sessionIds),
+  warn: (message) => app.log.warn(message),
+});
+hub.observeSessions({
+  changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),
+  removed: (sessionId) => campaignWorkObservations.sessionRemoved(sessionId),
+});
 
 registerPromptImageRoutes(app, {
   db,

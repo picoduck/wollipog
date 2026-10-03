@@ -102,10 +102,11 @@ A server-observed fact is `fresh`, `stale` (last value with its observation time
 `unavailable{reason}`. An unavailable fact never implies a favourable value; it may carry the last
 value seen for display only.
 
-- **Session status** of the open attempt's session: status, archived, held, and pending request
+- **Session status** of the latest attempt's session: status, archived, held, and pending request
   count. A deleted session is `unavailable{session_deleted}`; the attempt snapshot remains.
 - **Cleanup** (slice 5) of the latest attempt's session: each worktree as `pending`, `deferred`,
   `refused` (the existing campaign cleanup vocabulary, with its reason) or `retired`.
+- Read API, Observed Facts in Details, describes freshness.
 - **Forge facts** (slice 8): see Forge Status Scope.
 
 ## Derived Primary State
@@ -190,9 +191,8 @@ Orchestrator routes, all limited to the matching Orchestrator credential and lis
 
 The `wollipog campaign plan|update-item|assign|adjudicate|work-items` commands call the same tools.
 Recording a follow-up and recording a work-item verification are ledger writes and increment the
-revision. Observed session-status changes do not increment it yet; the Read API slice decides how
-observed changes invalidate cached pages. Until cost attribution lands, the `cost` sort falls back
-to queue order.
+revision. Observed changes increment it too, as Observed Invalidation describes. Until cost
+attribution lands, the `cost` sort falls back to queue order.
 
 ## Read API
 
@@ -206,9 +206,12 @@ to queue order.
   counts campaign children that have no attempt on any item and flags campaigns whose history
   predates the ledger.
 - **Membership** (`SessionView.campaignMembership`): for a campaign descendant, the root
-  `campaignSessionId` and the current work item and attempt, or null.
+  `campaignSessionId` and the current work item and attempt, or null. A nested Orchestrator is a
+  member of the root campaign; the root itself carries no membership. The current item and attempt
+  are the session's open attempt in the root's ledger.
 - **Endpoints** (slice 5), where `:id` may be the root or any member:
-  - `GET /api/sessions/:id/campaign/summary`
+  - `GET /api/sessions/:id/campaign/summary` returns a `CampaignWorkSummaryResponse`
+    (`{campaignSessionId, summary}`).
   - `GET /api/sessions/:id/campaign/work-items?cursor&limit&origin&state&sort` returns a
     `CampaignWorkItemsPage`. The default filter is `unfinished`, the default sort is `queue`
     (queue position, then creation). The cursor is opaque and bound to the filter, sort, and
@@ -221,15 +224,78 @@ to queue order.
     awaiting adjudication first, then newest first. Cursor and `revision_changed` rules match the
     work-item list.
 
+### Summary Cost
+
+The summary is built inside the campaign projection, so it is recomputed on every upsert of the
+root and of every nested Orchestrator view. It is therefore cached per campaign under a key made of
+the ledger revision and the observed status of every open attempt's session, which together
+determine everything the ledger part of the summary derives. Checking the key costs one query plus
+one observation per open attempt (bounded by the live-child limit); only a changed key reads the
+whole ledger. Coverage and completion are read fresh in a few indexed queries. Nothing is cached
+inside a transaction, because a rolled-back write could otherwise leave a cached summary under a
+revision number a later write reuses.
+
+### Observed Invalidation
+
+A work item's state reads the observed status of its open attempt's session, so a child going idle,
+failing, being held, archived, or raising a request moves an item without any ledger write. Readers
+bind cursors and reloads to the revision, so such a change must produce a new revision. The chosen
+mechanism (`apps/control-plane/src/campaign-work-observation.ts`):
+
+- Every session upsert the hub broadcasts is checked with one indexed lookup for an open attempt.
+  Sessions without one cost nothing more.
+- For an attempt session, the observation (status, archived, held, pending request count) is
+  compared with what this process last observed for that attempt. An unchanged observation does
+  nothing. An attempt not yet observed by this process counts as changed once, since it may have
+  changed after assignment or across a restart.
+- Changes are coalesced per campaign for one second: a burst of child status changes costs one
+  revision increment and one refresh of the root and of the nested Orchestrators above the changed
+  sessions. Re-sending those views does not feed back into another increment.
+- Deleting an attempt's session increments the revision in the database itself (a trigger on the
+  foreign key's `SET NULL`), whichever deletion path ran; the observer then re-sends the views.
+- A campaign that has never recorded ledger state has no revision to move and no cursor to
+  invalidate.
+
+The revision therefore counts ledger writes and observed changes; reads still never move it. The
+alternative of leaving observations out of the revision was rejected because a list stitched across
+an observed change could show one item in two states.
+
+### Observed Facts in Details
+
+Details observe the **latest** attempt's session, open or closed, so a delivered item still shows
+that its child was archived and whether its worktrees were retired. The derived state still reads
+only the open attempt.
+
+- **Freshness**: a fact is `fresh` (observed now) while the session's runner is connected, and
+  `stale` with the session row's last update time otherwise. A deleted session is
+  `unavailable{session_deleted}` for both facts.
+- **Session**: status, archived, held (the existing holds), and pending requests (typed workflow
+  decisions plus provider requests).
+- **Cleanup**: each worktree the session holds, in the existing campaign cleanup vocabulary
+  (`pending` with the existing reason, or a recorded `deferred` or `refused`), plus `retired` for a
+  worktree the cleanup records name but the session no longer holds. A live session's worktrees read
+  `pending` with "the session archive is still pending".
+- **Forge facts** stay omitted until slice 8; time and cost fields stay omitted until slice 6.
+
 ## Authorization and Cost Visibility
 
-- A human principal needs `canAccessSession(root)` to read the summary, list, or details.
-- An Orchestrator agent may read and write only its own resolved campaign. Children and other
-  agents have no ledger access.
+- A human principal needs `canAccessSession(root)` to read the summary, list, or details. A human
+  who cannot access `:id` itself receives `404`; one who can access a member but not its root
+  receives `403`. A session outside every campaign receives `404`.
+- An Orchestrator agent may read and write only its own resolved campaign: the browser routes are
+  in `ORCHESTRATOR_API_ROUTES` and refuse with `403` unless the credential's session resolves to the
+  same root as `:id`. A nested Orchestrator's campaign is the root. Children and other agents have
+  no ledger access (the routes are not in the general agent allowlist).
 - Cost follows the existing session-cost rule, which is session access. A per-attempt cost is shown
   only when the principal can access that attempt's session (or the session was deleted and the
   principal can access the root). A campaign bucket is `unavailable{not_authorized}` when the
   principal cannot access every session contributing to it.
+- The browser routes apply this rule to whatever cost the ledger carries
+  (`apps/control-plane/src/campaign-status-routes.ts`). Until slice 6 fills cost in there is none to
+  hide. The summary that rides on the root's session view is broadcast to everyone who can access
+  the root, so when slice 6 adds `cost` there it must either keep that cost to buckets every reader
+  of the root may see or move it to the summary route; and the `cost` sort must not order by a cost
+  the reader cannot see.
 
 ## Retention
 
@@ -349,3 +415,11 @@ starting contract. This document refines it as follows:
     returns the existing record without a write, so a retried `verify_campaign_child` is a no-op.
 17. **Stale cursors** return `409 {error, code: "revision_changed", revision}` on the Orchestrator
     route as well, through the shared refusal body.
+18. **Observed changes move the revision** (slice 5), coalesced per campaign; see Observed
+    Invalidation. The posted plan said only that ledger writes bump it.
+19. **Details observe the latest attempt**, not only an open one, so delivered items keep showing
+    their child's archive and cleanup state.
+20. **The summary route** returns `{campaignSessionId, summary}` (`CampaignWorkSummaryResponse`), so
+    a member's reader learns the root it resolved to.
+21. **No new protocol version for slice 5.** The browser detects the Read API by the presence of
+    `work` on the projection, and no runner consumes these routes.

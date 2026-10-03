@@ -157,7 +157,12 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId",
   "POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/assign",
   "POST /api/sessions/:id/orchestrator-campaign/recommendations/:recommendationId/adjudicate",
-  "POST /api/sessions", "POST /api/sessions/:id/prompt", "POST /api/sessions/:id/stop",
+  // Campaign Status reads; the routes limit an Orchestrator to its own campaign.
+  "GET /api/sessions/:id/campaign/summary",
+  "GET /api/sessions/:id/campaign/work-items",
+  "GET /api/sessions/:id/campaign/work-items/:itemId",
+  "GET /api/sessions/:id/campaign/recommendations",
+  "POST /api/sessions","POST /api/sessions/:id/prompt", "POST /api/sessions/:id/stop",
   "POST /api/sessions/:id/restart", "POST /api/sessions/:id/config", "POST /api/sessions/:id/archive",
   "POST /api/sessions/:id/background-jobs/:jobId/stop",
   "GET /api/sessions/:id/descendant-requests", "POST /api/sessions/:id/descendant-requests/resolve",

@@ -403,6 +403,13 @@ export interface CampaignWorkSummary {
   cost?: CampaignCostSummary;
 }
 
+/** `GET /api/sessions/:id/campaign/summary` (slice 5): the summary of the root campaign `:id`
+ * resolves to, with cost hidden per the session-cost rule. */
+export interface CampaignWorkSummaryResponse {
+  campaignSessionId: string;
+  summary: CampaignWorkSummary;
+}
+
 /** `SessionView.campaignMembership` for campaign descendants (slice 5). */
 export interface CampaignMembershipView {
   /** The root campaign session. */

@@ -24,6 +24,9 @@ import {
   type CampaignAttemptEndReason,
   type CampaignAttemptSessionSnapshot,
   type CampaignIssueRef,
+  type CampaignObservedCleanup,
+  type CampaignObservedFact,
+  type CampaignObservedSessionStatus,
   type CampaignPlanState,
   type CampaignPullRequestRef,
   type CampaignRecommendation,
@@ -156,6 +159,15 @@ CREATE INDEX IF NOT EXISTS idx_campaign_work_attempts_session
   ON campaign_work_attempts(session_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_work_attempts_campaign
   ON campaign_work_attempts(campaign_session_id, work_item_id, ordinal);
+-- Deleting an attempt's session changes what the ledger reads (the attempt loses its session and an
+-- open one blocks its item), so it is a new revision whichever deletion path ran. Foreign-key
+-- SET NULL actions fire update triggers.
+CREATE TRIGGER IF NOT EXISTS campaign_work_attempt_session_deleted
+  AFTER UPDATE OF session_id ON campaign_work_attempts
+  WHEN OLD.session_id IS NOT NULL AND NEW.session_id IS NULL
+BEGIN
+  UPDATE campaign_work_ledgers SET revision=revision+1 WHERE campaign_session_id=NEW.campaign_session_id;
+END;
 
 -- Delivery proof for one attempt. A later execution of the same child never invalidates it.
 CREATE TABLE IF NOT EXISTS campaign_work_verifications (
@@ -220,9 +232,30 @@ const done = <T>(data: T): LedgerResult<T> => ({ ok: true, data });
  * rows: a SessionView embeds the campaign projection, which would recurse. */
 export interface CampaignWorkLedgerHooks {
   observeSession(sessionId: string): CampaignAttemptSessionObservation | null;
+  /** How current the control plane's copy of a session is: fresh while its runner is connected,
+   * otherwise last known as of the row's update time. Null when the session is gone. */
+  observationFreshness(sessionId: string): { fresh: boolean; updatedAt: number } | null;
+  /** The session's worktrees in the existing campaign cleanup vocabulary, plus `retired` for a
+   * recorded worktree the session no longer holds. Null when the session is gone. */
+  observeCleanup(sessionId: string): CampaignObservedCleanup["worktrees"] | null;
   boundary(sessionId: string): CampaignAttemptBoundary;
   atomic<T>(work: () => T): T;
 }
+
+/** What `summary` derives from the ledger alone. Cached per campaign under the revision plus the
+ * observed status of every open attempt's session, which together determine it. */
+interface LedgerSummaryPart {
+  revision: number;
+  planState: CampaignPlanState;
+  ledgerCreatedAt: number | null;
+  counts: CampaignWorkSummary["counts"];
+  recommendations: CampaignWorkSummary["recommendations"];
+  verification: number;
+  publication: number;
+}
+
+/** Campaigns whose summary part stays cached. A miss only costs one recomputation. */
+const SUMMARY_CACHE_CAMPAIGNS = 64;
 
 interface ItemRow {
   id: string; campaign_session_id: string; item_key: string; title: string | null;
@@ -308,6 +341,12 @@ function issueOf(repository: string | null, number: number | null): CampaignIssu
 
 const FINISHED_STATES: ReadonlySet<CampaignWorkItemPrimaryState> = new Set(["delivered", "cancelled", "removed"]);
 
+function observationKey(observation: CampaignAttemptSessionObservation | null): string {
+  return observation
+    ? `${observation.status}:${observation.archived ? 1 : 0}:${observation.held ? 1 : 0}:${observation.pendingRequests}`
+    : "deleted";
+}
+
 function cursorKey(parts: Record<string, unknown>): string {
   return JSON.stringify(Object.keys(parts).sort().map((key) => [key, parts[key] ?? null]));
 }
@@ -349,6 +388,7 @@ function pageLimit(limit: unknown): LedgerResult<number> {
 
 export class CampaignWorkLedgerStore {
   private readonly statements = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
+  private readonly summaryCache = new Map<string, { key: string; part: LedgerSummaryPart }>();
 
   constructor(private readonly db: DatabaseSync, private readonly hooks: CampaignWorkLedgerHooks) {}
 
@@ -396,6 +436,27 @@ export class CampaignWorkLedgerStore {
     return this.revision(campaignId);
   }
 
+  /** A new revision for an observed change: an open attempt's session changed status, hold, or
+   * pending requests. The ledger rows are unchanged, so the plan state is too. A campaign that has
+   * never recorded anything has no cursor to invalidate and is left alone. */
+  observedChanged(campaignId: string, now: number): number {
+    this.stmt("UPDATE campaign_work_ledgers SET revision=revision+1, updated_at=? WHERE campaign_session_id=?")
+      .run(now, campaignId);
+    return this.revision(campaignId);
+  }
+
+  /** The open attempt a session is executing and a stable key for what the ledger observes of the
+   * session, so a caller can tell when an observed change moves derived state. */
+  observedAttempt(sessionId: string): { campaignSessionId: string; attemptId: string; key: string } | null {
+    const assignment = this.currentAssignment(sessionId);
+    if (!assignment) return null;
+    return {
+      campaignSessionId: assignment.campaignSessionId,
+      attemptId: assignment.attemptId,
+      key: observationKey(this.hooks.observeSession(sessionId)),
+    };
+  }
+
   /* ------------------------------ Lookups ------------------------------ */
 
   private item(campaignId: string, itemId: string): ItemRow | undefined {
@@ -437,6 +498,18 @@ export class CampaignWorkLedgerStore {
     return new Set((this.stmt(
       "SELECT DISTINCT session_id FROM campaign_work_attempts WHERE campaign_session_id=? AND session_id IS NOT NULL",
     ).all(campaignId) as Array<{ session_id: string }>).map((row) => row.session_id));
+  }
+
+  /** Every attempt's session per item, in attempt order, for per-principal cost visibility. A
+   * deleted attempt session is null. */
+  attemptSessionIdsByItem(campaignId: string): Map<string, Array<string | null>> {
+    const sessions = new Map<string, Array<string | null>>();
+    for (const row of this.stmt(
+      "SELECT work_item_id, session_id FROM campaign_work_attempts WHERE campaign_session_id=? ORDER BY work_item_id, ordinal",
+    ).all(campaignId) as Array<{ work_item_id: string; session_id: string | null }>) {
+      sessions.set(row.work_item_id, [...(sessions.get(row.work_item_id) ?? []), row.session_id]);
+    }
+    return sessions;
   }
 
   /* ------------------------------ Dependencies ------------------------------ */
@@ -1270,6 +1343,59 @@ export class CampaignWorkLedgerStore {
       cleanupPending: number;
     },
   ): CampaignWorkSummary {
+    const ledger = this.summaryPart(campaignId);
+    const attempted = this.attemptedSessionIds(campaignId);
+    const untrackedChildren = context.childSessionIds.filter((id) => !attempted.has(id)).length;
+    // Any child created before the ledger began (or with no ledger at all) has unrecorded history.
+    const earliestChild = context.childSessionIds.length ? (this.stmt(
+      `WITH RECURSIVE descendants(id) AS (
+         SELECT id FROM sessions WHERE parent_session_id=?
+         UNION SELECT child.id FROM sessions child JOIN descendants parent ON child.parent_session_id=parent.id
+       ) SELECT MIN(sessions.created_at) AS at FROM sessions JOIN descendants USING (id)`,
+    ).get(campaignId) as { at: number | null }).at : null;
+    const predatesLedger = earliestChild !== null && (ledger.ledgerCreatedAt === null || earliestChild < ledger.ledgerCreatedAt);
+    // Completion is verified when the last child report or item delivery was verified.
+    const completedAt = context.complete ? (this.stmt(
+      `SELECT MAX(verified_at) AS at FROM (
+         SELECT verified_at FROM orchestrator_campaign_child_reports WHERE campaign_session_id=?
+         UNION ALL SELECT verified_at FROM campaign_work_verifications WHERE campaign_session_id=?)`,
+    ).get(campaignId, campaignId) as { at: number | null }).at : null;
+    return {
+      revision: ledger.revision,
+      planState: ledger.planState,
+      coverage: { untrackedChildren, predatesLedger },
+      counts: { ...ledger.counts, byState: { ...ledger.counts.byState } },
+      recommendations: { ...ledger.recommendations },
+      obligations: {
+        verification: ledger.verification,
+        adjudication: ledger.recommendations.awaiting_adjudication,
+        publication: ledger.publication,
+        cleanup: context.cleanupPending,
+      },
+      elapsed: { startedAt: context.campaignCreatedAt, endedAt: completedAt },
+    };
+  }
+
+  /**
+   * The summary rides on every upsert of the root session, so the full ledger is read only when
+   * what it derives from moved: the revision (every ledger write, and an attempt session's
+   * deletion) or the observed status of an open attempt's session. Checking that costs one query
+   * plus one observation per open attempt, which the live-child limit bounds.
+   */
+  private summaryPart(campaignId: string): LedgerSummaryPart {
+    const open = this.stmt(
+      `SELECT id, session_id FROM campaign_work_attempts
+       WHERE campaign_session_id=? AND ended_at IS NULL ORDER BY id`,
+    ).all(campaignId) as Array<{ id: string; session_id: string | null }>;
+    const key = `${this.revision(campaignId)}|${open.map((attempt) =>
+      `${attempt.id}=${attempt.session_id ? observationKey(this.hooks.observeSession(attempt.session_id)) : "deleted"}`).join(",")}`;
+    const cached = this.summaryCache.get(campaignId);
+    if (cached?.key === key) {
+      // Refresh recency so the busiest campaigns stay cached.
+      this.summaryCache.delete(campaignId);
+      this.summaryCache.set(campaignId, cached);
+      return cached.part;
+    }
     const snapshot = this.snapshot(campaignId);
     const byState = Object.fromEntries(CAMPAIGN_WORK_ITEM_PRIMARY_STATES.map((state) => [state, 0])) as
       Record<CampaignWorkItemPrimaryState, number>;
@@ -1294,33 +1420,24 @@ export class CampaignWorkLedgerStore {
       recommendations[view.disposition] += 1;
       if (view.publication === "awaiting_publication") publication += 1;
     }
-    const attempted = this.attemptedSessionIds(campaignId);
-    const untrackedChildren = context.childSessionIds.filter((id) => !attempted.has(id)).length;
-    const ledgerStart = snapshot.ledgerCreatedAt;
-    const predatesLedger = context.childSessionIds.some((id) => {
-      const child = this.stmt("SELECT created_at FROM sessions WHERE id=?").get(id) as { created_at: number } | undefined;
-      return child !== undefined && (ledgerStart === null || child.created_at < ledgerStart);
-    });
-    // Completion is verified when the last child report or item delivery was verified.
-    const completedAt = context.complete ? (this.stmt(
-      `SELECT MAX(verified_at) AS at FROM (
-         SELECT verified_at FROM orchestrator_campaign_child_reports WHERE campaign_session_id=?
-         UNION ALL SELECT verified_at FROM campaign_work_verifications WHERE campaign_session_id=?)`,
-    ).get(campaignId, campaignId) as { at: number | null }).at : null;
-    return {
+    const part: LedgerSummaryPart = {
       revision: snapshot.revision,
       planState: snapshot.planState,
-      coverage: { untrackedChildren, predatesLedger },
+      ledgerCreatedAt: snapshot.ledgerCreatedAt,
       counts: { committed, delivered, original, followUp, cancelled, removed, byState },
       recommendations,
-      obligations: {
-        verification,
-        adjudication: recommendations.awaiting_adjudication,
-        publication,
-        cleanup: context.cleanupPending,
-      },
-      elapsed: { startedAt: context.campaignCreatedAt, endedAt: completedAt },
+      verification,
+      publication,
     };
+    // The snapshot and the key were read in one synchronous call, so they describe the same state.
+    // Inside a transaction they may yet roll back, and a later write would reuse the revision.
+    if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) return part;
+    this.summaryCache.delete(campaignId);
+    this.summaryCache.set(campaignId, { key, part });
+    if (this.summaryCache.size > SUMMARY_CACHE_CAMPAIGNS) {
+      this.summaryCache.delete(this.summaryCache.keys().next().value!);
+    }
+    return part;
   }
 
   page(campaignId: string, query: CampaignWorkItemsQuery, now: number): LedgerResult<CampaignWorkItemsPage> {
@@ -1370,7 +1487,8 @@ export class CampaignWorkLedgerStore {
     if (!item) return null;
     const byId = new Map(snapshot.items.map((candidate) => [candidate.id, candidate]));
     const attempts = snapshot.attempts.get(item.id) ?? [];
-    const open = attempts.at(-1)?.ended_at === null ? attempts.at(-1)! : null;
+    const latest = attempts.at(-1) ?? null;
+    const open = latest?.ended_at === null ? latest : null;
     const recommendations = this.recommendationRows(campaignId).map((row) => this.recommendationView(row));
     const observation = open?.session_id ? snapshot.observations.get(open.session_id) : undefined;
     return {
@@ -1394,17 +1512,33 @@ export class CampaignWorkLedgerStore {
       sourceRecommendation: recommendations.find((recommendation) =>
         recommendation.disposition === "accepted" && recommendation.resultingWorkItemId === item.id) ?? null,
       recommendations: recommendations.filter((recommendation) => recommendation.originWorkItemIds.includes(item.id)),
-      observed: open ? {
-        session: open.session_id === null
-          ? { availability: "unavailable", reason: "session_deleted" }
-          : observation
-            ? {
-              availability: "fresh",
-              value: { sessionId: open.session_id, ...observation },
-              observedAt: now,
-            }
-            : { availability: "unavailable", reason: "session_deleted" },
-      } : {},
+      observed: latest ? this.observedFacts(latest.session_id, open ? observation : undefined, now) : {},
+    };
+  }
+
+  /** Observed facts of the latest attempt's session, open or closed: a delivered item still shows
+   * whether its child was archived and its worktrees retired. Forge facts belong to slice 8. */
+  private observedFacts(
+    sessionId: string | null,
+    snapshotObservation: CampaignAttemptSessionObservation | null | undefined,
+    now: number,
+  ): CampaignWorkItemDetail["observed"] {
+    const freshness = sessionId ? this.hooks.observationFreshness(sessionId) : null;
+    const observation = snapshotObservation !== undefined ? snapshotObservation
+      : sessionId ? this.hooks.observeSession(sessionId) : null;
+    const worktrees = sessionId ? this.hooks.observeCleanup(sessionId) : null;
+    if (!sessionId || !freshness || !observation || !worktrees) {
+      return {
+        session: { availability: "unavailable", reason: "session_deleted" },
+        cleanup: { availability: "unavailable", reason: "session_deleted" },
+      };
+    }
+    const fact = <T>(value: T): CampaignObservedFact<T> => freshness.fresh
+      ? { availability: "fresh", value, observedAt: now }
+      : { availability: "stale", value, observedAt: freshness.updatedAt };
+    return {
+      session: fact<CampaignObservedSessionStatus>({ sessionId, ...observation }),
+      cleanup: fact<CampaignObservedCleanup>({ sessionId, worktrees }),
     };
   }
 }
