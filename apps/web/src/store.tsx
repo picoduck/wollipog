@@ -295,6 +295,7 @@ export interface State {
   worktreeSetupConfigSupported: boolean;
   /** True when session creation accepts a Session Role independent of the provider permission mode. */
   orchestratorRoleSupported: boolean;
+  sessionRoleConversionSupported: boolean;
   runners: Map<string, RunnerView>;
   boxes: Map<string, BoxView>;
   /** Authoritative when the snapshot advertises Project support; empty against legacy control
@@ -1093,6 +1094,7 @@ function reducer(state: State, action: Action): State {
             indefiniteSessionRemindersSupported: msg.capabilities?.indefiniteSessionReminders === true,
             worktreeSetupConfigSupported: msg.capabilities?.worktreeSetupConfig === true,
             orchestratorRoleSupported: msg.capabilities?.orchestratorRole === true,
+            sessionRoleConversionSupported: msg.capabilities?.sessionRoleConversion === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
             // `boxes` may be absent from an older control plane's snapshot — tolerate it.
             boxes: new Map((msg.boxes ?? []).map((b) => [b.boxId, b])),
@@ -1481,6 +1483,7 @@ function initialState(
     indefiniteSessionRemindersSupported: false,
     worktreeSetupConfigSupported: false,
     orchestratorRoleSupported: false,
+    sessionRoleConversionSupported: false,
     runners: new Map(),
     boxes: new Map(),
     projects: new Map(),

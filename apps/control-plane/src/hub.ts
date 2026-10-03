@@ -28,6 +28,7 @@ import type {
   ListSessionFilesResultMessage,
   LogoutAgentResultMessage,
   SwitchSessionProviderAccountResultMessage,
+  SessionRoleResultMessage,
   InspectProviderAuthenticationResultMessage,
   SelectProviderAuthenticationAccountResultMessage,
   AcpRegistryApprovalResultMessage,
@@ -230,6 +231,7 @@ export type RunnerRequestResult =
   | ListSessionFilesResultMessage
   | LogoutAgentResultMessage
   | SwitchSessionProviderAccountResultMessage
+  | SessionRoleResultMessage
   | InspectProviderAuthenticationResultMessage
   | SelectProviderAuthenticationAccountResultMessage
   | AcpRegistryApprovalResultMessage
@@ -643,6 +645,7 @@ export class Hub {
         indefiniteSessionReminders: true,
         worktreeSetupConfig: true,
         orchestratorRole: true,
+        sessionRoleConversion: true,
       },
       runners,
       boxes: globalAdmin ? this.db.listBoxes() : [],

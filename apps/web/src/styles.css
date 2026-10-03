@@ -16635,6 +16635,14 @@ body.shell-dock-dragging * {
   }
 }
 
+/* Existing-session promotion has a session-scoped policy draft. */
+.session-role-settings { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-3) var(--space-4); margin: var(--space-4) 0; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); min-width: 0; }
+.session-role-settings legend { font-weight: var(--weight-semibold); }
+.session-role-settings label, .session-role-settings .field { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.session-role-settings input { width: 100%; min-width: 0; }
+.session-role-settings p { grid-column: 1 / -1; margin: 0; }
+@media (max-width: 600px) { .session-role-settings { grid-template-columns: minmax(0, 1fr); padding: var(--space-3); } }
+
 /* --- COLOUR SCHEMES, GENERATED --- */
 /* ------------------------------------------------------------------------------------------------
  * Colour schemes (§6.5).

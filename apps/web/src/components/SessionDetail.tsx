@@ -889,6 +889,7 @@ function SessionDetailLoaded({
   const runnerOnline = runner?.status === "online";
   const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const stopBeforeArchiveSupported = useStoreSelector((s) => s.stopBeforeArchiveSupported);
+  const sessionRoleConversionSupported = useStoreSelector((s) => s.sessionRoleConversionSupported);
   const unarchiveAndRestartSupported = useStoreSelector((s) => s.unarchiveAndRestartSupported);
   const richGitSupported = runnerSupportsProtocol(runner?.protocolVersion, "gitVisibility");
   const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
@@ -5248,6 +5249,7 @@ function SessionDetailLoaded({
           onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
           runnerProtocolVersion={runner?.protocolVersion}
           stopBeforeArchiveSupported={stopBeforeArchiveSupported}
+          sessionRoleConversionSupported={sessionRoleConversionSupported}
           unarchiveAndRestartSupported={unarchiveAndRestartSupported}
           onReloadSession={async () => { loadSession((await api.session(session.id)).session); }}
           providerLogoutSupported={runner?.agents.find((agent) => agent.id === session.agentId)?.acp?.logout === true}

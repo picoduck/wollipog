@@ -1216,7 +1216,7 @@ function legacyCodexExecAgentId(agentId: string): string | null {
 }
 
 /** Preserve the session's persisted driver when discovery reassigns the old `codex` id to app-server. */
-function launchForRestart(db: ControlPlaneDb, session: SessionView): AgentLaunch | null {
+export function launchForRestart(db: ControlPlaneDb, session: SessionView): AgentLaunch | null {
   if (!session.agentId) return null;
   const targetBound = session.executionTarget !== undefined && session.executionTarget.adapter !== "host";
   const exact = db.getAgentLaunch(session.runnerId, session.agentId, targetBound);
@@ -3528,6 +3528,7 @@ export class SessionsService {
     }
     let parentSession: SessionView | null = null;
     if (parentSessionId) {
+      if (this.db.roleConversionBlocksSession(parentSessionId)) return fail("wait for the session role change to finish before creating children", 409);
       const parent = this.db.getSession(parentSessionId);
       if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
         return fail("the creating parent session is no longer active", 409);
@@ -4559,6 +4560,7 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before sending a message", 409);
     const configInputError = sessionGuardrailConfigError(requestedConfig);
     if (configInputError) return fail(configInputError, 400);
     if (!snapshotCommand) {
@@ -5180,6 +5182,7 @@ export class SessionsService {
     config: SessionConfig,
     actor: GovernanceActor = { kind: "human", id: "local" },
   ): ServiceResult<SessionView> {
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before changing configuration", 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const configInputError = sessionGuardrailConfigError(config);
@@ -5365,6 +5368,7 @@ export class SessionsService {
     sessionId: string,
     request: InvokeSessionCommandRequest,
   ): ServiceResult<SessionCommandInvocationView> {
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish", 409);
     const allowed = new Set(["submissionId", "providerCommandId", "catalogRevision", "argumentText"]);
     if (!request || typeof request !== "object" || Array.isArray(request) ||
         Object.keys(request).some((key) => !allowed.has(key))) {
@@ -6276,6 +6280,7 @@ export class SessionsService {
   }
 
   restart(sessionId: string, options: { unarchive?: boolean } = {}): ServiceResult<SessionView> {
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
     let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const campaignBefore = this.campaignAttentionController(session);
@@ -6531,6 +6536,7 @@ export class SessionsService {
   }
 
   setParentControl(sessionId: string, mode: ParentControlMode): ServiceResult<SessionView> {
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before changing Parent Control", 409);
     if (mode !== "off" && mode !== "questions" && mode !== "questions_and_approvals") {
       return fail("parentControl must be off, questions, or questions_and_approvals", 400);
     }
@@ -6560,6 +6566,7 @@ export class SessionsService {
     expectedRevision?: number,
     actor: GovernanceActor = { kind: "human", id: "local" },
   ): ServiceResult<SessionView> {
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before changing Parent Control policy", 409);
     if (!validateParentControlDecisions(decisions)) {
       return fail("every typed workflow decision category must be assigned to human or orchestrator", 400);
     }
@@ -7555,6 +7562,7 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean = () => true,
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean },
   ): ServiceResult<WorkflowDecisionView> {
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before requesting another decision", 409);
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
     }
@@ -9965,6 +9973,7 @@ export class SessionsService {
   /** Legacy compatibility adapter for workspace grouping. Durable clients use setProject. This is
    * CP-owned view state, requires no runner round trip, and never changes execution placement. */
   setWorkspace(sessionId: string, workspaceId: string | null): ServiceResult<SessionView> {
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish", 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     // Workspaces are scoped per runner — filing under another runner's workspace would render a
@@ -9995,6 +10004,7 @@ export class SessionsService {
     adoptingUserId?: string,
     options: { linkLocation?: boolean } = {},
   ): ServiceResult<SessionView> {
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish", 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (projectId !== null && (typeof projectId !== "string" || !projectId)) {
