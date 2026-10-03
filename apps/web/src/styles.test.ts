@@ -427,7 +427,7 @@ test("message and turn actions use the shared small icon button and never size t
 });
 
 test("hover clusters take no height and show on hover, focus within or an open menu", () => {
-  const user = soleRuleBody(".tl-user-actions");
+  const user = soleRuleBody(".tl-user-actions, .tl-user-menu");
   assert.match(user, /position: absolute;/, "the user cluster sits beside the bubble, not under it");
   assert.match(user, /bottom: 0;/, "bottom-aligned with the bubble");
   assert.match(user, /inset-inline-end: calc\(100% \+ var\(--space-1\)\);/, "to the bubble's left");
@@ -442,8 +442,8 @@ test("hover clusters take no height and show on hover, focus within or an open m
   assert.equal(soleRuleBody(".tl-more-actions"), "color: var(--text-faint);");
   const hidesMenu = allDeclarations(css).filter((declaration) =>
     ["opacity", "visibility", "display"].includes(declaration.prop) &&
-    declaration.selectors.some((selector) => selector.includes(".tl-more-actions")));
-  assert.deepEqual(hidesMenu, [], "nothing hides More Turn Actions");
+    declaration.selectors.some((selector) => /\.tl-(more-actions|user-menu)\b/.test(selector)));
+  assert.deepEqual(hidesMenu, [], "nothing hides More Turn Actions, or a touch screen's More Message Actions");
 });
 
 test("the phone Session status control leads its line without pushing the fixed actions", () => {

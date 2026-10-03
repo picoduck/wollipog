@@ -110,6 +110,7 @@ test("an unavailable item is disabled with its reason as a visible second line i
     const edit = await readTranscriptAction(container, menu, "Edit as a New Turn");
     assert.ok(edit, `${menu} lists Edit as a New Turn`);
     assert.equal(edit.disabled, true);
+    assert.equal(edit.element.disabled, false, "aria-disabled, not disabled, so it can still take focus");
     assert.equal(edit.reason, reason, "aria-describedby names the visible reason");
     const line = edit.element.querySelector(".menu-desc");
     assert.equal(line?.textContent, reason, "the reason is the item's visible second line");
@@ -130,6 +131,58 @@ test("a fine pointer gets the hover clusters; a coarse pointer gets only More Tu
   assertNoDomNode(coarse.container.querySelector(".tl-user-actions"), "no message cluster on a coarse pointer");
   const edit = await readTranscriptAction(coarse.container, "More Turn Actions", "Edit as a New Turn");
   assert.equal(edit?.disabled, false, "the turn menu still reaches every message action");
+  coarsePointer = false;
+});
+
+test("the arrow keys reach unavailable items, and choosing one does nothing", async () => {
+  coarsePointer = false;
+  let edited = false;
+  const { container } = await mount({
+    onEditAndResend: () => { edited = true; },
+    editAndResendUnavailableReason: "Runner is offline.",
+  });
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="More Turn Actions"]')!;
+  await act(async () => { trigger.click(); });
+  const menu = document.getElementById(trigger.getAttribute("aria-controls")!)!;
+  const press = async (key: string) => {
+    await act(async () => {
+      document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    });
+    return (document.activeElement as HTMLElement).dataset.menuLabel;
+  };
+  assert.equal((document.activeElement as HTMLElement).dataset.menuLabel, "Copy Message");
+  assert.equal(await press("ArrowDown"), "Edit as a New Turn", "the unavailable item takes focus");
+  assert.equal(await press("End"), "Copy Response as Markdown");
+  assert.equal(await press("ArrowDown"), "Copy Message", "the arrows wrap");
+  assert.equal(await press("ArrowUp"), "Copy Response as Markdown");
+  assert.equal(await press("Home"), "Copy Message");
+  const edit = [...menu.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+    .find((item) => item.dataset.menuLabel === "Edit as a New Turn")!;
+  await act(async () => { edit.click(); });
+  assert.equal(edited, false, "an unavailable action never runs");
+  assert.equal(trigger.getAttribute("aria-expanded"), "true", "and the menu stays open");
+});
+
+test("on a coarse pointer, a message no turn menu lists keeps More Message Actions", async () => {
+  coarsePointer = true;
+  const { container } = await mount({
+    onEditAndResend: () => {},
+    sessionActive: true,
+    items: [
+      ...items,
+      { kind: "user_message", id: 5, text: "A steer", deliveryIntent: "steer", submissionId: "steer-1" },
+      { kind: "user_message", id: 6, text: "Second prompt" },
+      { kind: "agent_message", id: 7, text: "Working on it" },
+    ],
+  });
+  const names = [...container.querySelectorAll(".tl-message-actions button")].map((button) => button.getAttribute("aria-label"));
+  // The first prompt is in its settled turn's menu. The steer belongs to that turn but is not its
+  // prompt, so it keeps its own menu before the footer; the running turn's prompt has no footer yet.
+  assert.deepEqual(names, ["More Message Actions", "More Turn Actions", "More Message Actions"]);
+  for (const index of [0, 1]) {
+    const edit = await readTranscriptAction(container, "More Message Actions", "Edit as a New Turn", index);
+    assert.equal(edit?.disabled, false);
+  }
   coarsePointer = false;
 });
 

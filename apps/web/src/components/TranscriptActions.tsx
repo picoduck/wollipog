@@ -1,4 +1,4 @@
-import React, { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import React, { Fragment, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { writeClipboardText } from "../clipboard.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { MoreHorizontalIcon } from "./Icons.js";
@@ -32,13 +32,12 @@ export const transcriptActionAvailable = (action: TranscriptAction): boolean =>
 
 /**
  * A `⋯` icon button that opens the shared menu (a bottom sheet on phones) with its groups in order,
- * each under a Title Case section label. `onOpenChange` lets the cluster around it stay shown while
- * its menu is open.
+ * each under a Title Case section label. The trigger's `aria-expanded` is what keeps the cluster
+ * around it shown while its menu is open (styles.css).
  */
-export function TranscriptActionMenu({ label, groups, onOpenChange }: {
+export function TranscriptActionMenu({ label, groups }: {
   label: string;
   groups: readonly TranscriptActionGroup[];
-  onOpenChange?: (open: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "transcript-actions");
@@ -48,7 +47,6 @@ export function TranscriptActionMenu({ label, groups, onOpenChange }: {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
-  useEffect(() => { onOpenChange?.(open); }, [onOpenChange, open]);
   const visibleGroups = groups.filter((group) => group.actions.length > 0);
   if (visibleGroups.length === 0) return null;
 
@@ -81,6 +79,25 @@ export function TranscriptActionMenu({ label, groups, onOpenChange }: {
     action.onSelect?.();
   };
 
+  // Unavailable items are aria-disabled rather than disabled, and the arrow keys stop on them too,
+  // so a keyboard or screen-reader user reaches each one and hears its reason (APG menu pattern).
+  // Choosing one does nothing. Everything else is the shared menu's own keyboard handling.
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      menu.onMenuKeyDown(event);
+      return;
+    }
+    const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    if (items.length === 0) return;
+    event.preventDefault();
+    const current = items.indexOf(document.activeElement as HTMLElement);
+    const next = event.key === "Home" ? 0
+      : event.key === "End" ? items.length - 1
+        : event.key === "ArrowDown" ? (current + 1) % items.length
+          : (current <= 0 ? items.length : current) - 1;
+    items[next]!.focus();
+  };
+
   return (
     <>
       <button
@@ -106,7 +123,7 @@ export function TranscriptActionMenu({ label, groups, onOpenChange }: {
           align="end"
           tabIndex={-1}
           onDismiss={() => menu.close(true)}
-          onKeyDown={menu.onMenuKeyDown}
+          onKeyDown={onMenuKeyDown}
         >
           {visibleGroups.map((group) => (
             <Fragment key={group.label}>
@@ -116,7 +133,7 @@ export function TranscriptActionMenu({ label, groups, onOpenChange }: {
                   key={action.key}
                   icon={action.icon}
                   data-menu-label={action.label}
-                  disabled={!transcriptActionAvailable(action)}
+                  aria-disabled={transcriptActionAvailable(action) ? undefined : true}
                   description={action.unavailableReason}
                   onClick={() => select(action)}
                 >

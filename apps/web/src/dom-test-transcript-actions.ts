@@ -4,6 +4,7 @@ import { act } from "react";
 /** A message or turn action as a test reads it from its open menu. */
 export interface TranscriptMenuItem {
   element: HTMLButtonElement;
+  /** aria-disabled: it stays focusable so its reason is heard, but choosing it does nothing. */
   disabled: boolean;
   /** The visible second line the item's aria-describedby names: why it cannot be used now. */
   reason: string | null;
@@ -33,7 +34,7 @@ export async function readTranscriptAction(
     .find((item) => item.dataset.menuLabel === label) ?? null;
   const result = element && {
     element,
-    disabled: element.disabled,
+    disabled: element.getAttribute("aria-disabled") === "true",
     reason: (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
       .map((id) => document.getElementById(id)?.textContent ?? "").join(" ") || null,
   };
@@ -50,6 +51,6 @@ export async function chooseTranscriptAction(root: ParentNode, menu: string, lab
   const item = [...surface.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
     .find((candidate) => candidate.dataset.menuLabel === label);
   assert.ok(item, `${menu} lists ${label}`);
-  assert.equal(item.disabled, false, `${label} is available`);
+  assert.notEqual(item.getAttribute("aria-disabled"), "true", `${label} is available`);
   await act(async () => { item.click(); });
 }

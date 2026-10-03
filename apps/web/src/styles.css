@@ -6939,7 +6939,9 @@ textarea,
   flex: none;
 }
 .tl-message-stack.user { position: relative; }
-.tl-user-actions {
+/* On a coarse pointer, a message no turn menu lists keeps More Message Actions, visible at rest. */
+.tl-user-actions,
+.tl-user-menu {
   position: absolute;
   inset-inline-end: calc(100% + var(--space-1));
   bottom: 0;

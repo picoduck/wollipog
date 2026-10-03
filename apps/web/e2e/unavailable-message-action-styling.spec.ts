@@ -57,10 +57,17 @@ for (const theme of ["dark", "light"] as const) {
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(menu).toBeVisible();
 
-    // The arrow keys skip unavailable rows.
+    // The arrow keys reach unavailable rows, so a keyboard or screen-reader user hears each reason;
+    // Enter on one does nothing.
     await copy.focus();
     await page.keyboard.press("ArrowDown");
-    await expect(copy).toBeFocused();
+    await expect(resend).toBeFocused();
+    expect(await paint(resend)).toMatchObject({ label: tokens.faint, reason: tokens.dim });
+    await page.keyboard.press("ArrowDown");
+    await expect(editInFork).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(menu).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
   });

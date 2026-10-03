@@ -687,6 +687,13 @@ function EventTimelineBody({
     () => layoutTurns(rows, summarizeTimelineTurns(items, forkTurns), sessionActive),
     [rows, projection.revision, items, forkTurns, sessionActive],
   );
+  // Prompts a settled turn's More Turn Actions already lists; on a coarse pointer every other user
+  // message (a steer, a running or footerless turn's prompt) keeps a menu of its own.
+  const turnMenuPrompts = useMemo(() => {
+    const prompts = new Set<number>();
+    for (const footer of turnFooters.values()) if (footer.prompt) prompts.add(footer.prompt.id);
+    return prompts;
+  }, [turnFooters]);
   // Read at call time: the projector extends `rows` in place, so the closure always sees the tail.
   // An open group's steps sit flush on its rule, so the rule runs unbroken from the ledger line.
   const rowGap = useCallback(
@@ -839,6 +846,7 @@ function EventTimelineBody({
           onOpenSourceLocation={onOpenSourceLocation}
           editInForkAvailability={item.kind === "user_message" ? editInForkAvailabilityByItem?.get(item.id) : undefined}
           standaloneCopy={standaloneReplies.has(row.key)}
+          inTurnMenu={item.kind === "user_message" && turnMenuPrompts.has(item.id)}
           questionContext={item.kind === "question" && row.key === pinnedQuestionRow?.key &&
             questionContext?.questionInTimeline === true ? questionContext : undefined}
           approvalContext={item.kind === "permission" && item.resolvedOptionId === undefined &&
@@ -2013,6 +2021,7 @@ const TimelineRow = memo(function TimelineRow({
   onOpenSourceLocation,
   editInForkAvailability,
   standaloneCopy = false,
+  inTurnMenu = false,
   highlightEligible = true,
   disclosureOpen = false,
   onDisclosureToggle,
@@ -2033,6 +2042,8 @@ const TimelineRow = memo(function TimelineRow({
   editInForkAvailability?: EditInForkAvailability;
   /** A reply no turn footer copies (a subagent's) keeps its own Copy. */
   standaloneCopy?: boolean;
+  /** A user message its settled turn's More Turn Actions already lists. */
+  inTurnMenu?: boolean;
   highlightEligible?: boolean;
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
@@ -2133,6 +2144,7 @@ const TimelineRow = memo(function TimelineRow({
             </div>
             <UserMessageActions
               item={item}
+              inTurnMenu={inTurnMenu}
               onRewind={onRewind}
               rewindTurn={rewindTurn}
               rewindUnavailableReason={rewindUnavailableReason}
@@ -2711,14 +2723,23 @@ export function messageActions(item: UserMessageItem, input: MessageActionInput)
   return actions;
 }
 
-/** Beside the user bubble on a fine pointer only (§15.3): Copy Message, Edit as a New Turn when it can
- * be used, and More Message Actions. It is drawn to the bubble's left, takes no height, and stays
- * transparent until the message is hovered, focused within or its menu is open. On a coarse pointer
- * the turn's More Turn Actions holds the same actions, so nothing renders here. */
-function UserMessageActions({ item, ...input }: MessageActionInput & { item: UserMessageItem }) {
+/** Beside the user bubble, drawn to its left and taking no height. On a fine pointer (§15.3): Copy
+ * Message, Edit as a New Turn when it can be used, and More Message Actions, transparent until the
+ * message is hovered, focused within or its menu is open. On a coarse pointer the turn's More Turn
+ * Actions holds the same actions, so nothing renders here, unless no turn menu lists this message
+ * (a steer, or a prompt whose turn is running or has no footer): then More Message Actions alone,
+ * visible at rest, so no message loses its actions on a touch screen. */
+function UserMessageActions({ item, inTurnMenu, ...input }: MessageActionInput & { item: UserMessageItem; inTurnMenu: boolean }) {
   const coarsePointer = useIsCoarsePointer();
-  if (coarsePointer) return null;
+  if (coarsePointer && inTurnMenu) return null;
   const actions = messageActions(item, input);
+  if (coarsePointer) {
+    return (
+      <div className="tl-message-actions tl-user-menu" role="group" aria-label="Message Actions">
+        <TranscriptActionMenu label="More Message Actions" groups={[{ label: "Your Message", actions }]} />
+      </div>
+    );
+  }
   const edit = actions.find((action) => action.key === "edit");
   return (
     <div className="tl-message-actions tl-user-actions" role="group" aria-label="Message Actions">
