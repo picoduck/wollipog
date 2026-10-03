@@ -96,12 +96,14 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `GlobeIcon` | Lucide | `Globe` | Remote host; a web fetch step in the transcript. |
 | `FolderIcon` | Lucide | `Folder` | Generic directory. |
 | `FileIcon` | Lucide | `File` | Generic file; a file row in the @ picker beside the folder row. |
+| `FileCodeIcon` | Lucide | `FileCode` | A file, line or diff reference attached to a message: the composer's reference chip and the transcript's. |
+| `FolderOpenIcon` | Lucide | `FolderOpen` | Open in Files: shows a referenced file in the Files panel. |
 | `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
 | `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row in the transcript; Side Chat's launcher. |
 | `MicIcon` | Lucide | `Mic` | Dictation action. |
 | `ImageIcon` | Lucide | `Image` | Image attachment. |
-| `ImageOffIcon` | Lucide | `ImageOff` | Transcript media that could not load; the composer's refused drop target when the model can't read images. |
+| `ImageOffIcon` | Lucide | `ImageOff` | Transcript media that could not load; an attached or sent image that could not be shown; the composer's refused drop target when the model can't read images. |
 | `PaperclipIcon` | Lucide | `Paperclip` | A message that carries images: a row of the composer's queue tray. |
 | `AtSignIcon` | Lucide | `AtSign` | Reference a workspace file: the + menu's Reference a File… row, which opens the @ picker. |
 | `ChainIcon` | Lucide | `GitCommitVertical` | Worktree or context-chain relationship. |

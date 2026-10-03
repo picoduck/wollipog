@@ -143,7 +143,7 @@ const EXEMPTIONS: Exemption[] = [
       const shadow = /^(box-shadow|text-shadow)$/.test(prop) || /^--(elev|shadow)/.test(prop);
       // A SCRIM is a named list, not "any background": `background: black` on a button is not depth.
       const scrim = /^(background|background-color)$/.test(prop)
-        && declaration.selectors.every((selector) => new Set([".image-remove", ".menu-backdrop", ".palette-backdrop"]).has(selector));
+        && declaration.selectors.every((selector) => new Set([".attach-thumb > .attach-remove", ".menu-backdrop", ".palette-backdrop"]).has(selector));
       if (!shadow && !scrim) return false;
       // Low alpha is part of the rationale, so it is part of the rule. Opaque black is theme data.
       const rgba = colour.match(/^rgba?\(\s*0[\s,]+0[\s,]+0\s*[,/]\s*([\d.]+)\s*\)$/i);
@@ -162,7 +162,7 @@ const EXEMPTIONS: Exemption[] = [
       // on the voice button is a different claim from white text on it.
       && declaration.selectors.every((selector) => (new Map([
         [".voice-btn.voice-recording > svg", "color"],
-        [".image-remove", "color"],
+        [".attach-thumb > .attach-remove", "color"],
         // These frame an iframe carrying its own theme; tinting them shows through it.
         [".artifact-preview-frame", "background"],
         [".browser-web-frame", "background"],

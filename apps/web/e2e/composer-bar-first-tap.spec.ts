@@ -1,4 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
+import { DECODABLE_PNG } from "./fixtures/prompt-image.js";
 
 /**
  * One tap on a composer bar control acts on the first try while the composer is focused (#1797).
@@ -107,14 +108,14 @@ test.describe("with the composer focused, one tap", () => {
     const composer = await focusComposer(page);
     await composer.pressSequentially("Review @src");
     await page.getByRole("option", { name: /src\/session\.ts/ }).click();
-    const chip = page.getByRole("button", { name: "Inspect Workspace Reference src/session.ts" });
+    const chip = page.getByRole("button", { name: "Inspect Reference src/session.ts" });
     await expect(chip).toBeVisible();
     await focusComposer(page);
     await tapOnce(page, chip);
-    const inspector = page.getByRole("dialog", { name: "Workspace Reference" });
+    const inspector = page.getByRole("dialog", { name: "File Reference" });
     await expectFocusSettlesIn(page, inspector);
     // The chip opened it, so the chip gets focus back — not the composer the tap never blurred.
-    await inspector.getByRole("button", { name: "Done" }).click();
+    await inspector.getByRole("button", { name: "Close" }).click();
     await expect(inspector).toHaveCount(0);
     await expect(chip).toBeFocused();
   });
@@ -143,9 +144,9 @@ test.describe("with the composer focused, one tap", () => {
       supportsImages: true,
     }));
     await page.locator(".composer-attach-input").setInputFiles([
-      { name: "one.png", mimeType: "image/png", buffer: Buffer.from([137, 80, 78, 71]) },
+      { name: "one.png", mimeType: "image/png", buffer: DECODABLE_PNG },
     ]);
-    const remove = page.getByRole("button", { name: "Remove Image" });
+    const remove = page.getByRole("button", { name: "Remove Attached Image 1" });
     await expect(remove).toHaveCount(1);
     const composer = await focusComposer(page);
     await tapOnce(page, remove);
@@ -159,7 +160,7 @@ test.describe("with the composer focused, one tap", () => {
     const composer = await focusComposer(page);
     await composer.pressSequentially("Review @src");
     await page.getByRole("option", { name: /src\/session\.ts/ }).click();
-    const remove = page.getByRole("button", { name: "Remove Workspace Reference src/session.ts" });
+    const remove = page.getByRole("button", { name: "Remove Reference src/session.ts" });
     await expect(remove).toBeVisible();
     await focusComposer(page);
     await tapOnce(page, remove);

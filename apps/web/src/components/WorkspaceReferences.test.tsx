@@ -7,7 +7,8 @@ import {
   type GitDiffInfo,
   type WorkspaceReference,
 } from "@wollipog/protocol";
-import { ImageStrip } from "./images.js";
+import { ComposerAttachments } from "./images.js";
+import { REFERENCE_HASH_LABEL, WorkspaceReferenceDialog, workspaceReferenceCheckSentence } from "./WorkspaceReferenceDialog.js";
 import { GitDiffViewer } from "./GitDiffViewer.js";
 import { WorkspaceReferencePicker } from "./WorkspaceReferencePicker.js";
 
@@ -31,11 +32,69 @@ const reference: WorkspaceReference = {
 };
 
 test("workspace reference chips are inspectable and removable without rendering as images", () => {
-  const html = renderToStaticMarkup(<ImageStrip images={[reference]} onRemove={() => {}} onInspectReference={() => {}} />);
-  assert.match(html, /@.*src\/app\.ts:10-12.*Base/);
-  assert.match(html, /aria-label="Inspect Workspace Reference/);
-  assert.match(html, /aria-label="Remove Workspace Reference/);
+  const html = renderToStaticMarkup(<ComposerAttachments images={[reference]} onRemove={() => {}} onInspectReference={() => {}} />);
+  assert.match(html, /class="ref-chip-path"><bdi>src\/app\.ts<\/bdi><\/span><span class="ref-chip-suffix">:10-12 · Base<\/span>/);
+  assert.match(html, /aria-label="Inspect Reference src\/app\.ts:10-12 · Base"/);
+  assert.match(html, /aria-label="Remove Reference src\/app\.ts:10-12 · Base"/);
+  // No "@" glyph and no text "✕": an icon says what the chip is, and the remove is the close icon.
+  assert.doesNotMatch(html, />@|✕/);
   assert.doesNotMatch(html, /<img/);
+});
+
+test("images and references share one tray and one remove recipe", () => {
+  const lines: WorkspaceReference = { ...reference, kind: "lines", side: undefined };
+  const html = renderToStaticMarkup(<ComposerAttachments
+    images={[{ mimeType: "image/png", data: "AAAA" }, lines, { mimeType: "image/png", data: "BBBB" }]}
+    onRemove={() => {}}
+  />);
+  assert.match(html, /^<div class="composer-attachments">/);
+  // Images are numbered among images, so the reference between them does not take a number.
+  assert.deepEqual([...html.matchAll(/aria-label="(Remove [^"]+)"/g)].map((match) => match[1]),
+    ["Remove Attached Image 1", "Remove Reference src/app.ts:10-12", "Remove Attached Image 2"]);
+  assert.equal(html.match(/class="attach-remove"/g)?.length, 3);
+  assert.match(html, /alt="Attached image 2"/);
+});
+
+function dialog(overrides: Partial<WorkspaceReference> = {}, machineName: string | null = "Studio Mac") {
+  return renderToStaticMarkup(<WorkspaceReferenceDialog
+    reference={{ ...reference, ...overrides }}
+    machineName={machineName}
+    onClose={() => {}}
+    onRemove={() => {}}
+    onOpenInFiles={overrides.kind === "lines" || overrides.kind === "file" ? () => {} : undefined}
+  />);
+}
+
+test("the reference dialog names its kind and lists its facts without a Done", () => {
+  const lines = dialog({ kind: "lines", side: undefined, diffHash: undefined, diffScope: undefined, startLine: 18, endLine: 21 });
+  assert.match(lines, /File Reference/);
+  assert.deepEqual([...lines.matchAll(/<dt>([^<]+)<\/dt>/g)].map((match) => match[1]), ["Path", "Lines", REFERENCE_HASH_LABEL]);
+  assert.match(lines, /<dd>18–21<\/dd>/);
+  // Twelve characters of the hash, and its Copy button copies exactly those.
+  assert.match(lines, /<span class="mono">aaaaaaaaaaaa<\/span>/);
+  assert.match(lines, new RegExp(`aria-label="Copy ${REFERENCE_HASH_LABEL}"`));
+  assert.match(lines, /aria-label="Copy Path"/);
+  assert.match(lines, /Before sending, Wollipog checks that these lines haven(&#x27;|')t changed on Studio Mac\./);
+  assert.match(lines, />Remove from Message</);
+  assert.match(lines, /Open in Files/);
+  assert.doesNotMatch(lines, />Done</);
+  assert.doesNotMatch(lines, /btn primary/);
+
+  const diffHtml = dialog();
+  assert.match(diffHtml, /Diff Reference/);
+  assert.deepEqual([...diffHtml.matchAll(/<dt>([^<]+)<\/dt>/g)].map((match) => match[1]),
+    ["Path", "Lines", "Side", "Scope", REFERENCE_HASH_LABEL]);
+  assert.doesNotMatch(diffHtml, /Open in Files/);
+
+  const folder = dialog({ kind: "directory", startLine: undefined, endLine: undefined, side: undefined, diffScope: undefined }, null);
+  assert.match(folder, /Folder Reference/);
+  assert.match(folder, /Before sending, Wollipog checks that this folder hasn(&#x27;|')t changed\./);
+});
+
+test("the check sentence follows what the reference points at", () => {
+  const file = { ...reference, kind: "file" as const, startLine: undefined, endLine: undefined };
+  assert.equal(workspaceReferenceCheckSentence(file, "Studio Mac"), "Before sending, Wollipog checks that this file hasn't changed on Studio Mac.");
+  assert.equal(workspaceReferenceCheckSentence(file, null), "Before sending, Wollipog checks that this file hasn't changed.");
 });
 
 function picker(overrides: Partial<React.ComponentProps<typeof WorkspaceReferencePicker>> = {}) {

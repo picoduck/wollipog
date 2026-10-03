@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { DECODABLE_PNG } from "./fixtures/prompt-image.js";
 
 /**
  * A composer control that removes itself keeps keyboard focus in the composer (#1913).
@@ -58,16 +59,16 @@ for (const [keyName, key] of [["Enter", "Enter"], ["Space", " "]] as const) {
     test("removes an image, and focuses the composer", async ({ page }) => {
       const composer = await openSession(page);
       await page.locator(".composer-attach-input").setInputFiles([
-        { name: "one.png", mimeType: "image/png", buffer: Buffer.from([137, 80, 78, 71]) },
+        { name: "one.png", mimeType: "image/png", buffer: DECODABLE_PNG },
       ]);
-      await activateFromKeyboard(page, composer, page.getByRole("button", { name: "Remove Image" }), key);
+      await activateFromKeyboard(page, composer, page.getByRole("button", { name: "Remove Attached Image 1" }), key);
     });
 
     test("removes a workspace reference, and focuses the composer", async ({ page }) => {
       const composer = await openSession(page);
       await composer.pressSequentially("Review @src");
       await page.getByRole("option", { name: /src\/session\.ts/ }).click();
-      const remove = page.getByRole("button", { name: "Remove Workspace Reference src/session.ts" });
+      const remove = page.getByRole("button", { name: "Remove Reference src/session.ts" });
       await expect(remove).toBeVisible();
       await activateFromKeyboard(page, composer, remove, key);
     });
@@ -119,10 +120,10 @@ test.describe("Enter on a composer control that removes itself, with the compose
   test("removes an image", async ({ page }) => {
     const composer = await openSession(page);
     await page.locator(".composer-attach-input").setInputFiles([
-      { name: "one.png", mimeType: "image/png", buffer: Buffer.from([137, 80, 78, 71]) },
+      { name: "one.png", mimeType: "image/png", buffer: DECODABLE_PNG },
     ]);
     await refuseCommands(page, composer);
-    await expectFocusMovesToSessionActivity(page, page.getByRole("button", { name: "Remove Image" }));
+    await expectFocusMovesToSessionActivity(page, page.getByRole("button", { name: "Remove Attached Image 1" }));
   });
 
   test("removes a workspace reference", async ({ page }) => {
@@ -131,6 +132,6 @@ test.describe("Enter on a composer control that removes itself, with the compose
     await page.getByRole("option", { name: /src\/session\.ts/ }).click();
     await refuseCommands(page, composer);
     await expectFocusMovesToSessionActivity(page,
-      page.getByRole("button", { name: "Remove Workspace Reference src/session.ts" }));
+      page.getByRole("button", { name: "Remove Reference src/session.ts" }));
   });
 });

@@ -906,7 +906,7 @@ One recipe for every read-only label and value list. It is the §19.4 merge of t
 - A region may set the list's spacing or size (the background work panel uses `--type-small`) but
   not its structure.
 - Replaces `.agent-details-grid`, `.background-work-job-meta`, `.usage-totals`,
-  `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Twelve more `<dl>` recipes
+  `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Eleven more `<dl>` recipes
   remain (§19.4); each area moves its own onto `.facts` when it is redesigned.
 
 ### 5.5 Disclosure (Expand and Collapse)
@@ -1897,8 +1897,8 @@ exactly one: the most severe, then the lowest rank.
 - Ranks live in one table, `SESSION_NOTICE_RANK`: worktree missing 1, conversation quarantined 2,
   worktree setup failed 3, invalid worktree setup configuration 4, account switch failed 5, session
   archived 7, skills unavailable 8, setup suggestion 9, composer error 10, attachment error 11,
-  attachment note 12, editing a copy 13, queued-message delivery failure 14. A new entry adds its
-  rank there.
+  attachment note 12, editing a copy 13, attachment that couldn't be shown 14, queued-message delivery
+  failure 15. A new entry adds its rank there.
 - The others are a `.btn.sm.ghost` "+N More" in the shown notice's title row. It opens a menu (§9.1)
   of their tone icons and one-line titles; choosing one shows it until the set of conditions changes,
   and focus moves to the new notice's "+N More".
@@ -2408,11 +2408,12 @@ local name so the two do not collide.
 - **Settings:** `.setting-row` details, `.set-sublabel`, `.update-block`, `.modal-body.allow-overflow`
   (unneeded once #1800 portals menus out of dialogs).
 
-**Remaining `<dl>` recipes.** Twelve other label and value lists still carry their own rules and
+**Remaining `<dl>` recipes.** Eleven other label and value lists still carry their own rules and
 move onto `.facts` with their area: `.context-popover-facts`, `.session-usage-facts`,
 `.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts`,
-`.runner-meta`, `.connection-details-list`, `.campaign-held-child-hold`, `.approval-selector-context`,
-`.automation-facts` and `.workspace-reference-details`.
+`.runner-meta`, `.connection-details-list`, `.campaign-held-child-hold`, `.approval-selector-context`
+and `.automation-facts`. (`.workspace-reference-details` moved onto `.facts` with the File Reference
+dialog, #2177.)
 
 ---
 

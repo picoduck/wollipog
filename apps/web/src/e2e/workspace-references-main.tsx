@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { CreateWorkspaceReferenceRequest, GitDiffInfo, PromptImageInput, WorkspaceReference } from "@wollipog/protocol";
 import { GitDiffViewer } from "../components/GitDiffViewer.js";
 import { WorkspaceReferencePicker } from "../components/WorkspaceReferencePicker.js";
-import { ImageStrip } from "../components/images.js";
+import { ComposerAttachments } from "../components/images.js";
 import "../styles.css";
 
 const query = new URLSearchParams(window.location.search);
@@ -101,7 +101,7 @@ function Fixture() {
       </header>
       <section className="card" style={{ padding: 16, display: "grid", gap: 12 }}>
         <strong>Prompt Composer</strong>
-        <ImageStrip images={attachments} onRemove={(index) => setAttachments((current) => current.filter((_, i) => i !== index))} />
+        <ComposerAttachments images={attachments} onRemove={(index) => setAttachments((current) => current.filter((_, i) => i !== index))} />
         <div style={{ position: "relative", marginTop: after ? 240 : 0 }}>
           {after && (
             <WorkspaceReferencePicker

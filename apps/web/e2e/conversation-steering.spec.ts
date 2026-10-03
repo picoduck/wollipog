@@ -575,12 +575,12 @@ test("recovered queued-edit attachments become self-contained ordinary draft ima
   await reopenSteeringSession(page);
   await expect(page.getByText("Recovered Queued Message", { exact: true })).toBeVisible();
   await expect(page.locator(".composer-input")).toHaveValue("Keep this recovered message");
-  await expect(page.locator(".image-thumb img")).toBeVisible();
+  await expect(page.locator(".attach-thumb img")).toBeVisible();
 
   await page.getByRole("button", { name: "Use as New Message" }).click();
   await expect(page.getByText("Recovered Queued Message", { exact: true })).toHaveCount(0);
   await expect(page.locator(".composer-input")).toHaveValue("Keep this recovered message");
-  await expect(page.locator(".image-thumb img")).toHaveAttribute("src", /^data:image\/png;base64,/);
+  await expect(page.locator(".attach-thumb img")).toHaveAttribute("src", /^data:image\/png;base64,/);
   await expect.poll(() => page.evaluate(async () =>
     (await window.__WOLLIPOG_PROJECT_INBOX_E2E__.composerDraft("session-alpha"))?.images,
   )).toEqual([{

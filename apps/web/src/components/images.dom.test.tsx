@@ -12,8 +12,12 @@ import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
   PROMPT_IMAGE_MIME_TYPES,
+  WORKSPACE_REFERENCE_MIME_TYPE,
+  type WorkspaceReference,
 } from "@wollipog/protocol";
 import {
+  attachedImageAlt,
+  attachmentFileName,
   describeAttachmentProblem,
   imageTypeName,
   modelRefusesImagesSentence,
@@ -80,6 +84,7 @@ const EVERY_PROBLEM: Record<AttachmentProblem["kind"], AttachmentProblem[]> = {
   "too-many": [{ kind: "too-many" }],
   "too-large-together": [{ kind: "too-large-together" }],
   "too-many-references": [{ kind: "too-many-references" }],
+  "duplicate-reference": [{ kind: "duplicate-reference", path: "src/session.ts" }],
 };
 
 test("every attachment problem reads in plain words", () => {
@@ -198,6 +203,43 @@ test("an unreadable file and an over-budget pick report in words too", async () 
     // The draft changed (some images landed) before the notice was reported, so the change does not
     // clear it.
     assert.equal(mounted.changes(), 1);
+  } finally {
+    await mounted.unmount();
+  }
+});
+
+test("each attached image keeps the name of the file it came from, for its alt text and notices (#2177)", async () => {
+  const mounted = await mountHook(PROMPT_IMAGE_MIME_TYPES);
+  try {
+    await mounted.add([png("diagram.png"), png("screenshot.png")]);
+    const [first, second] = mounted.hook().images;
+    assert.equal(attachmentFileName(first!), "diagram.png");
+    assert.equal(attachmentFileName(second!), "screenshot.png");
+    assert.equal(attachedImageAlt(2, attachmentFileName(second!)), "Attached image 2: screenshot.png");
+    // A restored draft's image has no name, and is numbered instead.
+    assert.equal(attachedImageAlt(1, attachmentFileName({ mimeType: "image/png", data: "AAAA" })), "Attached image 1");
+  } finally {
+    await mounted.unmount();
+  }
+});
+
+test("a reference already attached is an attachment notice, not a toast (#2177)", async () => {
+  const mounted = await mountHook(PROMPT_IMAGE_MIME_TYPES);
+  const reference: WorkspaceReference = {
+    artifactId: "workspace:readme", mimeType: WORKSPACE_REFERENCE_MIME_TYPE, sizeBytes: 0, sha256: "a".repeat(64),
+    referenceVersion: 1, kind: "file", path: "README.md", rootFingerprint: "b".repeat(64), targetFingerprint: "a".repeat(64),
+  };
+  try {
+    let outcome: string | undefined;
+    await act(async () => { outcome = mounted.hook().addWorkspaceReference(reference); });
+    assert.equal(outcome, "added");
+    assert.deepEqual(mounted.problems, [], "the chip is the confirmation");
+    await act(async () => { outcome = mounted.hook().addWorkspaceReference({ ...reference, artifactId: "workspace:again" }); });
+    assert.equal(outcome, "duplicate");
+    assert.deepEqual(mounted.problems, [{ kind: "duplicate-reference", path: "README.md" }]);
+    assert.deepEqual(describeAttachmentProblem(mounted.problems[0]!), {
+      title: "Already Attached", message: "“README.md” is already attached.",
+    });
   } finally {
     await mounted.unmount();
   }

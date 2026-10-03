@@ -55,6 +55,7 @@ import {
 import { StepOutput, StepStatus, ToolStep, toolIcon, WorkLedgerLine } from "./ToolStep.js";
 import { statusMeta, toolStatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { ReadonlyReferenceChip } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
@@ -2235,7 +2236,7 @@ const TimelineRow = memo(function TimelineRow({
                     <PromptImageView key={"artifactId" in img ? img.artifactId : i} image={img} alt={`attachment ${i + 1}`} />
                   ))}
                   {item.images.filter(isWorkspaceReference).map((reference) => (
-                    <span className="workspace-reference-chip is-readonly" key={reference.artifactId}>@{reference.path}</span>
+                    <ReadonlyReferenceChip key={reference.artifactId} reference={reference} />
                   ))}
                 </div>
               )}

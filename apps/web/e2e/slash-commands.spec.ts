@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { DECODABLE_PNG_BASE64 } from "./fixtures/prompt-image.js";
 
 /** A provider command's receipt row in the transcript, found by the command it shows. */
 function commandReceipt(page: Page, command: string) {
@@ -87,16 +88,16 @@ test("authorized provider commands use durable dispatch and preserve attachments
   }], [], { supportsImages: true }));
 
   const composer = page.locator(".composer-input");
-  await composer.evaluate((element) => {
+  await composer.evaluate((element, png) => {
     const transfer = new DataTransfer();
-    transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "fixture.png", { type: "image/png" }));
+    transfer.items.add(new File([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], "fixture.png", { type: "image/png" }));
     element.dispatchEvent(new ClipboardEvent("paste", {
       bubbles: true,
       cancelable: true,
       clipboardData: transfer,
     }));
-  });
-  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  }, DECODABLE_PNG_BASE64);
+  await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
 
   await composer.fill("/deploy production");
   // The note is an info entry of the notice slot (#2156), not a notice inside the card.
@@ -124,7 +125,7 @@ test("authorized provider commands use durable dispatch and preserve attachments
   // The receipt is a row of the transcript under the command it describes (#2171).
   await expect(commandReceipt(page, "/deploy production")).toContainText("Sending to");
   await expect(composer).toHaveValue("");
-  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
 });
 
 test("Codex prompts and skills are grouped by source and $name dispatches the same skill as /name", async ({ page }) => {
@@ -279,15 +280,15 @@ test("an edit made during command delivery survives attachment preservation and 
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextSessionCommandResponse();
   });
   const composer = page.locator(".composer-input");
-  await composer.evaluate((element) => {
+  await composer.evaluate((element, png) => {
     const transfer = new DataTransfer();
-    transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "fixture.png", { type: "image/png" }));
+    transfer.items.add(new File([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], "fixture.png", { type: "image/png" }));
     element.dispatchEvent(new ClipboardEvent("paste", {
       bubbles: true,
       cancelable: true,
       clipboardData: transfer,
     }));
-  });
+  }, DECODABLE_PNG_BASE64);
   await composer.fill("/deploy production");
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() =>
@@ -295,13 +296,13 @@ test("an edit made during command delivery survives attachment preservation and 
   await composer.fill("newer draft while command is in flight");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredSessionCommandResponse());
   await expect(composer).toHaveValue("newer draft while command is in flight");
-  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
   await expect.poll(() => page.evaluate(async () => {
     const draft = await window.__WOLLIPOG_PROJECT_INBOX_E2E__.composerDraft("session-alpha");
     return draft && { text: draft.text, images: draft.images };
   })).toEqual({
     text: "newer draft while command is in flight",
-    images: [{ mimeType: "image/png", data: "iVBORw==" }],
+    images: [{ mimeType: "image/png", data: DECODABLE_PNG_BASE64 }],
   });
 
   await page.reload();
@@ -309,7 +310,7 @@ test("an edit made during command delivery survives attachment preservation and 
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-input")).toHaveValue("newer draft while command is in flight");
-  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
 });
 
 test("forbid attachment metadata blocks provider dispatch and preserves the draft", async ({ page }) => {
@@ -317,23 +318,23 @@ test("forbid attachment metadata blocks provider dispatch and preserves the draf
     { name: "deploy", source: "plugin", description: "Deploy this workspace" },
   ], [], { supportsImages: true, attachmentPolicy: "forbid" }));
   const composer = page.locator(".composer-input");
-  await composer.evaluate((element) => {
+  await composer.evaluate((element, png) => {
     const transfer = new DataTransfer();
-    transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "fixture.png", { type: "image/png" }));
+    transfer.items.add(new File([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], "fixture.png", { type: "image/png" }));
     element.dispatchEvent(new ClipboardEvent("paste", {
       bubbles: true,
       cancelable: true,
       clipboardData: transfer,
     }));
-  });
-  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  }, DECODABLE_PNG_BASE64);
+  await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
 
   await composer.fill("/deploy production");
   await page.keyboard.press("Enter");
 
   await expect(page.locator('.session-notice-slot .notice.t-danger[role="alert"] .notice-body')).toHaveText("/deploy can't run with attachments. Remove them to run it.");
   await expect(composer).toHaveValue("/deploy production");
-  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(0);
 });
 
@@ -548,16 +549,16 @@ test("rename-session moves into a retryable status receipt without disturbing th
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands(
     [], [], { supportsImages: true },
   ));
-  await composer.evaluate((element) => {
+  await composer.evaluate((element, png) => {
     const transfer = new DataTransfer();
-    transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "fixture.png", { type: "image/png" }));
+    transfer.items.add(new File([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], "fixture.png", { type: "image/png" }));
     element.dispatchEvent(new ClipboardEvent("paste", {
       bubbles: true,
       cancelable: true,
       clipboardData: transfer,
     }));
-  });
-  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  }, DECODABLE_PNG_BASE64);
+  await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
   await composer.fill("/rename-session");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
   await page.getByRole("button", { name: "Send" }).click();
@@ -567,7 +568,7 @@ test("rename-session moves into a retryable status receipt without disturbing th
     title: "Retitled Again",
   }));
   await expect(composer).toHaveValue("");
-  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
   await expect(page.getByText("Retitled Again", { exact: true })).toBeVisible();
 });
 
@@ -676,16 +677,16 @@ test("wrapped composer errors stay in the composer while status receipts stay in
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands(
     [], [], { supportsImages: true },
   ));
-  await composer.evaluate((element) => {
+  await composer.evaluate((element, png) => {
     const transfer = new DataTransfer();
-    transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "fixture.png", { type: "image/png" }));
+    transfer.items.add(new File([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], "fixture.png", { type: "image/png" }));
     element.dispatchEvent(new ClipboardEvent("paste", {
       bubbles: true,
       cancelable: true,
       clipboardData: transfer,
     }));
-  });
-  await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
+  }, DECODABLE_PNG_BASE64);
+  await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands(
     [], [], { supportsImages: false },
   ));

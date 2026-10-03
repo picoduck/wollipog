@@ -1,1 +1,0 @@
-|.workspace-reference-chip.is-readonly|padding|4px

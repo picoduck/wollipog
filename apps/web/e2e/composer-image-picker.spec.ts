@@ -1,4 +1,6 @@
 import { devices, expect, test, type Page } from "@playwright/test";
+import { openSessionWithTray } from "./fixtures/composer-tray.js";
+import { DECODABLE_PNG, UNDRAWABLE_PNG } from "./fixtures/prompt-image.js";
 
 /**
  * The composer's Attach Image action, end to end.
@@ -13,8 +15,8 @@ import { devices, expect, test, type Page } from "@playwright/test";
 
 const phone = devices["Pixel 7"];
 
-/** A four-byte PNG signature: enough for the MIME-and-size gate, which never decodes pixels. */
-const PNG = Buffer.from([137, 80, 78, 71]);
+/** A PNG the browser can draw: the MIME-and-size gate never decodes pixels, but the tray does (#2177). */
+const PNG = DECODABLE_PNG;
 
 type PickedFile = { name: string; mimeType: string; buffer: Buffer };
 
@@ -51,7 +53,7 @@ async function pickImages(page: Page, files: PickedFile[]) {
   return chooser;
 }
 
-const thumbnails = (page: Page) => page.getByRole("button", { name: "Remove Image" });
+const thumbnails = (page: Page) => page.getByRole("button", { name: /^Remove Attached Image \d+$/ });
 
 test("the action opens a native multi-select chooser scoped to the session's image types", async ({ page }) => {
   await openSession(page);
@@ -413,4 +415,115 @@ test.describe("on a phone", () => {
     await thumbnails(page).first().tap();
     await expect(thumbnails(page)).toHaveCount(0);
   });
+
+  test("every remove button in the tray has a 44px hit area on a coarse pointer (#2177)", async ({ page }) => {
+    await openSessionWithTray(page);
+    const removes = page.locator(".composer-attachments .attach-remove");
+    await expect(removes).toHaveCount(3);
+    for (const remove of await removes.all()) {
+      const hit = await remove.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const after = getComputedStyle(element, "::after");
+        return {
+          width: box.width - parseFloat(after.left) - parseFloat(after.right),
+          height: box.height - parseFloat(after.top) - parseFloat(after.bottom),
+        };
+      });
+      expect(hit.width).toBeGreaterThanOrEqual(44);
+      expect(hit.height).toBeGreaterThanOrEqual(44);
+    }
+    // The hit area is real: a tap 10px above the reference's 20px remove button still lands on it.
+    const reference = page.getByRole("button", { name: "Remove Reference src/session.ts:18-21" });
+    const box = (await reference.boundingBox())!;
+    const target = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute("aria-label"),
+      { x: box.x + box.width / 2, y: box.y - 10 });
+    expect(target).toBe("Remove Reference src/session.ts:18-21");
+  });
+});
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`a line reference sits centred between 56px thumbnails in one tray at ${viewport.width}px (#2177)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await openSessionWithTray(page);
+
+    const tray = page.locator(".composer-attachments");
+    const chip = tray.locator(".ref-chip");
+    const thumbs = tray.locator(".attach-thumb");
+    await expect(thumbs).toHaveCount(2);
+    await expect(thumbs.locator("img")).toHaveCount(2);
+    await expect(chip).toHaveCount(1);
+    await expect(chip.locator(".ref-chip-path")).toHaveText("src/session.ts");
+    await expect(chip.locator(".ref-chip-suffix")).toHaveText(":18-21");
+    await expect(chip).not.toContainText("@");
+
+    const chipBox = (await chip.boundingBox())!;
+    // A control-height chip on the thumbnails' centre line, and the tray only as tall as a thumbnail.
+    expect(chipBox.height).toBe(28);
+    for (const thumb of await thumbs.all()) {
+      const box = (await thumb.boundingBox())!;
+      expect([box.width, box.height]).toEqual([56, 56]);
+      expect(Math.abs((chipBox.y + chipBox.height / 2) - (box.y + box.height / 2))).toBeLessThanOrEqual(1);
+    }
+    expect((await tray.boundingBox())!.height).toBeLessThanOrEqual(68);
+
+    // One remove recipe: each a 20px close-icon button.
+    const removes = tray.locator(".attach-remove");
+    await expect(removes).toHaveCount(3);
+    for (const remove of await removes.all()) {
+      const box = (await remove.boundingBox())!;
+      expect([box.width, box.height]).toEqual([20, 20]);
+      await expect(remove.locator("svg")).toHaveCount(1);
+      await expect(remove).toHaveText("");
+    }
+    await expect(page.getByRole("button", { name: "Remove Attached Image 1" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Remove Attached Image 2" })).toBeVisible();
+    await expect(page.getByRole("img", { name: "Attached image 2" })).toBeVisible();
+  });
+}
+
+test("adding a reference shows no toast; the chip is the confirmation (#2177)", async ({ page }) => {
+  await openSession(page);
+  const composer = page.locator(".composer-input");
+  await composer.pressSequentially("Review @src");
+  await page.getByRole("option", { name: /src\/session\.ts/ }).click();
+  await expect(page.getByRole("button", { name: "Inspect Reference src/session.ts" })).toBeVisible();
+  await expect(page.locator(".toast-region .toast")).toHaveCount(0);
+
+  // Attaching it again says so in the notice slot instead.
+  await composer.pressSequentially("@src");
+  await page.getByRole("option", { name: /src\/session\.ts/ }).click();
+  const notice = page.locator(".session-notice-slot").getByRole("alert", { name: "Already Attached" });
+  await expect(notice.locator(".notice-body")).toHaveText("“src/session.ts” is already attached.");
+  await expect(page.locator(".toast-region .toast")).toHaveCount(0);
+});
+
+test("an image the browser can't draw shows an image-off tile and a notice naming the file (#2177)", async ({ page }) => {
+  await openSession(page);
+  await pickImages(page, [file("diagram.png", "image/png", UNDRAWABLE_PNG)]);
+  const thumb = page.locator(".composer-attachments .attach-thumb");
+  await expect(thumb.locator(".image-broken svg")).toBeVisible();
+  await expect(thumb.locator("img")).toHaveCount(0);
+  await expect(thumb).not.toContainText("diagram");
+  await expect(page.getByRole("img", { name: "Attached image 1: diagram.png" })).toBeVisible();
+
+  const notice = page.locator(".session-notice-slot").getByRole("status", { name: "Image Couldn't Be Shown" });
+  await expect(notice.locator(".notice-body")).toHaveText("“diagram.png” couldn't be shown. Remove it and attach it again.");
+  // Typing is a draft change, which clears the composer's notices but not this one: the image is
+  // still attached, and still sent unless it is removed.
+  await page.locator(".composer-input").fill("What is wrong here?");
+  await expect(notice).toBeVisible();
+  await expect(thumb.locator(".image-broken")).toBeVisible();
+  await page.getByRole("button", { name: "Remove Attached Image 1" }).click();
+  await expect(notice).toHaveCount(0);
+});
+
+test("an image that fails before React is listening still becomes the image-off tile (#2177)", async ({ page }) => {
+  // The hidden input's change lands the image in one commit, so its data URL can fail to decode
+  // before the view's effects run; the tile must not depend on that order.
+  await openSession(page);
+  await page.locator(".composer-attach-input").setInputFiles([file("diagram.png", "image/png", UNDRAWABLE_PNG)]);
+  const thumb = page.locator(".composer-attachments .attach-thumb");
+  await expect(thumb.locator(".image-broken")).toBeVisible();
+  await expect(thumb.locator("img")).toHaveCount(0);
+  await expect(page.locator(".session-notice-slot").getByRole("status", { name: "Image Couldn't Be Shown" })).toBeVisible();
 });

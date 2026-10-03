@@ -33,6 +33,7 @@ import {
   Eye as LucideEye,
   EyeOff as LucideEyeOff,
   File as LucideFile,
+  FileCode as LucideFileCode,
   FileClock as LucideFileClock,
   FileDiff as LucideFileDiff,
   FilePen as LucideFilePen,
@@ -44,6 +45,7 @@ import {
   FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
   FolderInput as LucideFolderInput,
+  FolderOpen as LucideFolderOpen,
   FolderKanban as LucideFolderKanban,
   Gauge as LucideGauge,
   GitBranch as LucideGitBranch,
@@ -422,6 +424,16 @@ export function FolderIcon(props: IconProps) {
 
 export function FileIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFile} {...props} />;
+}
+
+/** A file or line reference attached to a message (#2177). */
+export function FileCodeIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFileCode} {...props} />;
+}
+
+/** Open a referenced file in the Files panel (#2177). */
+export function FolderOpenIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFolderOpen} {...props} />;
 }
 
 /** Why a choice can't be made: a disabled command's reason (#2155). */

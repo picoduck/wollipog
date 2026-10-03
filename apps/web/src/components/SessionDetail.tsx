@@ -96,8 +96,9 @@ import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useDiffFileFocus } from "../review-focus.js";
 import { useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
-import { attachImageDescription, describeAttachmentProblem, ImageStrip, modelRefusesImagesSentence, usePastedImages, type AttachmentProblem } from "./images.js";
+import { attachImageDescription, attachmentFileName, attachmentKey, ComposerAttachments, describeAttachmentProblem, modelRefusesImagesSentence, ReadonlyReferenceChip, usePastedImages, type AttachmentProblem } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
+import { WorkspaceReferenceDialog } from "./WorkspaceReferenceDialog.js";
 import {
   hasNewPendingPrompt,
   isPendingPromptShown,
@@ -1686,6 +1687,17 @@ function SessionDetailLoaded({
     selectedModelName,
   );
   const actualImages = images.filter((attachment) => !isWorkspaceReference(attachment));
+  // Attached images that couldn't be shown (#2177). Each stays a notice slot entry until it is removed:
+  // it is still sent, so the entry is about the attachment rather than an outcome a draft change clears.
+  const [brokenImages, setBrokenImages] = useState<ReadonlySet<PromptImageInput>>(() => new Set());
+  const reportBrokenImage = useCallback((image: PromptImageInput) => {
+    setBrokenImages((current) => current.has(image) ? current : new Set(current).add(image));
+  }, []);
+  useEffect(() => {
+    setBrokenImages((current) => [...current].every((image) => images.includes(image))
+      ? current
+      : new Set([...current].filter((image) => images.includes(image))));
+  }, [images]);
   const draftState = useRef<{ text: string; images: PromptImageInput[] }>({ text: "", images: [] });
   draftState.current = { text, images };
   const updateComposerSelection = useCallback((start: number, end = start) => {
@@ -4432,15 +4444,14 @@ function SessionDetailLoaded({
     }
     try {
       const { reference } = await api.createWorkspaceReference(sessionId, target);
-      const outcome = addWorkspaceReference(reference);
-      if (outcome !== "limit") setError(null);
-      if (outcome === "added") showToast(`Attached ${reference.path}.`);
-      if (outcome === "duplicate") showToast(`${reference.path} is already attached.`);
+      // The chip appearing in the tray is the confirmation, so an added reference raises no toast
+      // (§13.1). The limit and a duplicate are attachment notices in the slot (#2156).
+      if (addWorkspaceReference(reference) !== "limit") setError(null);
       window.requestAnimationFrame(() => inputRef.current?.focus());
     } catch (cause) {
       setError((cause as Error).message);
     }
-  }, [addWorkspaceReference, api, runner?.protocolVersion, sessionId, showToast, workspaceReferencesSupported]);
+  }, [addWorkspaceReference, api, runner?.protocolVersion, sessionId, workspaceReferencesSupported]);
 
   const selectWorkspaceCandidate = (candidate: WorkspaceReferenceCandidate) => {
     if (!workspaceTrigger) return;
@@ -4617,6 +4628,22 @@ function SessionDetailLoaded({
       ),
     });
   }
+  actualImages.forEach((image, index) => {
+    if (!brokenImages.has(image)) return;
+    const name = attachmentFileName(image);
+    sessionNotices.push({
+      key: `attachment-broken:${attachmentKey(image)}`,
+      severity: "warning",
+      rank: SESSION_NOTICE_RANK.attachmentBroken,
+      title: "Image Couldn't Be Shown",
+      render: ({ trailing }) => (
+        <Notice tone="warning" role="status" ariaLabel="Image Couldn't Be Shown" title="Image Couldn't Be Shown"
+          trailing={trailing}>
+          <p>{name ? `“${name}”` : `Attached image ${index + 1}`} couldn't be shown. Remove it and attach it again.</p>
+        </Notice>
+      ),
+    });
+  });
   const composerIdleCollapsed = isMobile && !composerExpanded && !/[\r\n]/u.test(text) &&
     images.length === 0 && session.pendingApproval == null &&
     !historyQuarantine && !queuedEdit && composerErrorEntries.length === 0 && !retitleFeedback && !dictation.recording &&
@@ -6080,7 +6107,7 @@ function SessionDetailLoaded({
                               <PromptImageView key={"artifactId" in img ? img.artifactId : i} image={img} alt={`attachment ${i + 1}`} />
                             ))}
                             {pending.images.filter(isWorkspaceReference).map((reference) => (
-                              <span className="workspace-reference-chip is-readonly" key={reference.artifactId}>@{reference.path}</span>
+                              <ReadonlyReferenceChip key={reference.artifactId} reference={reference} />
                             ))}
                           </div>
                         )}
@@ -6297,7 +6324,7 @@ function SessionDetailLoaded({
                   onActiveIndexChange={setActiveWorkspaceResult}
                 />
               )}
-              <ImageStrip
+              <ComposerAttachments
                 images={images}
                 onRemove={(i, control) => {
                   remove(i);
@@ -6307,6 +6334,7 @@ function SessionDetailLoaded({
                   workspaceReferenceReturnFocusRef.current = opener;
                   setInspectedWorkspaceReference(reference);
                 }}
+                onImageBroken={reportBrokenImage}
               />
               {composerReplyKeycap && (
                 /* The Reply shortcut's hint (§11.5): a keycap at the end of the idle composer's
@@ -6644,41 +6672,26 @@ function SessionDetailLoaded({
         />
       )}
       {mode === "expanded" && inspectedWorkspaceReference && (
-        <Modal
-          title="Workspace Reference"
+        <WorkspaceReferenceDialog
+          reference={inspectedWorkspaceReference}
+          machineName={runner ? runnerDisp.name || null : null}
           onClose={() => setInspectedWorkspaceReference(null)}
           returnFocusRef={workspaceReferenceReturnFocusRef}
-          footer={<button className="btn primary" type="button" onClick={() => setInspectedWorkspaceReference(null)}>Done</button>}
-        >
-          <dl className="workspace-reference-details">
-            <dt>Path</dt><dd><code>{inspectedWorkspaceReference.path}</code></dd>
-            <dt>Reference Type</dt><dd>{inspectedWorkspaceReference.kind === "diff" ? "Diff Lines" : inspectedWorkspaceReference.kind === "lines" ? "File Lines" : inspectedWorkspaceReference.kind === "directory" ? "Folder" : "File"}</dd>
-            {inspectedWorkspaceReference.startLine !== undefined && (
-              <><dt>Line Range</dt><dd>{inspectedWorkspaceReference.startLine}–{inspectedWorkspaceReference.endLine}</dd></>
-            )}
-            {inspectedWorkspaceReference.side && (
-              <><dt>Diff Side</dt><dd>{inspectedWorkspaceReference.side === "left" ? "Base" : "Worktree"}</dd></>
-            )}
-            {inspectedWorkspaceReference.diffScope && (
-              <><dt>Diff Scope</dt><dd>{inspectedWorkspaceReference.diffScope.replace("_", " ")}</dd></>
-            )}
-            <dt>Revision</dt><dd><code>{inspectedWorkspaceReference.targetFingerprint.slice(0, 12)}</code></dd>
-          </dl>
-          <p className="muted">The runner will verify this path, workspace, and revision again before delivery.</p>
-          {inspectedWorkspaceReference.kind !== "directory" && inspectedWorkspaceReference.kind !== "diff" && (
-            <button
-              className="btn ghost"
-              type="button"
-              onClick={() => {
-                openSourceLocation({ path: inspectedWorkspaceReference.path, line: inspectedWorkspaceReference.startLine });
-                rightPanel.show("files");
-                setInspectedWorkspaceReference(null);
-              }}
-            >
-              Open in Files
-            </button>
-          )}
-        </Modal>
+          onRemove={() => {
+            const index = images.indexOf(inspectedWorkspaceReference);
+            if (index !== -1) remove(index);
+            // The chip goes with the reference, so focus returns to the message instead (#1913).
+            workspaceReferenceReturnFocusRef.current = inputRef.current;
+            setInspectedWorkspaceReference(null);
+          }}
+          onOpenInFiles={inspectedWorkspaceReference.kind === "file" || inspectedWorkspaceReference.kind === "lines"
+            ? () => {
+              openSourceLocation({ path: inspectedWorkspaceReference.path, line: inspectedWorkspaceReference.startLine });
+              rightPanel.show("files");
+              setInspectedWorkspaceReference(null);
+            }
+            : undefined}
+        />
       )}
       {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver}
         sourceAgentId={session.agentId ?? undefined} machineName={runnerDisp.name || undefined}

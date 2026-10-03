@@ -98,7 +98,7 @@ test("a single-line preview truncates visually while expansion preserves and foc
 
 for (const exception of [
   { name: "multi-line draft", query: "&draft=Line%20one%5CnLine%20two", visible: ".composer-input" },
-  { name: "attachment", query: "&attachment=1", visible: ".image-strip" },
+  { name: "attachment", query: "&attachment=1", visible: ".composer-attachments" },
   { name: "pending approval", query: "&approval=checkpoint", visible: ".tl-request-card" },
   { name: "pending question", query: "&approval=question&draft=Preserved", visible: ".composer-question-waiting" },
   { name: "recovery notice", query: "&quarantine=1", visible: '[aria-label="Conversation Quarantined"]' },

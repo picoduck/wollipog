@@ -36,7 +36,7 @@ import {
   type WorkspaceReference,
 } from "@wollipog/protocol";
 import type { ProviderComposerCommand } from "../composer-commands.js";
-import { loadComposerDraft, type ComposerDraft } from "../composer-drafts.js";
+import { loadComposerDraft, saveComposerDraft, type ComposerDraft } from "../composer-drafts.js";
 import {
   queuedEditRecoveryAccountKey,
   saveDurableQueuedEditRecovery,
@@ -2466,6 +2466,8 @@ declare global {
       deferNextRetitle(): void;
       settleDeferredRetitle(result: { title?: string; error?: string }): void;
       composerDraft(id: string): Promise<ComposerDraft | null>;
+      /** Stores a draft before its session opens, as one left from an earlier visit (#2177). */
+      seedComposerDraft(id: string, text: string, images: PromptImageInput[]): Promise<boolean>;
       failNextSessionCommandResponse(): void;
       deferNextSessionCommandResponse(): void;
       settleDeferredSessionCommandResponse(): void;
@@ -2687,6 +2689,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   restartRequests: () => structuredClone(restartRequests),
   sessionCommandRequests: () => structuredClone(sessionCommandRequests),
   composerDraft: (id) => loadComposerDraft(id, "project-inbox-e2e"),
+  seedComposerDraft: (id, text, images) => saveComposerDraft(id, text, images, "project-inbox-e2e"),
   failNextSessionCommandResponse() {
     failNextSessionCommandResponse = true;
   },
