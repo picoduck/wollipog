@@ -5,6 +5,7 @@ import {
   restartResumesConversation,
   TURN_RETRY_BUSY_REASON,
   TURN_RETRY_FRESH_RESTART_REASON,
+  TURN_RETRY_RESTARTING_REASON,
   TURN_RETRY_STOP_FAILED_REASON,
   turnRetryPlan,
   type TurnRetryInput,
@@ -55,6 +56,7 @@ test("Retry Turn names why the session cannot take a new turn", () => {
   assert.equal(reason({ status: "stopped", stopFailed: true }), TURN_RETRY_STOP_FAILED_REASON);
   assert.equal(reason({ status: "stopped", stopFailed: true, driver: "claude-code" }), TURN_RETRY_STOP_FAILED_REASON,
     "a failed Stop blocks any restart, so it is named before the new-conversation reason");
+  assert.equal(reason({ status: "stopped", restarting: true }), TURN_RETRY_RESTARTING_REASON);
   assert.equal(reason({ policyPaused: true }), "Session is paused by guardrails. Review the pending decision to continue.");
   for (const status of ["running", "starting", "queued", "input_required"] as const) {
     assert.equal(reason({ status }), TURN_RETRY_BUSY_REASON, status);

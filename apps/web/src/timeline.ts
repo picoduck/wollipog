@@ -1262,6 +1262,9 @@ export class TimelineBuilder {
       }
       case "checkpoint": {
         this.breakText();
+        // A checkpoint bounds a turn, including an automatic continuation no prompt opened, so a
+        // later failure never merges into an earlier turn's error.
+        this.lastErrorIndex = null;
         const index = this.items.push({ kind: "checkpoint", id: ev.seq, turn: p.turn }) - 1;
         this.markDirty(index);
         // A prompt's own checkpoint directly follows it; any other opens an automatic continuation.
@@ -1282,6 +1285,7 @@ export class TimelineBuilder {
         break;
       case "conversation_checkpoint": {
         this.breakText();
+        this.lastErrorIndex = null;
         const promptTurn = this.pendingConversationUserIndex != null;
         if (this.pendingConversationUserIndex != null) {
           const item = this.items[this.pendingConversationUserIndex];

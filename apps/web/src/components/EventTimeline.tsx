@@ -241,10 +241,11 @@ export function userRewindTurns(items: readonly TimelineItem[]): ReadonlyMap<num
   return turns;
 }
 /** Checkpoints stay in the timeline model, where fork and rewind availability read them; the turn
- * footer replaces their Start Turn and End Turn separators, so they render no row. A stop is a fact
- * of its turn's footer ("Stopped at …"), so it renders no row either. */
+ * footer replaces their Start Turn and End Turn separators, so they render no row. A stop keeps its
+ * row, but the row shows nothing of its own: it is the anchor for its turn's footer ("Stopped at …"),
+ * which a stop with no other row in its turn would otherwise lack. */
 export function timelineItemRendersRow(item: TimelineItem): boolean {
-  return item.kind !== "checkpoint" && item.kind !== "conversation_checkpoint" && item.kind !== "turn_interrupted";
+  return item.kind !== "checkpoint" && item.kind !== "conversation_checkpoint";
 }
 
 const startsTurn = (item: TimelineItem): boolean =>
@@ -522,6 +523,7 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
     case "tool_call": return 28;
     case "conversation_forked": return row.item.handoff ? 76 : 52;
     case "provider_account_switched": return 52;
+    case "turn_interrupted": return 24;
     default: return 52;
   }
 };
@@ -827,12 +829,15 @@ function EventTimelineBody({
   };
   const renderRow = (row: TimelineRenderRow, state: VirtualRowState) => {
     const footer = turnFooters.get(row.key);
-    const content = renderRowContent(row, state);
+    // A stop's row is only its turn's footer, sitting where the footer would under the row before.
+    const stopRow = row.kind === "item" && row.item.kind === "turn_interrupted";
+    const content = stopRow ? null : renderRowContent(row, state);
     if (!footer) return content;
     return (
       <>
         {content}
         <TurnFooter
+          alone={stopRow}
           summary={footer}
           onFork={onFork}
           forkAvailability={footer.forkTurn == null ? undefined : forkAvailabilityByTurn?.get(footer.forkTurn)}
@@ -2292,7 +2297,7 @@ const TimelineRow = memo(function TimelineRow({
     case "error":
       return <TurnFailedNotice message={item.message} prompt={failedTurnPrompt} />;
     case "turn_interrupted":
-      // Never a row (timelineItemRendersRow): the turn footer says "Stopped at …".
+      // The row shows only its turn's footer ("Stopped at …"); EventTimelineBody renders that.
       return null;
     case "review_decision":
       return (
@@ -2962,7 +2967,9 @@ export function turnActions({ responseText, forkAvailability, onFork, forkTurn, 
  * turn's actions at the trailing end. More Turn Actions stays visible at rest on every pointer, so
  * every action, Rewind included, is found without hovering (#599); on a fine pointer, Copy Response
  * and a usable Fork After This Turn sit before it and show on hover or focus. */
-function TurnFooter({ summary, onFork, forkAvailability, prompt, ...messageInput }: MessageActionInput & {
+function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, ...messageInput }: MessageActionInput & {
+  /** The footer is its row's only content (a stop's row), so the row gap already spaces it. */
+  alone?: boolean;
   summary: TurnFooterSummary;
   onFork?: (turn: number) => void;
   forkAvailability?: ConversationForkAvailability;
@@ -2987,7 +2994,7 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, ...messageInput
     { label: "This Turn", actions },
   ];
   return (
-    <div className="tl-turn-footer" data-turn-footer={summary.turn ?? ""}>
+    <div className={alone ? "tl-turn-footer alone" : "tl-turn-footer"} data-turn-footer={summary.turn ?? ""}>
       {summary.turn !== undefined && <span className="tl-turn-label">Turn {summary.turn}</span>}
       {stopped ? (
         <span className="tl-turn-time tl-turn-stopped">

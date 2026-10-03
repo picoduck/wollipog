@@ -167,7 +167,11 @@ test("a stopped turn has no Interrupted row; its footer reads Stopped at its tim
     const icon = stopped.querySelector("svg")!;
     assert.equal(icon.getAttribute("width"), "14");
     assert.equal(icon.getAttribute("aria-hidden"), "true");
-    assert.equal(view.container.querySelectorAll('[role="listitem"]').length, 2, "prompt and reply, no stop row");
+    const rows = [...view.container.querySelectorAll('[role="listitem"]')];
+    assert.equal(rows.length, 3, "prompt, reply, and the stop's row");
+    assert.equal(rows[2]!.children.length, 1, "the stop's row holds nothing but its turn's footer");
+    assert.ok(rows[2]!.firstElementChild!.matches(".tl-turn-footer.alone"));
+    assertNoDomNode(rows[1]!.querySelector(".tl-turn-footer"), "the reply's row no longer carries the footer");
   });
 });
 
@@ -179,5 +183,26 @@ test("a stop in a turn no prompt opened still says when it stopped, without a tu
     const footer = view.container.querySelector(".tl-turn-footer")!;
     assert.ok(footer.querySelector(".tl-turn-stopped"));
     assertNoDomNode(footer.querySelector(".tl-turn-label"), "an unnumbered turn claims no number");
+  });
+});
+
+test("a stop with no other row in its turn still shows, alone or after a completed turn", async () => {
+  // Stop Turn can land before a queued prompt's user_message, straight after the previous turn's
+  // conversation checkpoint: the stop is then a turn of its own with nothing else to anchor it.
+  const stoppedFooters = (container: Element) => [...container.querySelectorAll(".tl-turn-stopped")];
+  await withView(<EventTimeline items={[{ kind: "turn_interrupted", id: 1, createdAt: at(31) }]} />, async (view) => {
+    assert.equal(stoppedFooters(view.container).length, 1);
+  });
+  await withView(<EventTimeline items={[
+    { kind: "user_message", id: 1, text: "Summarize the notes", createdAt: at(24) },
+    { kind: "checkpoint", id: 2, turn: 1 },
+    { kind: "agent_message", id: 3, text: "Done.", createdAt: at(24, 20) },
+    { kind: "conversation_checkpoint", id: 4, turn: 1 },
+    { kind: "turn_interrupted", id: 5, createdAt: at(26) },
+  ]} />, async (view) => {
+    const footers = [...view.container.querySelectorAll(".tl-turn-footer")];
+    assert.equal(footers.length, 2, "the completed turn's footer, then the stop's");
+    assertNoDomNode(footers[0]!.querySelector(".tl-turn-stopped"), "the completed turn did not stop");
+    assert.ok(footers[1]!.querySelector(".tl-turn-stopped"));
   });
 });

@@ -6746,6 +6746,8 @@ textarea,
 .tl-turn-label,
 .tl-turn-usage { white-space: nowrap; }
 .tl-turn-time { position: relative; white-space: nowrap; }
+/* A stop's row is only its footer; the row gap already sets it one row-gap below the reply. */
+.tl-turn-footer.alone { margin-top: 0; }
 /* A stopped turn (#2169): the 14px square leads "Stopped at …" in place of the finish time. */
 .tl-turn-stopped { display: inline-flex; align-items: center; gap: var(--space-1); }
 .tl-turn-stopped > svg { flex: none; }

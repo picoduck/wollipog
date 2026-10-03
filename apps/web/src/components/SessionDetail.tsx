@@ -3618,8 +3618,12 @@ function SessionDetailLoaded({
   // there; the Session Archived notice's Unarchive (and Restart) is the way back (#2301).
   const composerRestartOffered = session.status === "stopped" &&
     session.stopOperation?.status !== "stop_failed" && !session.archived;
+  // Retry Turn's restart and the composer's Restart share one guard: two restarts in flight would
+  // let the second replace the process the first started, interrupting the retried turn (#2169).
+  const turnRetryInFlightRef = useRef(false);
   const restartFromComposer = useCallback(async () => {
-    if (!composerRestartOffered || !runnerOnline || busy || restartPending || restartRefusal !== null) return;
+    if (!composerRestartOffered || !runnerOnline || busy || restartPending || restartRefusal !== null ||
+        turnRetryInFlightRef.current) return;
     const generation = viewGenerationRef.current;
     setError(null);
     setBusy(true);
@@ -3647,14 +3651,14 @@ function SessionDetailLoaded({
     sessionNoticeReason,
     policyPaused,
     stopFailed: session.stopOperation?.status === "stop_failed",
+    restarting: restartPending,
   });
   const [retryingTurnPromptId, setRetryingTurnPromptId] = useState<number>();
   const [turnRetryError, setTurnRetryError] = useState<{ promptId: number; message: string }>();
-  // One retry at a time, decided synchronously: a second click before the pending state renders
-  // must not submit the prompt twice.
-  const turnRetryInFlightRef = useRef(false);
   const retryTurn = useCallback(async (prompt: Extract<TimelineItem, { kind: "user_message" }>) => {
-    if (turnRetryInFlightRef.current || retryPlan.kind === "unavailable") return;
+    // One retry at a time, decided synchronously: a second click before the pending state renders
+    // must not submit the prompt twice.
+    if (turnRetryInFlightRef.current || restartPending || retryPlan.kind === "unavailable") return;
     turnRetryInFlightRef.current = true;
     const generation = viewGenerationRef.current;
     setTurnRetryError(undefined);
@@ -3663,7 +3667,9 @@ function SessionDetailLoaded({
       // A refused restart throws here, so the prompt is never sent into a session that did not
       // restart.
       if (retryPlan.kind === "restart_then_prompt") loadSession(await api.restart(session.id));
-      await api.prompt(session.id, prompt.text, prompt.images ?? []);
+      // The accepted prompt's session (queued or running) is loaded before the guard opens, so the
+      // button cannot offer the same prompt again while the socket's update is still on its way.
+      loadSession(await api.prompt(session.id, prompt.text, prompt.images ?? []));
     } catch (cause) {
       if (viewGenerationRef.current === generation) {
         setTurnRetryError({ promptId: prompt.id, message: (cause as Error).message });
@@ -3672,7 +3678,7 @@ function SessionDetailLoaded({
       turnRetryInFlightRef.current = false;
       if (viewGenerationRef.current === generation) setRetryingTurnPromptId(undefined);
     }
-  }, [api, loadSession, retryPlan.kind, session.id]);
+  }, [api, loadSession, restartPending, retryPlan.kind, session.id]);
   const retryPlanReason = retryPlan.kind === "unavailable" ? retryPlan.reason : undefined;
   const turnRetry = useMemo<TurnRetryControl>(() => ({
     onRetry: (prompt) => void retryTurn(prompt),
@@ -6455,7 +6461,8 @@ function SessionDetailLoaded({
                       className="send-btn"
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={() => void restartFromComposer()}
-                      disabled={!runnerOnline || composerRequestBusy || restartRefusal !== null}
+                      disabled={!runnerOnline || composerRequestBusy || restartRefusal !== null ||
+                        retryingTurnPromptId !== undefined}
                       title={restartPending ? "Restarting Session" : restartRefusal ?? "Restart Session"}
                       aria-label={restartPending ? "Restarting Session" : "Restart Session"}
                     >

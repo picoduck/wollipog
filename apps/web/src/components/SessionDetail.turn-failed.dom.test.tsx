@@ -273,6 +273,56 @@ test("a failed Pi session also restarts, resuming its conversation, before the p
   });
 });
 
+test("an accepted retry shows the session busy at once, so a second click cannot submit the prompt again", async () => {
+  // No socket update follows here: only the prompt's own response says the session is now queued.
+  await withFailedTurn({ status: "idle" }, async ({ id, calls, retry }) => {
+    await click(retry()!);
+    const button = retry()!;
+    assert.equal(button.disabled, true);
+    assert.equal(reasonOf(button)?.textContent, "The agent is working on another turn.");
+    await click(button);
+    assert.deepEqual(calls, [`prompt:${id}:Summarize the release notes:0`]);
+  });
+});
+
+const composerRestart = (container: HTMLElement) =>
+  container.querySelector<HTMLButtonElement>('.composer button[aria-label="Restart Session"], .composer button[aria-label="Restarting Session"]');
+
+test("while Retry Turn restarts a stopped session, the composer's Restart Session waits", async () => {
+  let finishRestart: (() => void) | undefined;
+  await withFailedTurn({
+    status: "stopped",
+    overrides: resumable,
+    restart: (session) => new Promise((resolve) => { finishRestart = () => resolve({ ...session, status: "starting" }); }),
+  }, async ({ id, container, calls, retry }) => {
+    const restart = composerRestart(container);
+    assert.ok(restart, "a stopped session offers Restart Session in the composer");
+    await click(retry()!);
+    assert.equal(composerRestart(container)!.disabled, true);
+    await click(composerRestart(container)!);
+    assert.deepEqual(calls, [`restart:${id}`], "one restart");
+    await act(async () => { finishRestart!(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+    assert.deepEqual(calls, [`restart:${id}`, `prompt:${id}:Summarize the release notes:0`]);
+  });
+});
+
+test("while the composer's Restart Session runs, Retry Turn waits and says why", async () => {
+  let finishRestart: (() => void) | undefined;
+  await withFailedTurn({
+    status: "stopped",
+    overrides: resumable,
+    restart: (session) => new Promise((resolve) => { finishRestart = () => resolve({ ...session, status: "starting" }); }),
+  }, async ({ id, container, calls, retry }) => {
+    await click(composerRestart(container)!);
+    const button = retry()!;
+    assert.equal(button.disabled, true);
+    assert.equal(reasonOf(button)?.textContent, "The session is restarting.");
+    await click(button);
+    assert.deepEqual(calls, [`restart:${id}`], "Retry Turn neither restarts again nor prompts");
+    await act(async () => { finishRestart!(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+  });
+});
+
 test("an idle Claude Code session's Retry Turn prompts directly", async () => {
   await withFailedTurn({ status: "idle", overrides: { driver: "claude-code" } }, async ({ id, calls, retry }) => {
     await click(retry()!);

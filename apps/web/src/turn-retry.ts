@@ -35,10 +35,14 @@ export interface TurnRetryInput {
   policyPaused: boolean;
   /** A Stop that failed, which must be retried before the session can restart. */
   stopFailed: boolean;
+  /** The composer's Restart Session is in flight; Retry Turn waits for it rather than restarting
+   * the session a second time. */
+  restarting?: boolean;
 }
 
 export const TURN_RETRY_BUSY_REASON = "The agent is working on another turn.";
 export const TURN_RETRY_STOP_FAILED_REASON = "Retry the failed Stop before retrying this turn.";
+export const TURN_RETRY_RESTARTING_REASON = "The session is restarting.";
 /** A restart of this driver starts a new provider conversation, so a retried prompt would run without
  * the turns before it; the person restarts knowingly, then sends it again. */
 export const TURN_RETRY_FRESH_RESTART_REASON =
@@ -51,6 +55,7 @@ export function turnRetryPlan(input: TurnRetryInput): TurnRetryPlan {
   if (input.promptRefusal !== null) return unavailable(input.promptRefusal);
   if (input.sessionNoticeReason !== undefined) return unavailable(input.sessionNoticeReason);
   if (!input.runnerOnline) return unavailable("Runner is offline.");
+  if (input.restarting) return unavailable(TURN_RETRY_RESTARTING_REASON);
   if (isTerminal(input.status)) {
     if (input.restartRefusal !== null) return unavailable(input.restartRefusal);
     if (input.stopFailed) return unavailable(TURN_RETRY_STOP_FAILED_REASON);

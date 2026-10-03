@@ -284,6 +284,40 @@ test("a failure reported as \"prompt failed: X\" and as X merges into one error 
     { kind: "user_message", text: "again" },
     { kind: "error", message: "prompt failed: Rate limit reached" },
   ]), ["prompt failed: Rate limit reached", "prompt failed: Rate limit reached"], "each turn's failure is its own");
+  assert.deepEqual(errors([
+    { kind: "user_message", text: "go" },
+    { kind: "checkpoint", turn: 1 },
+    { kind: "error", message: "Rate limit reached" },
+    { kind: "checkpoint", turn: 2 },
+    { kind: "agent_message", text: "resumed background work" },
+    { kind: "error", message: "Rate limit reached" },
+  ]), ["Rate limit reached", "Rate limit reached"], "an automatic continuation's failure stays in its own turn");
+  assert.deepEqual(errors([
+    { kind: "user_message", text: "go" },
+    { kind: "error", message: "Rate limit reached" },
+    { kind: "conversation_checkpoint", turn: 1 },
+    { kind: "error", message: "Rate limit reached" },
+  ]), ["Rate limit reached", "Rate limit reached"], "a conversation checkpoint ends the turn too");
+});
+
+test("an incremental builder merges a duplicate failure exactly as a full fold does", () => {
+  const payloads: SessionEventPayload[] = [
+    { kind: "user_message", text: "go" },
+    { kind: "checkpoint", turn: 1 },
+    { kind: "error", message: "prompt failed: Rate limit reached" },
+    { kind: "error", message: "Rate limit reached" },
+    { kind: "checkpoint", turn: 2 },
+    { kind: "error", message: "Rate limit reached" },
+  ];
+  const events = payloads.map(ev);
+  const builder = new TimelineBuilder();
+  const snapshots = events.map((event) => { builder.push(event); return builder.snapshot(); });
+  assert.deepEqual(snapshots.at(-1), deriveTimeline(events));
+  assert.deepEqual(snapshots[2]!.filter((item) => item.kind === "error").map((item) => item.kind === "error" && item.message),
+    ["prompt failed: Rate limit reached"]);
+  assert.deepEqual(snapshots[3]!.filter((item) => item.kind === "error").map((item) => item.kind === "error" && item.message),
+    ["Rate limit reached"], "the merge publishes the provider's wording on the next snapshot");
+  assert.notEqual(snapshots[3], snapshots[2], "the merge is a new snapshot generation");
 });
 
 test("streamed response completion evidence stays hidden and does not duplicate content", () => {
