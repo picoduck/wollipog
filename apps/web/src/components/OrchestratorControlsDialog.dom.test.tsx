@@ -581,6 +581,73 @@ test("a reload that never answers holds the next change only until its timeout",
   });
 });
 
+test("a reload that answers after a newer save is not published", async () => {
+  const timers = new Map<number, () => void>();
+  let nextTimer = 1;
+  await withScopedClockOverrides(domWindow, {
+    setTimeout: (callback: () => void, ms: number) => {
+      const id = nextTimer++;
+      if (ms === ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS) timers.set(id, callback);
+      return id;
+    },
+    clearTimeout: (id: number) => { timers.delete(id); },
+  }, async () => {
+    let releaseReload!: () => void;
+    const revisions: number[] = [];
+    const harness = await open(orchestrator(), {
+      setParentControlPolicy: async (_id: string, decisions: ParentControlDecisionPolicy, revision: number) => {
+        revisions.push(revision);
+        if (revisions.length === 1) throw new ApiError("Parent Control policy revision is stale", 409);
+        return orchestrator({ parentControlPolicy: { revision: revision + 1, decisions } });
+      },
+      session: () => new Promise((resolve) => {
+        releaseReload = () => resolve({ session: orchestrator() });
+      }),
+    });
+    const dialog = harness.dialog();
+    await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
+    await act(async () => fireDomEvent.click(option(gate(dialog, "Merged Branch Deletion"), "Orchestrator")));
+    await flush();
+    await act(async () => { for (const callback of timers.values()) callback(); });
+    await flush();
+    assert.deepEqual(revisions, [3, 3], "the second change ran after the reload timed out");
+    assert.equal(harness.changed.at(-1)?.parentControlPolicy?.revision, 4);
+    await act(async () => releaseReload());
+    await flush();
+    assert.equal(harness.changed.at(-1)?.parentControlPolicy?.revision, 4, "the late, older reload is not published");
+    assert.equal(option(gate(dialog, "Merged Branch Deletion"), "Orchestrator").getAttribute("aria-checked"), "true");
+  });
+});
+
+test("a dialog reopened while a change is saving shows that change, and a reversal is queued after it", async () => {
+  const replies: Array<() => void> = [];
+  const sent: WorkflowDecisionAuthority[] = [];
+  const client: Partial<ApiClient> = {
+    setParentControlPolicy: (_id: string, decisions: ParentControlDecisionPolicy, revision: number) => {
+      sent.push(decisions.pr_merge);
+      return new Promise<SessionView>((resolve) => replies.push(() => resolve(
+        orchestrator({ parentControlPolicy: { revision: revision + 1, decisions } }),
+      )));
+    },
+  };
+  const first = await open(orchestrator(), client);
+  await act(async () => fireDomEvent.click(option(gate(first.dialog(), "PR Merge Approval"), "Orchestrator")));
+  await flush();
+  await first.unmount();
+
+  const second = await open(orchestrator(), client);
+  const dialog = second.dialog();
+  assert.equal(option(gate(dialog, "PR Merge Approval"), "Orchestrator").getAttribute("aria-checked"), "true",
+    "the change still saving is what the reopened dialog shows");
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Human")));
+  await act(async () => replies[0]!());
+  await flush();
+  await act(async () => replies[1]!());
+  await flush();
+  assert.deepEqual(sent, ["orchestrator", "human"], "the reversal is sent after the change it reverses");
+  assert.equal(option(gate(dialog, "PR Merge Approval"), "Human").getAttribute("aria-checked"), "true");
+});
+
 test("any other failure says the change wasn't saved, with the server's words behind Show Details", async () => {
   const harness = await open(orchestrator(), {
     setParentControl: async () => { throw new ApiError("only an authenticated human may change Parent Control", 403); },

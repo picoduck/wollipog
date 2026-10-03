@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   WORKFLOW_DECISION_CATEGORIES,
   type DelegatableWorkflowDecisionCategory,
@@ -85,20 +85,43 @@ function sourceLabel(source: string | undefined): string {
 
 type SaveKey = "parentControl" | DelegatableWorkflowDecisionCategory;
 
+type PendingChoices = Partial<Record<SaveKey, { value: string; request: number }>>;
+
 interface SessionSaves {
   tail: Promise<void>;
   /** The newest copy of the session the queue has seen; each change is sent against its revision. */
   latest: SessionView;
+  /** The choice each control shows while its change is unsaved, tagged with the newest request for
+   * it: an older request settling leaves a newer choice in place. Replaced, never mutated. */
+  pending: PendingChoices;
+  requests: number;
 }
 
 /**
- * One save queue per session, shared by every Orchestrator Controls dialog opened on it. Changes
- * run one at a time against the newest revision: a second change sent while the first is saving
- * would carry the revision the first is about to replace. Shared, not per dialog, so a change made
- * after closing and reopening waits for one the closed dialog is still saving, and the newest choice
- * is the one stored. An entry is removed once its queue drains.
+ * One save queue per session, shared by every Orchestrator Controls dialog opened on it, with the
+ * choices still saving. Changes run one at a time against the newest revision: a second change sent
+ * while the first is saving would carry the revision the first is about to replace. Shared, not per
+ * dialog, so a dialog reopened while a change is saving shows that change and queues after it, and
+ * the newest choice is the one stored. An entry is removed once its queue drains.
  */
 const saveQueues = new Map<string, SessionSaves>();
+const pendingListeners = new Set<() => void>();
+const NO_PENDING: PendingChoices = {};
+
+function setPendingChoice(saves: SessionSaves, key: SaveKey, choice: { value: string; request: number } | null) {
+  if (choice) {
+    saves.pending = { ...saves.pending, [key]: choice };
+  } else {
+    const { [key]: _done, ...rest } = saves.pending;
+    saves.pending = rest;
+  }
+  pendingListeners.forEach((listener) => listener());
+}
+
+function subscribePending(listener: () => void) {
+  pendingListeners.add(listener);
+  return () => { pendingListeners.delete(listener); };
+}
 
 function policyRevision(session: SessionView): number {
   return session.parentControlPolicy?.revision ?? -1;
@@ -108,10 +131,12 @@ function policyRevision(session: SessionView): number {
  * reload that never answers must not hold every later change on the session. */
 export const ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS = 10_000;
 
-/** Keeps the newer of the queue's session and `session`: a reply or a reload that arrives after a
- * newer revision was already seen must not send the next change on the older one. */
-function observe(saves: SessionSaves, session: SessionView) {
-  if (policyRevision(session) >= policyRevision(saves.latest)) saves.latest = session;
+/** Keeps the newer of the queue's session and `session`, and says whether `session` was taken: a
+ * reply or a reload that arrives after a newer revision was seen is neither sent on nor published. */
+function observe(saves: SessionSaves, session: SessionView): boolean {
+  if (policyRevision(session) < policyRevision(saves.latest)) return false;
+  saves.latest = session;
+  return true;
 }
 
 /** A newer copy of the session, rendered while changes are queued, becomes the one they are sent against. */
@@ -123,7 +148,7 @@ function noteSession(session: SessionView) {
 function sessionSaves(session: SessionView): SessionSaves {
   const entry = saveQueues.get(session.id);
   if (!entry) {
-    const created = { tail: Promise.resolve(), latest: session };
+    const created: SessionSaves = { tail: Promise.resolve(), latest: session, pending: NO_PENDING, requests: 0 };
     saveQueues.set(session.id, created);
     return created;
   }
@@ -171,11 +196,12 @@ export function OrchestratorControlsDialog({
 }) {
   const api = useApi();
   const ids = useId();
-  // The choice shown while a change is unsaved, tagged with its request: a key changed again before
-  // its first change settles keeps showing the newest choice until that one's own request settles.
-  const [pending, setPending] = useState<Partial<Record<SaveKey, { value: string; request: number }>>>({});
-  const requests = useRef(0);
-  const latestRequest = useRef<Partial<Record<SaveKey, number>>>({});
+  // The choices still saving on this session, from this dialog or one closed before it.
+  const pending = useSyncExternalStore(
+    subscribePending,
+    () => saveQueues.get(session.id)?.pending ?? NO_PENDING,
+    () => NO_PENDING,
+  );
   const [saved, setSaved] = useState<SaveKey | null>(null);
   // A failure belongs to the control that failed: that control saving later retires it.
   const [failure, setFailure] = useState<{ key: SaveKey; message: string; detail: string } | null>(null);
@@ -203,19 +229,17 @@ export function OrchestratorControlsDialog({
   const change = (key: SaveKey, value: string, write: (current: SessionView) => Promise<SessionView>) => {
     if (refusal !== null) return;
     const saves = sessionSaves(session);
-    const request = ++requests.current;
-    setPending((prior) => ({ ...prior, [key]: { value, request } }));
+    const request = ++saves.requests;
+    setPendingChoice(saves, key, { value, request });
     // The control shows an unsaved choice now, so neither its check nor its old failure stays.
     setSaved((prior) => (prior === key ? null : prior));
     setFailure((prior) => (prior?.key === key ? null : prior));
     // A request a later change of the same key has replaced saves quietly: only the newest says Saved.
-    const newest = () => latestRequest.current[key] === request;
-    latestRequest.current[key] = request;
+    const newest = () => saves.pending[key]?.request === request;
     enqueueSave(saves, async () => {
       try {
         const next = await write(saves.latest);
-        observe(saves, next);
-        onSessionChanged(next);
+        if (observe(saves, next)) onSessionChanged(next);
         if (mounted.current && newest()) {
           showSaved(key);
           setFailure((prior) => (prior?.key === key ? null : prior));
@@ -232,17 +256,10 @@ export function OrchestratorControlsDialog({
         // The stored value comes back with the session, so the choice shown returns to it. A late
         // reload still lands, but the queue does not wait for it past the timeout.
         await within(api.session(session.id).then(({ session: fresh }) => {
-          observe(saves, fresh);
-          onSessionChanged(fresh);
+          if (observe(saves, fresh)) onSessionChanged(fresh);
         }, () => undefined), ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS);
       } finally {
-        if (mounted.current) {
-          setPending((prior) => {
-            if (prior[key]?.request !== request) return prior;
-            const { [key]: _done, ...rest } = prior;
-            return rest;
-          });
-        }
+        if (newest()) setPendingChoice(saves, key, null);
       }
     });
   };
