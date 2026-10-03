@@ -46,7 +46,9 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   await composer.fill("");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha"));
-  await expect(page.getByText("Interrupted", { exact: true })).toBeVisible();
+  // A stop is a footer fact, never its own row (#2169); the queued prompt resumes at once here, so
+  // the settled model below is the evidence.
+  await expect(page.getByText("Interrupted", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Held", { exact: true })).toHaveCount(0);
   await expect(page.getByTestId("queued-prompt-queued-1")).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => {

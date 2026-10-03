@@ -438,8 +438,8 @@ export interface TurnLayout {
 /** Places one footer after the last row of every settled turn, before any trailing history
  * divider; a turn that produced only usage keeps its footer under its prompt. A turn that is still
  * running has none (the working indicator stands in for it), and neither has a turn no prompt
- * opened unless a checkpoint numbers it: a subagent's output or a partial page must not claim an
- * unnumbered turn. */
+ * opened unless a checkpoint numbers it or it was stopped: a subagent's output or a partial page
+ * must not claim an unnumbered turn. */
 export function layoutTurns(
   rows: readonly TimelineRenderRow[],
   turns: TimelineTurns,
@@ -454,7 +454,8 @@ export function layoutTurns(
   const close = () => {
     const segment = turns.segments[current];
     if (!segment?.footerEligible || anchorKey === null || (current === finalIndex && sessionActive)) return;
-    if (!segment.prompted && segment.turn === undefined) return;
+    // A stop is the one fact such a turn keeps: its footer says when it stopped, with no number.
+    if (!segment.prompted && segment.turn === undefined && !segment.stopped) return;
     footers.set(anchorKey, segment);
   };
   rows.forEach((row, index) => {

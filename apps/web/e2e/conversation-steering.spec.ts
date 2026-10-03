@@ -174,7 +174,8 @@ test("Stop Turn preempts a deferred ordinary Send without losing its settlement"
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredCancelTurn();
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha");
   });
-  await expect(page.getByText("Interrupted", { exact: true })).toBeVisible();
+  // The deferred send resumes at once, so the stopped turn, still the newest, keeps no footer yet.
+  await expect(page.getByText("Interrupted", { exact: true })).toHaveCount(0);
 });
 
 test("Stop Turn preempts a deferred direct Steer", async ({ page }) => {
@@ -199,7 +200,7 @@ test("Stop Turn preempts a deferred direct Steer", async ({ page }) => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredCancelTurn();
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha");
   });
-  await expect(page.getByText("Interrupted", { exact: true })).toBeVisible();
+  await expect(page.locator(".tl-turn-stopped").last()).toContainText("Stopped at");
 });
 
 test("a deferred ordinary Send reservation stays suppressed across a session remount", async ({ page }) => {
@@ -437,7 +438,8 @@ test("a pending Stop Turn blocks direct steering and queued promotion", async ({
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredCancelTurn();
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha");
   });
-  await expect(page.getByText("Interrupted", { exact: true })).toBeVisible();
+  // The promoted prompt resumes at once, so the stopped turn, still the newest, keeps no footer yet.
+  await expect(page.getByText("Interrupted", { exact: true })).toHaveCount(0);
 });
 
 test("queued promotion uses stable queue identity and reconciles one canonical accepted message", async ({ page }) => {

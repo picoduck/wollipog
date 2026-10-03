@@ -26,8 +26,12 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await expect(page.locator(".composer-input")).toBeDisabled();
     await expect(page.locator(".composer-input")).toHaveAttribute("placeholder", /quarantined/i);
     await expect(page.locator(".status", { hasText: "Quarantined" })).toBeVisible();
-    // The provider's own rejection marks the point in the transcript; it names sizes, never content.
-    await expect(page.locator(".tl-error")).toContainText("rejected this conversation's stored history");
+    // The provider's own rejection marks the point in the transcript as a Turn Failed notice; its
+    // words, which name sizes and never content, wait behind Show Details (#2169).
+    const turnFailed = page.locator(".timeline .notice", { has: page.locator(".notice-title", { hasText: "Turn Failed" }) });
+    await expect(turnFailed).toHaveCount(1);
+    await turnFailed.getByRole("button", { name: "Show Details" }).click();
+    await expect(turnFailed.locator(".code-well")).toContainText("rejected this conversation's stored history");
     await page.screenshot({ path: test.info().outputPath("quarantined-session.png"), fullPage: true });
 
     await page.getByRole("button", { name: "Recover Session", exact: true }).click();

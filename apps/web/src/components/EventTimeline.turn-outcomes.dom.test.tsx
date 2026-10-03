@@ -167,3 +167,14 @@ test("a stopped turn has no Interrupted row; its footer reads Stopped at its tim
     assert.equal(view.container.querySelectorAll('[role="listitem"]').length, 2, "prompt and reply, no stop row");
   });
 });
+
+test("a stop in a turn no prompt opened still says when it stopped, without a turn number", async () => {
+  await withView(<EventTimeline items={[
+    { kind: "agent_message", id: 1, text: "Resuming background work.", createdAt: at(30) },
+    { kind: "turn_interrupted", id: 2, createdAt: at(31) },
+  ]} />, async (view) => {
+    const footer = view.container.querySelector(".tl-turn-footer")!;
+    assert.ok(footer.querySelector(".tl-turn-stopped"));
+    assert.equal(footer.querySelector(".tl-turn-label"), null);
+  });
+});
