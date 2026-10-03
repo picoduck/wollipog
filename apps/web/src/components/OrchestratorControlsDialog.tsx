@@ -85,6 +85,50 @@ function sourceLabel(source: string | undefined): string {
 
 type SaveKey = "parentControl" | DelegatableWorkflowDecisionCategory;
 
+interface SessionSaves {
+  tail: Promise<void>;
+  /** The newest copy of the session the queue has seen; each change is sent against its revision. */
+  latest: SessionView;
+}
+
+/**
+ * One save queue per session, shared by every Orchestrator Controls dialog opened on it. Changes
+ * run one at a time against the newest revision: a second change sent while the first is saving
+ * would carry the revision the first is about to replace. Shared, not per dialog, so a change made
+ * after closing and reopening waits for one the closed dialog is still saving, and the newest choice
+ * is the one stored. An entry is removed once its queue drains.
+ */
+const saveQueues = new Map<string, SessionSaves>();
+
+function policyRevision(session: SessionView): number {
+  return session.parentControlPolicy?.revision ?? -1;
+}
+
+/** A newer copy of the session, rendered while changes are queued, becomes the one they are sent against. */
+function noteSession(session: SessionView) {
+  const entry = saveQueues.get(session.id);
+  if (entry && policyRevision(session) >= policyRevision(entry.latest)) entry.latest = session;
+}
+
+function sessionSaves(session: SessionView): SessionSaves {
+  const entry = saveQueues.get(session.id);
+  if (!entry) {
+    const created = { tail: Promise.resolve(), latest: session };
+    saveQueues.set(session.id, created);
+    return created;
+  }
+  if (policyRevision(session) >= policyRevision(entry.latest)) entry.latest = session;
+  return entry;
+}
+
+function enqueueSave(saves: SessionSaves, run: () => Promise<void>) {
+  const tail = saves.tail.then(run);
+  saves.tail = tail;
+  void tail.then(() => {
+    if (saves.tail === tail && saveQueues.get(saves.latest.id) === saves) saveQueues.delete(saves.latest.id);
+  });
+}
+
 /**
  * Orchestrator Controls (#2192): an Orchestrator session's Child Session Requests choice, its five
  * workflow gates and its campaign's stored behavior, in a close-only dialog (§7.3). Each change
@@ -114,15 +158,10 @@ export function OrchestratorControlsDialog({
   const requests = useRef(0);
   const latestRequest = useRef<Partial<Record<SaveKey, number>>>({});
   const [saved, setSaved] = useState<SaveKey | null>(null);
-  const [failure, setFailure] = useState<{ message: string; detail: string } | null>(null);
+  // A failure belongs to the control that failed: that control saving later retires it.
+  const [failure, setFailure] = useState<{ key: SaveKey; message: string; detail: string } | null>(null);
   const savedTimer = useRef<number | null>(null);
-  // Changes run one at a time, each against the newest revision: a second gate changed while the
-  // first is still saving would otherwise send the revision the first is about to replace.
-  const queue = useRef<Promise<void>>(Promise.resolve());
-  const latest = useRef(session);
-  if ((session.parentControlPolicy?.revision ?? -1) >= (latest.current.parentControlPolicy?.revision ?? -1)) {
-    latest.current = session;
-  }
+  noteSession(session);
   const mounted = useRef(true);
   // Set on every setup: StrictMode runs setup, cleanup and setup again on mount.
   useEffect(() => {
@@ -144,21 +183,28 @@ export function OrchestratorControlsDialog({
 
   const change = (key: SaveKey, value: string, write: (current: SessionView) => Promise<SessionView>) => {
     if (refusal !== null) return;
+    const saves = sessionSaves(session);
     const request = ++requests.current;
     setPending((prior) => ({ ...prior, [key]: { value, request } }));
-    setFailure(null);
+    // The control shows an unsaved choice now, so neither its check nor its old failure stays.
+    setSaved((prior) => (prior === key ? null : prior));
+    setFailure((prior) => (prior?.key === key ? null : prior));
     // A request a later change of the same key has replaced saves quietly: only the newest says Saved.
     const newest = () => latestRequest.current[key] === request;
     latestRequest.current[key] = request;
-    queue.current = queue.current.then(async () => {
+    enqueueSave(saves, async () => {
       try {
-        const next = await write(latest.current);
-        latest.current = next;
+        const next = await write(saves.latest);
+        saves.latest = next;
         onSessionChanged(next);
-        if (mounted.current && newest()) showSaved(key);
+        if (mounted.current && newest()) {
+          showSaved(key);
+          setFailure((prior) => (prior?.key === key ? null : prior));
+        }
       } catch (cause) {
         if (mounted.current) {
           setFailure({
+            key,
             message: cause instanceof ApiError && cause.status === 409 ? ORCHESTRATOR_CONTROLS_CONFLICT : ORCHESTRATOR_CONTROLS_FAILED,
             detail: cause instanceof Error ? cause.message : String(cause),
           });
@@ -166,7 +212,7 @@ export function OrchestratorControlsDialog({
         }
         // The stored value comes back with the session, so the choice shown returns to it.
         await api.session(session.id).then(({ session: fresh }) => {
-          latest.current = fresh;
+          saves.latest = fresh;
           onSessionChanged(fresh);
         }, () => undefined);
       } finally {

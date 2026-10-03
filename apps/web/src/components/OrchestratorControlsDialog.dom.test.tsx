@@ -121,6 +121,8 @@ interface Harness {
   rerender: (session: SessionView) => Promise<void>;
   changed: SessionView[];
   closed: () => number;
+  /** Unmounts the dialog, as closing it does. */
+  unmount: () => Promise<void>;
 }
 
 const unmounts = new Set<() => Promise<void>>();
@@ -142,7 +144,9 @@ async function open(
   const changed: SessionView[] = [];
   let closed = 0;
   const merged = { ...api, ...client } as ApiClient;
+  let alive = true;
   const render = (current: SessionView): void => {
+    if (!alive) return;
     const dialog = (
       <ApiProvider client={merged}>
         <OrchestratorControlsDialog
@@ -160,6 +164,7 @@ async function open(
   await act(async () => render(session));
   const unmount = async () => {
     if (!unmounts.delete(unmount)) return;
+    alive = false;
     await act(async () => root.unmount());
     container.remove();
   };
@@ -173,6 +178,7 @@ async function open(
     rerender: (next) => act(async () => render(next)),
     changed,
     closed: () => closed,
+    unmount,
   };
 }
 
@@ -344,6 +350,9 @@ test("two gates changed back to back are saved one after the other, each on the 
   assert.equal(calls[1]!.revision, 4, "the second change uses the revision the first produced");
   assert.equal(calls[1]!.decisions.pr_merge, "orchestrator", "and keeps the first change");
   assert.equal(calls[1]!.decisions.merged_branch_deletion, "orchestrator");
+  // The session's save queue outlives the dialog, so settle it for the tests after this one.
+  await act(async () => replies[1]!(orchestrator({ parentControlPolicy: { revision: 5, decisions: calls[1]!.decisions } })));
+  await flush();
 });
 
 test("a revision conflict shows the danger notice in the dialog, reloads, and puts the stored choice back", async () => {
@@ -425,6 +434,89 @@ test("a gate changed three times before the first save settles shows the newest 
   assert.deepEqual(sent, ["orchestrator", "human", "orchestrator"]);
   assert.equal(shown(), "Orchestrator");
   assert.ok(savedOnRow(), "the newest save says Saved");
+});
+
+test("a change made after closing and reopening waits for the closed dialog's saves, so the newest choice is stored", async () => {
+  const replies: Array<{ resolve: (view: SessionView) => void; reject: (cause: unknown) => void }> = [];
+  const sent: Array<[WorkflowDecisionAuthority, number]> = [];
+  let stored = orchestrator({ parentControlPolicy: { revision: 4, decisions: { ...HUMAN_ONLY, implementation_question: "orchestrator" } } });
+  const client: Partial<ApiClient> = {
+    setParentControlPolicy: (_id: string, decisions: ParentControlDecisionPolicy, revision: number) => {
+      sent.push([decisions.implementation_question, revision]);
+      return new Promise<SessionView>((resolve, reject) => replies.push({ resolve, reject }));
+    },
+    session: async () => ({ session: stored }),
+  };
+  const first = await open(orchestrator(), client);
+  const firstDialog = first.dialog();
+  await act(async () => fireDomEvent.click(option(gate(firstDialog, "Implementation Questions"), "Human")));
+  await act(async () => fireDomEvent.click(option(gate(firstDialog, "Implementation Questions"), "Orchestrator")));
+  await flush();
+  await first.unmount();
+
+  const second = await open(orchestrator(), client);
+  const secondDialog = second.dialog();
+  await act(async () => fireDomEvent.click(option(gate(secondDialog, "Implementation Questions"), "Human")));
+  await flush();
+  assert.equal(sent.length, 1, "the reopened dialog's change waits behind the closed dialog's");
+
+  await act(async () => replies[0]!.reject(new ApiError("Parent Control policy revision is stale", 409)));
+  await flush();
+  assert.deepEqual(sent[1], ["orchestrator", 4], "the closed dialog's queued change is sent on the reloaded revision");
+  await act(async () => replies[1]!.resolve(stored = orchestrator({
+    parentControlPolicy: { revision: 5, decisions: { ...HUMAN_ONLY, implementation_question: "orchestrator" } },
+  })));
+  await flush();
+  assert.deepEqual(sent[2], ["human", 5], "and the newest choice goes last, on the revision before it");
+  await act(async () => replies[2]!.resolve(orchestrator({ parentControlPolicy: { revision: 6, decisions: { ...HUMAN_ONLY } } })));
+  await flush();
+  assert.equal(option(gate(secondDialog, "Implementation Questions"), "Human").getAttribute("aria-checked"), "true");
+  assertNoDomNode(secondDialog.querySelector(".notice.t-danger"), "the closed dialog's failure is not the reopened one's");
+});
+
+test("changing a gate again clears its Saved check until the new change saves", async () => {
+  const replies: Array<() => void> = [];
+  const harness = await open(orchestrator(), {
+    setParentControlPolicy: (_id: string, decisions: ParentControlDecisionPolicy, revision: number) =>
+      new Promise<SessionView>((resolve) => replies.push(() => resolve(orchestrator({ parentControlPolicy: { revision: revision + 1, decisions } })))),
+  });
+  const dialog = harness.dialog();
+  const savedOnRow = () => gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".ui-row-saved") ?? null;
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
+  await flush();
+  await act(async () => replies[0]!());
+  await flush();
+  assert.ok(savedOnRow(), "the first change saved");
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Human")));
+  await flush();
+  assertNoDomNode(savedOnRow(), "an unsaved choice has no Saved check");
+  await act(async () => replies[1]!());
+  await flush();
+  assert.ok(savedOnRow(), "until it saves");
+});
+
+test("a gate that failed and then saves retires its failure notice", async () => {
+  const replies: Array<{ resolve: (view: SessionView) => void; reject: (cause: unknown) => void }> = [];
+  const harness = await open(orchestrator(), {
+    setParentControlPolicy: () => new Promise<SessionView>((resolve, reject) => replies.push({ resolve, reject })),
+    session: async () => ({ session: orchestrator({ parentControlPolicy: { revision: 4, decisions: { ...HUMAN_ONLY } } }) }),
+  });
+  const dialog = harness.dialog();
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Human")));
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
+  await flush();
+  await act(async () => replies[0]!.reject(new ApiError("Parent Control policy revision is stale", 409)));
+  await flush();
+  assert.ok(dialog.querySelector(".notice.t-danger"), "the first change failed");
+  await act(async () => replies[1]!.resolve(orchestrator({ parentControlPolicy: { revision: 5, decisions: { ...HUMAN_ONLY } } })));
+  await flush();
+  await act(async () => replies[2]!.resolve(orchestrator({
+    parentControlPolicy: { revision: 6, decisions: { ...HUMAN_ONLY, pr_merge: "orchestrator" } },
+  })));
+  await flush();
+  assertNoDomNode(dialog.querySelector(".notice.t-danger"), "the newest change saved, so the failure is gone");
+  assert.ok(gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".ui-row-saved"));
 });
 
 test("any other failure says the change wasn't saved, with the server's words behind Show Details", async () => {
