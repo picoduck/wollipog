@@ -5,6 +5,8 @@ import {
   type HoldAdviceReader,
   type SessionCommandPermission,
   type SessionCommandPermissions,
+  type CampaignCostSummary,
+  type CampaignWorkSummary,
   type OrchestratorCampaignProjection,
   type SessionView,
 } from "@wollipog/protocol";
@@ -246,6 +248,30 @@ export interface SessionCommandPermissionSource {
   /** The root campaign an Orchestrator session resolves to (#2417). Without it, no agent sees a
    * campaign work summary. */
   resolvedCampaignSessionId?(sessionId: string): string | null;
+  /** The campaign's cost summary as `principal` may see it under the session-cost rule (#2417).
+   * Without it, an agent's copy of the summary carries no cost bucket at all. */
+  campaignCostFor?(principal: AuthPrincipal, campaignSessionId: string): CampaignCostSummary | null;
+}
+
+const COST_NOT_AUTHORIZED = { availability: "unavailable", reason: "not_authorized" } as const;
+
+/** The work summary an agent receives: its cost follows the agent's own session access, which a
+ * delegated credential may narrow below what the root's human audience can read. Fails closed. */
+export function campaignWorkForAgent(
+  source: Pick<SessionCommandPermissionSource, "campaignCostFor">,
+  principal: AuthPrincipal,
+  campaignSessionId: string,
+  work: CampaignWorkSummary,
+): CampaignWorkSummary {
+  if (!work.cost) return work;
+  const cost = source.campaignCostFor?.(principal, campaignSessionId) ?? {
+    total: COST_NOT_AUTHORIZED,
+    workItems: COST_NOT_AUTHORIZED,
+    coordination: COST_NOT_AUTHORIZED,
+    unattributed: COST_NOT_AUTHORIZED,
+    attributedSince: work.cost.attributedSince,
+  };
+  return { ...work, cost };
 }
 
 /** The campaign work summary is ledger data. An agent may read it only as an Orchestrator of that
@@ -262,7 +288,9 @@ export function withCampaignWorkFor<T extends SessionView>(
   const own = principal.orchestrator && principal.credentialSessionId
     ? source.resolvedCampaignSessionId?.(principal.credentialSessionId) ?? null
     : null;
-  if (own === session.id) return session;
+  if (own === session.id) {
+    return { ...session, orchestratorCampaign: { ...campaign, work: campaignWorkForAgent(source, principal, session.id, campaign.work) } };
+  }
   const { work: _hidden, ...withoutWork } = campaign;
   return { ...session, orchestratorCampaign: withoutWork };
 }
@@ -273,6 +301,13 @@ function isSessionViewWithWork(value: unknown): value is SessionView {
     candidate.orchestratorCampaign?.work !== undefined;
 }
 
+/** A bare campaign projection carrying cost, as `get_campaign` and `verify_campaign_child` return. */
+function isProjectionWithCost(value: unknown): value is OrchestratorCampaignProjection & { work: CampaignWorkSummary } {
+  const candidate = value as Partial<OrchestratorCampaignProjection> | null;
+  return typeof candidate === "object" && candidate !== null && !("id" in candidate) &&
+    typeof candidate.status === "string" && candidate.work?.cost !== undefined;
+}
+
 /**
  * Apply the campaign-work rule to a whole response body for an agent, the way
  * `withVisibleCampaignChildren` narrows held children: a session view or array of views at the top
@@ -281,14 +316,21 @@ function isSessionViewWithWork(value: unknown): value is SessionView {
  * command a campaign root it is an ancestor of, so every agent-bound API body passes through here.
  */
 export function withCampaignWorkForResponse(
-  source: Pick<SessionCommandPermissionSource, "resolvedCampaignSessionId">,
+  source: Pick<SessionCommandPermissionSource, "resolvedCampaignSessionId" | "campaignCostFor">,
   principal: AuthPrincipal | null | undefined,
   payload: unknown,
 ): unknown {
   if (principal?.kind !== "agent") return payload;
+  // A projection carries no campaign id. An agent only ever receives its own campaign's work, so
+  // cost is recomputed for the campaign its credential resolves to, or withheld without one.
+  const own = principal.orchestrator && principal.credentialSessionId
+    ? source.resolvedCampaignSessionId?.(principal.credentialSessionId) ?? null
+    : null;
   const projectView = (value: unknown): unknown => isSessionViewWithWork(value)
     ? withCampaignWorkFor(source as SessionCommandPermissionSource, principal, value)
-    : value;
+    : isProjectionWithCost(value)
+      ? { ...value, work: campaignWorkForAgent(own ? source : {}, principal, own ?? "", value.work) }
+      : value;
   const project = (value: unknown): unknown => {
     if (!Array.isArray(value)) return projectView(value);
     const projected = value.map(projectView);

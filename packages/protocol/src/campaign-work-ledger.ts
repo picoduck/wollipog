@@ -391,9 +391,13 @@ export type CampaignMetric<T> =
 
 export interface CampaignCostValue {
   usd: number;
-  /** Existing provenance: provider-reported, rate-table priced, or partially unpriced. */
+  /** Existing provenance: provider-reported, rate-table priced, or partially unpriced. The weakest
+   * provenance among the summed records wins. */
   source: UsageCostSource;
   unpricedRecords: number;
+  /** Usage records summed. `0` is a known zero (nothing was used), and `source` then carries no
+   * provenance. Omitted by peers that predate the field. */
+  records?: number;
 }
 
 /** Slice 6. Each usage record is counted once across the three buckets. */

@@ -191,8 +191,11 @@ Orchestrator routes, all limited to the matching Orchestrator credential and lis
 
 The `wollipog campaign plan|update-item|assign|adjudicate|work-items` commands call the same tools.
 Recording a follow-up and recording a work-item verification are ledger writes and increment the
-revision. Observed changes increment it too, as Observed Invalidation describes. Until cost
-attribution lands, the `cost` sort falls back to queue order.
+revision. Observed changes increment it too, as Observed Invalidation describes. The `cost` sort
+orders by measured item cost, highest first; items with nothing measured yet follow in queue order.
+That order moves without a ledger revision, both as usage arrives and as the reader's cost
+visibility changes. A `cost`-sorted cursor is therefore also bound, by a keyed digest, to the exact
+order its reader saw, and is refused with `409 revision_changed` once that order differs.
 
 ## Read API
 
@@ -341,7 +344,11 @@ only the open attempt.
   rebuild) so a recommendation outlives the child that made it.
 - Event pruning does not touch the ledger: attempts store history boundaries, not events, and usage
   attribution (slice 6) is persisted as usage arrives.
-- Usage attribution rows follow the existing usage retention policy for their bucket granularity.
+- Usage attribution rows are cumulative per attempt and per contributing session, with no time
+  buckets, so the hourly and daily retention policy does not apply to them. Like session totals,
+  they are kept for the ledger's lifetime: they cascade with the root campaign (and an attempt or
+  item row, which cascade only with the root) and set the contributing session to null when it is
+  deleted.
 
 ## Time Metrics
 
@@ -354,34 +361,89 @@ only the open attempt.
 | Active Time | Recorded intervals within an attempt while its session was running. |
 
 Queue, Waiting, and Active Time come from durable intervals recorded by slice 6, kept independent
-of the event cache:
+of the event cache (`apps/control-plane/src/campaign-work-accounting.ts`):
 
-- **Work-item intervals**: every change of an item's dispatch state, commitment, and open attempt
-  is recorded as a per-item interval, so the waits from `planned` to `queued` to the first attempt
-  are measurable even though no session exists yet.
-- **Session status intervals**: per session, for the time an attempt is open.
+- **Work-item intervals** (`campaign_work_item_transitions`): a trigger records every change of an
+  item's dispatch state, commitment, and recorded blocker, stamped with the mutation time. Attempts
+  already record when they open and close, and verifications when they deliver, so the waits from
+  `planned` to `queued` to the first attempt are measurable even though no session exists yet.
+- **Session status intervals** (`campaign_attempt_status_transitions`): keyed by attempt, so they
+  outlive the session. A trigger records the session's status and archive state when the attempt
+  opens and at every change while it stays open; deleting the session records a null status.
 
-Time before interval recording began is `unavailable{history_unavailable}` (or `partial` when only
-part of the span is covered), never zero.
+Reads replay these intervals through the derived-state function (`campaign-work-times.ts`), so each
+metric counts exactly the spans in which the item's primary state was `queued`, `waiting` or
+`blocked`, and `running`. Two simplifications: holds and pending decisions that do not change the
+session's status are not recorded, which only matters for telling `waiting` from `blocked` and
+Waiting Time counts both; and dependencies use their current edges for the whole replay. A
+dependency without recorded history at an instant counts as unfinished, never as blocking.
+
+Recording begins once per database (`campaign_work_accounting_meta.started_at`). At that moment
+every existing item and open attempt receives one interval stamped with the start time. Time before
+recording is `unavailable{history_unavailable}` when the item has no recorded unfinished span, or
+`partial{history_unavailable}` when it has some, never zero. Active Time of an item that has never
+had an attempt is `unavailable{not_started}`.
+
+The three durations do not partition Item Elapsed and need not fit inside it. Item Elapsed starts at
+the first attempt, while Queue and Waiting Time count from the item's creation: an item blocked or
+queued before it was first assigned can show more Waiting or Queue Time than Item Elapsed. The
+durations are also measured on the server up to `times.asOf`, while a reader computes an open Item
+Elapsed against its own clock, so the two can differ by the age of the response.
+
+**Campaign Elapsed** ends at the time the campaign projection first observed `verified_complete`
+(`campaign_work_completion`). Completion is derived on read rather than written by any operation,
+so the projection records the observation, and an observation of an unfinished campaign deletes it:
+a reopened campaign runs again until it next completes. A campaign created before recording began
+whose first observation is already complete finished before anything could see it, so it uses its
+latest child or work-item verification time instead; every later completion is stamped when it is
+observed.
 
 ## Usage Attribution (Slice 6)
 
 Attribution is written in the same transaction as `recordUsageDeltaInTransaction`, so each usage
-record is counted exactly once and survives replay, epoch replacement, and event pruning. A delta
-goes to:
+record is counted exactly once and survives replay, epoch replacement, and event pruning: a replayed
+or replaced record is refused by the usage watermark before any delta, and so before attribution.
+A delta goes to:
 
-1. the session's open attempt;
-2. otherwise **coordination**, when the session is the root or a nested Orchestrator;
-3. otherwise **unattributed**.
+1. the session's open attempt at the moment the delta is recorded;
+2. otherwise **coordination**, when the session is the root or a nested Orchestrator (a session
+   whose own campaign resolves, as `resolvedCampaignSessionId` does);
+3. otherwise **unattributed**, when the nearest Orchestrator ancestor resolves to a campaign.
 
-Snapshot residuals go to the attempt open at observation time. Provider-subagent usage stays
-excluded, as session totals already exclude it. Cost provenance keeps `providerReported`,
-`modelPriced`, `unpriced`, and `unpricedRecords`; labels distinguish provider-reported amounts,
-estimated API cost, partially priced usage, and unavailable data. Usage recorded before attribution
-existed is reported through `attributedSince` and makes affected buckets `partial`.
+A session outside every campaign, or under an ancestry the projection refuses, contributes nothing.
+Snapshot residuals go to the attempt open at observation time, because the residual is recorded
+then. Provider-subagent usage stays excluded, as session totals already exclude it: it never
+becomes a ledger delta. Usage a runner marks `independentUsage` (a Codex child thread that bills on
+its own, #2455) does reach the session ledger, so it is attributed like any other delta. Rows (`campaign_usage_attribution`) hold integer micro-USD and record counts
+per attempt and per contributing session, so `total = workItems + coordination + unattributed`
+equals the members' usage ledger deltas since attribution began, exactly.
 
-Budgets show their actual scope: a parent-session budget is never presented as a campaign-wide
-budget. Forecasts and ETA are out of scope.
+Cost provenance keeps `providerReported`, `modelPriced`, `unpriced`, and `unpricedRecords`; the
+weakest provenance among the summed records wins. `records` counts the summed usage records: a
+bucket with `records: 0` is a known zero, not missing data, and its `source` carries no provenance.
+Labels distinguish provider-reported amounts, estimated API cost, partially priced usage, a known
+zero, and unavailable data. A bucket with unpriced records is `partial{unpriced_usage}`.
+
+`attributedSince` is the later of the root's creation and the start of recording. A campaign
+created before recording began has unsplit usage, so all four buckets are
+`partial{history_unavailable}`; an attempt that started before recording is a partial attempt cost,
+and so is its item's. An item with no attempt has cost `unavailable{not_started}`.
+
+Every ledger read takes the reader's session-cost visibility, so a bucket, item, or attempt with a
+contributing session the reader may not see is `unavailable{not_authorized}`, and the `cost` sort
+ranks it as unmeasured rather than by its hidden amount. A deleted contributor's share stays visible
+to whoever can read the root. The Campaign Status routes pass the requesting principal's access; the
+Orchestrator's own read passes its credential's. The summary embedded in the root's view travels to
+everyone who can read the root, so there a contributor counts as visible only when the root's whole
+audience is contained in that contributor's (`scopeAudienceContainedWithMembership`). Every
+agent-bound API response passes one hook that recomputes cost under the agent's own access, since a
+delegated credential may read less than the root's human audience. That covers a session view and
+a bare projection alike, such as the ones `get_campaign` and `verify_campaign_child` return. An
+agent with no campaign of its own, or a hook without the cost check, receives no cost bucket.
+
+Budgets show their actual scope: `OrchestratorCampaignProjection.limits.costBudgetUsd` is the
+Orchestrator session's own budget, and the panel and the `get_campaign` tool say so. There is no
+campaign-wide budget. Forecasts and ETA are out of scope.
 
 ## Forge Status (Slice 8)
 
@@ -540,3 +602,8 @@ starting contract. This document refines it as follows:
 26. **More unavailable reasons** (slice 8): `not_authorized`, `not_observed`, `runner_disconnected`,
     `runner_unsupported`, `forge_cli_missing`, `forge_not_found`, and `forge_rate_limited` join the
     contract's forge reasons.
+27. **Time and cost (slice 6).** `CampaignCostValue.records` is added so a known zero is
+    distinguishable from missing data. Attribution rows are cumulative rather than time-bucketed and
+    are retained with the ledger, not by the usage retention policy. Holds and pending decisions are
+    not part of the recorded intervals. Campaign completion time is the projection's first
+    observation of `verified_complete`.

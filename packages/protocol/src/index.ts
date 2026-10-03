@@ -2339,6 +2339,8 @@ export interface OrchestratorCampaignProjection {
     maximumConcurrentChildren: number;
     occupied: number;
     remaining: number;
+    /** The Orchestrator session's own cost budget. It never caps or describes the campaign as a
+     * whole; campaign cost is `work.cost` and has no budget. */
     costBudgetUsd: number | null;
     maxToolCalls: number | null;
   };

@@ -23,10 +23,12 @@ import {
   type CampaignAttemptBoundary,
   type CampaignAttemptEndReason,
   type CampaignAttemptSessionSnapshot,
+  type CampaignCostValue,
   type CampaignIssueRef,
   type CampaignObservedCleanup,
   type CampaignObservedFact,
   type CampaignObservedSessionStatus,
+  type CampaignMetric,
   type CampaignPlanState,
   type CampaignPullRequestRef,
   type CampaignRecommendation,
@@ -41,6 +43,7 @@ import {
   type CampaignWorkItemOrigin,
   type CampaignWorkItemPrimaryState,
   type CampaignWorkItemSummary,
+  type CampaignWorkItemTimes,
   type CampaignWorkItemVerification,
   type CampaignWorkItemVerificationOutcome,
   type CampaignWorkItemsPage,
@@ -55,6 +58,14 @@ import {
   type CampaignAttemptSessionObservation,
   type CampaignWorkItemDerivedState,
 } from "./campaign-work-state.js";
+import {
+  CAMPAIGN_USAGE_NONE,
+  CampaignWorkAccounting,
+  addCampaignUsage,
+  campaignCostMetric,
+  type CampaignUsageAmount,
+} from "./campaign-work-accounting.js";
+import { campaignItemDurations, campaignItemTimelines } from "./campaign-work-times.js";
 
 /** Tables, in SCHEMA order. Child-session references are SET NULL so history survives a child's
  * deletion; the root campaign reference cascades, so deleting the root deletes its ledger. */
@@ -317,6 +328,10 @@ interface LedgerSnapshot {
   verifications: Map<string, VerificationRow[]>;
   derived: Map<string, CampaignWorkItemDerivedState>;
   observations: Map<string, CampaignAttemptSessionObservation | null>;
+  /** Usage attributed to each attempt (slice 6). */
+  usage: Map<string, CampaignUsageAmount>;
+  /** When interval recording and usage attribution began; null before it has. */
+  accountingStartedAt: number | null;
 }
 
 const L = CAMPAIGN_WORK_LEDGER_LIMITS;
@@ -374,29 +389,43 @@ function observationKey(observation: CampaignAttemptSessionObservation | null): 
     : "deleted";
 }
 
+/** Whether a reader may see a session's cost (the existing session-cost rule: session access). */
+export type SessionVisibility = (sessionId: string) => boolean;
+
+const NOT_AUTHORIZED = { availability: "unavailable", reason: "not_authorized" } as const;
+
+/** A deleted attempt session's share is visible to whoever may read the campaign itself. */
+function visible(attempt: AttemptRow, canSeeSession: SessionVisibility | undefined): boolean {
+  return !canSeeSession || canSeeSession(attempt.session_id ?? attempt.campaign_session_id);
+}
+
 function cursorKey(parts: Record<string, unknown>): string {
   return JSON.stringify(Object.keys(parts).sort().map((key) => [key, parts[key] ?? null]));
 }
 
-function encodeCursor(revision: number, key: string, offset: number): string {
-  return Buffer.from(JSON.stringify({ v: 1, r: revision, k: key, o: offset })).toString("base64url");
+/** `stamp` binds an ordering that can change without a ledger revision (the cost sort, which moves
+ * as usage arrives); a cursor minted under another stamp is refused like a stale revision. */
+function encodeCursor(revision: number, key: string, offset: number, stamp?: string): string {
+  return Buffer.from(JSON.stringify({ v: 1, r: revision, k: key, o: offset, ...(stamp ? { s: stamp } : {}) }))
+    .toString("base64url");
 }
 
 function decodeCursor(
   cursor: string | undefined,
   revision: number,
   key: string,
+  stamp?: string,
 ): LedgerResult<number> {
   if (cursor === undefined) return done(0);
   try {
     const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as
-      { v?: unknown; r?: unknown; k?: unknown; o?: unknown };
+      { v?: unknown; r?: unknown; k?: unknown; o?: unknown; s?: unknown };
     if (parsed.v !== 1 || !Number.isSafeInteger(parsed.r) || typeof parsed.k !== "string" ||
         !Number.isSafeInteger(parsed.o) || (parsed.o as number) < 0) {
       return fail("cursor is malformed");
     }
     if (parsed.k !== key) return fail("cursor belongs to a different filter or sort");
-    if (parsed.r !== revision) {
+    if (parsed.r !== revision || (parsed.s ?? undefined) !== stamp) {
       return fail("the campaign ledger changed since this cursor was issued; restart from the first page", 409,
         { code: CAMPAIGN_WORK_REVISION_CHANGED, revision });
     }
@@ -416,8 +445,12 @@ function pageLimit(limit: unknown): LedgerResult<number> {
 export class CampaignWorkLedgerStore {
   private readonly statements = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
   private readonly summaryCache = new Map<string, { key: string; part: LedgerSummaryPart }>();
+  /** Time and cost (slice 6): durable intervals and usage attribution for the same campaigns. */
+  readonly accounting: CampaignWorkAccounting;
 
-  constructor(private readonly db: DatabaseSync, private readonly hooks: CampaignWorkLedgerHooks) {}
+  constructor(private readonly db: DatabaseSync, private readonly hooks: CampaignWorkLedgerHooks) {
+    this.accounting = new CampaignWorkAccounting(db);
+  }
 
   private stmt(sql: string): ReturnType<DatabaseSync["prepare"]> {
     let statement = this.statements.get(sql);
@@ -952,6 +985,7 @@ export class CampaignWorkLedgerStore {
         snapshot.agentName, snapshot.model, snapshot.effort, actorSessionId, now, boundary.eventEpoch,
         boundary.runnerHistoryEpoch, boundary.seq,
       );
+      this.accounting.recordAttemptOpened(id, now, this.hooks.observeSession(childSessionId));
       this.stmt("UPDATE campaign_work_items SET updated_at=? WHERE id=?").run(now, item.id);
       const attempt = this.stmt("SELECT * FROM campaign_work_attempts WHERE id=?").get(id) as unknown as AttemptRow;
       return done({ revision: this.bump(campaignId, now), attempt: this.attemptView(attempt), closedAttempts, created: true });
@@ -1295,6 +1329,57 @@ export class CampaignWorkLedgerStore {
       verifications,
       derived: deriveCampaignWorkItemStates(records),
       observations,
+      usage: this.accounting.attemptUsage(campaignId),
+      accountingStartedAt: this.accounting.startedAt(),
+    };
+  }
+
+  /** An attempt's attributed cost. Usage before recording began was never attributed, so an
+   * attempt that started earlier is a lower bound. Cost follows session access: a reader who may
+   * not see the attempt's session sees `not_authorized`; a deleted session's share stays visible to
+   * whoever reads the campaign. */
+  private attemptCost(snapshot: LedgerSnapshot, attempt: AttemptRow, canSeeSession?: SessionVisibility): CampaignMetric<CampaignCostValue> {
+    if (!visible(attempt, canSeeSession)) return NOT_AUTHORIZED;
+    return campaignCostMetric(snapshot.usage.get(attempt.id) ?? CAMPAIGN_USAGE_NONE,
+      snapshot.accountingStartedAt === null || attempt.started_at < snapshot.accountingStartedAt);
+  }
+
+  /** An item's cost sums its attempts, so it needs every attempt's session; an item never assigned
+   * has nothing to measure yet. */
+  private itemCost(snapshot: LedgerSnapshot, itemId: string, canSeeSession?: SessionVisibility): CampaignMetric<CampaignCostValue> {
+    const attempts = snapshot.attempts.get(itemId) ?? [];
+    if (!attempts.length) return { availability: "unavailable", reason: "not_started" };
+    if (!attempts.every((attempt) => visible(attempt, canSeeSession))) return NOT_AUTHORIZED;
+    const sum = attempts.reduce((total, attempt) =>
+      addCampaignUsage(total, snapshot.usage.get(attempt.id) ?? CAMPAIGN_USAGE_NONE), CAMPAIGN_USAGE_NONE);
+    return campaignCostMetric(sum, attempts.some((attempt) =>
+      snapshot.accountingStartedAt === null || attempt.started_at < snapshot.accountingStartedAt));
+  }
+
+  /** Queue, Waiting, and Active Time of one item, replayed from the durable intervals of the item and
+   * of everything it depends on. */
+  private itemTimes(campaignId: string, snapshot: LedgerSnapshot, item: ItemRow, elapsed: CampaignWorkItemTimes["elapsed"],
+    now: number): CampaignWorkItemTimes {
+    const transitions = this.accounting.itemTransitions(campaignId);
+    const statuses = this.accounting.attemptStatuses(campaignId);
+    const timelines = campaignItemTimelines(snapshot.items.map((candidate) => ({
+      id: candidate.id,
+      createdAt: candidate.created_at,
+      transitions: transitions.get(candidate.id) ?? [],
+      dependsOn: snapshot.dependencies.get(candidate.id) ?? [],
+      attempts: (snapshot.attempts.get(candidate.id) ?? []).map((attempt) => ({
+        ordinal: attempt.ordinal,
+        startedAt: attempt.started_at,
+        endedAt: attempt.ended_at,
+        deliveredAt: (snapshot.verifications.get(candidate.id) ?? []).find((verification) =>
+          verification.attempt_id === attempt.id && verification.outcome === "delivered")?.verified_at ?? null,
+        statuses: statuses.get(attempt.id) ?? [],
+      })),
+    })));
+    return {
+      elapsed,
+      ...campaignItemDurations(timelines.get(item.id) ?? [], snapshot.attempts.get(item.id)?.length ?? 0, now),
+      asOf: now,
     };
   }
 
@@ -1335,7 +1420,7 @@ export class CampaignWorkLedgerStore {
     };
   }
 
-  private summaryView(snapshot: LedgerSnapshot, item: ItemRow): CampaignWorkItemSummary {
+  private summaryView(snapshot: LedgerSnapshot, item: ItemRow, canSeeSession?: SessionVisibility): CampaignWorkItemSummary {
     const attempts = snapshot.attempts.get(item.id) ?? [];
     const latest = attempts.at(-1);
     const open = latest && latest.ended_at === null ? latest : null;
@@ -1379,6 +1464,7 @@ export class CampaignWorkLedgerStore {
         startedAt: attempts[0]?.started_at ?? null,
         endedAt: deliveredAt ?? (derived.state === "cancelled" || derived.state === "removed" ? item.commitment_changed_at : null),
       },
+      cost: this.itemCost(snapshot, item.id, canSeeSession),
     };
   }
 
@@ -1391,6 +1477,8 @@ export class CampaignWorkLedgerStore {
       childSessionIds: readonly string[];
       /** Existing campaign worktree cleanup still pending. */
       cleanupPending: number;
+      /** Session-cost visibility of whoever receives this summary; omitted means every session. */
+      canSeeSession?: SessionVisibility;
     },
   ): CampaignWorkSummary {
     const ledger = this.summaryPart(campaignId);
@@ -1409,12 +1497,8 @@ export class CampaignWorkLedgerStore {
     ).get(campaignId) as { at: number | null }).at : null;
     const predatesLedger = context.childSessionIds.length > 0 &&
       (!recorded || (earliestChild !== null && earliestChild < ledger.ledgerCreatedAt!));
-    // Completion is verified when the last child report or item delivery was verified.
-    const completedAt = context.complete ? (this.stmt(
-      `SELECT MAX(verified_at) AS at FROM (
-         SELECT verified_at FROM orchestrator_campaign_child_reports WHERE campaign_session_id=?
-         UNION ALL SELECT verified_at FROM campaign_work_verifications WHERE campaign_session_id=?)`,
-    ).get(campaignId, campaignId) as { at: number | null }).at : null;
+    // The projection records when it first observed verified_complete and clears it on reopening.
+    const completedAt = context.complete ? this.accounting.completedAt(campaignId) ?? this.lastVerifiedAt(campaignId) : null;
     return {
       revision: ledger.revision,
       planState: ledger.planState,
@@ -1428,6 +1512,9 @@ export class CampaignWorkLedgerStore {
         cleanup: context.cleanupPending,
       },
       elapsed: { startedAt: context.campaignCreatedAt, endedAt: completedAt },
+      // Usage moves without a ledger revision, so cost is read on every summary, outside the cached
+      // part; it is one indexed read of the campaign's attribution rows.
+      cost: this.accounting.costSummary(campaignId, context.campaignCreatedAt, context.canSeeSession),
     };
   }
 
@@ -1520,7 +1607,18 @@ export class CampaignWorkLedgerStore {
     return part;
   }
 
-  page(campaignId: string, query: CampaignWorkItemsQuery, now: number): LedgerResult<CampaignWorkItemsPage> {
+  /** When the latest child report or item delivery was verified: completion time for a campaign that
+   * completed before the projection began recording it. */
+  lastVerifiedAt(campaignId: string): number | null {
+    return (this.stmt(
+      `SELECT MAX(verified_at) AS at FROM (
+         SELECT verified_at FROM orchestrator_campaign_child_reports WHERE campaign_session_id=?
+         UNION ALL SELECT verified_at FROM campaign_work_verifications WHERE campaign_session_id=?)`,
+    ).get(campaignId, campaignId) as { at: number | null }).at;
+  }
+
+  /** `canSeeSession` applies the session-cost rule for the reader; omitted means every session. */
+  page(campaignId: string, query: CampaignWorkItemsQuery, now: number, canSeeSession?: SessionVisibility): LedgerResult<CampaignWorkItemsPage> {
     const limit = pageLimit(query.limit);
     if (!limit.ok) return limit;
     const state = query.state ?? "unfinished";
@@ -1534,10 +1632,8 @@ export class CampaignWorkLedgerStore {
     if (!["queue", "activity", "elapsed", "cost"].includes(sort)) return fail("sort is not recognized");
     const snapshot = this.snapshot(campaignId);
     const key = cursorKey({ list: "work-items", state, origin: query.origin, sort });
-    const offset = decodeCursor(query.cursor, snapshot.revision, key);
-    if (!offset.ok) return offset;
     const unfinished = new Set<string>(CAMPAIGN_WORK_ITEM_UNFINISHED_STATES);
-    const rows = snapshot.items.map((item) => this.summaryView(snapshot, item)).filter((summary) =>
+    const rows = snapshot.items.map((item) => this.summaryView(snapshot, item, canSeeSession)).filter((summary) =>
       (query.origin === undefined || summary.origin === query.origin) &&
       (state === "all" || (state === "unfinished" ? unfinished.has(summary.primaryState)
         : state === "finished" ? FINISHED_STATES.has(summary.primaryState) : summary.primaryState === state)));
@@ -1547,21 +1643,27 @@ export class CampaignWorkLedgerStore {
     const byQueue = (a: CampaignWorkItemSummary, b: CampaignWorkItemSummary) =>
       (a.queuePosition ?? Number.MAX_SAFE_INTEGER) - (b.queuePosition ?? Number.MAX_SAFE_INTEGER) ||
       a.createdAt - b.createdAt || a.id.localeCompare(b.id);
-    // Cost attribution arrives with the Time and Cost slice; until then `cost` sorts by queue order.
+    // Highest known cost first; an item with nothing measured yet sorts after every measured one.
+    const cost = (summary: CampaignWorkItemSummary) =>
+      summary.cost && summary.cost.availability !== "unavailable" ? summary.cost.value.usd : -1;
     rows.sort(sort === "activity" ? (a, b) => b.activityAt - a.activityAt || byQueue(a, b)
       : sort === "elapsed" ? (a, b) => elapsed(b) - elapsed(a) || byQueue(a, b)
+      : sort === "cost" ? (a, b) => cost(b) - cost(a) || byQueue(a, b)
       : byQueue);
+    const stamp = sort === "cost" ? this.accounting.orderStamp(campaignId, rows.map((row) => row.id)) : undefined;
+    const offset = decodeCursor(query.cursor, snapshot.revision, key, stamp);
+    if (!offset.ok) return offset;
     const items = rows.slice(offset.data, offset.data + limit.data);
     const end = offset.data + items.length;
     return done({
       revision: snapshot.revision,
       items,
-      nextCursor: end < rows.length ? encodeCursor(snapshot.revision, key, end) : null,
+      nextCursor: end < rows.length ? encodeCursor(snapshot.revision, key, end, stamp) : null,
       total: rows.length,
     });
   }
 
-  detail(campaignId: string, itemId: string, now: number): CampaignWorkItemDetail | null {
+  detail(campaignId: string, itemId: string, now: number, canSeeSession?: SessionVisibility): CampaignWorkItemDetail | null {
     const snapshot = this.snapshot(campaignId);
     const item = snapshot.items.find((candidate) => candidate.id === itemId);
     if (!item) return null;
@@ -1571,8 +1673,9 @@ export class CampaignWorkLedgerStore {
     const open = latest?.ended_at === null ? latest : null;
     const recommendations = this.recommendationRows(campaignId).map((row) => this.recommendationView(row));
     const observation = open?.session_id ? snapshot.observations.get(open.session_id) : undefined;
+    const summary = this.summaryView(snapshot, item, canSeeSession);
     return {
-      ...this.summaryView(snapshot, item),
+      ...summary,
       dependsOn: (snapshot.dependencies.get(item.id) ?? []).map((id) => ({
         id,
         key: byId.get(id)?.item_key ?? id,
@@ -1598,6 +1701,8 @@ export class CampaignWorkLedgerStore {
           ? { pullRequests: this.hooks.forgePullRequests(campaignId, stagePullRequests(item), now) }
           : {}),
       },
+      times: this.itemTimes(campaignId, snapshot, item, summary.elapsed, now),
+      attemptCosts: attempts.map((attempt) => ({ attemptId: attempt.id, cost: this.attemptCost(snapshot, attempt, canSeeSession) })),
     };
   }
 

@@ -177,8 +177,14 @@ export function registerCampaignStatusRoutes(
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
-    const summary = db.campaignProjection(read.rootId)?.work;
-    if (!summary) return reply.code(404).send({ error: "this session is not part of an Orchestrator campaign" });
+    const projected = db.campaignProjection(read.rootId)?.work;
+    if (!projected) return reply.code(404).send({ error: "this session is not part of an Orchestrator campaign" });
+    // The projection's cost is masked for the root's audience. Recompute it for this reader over
+    // every contributing session, including one no longer a descendant (its parent was deleted),
+    // then keep the stricter rule that any unreadable descendant hides every bucket.
+    const summary = projected.cost
+      ? { ...projected, cost: db.campaignCostFor(read.principal, read.rootId) ?? projected.cost }
+      : projected;
     const response: CampaignWorkSummaryResponse = {
       campaignSessionId: read.rootId,
       summary: campaignSummaryForPrincipal(summary, !summary.cost || everySessionVisible(read)),
@@ -199,7 +205,7 @@ export function registerCampaignStatusRoutes(
       ...(text(query, "sort") !== undefined ? { sort: text(query, "sort") as CampaignWorkItemsQuery["sort"] } : {}),
     };
     const ledger = db.campaignWorkLedger;
-    const page = ledger.page(read.rootId, request, Date.now());
+    const page = ledger.page(read.rootId, request, Date.now(), read.canSee);
     if (!page.ok) return reply.code(page.status).send({ ...page.details, error: page.error });
     const attempts = page.data.items.some((item) => item.cost) ? ledger.attemptSessionIdsByItem(read.rootId) : null;
     return reply.send({
@@ -215,7 +221,7 @@ export function registerCampaignStatusRoutes(
     const read = reader(req, reply, id);
     if (!read) return reply;
     const ledger = db.campaignWorkLedger;
-    const item = itemId.length <= 256 ? ledger.detail(read.rootId, itemId, Date.now()) : null;
+    const item = itemId.length <= 256 ? ledger.detail(read.rootId, itemId, Date.now(), read.canSee) : null;
     if (!item) return reply.code(404).send({ error: "work item not found in this campaign" });
     const response: CampaignWorkItemDetailResponse = {
       revision: ledger.revision(read.rootId),

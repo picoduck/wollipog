@@ -84,6 +84,11 @@ test("Cost labels distinguish provider-reported, estimated, partially priced, un
   const partial = campaignCostView({ availability: "partial", value: { usd: 1, source: "modelPriced", unpricedRecords: 0 }, reason: "history_unavailable" });
   assert.equal(partial.provenance, "Partially Priced");
   assert.equal(campaignCostView(knownCost(0)).text, "$0.00", "a known zero is a real amount");
+  assert.deepEqual(
+    campaignCostView({ availability: "known", value: { usd: 0, source: "providerReported", unpricedRecords: 0, records: 0 } }),
+    { text: "$0.00", provenance: null, note: "No usage was recorded.", priced: true },
+    "a bucket with no usage records is a known zero without a provenance claim",
+  );
   for (const missing of [undefined, { availability: "unavailable" as const, reason: "not_authorized" as const }]) {
     const view = campaignCostView(missing);
     assert.equal(view.text, "Unavailable");

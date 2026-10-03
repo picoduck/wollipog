@@ -257,7 +257,11 @@ test("Campaign Status reads the live Read API for a campaign, its items and a me
   const panel = page.locator(".campaign-status");
   await expect(summaryBox(page)).toContainText("1 of 7 Delivered");
   await expect(summaryBox(page)).toContainText("1 rejected, 0 deferred, 1 duplicate");
-  await expect(summaryBox(page)).not.toContainText("$0.00");
+  // Slice 6 cost: $4.90 attributed with one record unpriced, so the total is a partially priced lower bound.
+  await expect(summaryBox(page)).toContainText("$4.90");
+  await expect(summaryBox(page)).toContainText("Partially Priced");
+  await expect(summaryBox(page)).toContainText("coordination $0.35 (provider-reported)");
+  await expect(summaryBox(page)).toContainText("unattributed $0.15 (provider-reported)");
   const rows = workRows(page);
   // Unfinished by default: running, blocked (recorded and by dependency), waiting, planned.
   await expect(rows).toHaveCount(6);
@@ -316,6 +320,13 @@ test("Campaign Status reads the live Read API for a campaign, its items and a me
         await panel.getByRole("heading", { name: "Delivery", exact: true })
           .evaluate((element) => element.scrollIntoView({ block: "start" }));
         await shot("details-observed");
+        // An attempt that used nothing reads a known zero, without a provenance claim.
+        await page.getByRole("button", { name: "Back to Work Items" }).click();
+        await rows.filter({ hasText: "Time and Cost Attribution" }).click();
+        await panel.getByRole("heading", { name: "Time and Cost", exact: true })
+          .evaluate((element) => element.scrollIntoView({ block: "start" }));
+        await expect(panel).toContainText("No usage was recorded.");
+        await shot("details-known-zero");
         await openCampaignStatus(page, seeded.panelId);
         await expect(assignment).toBeVisible();
         await shot("member");

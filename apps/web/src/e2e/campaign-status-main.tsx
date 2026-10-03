@@ -185,7 +185,7 @@ const recordedWork = (revision: number) => workSummary(NOW, {
     total: { availability: "partial", value: { usd: 14.82, source: "modelPriced", unpricedRecords: 3 }, reason: "unpriced_usage" },
     workItems: { availability: "partial", value: { usd: 12.57, source: "modelPriced", unpricedRecords: 3 }, reason: "unpriced_usage" },
     coordination: knownCost(2.25),
-    unattributed: knownCost(0),
+    unattributed: knownCost(0, "providerReported", 0, 0),
     attributedSince: NOW - 3 * HOUR,
   },
 });

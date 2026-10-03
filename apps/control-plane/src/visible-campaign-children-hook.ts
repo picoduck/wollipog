@@ -10,7 +10,7 @@ import { withCampaignWorkForResponse, withVisibleCampaignChildren } from "./sess
 export function registerVisibleCampaignChildrenHook(
   app: FastifyInstance,
   deps: {
-    db: Pick<ControlPlaneDb, "canAccessSession" | "resolvedCampaignSessionId">;
+    db: Pick<ControlPlaneDb, "canAccessSession" | "resolvedCampaignSessionId" | "campaignCostFor">;
     requestPrincipal: (req: FastifyRequest) => AuthPrincipal | null | undefined;
   },
 ): void {

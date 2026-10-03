@@ -31,8 +31,13 @@ export function forgeObservation(overrides: Partial<CampaignForgePullRequestObse
   };
 }
 
-export function knownCost(usd: number, source: CampaignCostValue["source"] = "providerReported", unpricedRecords = 0): CampaignMetric<CampaignCostValue> {
-  return { availability: "known", value: { usd, source, unpricedRecords } };
+export function knownCost(
+  usd: number,
+  source: CampaignCostValue["source"] = "providerReported",
+  unpricedRecords = 0,
+  records?: number,
+): CampaignMetric<CampaignCostValue> {
+  return { availability: "known", value: { usd, source, unpricedRecords, ...(records !== undefined ? { records } : {}) } };
 }
 
 export function workSummary(now: number, overrides: Partial<CampaignWorkSummary> = {}): CampaignWorkSummary {
@@ -51,7 +56,8 @@ export function workSummary(now: number, overrides: Partial<CampaignWorkSummary>
       total: knownCost(2.5),
       workItems: knownCost(2),
       coordination: knownCost(0.5),
-      unattributed: knownCost(0),
+      // Nothing was used outside an attempt or coordination: a known zero with no provenance.
+      unattributed: knownCost(0, "providerReported", 0, 0),
       attributedSince: now - 10 * MINUTE,
     },
     ...overrides,

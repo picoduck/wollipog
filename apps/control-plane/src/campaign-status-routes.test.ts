@@ -30,7 +30,7 @@ import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
-import { withSessionCommandPermissions } from "./session-command-permissions.js";
+import { withCampaignWorkForResponse, withSessionCommandPermissions } from "./session-command-permissions.js";
 import { registerVisibleCampaignChildrenHook } from "./visible-campaign-children-hook.js";
 import { SessionsService } from "./sessions.js";
 
@@ -480,7 +480,9 @@ test("Campaign Status routes authorize humans by the root and Orchestrators by t
     assert.equal(ok.status, 200);
     assert.equal(ok.body.campaignSessionId, root, "a member resolves to its root campaign");
     assert.equal(ok.body.summary.planState, "not_recorded");
-    assert.equal(ok.body.summary.cost, undefined, "cost is not collected until slice 6");
+    assert.deepEqual(ok.body.summary.cost?.total, {
+      availability: "known", value: { usd: 0, source: "providerReported", unpricedRecords: 0, records: 0 },
+    }, "slice 6 attributes cost: a campaign that used nothing reads a known zero");
     assert.equal((await get("owner", summaryOf(root))).status, 200, "an organization owner can read every campaign");
 
     // Bob can open the child but not the campaign it belongs to.
@@ -739,7 +741,7 @@ test("item details keep archived and deleted children's history and report obser
       { path: "/worktrees/old", status: "retired", reason: null },
     ]);
     assert.deepEqual(kept.observed.pullRequests, [], "forge facts are collected; this item reports no pull request");
-    assert.equal(kept.times, undefined, "time metrics belong to slice 6");
+    assert.deepEqual(kept.times?.elapsed, kept.elapsed, "slice 6 time metrics ride on the detail");
 
     // Facts from a disconnected runner are the last known values, marked stale with their age.
     db.raw().prepare("UPDATE runners SET status='offline' WHERE runner_id=?").run(RUNNER_ID);
@@ -758,6 +760,99 @@ test("item details keep archived and deleted children's history and report obser
     assert.deepEqual([kept.primaryState, kept.verifications[0]?.outcome], ["delivered", "delivered"],
       "archiving keeps the verification");
     assert.equal((await get("owner", url("cwi_missing"))).status, 404);
+  } finally {
+    await app.close();
+    db.close();
+  }
+});
+
+test("an agent's copy of the root's work summary follows that agent's own cost visibility (#2417)", () => {
+  const { db, root, child, ownBy } = campaignFixture();
+  try {
+    ownBy(root, "alice");
+    const contributor = child(root, "Organization Child");
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='organization', owner_id=? WHERE session_id=?").run(ORG, contributor);
+    db.appendEvent(contributor, { kind: "token_usage", inputTokens: 1, costUsd: 7 }, Date.now(), { accrueUsage: true });
+    const delegatedToAlice: AgentPrincipal = {
+      ...agent(root, true), delegatedScope: { organizationId: ORG, owner: { kind: "user", userId: "alice" } },
+    };
+    assert.equal(db.canAccessSession(delegatedToAlice, contributor), false, "precondition: the agent cannot read the child");
+    const view = db.getSession(root)!;
+    assert.equal(view.orchestratorCampaign?.work?.cost?.unattributed.availability, "known",
+      "everyone who can read the root can read the organization's child, so the shared view carries its cost");
+
+    const notAuthorized = { availability: "unavailable", reason: "not_authorized" };
+    const forAgent = withCampaignWorkForResponse(db, delegatedToAlice, view) as SessionView;
+    assert.deepEqual(forAgent.orchestratorCampaign?.work?.cost?.unattributed, notAuthorized);
+    assert.deepEqual(forAgent.orchestratorCampaign?.work?.cost?.total, notAuthorized);
+    const forWideAgent = withCampaignWorkForResponse(db, agent(root, true), view) as SessionView;
+    assert.equal(forWideAgent.orchestratorCampaign?.work?.cost?.unattributed.availability, "known");
+    // Without a cost source, the agent's copy fails closed.
+    const sourceless = withCampaignWorkForResponse({ resolvedCampaignSessionId: (id) => db.resolvedCampaignSessionId(id) },
+      agent(root, true), view) as SessionView;
+    assert.deepEqual(sourceless.orchestratorCampaign?.work?.cost?.workItems, notAuthorized);
+  } finally {
+    db.close();
+  }
+});
+
+test("the summary route recomputes cost for its reader, including contributors detached by a deleted parent (#2417)", async () => {
+  const { db, root, child, ownBy } = campaignFixture();
+  ownBy(root, "alice");
+  const middle = child(root, "Middle");
+  const contributor = child(middle, "Organization Grandchild");
+  ownBy(middle, "alice");
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='organization', owner_id=? WHERE session_id=?").run(ORG, contributor);
+  db.appendEvent(contributor, { kind: "token_usage", inputTokens: 1, costUsd: 7 }, Date.now(), { accrueUsage: true });
+  const delegatedToAlice: AgentPrincipal = {
+    ...agent(root, true), delegatedScope: { organizationId: ORG, owner: { kind: "user", userId: "alice" } },
+  };
+  const { app, get } = await routes(db, { alice: delegatedToAlice, wide: agent(root, true) });
+  try {
+    db.deleteSession(middle);
+    assert.ok(db.getSession(contributor), "precondition: the contributor outlives its deleted parent");
+    assert.equal(db.campaignDescendantIds(root).includes(contributor), false, "precondition: it is no longer a descendant");
+    const summaryOf = async (who: string) =>
+      (await get<CampaignWorkSummaryResponse>(who, `/api/sessions/${root}/campaign/summary`)).body.summary.cost!;
+    const notAuthorized = { availability: "unavailable", reason: "not_authorized" };
+    assert.deepEqual((await summaryOf("alice")).unattributed, notAuthorized);
+    assert.deepEqual((await summaryOf("alice")).total, notAuthorized);
+    assert.equal((await summaryOf("wide")).unattributed.availability, "known", "a reader who can see the contributor sees its cost");
+  } finally {
+    await app.close();
+    db.close();
+  }
+});
+
+test("bare campaign projections sent to an agent, such as get_campaign and verify_campaign_child, follow its cost visibility (#2417)", async () => {
+  const { db, root, child, ownBy } = campaignFixture();
+  const app = Fastify();
+  try {
+    ownBy(root, "alice");
+    const contributor = child(root, "Organization Child");
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='organization', owner_id=? WHERE session_id=?").run(ORG, contributor);
+    db.appendEvent(contributor, { kind: "token_usage", inputTokens: 1, costUsd: 7 }, Date.now(), { accrueUsage: true });
+    const delegatedToAlice: AgentPrincipal = {
+      ...agent(root, true), delegatedScope: { organizationId: ORG, owner: { kind: "user", userId: "alice" } },
+    };
+    const principals: Record<string, AuthPrincipal> = { alice: delegatedToAlice, wide: agent(root, true), other: agent("unrelated", true) };
+    registerVisibleCampaignChildrenHook(app, { db, requestPrincipal: (req) => principals[String(req.headers["x-test-principal"])] });
+    // The same bodies the real routes send: get_campaign's projection and verify-child's {campaign, child}.
+    app.get("/api/get-campaign", async () => db.campaignProjection(root));
+    app.get("/api/verify-child", async () => ({ campaign: db.campaignProjection(root), child: db.getSession(contributor) }));
+    await app.ready();
+    const read = async (url: string, who: string) =>
+      (await app.inject({ method: "GET", url, headers: { "x-test-principal": who } })).json() as Record<string, unknown>;
+    const notAuthorized = { availability: "unavailable", reason: "not_authorized" };
+    const projectionOf = (body: Record<string, unknown>, nested: boolean) =>
+      (nested ? body.campaign : body) as { work: CampaignWorkSummary };
+
+    for (const [url, nested] of [["/api/get-campaign", false], ["/api/verify-child", true]] as const) {
+      assert.deepEqual(projectionOf(await read(url, "alice"), nested).work.cost?.unattributed, notAuthorized, url);
+      assert.equal(projectionOf(await read(url, "wide"), nested).work.cost?.unattributed.availability, "known", url);
+      // An agent with no campaign of its own never receives another campaign's cost.
+      assert.deepEqual(projectionOf(await read(url, "other"), nested).work.cost?.total, notAuthorized, url);
+    }
   } finally {
     await app.close();
     db.close();

@@ -15,7 +15,7 @@ The Usage view reports content-free token and cost aggregates for the organizati
 - A snapshot does not identify when an unseen cumulative prefix accrued. Its positive residual is therefore attributed to control-plane observation time instead of fabricating historical precision.
 - The upgrade cutover seeds existing lifetime session totals only as watermarks. It creates no historical buckets, so the dashboard explicitly displays its coverage start.
 
-Usage bucket writes, replay-watermark updates, accepted event persistence, and session budget totals share the same SQLite transaction. Aggregate retention never deletes transcripts, audit records, provider state, or session budget totals.
+Usage bucket writes, replay-watermark updates, accepted event persistence, session budget totals, and Orchestrator campaign attribution (`docs/campaign-work-ledger.md`, "Usage Attribution") share the same SQLite transaction. Aggregate retention never deletes transcripts, audit records, provider state, or session budget totals.
 
 ## Authorization and privacy
 

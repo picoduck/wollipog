@@ -6896,7 +6896,7 @@ export class SessionsService {
     const updated = this.ledgerWrite(scope.data, () =>
       this.db.campaignWorkLedger.updateItem(scope.data!.root.id, callerSessionId, request, now));
     if (!updated.ok || !updated.data) return failAs(updated);
-    const item = this.db.campaignWorkLedger.detail(scope.data.root.id, updated.data.itemId, now)!;
+    const item = this.db.campaignWorkLedger.detail(scope.data.root.id, updated.data.itemId, now, canAccess)!;
     return ok({ revision: updated.data.revision, item });
   }
 
@@ -6946,7 +6946,7 @@ export class SessionsService {
     return ok({
       revision: result.data.revision,
       recommendation: this.db.campaignWorkLedger.recommendation(rootId, result.data.recommendationId)!,
-      workItem: result.data.workItemId ? this.db.campaignWorkLedger.detail(rootId, result.data.workItemId, now) : null,
+      workItem: result.data.workItemId ? this.db.campaignWorkLedger.detail(rootId, result.data.workItemId, now, canAccess) : null,
     });
   }
 
@@ -6967,15 +6967,16 @@ export class SessionsService {
       complete: projection?.status === "verified_complete",
       childSessionIds: this.db.campaignDescendantIds(root.id),
       cleanupPending: projection?.children.cleanupPending ?? 0,
+      canSeeSession: canAccess,
     });
     const response: GetCampaignWorkItemsResponse = { summary };
     if (request?.workItemId !== undefined) {
       if (!boundedDecisionString(request.workItemId, 256)) return fail("workItemId must be bounded", 400);
-      const item = ledger.detail(root.id, request.workItemId, now);
+      const item = ledger.detail(root.id, request.workItemId, now, canAccess);
       if (!item) return fail("work item not found in this campaign", 404);
       response.item = item;
     } else {
-      const page = ledger.page(root.id, request ?? {}, now);
+      const page = ledger.page(root.id, request ?? {}, now, canAccess);
       if (!page.ok) {
         return { ok: false, status: page.status, error: page.error, ...(page.details ? { errorDetails: page.details } : {}) };
       }

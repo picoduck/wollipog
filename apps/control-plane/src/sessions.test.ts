@@ -24426,3 +24426,405 @@ for (const priced of [true, false]) test(`independent Codex child usage applies 
   assert.equal(session.pendingApproval?.kind, priced ? "cost_budget" : "cost_unpriced");
   assert.equal(session.status, "input_required", "child spending must not wait for root usage or idle");
 });
+
+/* ------------------------- Campaign time and cost (#2417 slice 6) ------------------------- */
+
+const NO_ATTEMPT_SNAPSHOT = { title: null, harness: null, agentName: null, model: null, effort: null };
+
+function knownUsd(metric: { availability: string; value?: { usd: number } } | undefined): number {
+  assert.ok(metric && metric.availability !== "unavailable", `expected a measured cost, got ${JSON.stringify(metric)}`);
+  return Math.round(metric.value!.usd * 1_000_000) / 1_000_000;
+}
+
+test("independent Codex child-thread usage is attributed to the attempt, while ordinary subagent usage stays out (#2417, #2455)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "codex" }], planComplete: true });
+    const child = spawn(parent.id, "Delegate to Codex threads");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: plan.data!.items[0]!.workItemId, childSessionId: child }).ok);
+    const usage = (extra: Partial<SessionEventPayload>) => db.appendEvent(child,
+      { kind: "token_usage", inputTokens: 10, outputTokens: 1, ...extra } as SessionEventPayload, Date.now(), { accrueUsage: true });
+    usage({ costUsd: 1 });
+    // A Codex child thread bills on its own and reaches the session ledger, so it reaches the attempt.
+    usage({ costUsd: 2, parentToolUseId: "codex-child", independentUsage: true });
+    // A provider subagent already included in the parent's total stays display-only.
+    usage({ costUsd: 9, parentToolUseId: "claude-subagent" });
+    const item = ledgerItem(svc, parent.id, "codex");
+    assert.equal(knownUsd(item.cost), 3);
+    assert.equal(knownUsd(item.cost), db.getSession(child)!.costUsd, "the attempt equals the session ledger it was charged from");
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign usage reaches exactly one bucket per record and keeps its attempt through reassignment, replay, and deletion (#2417)", () => {
+  const { db, svc, parent, spawn, report } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }, { key: "b" }, { key: "nested" }], planComplete: true });
+    const [a, b, nestedItem] = plan.data!.items;
+    const usage = (sessionId: string, costUsd: number, extra: Partial<SessionEventPayload> = {},
+      options: { runnerSeq?: number; historyEpoch?: number } = {}) =>
+      db.appendEvent(sessionId, { kind: "token_usage", inputTokens: 10, outputTokens: 1, costUsd, ...extra } as SessionEventPayload,
+        Date.now(), { accrueUsage: true, ...options });
+    const summaryCost = () => svc.campaignWorkItems(parent.id, {}).data!.summary.cost!;
+
+    usage(parent.id, 0.5); // The root outside any attempt is coordination.
+    const child = spawn(parent.id, "Deliver a");
+    usage(child, 0.25); // A child with no open attempt is unattributed.
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: a!.workItemId, childSessionId: child }).ok);
+    usage(child, 1, {}, { runnerSeq: 1, historyEpoch: 1 });
+    usage(child, 9, { parentToolUseId: "toolu_subagent" }); // Provider-subagent usage stays display-only.
+    usage(child, 2, {}, { runnerSeq: 2, historyEpoch: 1 });
+    svc.onSessionStatus(child, "idle");
+    const delivered = report(child, "a delivered");
+    assert.ok(svc.verifyCampaignChild(parent.id, {
+      childSessionId: child, reportEventSeq: delivered, followUpsAccounted: true, workItem: { id: a!.workItemId, outcome: "delivered" },
+    }).ok);
+
+    // Reassigned to b: a keeps what it used, b gets only what follows.
+    svc.onSessionStatus(child, "running");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: b!.workItemId, childSessionId: child }).ok);
+    usage(child, 4, {}, { runnerSeq: 3, historyEpoch: 1 });
+    const childSnapshot = (over: Partial<SessionSnapshot>) => snapshot({
+      id: child, agentId: AGENT_ID, status: "running", useWorktree: false, worktreePath: null, tokensIn: 40, tokensOut: 4, ...over,
+    });
+    // A snapshot that matches the ledger adds nothing, and history it already covers is a replay.
+    db.updateSessionFromSnapshot(child, childSnapshot({ costUsd: 7.25, historyEpoch: 1, seq: 5 }), Date.now());
+    usage(child, 1, {}, { runnerSeq: 4, historyEpoch: 1 });
+    // Replacement history in a new epoch is not charged again; only the next snapshot's positive
+    // residual is, at observation time, to the attempt open then.
+    usage(child, 100, {}, { runnerSeq: 6, historyEpoch: 2 });
+    db.updateSessionFromSnapshot(child, childSnapshot({ costUsd: 8, historyEpoch: 2, seq: 6 }), Date.now());
+
+    // A nested Orchestrator's own usage is coordination; its child's, outside an attempt, is not.
+    const nested = db.createSession({
+      id: "cost-nested-orchestrator", parentSessionId: parent.id, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+      agentId: "test-orchestrator", title: "Nested", useWorktree: false, driver: "claude-code", config: {},
+      role: "orchestrator", orchestratorPolicy: db.getSession(parent.id)!.orchestratorPolicy!, now: Date.now(),
+    });
+    const grandchild = db.createSession({
+      id: "cost-nested-grandchild", parentSessionId: nested.id, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+      agentId: AGENT_ID, title: "Grandchild", useWorktree: false, driver: "claude-code", config: {}, now: Date.now(),
+    });
+    usage(nested.id, 0.125);
+    usage(grandchild.id, 0.0625);
+    assert.ok(svc.assignCampaignWorkItem(nested.id, { workItemId: nestedItem!.workItemId, childSessionId: grandchild.id }).ok);
+    usage(grandchild.id, 3);
+
+    // A session outside every campaign contributes nothing.
+    const outsider = db.createSession({
+      id: "cost-outsider", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "Outside",
+      useWorktree: false, driver: "claude-code", config: {}, now: Date.now(),
+    });
+    usage(outsider.id, 50);
+
+    const first = ledgerItem(svc, parent.id, "a");
+    const second = ledgerItem(svc, parent.id, "b");
+    assert.equal(knownUsd(first.cost), 3, "a keeps both of its records, counted once");
+    assert.equal(first.cost?.availability === "known" && first.cost.value.records, 2);
+    assert.equal(knownUsd(second.cost), 4.75, "b gets its own record and the residual observed while it was open");
+    assert.deepEqual(first.attemptCosts?.map((entry) => knownUsd(entry.cost)), [3]);
+    assert.equal(knownUsd(ledgerItem(svc, parent.id, "nested").cost), 3);
+    let cost = summaryCost();
+    assert.equal(knownUsd(cost.workItems), 10.75);
+    assert.equal(knownUsd(cost.coordination), 0.625);
+    assert.equal(knownUsd(cost.unattributed), 0.3125);
+    assert.equal(knownUsd(cost.total), 11.6875);
+    assert.equal(cost.attributedSince, db.getSession(parent.id)!.createdAt, "the campaign was attributed from its start");
+
+    // Reconciliation: the buckets partition the members' ledger deltas exactly.
+    const members = [parent.id, child, nested.id, grandchild.id];
+    const ledgerTotal = members.reduce((sum, id) => sum + db.getSession(id)!.costUsd, 0);
+    assert.equal(knownUsd(cost.total), Math.round(ledgerTotal * 1_000_000) / 1_000_000);
+    assert.equal(knownUsd(cost.total),
+      Math.round((knownUsd(cost.workItems) + knownUsd(cost.coordination) + knownUsd(cost.unattributed)) * 1_000_000) / 1_000_000);
+
+    // Event pruning, archive, and deletion leave attribution alone.
+    db.raw().prepare("DELETE FROM session_events WHERE session_id=?").run(child);
+    db.raw().prepare("UPDATE sessions SET archived=1 WHERE id=?").run(child);
+    db.deleteSession(child);
+    cost = summaryCost();
+    assert.equal(knownUsd(ledgerItem(svc, parent.id, "a").cost), 3);
+    assert.equal(knownUsd(ledgerItem(svc, parent.id, "b").cost), 4.75);
+    assert.equal(knownUsd(cost.total), 11.6875);
+  } finally {
+    db.close();
+  }
+});
+
+test("waiting before the first attempt counts toward Waiting Time but not Item Elapsed (#2417)", () => {
+  const { db, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const ledger = db.campaignWorkLedger;
+    const minute = 60_000;
+    const base = Date.now() + minute;
+    const planned = ledger.recordPlan(parent.id, parent.id, { items: [{ key: "held", dispatchState: "queued" }], planComplete: true }, base);
+    assert.ok(planned.ok);
+    const itemId = planned.data.items[0]!.workItemId;
+    // Blocked for ten minutes before anyone was assigned, then worked on for two.
+    assert.ok(ledger.updateItem(parent.id, parent.id, {
+      workItemId: itemId, blocker: { reason: "Waiting for the storage slice.", responsibleActor: "orchestrator" },
+    }, base + minute).ok);
+    assert.ok(ledger.updateItem(parent.id, parent.id, { workItemId: itemId, blocker: null }, base + 11 * minute).ok);
+    const child = spawn(parent.id, "Deliver held");
+    assert.ok(ledger.assign(parent.id, parent.id, itemId, child, NO_ATTEMPT_SNAPSHOT, base + 11 * minute).ok);
+    const detail = ledger.detail(parent.id, itemId, base + 13 * minute)!;
+    const itemElapsed = (detail.times!.elapsed.endedAt ?? detail.times!.asOf) - detail.times!.elapsed.startedAt!;
+    assert.equal(itemElapsed, 2 * minute, "Item Elapsed starts at the first attempt");
+    assert.deepEqual(detail.times!.waiting, { availability: "known", value: 10 * minute });
+    assert.deepEqual(detail.times!.queue, { availability: "known", value: minute });
+    assert.ok(detail.times!.waiting.availability === "known" && detail.times!.waiting.value > itemElapsed,
+      "Waiting Time may exceed Item Elapsed: the durations are not a partition of it");
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign elapsed is wall-clock, not a sum of concurrent items, and item times replay durable intervals (#2417)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const ledger = db.campaignWorkLedger;
+    const minute = 60_000;
+    const base = Date.now() + minute;
+    db.raw().prepare("UPDATE sessions SET created_at=? WHERE id=?").run(base, parent.id);
+    const planned = ledger.recordPlan(parent.id, parent.id, {
+      items: [{ key: "one", dispatchState: "queued" }, { key: "two", dispatchState: "queued" }], planComplete: true,
+    }, base);
+    assert.ok(planned.ok);
+    const children = [spawn(parent.id, "One"), spawn(parent.id, "Two")];
+    planned.data.items.forEach((item, index) => {
+      assert.ok(ledger.assign(parent.id, parent.id, item.workItemId, children[index]!, NO_ATTEMPT_SNAPSHOT, base + minute).ok);
+    });
+    for (const [index, child] of children.entries()) {
+      db.updateSessionStatus(child, "idle", base + 11 * minute);
+      assert.ok(ledger.recordVerification(parent.id, {
+        workItemId: planned.data.items[index]!.workItemId, childSessionId: child, outcome: "delivered",
+        report: { seq: 1, eventEpoch: null, digest: null, ts: null }, verifiedBySessionId: parent.id,
+      }, base + 12 * minute).ok);
+    }
+    const detail = ledger.detail(parent.id, planned.data.items[0]!.workItemId, base + 20 * minute)!;
+    assert.deepEqual(detail.times, {
+      elapsed: { startedAt: base + minute, endedAt: base + 12 * minute },
+      queue: { availability: "known", value: minute },
+      waiting: { availability: "known", value: minute },
+      active: { availability: "known", value: 10 * minute },
+      asOf: base + 20 * minute,
+    });
+    assert.equal(ledger.page(parent.id, { state: "all" }, base + 20 * minute).ok, true);
+
+    // Two concurrent eleven-minute items complete a campaign that ran twelve minutes, not twenty-two.
+    ledger.accounting.observeCompletion(parent.id, true, base + 12 * minute, () => null);
+    const summary = ledger.summary(parent.id, {
+      campaignCreatedAt: base, complete: true, childSessionIds: children, cleanupPending: 0,
+    });
+    assert.equal(summary.elapsed.endedAt! - summary.elapsed.startedAt!, 12 * minute);
+    ledger.accounting.observeCompletion(parent.id, true, base + 30 * minute, () => null);
+    assert.equal(ledger.accounting.completedAt(parent.id), base + 12 * minute, "only the first observation stamps completion");
+    ledger.accounting.observeCompletion(parent.id, false, base + 31 * minute, () => null);
+    assert.equal(ledger.summary(parent.id, {
+      campaignCreatedAt: base, complete: false, childSessionIds: children, cleanupPending: 0,
+    }).elapsed.endedAt, null, "a reopened campaign is running again");
+
+    // A campaign created before recording began takes its last verification time only when it was
+    // already complete at its first observation; any later completion is stamped when observed.
+    const accounting = ledger.accounting;
+    db.raw().prepare("UPDATE campaign_work_accounting_meta SET started_at=?").run(base + 40 * minute);
+    db.raw().prepare("DELETE FROM campaign_work_completion").run();
+    accounting.observeCompletion(parent.id, true, base + 41 * minute, () => base + 12 * minute);
+    assert.equal(accounting.completedAt(parent.id), base + 12 * minute, "complete at cutover keeps its real end");
+    accounting.observeCompletion(parent.id, false, base + 42 * minute, () => base + 12 * minute);
+    accounting.observeCompletion(parent.id, true, base + 43 * minute, () => base + 12 * minute);
+    assert.equal(accounting.completedAt(parent.id), base + 43 * minute, "a reopened legacy campaign is not backdated");
+    db.raw().prepare("DELETE FROM campaign_work_completion").run();
+    accounting.observeCompletion(parent.id, false, base + 44 * minute, () => base + 12 * minute);
+    accounting.observeCompletion(parent.id, true, base + 45 * minute, () => base + 12 * minute);
+    assert.equal(accounting.completedAt(parent.id), base + 45 * minute, "observed unfinished after cutover, so stamped now");
+    void svc;
+  } finally {
+    db.close();
+  }
+});
+
+test("the campaign projection records completion when it first reaches verified_complete and clears it on reopening (#2417)", () => {
+  const { db, svc, parent, spawn, report, verify } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const child = spawn(parent.id, "Only child");
+    svc.onSessionStatus(child, "idle");
+    assert.ok(verify(child, report(child, "done")).ok);
+    assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
+    const completedAt = db.campaignWorkLedger.accounting.completedAt(parent.id);
+    assert.ok(completedAt !== null);
+    assert.equal(svc.campaignWorkItems(parent.id, {}).data?.summary.elapsed.endedAt, completedAt);
+    spawn(parent.id, "More work");
+    assert.notEqual(db.campaignProjection(parent.id)?.status, "verified_complete");
+    assert.equal(db.campaignWorkLedger.accounting.completedAt(parent.id), null);
+    assert.equal(svc.campaignWorkItems(parent.id, {}).data?.summary.elapsed.endedAt, null);
+  } finally {
+    db.close();
+  }
+});
+
+test("time and cost before recording began read as unavailable or partial, never zero, and unpriced usage is a lower bound (#2417)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a", dispatchState: "queued" }, { key: "idle" }], planComplete: true });
+    const child = spawn(parent.id, "Deliver a");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: plan.data!.items[0]!.workItemId, childSessionId: child }).ok);
+    db.appendEvent(child, { kind: "token_usage", inputTokens: 10, outputTokens: 1, costUsd: 1 }, Date.now(), { accrueUsage: true });
+    // No provider cost and no rate: the record counts, unpriced.
+    db.appendEvent(child, { kind: "token_usage", inputTokens: 10, outputTokens: 1, model: "unknown-model" }, Date.now(), { accrueUsage: true });
+    db.appendEvent(parent.id, { kind: "token_usage", inputTokens: 10, outputTokens: 1, costUsd: 0.5 }, Date.now(), { accrueUsage: true });
+
+    let cost = svc.campaignWorkItems(parent.id, {}).data!.summary.cost!;
+    assert.deepEqual(cost.workItems, {
+      availability: "partial", reason: "unpriced_usage",
+      value: { usd: 1, source: "unpriced", unpricedRecords: 1, records: 2 },
+    }, "the weakest provenance wins and the amount is a lower bound");
+    assert.deepEqual(cost.coordination, {
+      availability: "known", value: { usd: 0.5, source: "providerReported", unpricedRecords: 0, records: 1 },
+    });
+    assert.deepEqual(cost.unattributed, {
+      availability: "known", value: { usd: 0, source: "providerReported", unpricedRecords: 0, records: 0 },
+    }, "nothing used is a known zero, distinct from missing data");
+    assert.equal(cost.total.availability === "partial" && cost.total.value.source, "unpriced");
+    assert.deepEqual(ledgerItem(svc, parent.id, "idle").cost, { availability: "unavailable", reason: "not_started" });
+
+    // Move the recording start after everything above: it all predates attribution and intervals.
+    const later = Date.now() + 60_000;
+    db.raw().prepare("UPDATE campaign_work_accounting_meta SET started_at=?").run(later);
+    cost = svc.campaignWorkItems(parent.id, {}).data!.summary.cost!;
+    for (const bucket of [cost.total, cost.workItems, cost.coordination, cost.unattributed]) {
+      assert.equal(bucket.availability === "partial" && bucket.reason, "history_unavailable");
+    }
+    assert.equal(cost.attributedSince, later);
+    db.raw().prepare("DELETE FROM campaign_work_item_transitions").run();
+    db.raw().prepare("DELETE FROM campaign_attempt_status_transitions").run();
+    const times = ledgerItem(svc, parent.id, "a").times!;
+    assert.deepEqual([times.queue, times.waiting, times.active], [
+      { availability: "unavailable", reason: "history_unavailable" },
+      { availability: "unavailable", reason: "history_unavailable" },
+      { availability: "unavailable", reason: "history_unavailable" },
+    ]);
+  } finally {
+    db.close();
+  }
+});
+
+test("starting recording seeds existing items and open attempts once, so later intervals are measured (#2417)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, {
+      items: [{ key: "a", dispatchState: "queued" }, { key: "orphaned", dispatchState: "queued" }], planComplete: true,
+    });
+    const child = spawn(parent.id, "Deliver a");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: plan.data!.items[0]!.workItemId, childSessionId: child }).ok);
+    // An open attempt whose session was deleted before recording began still gets its interval.
+    const doomed = spawn(parent.id, "Deleted before the upgrade");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: plan.data!.items[1]!.workItemId, childSessionId: doomed }).ok);
+    db.deleteSession(doomed);
+    // Simulate an upgrade: the ledger existed, recording had not started.
+    for (const table of ["campaign_work_item_transitions", "campaign_attempt_status_transitions", "campaign_work_accounting_meta"]) {
+      db.raw().prepare(`DELETE FROM ${table}`).run();
+    }
+    const start = Date.now() + 1_000;
+    db.campaignWorkLedger.accounting.startRecording(start);
+    db.campaignWorkLedger.accounting.startRecording(start + 5_000);
+    assert.equal(db.campaignWorkLedger.accounting.startedAt(), start);
+    assert.equal(Number((db.raw().prepare("SELECT COUNT(*) AS count FROM campaign_work_item_transitions").get() as { count: number }).count), 2);
+    db.updateSessionStatus(child, "idle", start + 2_000);
+    const times = db.campaignWorkLedger.detail(parent.id, plan.data!.items[0]!.workItemId, start + 3_000)!.times!;
+    assert.deepEqual(times.active, { availability: "partial", value: 2_000, reason: "history_unavailable" });
+    assert.deepEqual(times.waiting, { availability: "partial", value: 1_000, reason: "history_unavailable" });
+    const orphaned = db.campaignWorkLedger.detail(parent.id, plan.data!.items[1]!.workItemId, start + 3_000)!.times!;
+    assert.deepEqual(orphaned.waiting, { availability: "partial", value: 3_000, reason: "history_unavailable" },
+      "a deleted attempt session blocks the item from the moment recording began");
+  } finally {
+    db.close();
+  }
+});
+
+test("the summary embedded in the root's view hides cost from contributors its whole audience cannot read (#2417)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true });
+    const child = spawn(parent.id, "Deliver a");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: plan.data!.items[0]!.workItemId, childSessionId: child }).ok);
+    db.appendEvent(child, { kind: "token_usage", inputTokens: 1, costUsd: 1 }, Date.now(), { accrueUsage: true });
+    db.appendEvent(parent.id, { kind: "token_usage", inputTokens: 1, costUsd: 0.5 }, Date.now(), { accrueUsage: true });
+    assert.equal(knownUsd(db.campaignProjection(parent.id)?.work?.cost?.workItems), 1, "a child sharing the root's scope is visible");
+
+    // The child now belongs to another user: some readers of the root may not read it.
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='someone-else' WHERE session_id=?").run(child);
+    const cost = db.campaignProjection(parent.id)!.work!.cost!;
+    assert.deepEqual(cost.workItems, { availability: "unavailable", reason: "not_authorized" });
+    assert.deepEqual(cost.total, { availability: "unavailable", reason: "not_authorized" });
+    assert.equal(knownUsd(cost.coordination), 0.5);
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign cost follows session access: a hidden contributor hides its bucket, attempt, and item (#2417)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const plan = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true });
+    const itemId = plan.data!.items[0]!.workItemId;
+    const child = spawn(parent.id, "Deliver a");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: itemId, childSessionId: child }).ok);
+    db.appendEvent(child, { kind: "token_usage", inputTokens: 1, costUsd: 1 }, Date.now(), { accrueUsage: true });
+    db.appendEvent(parent.id, { kind: "token_usage", inputTokens: 1, costUsd: 0.5 }, Date.now(), { accrueUsage: true });
+    const hiddenChild = (sessionId: string) => sessionId !== child;
+    const notAuthorized = { availability: "unavailable", reason: "not_authorized" };
+
+    const page = svc.campaignWorkItems(parent.id, { state: "all" }, hiddenChild).data!;
+    assert.deepEqual(page.summary.cost?.workItems, notAuthorized);
+    assert.deepEqual(page.summary.cost?.total, notAuthorized);
+    assert.equal(knownUsd(page.summary.cost?.coordination), 0.5, "a bucket whose contributors are all visible stays");
+    assert.deepEqual(page.page?.items[0]?.cost, notAuthorized);
+    const detail = svc.campaignWorkItems(parent.id, { workItemId: itemId }, hiddenChild).data!.item!;
+    assert.deepEqual(detail.cost, notAuthorized);
+    assert.deepEqual(detail.attemptCosts?.[0]?.cost, notAuthorized);
+    // The cost sort moves as usage arrives, so its cursor is refused once usage changed.
+    const other = spawn(parent.id, "Deliver b");
+    const second = svc.recordCampaignPlan(parent.id, { items: [{ key: "b" }], planComplete: true }).data!.items[0]!.workItemId;
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: second, childSessionId: other }).ok);
+    db.appendEvent(other, { kind: "token_usage", inputTokens: 1, costUsd: 0.25 }, Date.now(), { accrueUsage: true });
+    const first = svc.campaignWorkItems(parent.id, { state: "all", sort: "cost", limit: 1 }).data!.page!;
+    assert.equal(first.items[0]?.key, "a");
+    assert.deepEqual(
+      svc.campaignWorkItems(parent.id, { state: "all", sort: "cost" }, hiddenChild).data!.page!.items.map((item) => item.key),
+      ["b", "a"], "a reader who cannot see a's cost does not get it ranked by that cost");
+    const cursorJson = Buffer.from(first.nextCursor!, "base64url").toString("utf8");
+    assert.doesNotMatch(cursorJson, /1250000|1000000|250000/u, "the cursor reveals no attributed amount, even a hidden one");
+    assert.equal(svc.campaignWorkItems(parent.id, { state: "all", sort: "cost", limit: 1, cursor: first.nextCursor! }, hiddenChild).status,
+      409, "a cost cursor minted under another visibility orders differently, so it restarts instead of skipping");
+    const queueFirst = svc.campaignWorkItems(parent.id, { state: "all", limit: 1 }).data!.page!;
+    db.appendEvent(other, { kind: "token_usage", inputTokens: 1, costUsd: 2 }, Date.now(), { accrueUsage: true });
+    const stale = svc.campaignWorkItems(parent.id, { state: "all", sort: "cost", limit: 1, cursor: first.nextCursor! });
+    assert.equal(stale.status, 409, "a cost-sorted page after new usage restarts instead of skipping an item");
+    assert.ok(svc.campaignWorkItems(parent.id, { state: "all", limit: 1, cursor: queueFirst.nextCursor! }).ok,
+      "a queue-sorted cursor does not depend on usage");
+    // A mutation's response is a read too.
+    const updated = svc.updateCampaignWorkItem(parent.id, { workItemId: itemId, title: "Renamed" }, hiddenChild);
+    assert.ok(updated.ok && updated.data, updated.error);
+    assert.deepEqual(updated.data.item.cost, notAuthorized);
+    assert.deepEqual(updated.data.item.attemptCosts?.[0]?.cost, notAuthorized);
+
+    // A deleted contributor's share is visible to whoever can read the campaign.
+    db.deleteSession(child);
+    const after = svc.campaignWorkItems(parent.id, { workItemId: itemId }, hiddenChild).data!;
+    assert.equal(knownUsd(after.item?.cost), 1);
+    assert.equal(knownUsd(after.summary.cost?.total), 3.75);
+    // ...and only to them: a reader who cannot read the root (a differently scoped nested
+    // Orchestrator) does not gain a contributor's cost when that contributor is deleted.
+    const withoutRoot = (sessionId: string) => sessionId !== parent.id && sessionId !== child;
+    const hiddenDetail = db.campaignWorkLedger.detail(parent.id, itemId, Date.now(), withoutRoot)!;
+    assert.deepEqual(hiddenDetail.cost, notAuthorized);
+    assert.deepEqual(hiddenDetail.attemptCosts?.[0]?.cost, notAuthorized);
+    const hiddenSummary = db.campaignWorkLedger.accounting.costSummary(parent.id, db.getSession(parent.id)!.createdAt, withoutRoot);
+    assert.deepEqual(hiddenSummary.workItems, notAuthorized);
+    assert.deepEqual(hiddenSummary.coordination, notAuthorized, "the root's own usage needs the root as well");
+  } finally {
+    db.close();
+  }
+});

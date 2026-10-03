@@ -150,6 +150,7 @@ import {
   type OrchestratorCampaignProjection,
   type OrchestratorFollowUpRecord,
   type CampaignAttemptBoundary,
+  type CampaignCostSummary,
   type CampaignMembershipView,
   type CampaignObservedCleanup,
   type OrchestratorDefaults,
@@ -295,6 +296,7 @@ import {
   CampaignForgeObservationStore,
   type ForgeObserverState,
 } from "./campaign-forge-observations.js";
+import { CAMPAIGN_WORK_ACCOUNTING_SCHEMA, type CampaignUsageMembership } from "./campaign-work-accounting.js";
 import type { CampaignAttemptSessionObservation } from "./campaign-work-state.js";
 import {
   executionTargetsForHost,
@@ -898,6 +900,7 @@ CREATE INDEX IF NOT EXISTS idx_orchestrator_follow_up_campaign
   ON orchestrator_campaign_follow_ups(campaign_session_id, created_at, id);
 ${CAMPAIGN_WORK_LEDGER_SCHEMA}
 ${CAMPAIGN_FORGE_OBSERVATION_SCHEMA}
+${CAMPAIGN_WORK_ACCOUNTING_SCHEMA}
 
 -- Descendant transitions are durable before a synthetic parent turn is admitted. Stable event
 -- identities make repeated projection/reconnect passes harmless, while the continuation range is
@@ -6234,6 +6237,7 @@ export class ControlPlaneDb {
       controlPlane.collectWorkflowArtifactBlobs();
       controlPlane.rekeyNestedCampaignChildReports();
       controlPlane.captureUnresetLegacyCampaignReports();
+      controlPlane.campaignWorkLedger.accounting.startRecording(Date.now());
       controlPlane.seedUsageAggregationBaseline(Date.now());
       controlPlane.maintainUsageAggregation(Date.now());
       return controlPlane;
@@ -11989,6 +11993,10 @@ export class ControlPlaneDb {
          ${USAGE_LEDGER_ACCUMULATE_SQL},
          updated_at=excluded.updated_at`,
     ).run(sessionId, dimensions.model, dimensions.driver, ...ledgerValues, occurredAt);
+    // Campaign attribution (#2417) shares this transaction and this delta, so each usage record that
+    // reaches the session ledger reaches exactly one campaign bucket, and nothing else does.
+    this.campaignWorkLedger.accounting.attributeUsage(sessionId, amount, occurredAt,
+      () => this.campaignUsageMembership(sessionId));
     if (updateSessionTotals) {
       this.stmt(
         `UPDATE sessions SET
@@ -15857,6 +15865,16 @@ export class ControlPlaneDb {
       : this.stmt("SELECT * FROM sessions WHERE id=?").get(root.id) as unknown as SessionRow;
   }
 
+  /** Where a session's usage outside an attempt is attributed (#2417): the campaign the shared
+   * ancestry walk (#2451) resolves, as coordination when the session is itself an Orchestrator of
+   * that campaign (the root or a nested one) and as unattributed otherwise. Null outside every
+   * campaign, including under refused ancestry or an unreadable root policy. */
+  private campaignUsageMembership(sessionId: string): CampaignUsageMembership | null {
+    const root = this.campaignAncestryRoot(sessionId);
+    if (typeof root !== "object" || !root.hasPolicy) return null;
+    return { campaignSessionId: root.id, coordinating: this.resolvedCampaignSessionId(sessionId) === root.id };
+  }
+
   /** The campaign id every campaign-keyed write must use, so rows land where the projection
    * counts them. Null whenever campaignProjection would refuse this session's ancestry. */
   resolvedCampaignSessionId(campaignSessionId: string): string | null {
@@ -16047,6 +16065,10 @@ export class ControlPlaneDb {
       : continuation.continuation?.state === "missing_result" ? "continuation_missing_result" as const
       : undefined;
     const status = stalled && childStatus === "active" ? "blocked" as const : childStatus;
+    // Campaign Elapsed ends when the campaign first reaches verified completion and resumes if it
+    // reopens. Completion is derived, never written, so the projection records what it observes.
+    this.campaignWorkLedger.accounting.observeCompletion(resolvedCampaignId, status === "verified_complete", Date.now(),
+      () => this.campaignWorkLedger.lastVerifiedAt(resolvedCampaignId));
     const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
     const occupied = this.childSessionAllocations(resolvedCampaignId).liveCount;
     return {
@@ -16097,7 +16119,36 @@ export class ControlPlaneDb {
         complete: status === "verified_complete",
         childSessionIds: childIds,
         cleanupPending,
+        canSeeSession: this.campaignRootAudienceCanSee(resolvedCampaignId),
       }) } : {}),
+    };
+  }
+
+  /** The campaign's cost buckets as one principal may see them: every contributing session is
+   * checked against that principal's own access (#2417). Null outside a readable campaign. */
+  campaignCostFor(principal: AuthPrincipal, campaignSessionId: string): CampaignCostSummary | null {
+    const campaign = this.stmt("SELECT created_at FROM sessions WHERE id=?").get(campaignSessionId) as
+      { created_at: number } | undefined;
+    if (!campaign) return null;
+    return this.campaignWorkLedger.accounting.costSummary(campaignSessionId, campaign.created_at,
+      (sessionId) => this.canAccessSession(principal, sessionId));
+  }
+
+  /** Cost visibility for a summary embedded in the root's own view, which reaches everyone who can
+   * read the root: a contributing session counts as visible only when that whole audience can read
+   * it too, so the view never carries cost its reader could not see (#2417). */
+  private campaignRootAudienceCanSee(rootId: string): (sessionId: string) => boolean {
+    const rootScope = this.sessionScope(rootId);
+    const seen = new Map<string, boolean>();
+    return (sessionId) => {
+      if (sessionId === rootId) return true;
+      let visible = seen.get(sessionId);
+      if (visible === undefined) {
+        const scope = this.sessionScope(sessionId);
+        visible = rootScope !== null && scope !== null && this.scopeAudienceContainedWithMembership(rootScope, scope);
+        seen.set(sessionId, visible);
+      }
+      return visible;
     };
   }
 

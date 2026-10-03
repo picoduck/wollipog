@@ -11,7 +11,8 @@ const MINUTE = 60_000;
 /**
  * Seed a real control-plane database with a campaign ledger (#2417): delivered, running, blocked,
  * waiting, queued, planned and removed work, an accepted follow-up, and rejected and duplicate
- * recommendations. The live spec serves it through the real Read API.
+ * recommendations, with attributed usage: provider-reported, unpriced, coordination, unattributed,
+ * and an attempt that used nothing. The live spec serves it through the real Read API.
  */
 export function seedCampaignStatus(databasePath: string, workspacePath: string) {
   const db = ControlPlaneDb.open(databasePath);
@@ -106,9 +107,19 @@ export function seedCampaignStatus(databasePath: string, workspacePath: string) 
     const id = (key: string) => plan.data!.items.find((item) => item.key === key)!.workItemId;
     const assign = (key: string, session: string) =>
       assert.ok(svc.assignCampaignWorkItem(root, { workItemId: id(key), childSessionId: session }).ok);
+    // Usage is attributed as it is recorded (slice 6): to the session's open attempt, otherwise to
+    // coordination for the root or unattributed for a child. No costUsd and no rate is unpriced.
+    const usage = (session: string, costUsd?: number) => db.appendEvent(session, {
+      kind: "token_usage", inputTokens: 1_000, outputTokens: 200,
+      ...(costUsd === undefined ? { model: "unpriced-model" } : { costUsd }),
+    }, Date.now(), { accrueUsage: true });
+    usage(root, 0.35);
+    usage(untracked, 0.15);
 
     // Delivered: verified against the child's final report, then the child is archived.
     assign("contract", contract);
+    usage(contract, 0.7);
+    usage(contract, 0.5);
     db.updateSessionStatus(contract, "idle", now - 120 * MINUTE);
     const report = db.appendEvent(contract, { kind: "agent_message", text: "Contract merged.", final: true }, now - 121 * MINUTE).seq;
     assert.ok(svc.updateCampaignWorkItem(root, { workItemId: id("contract"),
@@ -119,9 +130,12 @@ export function seedCampaignStatus(databasePath: string, workspacePath: string) 
     db.setSessionArchived(contract, true, now - 110 * MINUTE);
 
     assign("panel", panel);
+    usage(panel, 2.4);
+    usage(panel);
     assert.ok(svc.updateCampaignWorkItem(root, { workItemId: id("panel"),
       stage: { stage: "implementing", note: "Binding to the merged contract." } }).ok);
     assign("read-api", readApi);
+    usage(readApi, 0.8);
     assert.ok(svc.updateCampaignWorkItem(root, { workItemId: id("read-api"),
       blocker: { reason: "Waiting for a merge decision on the storage pull request.", responsibleActor: "human" },
       nextAction: "Rebase onto main once storage merges.",

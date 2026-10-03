@@ -127,6 +127,10 @@ export function campaignCostView(metric: CampaignMetric<CampaignCostValue> | und
   const value = metric.value;
   // formatCost renders nothing for zero. A known zero is a real amount and says so.
   const text = formatCost(value.usd) || "$0.00";
+  // Nothing was used: a known zero with no provenance to report.
+  if (metric.availability === "known" && value.records === 0) {
+    return { text, provenance: null, note: "No usage was recorded.", priced: true };
+  }
   if (metric.availability === "partial" || value.source === "unpriced" || value.unpricedRecords > 0) {
     const records = value.unpricedRecords === 1 ? "1 record" : `${value.unpricedRecords} records`;
     return {
