@@ -9541,7 +9541,7 @@ export class SessionsService {
         ),
         answeredBy: resolvedByParentSessionId ? { kind: "parent", sessionId: resolvedByParentSessionId } : { kind: "person" },
       };
-      this.db.recordQuestionAnswerSummary(sessionId, pending.questions ?? [], payload, now);
+      this.db.recordQuestionAnswerSummary(sessionId, pending.questions ?? [], question !== null, payload, now);
       // A question parked from a reconnect snapshot before its request event arrived has no row to
       // attach to yet; the summary is restored right after that request when it arrives, live or
       // from history.
