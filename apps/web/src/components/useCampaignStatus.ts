@@ -211,6 +211,9 @@ export function useCampaignStatus({
   filtersRef.current = filters;
   const loadedCountRef = useRef(0);
   loadedCountRef.current = list.key === listKey ? list.state.items.length : 0;
+  // The page a Show More in flight asked for. A reload that starts before it lands drops its
+  // response, so the reload loads those rows itself rather than swallowing the request.
+  const requestedMore = useRef<{ key: string } | null>(null);
 
   /**
    * Load the list from its first page until at least `target` rows are shown, page by page, all at
@@ -275,7 +278,9 @@ export function useCampaignStatus({
   if (restore.current.key !== listKey) restore.current.count = 0;
   useEffect(() => {
     if (!online) return;
-    return reload(Math.max(loadedCountRef.current, restore.current.count));
+    const pendingMore = requestedMore.current?.key === listKey ? CAMPAIGN_WORK_PAGE_SIZE : 0;
+    requestedMore.current = null;
+    return reload(Math.max(loadedCountRef.current + pendingMore, restore.current.count));
   }, [reload, online, revision, reconnects, retries]);
 
   const loadMore = useCallback(() => {
@@ -283,8 +288,12 @@ export function useCampaignStatus({
     // A reload in flight would replace whatever this page adds, so paging waits for it.
     if (current.key !== listKey || !current.cursor || current.state.loadingMore || reloading.current) return;
     const generation = listGeneration.current;
+    const request = { key: listKey };
+    requestedMore.current = request;
+    const settled = () => { if (requestedMore.current === request) requestedMore.current = null; };
     setList({ ...current, state: { ...current.state, loadingMore: true } });
     api.campaignWorkItems(session.id, campaignWorkItemsQuery(filtersRef.current, current.cursor, CAMPAIGN_WORK_PAGE_SIZE)).then((page) => {
+      settled();
       if (generation !== listGeneration.current) return;
       setList((latest) => {
         const seen = new Set(latest.state.items.map((item) => item.id));
@@ -303,6 +312,7 @@ export function useCampaignStatus({
         };
       });
     }).catch((cause: unknown) => {
+      settled();
       if (generation !== listGeneration.current) return;
       if (isRevisionChanged(cause)) {
         // The ledger moved between pages. Reload what was shown, plus the page asked for, under the

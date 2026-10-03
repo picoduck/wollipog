@@ -105,7 +105,8 @@ CLI). Every record lands in the root campaign, including from a nested Orchestra
   item or moving an item to another child opens a new attempt; earlier attempts keep their
   verification and accounting.
 - `update_campaign_work_item` records reported stages, blockers, next actions, cancellations, and
-  scope removals. A reported stage is a claim: `merged` does not mark the item delivered.
+  scope removals, and closes a failed or abandoned attempt with `endAttempt` so the item waits for
+  dispatch again. A reported stage is a claim: `merged` does not mark the item delivered.
 - `adjudicate_campaign_recommendation` records accepted, rejected, deferred, or duplicate for a
   recorded follow-up; pass `originWorkItemIds` when recording it.
 - `get_campaign_work_items` reads the summary and a page or one item. Restart from the first page

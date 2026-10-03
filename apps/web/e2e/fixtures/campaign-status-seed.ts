@@ -75,6 +75,18 @@ export function seedCampaignStatus(databasePath: string, workspacePath: string) 
     const readApi = child("#2417 Slice 5: Read API", 70);
     const timeCost = child("#2417 Slice 6: Time and Cost", 50);
     const untracked = child("Exploratory Spike", 40);
+    // A nested Orchestrator is a member of the root campaign, and an unrelated session is in none.
+    const nested = "campaign-nested-orchestrator";
+    db.createSession({
+      id: nested, parentSessionId: root, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "orchestrator-agent",
+      title: "Nested Release Orchestrator", useWorktree: false, driver: "claude-code", config: { permissionMode: "orchestrator" },
+      role: "orchestrator", orchestratorPolicy: db.getSession(root)!.orchestratorPolicy!, now: now - 35 * MINUTE,
+    });
+    const unrelated = "unrelated-session";
+    db.createSession({
+      id: unrelated, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "child-agent", title: "Unrelated Session",
+      useWorktree: false, driver: "claude-code", config: {}, now: now - 30 * MINUTE,
+    });
 
     const repo = "picoduck/wollipog";
     const plan = svc.recordCampaignPlan(root, {
@@ -130,7 +142,30 @@ export function seedCampaignStatus(databasePath: string, workspacePath: string) 
       reason: "Motion is out of scope." }).ok);
 
     return { rootId: root, panelId: panel, readApiId: readApi, timeCostId: timeCost, untrackedId: untracked,
+      nestedId: nested, unrelatedId: unrelated,
       contractItemId: id("contract"), panelItemId: id("panel"), readApiItemId: id("read-api") };
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Record plan items while the control plane is down, through the same service operation the
+ * Orchestrator tool calls. Used to prove a reconnecting browser catches up on what it missed.
+ */
+export function recordPlanOffline(databasePath: string, rootId: string, items: Array<{ key: string; title: string; queuePosition: number }>) {
+  const db = ControlPlaneDb.open(databasePath);
+  try {
+    const hub = new Proxy({ isRunnerOnline: () => false, sendToRunner: () => false }, {
+      get(target, key: string) {
+        return key in target ? target[key as keyof typeof target] : () => undefined;
+      },
+    }) as unknown as Hub;
+    const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+    const recorded = svc.recordCampaignPlan(rootId, {
+      items: items.map((item) => ({ ...item, dispatchState: "queued" as const })), planComplete: true,
+    });
+    assert.ok(recorded.ok, recorded.error);
   } finally {
     db.close();
   }
@@ -146,6 +181,8 @@ export function restoreCampaignStatuses(databasePath: string, seeded: ReturnType
     db.updateSessionStatus(seeded.readApiId, "running", now - 8 * MINUTE);
     db.updateSessionStatus(seeded.timeCostId, "idle", now - 3 * MINUTE);
     db.updateSessionStatus(seeded.untrackedId, "idle", now - 30 * MINUTE);
+    db.updateSessionStatus(seeded.nestedId, "running", now - 2 * MINUTE);
+    db.updateSessionStatus(seeded.unrelatedId, "idle", now - 20 * MINUTE);
   } finally {
     db.close();
   }

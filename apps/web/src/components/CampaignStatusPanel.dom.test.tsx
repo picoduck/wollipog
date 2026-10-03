@@ -562,6 +562,44 @@ test("Show More waits for a reload of the shown rows instead of racing it", asyn
   }
 });
 
+test("Show More still lands when a new revision arrives while its page is in flight", async () => {
+  // The live order: the next page is requested, the ledger moves, the root view carrying the new
+  // revision arrives first, and only then is the page refused (or answered) under the old revision.
+  const all = Array.from({ length: 80 }, (_, index) => item(`cwi_${index + 1}`, { queuePosition: index + 1 }));
+  let revision = 1;
+  const nextPage = deferred<CampaignWorkItemsPage>();
+  const listCalls: string[] = [];
+  const client = {
+    ...fakeClient(() => ({ revision: 1, items: [], nextCursor: null })).client,
+    campaignWorkItems: (_id: string, query: string) => {
+      listCalls.push(query);
+      const search = new URLSearchParams(query);
+      if (search.get("cursor")) return nextPage.promise;
+      const limit = Number(search.get("limit"));
+      return Promise.resolve({ revision, items: all.slice(0, limit), nextCursor: limit < all.length ? `${revision}:${limit}` : null,
+        total: all.length });
+    },
+  } as ApiClient;
+  const panel = await mount({ initial: rootSession, sessions: [rootSession], client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 50);
+    await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Show More")!);
+    assert.match(listCalls.at(-1)!, /cursor=/, "the next page is requested");
+    revision = 2;
+    await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({ revision: 2 })) }));
+    await act(async () => { nextPage.reject(new ApiError("revision changed", 409, "revision_changed")); });
+    await settle();
+    assert.match(listCalls.at(-1)!, /limit=100/, "the reload covers the shown rows and the page asked for");
+    assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 80,
+      "the rows Show More asked for are shown without a second click");
+    assertNoDomNode(panel.container.querySelector('[role="alert"]'), "a revision change is not an error");
+  } finally {
+    await panel.dispose();
+  }
+});
+
 test("a new revision reloads every row already shown, past one request's page ceiling", async () => {
   const all = Array.from({ length: 160 }, (_, index) => item(`cwi_${index + 1}`, { queuePosition: index + 1 }));
   let revision = 1;
