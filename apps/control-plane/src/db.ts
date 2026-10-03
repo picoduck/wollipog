@@ -18161,10 +18161,18 @@ export class ControlPlaneDb {
         event.sessionId, event.payload.requestId, digest, cached.runner_seq, epoch,
       ) as { payload: string; created_at: number } | undefined;
     if (bound) return options?.unboundOnly ? null : { payload: JSON.parse(bound.payload), timestamp: bound.created_at };
+    // An older runner's request carries no occurrence, while the answer kept the one the control
+    // plane minted for its pending card. Such a request takes the answer only as the newest cached
+    // request with its id, so a settled earlier use of a reused id never does.
+    const legacy = event.payload.occurrenceId === undefined;
+    if (legacy && this.stmt(
+      `SELECT 1 FROM session_events WHERE session_id=? AND kind='question_request' AND seq>?
+         AND json_extract(payload,'$.requestId')=? LIMIT 1`,
+    ).get(event.sessionId, event.seq, event.payload.requestId)) return null;
     const unbound = this.stmt(`SELECT rowid AS row_id, payload, created_at FROM question_answer_summaries
-      WHERE session_id=? AND request_id=? AND occurrence_id=? AND question_digest=? AND runner_seq IS NULL
+      WHERE session_id=? AND request_id=? AND (? OR occurrence_id=?) AND question_digest=? AND runner_seq IS NULL
       ORDER BY created_at LIMIT 1`).get(
-        event.sessionId, event.payload.requestId, event.payload.occurrenceId ?? "", digest,
+        event.sessionId, event.payload.requestId, legacy ? 1 : 0, event.payload.occurrenceId ?? "", digest,
       ) as { row_id: number; payload: string; created_at: number } | undefined;
     if (!unbound) return null;
     this.stmt("UPDATE question_answer_summaries SET runner_seq=?, history_epoch=? WHERE rowid=?")

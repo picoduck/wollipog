@@ -12754,6 +12754,48 @@ test("an occurrence-less older request matches its own answer, but never a settl
     "the answer waits, unbound, for its own occurrence");
 });
 
+test("an older runner's snapshot-parked answer attaches to its occurrence-less request, live or from history (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
+  const request = { kind: "question_request" as const, requestId: "legacy", questions };
+  const parkAndAnswer = (id: string, answer: string) => {
+    db.setPendingApproval(id, { requestId: "legacy", kind: "question", title: "Go?", options: [], questions });
+    db.updateSessionStatus(id, "input_required", Date.now());
+    const minted = db.getSession(id)?.pendingApproval?.occurrenceId;
+    assert.ok(minted, "the control plane mints the pending occurrence an older runner omits");
+    assert.ok(svc.answerQuestion(id, "legacy", { q: answer }, undefined, "submit", undefined, minted).ok);
+    assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
+  };
+  const summaries = (id: string) => db.listEvents(id).flatMap((event) =>
+    event.payload.kind === "question_answered" ? [event.payload] : []);
+
+  const live = seedSession(svc, hub);
+  db.reconcileRunnerHistory(live, 1, 0);
+  parkAndAnswer(live, "Yes");
+  svc.onSessionEvent(live, request, 1, 100);
+  assert.deepEqual(summaries(live).map((summary) => [summary.questionEventSeq, summary.answers[0]!.selected]),
+    [[db.listEvents(live)[0]!.seq, ["Yes"]]]);
+
+  // From history, a page holding a settled earlier use of the same request id and the answered one
+  // binds the answer to the newest request only.
+  const hydrated = seedSession(svc, hub);
+  db.reconcileRunnerHistory(hydrated, 1, 0);
+  parkAndAnswer(hydrated, "No");
+  db.reconcileRunnerHistory(hydrated, 1, 4);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: hydrated, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "legacy", answered: true } },
+      { seq: 3, ts: 102, payload: request },
+      { seq: 4, ts: 103, payload: { kind: "question_resolved", requestId: "legacy", answered: true } },
+    ],
+    page: { logEpoch: 1, throughSeq: 4, nextAfterSeq: 4, hasMore: false } });
+  await svc.hydrateHistory(hydrated);
+  const newest = db.listEvents(hydrated).filter((event) => event.payload.kind === "question_request").at(-1)!;
+  assert.deepEqual(summaries(hydrated).map((summary) => [summary.questionEventSeq, summary.answers[0]!.selected]),
+    [[newest.seq, ["No"]]]);
+});
+
 test("restoring a stored answer never moves the session's last activity backward (#2188)", async () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
