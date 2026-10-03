@@ -921,6 +921,11 @@ const MUTATING_METHODS = new Set(["push", "unshift", "splice", "fill", "copyWith
  * its alternatives at once, a composed value would put a prefix on the first of them only (#2394).
  */
 const MAX_ALTERNATIVES = 1024;
+/**
+ * Past this depth, a type is taken to hold a function rather than read further. A recursive generic
+ * alias (`type Tree<T> = { next?: Tree<{ value: T }> }`) is a new type at every depth (#2458).
+ */
+const MAX_TYPE_DEPTH = 32;
 
 type SourceFunction = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
 const isSourceFunction = (node: ts.Node | undefined): node is SourceFunction =>
@@ -2200,9 +2205,10 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
    * callable, a tuple with such an element, an object with such a member or index signature, or any
    * part of an intersection that can (#2458). `{}` can hold a function too; but without the library,
    * the checker reads every array as `{}`, and drops it from an intersection, so an array is judged
-   * by the elements it is written with (`declared`).
+   * by the elements it is written with (`declared`). Past MAX_TYPE_DEPTH, a type is taken to hold one.
    */
-  const holdsFunction = (type: ts.Type, declared: ts.Node | undefined, seen = new Set<ts.Type>(), expanding = new Set<ts.Node>()): boolean => {
+  const holdsFunction = (type: ts.Type, declared: ts.Node | undefined, seen = new Set<ts.Type>(), expanding = new Set<ts.Node>(), depth = 0): boolean => {
+    if (depth > MAX_TYPE_DEPTH) return true;
     const arrays = arraysOf(declared);
     // An element already being read, through a recursive alias (`type Nodes = (Nodes | typeof Icon)[]`), adds nothing.
     const elementHolds = (element: ts.Node) => {
@@ -2210,13 +2216,13 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       if (expanding.has(element)) return false;
       expanding.add(element);
       const type = ts.isTypeNode(element) ? checker.getTypeFromTypeNode(element) : checker.getTypeAtLocation(element);
-      try { return holdsFunction(type, element, seen, expanding); } finally { expanding.delete(element); }
+      try { return holdsFunction(type, element, seen, expanding, depth + 1); } finally { expanding.delete(element); }
     };
-    return (arrays !== null && arrays.some(elementHolds)) || typeHoldsFunction(type, arrays !== null, seen, expanding);
+    return (arrays !== null && arrays.some(elementHolds)) || typeHoldsFunction(type, arrays !== null, seen, expanding, depth);
   };
   /** `holdsFunction` for the type itself, where `{}` is the array `declared` names when `array` is set. */
-  const typeHoldsFunction = (type: ts.Type, array: boolean, seen: Set<ts.Type>, expanding: Set<ts.Node>): boolean => {
-    if (type.isUnionOrIntersection()) return type.types.some((member) => typeHoldsFunction(member, array, seen, expanding));
+  const typeHoldsFunction = (type: ts.Type, array: boolean, seen: Set<ts.Type>, expanding: Set<ts.Node>, depth: number): boolean => {
+    if (type.isUnionOrIntersection()) return type.types.some((member) => typeHoldsFunction(member, array, seen, expanding, depth));
     if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.NonPrimitive | ts.TypeFlags.InstantiableNonPrimitive)) return true;
     if (!(type.flags & ts.TypeFlags.Object)) return false;
     if (type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0) return true;
@@ -2226,16 +2232,19 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (seen.has(type)) return false;
     seen.add(type);
     // A tuple's rest element is in its type arguments, not its properties.
-    if (checker.isTupleType(type)) return checker.getTypeArguments(type).some((element) => holdsFunction(element, undefined, seen, expanding));
-    return properties.some((property) => holdsFunction(checker.getTypeOfSymbol(property), property.valueDeclaration, seen, expanding))
-      || indexes.some((index) => holdsFunction(index.type, index.declaration?.type, seen, expanding));
+    if (checker.isTupleType(type)) return checker.getTypeArguments(type).some((element) => holdsFunction(element, undefined, seen, expanding, depth + 1));
+    return properties.some((property) => holdsFunction(checker.getTypeOfSymbol(property), property.valueDeclaration, seen, expanding, depth + 1))
+      || indexes.some((index) => holdsFunction(index.type, index.declaration?.type, seen, expanding, depth + 1));
   };
-  /** Whether a value can only be a primitive, which holds nothing, so no function. */
+  /**
+   * Whether a value can only be a primitive, which holds nothing, so no function. Not `void`: a
+   * function typed to return it may return anything.
+   */
   const primitiveOnly = (node: ts.Node): boolean => {
     const type = checker.getTypeAtLocation(node);
     return (type.isUnion() ? type.types : [type]).every((member) => (member.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike
       | ts.TypeFlags.BooleanLike | ts.TypeFlags.BigIntLike | ts.TypeFlags.ESSymbolLike | ts.TypeFlags.Null | ts.TypeFlags.Undefined
-      | ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0);
+      | ts.TypeFlags.Never)) !== 0);
   };
   /**
    * Whether a write through a member (`data.k`, `data[k]`) puts only primitives in: a deletion, `++`
@@ -3990,9 +3999,10 @@ test("every route #2394 found that could hide an icon class is followed, reporte
   // A written constant handed to another package is reported only when a function, the one thing in
   // it that could be a component, may be put in: when its type can hold one — a callable member, at
   // any depth, `any`, a generic type, an array of components however its type is written (a tuple's
-  // rest, an intersection, an assertion, a recursive alias) — or a write puts in an object, which may
-  // carry more than its type names (a replacement, an `Object.assign` source). One that holds only
-  // data and is written only with primitives is not, however its type is written (#2458).
+  // rest, an intersection, an assertion, a recursive alias) or too deep to read — or a write puts in
+  // anything but a primitive, which may carry more than its type names (a replacement, an
+  // `Object.assign` source, a `void` result). One that holds only data and is written only with
+  // primitives is not, however its type is written (#2458).
   assert.deepEqual(scanOf({ "Written.tsx": [
     "import { Slot } from \"some-package\";",
     "function Icon({ className }: { className?: string }) { return <svg className={className} />; }",
@@ -4054,6 +4064,13 @@ test("every route #2394 found that could hide an icon class is followed, reporte
     "export const Last = () => <>",
     "  <Slot tree={tree} /><Slot labels={labels} /><Slot either={either} /><Slot entries={entries} /><Slot target={target} />",
     "</>;",
+    "const fire: () => void = () => pick();",
+    "const slot: { entry: void } = { entry: undefined };",
+    "slot.entry = fire();",
+    "type Tree<T> = { next?: Tree<{ value: T }>; label: string };",
+    "const deep: Tree<string> = { label: \"x\" };",
+    "deep.label = \"y\";",
+    "export const Deeper = () => <><Slot slot={slot} /><Slot deep={deep} /></>;",
   ].join("\n") }), {
     classes: ["seen-icon"],
     unread: [
@@ -4070,6 +4087,8 @@ test("every route #2394 found that could hide an icon class is followed, reporte
       "Written.tsx:59 <Slot entries> hands another package an object written after it is bound, so what it holds cannot be listed",
       "Written.tsx:59 <Slot target> hands another package an object written after it is bound, so what it holds cannot be listed",
       "Written.tsx:59 <Slot tree> hands another package an object written after it is bound, so what it holds cannot be listed",
+      "Written.tsx:67 <Slot deep> hands another package an object written after it is bound, so what it holds cannot be listed",
+      "Written.tsx:67 <Slot slot> hands another package an object written after it is bound, so what it holds cannot be listed",
     ],
   });
   // An object handed to a function in the sources is followed into it, which never calls the icon.
