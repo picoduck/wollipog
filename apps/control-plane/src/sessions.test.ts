@@ -24375,3 +24375,38 @@ test("campaign work ledger retries match the exact report identity and normalize
     db.close();
   }
 });
+
+test("a nested Orchestrator's work-item verification lands in the root ledger and refreshes every campaign view (#2417, #1462)", () => {
+  const { db, svc, hub, parent, report } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const nested = db.createSession({
+      id: "nested-ledger-orchestrator", parentSessionId: parent.id, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+      agentId: "test-orchestrator", title: "Nested", useWorktree: false, driver: "claude-code", config: {},
+      role: "orchestrator", orchestratorPolicy: db.getSession(parent.id)!.orchestratorPolicy!, now: Date.now(),
+    });
+    const grandchild = db.createSession({
+      id: "nested-ledger-grandchild", parentSessionId: nested.id, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+      agentId: AGENT_ID, title: "Grandchild", useWorktree: false, driver: "claude-code", config: {}, now: Date.now(),
+    });
+    const plan = svc.recordCampaignPlan(nested.id, { items: [{ key: "nested:delivery" }], planComplete: false });
+    const itemId = plan.data!.items[0]!.workItemId;
+    assert.ok(svc.assignCampaignWorkItem(nested.id, { workItemId: itemId, childSessionId: grandchild.id }).ok);
+    svc.onSessionStatus(grandchild.id, "idle");
+    const seq = report(grandchild.id, "Nested delivery");
+    hub.sessionChangedByIdCalls.length = 0;
+    const verified = svc.verifyCampaignChild(nested.id, {
+      childSessionId: grandchild.id, reportEventSeq: seq, followUpsAccounted: true,
+      workItem: { id: itemId, outcome: "delivered" },
+    });
+    assert.ok(verified.ok, verified.error);
+    assert.equal(db.campaignChildReportVerified(parent.id, grandchild.id), true,
+      "the session-level report is keyed by the root, as #1462 requires");
+    const item = ledgerItem(svc, parent.id, "nested:delivery");
+    assert.equal(item.primaryState, "delivered", "the work-item verification lands in the root ledger");
+    assert.equal(item.verifications[0]?.verifiedBySessionId, nested.id);
+    assert.ok(hub.sessionChangedByIdCalls.includes(parent.id), "the root campaign view is refreshed");
+    assert.ok(hub.sessionChangedByIdCalls.includes(nested.id), "the nested Orchestrator's view is refreshed");
+  } finally {
+    db.close();
+  }
+});
