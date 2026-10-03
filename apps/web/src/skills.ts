@@ -705,17 +705,18 @@ const ATTENTION_ORDER: Record<SkillAttention, number> = { error: 0, edited: 1, u
  * always agree, most urgent first and then by name, with a one-line reason each; then the orphaned
  * copies as one row while any machine reports some. A recommendation is never an item.
  */
-export function skillOverviewAttention({ skills, runners, machineSkills, orphanCount, machineLabel }: {
+export function skillOverviewAttention({ skills, runners, machineSkills, orphanCount, machineLabel, hideAccountEmails = true }: {
   skills: ReadonlyArray<SkillSummary>;
   runners: ReadonlyArray<RunnerView>;
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>;
   orphanCount: number;
   machineLabel: (runnerId: string) => string;
+  hideAccountEmails?: boolean;
 }): SkillOverviewAttentionItem[] {
   const items: SkillOverviewAttentionItem[] = skills
     .flatMap((skill) => {
       const kind = skillAttention(skill, runners, machineSkills);
-      return kind ? [{ kind, skill, reason: skillAttentionReason(kind, skill, runners, machineSkills, machineLabel) }] : [];
+      return kind ? [{ kind, skill, reason: skillAttentionReason(kind, skill, runners, machineSkills, machineLabel, hideAccountEmails) }] : [];
     })
     .sort((a, b) => ATTENTION_ORDER[a.kind] - ATTENTION_ORDER[b.kind] || a.skill.name.localeCompare(b.skill.name));
   if (orphanCount > 0) {
@@ -761,13 +762,14 @@ function skillAttentionReason(
   runners: ReadonlyArray<RunnerView>,
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
   machineLabel: (runnerId: string) => string,
+  hideAccountEmails: boolean,
 ): string {
   const loaded = runners.flatMap((runner) => {
     const state = machineSkills[runner.runnerId];
     return state && !state.loadError ? [{ runner, state }] : [];
   });
   if (kind === "error") {
-    const summary = skillDeploymentErrorSummary(skill.name, runners, machineSkills);
+    const summary = skillDeploymentErrorSummary(skill.name, runners, machineSkills, undefined, hideAccountEmails);
     if (!summary) return "A machine reported a deployment error.";
     const { who, detail, more } = skillDeploymentErrorWords(summary, machineLabel);
     return `${who}: ${detail}${more ? ` ${more}` : ""}`;

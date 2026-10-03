@@ -1,3 +1,4 @@
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import type { AgentDriverKind, WorkflowArtifactView } from "@wollipog/protocol";
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
@@ -2105,23 +2106,8 @@ const TimelineRow = memo(function TimelineRow({
         </div>
       );
     }
-    case "provider_account_switched": {
-      // A separator cannot hold a reveal control, so an email-shaped label is named only generically.
-      const account = accountLabelText(item.providerAccountLabel);
-      const label = `${item.automatic ? "Automatically Switched" : "Switched"} Account to ${account}`;
-      return (
-        <div
-          className="tl-checkpoint restored"
-          role="separator"
-          aria-label={label}
-          title={`Provider conversation resumed with ${account}`}
-        >
-          <span className="checkpoint-line" />
-          <span className="checkpoint-label">{label}</span>
-          <span className="checkpoint-line" />
-        </div>
-      );
-    }
+    case "provider_account_switched":
+      return <AccountSwitchCheckpoint item={item} />;
     case "user_message":
       return (
         <div className="tl-row user">
@@ -2901,5 +2887,20 @@ function DiffBlock({ diff }: { diff: string }) {
         );
       })}
     </pre>
+  );
+}
+
+/** A structured account checkpoint follows privacy without changing transcript text. */
+function AccountSwitchCheckpoint({ item }: { item: Extract<TimelineItem, { kind: "provider_account_switched" }> }) {
+  const privacy = useAccountEmailPrivacy();
+  const account = accountLabelText(item.providerAccountLabel, undefined, privacy.hide);
+  const label = `${item.automatic ? "Automatically Switched" : "Switched"} Account to ${account}`;
+  return (
+    <div className="tl-checkpoint restored" role="separator" aria-label={label}
+      title={`Provider conversation resumed with ${account}`}>
+      <span className="checkpoint-line" />
+      <span className="checkpoint-label">{label}</span>
+      <span className="checkpoint-line" />
+    </div>
   );
 }

@@ -1,3 +1,4 @@
+import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-privacy.js";
 import React, { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import {
@@ -390,6 +391,7 @@ export function BehaviorPanel({
   agentHarnessDefaults,
   sessionNaming,
 }: { agentHarnessDefaults?: ReactNode; sessionNaming?: ReactNode } = {}) {
+  const privacy = useAccountEmailPrivacy();
   const enterKey = useEnterKeyBehavior();
   const questionResponseStyle = useQuestionResponseStyle();
   return (
@@ -449,6 +451,16 @@ export function BehaviorPanel({
           reason="Chosen per session when you create it; defaults are not available in this client."
         />
       )}
+      </SettingsGroup>
+      <SettingsGroup title="Privacy">
+        <SwitchRow
+          title="Hide Account Emails"
+          description={privacy.persistent
+            ? "Hide account emails until you choose Show. Stored on this device."
+            : "This choice lasts until reload because this device could not save it."}
+          checked={privacy.hide}
+          onClick={() => setHideAccountEmails(!privacy.hide)}
+        />
       </SettingsGroup>
       {sessionNaming}
     </>

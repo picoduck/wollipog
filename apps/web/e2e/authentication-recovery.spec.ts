@@ -1,6 +1,11 @@
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
+// These cases exercise the explicitly enabled privacy mode. Default-off behavior has separate coverage.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
+});
+
 /** Authentication Required account context (#1649) in a real SessionDetail. Set
  * WOLLIPOG_EVIDENCE_DIR to also write reviewable captures of each state. */
 const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;

@@ -1,3 +1,4 @@
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import React, { useEffect, useState } from "react";
 import { runnerSupportsProtocol, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
@@ -62,6 +63,7 @@ export interface SkillDeploymentProps<T extends SkillRule> {
  */
 export function SkillDeployment<T extends SkillRule>(props: SkillDeploymentProps<T>) {
   const { skill, runners, machineLabels, machineSkills } = props;
+  const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const [policies, setPolicies] = useState<Record<string, MachineSkillVersionPolicy | "error">>({});
   const [versions, setVersions] = useState<SkillVersionSummary[]>([]);
@@ -115,7 +117,7 @@ export function SkillDeployment<T extends SkillRule>(props: SkillDeploymentProps
   const machines = runners.map((runner) => ({
     runner,
     state: machineSkills[runner.runnerId],
-    deployment: skillMachineDeployment(runner, skill.name, machineSkills[runner.runnerId]),
+    deployment: skillMachineDeployment(runner, skill.name, machineSkills[runner.runnerId], privacy.hide),
   }));
   const settled = machines.every(({ state }) => state && !state.loadError);
   const notDeployed = runners.length === 0 || (settled && machines.every(({ deployment }) => deployment.total === 0));
@@ -234,7 +236,7 @@ export function SkillDeployment<T extends SkillRule>(props: SkillDeploymentProps
                         <p className="cell-note" key={`${entry.path}:${entry.reason}:${index}`}>
                           Removed {entry.path}
                           {entry.providerAccountId && ` (${accountLabelText(runner.providerAccounts?.find((account) =>
-                            account.id === entry.providerAccountId)?.label ?? "Provider Account")})`}: {entry.reason}
+                            account.id === entry.providerAccountId)?.label ?? "Provider Account", undefined, privacy.hide)})`}: {entry.reason}
                         </p>
                       ))}
                     </td>

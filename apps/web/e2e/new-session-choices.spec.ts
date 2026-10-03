@@ -1,4 +1,9 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+
+// These cases exercise the explicitly enabled privacy mode. Default-off behavior has separate coverage.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
+});
 import { dialogMotionSettled } from "./dialog-motion.js";
 import { pinWidestFace } from "./font-geometry.js";
 

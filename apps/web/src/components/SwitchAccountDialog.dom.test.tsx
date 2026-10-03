@@ -16,6 +16,7 @@ import { SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/session/session-switch" });
+domWindow.localStorage.setItem("wollipog.hide-account-emails", "true");
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,

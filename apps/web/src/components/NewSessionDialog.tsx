@@ -65,7 +65,7 @@ import {
 } from "./agent-options.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
-import { PersonalIdentifierRevealButton, usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
+import { AccountIdentifierRevealButton, useAccountIdentifierReveal } from "./AccountIdentifier.js";
 import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { ChooseFolderDialog } from "./ChooseFolderDialog.js";
 import { useInstanceScope } from "../instance-scope.js";
@@ -425,8 +425,8 @@ export function NewSessionDialog({
     !providerAccounts.some((account) => account.id === savedProviderAccount.accountId);
   const providerAccountTitles = maskedAccountTitles(providerAccounts.map((account) => account.label));
   // Bound to this exact account list: another Machine or Agent offers other accounts, hidden again.
-  const [accountIdentifiersRevealed, toggleAccountIdentifiers] = usePersonalIdentifierReveal(
-    providerAccounts.map((account) => account.label).join("\n"),
+  const [accountIdentifiersRevealed, toggleAccountIdentifiers] = useAccountIdentifierReveal(
+    JSON.stringify([runnerId, agentId, providerAccountId, providerAccounts.map((account) => [account.id, account.label])]),
   );
   const accountSelectionKey = `${runnerId}\0${agentId}`;
   const previousAccountSelectionKey = useRef(accountSelectionKey);
@@ -1583,7 +1583,7 @@ export function NewSessionDialog({
               <div className="pid-field-head">
                 <label className="new-session-field-label">Account</label>
                 {providerAccounts.some((account) => isPersonalIdentifier(account.label)) && (
-                  <PersonalIdentifierRevealButton
+                  <AccountIdentifierRevealButton
                     label="Emails"
                     revealed={accountIdentifiersRevealed}
                     onToggle={toggleAccountIdentifiers}

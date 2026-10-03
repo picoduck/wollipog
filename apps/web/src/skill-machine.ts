@@ -29,9 +29,10 @@ export function runnerCanImportSkills(runner: Pick<RunnerView, "os" | "protocolV
 export function machineSkillLocation(
   entry: Pick<MachineSkillCandidate, "name" | "sourceDirectory" | "providerAccountId" | "context">,
   runner?: Pick<RunnerView, "providerAccounts">,
+  hideAccountEmails = true,
 ): string {
   const account = entry.providerAccountId
-    ? accountLabelText(runner?.providerAccounts?.find((candidate) => candidate.id === entry.providerAccountId)?.label ?? "Provider Account")
+    ? accountLabelText(runner?.providerAccounts?.find((candidate) => candidate.id === entry.providerAccountId)?.label ?? "Provider Account", undefined, hideAccountEmails)
     : null;
   return `${account ? `Account: ${account} · ` : ""}${entry.context?.kind === "wsl" ? `WSL: ${entry.context.distro} · ` : ""}${entry.sourceDirectory}/${entry.name}`;
 }

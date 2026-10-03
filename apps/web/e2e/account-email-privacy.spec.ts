@@ -1,0 +1,220 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { expect, test, type Page } from "@playwright/test";
+
+const evidenceDir = process.env.WOLLIPOG_PRIVACY_EVIDENCE_DIR ?? "test-results/account-email-privacy";
+mkdirSync(evidenceDir, { recursive: true });
+
+const KEY = "wollipog.hide-account-emails";
+async function openPicker(page: Page) {
+  await page.goto("/command-inbox-projects-e2e.html?scenario=switch-account&accounts=default");
+  await page.getByRole("button", { name: /Alpha Session/ }).click();
+  const expand = page.getByRole("button", { name: "Expand Session" });
+  if (await expand.isVisible()) await expand.click();
+  await page.getByRole("button", { name: "More Actions", exact: true }).first().click();
+  await page.getByRole("menuitem", { name: /Switch Account…/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Switch Account" });
+  await expect(dialog).toBeVisible();
+  await page.waitForFunction(() => !document.getAnimations().some(animation => animation.playState === "running" && animation.effect?.getComputedTiming().iterations !== Infinity));
+  return dialog;
+}
+for (const width of [390, 1440]) {
+  for (const theme of ["light", "dark"]) {
+    test(`${width}px ${theme}: Settings controls open account surfaces and keeps the saved choice after reload`, async ({ page, context }) => {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.goto(`/settings-rows-e2e.html?section=behavior&theme=${theme}`);
+      const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
+      await expect(privacy).toHaveAttribute("aria-checked", "false");
+      expect(await page.evaluate(key => localStorage.getItem(key), KEY)).toBeNull();
+      const accountsPage = await context.newPage();
+      await accountsPage.setViewportSize({ width, height: 1000 });
+      await accountsPage.addInitScript(theme => document.documentElement.dataset.theme = theme, theme);
+      const picker = await openPicker(accountsPage);
+      await accountsPage.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+      await expect(picker).toContainText("current.me@example.com");
+      await expect(picker.getByRole("button", { name: /(?:Show|Hide) Emails/ })).toHaveCount(0);
+      await accountsPage.screenshot({ path: join(evidenceDir, `picker-${width}-${theme}-off.png`) });
+      await privacy.focus();
+      await page.keyboard.press("Space");
+      await expect(privacy).toHaveAttribute("aria-checked", "true");
+      await expect(picker).not.toContainText("@example.");
+      expect(await picker.innerHTML()).not.toContain("@example.");
+      const reveal = picker.getByRole("button", { name: "Show Emails" });
+      await reveal.focus();
+      await accountsPage.keyboard.press("Enter");
+      await expect(picker).toContainText("work.me@example.com");
+      await expect(picker.getByRole("button", { name: "Hide Emails" })).toBeFocused();
+      // Changing the persisted mode twice clears this tab's temporary grant.
+      await privacy.click();
+      await privacy.click();
+      await expect(reveal).toBeVisible();
+      expect(await picker.innerHTML()).not.toContain("@example.");
+      await accountsPage.screenshot({ path: join(evidenceDir, `picker-${width}-${theme}-on.png`) });
+      await page.screenshot({ path: join(evidenceDir, `settings-${width}-${theme}-on.png`) });
+      await page.reload();
+      await expect(privacy).toHaveAttribute("aria-checked", "true");
+      await accountsPage.reload();
+      const reopened = await openPicker(accountsPage);
+      expect(await reopened.innerHTML()).not.toContain("@example.");
+      await privacy.click();
+      await expect(reopened).toContainText("work.me@example.com");
+      await expect(reopened.getByRole("button", { name: /(?:Show|Hide) Emails/ })).toHaveCount(0);
+      await accountsPage.close();
+    });
+  }
+}
+
+for (const [width, theme] of [[390, "light"], [1440, "dark"]] as const) {
+test(`${width}px ${theme}: Usage and authentication recovery show emails by default and update while open`, async ({ page, context }) => {
+  await page.goto(`/settings-rows-e2e.html?section=behavior&theme=${theme}`);
+  const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
+  const usage = await context.newPage();
+  await usage.setViewportSize({ width, height: 1000 });
+  await usage.goto("/usage-view-e2e.html?subscriptions=1");
+  await usage.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+  const account = usage.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-account");
+  await expect(account).toContainText("codex@example.com");
+  await expect(account.getByRole("button")).toHaveCount(0);
+  const auth = await context.newPage();
+  await auth.setViewportSize({ width, height: 1000 });
+  await auth.goto("/authentication-recovery-e2e.html");
+  await auth.getByRole("button", { name: "Review Request" }).click();
+  await auth.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+  const recovery = auth.getByRole("group", { name: "Account Recovery" });
+  await expect(recovery).toContainText("morgan.lee@example.com");
+  await expect(recovery.getByRole("button", { name: "Show Current Account Email" })).toHaveCount(0);
+  await account.screenshot({ path: join(evidenceDir, `usage-${width}-${theme}-off.png`) });
+  await recovery.screenshot({ path: join(evidenceDir, `recovery-${width}-${theme}-off.png`) });
+  await privacy.click();
+  await expect(account).toContainText("Email Hidden");
+  expect(await account.innerHTML()).not.toContain("codex@example.com");
+  await expect(recovery.getByRole("button", { name: "Show Current Account Email" })).toBeVisible();
+  expect(await recovery.innerHTML()).not.toContain("morgan.lee@example.com");
+  await account.screenshot({ path: join(evidenceDir, `usage-${width}-${theme}-on.png`) });
+  await recovery.screenshot({ path: join(evidenceDir, `recovery-${width}-${theme}-on.png`) });
+  await privacy.click();
+  await expect(account).toContainText("codex@example.com");
+  await expect(recovery).toContainText("morgan.lee@example.com");
+  await usage.close(); await auth.close();
+});
+
+}
+
+for (const width of [390, 1440]) {
+  test(`${width}px: provider management hides a reopened disclosure and an already-open confirmation`, async ({ page, context }) => {
+    await page.goto("/settings-rows-e2e.html?section=behavior");
+    const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
+    const management = await context.newPage();
+    await management.setViewportSize({ width, height: 1000 });
+    await management.goto("/machine-management-e2e.html?emailLabels=1");
+    await management.getByText("Accounts", { exact: true }).click();
+    const row = management.locator(".agent-row").filter({ hasText: "work@example.com" });
+    await expect(row).toBeVisible();
+    await expect(row.getByRole("button", { name: "Show Account Email" })).toHaveCount(0);
+    await management.screenshot({ path: join(evidenceDir, `management-${width}-off.png`) });
+    await privacy.click();
+    const maskedRow = management.locator(".agent-row").filter({ hasText: "Email Hidden" });
+    const show = maskedRow.getByRole("button", { name: "Show Account Email" });
+    await show.focus(); await management.keyboard.press("Enter");
+    await expect(row).toBeVisible();
+    await management.getByText("Accounts", { exact: true }).click();
+    await management.getByText("Accounts", { exact: true }).click();
+    await expect(show).toBeVisible();
+    expect(await maskedRow.innerHTML()).not.toContain("work@example.com");
+    await management.screenshot({ path: join(evidenceDir, `management-${width}-on.png`) });
+    await maskedRow.getByRole("button", { name: "Remove", exact: true }).click();
+    const confirm = management.getByRole("dialog", { name: "Remove Account" });
+    await expect(confirm).toBeVisible();
+    expect(await confirm.innerHTML()).not.toContain("work@example.com");
+    await privacy.click();
+    await expect(confirm).toContainText("work@example.com");
+    await privacy.click();
+    expect(await confirm.innerHTML()).not.toContain("work@example.com");
+    await confirm.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(management.getByText("Work", { exact: true })).toHaveCount(0);
+    await expect(management.getByText("Personal", { exact: true })).toBeVisible();
+    await management.close();
+  });
+}
+
+for (const [width, theme] of [[390, "light"], [1440, "dark"]] as const) {
+  test(`${width}px ${theme}: the pinned session account follows the setting without rewriting conversation content`, async ({ page, context }) => {
+    await page.goto(`/settings-rows-e2e.html?section=behavior&theme=${theme}`);
+    const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
+    const session = await context.newPage();
+    await session.setViewportSize({ width, height: 1000 });
+    await session.goto("/command-inbox-projects-e2e.html?fullShell=1&scenario=pinned-summary&psActivity=1");
+    await session.getByRole("button", { name: /Alpha Session/ }).first().click();
+    const expand = session.getByRole("button", { name: "Expand Session" });
+    if (await expand.isVisible()) await expand.click();
+    await session.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+    let summary = session.locator('aside.ps[aria-label="Pinned Summary"]');
+    if (width < 768) {
+      await session.getByRole("button", { name: "Pinned Summary", exact: true }).click();
+      summary = session.getByRole("dialog", { name: "Pinned Summary" });
+    }
+    await expect(summary).toContainText("pat.example@example.com");
+    await summary.screenshot({ path: join(evidenceDir, `summary-${width}-${theme}-off.png`) });
+    const conversation = await session.locator(".md").allTextContents();
+    await privacy.click();
+    await expect(summary).toContainText("Email Hidden");
+    expect(await summary.innerHTML()).not.toContain("pat.example@example.com");
+    expect(await session.locator(".md").allTextContents()).toEqual(conversation);
+    await summary.screenshot({ path: join(evidenceDir, `summary-${width}-${theme}-on.png`) });
+    await privacy.click();
+    await expect(summary).toContainText("pat.example@example.com");
+    await session.close();
+  });
+}
+
+for (const [width, theme] of [[390, "light"], [1440, "dark"]] as const) {
+  test(`${width}px ${theme}: New Session account choices are visible by default and a selection clears the reveal`, async ({ page, context }) => {
+    await page.goto("/settings-rows-e2e.html?section=behavior");
+    const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
+    const creation = await context.newPage();
+    await creation.setViewportSize({ width, height: 1000 });
+    await creation.goto("/new-session-choices-e2e.html?emailAccounts=1");
+    await creation.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+    const account = creation.getByRole("button", { name: /Account:/ });
+    await expect(account).toHaveAccessibleName(/work\.me@example\.com/);
+    await expect(creation.getByRole("button", { name: "Show Emails" })).toHaveCount(0);
+    await creation.getByRole("dialog").screenshot({ path: join(evidenceDir, `new-session-${width}-${theme}-off.png`) });
+    await privacy.click();
+    await expect(account).toHaveAccessibleName(/Hidden Account/);
+    await creation.getByRole("dialog").screenshot({ path: join(evidenceDir, `new-session-${width}-${theme}-on.png`) });
+    await creation.getByRole("button", { name: "Show Emails" }).click();
+    await account.click();
+    await creation.getByRole("option", { name: /personal\.me@example/ }).click();
+    await expect(account).toHaveAccessibleName(/Hidden Account/);
+    await expect(creation.getByRole("button", { name: "Show Emails" })).toBeVisible();
+    await privacy.click();
+    await expect(account).toHaveAccessibleName(/personal\.me@example/);
+    await creation.close();
+  });
+}
+
+test("default account settings follow privacy and changing their selection resets a reveal", async ({ page, context }) => {
+  await page.goto("/settings-rows-e2e.html?section=behavior");
+  const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
+  const management = await context.newPage();
+  await management.goto("/machine-management-e2e.html?emailLabels=1");
+  await management.getByRole("button", { name: "Manage", exact: true }).click();
+  const dialog = management.getByRole("dialog", { name: "Manage Design Workstation" });
+  const defaults = dialog.locator("section.machine-settings-section").filter({ hasText: "Default Provider Accounts" });
+  const claude = dialog.getByRole("button", { name: /Default Claude Account:/ });
+  await claude.click();
+  await management.getByRole("option", { name: /work@example\.com/ }).click();
+  await expect(claude).toHaveAccessibleName(/work@example\.com/);
+  await expect(defaults.getByRole("button", { name: "Show Emails" })).toHaveCount(0);
+  await privacy.click();
+  await expect(claude).toHaveAccessibleName(/Hidden Account/);
+  await defaults.getByRole("button", { name: "Show Emails" }).click();
+  await expect(claude).toHaveAccessibleName(/work@example\.com/);
+  await claude.click();
+  await management.getByRole("option", { name: /Personal/ }).click();
+  await expect(defaults.getByRole("button", { name: "Show Emails" })).toBeVisible();
+  await claude.click();
+  await expect(management.getByRole("option", { name: /Hidden Account/ })).toBeVisible();
+  expect(await management.getByRole("listbox").innerHTML()).not.toContain("work@example.com");
+  await management.close();
+});

@@ -39,7 +39,7 @@ import {
   WarningIcon,
 } from "./Icons.js";
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, Spinner } from "./common.js";
-import { PersonalIdentifier } from "./PersonalIdentifier.js";
+import { AccountIdentifier } from "./AccountIdentifier.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { shownWatchdogDelivery } from "../background-delivery-status.js";
 import { effortLabel, relativeTime, resolvedModelLabel, shortenPath } from "../format.js";
@@ -204,7 +204,7 @@ export function PinnedSummary({
           <SummaryRow
             icon={<AccountIcon className="ps-icon" size={14} aria-hidden="true" />}
             label="Account"
-            value={<PersonalIdentifier value={session.providerAccountLabel} label="Account Email" />}
+            value={<AccountIdentifier identity={`${session.id}:${session.providerAccountId ?? ""}`} value={session.providerAccountLabel} label="Account Email" />}
             note={session.providerAccountAutomaticallySelected ? "Chosen Automatically" : undefined}
           />
         )}

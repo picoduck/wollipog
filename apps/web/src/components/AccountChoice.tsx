@@ -1,7 +1,7 @@
 import React from "react";
 import type { SubscriptionUsageBucket } from "@wollipog/protocol";
 import { maskedAccountTitles } from "../personal-identifiers.js";
-import { PersonalIdentifierRevealButton } from "./PersonalIdentifier.js";
+import { AccountIdentifierRevealButton } from "./AccountIdentifier.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChoiceRows, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 
@@ -73,7 +73,7 @@ export function AccountsHead({ revealable, revealed, onToggleReveal, controls, t
     <div className="section-head">
       <h3 className="section-title" id={titleId}>{title}</h3>
       {revealable && (
-        <PersonalIdentifierRevealButton
+        <AccountIdentifierRevealButton
           label="Emails"
           revealed={revealed}
           onToggle={onToggleReveal}

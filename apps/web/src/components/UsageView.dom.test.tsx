@@ -14,6 +14,7 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
 import { UsageView } from "./UsageView.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+domWindow.localStorage.setItem("wollipog.hide-account-emails", "true");
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,

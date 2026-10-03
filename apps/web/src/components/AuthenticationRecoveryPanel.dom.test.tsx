@@ -17,6 +17,7 @@ import { AuthenticationRecoveryPanel, authenticationRecoveryPanelApplies } from 
 import { textBefore } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/session/session-auth" });
+domWindow.localStorage.setItem("wollipog.hide-account-emails", "true");
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,

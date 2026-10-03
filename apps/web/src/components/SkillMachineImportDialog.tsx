@@ -1,3 +1,4 @@
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { RunnerView } from "@wollipog/protocol";
 import {
@@ -59,6 +60,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
   onClose: () => void;
   onImported: () => Promise<void>;
 }) {
+  const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const phone = useIsMobile();
   const labels = useMemo(() => machineLabels ?? machineOptionLabels(runners), [machineLabels, runners]);
@@ -378,7 +380,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
           aria-current={isSelected || undefined} disabled={busy || machineBusy} onClick={() => select(candidate)}>
           <span className="row-body">
             <span className="row-title">{candidate.name}</span>
-            <span className="row-sub skill-machine-location" title={machineSkillLocation(candidate, runner)}>{machineSkillLocation(candidate, runner)}</span>
+            <span className="row-sub skill-machine-location" title={machineSkillLocation(candidate, runner, privacy.hide)}>{machineSkillLocation(candidate, runner, privacy.hide)}</span>
           </span>
           <span className="row-trail">{machineSkillRowResult(candidate.name, results[candidate.id], libraryNames)}</span>
         </button>;
@@ -406,7 +408,7 @@ export function SkillMachineImportDialog({ runners, libraryNames, machineLabels,
         <h3 className="skill-machine-import-title">{shown.candidate.name}</h3>
         <dl className="facts">
           <div><dt>Machine</dt><dd>{machineName}</dd></div>
-          <div><dt>Folder</dt><dd className="skill-machine-location">{machineSkillLocation(shown.candidate, runner)}</dd></div>
+          <div><dt>Folder</dt><dd className="skill-machine-location">{machineSkillLocation(shown.candidate, runner, privacy.hide)}</dd></div>
           <div><dt>Result</dt><dd>{MACHINE_SKILL_RESULT_FACT[shown.disposition]}</dd></div>
         </dl>
         {matchNotice}
@@ -509,6 +511,7 @@ function AdoptionConfirmation({ discovery, preview, runner, machineName, track, 
   track: MachineRequestTracker;
   onDone: (result: MachineSkillAdoptionResult) => Promise<void>;
 }) {
+  const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const [preflight, setPreflight] = useState<MachineSkillAdoptionPreflight | null>(null);
   const [checking, setChecking] = useState(true);
@@ -572,7 +575,7 @@ function AdoptionConfirmation({ discovery, preview, runner, machineName, track, 
       </BusyButton>
     </>}>
     <p className="confirmation-message" id={messageId}>
-      {preview.candidate.name} in {machineSkillLocation(preview.candidate, runner).replace(/\/[^/]*$/u, "")} on {machineName} moves
+      {preview.candidate.name} in {machineSkillLocation(preview.candidate, runner, privacy.hide).replace(/\/[^/]*$/u, "")} on {machineName} moves
       into a recovery journal, and a link to the library version takes its place. You can undo this from Adoption Recovery.
     </p>
     <div className="skill-adoption-findings" id={findingsId}>

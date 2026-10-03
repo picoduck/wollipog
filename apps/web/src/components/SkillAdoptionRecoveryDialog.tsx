@@ -1,3 +1,4 @@
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useEffect, useId, useRef, useState } from "react";
 import type { RunnerView, SkillAdoptionRecoveryOperation } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
@@ -36,6 +37,7 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, track, machin
   onClose: () => void;
   onRestored: () => Promise<void>;
 }) {
+  const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const { confirm } = useFeedback();
   const [recovery, setRecovery] = useState<MachineSkillRecovery | null>(null);
@@ -144,7 +146,7 @@ export function SkillAdoptionRecoveryDialog({ runner, machineName, track, machin
             {operations.map((operation, index) => <div className="row row-2" role="listitem" key={operation.operationId}>
               <span className="row-body">
                 <span className="row-title" id={`${rowId}-${index}`}>{operation.name}</span>
-                <span className="row-sub skill-machine-location" title={operation.detail}>{machineSkillLocation(operation, runner)}</span>
+                <span className="row-sub skill-machine-location" title={operation.detail}>{machineSkillLocation(operation, runner, privacy.hide)}</span>
               </span>
               <span className="row-trail">{RECOVERY_STATE_LABEL[operation.state] ?? "Unknown"}</span>
               {restorable(operation) && <button className="btn sm" type="button"

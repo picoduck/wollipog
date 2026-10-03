@@ -4,11 +4,14 @@ import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronRightIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./common.js";
-import { PersonalIdentifier } from "./PersonalIdentifier.js";
+import { AccountIdentifier } from "./AccountIdentifier.js";
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
 import { Select } from "./ui/ChoiceControls.js";
 
 export function ProviderAccountsSection({ runner, online }: { runner: RunnerView; online: boolean }) {
+  const privacy = useAccountEmailPrivacy();
+  const [revealEpoch, setRevealEpoch] = useState(0);
   const api = useApi();
   const { confirm, showToast } = useFeedback();
   const [adding, setAdding] = useState(false);
@@ -55,7 +58,7 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
         "A session that still uses the account keeps its credentials, and the account itself is not affected.",
       details: (
         <span className="provider-account-remove-target">
-          <PersonalIdentifier value={account.label} label="Account Email" />
+          <AccountIdentifier identity={`${runner.runnerId}:${account.id}`} value={account.label} label="Account Email" />
           <span className="atag">{account.provider === "claude" ? "Claude" : "Codex"}</span>
         </span>
       ),
@@ -80,8 +83,9 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
   if (!supported && !(runner.providerAccounts?.length)) return null;
   return (
     <>
-      <details className="runner-agents disclosure" open={logins.length > 0 || undefined}>
-        <summary>
+      <details className="runner-agents disclosure" open={logins.length > 0 || undefined}
+        onToggle={() => setRevealEpoch((value) => value + 1)}>
+        <summary onClick={() => setRevealEpoch((value) => value + 1)}>
           <ChevronRightIcon className="disclosure-chevron" />
           <span className="runner-agents-label">Accounts</span>
           <span className="group-count">{runner.providerAccounts?.length ?? 0}</span>
@@ -99,7 +103,7 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
             {(runner.providerAccounts ?? []).map((account) => (
               <div className="agent-row" key={account.id}>
                 <div className="agent-row-head">
-                  <PersonalIdentifier className="agent-name" value={account.label} label="Account Email" />
+                  <AccountIdentifier identity={`${runner.runnerId}:${account.id}:${revealEpoch}`} className="agent-name" value={account.label} label="Account Email" />
                   {supported && canManage && account.authStatus !== "authenticated" && (
                     <button
                       type="button"
@@ -131,7 +135,7 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
               </div>
             ))}
           </div>
-          {logins.map((login) => <ProviderLoginCard key={login.operationId} runnerId={runner.runnerId} login={login} />)}
+          {logins.map((login) => <ProviderLoginCard key={login.operationId} runnerId={runner.runnerId} login={login} revealScope={String(revealEpoch)} />)}
           {error && <div className="form-error" role="alert">{error}</div>}
         </div>
       </details>
@@ -176,7 +180,9 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
                 onChange={(event) => setLabel(event.target.value)}
               />
               <small id="provider-account-label-hint" className="muted">
-                A name such as Work or Personal stays visible. An email address is hidden until revealed.
+                {privacy.hide
+                  ? "A name such as Work or Personal stays visible. An email address is hidden until revealed."
+                  : "A name such as Work or Personal stays visible. Email addresses follow Hide Account Emails in Settings."}
               </small>
             </label>
             {error && <div className="form-error" role="alert">{error}</div>}

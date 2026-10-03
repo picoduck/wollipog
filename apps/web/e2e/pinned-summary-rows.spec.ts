@@ -1,4 +1,9 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+
+// These cases exercise the explicitly enabled privacy mode. Default-off behavior has separate coverage.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
+});
 import { dialogMotionSettled } from "./dialog-motion.js";
 
 // The Pinned Summary's contents (#2160): four sections of one-line rows that state each fact once.
@@ -15,6 +20,7 @@ async function openSession(page: Page, width: number, storage: Record<string, st
     if (sessionStorage.getItem("pinned-summary-seeded")) return;
     sessionStorage.setItem("pinned-summary-seeded", "1");
     localStorage.clear();
+    localStorage.setItem("wollipog.hide-account-emails", "true");
     for (const [key, value] of Object.entries(values)) localStorage.setItem(key, value);
   }, storage);
   await page.goto(fixture);

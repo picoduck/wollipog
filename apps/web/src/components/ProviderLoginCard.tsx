@@ -2,7 +2,8 @@ import React, { useState } from "react";
 import type { ProviderLoginView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { accountLabelText } from "../personal-identifiers.js";
-import { PersonalIdentifier } from "./PersonalIdentifier.js";
+import { AccountIdentifier } from "./AccountIdentifier.js";
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 
 function statusLabel(status: ProviderLoginView["status"]): string {
   if (status === "starting") return "Starting";
@@ -14,7 +15,8 @@ function statusLabel(status: ProviderLoginView["status"]): string {
   return "Sign-In Failed";
 }
 
-export function ProviderLoginCard({ runnerId, login }: { runnerId: string; login: ProviderLoginView }) {
+export function ProviderLoginCard({ runnerId, login, revealScope = "" }: { runnerId: string; login: ProviderLoginView; revealScope?: string }) {
+  const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -52,11 +54,11 @@ export function ProviderLoginCard({ runnerId, login }: { runnerId: string; login
     <article
       className="provider-login-card"
       data-provider-login-status={login.status}
-      aria-label={`${accountLabelText(login.label)} Provider Sign-In`}
+      aria-label={`${accountLabelText(login.label, undefined, privacy.hide)} Provider Sign-In`}
     >
       <div className="provider-login-head">
         <div>
-          <strong><PersonalIdentifier value={login.label} label="Account Email" /></strong>
+          <strong><AccountIdentifier identity={JSON.stringify([runnerId, login.accountId, login.operationId, revealScope])} value={login.label} label="Account Email" /></strong>
           <span>{login.provider === "claude" ? "Claude" : "Codex"} · {statusLabel(login.status)}</span>
         </div>
         {active && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void cancel()}>Cancel</button>}

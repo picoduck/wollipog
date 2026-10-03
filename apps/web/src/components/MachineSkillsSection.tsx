@@ -1,3 +1,4 @@
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import React, { useRef, useState } from "react";
 import { runnerSupportsProtocol, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
@@ -16,6 +17,7 @@ import { ChevronRightIcon } from "./Icons.js";
  * reported, including those of skills the library no longer has. Read when first opened.
  */
 export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
+  const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const [state, setState] = useState<RunnerSkillsResponse | "error" | null>(null);
   const [loading, setLoading] = useState(false);
@@ -42,7 +44,7 @@ export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
   const removals = reportedSkillLinkRemovals(loaded?.reported, null);
   const removalReporting = loaded?.removalReporting ?? "unknown";
   const accountLabel = (providerAccountId: string) => accountLabelText(
-    runner.providerAccounts?.find((account) => account.id === providerAccountId)?.label ?? "Provider Account",
+    runner.providerAccounts?.find((account) => account.id === providerAccountId)?.label ?? "Provider Account", undefined, privacy.hide,
   );
   const agentName = (agentId: string) => runner.agents.find((agent) => agent.id === agentId)?.name || agentId;
   const reportedAt = loaded?.reported?.removalsUpdatedAt ?? loaded?.reported?.updatedAt;

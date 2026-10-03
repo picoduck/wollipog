@@ -10,7 +10,8 @@ import {
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { maskedAccountTitles } from "../personal-identifiers.js";
-import { PersonalIdentifier } from "./PersonalIdentifier.js";
+import { AccountIdentifier } from "./AccountIdentifier.js";
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
 
 type Loadable<T> =
@@ -54,6 +55,7 @@ export function AuthenticationRecoveryPanel({
   runner: RunnerView | undefined;
   runnerOnline: boolean;
 }) {
+  const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const supported = runnerSupportsProtocol(runner?.protocolVersion, "providerAuthenticationAccountRecovery");
   const provider = providerName(session.driver);
@@ -122,7 +124,8 @@ export function AuthenticationRecoveryPanel({
     : [];
   // Button names cannot carry a reveal control, so an email-shaped label is named by a distinct
   // hidden ordinal instead of its value.
-  const accountTitles = maskedAccountTitles(alternatives.map((account) => account.label));
+  const labels = alternatives.map((account) => account.label);
+  const accountTitles = privacy.hide ? maskedAccountTitles(labels) : labels;
   const canSwitch = !!session.providerAccountId;
   const canStartSignIn = runner?.canManage === true && runnerSupportsProtocol(runner.protocolVersion, "providerLogin");
   const accountLogins = (runner?.providerLogins ?? []).filter((login) =>
@@ -170,6 +173,7 @@ export function AuthenticationRecoveryPanel({
           <dt>Provider-Reported Account</dt>
           <dd>
             <ProviderIdentity
+              key={`${session.id}:${cardKey}`}
               provider={provider}
               runnerOnline={runnerOnline}
               signingIn={signingIn}
@@ -182,7 +186,7 @@ export function AuthenticationRecoveryPanel({
           <dt>Configured Account</dt>
           <dd>
             {session.providerAccountLabel
-              ? <PersonalIdentifier value={session.providerAccountLabel} label="Configured Account Email" />
+              ? <AccountIdentifier identity={`${session.id}:${cardKey}`} value={session.providerAccountLabel} label="Configured Account Email" />
               : <span>Machine Default Sign-In</span>}
             <span className="auth-recovery-hint">
               {session.providerAccountLabel
@@ -218,7 +222,8 @@ export function AuthenticationRecoveryPanel({
             {alternatives.map((account, index) => (
               <li key={account.id} className="auth-recovery-account" data-availability={account.availability}>
                 <div className="auth-recovery-account-head">
-                  <PersonalIdentifier
+                  <AccountIdentifier
+                    identity={`${session.id}:${cardKey}:${account.id}`}
                     className="auth-recovery-account-label"
                     value={account.label}
                     label="Account Email"
@@ -338,7 +343,8 @@ function ProviderIdentity({
   return (
     <span className="auth-recovery-email">
       {message ?? (
-        <PersonalIdentifier
+        <AccountIdentifier
+          identity={identity.key}
           value={value.email!}
           label="Current Account Email"
           sensitive

@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
 
+// These cases exercise the explicitly enabled privacy mode. Default-off behavior has separate coverage.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
+});
+
 test("account labels and controls remain readable on narrow usage cards", async ({ page }) => {
   const longLabel = "a-very-long-account-label-without-natural-breaks@example.com";
 

@@ -1,5 +1,10 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+// These cases exercise the explicitly enabled privacy mode. Default-off behavior has separate coverage.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
+});
+
 /** #1954: a masked email says what it hides, and its reveal control is a real square small button. */
 const SURFACES: Array<{ name: string; open: (page: Page) => Promise<Locator>; reveal: string; email: string }> = [
   {

@@ -102,12 +102,13 @@ export function skillMachineErrors(
   skillName: string,
   runners: ReadonlyArray<RunnerView>,
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
+  hideAccountEmails = true,
 ): SkillMachineErrors[] {
   return runners.flatMap((runner) => {
     const state = machineSkills[runner.runnerId];
     if (!state || state.loadError) return [];
     const rows = runner.agents
-      .map((agent) => skillAgentDeployment(runner, agent, skillName, state))
+      .map((agent) => skillAgentDeployment(runner, agent, skillName, state, hideAccountEmails))
       .filter((row) => row.eligible && row.status === "error");
     return rows.length ? [{ runnerId: runner.runnerId, rows }] : [];
   });
@@ -140,8 +141,9 @@ export function skillDeploymentErrorSummary(
   runners: ReadonlyArray<RunnerView>,
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
   kind?: "manual-only" | "machine",
+  hideAccountEmails = true,
 ): SkillDeploymentErrorSummary | null {
-  const all = skillMachineErrors(skillName, runners, machineSkills);
+  const all = skillMachineErrors(skillName, runners, machineSkills, hideAccountEmails);
   // The notice's test (`skillManualOnlyErrors`): a Manual Only target the agent can't run is a skip
   // even when the machine also reports an error for it, which Deployment shows first.
   const skips = (row: SkillAgentDeployment) => row.invocation === "manual" && !supportsManualOnly(row.agent.driver);
@@ -199,7 +201,7 @@ function ineligibleReason(runner: RunnerView, agent: AgentDefinition): string {
  * or Linked. A machine whose report has not loaded shows no status.
  */
 export function skillAgentDeployment(runner: RunnerView, agent: AgentDefinition, skillName: string,
-  state?: RunnerSkillsResponse): SkillAgentDeployment {
+  state?: RunnerSkillsResponse, hideAccountEmails = true): SkillAgentDeployment {
   const eligible = skillAgentEligible(runner, agent);
   const target = state && !state.loadError
     ? state.desired.find((skill) => skill.name === skillName)?.targets.find((candidate) => candidate.agentId === agent.id)
@@ -207,7 +209,7 @@ export function skillAgentDeployment(runner: RunnerView, agent: AgentDefinition,
   const base = { agent, eligible, invocation: target?.invocation ?? null };
   if (!eligible) return { ...base, status: null, reason: ineligibleReason(runner, agent) };
   if (!state || state.loadError) return { ...base, status: null };
-  const cell = skillAgentMatrixCell(runner, agent, skillName, state);
+  const cell = skillAgentMatrixCell(runner, agent, skillName, state, hideAccountEmails);
   const reported = cell.reported;
   // An agent nothing targets is this skill's only while it still holds a link: a machine-wide error
   // or an unreported link says nothing about it.
@@ -241,7 +243,7 @@ export function skillAgentDeployment(runner: RunnerView, agent: AgentDefinition,
   if (reported === "Linked (Not Targeted)") {
     return { ...base, status: "linked", reason: "Not assigned. A link from before, or a shared skills folder, still exposes it." };
   }
-  const unreported = target ? unreportedAccount(runner, agent, skillName, state) : undefined;
+  const unreported = target ? unreportedAccount(runner, agent, skillName, state, hideAccountEmails) : undefined;
   if (unreported) return { ...base, status: "pending", reason: `${unreported}: Not reported yet.` };
   return { ...base, status: "linked" };
 }
@@ -249,7 +251,7 @@ export function skillAgentDeployment(runner: RunnerView, agent: AgentDefinition,
 /** The label of a provider account this agent deploys into that the report has no link from, when
  * the machine reports per account: each of a native agent's accounts gets its own copy. */
 function unreportedAccount(runner: RunnerView, agent: AgentDefinition, skillName: string,
-  state: RunnerSkillsResponse): string | undefined {
+  state: RunnerSkillsResponse, hideAccountEmails: boolean): string | undefined {
   const deployed = state.reported?.deployed?.filter((row) => row.name === skillName) ?? [];
   if ((agent.context?.kind ?? "native") !== "native" || !deployed.some((row) => row.providerAccountId)) return undefined;
   const provider = agent.driver === "claude-code" ? "claude"
@@ -257,7 +259,7 @@ function unreportedAccount(runner: RunnerView, agent: AgentDefinition, skillName
   const missing = (runner.providerAccounts ?? []).find((account) => provider && account.provider === provider &&
     !deployed.some((row) => row.providerAccountId === account.id &&
       row.links.some((link) => link.agentId === agent.id && link.status === "linked")));
-  return missing ? accountLabelText(missing.label) : undefined;
+  return missing ? accountLabelText(missing.label, undefined, hideAccountEmails) : undefined;
 }
 
 /** The rule responsible for a targeted agent: "Direct" for the skill's own assignment, the group's
@@ -286,8 +288,8 @@ export interface SkillMachineDeployment {
   total: number;
 }
 
-export function skillMachineDeployment(runner: RunnerView, skillName: string, state?: RunnerSkillsResponse): SkillMachineDeployment {
-  const all = runner.agents.map((agent) => skillAgentDeployment(runner, agent, skillName, state));
+export function skillMachineDeployment(runner: RunnerView, skillName: string, state?: RunnerSkillsResponse, hideAccountEmails = true): SkillMachineDeployment {
+  const all = runner.agents.map((agent) => skillAgentDeployment(runner, agent, skillName, state, hideAccountEmails));
   const rows = all.filter((row) => row.eligible);
   const counted = rows.filter((row) => row.status !== null);
   return {
@@ -347,7 +349,7 @@ export function skillRuleUnreachableAgents<T extends SkillRule>(
 
 /** Display configuration separately from the last reported link; a shared harness may expose a
  * skill even when this specific agent has no desired target. Never infer successful removal. */
-export function skillAgentMatrixCell(runner: RunnerView, agent: AgentDefinition, skillName: string, state?: RunnerSkillsResponse): { desired: string; reported: string; detail?: string } {
+export function skillAgentMatrixCell(runner: RunnerView, agent: AgentDefinition, skillName: string, state?: RunnerSkillsResponse, hideAccountEmails = true): { desired: string; reported: string; detail?: string } {
   if (!state || state.loadError) return { desired: "Unknown", reported: "Unknown", detail: state?.loadError ?? "Skills status has not loaded." };
   const desired = state.desired.find(skill => skill.name === skillName);
   const target = desired?.targets.find(target => target.agentId === agent.id);
@@ -366,7 +368,7 @@ export function skillAgentMatrixCell(runner: RunnerView, agent: AgentDefinition,
       : Boolean(row.error)));
   const scopedDetail = (row: (typeof deployed)[number], detail: string | undefined) => {
     if (!row.providerAccountId) return detail;
-    const label = accountLabelText(account(row.providerAccountId)?.label ?? "Provider Account");
+    const label = accountLabelText(account(row.providerAccountId)?.label ?? "Provider Account", undefined, hideAccountEmails);
     return `${label}: ${detail ?? "deployment did not succeed"}`;
   };
   const linkedRows = relevant.flatMap(row => row.links

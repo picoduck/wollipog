@@ -1,10 +1,9 @@
 /**
  * Display privacy for structured personal identifiers.
  *
- * A provider-reported account email is personal information, and the dashboard is often on a
- * shared or streamed screen. App-controlled identity surfaces therefore render these values masked
- * until a person explicitly reveals one, and that reveal lives only in the component instance that
- * showed it: nothing here is persisted, so a reload or another surface starts hidden again.
+ * Provider account fields follow the device's Hide Account Emails preference, which defaults off.
+ * When enabled, each temporary reveal lives only in its open surface; reopening or changing the
+ * account hides it again. Other personal fields retain their existing masking behavior.
  *
  * Two kinds of value reach those surfaces:
  * - provider-reported identifiers (the email a Claude or Codex login reports) are always personal;
@@ -26,7 +25,7 @@ const EMAIL_ADDRESSES = new RegExp(EMAIL_ADDRESS.source, "gu");
 /** Safe stand-in for a hidden account label inside sentences, tooltips, and notifications. */
 export const HIDDEN_ACCOUNT = "Hidden Account";
 
-/** Whether an alias or display value carries an email address and must be masked by default. */
+/** Whether an alias or display value carries an email address and can be masked. */
 export function isPersonalIdentifier(value: string | null | undefined): boolean {
   return typeof value === "string" && EMAIL_ADDRESS.test(value);
 }
@@ -35,8 +34,8 @@ export function isPersonalIdentifier(value: string | null | undefined): boolean 
  * Text for a label that must appear inside a plain string — a toast, `title`, `aria-label`, or
  * sentence — where no reveal control can accompany it. A personal identifier becomes `hidden`.
  */
-export function accountLabelText(label: string, hidden = HIDDEN_ACCOUNT): string {
-  return isPersonalIdentifier(label) ? hidden : label;
+export function accountLabelText(label: string, hidden = HIDDEN_ACCOUNT, hide = true): string {
+  return hide && isPersonalIdentifier(label) ? hidden : label;
 }
 
 /**

@@ -119,6 +119,8 @@ function detailRowsOverflowCount(rows: readonly ConfirmationDetailRow[], overflo
 }
 
 export interface ToastOptions {
+  /** Live content for a message whose display preference can change while the toast is open. */
+  messageContent?: ReactNode;
   tone?: "info" | "success" | "warning" | "error";
   /** An optional second line under the message, in the secondary text colour. */
   detail?: string;
@@ -430,7 +432,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
         <ToneIcon tone={toast.tone === "error" ? "danger" : toast.tone ?? "info"} />
       </span>
       <div className="toast-copy">
-        <span className="toast-message">{toast.message}</span>
+        <span className="toast-message">{toast.messageContent ?? toast.message}</span>
         {toast.detail && <span className={toast.detailStyle === "mono" ? "toast-detail mono" : "toast-detail"}>{toast.detail}</span>}
         {toast.link && (
           <a className="toast-link" href={toast.link.href} target="_blank" rel="noreferrer">{toast.link.label}</a>

@@ -20,6 +20,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import { setHideAccountEmails } from "../account-email-privacy.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -395,7 +396,8 @@ test("Account Switch Failed offers Switch Account… and names a plain label", a
   }
 });
 
-test("an email-shaped account label is never inlined, masked or not", async () => {
+test("an open account failure follows privacy without adding a local reveal control", async () => {
+  setHideAccountEmails(false);
   const fixture = await mount(sessionView({
     providerAccountSwitchFailure: {
       ...accountFailure("ada@example.com"),
@@ -405,12 +407,18 @@ test("an email-shaped account label is never inlined, masked or not", async () =
   try {
     const notice = fixture.notices()[0]!;
     assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "Wollipog couldn’t continue with ada@example.com. Ada@example.com has no usage headroom.");
+    await act(async () => setHideAccountEmails(true));
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
       "Wollipog couldn’t continue with the selected account. The selected account has no usage headroom.");
     assertNoDomNode(notice.querySelector(".pid"), "no masked identifier");
     assertNoDomNode(notice.querySelector(".pid-toggle"), "no reveal button");
     assert.doesNotMatch(notice.textContent ?? "", /••••|@/u);
+    await act(async () => setHideAccountEmails(false));
+    assert.match(notice.textContent ?? "", /ada@example.com/u);
   } finally {
     await fixture.unmount();
+    setHideAccountEmails(false);
   }
 });
 

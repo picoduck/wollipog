@@ -5,7 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
 async function openSwitchAccount(page: Page, accounts: "default" | "removed" | "none" | "auth" | "reasons", width = 1440, height = 900) {
   await page.setViewportSize({ width, height });
   const url = `/command-inbox-projects-e2e.html?scenario=switch-account&accounts=${accounts}`;
-  await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
+  await page.goto(url); await page.evaluate(() => { localStorage.clear(); localStorage.setItem("wollipog.hide-account-emails", "true"); }); await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();

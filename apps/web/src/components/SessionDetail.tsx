@@ -54,6 +54,8 @@ import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelect
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
 import { COMPOSER_USAGE_MIN_COLUMN_REM, composerUsagePlacement, useNarrowerThanRem } from "../composer-usage-placement.js";
 import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
+import { AccountLabel } from "./AccountIdentifier.js";
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { compareSessionNotices, SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -813,6 +815,7 @@ function SessionDetailLoaded({
   composerDraftCleanup = deleteComposerDraftIfMatches,
   session,
 }: SessionDetailProps & { session: SessionView }) {
+  const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const isMobile = useIsMobile();
   const isMobileRef = useRef(isMobile);
@@ -2616,7 +2619,9 @@ function SessionDetailLoaded({
     });
     automaticAccountSwitchNotice.current = update.state;
     if (update.providerAccountLabel) {
-      showToast(`Moved this session to ${accountLabelText(update.providerAccountLabel, "another account")} after its prior account exhausted a usage window.`);
+      showToast(`Moved this session to ${accountLabelText(update.providerAccountLabel, "another account")} after its prior account exhausted a usage window.`, {
+        messageContent: <>Moved this session to <AccountLabel value={update.providerAccountLabel} hidden="another account" /> after its prior account exhausted a usage window.</>,
+      });
     }
   }, [eventHistory?.everComplete, evs, session.id, showToast, timelineItems]);
   const observedLastEventAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || undefined;
@@ -3856,7 +3861,7 @@ function SessionDetailLoaded({
   if (accountSwitchFailure && accountSwitchFailedOrder) {
     const failure = accountSwitchFailure;
     // A personal identifier is never inlined, masked or not: the sentence names the account by role.
-    const account = isPersonalIdentifier(failure.providerAccountLabel)
+    const account = privacy.hide && isPersonalIdentifier(failure.providerAccountLabel)
       ? "the selected account"
       : failure.providerAccountLabel;
     const switchReason = !accountSwitchSupported
@@ -3885,7 +3890,7 @@ function SessionDetailLoaded({
           )}>
           <p>
             Wollipog couldn&rsquo;t continue with {account}.
-            {" "}{asSentence(redactPersonalIdentifiers(failure.reason, "the selected account"))}
+            {" "}{asSentence(privacy.hide ? redactPersonalIdentifiers(failure.reason, "the selected account") : failure.reason)}
           </p>
           {accountSwitchApplicable && switchReason !== null && (
             <p className="notice-meta" id="account-switch-refusal">{switchReason}</p>

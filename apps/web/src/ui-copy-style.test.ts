@@ -465,13 +465,14 @@ test("a masked identifier's words and every reveal control's name are Title Case
   assert.deepEqual(Object.values(HIDDEN_IDENTIFIER_TEXT), ["Email Hidden", "Hidden"]);
   for (const text of Object.values(HIDDEN_IDENTIFIER_TEXT)) assert.ok(isTitleCase(text), text);
   // A reveal control's name is "Show" or "Hide" and the label its caller passes.
-  const REVEALS = new Set(["PersonalIdentifier", "PersonalIdentifierRevealButton"]);
+  const REVEALS = new Set(["PersonalIdentifier", "PersonalIdentifierRevealButton", "AccountIdentifier", "AccountIdentifierRevealButton"]);
   const names: string[] = [];
   const failures: string[] = [];
   for (const file of sourceFiles(SOURCE_ROOT)) {
     const source = readFileSync(file, "utf8");
     // The component forwards its own `label`; its callers supply the copy.
-    if (!source.includes("<PersonalIdentifier") || file.endsWith(`${path.sep}PersonalIdentifier.tsx`)) continue;
+    if ((!source.includes("<PersonalIdentifier") && !source.includes("<AccountIdentifier")) ||
+        file.endsWith(`${path.sep}PersonalIdentifier.tsx`) || file.endsWith(`${path.sep}AccountIdentifier.tsx`)) continue;
     const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     const visit = (node: ts.Node) => {
       if (ts.isJsxOpeningLikeElement(node) && REVEALS.has(node.tagName.getText(sourceFile))) {

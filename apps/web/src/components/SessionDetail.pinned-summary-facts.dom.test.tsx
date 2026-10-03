@@ -21,6 +21,7 @@ import { staticPinnedSummary } from "./pinned-summary-state.js";
  */
 
 const domWindow = new Window({ url: "http://localhost/" });
+domWindow.localStorage.setItem("wollipog.hide-account-emails", "true");
 installDomTestCleanup(domWindow);
 Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
   configurable: true,

@@ -1,3 +1,4 @@
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { State } from "./State.js";
 import { runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
@@ -90,6 +91,7 @@ export type SkillsRoute = Extract<View, { name: "skills" }>;
 const PANE_TITLES: Record<SkillsPane, string> = { orphans: "Orphaned Copies", overview: "Library Overview" };
 
 export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute } = {}) {
+  const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const { navigate } = useStoreActions();
   const isMobile = useIsMobile();
@@ -490,8 +492,9 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
     runners,
     machineSkills,
     orphanCount,
+    hideAccountEmails: privacy.hide,
     machineLabel: (runnerId) => machineLabels.get(runnerId) ?? runnerId,
-  }), [skills, runners, machineSkills, orphanCount, machineLabels]);
+  }), [skills, runners, machineSkills, orphanCount, machineLabels, privacy.hide]);
 
   const orphanResolved = async (result: OrphanedSkillCopyResolution) => {
     if (result.warning) showToast(result.warning, { tone: "error" });
@@ -565,7 +568,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
   ], [assignments, groupRulesCurrent, groupRules]);
   // One answer for the slot and for Source, so a notice the slot shows is never repeated below.
   const noticeItem = detail
-    ? skillNoticeItem(detail, runners, machineSkills, detailRules, !detailGroupId || groupRulesCurrent)
+    ? skillNoticeItem(detail, runners, machineSkills, detailRules, !detailGroupId || groupRulesCurrent, privacy.hide)
     : null;
   // An edited copy of an older version is named by its number (#2291): read the versions until its
   // digest turns up. The latest needs no read; a failed or bounded-out read leaves the digest.

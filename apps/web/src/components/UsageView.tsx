@@ -36,6 +36,8 @@ import {
   type UsageMetric,
 } from "../usage-view-model.js";
 import { PersonalIdentifier } from "./PersonalIdentifier.js";
+import { AccountIdentifier } from "./AccountIdentifier.js";
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { SegmentedControl, Select } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -80,6 +82,7 @@ function OfflineMachineWatcher({ onNames }: { onNames: (names: string[]) => void
 }
 
 export function UsageView() {
+  const privacy = useAccountEmailPrivacy();
   const { confirm } = useFeedback();
   const api = useApi();
   const hasStore = useHasStore();
@@ -437,7 +440,8 @@ export function UsageView() {
                       <p className="subscription-account">
                         <strong>Account:</strong>{" "}
                         {/* Without an account binding the label is the provider-reported email. */}
-                        <PersonalIdentifier
+                        <AccountIdentifier
+                          identity={`${source.runnerId}:${source.sourceId}:${source.providerAccountId ?? ""}`}
                           value={source.accountLabel}
                           label="Account Email"
                           kind="email"
@@ -465,7 +469,7 @@ export function UsageView() {
                     </button>
                   )}
                 </header>
-                {source.detail && <p className="subscription-detail">{redactPersonalIdentifiers(source.detail)}</p>}
+                {source.detail && <p className="subscription-detail">{privacy.hide ? redactPersonalIdentifiers(source.detail) : source.detail}</p>}
                 {source.buckets.length > 0 && (
                   <dl className="facts">
                     {source.buckets.map((bucket) => {

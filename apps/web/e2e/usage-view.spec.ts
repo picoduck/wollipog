@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
 
+// These cases exercise the explicitly enabled privacy mode. Default-off behavior has separate coverage.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
+});
+
 /**
  * The redesigned Usage & Cost view (#601): metric toggle, driver-stacked chart with a hover and
  * keyboard readout, totals tiles, shared time aggregation, and the coverage notice. Screenshots land

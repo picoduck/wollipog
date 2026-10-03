@@ -77,7 +77,7 @@ let runner: RunnerView | null = {
   providerAccounts: [
     {
       id: "claude-work",
-      label: "Work",
+      label: new URLSearchParams(window.location.search).has("emailLabels") ? "work@example.com" : "Work",
       provider: "claude",
       authStatus: "authenticated",
     },

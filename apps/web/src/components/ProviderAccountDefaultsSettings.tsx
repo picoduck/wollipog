@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { runnerSupportsProtocol, type RunnerProviderAccountDefault, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
-import { PersonalIdentifierRevealButton, usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
+import { AccountIdentifierRevealButton, useAccountIdentifierReveal } from "./AccountIdentifier.js";
 import { Select } from "./ui/ChoiceControls.js";
 
 const PROVIDERS = ["claude", "codex"] as const;
@@ -13,8 +13,8 @@ export function ProviderAccountDefaultsSettings({ runner }: { runner: RunnerView
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const accounts = runner.providerAccounts ?? [];
-  const [revealed, toggleReveal] = usePersonalIdentifierReveal(
-    `${runner.runnerId}\0${accounts.map((account) => `${account.id}:${account.label}`).join("\0")}`,
+  const [revealed, toggleReveal] = useAccountIdentifierReveal(
+    JSON.stringify([runner.runnerId, choices.map((choice) => [choice.provider, choice.accountId]), accounts.map((account) => [account.id, account.label])]),
   );
   const titles = maskedAccountTitles(accounts.map((account) => account.label));
   useEffect(() => { setChoices(runner.providerAccountDefaults ?? []); }, [runner.providerAccountDefaults]);
@@ -45,7 +45,7 @@ export function ProviderAccountDefaultsSettings({ runner }: { runner: RunnerView
       <h3>Default Provider Accounts</h3>
       <p>Choose the account used for new native host sessions when no account is specified. Existing sessions keep their accounts.</p>
       {accounts.some((account) => isPersonalIdentifier(account.label)) && (
-        <PersonalIdentifierRevealButton
+        <AccountIdentifierRevealButton
           label="Emails"
           revealed={revealed}
           onToggle={toggleReveal}

@@ -12,7 +12,7 @@ import { isPersonalIdentifier } from "../personal-identifiers.js";
 import { Modal } from "./common.js";
 import { AccountRows, AccountsHead, type AccountRowAccount, type CurrentAccountRow } from "./AccountChoice.js";
 import { Notice } from "./Notice.js";
-import { usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
+import { useAccountIdentifierReveal } from "./AccountIdentifier.js";
 import { State } from "./State.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
@@ -180,7 +180,7 @@ export function SwitchAccountDialog({
   // One deliberate reveal for every row (rows are radios inside labels and cannot nest a control),
   // bound to this exact list so a changed list starts hidden again.
   const shownLabels = [...(current && !current.removedFrom ? [current.label] : []), ...accounts.map((account) => account.label)];
-  const [revealed, toggleReveal] = usePersonalIdentifierReveal(shownLabels.join("\n"));
+  const [revealed, toggleReveal] = useAccountIdentifierReveal(JSON.stringify([session.id, currentId, selectedId, current?.label, accounts.map((account) => [account.id, account.label])]));
 
   // A message sent while the session waits for sign-in stays with that sign-in (#1668), so the body
   // promises the queue moves only when nothing is waiting for authentication.

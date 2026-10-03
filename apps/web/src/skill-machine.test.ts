@@ -135,3 +135,12 @@ test("machine requests run one at a time, in order, even after a failure, and ar
   assert.equal(queue.pending(), 0);
   assert.equal(notified, 4, "subscribers hear every change");
 });
+
+test("structured skill locations honor the account email preference and keep aliases readable", () => {
+  const runner = { providerAccounts: [{ id: "acct", label: "work@example.com", provider: "claude" as const, authStatus: "authenticated" as const }] };
+  const skill = { name: "review", sourceDirectory: ".claude/skills", providerAccountId: "acct" };
+  assert.match(machineSkillLocation(skill, runner, false), /work@example\.com/);
+  assert.doesNotMatch(machineSkillLocation(skill, runner, true), /work@example\.com/);
+  runner.providerAccounts[0]!.label = "Work";
+  assert.match(machineSkillLocation(skill, runner, true), /Account: Work/);
+});

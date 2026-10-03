@@ -1,3 +1,4 @@
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import React, { useId, useState, type ReactNode } from "react";
 import { runnerSupportsProtocol, type RunnerView, type SkillDriftState } from "@wollipog/protocol";
 import { Notice } from "./Notice.js";
@@ -51,12 +52,13 @@ export function skillNoticeItem<T extends SkillRule>(
   machineSkills: Readonly<Record<string, RunnerSkillsResponse | undefined>>,
   rules: ReadonlyArray<T>,
   rulesComplete = true,
+  hideAccountEmails = true,
 ): SkillNoticeItem<T> | null {
   // A rule that skips agents outranks a machine's own error: the page can name its fix.
   const manualOnly = skillManualOnlyErrors(skill.name, runners, machineSkills, rules, rulesComplete)[0];
   if (manualOnly) return { kind: "manual-only", error: manualOnly };
   // The machine's own error, told as the Library Overview tells it (#2293).
-  const failed = skillDeploymentErrorSummary(skill.name, runners, machineSkills, "machine");
+  const failed = skillDeploymentErrorSummary(skill.name, runners, machineSkills, "machine", hideAccountEmails);
   if (failed) return { kind: "deployment-error", error: failed };
   // Deployment keeps no list of edited copies, so a copy that can be resolved now goes first: an
   // offline machine's copy must not hide another machine's behind its disabled actions.
@@ -278,9 +280,10 @@ export interface SkillNoticeSlotProps<T extends SkillRule> {
 
 /** The notice slot directly under the skill detail's header: at most one notice (§13.2). */
 export function SkillNoticeSlot<T extends SkillRule>(props: SkillNoticeSlotProps<T>) {
+  const privacy = useAccountEmailPrivacy();
   const { skill, runners, machineLabels, machineSkills, rules, busy } = props;
   const reasonId = `skill-notice-reason-${useId().replace(/:/g, "")}`;
-  const item = props.item !== undefined ? props.item : skillNoticeItem(skill, runners, machineSkills, rules, props.rulesComplete ?? true);
+  const item = props.item !== undefined ? props.item : skillNoticeItem(skill, runners, machineSkills, rules, props.rulesComplete ?? true, privacy.hide);
   if (!item) return null;
   const machineName = (runnerId: string) => machineLabels.get(runnerId) ?? runnerId;
   const runnerOf = (runnerId: string) => runners.find((runner) => runner.runnerId === runnerId);
