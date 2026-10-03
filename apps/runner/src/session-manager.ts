@@ -11251,9 +11251,12 @@ export class SessionManager {
   private async prepareSessionRoleOnce(command: PrepareSessionRoleMessage,
     revokeCredentials: () => void, hasLiveNativeTui: () => boolean): Promise<SessionRoleResultMessage> {
     const { sessionId, conversionId } = command;
-    const reply = (ok: boolean, error?: string, pending?: boolean): SessionRoleResultMessage => ({
+    const reply = (ok: boolean, error?: string, pending = (() => {
+      const current = this.store.readMeta(sessionId)?.roleConversion;
+      return current?.command.conversionId === conversionId && current.state !== "applied";
+    })()): SessionRoleResultMessage => ({
       type: "session_role_result", requestId: command.requestId, sessionId, conversionId, ok,
-      ...(error ? { error } : {}), ...(pending ? { pending } : {}),
+      ...(error ? { error } : {}), ...(!ok && pending ? { pending } : {}),
       ...(ok ? { receipt: { conversionId, state: "prepared" } } : {}),
     });
     const meta = this.store.readMeta(sessionId);
@@ -11267,6 +11270,12 @@ export class SessionManager {
     }
     if (prior && prior.state !== "applied" && prior.command.conversionId !== conversionId) {
       return reply(false, "Another role change must finish first.", true);
+    }
+    const localLaunch = this.resolveLaunch?.(meta.driver, meta.context, meta.agentId);
+    if (!localLaunch || localLaunch.command !== command.command ||
+        localLaunch.args.length !== command.args.length ||
+        localLaunch.args.some((arg, index) => arg !== command.args[index])) {
+      return reply(false, "The launch command does not match runner-local configuration. Refresh the Machine's installations and retry.");
     }
     const role = meta.orchestrator || meta.config.permissionMode === "orchestrator" ? "orchestrator" : "normal";
     if (role !== command.expectedRole || (meta.config.permissionMode ?? null) !== command.permissionMode ||
@@ -11306,7 +11315,7 @@ export class SessionManager {
     if (!this.store.acquireLock(sessionId, this.lockOwner)) return reply(false, "Another runner owns this provider. Retry after it releases the session.");
     try {
       this.store.patchMeta(sessionId, { roleConversion: resumingRetirement ? prior : {
-        command, state: "retiring", runnerPid: process.pid, providerPid: entry?.client.pid ?? null,
+        command, state: "retiring", runnerPid: process.pid, providerPid: entry ? entry.client.pid : null,
       } });
       this.store.flush(sessionId);
       if (entry) {

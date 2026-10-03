@@ -200,19 +200,23 @@ export class SessionRoleConversions {
     const receipt = snapshot.roleConversionReceipt;
     if (!session || session.runnerId !== runnerId || !intent || !receipt ||
         intent.command.conversionId !== receipt.conversionId) return;
+    let changed = false;
     if (receipt.state === "prepared" && intent.state === "preparing") {
       this.db.commitSessionRoleConversion(snapshot.id, receipt.conversionId, Date.now());
+      changed = true;
       this.log("session_role_conversion_committed", { sessionId: snapshot.id, conversionId: receipt.conversionId, entryPoint: "runner_receipt" });
     } else if (receipt.state === "applied" && intent.state === "committing") {
       this.db.finishSessionRoleConversion(snapshot.id, receipt.conversionId);
+      changed = true;
       this.log("session_role_conversion_applied", { sessionId: snapshot.id, conversionId: receipt.conversionId, entryPoint: "runner_receipt" });
     }
-    this.hub.sessionChangedById(snapshot.id);
+    if (changed) this.hub.sessionChangedById(snapshot.id);
   }
 
   reconcile(runnerId: string, snapshot: Pick<SessionSnapshot, "id" | "roleConversionReceipt">): void {
-    const session = this.db.getSession(snapshot.id);
     const intent = this.db.sessionRoleConversion(snapshot.id);
+    if (!intent || intent.state === "applied") return;
+    const session = this.db.getSession(snapshot.id);
     if (!session || session.runnerId !== runnerId || !intent ||
         !runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "sessionRoleConversion") ||
         (snapshot.roleConversionReceipt && snapshot.roleConversionReceipt.conversionId !== intent.command.conversionId)) return;
