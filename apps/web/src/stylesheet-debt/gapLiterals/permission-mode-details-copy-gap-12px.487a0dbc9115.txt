@@ -1,1 +1,0 @@
-|.permission-mode-details-copy|gap|12px
