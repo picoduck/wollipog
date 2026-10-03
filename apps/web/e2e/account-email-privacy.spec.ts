@@ -6,6 +6,47 @@ const evidenceDir = process.env.WOLLIPOG_PRIVACY_EVIDENCE_DIR ?? "test-results/a
 mkdirSync(evidenceDir, { recursive: true });
 
 const KEY = "wollipog.hide-account-emails";
+async function settleTheme(page: Page, theme: string) {
+  await page.evaluate(async value => {
+    document.documentElement.dataset.theme = value;
+    // Style changes create transitions at the next rendered frame, after the dialog has opened.
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    await Promise.all(document.getAnimations().filter(animation =>
+      animation.effect?.getComputedTiming().iterations !== Infinity).map(animation => animation.finished.catch(() => {})));
+  }, theme);
+}
+
+async function pickerContrast(page: Page) {
+  return page.getByRole("dialog", { name: "Switch Account" }).evaluate(dialog => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d")!;
+    type Color = [number, number, number, number];
+    const color = (value: string): Color => {
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = value;
+      context.fillRect(0, 0, 1, 1);
+      const rgba = [...context.getImageData(0, 0, 1, 1).data];
+      return [rgba[0]!, rgba[1]!, rgba[2]!, rgba[3]! / 255];
+    };
+    const over = (front: Color, back: Color): Color => [
+      ...front.slice(0, 3).map((channel, index) => channel * front[3] + back[index]! * (1 - front[3])), 1,
+    ] as Color;
+    const luminance = (rgba: Color) => rgba.slice(0, 3).map(channel => {
+      const value = channel / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    }).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index]!, 0);
+    return [...dialog.querySelectorAll<HTMLElement>('.choice-row:has(input:checked) .account-usage-text, button.primary')].map(element => {
+      const ancestors: Element[] = [];
+      for (let parent: Element | null = element; parent; parent = parent.parentElement) ancestors.unshift(parent);
+      const background = ancestors.reduce((back, node) => over(color(getComputedStyle(node).backgroundColor), back), [255, 255, 255, 1] as Color);
+      const foreground = over(color(getComputedStyle(element).color), background);
+      const light = luminance(foreground), dark = luminance(background);
+      return { kind: element.matches("button") ? "button" : "selected usage label", contrast: (Math.max(light, dark) + 0.05) / (Math.min(light, dark) + 0.05) };
+    });
+  });
+}
+
 async function openPicker(page: Page) {
   await page.goto("/command-inbox-projects-e2e.html?scenario=switch-account&accounts=default");
   await page.getByRole("button", { name: /Alpha Session/ }).click();
@@ -30,7 +71,11 @@ for (const width of [390, 1440]) {
       await accountsPage.setViewportSize({ width, height: 1000 });
       await accountsPage.addInitScript(theme => document.documentElement.dataset.theme = theme, theme);
       const picker = await openPicker(accountsPage);
-      await accountsPage.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+      await settleTheme(accountsPage, theme);
+      const contrast = await pickerContrast(accountsPage);
+      expect(contrast).toHaveLength(3);
+      for (const item of contrast) expect(item.contrast, item.kind).toBeGreaterThanOrEqual(4.5);
+      console.log(JSON.stringify({ width, theme, settledPickerContrast: contrast }));
       await expect(picker).toContainText("current.me@example.com");
       await expect(picker.getByRole("button", { name: /(?:Show|Hide) Emails/ })).toHaveCount(0);
       await accountsPage.screenshot({ path: join(evidenceDir, `picker-${width}-${theme}-off.png`) });
