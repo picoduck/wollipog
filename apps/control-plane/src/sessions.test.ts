@@ -12811,6 +12811,69 @@ test("a re-emitted occurrence whose answer never reached the provider is not sho
   assert.equal(summaries()[0]!.payload.kind === "question_answered" ? summaries()[0]!.payload.questionEventSeq : null, firstRequestSeq());
 });
 
+test("each answer to a re-emitted occurrence stays with its own request through a reset (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const request = { kind: "question_request" as const, requestId: "again", occurrenceId: "request_again", async: true,
+    questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }] };
+  db.reconcileRunnerHistory(id, 0, 0);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "again", { q: "Yes" }, undefined, "submit", undefined, "request_again").ok);
+  // The answer never reached the provider; the runner reopens the same occurrence, answered anew.
+  const delivery = hub.sentOfType("durable_session_command").at(-1)!;
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update", commandId: delivery.commandId, sessionId: id, state: "failed", revision: 1,
+  }), true);
+  svc.onSessionEvent(id, request, 2, 101);
+  const retried = svc.answerQuestion(id, "again", { q: "No" }, undefined, "submit", undefined, "request_again");
+  assert.ok(retried.ok, retried.error);
+  const shown = () => {
+    const events = db.listEvents(id);
+    const requests = events.filter((event) => event.payload.kind === "question_request").map((event) => event.seq);
+    return events.flatMap((event) => event.payload.kind === "question_answered"
+      ? [[requests.indexOf(event.payload.questionEventSeq!), event.payload.answers[0]!.selected![0]]] : []);
+  };
+  assert.deepEqual(shown(), [[0, "Yes"], [1, "No"]]);
+
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 2);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: request }, { seq: 2, ts: 101, payload: request }],
+    page: { logEpoch: 0, throughSeq: 2, nextAfterSeq: 2, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.deepEqual(shown(), [[0, "Yes"], [1, "No"]]);
+});
+
+test("a snapshot-parked async question answered behind a policy-hook card shows its answer when its request arrives (#2188)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.upsertGovernancePolicy({
+    policyId: "ask-before-write", name: "Ask Before Write", effect: "ask", priority: 100, enabled: true,
+    scope: { toolName: "Write" },
+  });
+  svc.evaluatePolicyHook(id, {
+    hookEventName: "PreToolUse", providerSessionId: "provider-hook-summary", permissionMode: "plan",
+    toolUseId: "write-hook-summary", context: { toolName: "Write" },
+  }, true);
+  const hook = db.getSession(id)!.pendingApproval!;
+  assert.equal(hook.kind, "policy_hook");
+  const questions = [{ id: "choice", question: "Which option?", options: [{ label: "A" }, { label: "B" }] }];
+  db.setPendingApproval(id, { ...hook, additionalRequests: [...(hook.additionalRequests ?? []), {
+    requestId: "behind-hook", occurrenceId: "request_behind_hook", recoveryId: "request_behind_hook", kind: "question",
+    title: "Which option?", options: [], questions, async: true,
+  }] });
+  assert.ok(svc.answerQuestion(id, "behind-hook", { choice: "B" }, undefined, "submit", undefined, "request_behind_hook").ok);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
+
+  svc.onSessionEvent(id, { kind: "question_request", async: true, requestId: "behind-hook",
+    occurrenceId: "request_behind_hook", questions });
+  const summaries = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(summaries.length, 1);
+  assert.deepEqual(summaries[0]!.payload.kind === "question_answered" ? summaries[0]!.payload.answers : null,
+    [{ questionId: "choice", selected: ["B"] }]);
+});
+
 test("a snapshot-parked answer whose request arrives live before the history epoch is known survives a later reset (#2188)", async () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

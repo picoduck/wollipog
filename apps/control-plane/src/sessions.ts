@@ -12500,7 +12500,7 @@ export class SessionsService {
     // Preserve the authoritative history event, but never let a late permission/question/policy
     // event recreate an approval card or move the control-plane session out of stopped.
     if (this.db.hasSessionStopIntent(sessionId)) {
-      if (payload.kind === "question_request") this.hub.sessionEvent(ev, { suppressReminderWake: true });
+      if (payload.kind === "question_request") this.publishQuestionRequest(ev, { suppressReminderWake: true });
       this.db.updateSessionStatus(sessionId, "stopped", now, { cause: "requested" });
       this.sendStopCommand(session.runnerId, sessionId);
       this.hub.sessionChangedById(sessionId);
@@ -12822,13 +12822,13 @@ export class SessionsService {
       if (occupiedHook?.kind === "policy_hook" && payload.async) {
         // The hook owns a blocking decision, but an async question can remain answerable behind
         // it. Preserve both instead of dismissing a non-blocking question at the turn barrier.
-        this.hub.sessionEvent(ev, { suppressReminderWake: true });
+        this.publishQuestionRequest(ev, { suppressReminderWake: true });
         this.db.setPendingApproval(sessionId, appendPendingApproval(occupiedHook, approval));
         this.hub.sessionChangedById(sessionId);
         return;
       }
       if (occupiedHook?.kind === "policy_hook") {
-        this.hub.sessionEvent(ev, { suppressReminderWake: true });
+        this.publishQuestionRequest(ev, { suppressReminderWake: true });
         const sent = this.hub.sendToRunner(session.runnerId, {
           type: "answer_question",
           sessionId,
@@ -12878,11 +12878,7 @@ export class SessionsService {
           return;
         }
       }
-      this.hub.sessionEvent(ev, suppressRequestReminder ? { suppressReminderWake: true } : undefined);
-      // A reconnect snapshot may have parked this occurrence, and it may have been answered, before
-      // this frame arrived; its stored answer belongs right after it.
-      const answer = this.restoreQuestionAnswerSummary(ev);
-      if (answer) this.hub.sessionEvent(answer);
+      this.publishQuestionRequest(ev, suppressRequestReminder ? { suppressReminderWake: true } : undefined);
       this.db.setPendingApproval(
         sessionId,
         addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
@@ -13550,8 +13546,16 @@ export class SessionsService {
       { restored: true });
   }
 
-  /** Restore a stored answer summary (#2188) after a runner-history cache reset, or bind one that
-   * was answered before its question's request event arrived. */
+  /** Publish a live question request, then the stored answer it already has: a reconnect snapshot
+   * may have parked the occurrence, and it may have been answered, before this frame arrived. */
+  private publishQuestionRequest(ev: SessionEvent, options?: { suppressReminderWake?: boolean }): void {
+    this.hub.sessionEvent(ev, options);
+    const answer = this.restoreQuestionAnswerSummary(ev);
+    if (answer) this.hub.sessionEvent(answer);
+  }
+
+  /** Restore a stored answer summary (#2188) after its question's request: after a runner-history
+   * cache reset, or for an answer accepted before that request arrived. */
   private restoreQuestionAnswerSummary(event: SessionEvent): SessionEvent | null {
     if (event.payload.kind !== "question_request") return null;
     const stored = this.db.restorableQuestionAnswerSummary(event);
