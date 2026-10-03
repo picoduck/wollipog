@@ -43,6 +43,9 @@ export interface TurnRetryInput {
 export const TURN_RETRY_BUSY_REASON = "The agent is working on another turn.";
 export const TURN_RETRY_STOP_FAILED_REASON = "Retry the failed Stop before retrying this turn.";
 export const TURN_RETRY_RESTARTING_REASON = "The session is restarting.";
+/** Why Restart Session waits while Retry Turn runs: a second restart would replace the process the
+ * retried turn runs in. */
+export const TURN_RETRY_IN_FLIGHT_REASON = "Wait for Retry Turn to finish.";
 /** A restart of this driver starts a new provider conversation, so a retried prompt would run without
  * the turns before it; the person restarts knowingly, then sends it again. */
 export const TURN_RETRY_FRESH_RESTART_REASON =

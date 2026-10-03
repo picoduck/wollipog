@@ -22,6 +22,7 @@ for (const [name, value] of Object.entries({
   HTMLTextAreaElement: domWindow.HTMLTextAreaElement, Node: domWindow.Node, Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent, KeyboardEvent: domWindow.KeyboardEvent,
   MutationObserver: domWindow.MutationObserver, React, IS_REACT_ACT_ENVIRONMENT: true,
+  HTMLButtonElement: domWindow.HTMLButtonElement, getComputedStyle: domWindow.getComputedStyle.bind(domWindow),
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
   requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0) as unknown as number,
   cancelAnimationFrame: (id: number) => clearTimeout(id as unknown as NodeJS.Timeout),
@@ -111,9 +112,14 @@ async function withFailedTurn(
       calls.push(`restart:${sessionId}`);
       return restart ? restart(session) : { ...session, status: "starting" as const };
     },
-    prompt: async (sessionId: string, text: string, images: unknown[]) => {
-      calls.push(`prompt:${sessionId}:${text}:${images.length}`);
+    prompt: async (sessionId: string, text: string, images: unknown[], config?: unknown) => {
+      calls.push(`prompt:${sessionId}:${text}:${images.length}${config === undefined ? "" : `:${JSON.stringify(config)}`}`);
       return { ...session, status: "queued" as const };
+    },
+    // A configuration change still being saved when Retry Turn is pressed.
+    setConfig: (sessionId: string) => {
+      calls.push(`setConfig:${sessionId}`);
+      return new Promise<never>(() => {});
     },
   } as unknown as ApiClient;
   const socket = new FakeSocket();
@@ -320,6 +326,65 @@ test("while the composer's Restart Session runs, Retry Turn waits and says why",
     await click(button);
     assert.deepEqual(calls, [`restart:${id}`], "Retry Turn neither restarts again nor prompts");
     await act(async () => { finishRestart!(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+  });
+});
+
+const page = () => domWindow.document as unknown as Document;
+const moreActionsItem = async (label: string) => {
+  const trigger = page().querySelector<HTMLButtonElement>('button[aria-label="More Actions"]');
+  assert.ok(trigger, "the session bar renders More Actions");
+  await act(async () => { trigger.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+  const menu = page().querySelector<HTMLElement>('[role="menu"][aria-label="More Actions"]');
+  assert.ok(menu, "More Actions is open");
+  return [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((candidate) => candidate.querySelector(".menu-text")?.textContent === label);
+};
+
+test("while Retry Turn restarts the session, More Actions' Restart Session waits and says why", async () => {
+  let finishRestart: (() => void) | undefined;
+  await withFailedTurn({
+    status: "failed",
+    overrides: resumable,
+    restart: (session) => new Promise((resolve) => { finishRestart = () => resolve({ ...session, status: "starting" }); }),
+  }, async ({ id, calls, retry }) => {
+    await click(retry()!);
+    const restart = await moreActionsItem("Restart Session");
+    assert.ok(restart, "More Actions offers Restart Session");
+    assert.equal(restart.getAttribute("aria-disabled") === "true" || restart.disabled, true);
+    assert.match(restart.textContent ?? "", /Wait for Retry Turn to finish\./u);
+    await act(async () => restart.click());
+    assert.deepEqual(calls, [`restart:${id}`], "one restart");
+    await act(async () => { finishRestart!(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+  });
+});
+
+test("while More Actions' Restart Session runs, Retry Turn waits and says why", async () => {
+  let finishRestart: (() => void) | undefined;
+  await withFailedTurn({
+    status: "failed",
+    overrides: resumable,
+    restart: (session) => new Promise((resolve) => { finishRestart = () => resolve({ ...session, status: "starting" }); }),
+  }, async ({ id, calls, retry }) => {
+    const restart = await moreActionsItem("Restart Session");
+    assert.ok(restart);
+    await act(async () => { restart.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const button = retry()!;
+    assert.equal(button.disabled, true);
+    assert.equal(reasonOf(button)?.textContent, "The session is restarting.");
+    await click(button);
+    assert.deepEqual(calls, [`restart:${id}`], "Retry Turn neither restarts again nor prompts");
+    await act(async () => { finishRestart!(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+  });
+});
+
+test("a configuration change still being saved travels with the retried prompt, as Send's does", async () => {
+  await withFailedTurn({ status: "idle", overrides: { driver: "claude-code", permissionMode: "plan" } }, async ({ id, container, calls, retry }) => {
+    const plan = container.querySelector<HTMLButtonElement>(".mode-pill");
+    assert.ok(plan, "the Plan pill is shown in plan mode");
+    await act(async () => plan.click());
+    assert.deepEqual(calls, [`setConfig:${id}`], "the change is being saved");
+    await click(retry()!);
+    assert.deepEqual(calls, [`setConfig:${id}`, `prompt:${id}:Summarize the release notes:0:{"permissionMode":""}`]);
   });
 });
 

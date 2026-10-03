@@ -90,7 +90,7 @@ import { Notice } from "./Notice.js";
 import { sessionArchivedAtRest, statusMeta } from "../status-meta.js";
 import { shownWatchdogDelivery } from "../background-delivery-status.js";
 import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest, type TurnRetryControl } from "./EventTimeline.js";
-import { turnRetryPlan } from "../turn-retry.js";
+import { TURN_RETRY_IN_FLIGHT_REASON, turnRetryPlan } from "../turn-retry.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
@@ -3621,6 +3621,8 @@ function SessionDetailLoaded({
   // Retry Turn's restart and the composer's Restart share one guard: two restarts in flight would
   // let the second replace the process the first started, interrupting the retried turn (#2169).
   const turnRetryInFlightRef = useRef(false);
+  // More Actions → Restart Session in the header, which Retry Turn also waits for.
+  const [headerRestartPending, setHeaderRestartPending] = useState(false);
   const restartFromComposer = useCallback(async () => {
     if (!composerRestartOffered || !runnerOnline || busy || restartPending || restartRefusal !== null ||
         turnRetryInFlightRef.current) return;
@@ -3651,14 +3653,15 @@ function SessionDetailLoaded({
     sessionNoticeReason,
     policyPaused,
     stopFailed: session.stopOperation?.status === "stop_failed",
-    restarting: restartPending,
+    restarting: restartPending || headerRestartPending,
   });
   const [retryingTurnPromptId, setRetryingTurnPromptId] = useState<number>();
   const [turnRetryError, setTurnRetryError] = useState<{ promptId: number; message: string }>();
   const retryTurn = useCallback(async (prompt: Extract<TimelineItem, { kind: "user_message" }>) => {
     // One retry at a time, decided synchronously: a second click before the pending state renders
     // must not submit the prompt twice.
-    if (turnRetryInFlightRef.current || restartPending || retryPlan.kind === "unavailable") return;
+    if (turnRetryInFlightRef.current || restartPending || headerRestartPending ||
+        retryPlan.kind === "unavailable") return;
     turnRetryInFlightRef.current = true;
     const generation = viewGenerationRef.current;
     setTurnRetryError(undefined);
@@ -3669,7 +3672,11 @@ function SessionDetailLoaded({
       if (retryPlan.kind === "restart_then_prompt") loadSession(await api.restart(session.id));
       // The accepted prompt's session (queued or running) is loaded before the guard opens, so the
       // button cannot offer the same prompt again while the socket's update is still on its way.
-      loadSession(await api.prompt(session.id, prompt.text, prompt.images ?? []));
+      // A model or effort chosen since the failure travels with the prompt, as Send's does, so the
+      // turn never starts on the previous selection while that change is still being saved.
+      const cfg = Object.keys(pendingConfig.current).length ? pendingConfig.current : undefined;
+      loadSession(await api.prompt(session.id, prompt.text, prompt.images ?? [], cfg));
+      pendingConfig.current = {};
     } catch (cause) {
       if (viewGenerationRef.current === generation) {
         setTurnRetryError({ promptId: prompt.id, message: (cause as Error).message });
@@ -3678,7 +3685,7 @@ function SessionDetailLoaded({
       turnRetryInFlightRef.current = false;
       if (viewGenerationRef.current === generation) setRetryingTurnPromptId(undefined);
     }
-  }, [api, loadSession, restartPending, retryPlan.kind, session.id]);
+  }, [api, headerRestartPending, loadSession, restartPending, retryPlan.kind, session.id]);
   const retryPlanReason = retryPlan.kind === "unavailable" ? retryPlan.reason : undefined;
   const turnRetry = useMemo<TurnRetryControl>(() => ({
     onRetry: (prompt) => void retryTurn(prompt),
@@ -5527,6 +5534,8 @@ function SessionDetailLoaded({
             <MoveToWorkspaceDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
           )}
           topbarControls={topbarControls}
+          restartBlockedReason={retryingTurnPromptId !== undefined ? TURN_RETRY_IN_FLIGHT_REASON : undefined}
+          onRestartPendingChange={setHeaderRestartPending}
           activeSubagents={activeWorkerCount ? {
             count: activeWorkerCount,
             workers: true,
