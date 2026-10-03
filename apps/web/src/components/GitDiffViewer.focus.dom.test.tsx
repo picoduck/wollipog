@@ -70,6 +70,22 @@ test("Open in Review expands its file, scrolls it into view and focuses its head
   assert.deepEqual(scrolled, ["src/b.ts", "src/b.ts"], "asking again scrolls again");
 });
 
+test("a diff read before the request waits for the file instead of giving up", async () => {
+  const { container, root } = await mount();
+  let handled = 0;
+  const stale: GitDiffInfo = { ...diff, diffHash: "d".repeat(64), files: [file("src/a.ts")] };
+  const render = (shown: GitDiffInfo, focusSettled: boolean) => root.render(
+    <GitDiffViewer diff={shown} focus={{ path: "src/new.ts", request: 1 }} focusSettled={focusSettled} onFocusHandled={() => { handled += 1; }} />,
+  );
+  await act(async () => render(stale, false));
+  assert.equal(handled, 0, "the stale diff may predate the edit");
+  const fresh: GitDiffInfo = { ...diff, diffHash: "e".repeat(64), files: [file("src/a.ts"), file("src/new.ts")] };
+  await act(async () => render(fresh, true));
+  assert.equal(handled, 1);
+  assert.equal(container.querySelector(".diff-file[data-path='src/new.ts'] .diff-file-head"), domWindow.document.activeElement as unknown,
+    "the file that arrived with the fresh read is the one focused");
+});
+
 test("a file this diff does not hold ends the request without scrolling", async () => {
   const { root } = await mount();
   let handled = 0;

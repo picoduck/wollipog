@@ -1587,6 +1587,19 @@ test("builder: a steer stays in its turn's plan card; an automatic continuation 
   assert.equal(plans[1]!.entries[0]!.status, "completed");
 });
 
+test("builder: an async answer that starts a turn opens a new plan card", () => {
+  const items = deriveTimeline([
+    ev({ kind: "user_message", text: "first" }),
+    ev({ kind: "plan", entries: [{ content: "a", status: "in_progress" }] }),
+    ev({ kind: "question_resolved", requestId: "q1", answered: true, startsTurn: true }),
+    ev({ kind: "plan", entries: [{ content: "a", status: "completed" }] }),
+  ]);
+  const plans = items.filter((item): item is Extract<TimelineItem, { kind: "plan" }> => item.kind === "plan");
+  assert.equal(plans.length, 2);
+  assert.equal(plans[0]!.entries[0]!.status, "in_progress", "the interrupted turn's card keeps its own plan");
+  assert.equal(plans[1]!.history, undefined);
+});
+
 test("nestSubagents does not mutate its input array or items", () => {
   const items = deriveTimeline([
     ev({ kind: "tool_call", toolCallId: "task1", title: "Task", status: "in_progress" }),

@@ -175,6 +175,7 @@ export function GitDiffViewer({
   onAttachWorkspaceReference,
   layout = "unified",
   focus,
+  focusSettled = true,
   onFocusHandled,
 }: {
   diff: GitDiffInfo;
@@ -184,18 +185,21 @@ export function GitDiffViewer({
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   layout?: DiffLayout;
   focus?: DiffFileFocus | null;
-  /** The focus request was met, or this diff does not hold its file. */
+  /** This diff was read after the focus request, so a file missing from it is really absent. */
+  focusSettled?: boolean;
+  /** The focus request was met, or a diff read after it does not hold its file. */
   onFocusHandled?: () => void;
 }) {
   // Memoized on the diff object rather than repeated for every re-render the surrounding panel
   // causes (typing a commit message, a status poll landing).
   const files = useMemo(() => groupHunksForDisplay(diff.files, COLLAPSE_THRESHOLD), [diff]);
   const focusedPath = focus && files.some((display) => display.file.path === focus.path) ? focus.path : null;
-  // A file this diff does not hold (committed since, or outside this scope) ends the request
-  // rather than waiting to jump the reader later.
+  // A file a fresh read does not hold (committed since, or outside this scope) ends the request
+  // rather than waiting to jump the reader later. A diff from before the request may simply
+  // predate the edit, so it only waits.
   useEffect(() => {
-    if (focus && !focusedPath) onFocusHandled?.();
-  }, [focus, focusedPath, onFocusHandled]);
+    if (focus && !focusedPath && focusSettled) onFocusHandled?.();
+  }, [focus, focusedPath, focusSettled, onFocusHandled]);
 
   const lineage = review?.lineage ?? "";
   // Anchored findings grouped by their anchor, once per diff instead of a scan per rendered row.

@@ -18,6 +18,7 @@ import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ReviewPanel } from "./ReviewPanel.js";
+import type { DiffFileFocus } from "./GitDiffViewer.js";
 import { clearPanelScratch } from "../right-panel-scratch.js";
 import type { GitStatus } from "./useGitStatus.js";
 
@@ -283,8 +284,10 @@ interface Harness {
   holdDiff: () => () => Promise<void>;
   /** Hold the next stage reply, returning a resolver for it. */
   holdStage: () => (reply: { diff?: GitDiffInfo; status?: GitStatusInfo }) => Promise<void>;
-  render: (over?: { status?: GitStatusInfo | null; sessionStatus?: SessionView["status"] }) => Promise<void>;
+  render: (over?: { status?: GitStatusInfo | null; sessionStatus?: SessionView["status"]; focus?: DiffFileFocus | null }) => Promise<void>;
   installed: GitStatusInfo[];
+  /** How many times the panel reported a focus request met or settled. */
+  focusHandled: () => number;
   unmount: () => Promise<void>;
 }
 
@@ -326,6 +329,8 @@ async function mountPanel(options: {
 
   let currentStatus: GitStatusInfo | null = options.status === undefined ? statusOf() : options.status;
   let currentSessionStatus: SessionView["status"] = options.sessionStatus ?? "idle";
+  let currentFocus: DiffFileFocus | null = null;
+  let focusHandled = 0;
 
   const tree = () => {
     const git: GitStatus = {
@@ -349,6 +354,8 @@ async function mountPanel(options: {
           runnerProtocolVersion={157}
           git={git}
           onOpenSourceLocation={() => {}}
+          focus={currentFocus}
+          onFocusHandled={() => { focusHandled += 1; currentFocus = null; }}
         />
       </ApiProvider>
     );
@@ -382,8 +389,10 @@ async function mountPanel(options: {
     render: async (over = {}) => {
       if ("status" in over) currentStatus = over.status ?? null;
       if (over.sessionStatus) currentSessionStatus = over.sessionStatus;
+      if ("focus" in over) currentFocus = over.focus ?? null;
       await act(async () => { root.render(tree()); });
     },
+    focusHandled: () => focusHandled,
     unmount: async () => {
       await act(async () => { root.unmount(); });
       host.remove();
@@ -488,6 +497,33 @@ function staleMarkers(container: HTMLElement): number {
 /* -------------------------------------------------------------------------- */
 /* #1203 — unsent drafts and existing findings survive an unrelated refresh    */
 /* -------------------------------------------------------------------------- */
+
+test("Open in Review re-reads the diff and waits for a file the diff on screen predates (#2187)", async () => {
+  const harness = await mountPanel();
+  try {
+    const before = harness.diffCalls.length;
+    const release = harness.holdDiff();
+    await harness.render({ focus: { path: "src/c.ts", request: 1 } });
+    assert.equal(harness.diffCalls.length, before + 1, "the request asks for a fresh read");
+    assert.equal(harness.focusHandled(), 0, "the diff on screen may predate the edit, so the request waits");
+    harness.serveDiff(diffOf("2", [fileA(), fileB(), { ...fileA(), path: "src/c.ts" }]));
+    await release();
+    assert.equal(harness.focusHandled(), 1);
+    assert.equal(card(harness.container, "src/c.ts").querySelector(".diff-file-head"), domWindow.document.activeElement as unknown);
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("Open in Review gives up on a file a fresh read does not hold (#2187)", async () => {
+  const harness = await mountPanel();
+  try {
+    await harness.render({ focus: { path: "src/gone.ts", request: 1 } });
+    assert.equal(harness.focusHandled(), 1);
+  } finally {
+    await harness.unmount();
+  }
+});
 
 test("staging a hunk in one file leaves an unsent draft in another intact", async () => {
   const harness = await mountPanel();

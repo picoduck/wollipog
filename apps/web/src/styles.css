@@ -6910,14 +6910,28 @@ textarea,
   flex: none;
   color: var(--text-faint);
 }
+/* The verb keeps its place; the object gives way first, and a path gives up its directory before
+   its file name (#2187). The space between them is in the text for readers; the gap draws it. */
 .tl-step-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tl-step-verb {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .tl-step-object {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--text);
   font: var(--type-small);
   font-family: var(--font-mono);
@@ -7138,16 +7152,35 @@ textarea,
   color: var(--text-dim);
   font: var(--type-label);
 }
-/* A path in mono 12px: the directory faint, the file name in full text (#2187). */
+/* A path in mono 12px: the directory faint, the file name in full text (#2187). Short of room,
+   the directory shrinks first; the file name never shrinks, and clips only past the full width. */
 .tl-path {
+  display: flex;
+  min-width: 0;
   font: var(--type-small);
   font-family: var(--font-mono);
   color: var(--text);
+  white-space: nowrap;
 }
-.tl-path-dir { color: var(--text-faint); }
-.tl-diff-file-path {
+.tl-path-dir,
+.tl-path-name {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-path-dir {
+  flex: 0 1 auto;
+  color: var(--text-faint);
+}
+.tl-path-name {
+  flex: 0 0 auto;
+  max-width: 100%;
+}
+.tl-diff-file-path { min-width: 0; }
+/* What Git says about a change with no lines to show: binary, renamed, empty. */
+.tl-diff-note {
+  color: var(--text-dim);
+  font: var(--type-small);
 }
 .tl-diff-actions {
   display: flex;

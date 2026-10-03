@@ -1272,6 +1272,9 @@ export class TimelineBuilder {
         break;
       }
       case "question_resolved": {
+        // An async answer can start the next provider turn with no prompt or checkpoint
+        // (turn-progress.ts reads the same boundary).
+        if (p.startsTurn) this.endTurnPlan();
         const idx = this.permIndex.get(p.requestId);
         if (idx != null && this.items[idx]!.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;

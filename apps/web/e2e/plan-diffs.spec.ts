@@ -30,6 +30,10 @@ for (const width of [1440, 390]) {
   test(`a file edit's diff shows numbered lines, collapses after 8 and opens in Review at ${width}px`, async ({ page }) => {
     await openFixture(page, width);
     const created = page.locator("details.tl-step").filter({ hasText: "release-notes.ts" });
+    // The directory gives way before the file name, which stays whole.
+    const name = created.locator(".tl-step-head .tl-path-name");
+    await expect(name).toHaveText("release-notes.ts");
+    await expect.poll(() => name.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await created.locator("summary").click();
     await expect(created.locator(".tl-diff-line")).toHaveCount(8);
     await expect(created.locator(".tl-diff")).not.toContainText("new file mode");

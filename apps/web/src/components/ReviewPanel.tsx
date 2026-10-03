@@ -163,6 +163,8 @@ export function ReviewPanel({
     panelScratch, "review.diffLayout", "unified", (raw) => raw === "unified" || raw === "split",
   );
   const [diff, setDiff] = useState<GitDiffInfo | null>(null);
+  /** Completed diff reads, so a request can tell a read that landed after it from one before. */
+  const [diffReads, setDiffReads] = useState(0);
   const [diffBusy, setDiffBusy] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
   // Per-hunk staging (PR-B): the in-flight mutation's `${path}#${index}` key, and the amber
@@ -274,6 +276,7 @@ export function ReviewPanel({
       if (diffReqRef.current !== reqId) return; // superseded by a newer scope/refresh
       diffSignatureRef.current = observed;
       setDiff(d);
+      setDiffReads((reads) => reads + 1);
       setDiffError(null);
       setAutoReloadFailed(false);
     } catch (e) {
@@ -315,6 +318,7 @@ export function ReviewPanel({
     busyOwnerRef.current = null;
     setDiffBusy(false);
     setDiff(payload.diff);
+    setDiffReads((reads) => reads + 1);
     setDiffError(null);
     // This reply IS a successful paired read of both halves, so any earlier warning that the diff
     // had fallen behind the file list is now answered.
@@ -669,6 +673,16 @@ export function ReviewPanel({
   // Never render a diff under the wrong tab: a scope switch keeps the previous response in state
   // until the new one lands, so gate the viewer on the response's own scope. A same-scope refresh
   // still shows the current diff while reloading (stale-while-revalidate).
+  // Open in Review (#2187): each request re-reads the diff, because the one on screen may predate
+  // the edit. Only a read that lands after the request may decide the file is absent.
+  const [focusRead, setFocusRead] = useState<{ request: number; readsBefore: number } | null>(null);
+  useEffect(() => {
+    if (!focus) return;
+    setFocusRead({ request: focus.request, readsBefore: diffReads });
+    void loadDiff({ background: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.request]);
+  const focusSettled = focus != null && focusRead?.request === focus.request && diffReads > focusRead.readsBefore;
   const scopedDiff = diff && diff.scope === scope ? diff : null;
   // Memoized on the response plus the pane that projects it: the viewer keys its file cards and its
   // anchor bookkeeping off this object's identity, so re-minting it for unrelated panel state (a
@@ -856,6 +870,7 @@ export function ReviewPanel({
             onOpenSourceLocation={onOpenSourceLocation}
             onAttachWorkspaceReference={onAttachWorkspaceReference}
             focus={focus}
+            focusSettled={focusSettled}
             onFocusHandled={onFocusHandled}
             review={{
               findings,

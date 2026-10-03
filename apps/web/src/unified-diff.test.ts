@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { diffFileIsPlain, diffLineCounts, hunkLabel, parseUnifiedDiff } from "./unified-diff.js";
+import { diffFileIsPlain, diffLineCounts, diffMaxLineNumber, hunkLabel, parseUnifiedDiff } from "./unified-diff.js";
 
 const NEW_FILE = [
   "diff --git a/src/notes.ts b/src/notes.ts",
@@ -100,6 +100,41 @@ test("counts are the change lines of every file, never their headers", () => {
   assert.deepEqual(diffLineCounts(EDIT), { added: 2, removed: 1 });
   assert.deepEqual(diffLineCounts(`${EDIT}\n${NEW_FILE}`), { added: 5, removed: 1 });
   assert.equal(diffLineCounts(undefined), null);
+});
+
+test("a binary change or a pure rename keeps what Git says about it, and a binary patch is not lines", () => {
+  const [image] = parseUnifiedDiff("diff --git a/logo.png b/logo.png\nindex 1..2 100644\nBinary files a/logo.png and b/logo.png differ");
+  assert.deepEqual([image!.path, image!.binary, image!.hunks.length], ["logo.png", true, 0]);
+  const [patch, next] = parseUnifiedDiff([
+    "diff --git a/icon.png b/icon.png",
+    "GIT binary patch",
+    "literal 12",
+    "zcmZQzU|?ur",
+    "",
+    "diff --git a/src/a.ts b/src/a.ts",
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -1 +1 @@",
+    "-a",
+    "+b",
+  ].join("\n"));
+  assert.deepEqual([patch!.binary, patch!.hunks.length], [true, 0]);
+  assert.deepEqual(next!.hunks[0]!.lines.map((line) => line.kind), ["removed", "added"]);
+  const [moved] = parseUnifiedDiff("diff --git a/src/old.ts b/src/new.ts\nsimilarity index 100%\nrename from src/old.ts\nrename to src/new.ts");
+  assert.deepEqual([moved!.path, moved!.oldPath, moved!.hunks.length], ["src/new.ts", "src/old.ts", 0]);
+  const [gone] = parseUnifiedDiff("diff --git a/x b/x\ndeleted file mode 100644\n--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-x");
+  assert.equal(gone!.isDeleted, true);
+});
+
+test("CRLF line endings are not part of a line's text", () => {
+  const [file] = parseUnifiedDiff("--- a/x\r\n+++ b/x\r\n@@ -1 +1 @@\r\n-a\r\n+b\r\n");
+  assert.deepEqual(file!.hunks[0]!.lines.map((line) => line.text), ["a", "b"]);
+});
+
+test("the widest line number of a very large diff is found without a spread call", () => {
+  const body = Array.from({ length: 200_000 }, (_, index) => `+${index}`).join("\n");
+  const files = parseUnifiedDiff(`@@ -0,0 +1,200000 @@\n${body}`);
+  assert.equal(diffMaxLineNumber(files), 200_000);
 });
 
 test("an empty or headers-only diff has no lines", () => {

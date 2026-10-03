@@ -227,3 +227,53 @@ test("without a Review tab there is no Open in Review, and the per-turn capture 
   assert.deepEqual([...capture.querySelectorAll(".tl-diff-file-path")].map((path) => path.textContent),
     ["src/components/Header.tsx", "src/notes.ts"], "a capture of several files names each file it shows");
 });
+
+async function openCapture(diff: string) {
+  const { container, root } = await mount();
+  await act(async () => root.render(<EventTimeline
+    items={[{ kind: "user_message", id: 1, text: "Go" }, { kind: "file_edit", id: 2, path: "worktree", diff }]}
+    workspaceRoot="/repo"
+  />));
+  await openWork(container);
+  const capture = container.querySelector<HTMLElement>("details.tl-step")!;
+  await act(async () => capture.querySelector<HTMLElement>("summary")!.click());
+  return capture;
+}
+
+test("a capture of one file still names it, and changes with no lines say what changed", async () => {
+  const single = await openCapture(EDIT);
+  assert.deepEqual([...single.querySelectorAll(".tl-diff-file-path")].map((path) => path.textContent), ["src/components/Header.tsx"]);
+  const binary = await openCapture("diff --git a/logo.png b/logo.png\nindex 1..2 100644\nBinary files a/logo.png and b/logo.png differ");
+  assert.equal(binary.querySelector(".tl-diff-file-path")?.textContent, "logo.png");
+  assert.equal(binary.querySelector(".tl-diff-note")?.textContent, "Binary file changed.");
+  const moved = await openCapture("diff --git a/src/old.ts b/src/new.ts\nsimilarity index 100%\nrename from src/old.ts\nrename to src/new.ts");
+  assert.equal(moved.querySelector(".tl-diff-file-path")?.textContent, "src/new.ts");
+  assert.equal(moved.querySelector(".tl-diff-note")?.textContent, "Renamed from src/old.ts.");
+});
+
+test("a diff too large for a spread call still renders its first 8 lines", async () => {
+  const lines = 150_000;
+  const huge = `@@ -0,0 +1,${lines} @@\n${Array.from({ length: lines }, (_, index) => `+line ${index + 1}`).join("\n")}`;
+  const { container, root } = await mount();
+  await act(async () => root.render(<EventTimeline
+    items={[{ kind: "user_message", id: 1, text: "Go" }, { kind: "file_edit", id: 2, path: "/repo/big.txt", diff: huge }]}
+    workspaceRoot="/repo"
+  />));
+  await openWork(container);
+  const step = container.querySelector<HTMLElement>("details.tl-step")!;
+  await act(async () => step.querySelector<HTMLElement>("summary")!.click());
+  assert.equal(step.querySelectorAll(".tl-diff-line").length, 8);
+  assert.equal(button(step, "More Lines")?.textContent, `Show ${lines - 8} More Lines`);
+});
+
+test("an edit's path keeps its file name whole when the directory gives way", async () => {
+  const { edit } = await openEdits();
+  const path = edit.querySelector(".tl-step-object .tl-path")!;
+  assert.equal(path.getAttribute("title"), "src/components/Header.tsx", "the whole path is the label's title");
+  assert.deepEqual([...path.children].map((part) => [part.className, part.textContent]), [
+    ["tl-path-dir", "src/components/"],
+    ["tl-path-name", "Header.tsx"],
+  ]);
+  const stylesheet = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(stylesheet, /\.tl-path-name \{\n  flex: 0 0 auto;\n  max-width: 100%;/, "the name never shrinks while the directory can");
+});

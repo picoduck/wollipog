@@ -31,12 +31,17 @@ export interface DiffHunk {
 export interface DiffFile {
   /** The new-side path with Git's `b/` prefix removed, when the diff names one. */
   path?: string;
+  /** The path a rename or copy started from. */
+  oldPath?: string;
   isNew: boolean;
+  isDeleted?: boolean;
+  /** A binary change: Git describes it, but it has no lines to show. */
+  binary?: boolean;
   hunks: DiffHunk[];
 }
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
-const METADATA = /^(?:new file mode|deleted file mode|index |old mode|new mode|similarity index|dissimilarity index|rename from|rename to|copy from|copy to|Binary files )/;
+const METADATA = /^(?:new file mode|deleted file mode|index |old mode|new mode|similarity index|dissimilarity index|rename from|rename to|copy from|copy to|Binary files |GIT binary patch)/;
 
 const headerPath = (value: string): string | undefined => {
   const path = value.replace(/\t.*$/, "").trim();
@@ -52,12 +57,15 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
   let newLeft = 0;
   let oldAt = 1;
   let newAt = 1;
+  // A `GIT binary patch` is base85 data up to the next file, never lines to show.
+  let binaryPatch = false;
   const startFile = (): DiffFile => {
     file = { isNew: false, hunks: [] };
     files.push(file);
     hunk = null;
     oldLeft = 0;
     newLeft = 0;
+    binaryPatch = false;
     return file;
   };
   const bodyLine = (line: string) => {
@@ -83,7 +91,7 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
       newLeft -= 1;
     }
   };
-  const lines = diff.split("\n");
+  const lines = diff.split(/\r?\n/);
   if (lines.at(-1) === "") lines.pop();
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
@@ -93,6 +101,7 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
       bodyLine(line);
       continue;
     }
+    if (binaryPatch && !line.startsWith("diff ")) continue;
     if (line.startsWith("diff ")) {
       const current = startFile();
       const target = / b\/(.+)$/.exec(line)?.[1];
@@ -123,13 +132,24 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
     if (line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ") && !(hunk && !hunk.header)) {
       const current: DiffFile = file && !(file as DiffFile).hunks.length ? file : startFile();
       if (line.slice(4).trim() === "/dev/null") current.isNew = true;
+      if (lines[index + 1]!.slice(4).trim() === "/dev/null") current.isDeleted = true;
       const target = headerPath(lines[index + 1]!.slice(4));
       if (target) current.path = target;
       index += 1;
       continue;
     }
     if (!hunk && METADATA.test(line)) {
-      if (line.startsWith("new file mode") && file) (file as DiffFile).isNew = true;
+      const current = file as DiffFile | null;
+      if (current) {
+        if (line.startsWith("new file mode")) current.isNew = true;
+        else if (line.startsWith("deleted file mode")) current.isDeleted = true;
+        else if (line.startsWith("rename from ") || line.startsWith("copy from ")) current.oldPath = line.replace(/^(?:rename|copy) from /, "");
+        else if (line.startsWith("rename to ") || line.startsWith("copy to ")) current.path = line.replace(/^(?:rename|copy) to /, "");
+        else if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) {
+          current.binary = true;
+          binaryPatch = line.startsWith("GIT binary patch");
+        }
+      }
       continue;
     }
     bodyLine(line);
@@ -142,6 +162,18 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
     if (created) each.isNew = true;
   }
   return files;
+}
+
+/** The widest line number in a diff, for its number column; a loop, since a diff can hold more
+ * lines than a spread call can take arguments. */
+export function diffMaxLineNumber(files: readonly DiffFile[]): number {
+  let max = 0;
+  for (const file of files) {
+    for (const hunk of file.hunks) {
+      for (const line of hunk.lines) if (line.number > max) max = line.number;
+    }
+  }
+  return max;
 }
 
 /** A file whose every line is new carries no information in a wash: it shows as plain code. */

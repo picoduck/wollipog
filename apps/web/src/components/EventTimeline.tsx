@@ -31,7 +31,7 @@ import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
 import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
-import { diffFileIsPlain, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
+import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
@@ -2609,13 +2609,14 @@ function ThoughtStep({ item, open, onToggle, highlightEligible, mediaSettled }: 
   );
 }
 
-/** A path in mono 12px, its directory faint and its file name in full text (#2187). */
+/** A path in mono 12px, its directory faint and its file name in full text (#2187). Short of
+ * room, the directory gives way before the file name (§11.3); the whole path is its title. */
 function PathLabel({ path }: { path: string }) {
   const slash = path.lastIndexOf("/");
   return (
-    <span className="tl-path">
+    <span className="tl-path" title={path}>
       {slash > 0 && <span className="tl-path-dir">{path.slice(0, slash + 1)}</span>}
-      {path.slice(slash + 1)}
+      <span className="tl-path-name">{path.slice(slash + 1)}</span>
     </span>
   );
 }
@@ -2671,7 +2672,7 @@ function FileEditStep({ item, open, onToggle, onOpenSourceLocation }: {
           mimeType="text/x-diff"
           label="Diff"
         >
-          {(text) => <DiffBlock diff={text} />}
+          {(text) => <DiffBlock diff={text} namesFiles={capture} />}
         </EventPayloadContent>
       )}
     </ToolStep>
@@ -3148,6 +3149,14 @@ function PlanBlock({ item, historyOpen, onHistoryToggle }: {
 const DIFF_PREVIEW_LINES = 8;
 const DIFF_SIGN = { added: "+", removed: "\u2212", context: "" } as const;
 
+/** What Git says about a change that has no lines to show, or about a renamed file's origin. */
+function diffFileNote(file: DiffFile): string | null {
+  if (file.binary) return file.isDeleted ? "Binary file deleted." : file.isNew ? "Binary file added." : "Binary file changed.";
+  if (file.oldPath && file.oldPath !== file.path) return `Renamed from ${file.oldPath}.`;
+  if (file.hunks.length === 0) return file.isDeleted ? "Empty file deleted." : file.isNew ? "Empty file added." : "No line changes.";
+  return null;
+}
+
 const diffLineTotal = (files: readonly DiffFile[]) =>
   files.reduce((sum, file) => sum + file.hunks.reduce((lines, hunk) => lines + hunk.lines.length, 0), 0);
 
@@ -3157,21 +3166,27 @@ const diffLineTotal = (files: readonly DiffFile[]) =>
  * only; a new file is plain code with green + signs. Past 8 lines the rest waits behind Show N More
  * Lines.
  */
-function DiffBlock({ diff }: { diff: string }) {
+function DiffBlock({ diff, namesFiles = false }: {
+  diff: string;
+  /** Name every file, even a lone one: the runner's per-turn capture names no file in its head. */
+  namesFiles?: boolean;
+}) {
   const files = useMemo(() => parseUnifiedDiff(diff), [diff]);
   const [expanded, setExpanded] = useState(false);
+  if (files.length === 0) return null;
   const total = diffLineTotal(files);
-  if (total === 0) return null;
-  const digits = String(Math.max(...files.flatMap((file) => file.hunks.flatMap((hunk) => hunk.lines.map((line) => line.number))))).length;
-  let budget = expanded ? total : DIFF_PREVIEW_LINES;
+  const digits = String(diffMaxLineNumber(files)).length;
   const hidden = total - DIFF_PREVIEW_LINES;
+  // Only a collapsed diff has a budget; otherwise every file shows, including ones with no lines.
+  let budget = hidden > 0 && !expanded ? DIFF_PREVIEW_LINES : Number.POSITIVE_INFINITY;
   return (
     <div className="tl-diff" style={{ "--tl-diff-digits": digits } as CSSProperties}>
       {files.map((file, fileIndex) => {
         if (budget <= 0) return null;
         return (
           <section key={fileIndex} className={`tl-diff-file${diffFileIsPlain(file) ? " is-plain" : ""}`}>
-            {files.length > 1 && file.path && <div className="tl-diff-file-path"><PathLabel path={file.path} /></div>}
+            {(namesFiles || files.length > 1) && file.path && <div className="tl-diff-file-path"><PathLabel path={file.path} /></div>}
+            {diffFileNote(file) && <div className="tl-diff-note">{diffFileNote(file)}</div>}
             {file.hunks.map((hunk, hunkIndex) => {
               if (budget <= 0) return null;
               const shown = hunk.lines.slice(0, budget);

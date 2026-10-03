@@ -95,7 +95,7 @@ export function ToolStep({
         : <span className="tl-step-chevron-space" aria-hidden="true" />}
       <span className="tl-step-icon">{icon}</span>
       <span className="tl-step-title">
-        {verb}
+        <span className="tl-step-verb">{verb}</span>
         {object && <> <span className="tl-step-object">{object}</span></>}
       </span>
       {(trail || timing) && (
