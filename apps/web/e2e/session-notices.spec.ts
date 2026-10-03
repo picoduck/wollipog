@@ -117,7 +117,7 @@ async function failSendThenDropBmp(page: Page, width: number, height: number) {
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
-  const edit = page.getByRole("button", { name: /^Edit Message:/ });
+  const edit = page.locator(".composer-idle-preview");
   if (await edit.isVisible()) await edit.click();
   const composer = page.locator(".composer-input");
   await composer.fill("Look at this screenshot");
