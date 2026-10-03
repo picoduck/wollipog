@@ -176,6 +176,22 @@ const VOCABULARY = {
     not_sent: danger("Not Sent"),
     cancelled: neutral("Canceled"),
   },
+  /** What happened to a message after it was sent: the one receipt line under its row in the
+   * transcript (#2171). Sending has no badge (a spinner and the word), so it does not pulse here. */
+  messageReceipt: {
+    sending: info("Sending"),
+    queued: neutral("Queued"),
+    delivered: success("Delivered"),
+    steered: success("Steered the Current Turn"),
+    uncertain: warning("Delivery Uncertain"),
+    failed: danger("Delivery Failed"),
+    not_sent: danger("Not Sent"),
+    not_accepted: danger("Not Accepted"),
+    rejected: danger("Rejected"),
+    rename_failed: danger("Rename Failed"),
+    cancelled: neutral("Canceled"),
+    dismissed: neutral("Dismissed"),
+  },
   /** Delivery receipts: a background result returning, or a push notification. */
   delivery: {
     delivered: success("Delivered"),

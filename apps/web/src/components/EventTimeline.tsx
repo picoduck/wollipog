@@ -43,7 +43,7 @@ import {
   type WorkLedger,
 } from "../work-steps.js";
 import { StepOutput, StepStatus, ToolStep, toolIcon, WorkLedgerLine } from "./ToolStep.js";
-import { toolStatusMeta } from "../status-meta.js";
+import { statusMeta, toolStatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { PromptImageView } from "./PromptImageView.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
@@ -2127,9 +2127,6 @@ const TimelineRow = memo(function TimelineRow({
         <div className="tl-row user">
           <div className="tl-message-stack user">
             <div className="tl-bubble">
-              {item.deliveryIntent === "steer" && item.submissionId && (
-                <span className="steered-marker">Steered</span>
-              )}
               {item.images && item.images.length > 0 && (
                 <div className="bubble-images">
                   {item.images.filter((attachment) => !isWorkspaceReference(attachment)).map((img, i) => (
@@ -2142,6 +2139,12 @@ const TimelineRow = memo(function TimelineRow({
               )}
               {item.text && <div className="bubble-text"><Markdown profile="inline" highlightEligible={highlightEligible}>{item.text}</Markdown></div>}
             </div>
+            {/* A steer the agent took keeps one quiet fact under it (#2171). */}
+            {item.deliveryIntent === "steer" && item.submissionId && (
+              <div className="tl-receipt" data-status="steered">
+                <StatusBadge meta={statusMeta("messageReceipt", "steered")} inline className="tl-receipt-status" />
+              </div>
+            )}
             <UserMessageActions
               item={item}
               inTurnMenu={inTurnMenu}

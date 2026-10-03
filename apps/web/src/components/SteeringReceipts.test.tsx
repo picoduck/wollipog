@@ -71,12 +71,12 @@ test("receipt derivation exposes every durable label and retires only canonical 
   ];
   const receipts = deriveSteeringReceipts(attempts, timelineItems, "turn-1");
   assert.deepEqual(receipts.map(({ attempt, label }) => [attempt.submissionId, label]), [
-    ["pending", "Steering\u2026"],
-    ["accepted-visible", "Accepted"],
-    ["converted", "Converted to Queue"],
-    ["rejected", "Rejected"],
+    ["pending", "Sending"],
+    ["accepted-visible", "Steered the Current Turn"],
+    ["converted", "Queued"],
+    ["rejected", "Not Accepted"],
     ["uncertain", "Delivery Uncertain"],
-    ["queued-again", "Queued Again"],
+    ["queued-again", "Queued"],
   ]);
 });
 
@@ -187,7 +187,7 @@ test("receipt retirement keeps unresolved and current-turn work plus the recent 
   );
 });
 
-test("receipt markup shows bounded reasons, pending resolution copy, disabled actions, and E2E identity", () => {
+test("receipts are transcript rows with plain reasons, pending resolution copy, disabled actions, and E2E identity", () => {
   const html = renderToStaticMarkup(<SteeringReceipts
     attempts={[
       attempt("converted", "converted_to_queue", { reason: "stale_turn" }),
@@ -204,12 +204,16 @@ test("receipt markup shows bounded reasons, pending resolution copy, disabled ac
     onDismiss={() => {}}
   />);
   assert.match(html, /data-testid="steering-attempt-converted"/);
-  assert.match(html, /Stale turn\./);
-  assert.match(html, /Provider rejected\./);
-  assert.match(html, /Transport uncertain\./);
+  assert.match(html, /class="tl-row user tl-receipt-row"/);
+  assert.match(html, /The turn ended before this could steer it\./);
+  assert.match(html, /The agent didn&#x27;t accept this message\./);
+  assert.match(html, /Wollipog couldn&#x27;t confirm this message was delivered\./);
   assert.match(html, /Queue Again is pending\./);
   assert.match(html, /aria-busy="true"/);
   assert.equal((html.match(/disabled=""/g) ?? []).length, 2);
+  // Neither the source nor an enum fragment is repeated on the receipts (#2171).
+  assert.doesNotMatch(html, /Direct Steering|Queued Prompt|Stale turn|Provider rejected|Transport uncertain/);
+  assert.doesNotMatch(html, /steering-receipt\b/);
 });
 
 test("a completed Queue Again receipt is clearly settled and manually dismissible", () => {
@@ -222,13 +226,12 @@ test("a completed Queue Again receipt is clearly settled and manually dismissibl
     onQueueAgain={() => {}}
     onDismiss={() => {}}
   />);
-  assert.match(html, /Queued Again/);
-  assert.match(html, /Queued for a later turn\./);
-  assert.doesNotMatch(html, /Transport uncertain\./);
-  assert.match(html, /class="icon-btn sm steering-receipt-dismiss"/);
-  assert.match(html, /aria-label="Dismiss"/);
-  assert.doesNotMatch(html, /class="steering-receipt-actions"/,
-    "a completed receipt must not reserve a full dismiss-action row");
+  assert.match(html, />Queued</);
+  assert.match(html, /Waiting for the next turn\./);
+  assert.doesNotMatch(html, /couldn&#x27;t confirm/);
+  // Dismiss is a small button outside the bubble, never an icon or an outline button on a fill.
+  assert.match(html, /<button class="btn sm" type="button">Dismiss<\/button>/);
+  assert.doesNotMatch(html, /icon-btn/);
 });
 
 test("uncertain receipt actions call the matching callback and local pending state disables both", async () => {
@@ -251,9 +254,11 @@ test("uncertain receipt actions call the matching callback and local pending sta
 
   await act(async () => root.render(render()));
   let buttons = [...container.querySelectorAll("button")] as HTMLButtonElement[];
-  assert.equal(buttons.length, 2);
-  assert.equal(container.querySelector('.steering-receipt-dismiss')?.getAttribute("aria-label"), "Dismiss");
-  assert.equal(container.querySelector('.steering-receipt-actions')?.textContent?.trim(), "Queue Again");
+  assert.deepEqual(buttons.map((button) => [button.textContent, button.className]),
+    [["Queue Again", "btn sm"], ["Dismiss", "btn sm"]]);
+  assert.match(container.querySelector(".tl-receipt")?.textContent ?? "",
+    /^Delivery Uncertain·Wollipog couldn't confirm this message was delivered\.·Queue AgainDismiss$/u,
+    "the line reads status, then reason, then its actions");
   await act(async () => { buttons[0]!.click(); buttons[1]!.click(); });
   assert.deepEqual(queueAgain, ["actionable"]);
   assert.deepEqual(dismissed, ["actionable"]);
@@ -284,10 +289,11 @@ test("one rejected receipt can be durably dismissed", async () => {
     onDismiss={(submissionId) => { dismissed.push(submissionId); }}
   />));
   const button = container.querySelector("button") as HTMLButtonElement;
-  assert.equal(button.classList.contains("steering-receipt-dismiss"), true);
-  assert.equal(button.getAttribute("aria-label"), "Dismiss");
-  assertNoDomNode(container.querySelector(".steering-receipt-actions"),
-    "a rejection uses the compact corner dismissal instead of an action row");
+  assert.equal(button.className, "btn sm");
+  assert.equal(button.textContent, "Dismiss");
+  assert.equal(container.querySelectorAll("button").length, 1, "a rejection offers Dismiss alone");
+  assert.equal(container.querySelector(".tl-bubble")?.className, "tl-bubble is-failed");
+  assert.match(container.querySelector(".tl-receipt")?.textContent ?? "", /^Not Accepted·No turn was running to steer\./u);
   await act(async () => button.click());
   assert.deepEqual(dismissed, ["rejected-one"]);
 
@@ -329,7 +335,8 @@ test("multiple rejected receipts collapse and clear together without touching ac
   const toggle = group.querySelector('[aria-controls="rejected-steering-receipts"]') as HTMLButtonElement;
   assert.equal(toggle.getAttribute("aria-expanded"), "false",
     "the terminal group has a bounded collapsed footprint by default");
-  assert.match(toggle.textContent ?? "", /3 Rejected Receipts/);
+  assert.equal(toggle.textContent, "Show All");
+  assert.match(group.textContent ?? "", /Not Accepted·3 messages/);
   assert.ok(container.querySelector('[data-testid="steering-attempt-pending-actionable"]'));
   assert.ok(container.querySelector('[data-testid="steering-attempt-uncertain-actionable"]'));
   const clearAll = [...group.querySelectorAll("button")]
@@ -368,7 +375,7 @@ test("multiple completed Queue Again receipts collapse into one bounded group", 
   assert.ok(group);
   const toggle = group.querySelector('[aria-controls="queued-again-steering-receipts"]') as HTMLButtonElement;
   assert.equal(toggle.getAttribute("aria-expanded"), "false");
-  assert.match(toggle.textContent ?? "", /3 Completed Receipts/);
+  assert.match(group.textContent ?? "", /Queued·3 messages/);
   assert.equal(container.querySelectorAll('[data-testid^="steering-attempt-"]').length, 0,
     "collapsed terminal history occupies one compact row");
   const clearAll = [...group.querySelectorAll("button")]
@@ -399,9 +406,9 @@ test("a late Queue Again resolution is grouped only by its completed receipt sta
     onQueueAgain={() => {}}
     onDismiss={() => {}}
   />);
-  assert.match(html, /2 Rejected Receipts/);
-  assert.match(html, /2 Completed Receipts/);
-  assert.doesNotMatch(html, /3 Rejected Receipts/);
+  assert.match(html, /data-terminal-status="rejected".*?2 messages/);
+  assert.match(html, /data-terminal-status="queued_again".*?2 messages/);
+  assert.doesNotMatch(html, /3 messages/);
 });
 
 test("applied dismissals stay absent after authoritative session state refreshes", () => {
@@ -448,17 +455,17 @@ test("a Viewer's Queue Again, Dismiss and Clear All are disabled with the reason
       />);
     });
     const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .filter((button) => ["Queue Again", "Clear All"].includes(button.textContent ?? "") ||
-        button.getAttribute("aria-label") === "Dismiss");
+      .filter((button) => ["Queue Again", "Clear All", "Dismiss"].includes(button.textContent ?? ""));
     assert.ok(buttons.some((button) => button.textContent === "Queue Again"));
     assert.ok(buttons.some((button) => button.textContent === "Clear All"));
-    assert.ok(buttons.some((button) => button.getAttribute("aria-label") === "Dismiss"));
+    assert.ok(buttons.some((button) => button.textContent === "Dismiss"));
     for (const button of buttons) {
-      assert.equal(button.disabled, true, `${button.textContent || button.getAttribute("aria-label")} is disabled`);
+      assert.equal(button.disabled, true, `${button.textContent} is disabled`);
       assert.equal(button.title, reason);
       const described = button.getAttribute("aria-describedby");
-      assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason,
-        "the reason is a description, not only a tooltip");
+      const description = described ? domWindow.document.getElementById(described) : null;
+      assert.equal(description?.textContent ?? null, reason, "the reason is a description, not only a tooltip");
+      assert.equal(description?.classList.contains("sr-only"), false, "a Viewer sees the reason (#1857)");
     }
     await act(async () => { for (const button of buttons) button.click(); });
     assert.deepEqual(actions, []);

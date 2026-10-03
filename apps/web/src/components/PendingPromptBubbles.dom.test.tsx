@@ -229,37 +229,55 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
         onRetry={(id) => actions.push(`retry:${id}`)}
       />);
     });
-    assert.equal(container.querySelectorAll(".pending-prompt-bubble").length, 4);
+    assert.equal(container.querySelectorAll(".tl-receipt-row").length, 4);
     assertNoDomNode(container.querySelector("[data-testid='pending-prompt-delivered']"));
     assert.deepEqual(
-      [...container.querySelectorAll(".pending-prompt-state")].map((node) => node.textContent),
-      ["Pending", "Queued", "Canceled", "Delivery Failed"],
+      [...container.querySelectorAll(".tl-receipt-text")].map((node) => node.firstElementChild?.textContent),
+      ["Sending", "Queued", "Canceled", "Delivery Failed"],
     );
-    const buttons = [...container.querySelectorAll("button")];
+    // A pending bubble is dashed, a failed one has the red edge; neither is filled (#2171).
+    assert.deepEqual(
+      [...container.querySelectorAll(".tl-receipt-row .tl-bubble")].map((node) => node.className),
+      ["tl-bubble is-pending", "tl-bubble is-pending", "tl-bubble is-pending", "tl-bubble is-failed"],
+    );
+    assert.match(
+      container.querySelector("[data-testid='pending-prompt-auth-retry'] .tl-receipt")?.textContent ?? "",
+      /^Delivery Failed·Sign-in was dismissed, so this message wasn't sent\.·RetryDismissShow Details$/u,
+    );
+    const buttons = ([...container.querySelectorAll(".tl-receipt-buttons button")] as unknown as HTMLButtonElement[]);
     assert.deepEqual(buttons.map((button) => button.getAttribute("aria-describedby")), [
       "pending-prompt-details-cancel-local",
       "pending-prompt-details-cancel-live",
       "pending-prompt-details-failed",
-      "pending-prompt-details-auth-retry",
-      "pending-prompt-details-auth-retry",
+      "pending-prompt-details-auth-retry pending-prompt-reason-auth-retry",
+      "pending-prompt-details-auth-retry pending-prompt-reason-auth-retry",
     ]);
-    // styles.css gives these actions their on-accent ink as `.pending-prompt-actions .btn.ghost`:
-    // an action that is not a ghost would keep `.btn`'s own surface, where that ink measures 1.12:1.
-    assert.deepEqual(
-      [...container.querySelectorAll(".pending-prompt-actions > *")].map((node) => [...node.classList].sort()),
-      buttons.map(() => ["btn", "ghost", "sm"]),
-      "every pending-prompt action must be a ghost button over the bubble",
-    );
+    // Actions are small buttons outside the bubble, never outline buttons on a fill.
+    for (const button of buttons) {
+      assert.equal(button.className, "btn sm", button.textContent ?? "");
+      assertNoDomNode(button.closest(".tl-bubble"), `${button.textContent} sits outside the bubble`);
+    }
     await act(async () => { for (const button of buttons) button.click(); });
     assert.deepEqual(actions, [
       "pending:cancel-local",
       "live:cancel-live",
       "dismiss:failed",
-      "dismiss:auth-retry",
       "retry:auth-retry",
+      "dismiss:auth-retry",
     ]);
-    assert.match(container.textContent ?? "", /prompt canceled before runner delivery/);
-    assert.match(container.textContent ?? "", /message was not sent/);
+    // Raw provider text waits behind Show Details, and is not in the DOM until it opens.
+    assert.doesNotMatch(container.textContent ?? "", /prompt canceled before runner delivery/);
+    assert.doesNotMatch(container.textContent ?? "", /authentication recovery was dismissed/);
+    const showDetails = container.querySelector(
+      "[data-testid='pending-prompt-auth-retry'] .tl-receipt-actions > button") as unknown as HTMLButtonElement;
+    assert.equal(showDetails.textContent, "Show Details");
+    await act(async () => { showDetails.click(); });
+    assert.equal(showDetails.textContent, "Hide Details");
+    assert.equal(showDetails.getAttribute("aria-expanded"), "true");
+    assert.match(
+      domWindow.document.getElementById(showDetails.getAttribute("aria-controls")!)?.textContent ?? "",
+      /authentication recovery was dismissed; this message was not sent/,
+    );
 
     const noOp = () => {};
     await act(async () => {
@@ -280,8 +298,9 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
       />);
     });
     assert.deepEqual(
-      [...container.querySelectorAll("button")].map((button) => [button.textContent, button.getAttribute("aria-label"), button.disabled]),
-      [["Dismiss", "Dismiss Pending Message", true], ["Retry", "Retry Message", true]],
+      ([...container.querySelectorAll(".tl-receipt-buttons button")] as unknown as HTMLButtonElement[])
+        .map((button) => [button.textContent, button.getAttribute("aria-label"), button.disabled]),
+      [["Retry", "Retry Message", true], ["Dismiss", "Dismiss Pending Message", true]],
       "a shared busy identity must not claim both mutually exclusive actions are running",
     );
   } finally {
@@ -328,8 +347,13 @@ test("started prompts retire from partial transcripts using durable user-event e
   };
   try {
     await render([beforeCapacityRelease, recoverable]);
-    assert.ok(container.querySelector('[data-testid="pending-prompt-admission-queued"]'));
-    assert.match(container.textContent ?? "", /287 Delivery Attempts/);
+    const queuedRow = container.querySelector('[data-testid="pending-prompt-admission-queued"]');
+    assert.ok(queuedRow);
+    assert.doesNotMatch(container.textContent ?? "", /Delivery Attempts/, "attempt counts wait behind Show Details");
+    await act(async () => {
+      (queuedRow.querySelector(".tl-receipt-actions > button") as unknown as HTMLButtonElement).click();
+    });
+    assert.match(queuedRow.textContent ?? "", /Wollipog tried to deliver this message 287 times\./);
 
     await render([afterCapacityRelease, recoverable]);
     assertNoDomNode(container.querySelector('[data-testid="pending-prompt-admission-queued"]'),
@@ -383,17 +407,21 @@ test("retained-prompt Retry and Dismiss are described by the message and the rec
     await render(true);
     assert.equal(button("Retry").getAttribute("aria-label"), "Retry Message");
     assert.equal(button("Dismiss").getAttribute("aria-label"), "Dismiss Pending Message");
+    const notSent = "This session's worktree needs recovery before this message can be sent.";
     assert.deepEqual(described(button("Retry")), [
-      "Durable messageThe selected worktree could not be verified; this message was not sent.",
+      "Durable message",
+      notSent,
       "Recover the selected worktree before retrying this message.",
     ], "a disabled Retry announces why it is unavailable, not only a tooltip");
     assert.deepEqual(described(button("Dismiss")), [
-      "Durable messageThe selected worktree could not be verified; this message was not sent.",
-    ], "Dismiss stays available, so it carries only the retained message");
+      "Durable message",
+      notSent,
+    ], "Dismiss stays available, so it carries only the retained message and why it was not sent");
 
     await render(false);
     assert.deepEqual(described(button("Retry")), [
-      "Durable messageThe selected worktree could not be verified; this message was not sent.",
+      "Durable message",
+      notSent,
     ], "the recovery reason is withdrawn once the worktree is recovered");
     assertNoDomNode(container.querySelector("#pending-prompt-recovery-retained"));
   } finally {
@@ -426,13 +454,15 @@ test("a Viewer sees every delivery action disabled and described by the reason, 
       />);
     });
     const buttons = [...container.querySelectorAll("button")];
-    assert.deepEqual(buttons.map((button) => button.textContent), ["Cancel", "Dismiss", "Retry"]);
+    assert.deepEqual(buttons.map((button) => button.textContent), ["Cancel", "Retry", "Dismiss"]);
     for (const button of buttons) {
       assert.equal(button.disabled, true, `${button.textContent} is disabled`);
       assert.equal(button.title, reason);
       const descriptions = (button.getAttribute("aria-describedby") ?? "").split(" ")
-        .map((id) => domWindow.document.getElementById(id)?.textContent ?? "");
-      assert.ok(descriptions.includes(reason), `${button.textContent} is described by the reason`);
+        .map((id) => domWindow.document.getElementById(id));
+      const refusal = descriptions.find((node) => node?.textContent === reason);
+      assert.ok(refusal, `${button.textContent} is described by the reason`);
+      assert.equal(refusal.classList.contains("sr-only"), false, "a Viewer sees the reason (#1857)");
     }
     await act(async () => { for (const button of buttons) button.click(); });
     assert.deepEqual(actions, []);

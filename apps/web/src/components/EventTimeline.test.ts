@@ -206,7 +206,7 @@ test("historical transcript error rows are not assertive live regions", () => {
   assert.match(html, /Worktree verification failed/);
 });
 
-test("canonical accepted steering messages render one compact Steered marker", () => {
+test("a canonical accepted steer keeps one quiet Steered the Current Turn fact under its bubble", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [
       {
@@ -220,8 +220,9 @@ test("canonical accepted steering messages render one compact Steered marker", (
       { kind: "user_message", id: 3, text: "Incomplete steering metadata", deliveryIntent: "steer" },
     ],
   }));
-  assert.equal((html.match(/class="steered-marker"/g) ?? []).length, 1);
-  assert.match(html, /<span class="steered-marker">Steered<\/span>/);
+  assert.equal((html.match(/data-status="steered"/g) ?? []).length, 1);
+  // Inline success status (§11.2), outside the bubble, never a chip inside it.
+  assert.match(html, /<\/div><div class="tl-receipt" data-status="steered"><span class="status[^"]*\bt-success\b[^"]*\binline\b[^"]*">Steered the Current Turn<\/span><\/div>/);
 });
 
 test("the pending question replaces its matching timeline card without a duplicate historical row", () => {

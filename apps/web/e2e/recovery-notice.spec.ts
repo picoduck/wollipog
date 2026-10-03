@@ -133,7 +133,7 @@ test("an off-screen message that was not sent is named in danger text and scroll
   await notSent.click();
   await expect(message).toBeInViewport();
   // Focus follows to the message's first action, so the keyboard lands where the person can act.
-  await expect(message.locator(".pending-prompt-actions button").first()).toBeFocused();
+  await expect(message.locator(".tl-receipt-buttons button").first()).toBeFocused();
 });
 
 for (const width of [320, 390]) {

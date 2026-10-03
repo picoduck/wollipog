@@ -1,5 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 
+/** A provider command's receipt row in the transcript, found by the command it shows. */
+function commandReceipt(page: Page, command: string) {
+  return page.locator('.detail-scroll [data-testid^="provider-command-"]', { hasText: command });
+}
+
 async function openSession(page: Page) {
   await page.goto("/command-inbox-projects-e2e.html");
   await page.evaluate(() => localStorage.clear());
@@ -104,8 +109,8 @@ test("authorized provider commands use durable dispatch and preserve attachments
       },
     }]);
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([]);
-  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("/deploy production");
-  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("Sent");
+  // The receipt is a row of the transcript under the command it describes (#2171).
+  await expect(commandReceipt(page, "/deploy production")).toContainText("Sending to");
   await expect(composer).toHaveValue("");
   await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
 });
@@ -149,25 +154,25 @@ test("Codex prompts and skills are labeled by source and $name dispatches the sa
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionCommandRequests()
     .map(({ request }) => [request.providerCommandId, request.argumentText])))
     .toEqual([["codex-skill-review", "pr 42"], ["codex-skill-review", "pr 43"]]);
-  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
+  await expect(commandReceipt(page, "$review pr 42")).toBeVisible();
 
   // A rotated catalog that adds a same-named prompt must not respell the outstanding skill receipt.
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
     { name: "review", source: "user", invocation: { id: "codex-prompt-review", catalogRevision: "codex-catalog-2", executionMode: "passthrough" } },
     { name: "review", source: "skill", invocation: { id: "codex-skill-review-2", catalogRevision: "codex-catalog-2", executionMode: "passthrough" } },
   ], []));
-  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
+  await expect(commandReceipt(page, "$review pr 42")).toBeVisible();
 
   // The reverse: a prompt receipt stays /name when a later catalog keeps only the same-named skill.
   await composer.fill("/user:review notes");
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("/review notes");
+  await expect(commandReceipt(page, "/review notes")).toBeVisible();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
     { name: "review", source: "skill", invocation: { id: "codex-skill-review-3", catalogRevision: "codex-catalog-3", executionMode: "passthrough" } },
   ], []));
-  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("/review notes");
-  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
+  await expect(commandReceipt(page, "/review notes")).toBeVisible();
+  await expect(commandReceipt(page, "$review pr 42")).toBeVisible();
 
   await composer.fill("$HOME stays text");
   await expect(listbox).toBeHidden();
@@ -234,7 +239,7 @@ test("a lost command response retries with the same durable submission ID", asyn
   await page.keyboard.press("Enter");
   await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toContainText("Simulated lost provider command response");
   await expect(composer).toHaveValue("/review storage");
-  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("Sent");
+  await expect(commandReceipt(page, "/review storage")).toContainText("Sending to");
 
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() =>
@@ -448,8 +453,10 @@ test("rename-session moves into a retryable status receipt without disturbing th
   ]);
   const receipt = page.getByRole("region", { name: "Rename Session Status" });
   const announcement = page.locator('.composer > [role="status"]');
-  await expect(receipt).toContainText("/rename-session");
-  await expect(receipt).toContainText("Renaming Session…");
+  // A row of the transcript (#2171) in plain words: no slash command, no raw provider text.
+  await expect(page.locator(".detail-scroll").getByRole("region", { name: "Rename Session Status" })).toBeVisible();
+  await expect(receipt).not.toContainText("/rename-session");
+  await expect(receipt).toContainText("Renaming session…");
   await expect(announcement).toHaveText("Renaming Session.");
   await expect(announcement).toHaveAttribute("aria-live", "polite");
   await expect(composer).toHaveAttribute("aria-busy", "true");
@@ -467,8 +474,12 @@ test("rename-session moves into a retryable status receipt without disturbing th
     error: "Session naming failed during thread start. Verify the selected Agent Harness and try again.",
   }));
   await expect(receipt).toContainText("Rename Failed");
+  await expect(receipt).toContainText("Couldn't rename this session.");
+  await expect(receipt).not.toContainText("Session naming failed during thread start");
+  await expect(announcement).toHaveText("Rename failed. Couldn't rename this session.");
+  await receipt.getByRole("button", { name: "Show Details" }).click();
   await expect(receipt).toContainText("Session naming failed during thread start");
-  await expect(announcement).toContainText("Rename failed. Session naming failed during thread start");
+  await receipt.getByRole("button", { name: "Hide Details" }).click();
   await expect(composer).not.toHaveAttribute("aria-busy", "true");
   await expect(composer).toHaveValue("Draft I care about");
 
@@ -476,15 +487,18 @@ test("rename-session moves into a retryable status receipt without disturbing th
   await page.keyboard.press("Enter");
   const composerError = page.locator('.composer > .notice.t-danger[role="alert"]');
   await expect(composerError).toContainText("There is no active turn to stop.");
+  // The receipt is in the transcript, so the composer's own error never shares its space.
   const [errorBox, receiptBox] = await Promise.all([composerError.boundingBox(), receipt.boundingBox()]);
   expect(errorBox).not.toBeNull();
   expect(receiptBox).not.toBeNull();
-  expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(receiptBox!.y);
+  expect(receiptBox!.y + receiptBox!.height).toBeLessThanOrEqual(errorBox!.y);
   await composer.fill("Draft I care about");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
   const retry = receipt.getByRole("button", { name: "Retry Rename" });
   await composer.evaluate((element) => (element as HTMLTextAreaElement).setSelectionRange(5, 5));
+  await page.keyboard.press("Shift+Tab");
+  await expect(receipt.getByRole("button", { name: "Show Details" })).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(retry).toBeFocused();
   await retry.press("Enter");
@@ -492,7 +506,7 @@ test("rename-session moves into a retryable status receipt without disturbing th
     "session-alpha",
     "session-alpha",
   ]);
-  await expect(receipt).toContainText("Renaming Session…");
+  await expect(receipt).toContainText("Renaming session…");
   await expect(receipt).toBeFocused();
   await expect(composerError).toContainText("There is no active turn to stop.");
   await expect(composer).toHaveValue("Draft I care about");
@@ -612,6 +626,8 @@ test("phone rename retry reveals the idle composer before restoring keyboard foc
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
   await composer.focus();
   await page.keyboard.press("Shift+Tab");
+  await expect(receipt.getByRole("button", { name: "Show Details" })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
   await expect(retry).toBeFocused();
   await retry.press("Enter");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
@@ -623,7 +639,7 @@ test("phone rename retry reveals the idle composer before restoring keyboard foc
   await expect(composer).toBeFocused();
 });
 
-test("wrapped composer errors stay in flow beside status receipts at responsive widths", async ({ page }) => {
+test("wrapped composer errors stay in the composer while status receipts stay in the transcript at responsive widths", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const composer = page.locator(".composer-input");
   await page.getByRole("button", { name: /^Edit Message:/ }).click();
@@ -666,7 +682,7 @@ test("wrapped composer errors stay in flow beside status receipts at responsive 
     const [errorBox, receiptBox] = await Promise.all([composerError.boundingBox(), receipt.boundingBox()]);
     expect(errorBox).not.toBeNull();
     expect(receiptBox).not.toBeNull();
-    expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(receiptBox!.y);
+    expect(receiptBox!.y + receiptBox!.height).toBeLessThanOrEqual(errorBox!.y);
   };
   await expectSeparated();
   await page.setViewportSize({ width: 1280, height: 900 });
@@ -676,17 +692,17 @@ test("wrapped composer errors stay in flow beside status receipts at responsive 
   await composer.fill("/rename-session");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(composerError).toHaveCount(0);
-  const [composerBox, receiptBox, composerInset] = await Promise.all([
+  // The running rename is a row of the transcript, never a card above the composer (#2171).
+  await expect(page.locator(".detail-scroll").getByRole("region", { name: "Rename Session Status" }))
+    .toContainText("Renaming session…");
+  await expect(page.locator(".composer .tl-receipt")).toHaveCount(0);
+  const [composerBox, receiptBox] = await Promise.all([
     page.locator(".composer").boundingBox(),
     receipt.boundingBox(),
-    page.locator(".composer").evaluate((element) => {
-      const style = getComputedStyle(element);
-      return Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.paddingTop);
-    }),
   ]);
   expect(composerBox).not.toBeNull();
   expect(receiptBox).not.toBeNull();
-  expect(receiptBox!.y - composerBox!.y).toBeCloseTo(composerInset, 1);
+  expect(receiptBox!.y + receiptBox!.height).toBeLessThanOrEqual(composerBox!.y);
 });
 
 test("a stale semantic rename reports its fence without replacing a newer title", async ({ page }) => {
@@ -708,6 +724,8 @@ test("a stale semantic rename reports its fence without replacing a newer title"
   await expect(page.getByText("Newer Manual Title", { exact: true })).toBeVisible();
   const receipt = page.getByRole("region", { name: "Rename Session Status" });
   await expect(receipt).toContainText("Rename Failed");
+  await expect(receipt).toContainText("Couldn't rename this session.");
+  await receipt.getByRole("button", { name: "Show Details" }).click();
   await expect(receipt).toContainText("Session naming was superseded by a newer rename.");
   await expect(composer).toHaveValue("");
 });

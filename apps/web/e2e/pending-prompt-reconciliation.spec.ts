@@ -44,7 +44,10 @@ for (const viewport of [
     const prompt = page.getByTestId("pending-prompt-admission-queued");
     await expect(prompt).toBeVisible();
     await expect(prompt).toContainText("Queued");
-    await expect(prompt).toContainText("287 Delivery Attempts");
+    // Attempt counts are not a headline (#2171): they wait behind Show Details.
+    await expect(prompt).not.toContainText("Delivery Attempts");
+    await prompt.getByRole("button", { name: "Show Details" }).click();
+    await expect(prompt).toContainText("Wollipog tried to deliver this message 287 times.");
     await capture(page, "before", viewport.name);
 
     await page.evaluate(() => {
@@ -101,7 +104,9 @@ test("known-undelivered authentication prompts expose a prominent retry path", a
   await openAlphaSession(page);
 
   const prompt = page.getByTestId("pending-prompt-authentication-recovery");
-  await expect(prompt).toContainText("This message was not sent");
+  await expect(prompt).toContainText("Delivery Failed");
+  await expect(prompt).toContainText("Sign-in was dismissed, so this message wasn't sent.");
+  await expect(prompt).not.toContainText("Authentication recovery was dismissed");
   await expect(page.getByRole("button", { name: "Retry Message" })).toHaveCount(0);
   await capture(page, "auth-recovery-before", "desktop");
 

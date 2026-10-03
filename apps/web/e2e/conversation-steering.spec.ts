@@ -22,8 +22,9 @@ async function openSteeringSession(page: Page) {
   await expect(page.locator(".composer-input")).toBeEnabled();
 }
 
+/** A steering receipt: a row of the transcript under the message it describes (#2171). */
 function receipt(page: Page, submissionId: string) {
-  return page.locator(`.steering-receipt[data-submission-id="${submissionId}"]`);
+  return page.locator(`.detail-scroll .tl-receipt-row[data-submission-id="${submissionId}"]`);
 }
 
 async function reopenSteeringSession(page: Page) {
@@ -108,7 +109,7 @@ test("Ctrl+Enter steers without an optimistic echo while Enter, Shift+Enter, IME
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(1);
   const submissionId = await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[0]!.submissionId);
-  await expect(receipt(page, submissionId)).toContainText("Steering…");
+  await expect(receipt(page, submissionId)).toContainText("Sending");
   await expect(receipt(page, submissionId).getByText("Steer this active turn", { exact: true })).toBeVisible();
   await expect(page.locator(".timeline").getByText("Steer this active turn", { exact: true })).toHaveCount(0);
 
@@ -566,7 +567,7 @@ test("a definite direct rejection preserves the draft and never creates a transc
     emitCanonicalEvent: false,
   }));
   await expect(composer).toHaveValue("Keep this rejected steer as a draft");
-  await expect(receipt(page, submissionId)).toContainText("Rejected");
+  await expect(receipt(page, submissionId)).toContainText("Not Accepted");
   await expect(page.locator(".timeline").getByText("Keep this rejected steer as a draft", { exact: true })).toHaveCount(0);
 });
 
@@ -585,14 +586,19 @@ test("durable receipts render every disposition and uncertain recovery actions",
     });
   });
 
-  await expect(receipt(page, "receipt-pending")).toContainText("Steering…");
-  await expect(receipt(page, "receipt-accepted")).toContainText("Accepted");
-  await expect(receipt(page, "receipt-converted")).toContainText("Converted to Queue");
-  await expect(receipt(page, "receipt-rejected")).toContainText("Rejected");
+  await expect(receipt(page, "receipt-pending")).toContainText("Sending");
+  await expect(receipt(page, "receipt-accepted")).toContainText("Steered the Current Turn");
+  await expect(receipt(page, "receipt-converted")).toContainText("Queued");
+  await expect(receipt(page, "receipt-converted")).toContainText("The turn ended before this could steer it.");
+  await expect(receipt(page, "receipt-rejected")).toContainText("Not Accepted");
+  await expect(receipt(page, "receipt-rejected")).toContainText("The agent didn't accept this message.");
+  // Receipts are rows of the transcript, so the composer column holds none of them.
+  await expect(page.locator(".composer .tl-receipt-row")).toHaveCount(0);
+  await expect(page.locator(".detail-scroll")).not.toContainText("Direct Steering");
   await expect(receipt(page, "receipt-uncertain-queue")).toContainText("Delivery Uncertain");
 
   await receipt(page, "receipt-uncertain-queue").getByRole("button", { name: "Queue Again" }).click();
-  await expect(receipt(page, "receipt-uncertain-queue")).toContainText("Queued Again");
+  await expect(receipt(page, "receipt-uncertain-queue")).toContainText("Waiting for the next turn.");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringResolutionRequests()[0]))
     .toMatchObject({ submissionId: "receipt-uncertain-queue", action: "queue_again" });
 
@@ -626,16 +632,15 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
 
     const completedGroup = page.locator('[data-terminal-status="queued_again"]');
     await expect(completedGroup).toBeVisible();
-    await expect(completedGroup).toContainText("2 Completed Receipts");
+    await expect(completedGroup).toContainText("2 messages");
     expect((await completedGroup.boundingBox())!.height).toBeLessThanOrEqual(48);
-    await completedGroup.getByRole("button", { name: /Completed Receipts/ }).click();
+    await completedGroup.getByRole("button", { name: "Show All" }).click();
     const delivered = receipt(page, "queue-again-delivered");
     const manual = receipt(page, "queue-again-manual");
-    await expect(delivered).toContainText("Queued for a later turn.");
-    await expect(delivered).not.toContainText("Transport uncertain.");
+    await expect(delivered).toContainText("Waiting for the next turn.");
+    await expect(delivered).not.toContainText("couldn't confirm");
     await expect(manual.getByRole("button", { name: "Dismiss" })).toBeVisible();
-    await expect(manual.locator(".steering-receipt-dismiss")).toHaveAttribute("title", "Dismiss");
-    await expect(manual.locator(".steering-receipt-actions")).toHaveCount(0);
+    await expect(manual.getByRole("button", { name: "Queue Again" })).toHaveCount(0);
     await page.screenshot({ path: test.info().outputPath(`queue-again-settled-${viewport.width}.png`) });
 
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage(
@@ -677,15 +682,15 @@ test("concurrent uncertainty resolutions retain independent pending UI", async (
   await dismissReceipt.getByRole("button", { name: "Dismiss" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringResolutionRequests().length)).toBe(2);
   await expect(queueReceipt).toHaveAttribute("data-status", "uncertain");
-  await expect(queueReceipt.locator(".steering-receipt-actions")).toHaveAttribute("aria-busy", "true");
+  await expect(queueReceipt.locator(".tl-receipt-buttons")).toHaveAttribute("aria-busy", "true");
   await expect(queueReceipt.getByRole("button", { name: "Queue Again" })).toBeDisabled();
   await expect(queueReceipt).toContainText("Queue Again is pending.");
-  await expect(dismissReceipt.locator(".steering-receipt-actions")).toHaveAttribute("aria-busy", "true");
+  await expect(dismissReceipt.locator(".tl-receipt-buttons")).toHaveAttribute("aria-busy", "true");
   await expect(dismissReceipt.getByRole("button", { name: "Dismiss" })).toBeDisabled();
   await expect(dismissReceipt).toContainText("Dismiss is pending.");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredSteeringResolution("resolve-queue"));
-  await expect(queueReceipt).toContainText("Queued Again");
+  await expect(queueReceipt).toContainText("Waiting for the next turn.");
   await expect(dismissReceipt.getByRole("button", { name: "Dismiss" })).toBeDisabled();
   await expect(dismissReceipt).toContainText("Dismiss is pending.");
 
@@ -716,8 +721,9 @@ test("rejected receipts stay compact on mobile and clear durably without touchin
 
   const group = page.locator(".steering-terminal-receipts");
   await expect(group).toBeVisible();
-  await expect(group.getByRole("button", { name: /Rejected Receipts/ })).toHaveAttribute("aria-expanded", "false");
-  await expect(group).toContainText("8 Rejected Receipts");
+  await expect(group.getByRole("button", { name: "Show All" })).toHaveAttribute("aria-expanded", "false");
+  await expect(group).toContainText("Not Accepted");
+  await expect(group).toContainText("8 messages");
   expect((await group.boundingBox())!.height).toBeLessThanOrEqual(48);
   await expect(receipt(page, "pending-stays")).toBeVisible();
   await expect(receipt(page, "uncertain-stays")).toBeVisible();
@@ -766,7 +772,7 @@ test("desktop rejected receipt grouping retains individual dismissal", async ({ 
   });
 
   const group = page.locator(".steering-terminal-receipts");
-  await group.getByRole("button", { name: /Rejected Receipts/ }).click();
+  await group.getByRole("button", { name: "Show All" }).click();
   await expect(receipt(page, "desktop-rejected-a")).toBeVisible();
   await receipt(page, "desktop-rejected-a").getByRole("button", { name: "Dismiss" }).click();
   await expect(receipt(page, "desktop-rejected-a")).toHaveCount(0);

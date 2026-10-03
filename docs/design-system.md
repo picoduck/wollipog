@@ -1468,7 +1468,8 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
 | Session header, background work | "Background Work Lost": danger (was "Background Work Orphaned") |
 | Delivery receipt | Delivered: success (inline, no pill) · Delivery Failed: danger |
-| Queued message (`queuedMessage`: pending bubbles and the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
+| Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
+| Message receipt (`messageReceipt`: the one line under a sent message in the transcript — pending prompts, steering, provider commands, the rename) | Sending: a spinner and the word, no badge · Queued, Canceled, Dismissed: neutral · Delivered, Steered the Current Turn: success (inline) · Delivery Uncertain: warning · Delivery Failed, Not Sent, Not Accepted, Rejected, Rename Failed: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
 | Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
@@ -1484,6 +1485,18 @@ The queued-message labels were the composer's and the pending bubble's own table
 `PendingPromptBubbles.tsx`, `queueLabel` in `SessionDetail.tsx`). The words are unchanged. Held was
 drawn in red and is now the warning tone, and every label now renders in Title Case instead of an
 uppercase transform.
+
+**Message receipts** (#2171). What happened to a message after it was sent is one `.tl-receipt` line
+under that message, inside the scrolling transcript: after the last canonical item and before the
+Working row, right-aligned like the person's own messages. The line reads status first, then the
+reason, then the actions (`.btn.sm`, outside the bubble, never an outline button on a fill), with
+Show Details last. While the message is not the agent's yet its bubble is unfilled: `.is-pending`
+is a dashed `--control-outline` edge, `.is-failed` a red-tinted edge, and `.is-command` sets a
+provider command in mono. Reasons come from one `deliveryReason(code)` table in
+`conversation-steering.ts`, written for people; an unknown code reads "Wollipog couldn't confirm this
+message was delivered." Raw provider text and attempt counts wait behind Show Details. A steer the
+agent took keeps a quiet "Steered the Current Turn" under its canonical row. A failed message that
+has scrolled out of view raises "1 Message Not Sent" in the floating tail control (#2153).
 
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;
@@ -1805,7 +1818,7 @@ scroll to trigger it (#313).
 | Actions | `.btn.sm` row under the body, left-aligned; the resolving action first (primary only if it is the page's main next step). An action a person cannot take now keeps a visible reason line in the body ("Build Box is offline.", a Viewer's refusal) that the button references with `aria-describedby`, never only a `title`. |
 | Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. |
 | Placement | Directly where the problem is: above the composer for session state, above the footer for submit errors, at the top of a section for section state. Aligned to that column's edges. |
-| Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts and queued rows are not notices and do not share this slot. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
+| Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts and queued rows are not notices and do not share this slot: receipts are rows of the transcript under their message (§11.2), and queued rows belong to the composer. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
 
 **Session notice slot.** `SessionNoticeSlot` (`apps/web/src/components/SessionNoticeSlot.tsx`) is that
 slot: the first child of the composer column, on the composer's width and gutters. It takes a list of

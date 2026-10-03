@@ -1,10 +1,14 @@
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
+  type DurableSessionCommandErrorCode,
   type QueuedPromptView,
+  type SessionCommandInvocationErrorCode,
   type SessionView,
   type SteeringAttemptView,
+  type SteerResultReason,
 } from "@wollipog/protocol";
+import { statusMeta, type StatusTone, type StatusValue } from "./status-meta.js";
 
 export interface ConversationSteeringAvailabilityInput {
   runnerProtocolVersion: number | null | undefined;
@@ -22,13 +26,65 @@ export type SteeringAvailability =
   | { available: true }
   | { available: false; reason: string };
 
-export type SteeringReceiptTone = "pending" | "success" | "warning" | "danger" | "neutral";
+export type MessageReceiptStatus = StatusValue<"messageReceipt">;
 
 export interface SteeringReceiptPresentation {
+  /** The receipt's place in the one message-receipt vocabulary (§11.2). */
+  status: MessageReceiptStatus;
   label: string;
-  tone: SteeringReceiptTone;
+  tone: StatusTone;
   actionRequired: boolean;
+  /** Why it ended this way, in words for people (`deliveryReason`). */
+  reason?: string;
   detail?: string;
+}
+
+/** Every code a sent message's receipt can carry: a steering result, a durable prompt failure or
+ * a provider command failure. */
+export type DeliveryReasonCode =
+  | SteerResultReason
+  | DurableSessionCommandErrorCode
+  | SessionCommandInvocationErrorCode;
+
+/** What a receipt says when its code is missing or unknown. */
+export const DELIVERY_REASON_FALLBACK = "Wollipog couldn't confirm this message was delivered.";
+
+/** One sentence per code, for people (§17.2). The record is exhaustive, so a new protocol code
+ * fails typechecking until it has words here. Raw provider text stays behind Show Details. */
+const DELIVERY_REASONS: Record<DeliveryReasonCode, string> = {
+  accepted: "The agent took this message into the current turn.",
+  stale_turn: "The turn ended before this could steer it.",
+  no_active_provider_turn: "No turn was running to steer.",
+  unsupported_protocol: "This machine needs an update before it can steer a turn.",
+  unsupported_driver: "This agent can't take messages during a turn.",
+  configuration_mismatch: "The session's settings changed before this could steer the turn.",
+  policy_blocked: "A guardrail stopped this message.",
+  governance_blocked: "A governance rule stopped this message.",
+  queue_item_absent: "The queued message was already gone.",
+  queue_item_started: "The queued message had already started.",
+  queue_capacity_exceeded: "The queue was full, so this message wasn't sent.",
+  provider_rejected: "The agent didn't accept this message.",
+  transport_uncertain: DELIVERY_REASON_FALLBACK,
+  history_integrity_failure: "The conversation history couldn't be checked, so this message wasn't sent.",
+  COMMAND_ID_CONFLICT: "Another message already had this message's delivery slot.",
+  COMMAND_EXPIRED: "This message waited too long and wasn't sent.",
+  INVALID_COMMAND: "This message couldn't be sent as written.",
+  SESSION_NOT_FOUND: "The session wasn't on its machine, so this message wasn't sent.",
+  QUEUE_FULL: "The queue was full, so this message wasn't sent.",
+  COMMAND_CANCELLED: "This message was canceled before it was sent.",
+  PROVIDER_AUTHENTICATION_REQUIRED: "Sign-in was dismissed, so this message wasn't sent.",
+  WORKTREE_RECOVERY_REQUIRED: "This session's worktree needs recovery before this message can be sent.",
+  RECEIPT_STORE_FULL: "Wollipog had no room to track this message, so it wasn't sent.",
+  COMMAND_CATALOG_STALE: "The agent's commands changed, so this command wasn't run.",
+  COMMAND_UNAVAILABLE: "This command isn't available right now.",
+  COMMAND_MODE_UNSUPPORTED: "This agent can't run this command that way.",
+};
+
+/** A receipt's reason in plain words. Unknown and missing codes say delivery is unconfirmed. */
+export function deliveryReason(code: string | null | undefined): string {
+  return code != null && Object.hasOwn(DELIVERY_REASONS, code)
+    ? DELIVERY_REASONS[code as DeliveryReasonCode]
+    : DELIVERY_REASON_FALLBACK;
 }
 
 /** A slow draft read must be repeated whenever the reservation generation it observed was
@@ -148,34 +204,41 @@ export function queuedPromptEditingAvailability(
   return { available: true };
 }
 
+function receiptPresentation(
+  status: MessageReceiptStatus,
+  actionRequired: boolean,
+  extra: Pick<SteeringReceiptPresentation, "reason" | "detail"> = {},
+): SteeringReceiptPresentation {
+  const { label, tone } = statusMeta("messageReceipt", status);
+  return { status, label, tone, actionRequired, ...extra };
+}
+
 /** Stable visible state for a durable control-plane steering receipt. */
 export function steeringReceiptPresentation(
   attempt: SteeringAttemptView,
 ): SteeringReceiptPresentation {
   if (attempt.resolution?.state === "applied") {
     return attempt.resolution.action === "queue_again"
-      ? { label: "Queued Again", tone: "neutral", actionRequired: false }
-      : { label: "Dismissed", tone: "neutral", actionRequired: false };
+      ? receiptPresentation("queued", false, { reason: "Waiting for the next turn." })
+      : receiptPresentation("dismissed", false);
   }
   if (attempt.state === "uncertain") {
     const pendingAction = attempt.resolution?.state === "pending"
       ? attempt.resolution.action === "queue_again" ? "Queue Again" : "Dismiss"
       : undefined;
-    return {
-      label: "Delivery Uncertain",
-      tone: "warning",
-      actionRequired: pendingAction === undefined,
+    return receiptPresentation("uncertain", pendingAction === undefined, {
+      reason: deliveryReason(attempt.reason),
       ...(pendingAction ? { detail: `${pendingAction} is pending.` } : {}),
-    };
+    });
   }
   switch (attempt.state) {
     case "pending":
-      return { label: "Steering…", tone: "pending", actionRequired: false };
+      return receiptPresentation("sending", false);
     case "accepted":
-      return { label: "Accepted", tone: "success", actionRequired: false };
+      return receiptPresentation("steered", false);
     case "converted_to_queue":
-      return { label: "Converted to Queue", tone: "neutral", actionRequired: false };
+      return receiptPresentation("queued", false, { reason: deliveryReason(attempt.reason) });
     case "rejected":
-      return { label: "Rejected", tone: "danger", actionRequired: false };
+      return receiptPresentation("not_accepted", false, { reason: deliveryReason(attempt.reason) });
   }
 }

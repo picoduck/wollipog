@@ -58,7 +58,7 @@ letting fleet recovery page only above the cursor that window published. Derived
 same rule. A partial load does not rebuild the heartbeat ring, whose buckets can predate it. The
 Subagents panel says earlier activity is unloaded rather than presenting its list as an inventory.
 And absence stops being evidence: a completed provider command or an accepted steer whose canonical
-message sits in an unloaded turn no longer resurrects a recovery receipt beside the composer, since
+message sits in an unloaded turn no longer resurrects a recovery receipt in the transcript, since
 against a bounded window that absence proves nothing.
 
 Two loads keep the forward chain. A reconnect gap is owned by the forward cursor frozen at

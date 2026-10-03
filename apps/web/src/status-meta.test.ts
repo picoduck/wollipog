@@ -90,6 +90,19 @@ const TABLE: readonly Row[] = [
   ["queuedMessage", "failed", "Delivery Failed", "danger"],
   ["queuedMessage", "not_sent", "Not Sent", "danger"],
   ["queuedMessage", "cancelled", "Canceled", "neutral"],
+  // Message receipts under a sent message in the transcript (#2171)
+  ["messageReceipt", "sending", "Sending", "info"],
+  ["messageReceipt", "queued", "Queued", "neutral"],
+  ["messageReceipt", "delivered", "Delivered", "success"],
+  ["messageReceipt", "steered", "Steered the Current Turn", "success"],
+  ["messageReceipt", "uncertain", "Delivery Uncertain", "warning"],
+  ["messageReceipt", "failed", "Delivery Failed", "danger"],
+  ["messageReceipt", "not_sent", "Not Sent", "danger"],
+  ["messageReceipt", "not_accepted", "Not Accepted", "danger"],
+  ["messageReceipt", "rejected", "Rejected", "danger"],
+  ["messageReceipt", "rename_failed", "Rename Failed", "danger"],
+  ["messageReceipt", "cancelled", "Canceled", "neutral"],
+  ["messageReceipt", "dismissed", "Dismissed", "neutral"],
   // Delivery receipt
   ["delivery", "delivered", "Delivered", "success"],
   ["delivery", "delivery_failed", "Delivery Failed", "danger"],
@@ -134,6 +147,8 @@ test("only actively progressing work pulses, and an unverified source draws a ho
   assert.equal(statusMeta("session", "stop_waiting_for_runner").pulse, false);
   assert.equal(statusMeta("job", "running").pulse, true);
   assert.deepEqual(pulsing("queuedMessage"), ["sent", "started", "steering"]);
+  // Sending is a spinner beside the word, never a pulsing badge (#2171).
+  assert.deepEqual(pulsing("messageReceipt"), []);
   assert.equal(statusMeta("job", "stalled").pulse, false);
   assert.equal(statusMeta("machine", "offline").hollow, true);
   assert.equal(statusMeta("job", "unverified").hollow, true);
@@ -147,14 +162,14 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
   for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "tool", "family",
-    "job", "background_work", "queuedMessage", "delivery", "notification", "workflow", "pod", "member", "provider_account",
+    "job", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "pod", "member", "provider_account",
     "share", "usage"] as const) {
     for (const value of statusValues(domain)) {
       const { label } = statusMeta(domain, value);
       for (const text of [label]) {
         assert.doesNotMatch(text, /[⚠⛔✓×]/u, `${domain}/${value}`);
         for (const word of text.split(/[\s—-]+/).filter(Boolean)) {
-          if (["for", "on", "of", "to", "in"].includes(word)) continue;
+          if (["for", "on", "of", "to", "in", "the"].includes(word)) continue;
           assert.match(word, /^[A-Z]/, `${domain}/${value}: "${word}" in "${text}"`);
         }
       }

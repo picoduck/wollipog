@@ -1,17 +1,31 @@
 import type { SessionCommandInvocationView } from "@wollipog/protocol";
 import React from "react";
+import { deliveryReason, type MessageReceiptStatus } from "../conversation-steering.js";
 import type { TimelineItem } from "../timeline.js";
+import { ReceiptLine, ReceiptRow, receiptRowId } from "./TranscriptReceipt.js";
 
-const LABELS: Record<SessionCommandInvocationView["state"], string> = {
-  pending: "Pending Delivery",
-  sent: "Sent",
-  accepted: "Accepted",
-  queued: "Queued",
-  started: "Running",
-  completed: "Completed",
-  rejected: "Rejected",
-  uncertain: "Delivery Uncertain",
-};
+/** Where a command went and what happened to it, as its receipt line says it (#2171). */
+export function commandReceiptLine(
+  invocation: Pick<SessionCommandInvocationView, "state" | "code">,
+  agent: string,
+): { status: MessageReceiptStatus; progress?: string; reason?: string } {
+  switch (invocation.state) {
+    case "pending":
+    case "sent":
+      return { status: "sending", progress: `Sending to ${agent}…` };
+    case "accepted":
+    case "queued":
+      return { status: "queued", reason: `Waiting for ${agent}.` };
+    case "started":
+      return { status: "sending", progress: `Running in ${agent}…` };
+    case "completed":
+      return { status: "delivered", reason: `Ran in ${agent}.` };
+    case "rejected":
+      return { status: "rejected", reason: deliveryReason(invocation.code) };
+    case "uncertain":
+      return { status: "uncertain", reason: `${deliveryReason(undefined)} Check the transcript before running it again.` };
+  }
+}
 
 const TERMINAL_RECOVERY_RECEIPT_LIMIT = 5;
 
@@ -68,51 +82,57 @@ export function visibleSessionCommandReceipts(
   });
 }
 
-/** Durable provider-command delivery state. Completed rows retire into the canonical transcript;
- * failures and ambiguity remain visible beside the composer. */
+/** Durable provider-command delivery state, as rows of the transcript under each command (#2171).
+ * Completed rows retire into the canonical transcript; failures and ambiguity remain. */
 export function SessionCommandReceipts({
   invocations,
   timelineItems,
   historyPartial = false,
+  agentLabel,
   isSkillInvocation,
 }: {
   invocations: readonly SessionCommandInvocationView[];
   timelineItems: readonly TimelineItem[];
   /** The transcript is a bounded window, so a canonical message may sit in an unloaded turn. */
   historyPartial?: boolean;
+  /** The agent the command went to, as the session names it. */
+  agentLabel: string;
   /** True for a skill invocation, spelled `$name` like the canonical transcript. */
   isSkillInvocation?: (invocation: SessionCommandInvocationView) => boolean;
 }) {
   const visible = visibleSessionCommandReceipts(invocations, timelineItems, historyPartial);
   if (!visible.length) return null;
   return (
-    <section className="steering-receipts" aria-label="Provider Command Receipts">
-      {visible.map((invocation) => (
-        <article
-          className="steering-receipt"
-          data-status={invocation.state}
-          data-testid={`provider-command-${invocation.submissionId}`}
-          key={invocation.invocationId}
-        >
-          <div className="steering-receipt-head">
-            <span className="steering-receipt-status" data-status={invocation.state}>
-              {LABELS[invocation.state]}
-            </span>
-            <span className="steering-receipt-source">Provider Command</span>
-          </div>
-          <div className="steering-receipt-content">
-            <span className="steering-receipt-text">
-              {isSkillInvocation?.(invocation) ? "$" : "/"}{invocation.commandName}
-              {invocation.argumentText ? ` ${invocation.argumentText}` : ""}
-            </span>
-          </div>
-          {(invocation.error || invocation.state === "uncertain") && (
-            <div className="steering-receipt-details" role={invocation.state === "rejected" ? "alert" : "status"}>
-              {invocation.error ?? "Delivery may have reached the provider. Inspect the transcript before retrying."}
-            </div>
-          )}
-        </article>
-      ))}
-    </section>
+    <>
+      {visible.map((invocation) => {
+        const line = commandReceiptLine(invocation, agentLabel);
+        const failed = invocation.state === "rejected" || invocation.state === "uncertain";
+        return (
+          <ReceiptRow
+            key={invocation.invocationId}
+            receiptId={receiptRowId.command(invocation.invocationId)}
+            testId={`provider-command-${invocation.submissionId}`}
+            rowProps={{ "data-status": invocation.state }}
+            commandBubble
+            bubbleVariant={failed ? "failed" : invocation.state === "completed" ? undefined : "pending"}
+            bubble={(
+              <span className="bubble-text">
+                {isSkillInvocation?.(invocation) ? "$" : "/"}{invocation.commandName}
+                {invocation.argumentText ? ` ${invocation.argumentText}` : ""}
+              </span>
+            )}
+          >
+            <ReceiptLine
+              status={line.status}
+              progress={line.progress}
+              reason={line.reason}
+              role="status"
+              detailsId={`provider-command-details-${invocation.invocationId}`}
+              details={invocation.error ? <p className="tl-receipt-raw">{invocation.error}</p> : undefined}
+            />
+          </ReceiptRow>
+        );
+      })}
+    </>
   );
 }

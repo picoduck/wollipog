@@ -105,7 +105,7 @@ import {
 import {
   TranscriptTailControl,
   transcriptTailView,
-  useOffscreenPendingPrompts,
+  useOffscreenReceipts,
   useRecoveryAnnouncement,
 } from "./TranscriptTailControl.js";
 import { ApprovalsControl, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
@@ -202,8 +202,9 @@ import {
   queuedPromptSteeringAvailability,
   shouldReloadReservedDraft,
 } from "../conversation-steering.js";
-import { SteeringReceipts } from "./SteeringReceipts.js";
-import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
+import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
+import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
+import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId } from "./TranscriptReceipt.js";
 import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, InfoIcon, MicIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
@@ -4051,14 +4052,37 @@ function SessionDetailLoaded({
     history: eventHistory,
     conn,
   });
+  // Receipts for messages already sent are rows of the transcript, under their message (#2171). The
+  // full session view shows steering, command and rename receipts; the pending prompts show
+  // everywhere the transcript does.
+  const historyPartial = isPartialHistory(eventWindow);
+  const steeringReceipts = mode === "expanded"
+    ? deriveSteeringReceipts(session.steeringAttempts ?? [], items, session.activeTurnId, historyPartial)
+    : [];
+  const commandReceipts = mode === "expanded"
+    ? visibleSessionCommandReceipts(session.commandInvocations ?? [], items, historyPartial)
+    : [];
+  const hasTranscriptReceipts = (session.pendingPrompts?.length ?? 0) > 0 || steeringReceipts.length > 0 ||
+    commandReceipts.length > 0 || retitleFeedback !== null;
   // The floating tail control (#2153). Only a transcript with rows has a tail to jump to; loading,
   // history-error and empty states show nothing there.
   const transcriptHasTail = transcript.body === "timeline" ||
-    (transcript.body === "empty" && (session.pendingPrompts?.length ?? 0) > 0);
-  const undeliveredPromptIds = (session.pendingPrompts ?? [])
-    .filter((prompt) => isPendingPromptShown(prompt, deliveredPromptCommandIds) && isUndeliveredPrompt(prompt))
-    .map((prompt) => prompt.commandId);
-  const offscreenUndeliveredIds = useOffscreenPendingPrompts(scrollRef, undeliveredPromptIds, transcriptHasTail);
+    (transcript.body === "empty" && hasTranscriptReceipts);
+  // Every message the agent did not take — a failed prompt, a steer it did not accept, a command it
+  // rejected — raises "Message Not Sent" when its row is off-screen, so a receipt in the scroll never
+  // hides a failure.
+  const undeliveredReceiptIds = [
+    ...(session.pendingPrompts ?? [])
+      .filter((prompt) => isPendingPromptShown(prompt, deliveredPromptCommandIds) && isUndeliveredPrompt(prompt))
+      .map((prompt) => receiptRowId.prompt(prompt.commandId)),
+    ...steeringReceipts
+      .filter(({ status }) => status === "rejected")
+      .map(({ attempt }) => receiptRowId.steering(attempt.submissionId)),
+    ...commandReceipts
+      .filter((invocation) => invocation.state === "rejected")
+      .map((invocation) => receiptRowId.command(invocation.invocationId)),
+  ];
+  const offscreenUndeliveredIds = useOffscreenReceipts(scrollRef, undeliveredReceiptIds, transcriptHasTail);
   const recoveryAnnouncement = useRecoveryAnnouncement(transcript.notice, sessionId);
   const tailView = transcriptTailView({
     hasTail: transcriptHasTail,
@@ -4073,11 +4097,11 @@ function SessionDetailLoaded({
     const scroller = scrollRef.current;
     const id = offscreenUndeliveredIds[0];
     if (!scroller || id === undefined) return;
-    const row = [...scroller.querySelectorAll<HTMLElement>("[data-pending-prompt-id]")]
-      .find((candidate) => candidate.dataset.pendingPromptId === id);
+    const row = [...scroller.querySelectorAll<HTMLElement>(`[${RECEIPT_ROW_ATTRIBUTE}]`)]
+      .find((candidate) => candidate.getAttribute(RECEIPT_ROW_ATTRIBUTE) === id);
     if (!row) return;
     row.scrollIntoView({ block: "nearest" });
-    const action = row.querySelector<HTMLButtonElement>(".pending-prompt-actions button:not(:disabled)");
+    const action = row.querySelector<HTMLButtonElement>(".tl-receipt-buttons button:not(:disabled)");
     (action ?? scroller).focus({ preventScroll: true });
   }, [offscreenUndeliveredIds]);
 
@@ -5431,7 +5455,7 @@ function SessionDetailLoaded({
                     {conn === "offline" ? "Reconnect to load this transcript." : "This device needs access to the control plane."}
                   </State>
                 )
-              ) : transcript.body === "empty" && (session.pendingPrompts?.length ?? 0) === 0 ? (
+              ) : transcript.body === "empty" && !hasTranscriptReceipts ? (
                 // Offline and error outrank empty (§12): a once-empty history that failed to refresh
                 // or is cached while disconnected is its notice alone, never the notice above "Start
                 // the Conversation" or "Starting {Agent}".
@@ -5508,6 +5532,85 @@ function SessionDetailLoaded({
                       </div>
                     </div>
                   )}
+                  {mode === "expanded" && (
+                    <>
+                      <SessionCommandReceipts
+                        invocations={session.commandInvocations ?? []}
+                        timelineItems={items}
+                        historyPartial={historyPartial}
+                        agentLabel={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
+                        isSkillInvocation={isSkillInvocation}
+                      />
+                      <SteeringReceipts
+                        attempts={session.steeringAttempts ?? []}
+                        timelineItems={items}
+                        activeTurnId={session.activeTurnId}
+                        historyPartial={historyPartial}
+                        pendingActions={steeringResolutionPending}
+                        actionRefusal={queueRefusal}
+                        onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
+                        onDismiss={(submissionId) => resolveSteeringAttempt(submissionId, "dismiss")}
+                      />
+                    </>
+                  )}
+                  {retitleFeedback && (
+                    <div
+                      ref={retitleReceiptRef}
+                      className="tl-row user tl-receipt-row"
+                      data-status={retitleFeedback.state}
+                      role="region"
+                      aria-label="Rename Session Status"
+                      tabIndex={-1}
+                    >
+                      <div className="tl-message-stack user">
+                        <ReceiptLine
+                          status={retitleFeedback.state === "running" ? "sending" : "rename_failed"}
+                          progress={retitleFeedback.state === "running" ? "Renaming session…" : undefined}
+                          reason={retitleFeedback.state === "failed" ? "Couldn't rename this session." : undefined}
+                          detailsId={`retitle-details-${session.id}`}
+                          details={retitleFeedback.state === "failed" && retitleFeedback.message
+                            ? <p className="tl-receipt-raw">{retitleFeedback.message}</p>
+                            : undefined}
+                          actions={retitleFeedback.state === "failed" ? (
+                            <span className="tl-receipt-buttons">
+                              <button
+                                type="button"
+                                className="btn sm"
+                                disabled={renameRefusal !== null}
+                                title={renameRefusal ?? undefined}
+                                aria-describedby={renameRefusal !== null ? `retitle-refusal-${session.id}` : undefined}
+                                onPointerDown={() => {
+                                  retitleRetryPointerActivationRef.current = true;
+                                }}
+                                onPointerCancel={() => {
+                                  retitleRetryPointerActivationRef.current = false;
+                                }}
+                                onKeyDown={() => {
+                                  retitleRetryPointerActivationRef.current = false;
+                                }}
+                                onClick={(event) => {
+                                  const input = inputRef.current;
+                                  const keyboardActivation = event.detail === 0
+                                    && !retitleRetryPointerActivationRef.current;
+                                  retitleRetryPointerActivationRef.current = false;
+                                  const composerFocus = keyboardActivation && input
+                                    ? captureComposerFocus(input)
+                                    : undefined;
+                                  retitleReceiptRef.current?.focus();
+                                  void requestSessionRetitle(composerFocus);
+                                }}
+                              >
+                                Retry Rename
+                              </button>
+                            </span>
+                          ) : undefined}
+                        />
+                        {retitleFeedback.state === "failed" && renameRefusal !== null && (
+                          <p className="tl-receipt-refusal" id={`retitle-refusal-${session.id}`}>{renameRefusal}</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   {activeTurnVisible && (
                     <WorkingIndicator
                       label={workingLabel}
@@ -5576,82 +5679,10 @@ function SessionDetailLoaded({
               {retitleFeedback?.state === "running"
                 ? "Renaming Session."
                 : retitleFeedback?.state === "failed"
-                  ? `Rename failed. ${retitleFeedback.message}`
+                  ? "Rename failed. Couldn't rename this session."
                   : ""}
             </span>
             {error && <Notice tone="danger" compact role="alert">{error}</Notice>}
-            {retitleFeedback && (
-              <div
-                ref={retitleReceiptRef}
-                className="retitle-receipt"
-                data-status={retitleFeedback.state}
-                role="region"
-                aria-label="Rename Session Status"
-                tabIndex={-1}
-              >
-                <div className="retitle-receipt-head">
-                  <span className="retitle-receipt-command">/rename-session</span>
-                  <span className="retitle-receipt-status">
-                    {retitleFeedback.state === "running" ? "Renaming Session…" : "Rename Failed"}
-                  </span>
-                </div>
-                {retitleFeedback.state === "failed" && (
-                  <div className="retitle-receipt-details">
-                    <span>{retitleFeedback.message}</span>
-                    <button
-                      type="button"
-                      className="btn ghost sm retitle-receipt-retry"
-                      disabled={renameRefusal !== null}
-                      title={renameRefusal ?? undefined}
-                      aria-describedby={renameRefusal !== null ? `retitle-refusal-${session.id}` : undefined}
-                      onPointerDown={() => {
-                        retitleRetryPointerActivationRef.current = true;
-                      }}
-                      onPointerCancel={() => {
-                        retitleRetryPointerActivationRef.current = false;
-                      }}
-                      onKeyDown={() => {
-                        retitleRetryPointerActivationRef.current = false;
-                      }}
-                      onClick={(event) => {
-                        const input = inputRef.current;
-                        const keyboardActivation = event.detail === 0
-                          && !retitleRetryPointerActivationRef.current;
-                        retitleRetryPointerActivationRef.current = false;
-                        const composerFocus = keyboardActivation && input
-                          ? captureComposerFocus(input)
-                          : undefined;
-                        retitleReceiptRef.current?.focus();
-                        void requestSessionRetitle(composerFocus);
-                      }}
-                    >
-                      Retry Rename
-                    </button>
-                    {renameRefusal !== null && (
-                      <span className="sr-only" id={`retitle-refusal-${session.id}`}>{renameRefusal}</span>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-            {/* Active-turn progress renders in the transcript's Working row, not as a card here —
-                the composer area keeps only composer concerns (receipts, queue, input). */}
-            <SessionCommandReceipts
-              invocations={session.commandInvocations ?? []}
-              timelineItems={items}
-              historyPartial={isPartialHistory(eventWindow)}
-              isSkillInvocation={isSkillInvocation}
-            />
-            <SteeringReceipts
-              attempts={session.steeringAttempts ?? []}
-              timelineItems={items}
-              activeTurnId={session.activeTurnId}
-              historyPartial={isPartialHistory(eventWindow)}
-              pendingActions={steeringResolutionPending}
-              actionRefusal={queueRefusal}
-              onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
-              onDismiss={(submissionId) => resolveSteeringAttempt(submissionId, "dismiss")}
-            />
             {queuedPromptControls.length > 0 && (
               <div className="queued-list" aria-label="Queued Messages">
                 {/* A disabled control's tooltip is announced by nothing, so the refusal is also a

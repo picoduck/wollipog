@@ -3,20 +3,36 @@ import type {
   QueuedPromptView,
   SessionStatus,
 } from "@wollipog/protocol";
+import { deliveryReason, type MessageReceiptStatus } from "../conversation-steering.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
-import { StatusBadge } from "./StatusBadge.js";
 import { Markdown } from "./Markdown.js";
+import { ReceiptAttachmentChip, ReceiptLine, ReceiptRow, receiptRowId } from "./TranscriptReceipt.js";
 
 const RECOVERY_BLOCKS_RETRY_REASON = "Recover the selected worktree before retrying this message.";
 
-/** A pending message's status on the shared queued-message vocabulary (§11.2). */
-export function pendingPromptStatus(prompt: PendingPromptView): StatusMeta {
-  if (prompt.state === "failed" && prompt.errorCode === "WORKTREE_RECOVERY_REQUIRED") {
-    return statusMeta("queuedMessage", "not_sent");
+/** A pending message's place in the message-receipt vocabulary (§11.2). */
+export function pendingPromptReceiptStatus(prompt: PendingPromptView): MessageReceiptStatus {
+  switch (prompt.state) {
+    case "pending":
+    case "sent":
+      return "sending";
+    case "accepted":
+    case "queued":
+      return "queued";
+    case "started":
+      return "delivered";
+    case "uncertain":
+      return "uncertain";
+    case "failed":
+      return prompt.errorCode === "WORKTREE_RECOVERY_REQUIRED"
+        ? "not_sent"
+        : prompt.errorCode === "COMMAND_CANCELLED" ? "cancelled" : "failed";
   }
-  return prompt.state === "failed" && prompt.errorCode === "COMMAND_CANCELLED"
-    ? statusMeta("queuedMessage", "cancelled")
-    : statusMeta("queuedMessage", prompt.state);
+}
+
+/** A pending message's status label and tone. */
+export function pendingPromptStatus(prompt: PendingPromptView): StatusMeta {
+  return statusMeta("messageReceipt", pendingPromptReceiptStatus(prompt));
 }
 
 /** A message the person sent that did not reach the agent (Delivery Failed or Not Sent, not Canceled). */
@@ -95,44 +111,67 @@ export function PendingPromptBubbles({
     // programmatic description alongside the retained message itself.
     const recoveryReasonId = `pending-prompt-recovery-${prompt.commandId}`;
     const refusalId = `pending-prompt-refusal-${prompt.commandId}`;
+    const receiptStatus = pendingPromptReceiptStatus(prompt);
+    const failed = receiptStatus === "failed" || receiptStatus === "not_sent";
+    const reason = failed || receiptStatus === "uncertain" ? deliveryReason(prompt.errorCode) : undefined;
+    const reasonId = `pending-prompt-reason-${prompt.commandId}`;
+    // An action is described by the message it acts on and, when there is one, why it ended there.
+    const messageDescription = reason ? `${detailsId} ${reasonId}` : detailsId;
     const refused = actionRefusal !== null;
-    const describedBy = refused ? `${detailsId} ${refusalId}` : detailsId;
+    const describedBy = refused ? `${messageDescription} ${refusalId}` : messageDescription;
     const retryDescribedBy = refused
       ? describedBy
-      : recoveryBlocksRetry ? `${detailsId} ${recoveryReasonId}` : detailsId;
+      : recoveryBlocksRetry ? `${messageDescription} ${recoveryReasonId}` : messageDescription;
+    const hasActions = cancelPending || cancelLive || prompt.canDismiss || prompt.canRetry;
+    const details = prompt.attemptCount > 1 || prompt.error ? (
+      <>
+        {prompt.attemptCount > 1 && <p>Wollipog tried to deliver this message {prompt.attemptCount} times.</p>}
+        {prompt.error && <p className="tl-receipt-raw">{prompt.error}</p>}
+      </>
+    ) : undefined;
     return (
-      <div
-        className="tl-row user"
-        data-testid={`pending-prompt-${prompt.commandId}`}
-        data-pending-prompt-id={prompt.commandId}
+      <ReceiptRow
         key={prompt.commandId}
-      >
-        <div className={`tl-bubble pending-prompt-bubble state-${prompt.state}`}>
-          <div className="pending-prompt-meta">
-            <StatusBadge meta={pendingPromptStatus(prompt)} inline className="pending-prompt-state" />
-            <span className="pending-prompt-attempts">
-              {prompt.attemptCount > 1
-                ? `${prompt.attemptCount} Delivery Attempts`
-                : "Awaiting Delivery"}
-            </span>
-          </div>
-          <div id={detailsId}>
-            {prompt.hasImages && <div className="pending-prompt-attachment">Attachment</div>}
+        receiptId={receiptRowId.prompt(prompt.commandId)}
+        testId={`pending-prompt-${prompt.commandId}`}
+        rowProps={{ "data-pending-prompt-id": prompt.commandId }}
+        bubbleId={detailsId}
+        bubbleVariant={failed ? "failed" : "pending"}
+        bubble={(
+          <>
+            {prompt.hasImages && <ReceiptAttachmentChip />}
             {prompt.text && <div className="bubble-text"><Markdown profile="inline">{prompt.text}</Markdown></div>}
-            {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
-          </div>
-          {prompt.canRetry && recoveryBlocksRetry && !refused && (
-            <p className="sr-only" id={recoveryReasonId}>{RECOVERY_BLOCKS_RETRY_REASON}</p>
-          )}
-          {refused && (cancelPending || cancelLive || prompt.canDismiss || prompt.canRetry) && (
-            <p className="sr-only" id={refusalId}>{actionRefusal}</p>
-          )}
-          {(cancelPending || cancelLive || prompt.canDismiss || prompt.canRetry) && (
-            <div className="pending-prompt-actions" aria-busy={busy || undefined}>
+          </>
+        )}
+      >
+        {prompt.canRetry && recoveryBlocksRetry && !refused && (
+          <p className="sr-only" id={recoveryReasonId}>{RECOVERY_BLOCKS_RETRY_REASON}</p>
+        )}
+        <ReceiptLine
+          status={receiptStatus}
+          reason={reason}
+          reasonId={reasonId}
+          detailsId={`pending-prompt-more-${prompt.commandId}`}
+          details={details}
+          actions={hasActions ? (
+            <span className="tl-receipt-buttons" aria-busy={busy || undefined}>
+              {prompt.canRetry && (
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={actionPending || recoveryBlocksRetry || refused}
+                  title={actionRefusal ?? (recoveryBlocksRetry ? RECOVERY_BLOCKS_RETRY_REASON : undefined)}
+                  aria-label={busy && !prompt.canDismiss ? "Retrying Message" : "Retry Message"}
+                  aria-describedby={retryDescribedBy}
+                  onClick={() => onRetry(prompt.commandId)}
+                >
+                  {busy && !prompt.canDismiss ? "Retrying…" : "Retry"}
+                </button>
+              )}
               {(cancelPending || cancelLive) && (
                 <button
                   type="button"
-                  className="btn ghost sm"
+                  className="btn sm"
                   disabled={actionPending || refused}
                   title={actionRefusal ?? undefined}
                   aria-label={busy ? "Canceling Pending Message" : "Cancel Pending Message"}
@@ -147,7 +186,7 @@ export function PendingPromptBubbles({
               {prompt.canDismiss && (
                 <button
                   type="button"
-                  className="btn ghost sm"
+                  className="btn sm"
                   disabled={actionPending || refused}
                   title={actionRefusal ?? undefined}
                   aria-label={busy && !prompt.canRetry ? "Dismissing Pending Message" : "Dismiss Pending Message"}
@@ -157,23 +196,11 @@ export function PendingPromptBubbles({
                   {busy && !prompt.canRetry ? "Dismissing…" : "Dismiss"}
                 </button>
               )}
-              {prompt.canRetry && (
-                <button
-                  type="button"
-                  className="btn ghost sm"
-                  disabled={actionPending || recoveryBlocksRetry || refused}
-                  title={actionRefusal ?? (recoveryBlocksRetry ? RECOVERY_BLOCKS_RETRY_REASON : undefined)}
-                  aria-label={busy && !prompt.canDismiss ? "Retrying Message" : "Retry Message"}
-                  aria-describedby={retryDescribedBy}
-                  onClick={() => onRetry(prompt.commandId)}
-                >
-                  {busy && !prompt.canDismiss ? "Retrying…" : "Retry"}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
+            </span>
+          ) : undefined}
+        />
+        {refused && hasActions && <p className="tl-receipt-refusal" id={refusalId}>{actionRefusal}</p>}
+      </ReceiptRow>
     );
   });
 }

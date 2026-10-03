@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { SessionCommandInvocationView } from "@wollipog/protocol";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
+import { commandReceiptLine, SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
 
 function invocation(
   state: SessionCommandInvocationView["state"],
@@ -114,15 +114,39 @@ test("only the newest five terminal recovery receipts remain while active receip
     "an unmatched completion participates in the combined terminal cap");
 });
 
-test("provider command receipts expose Title Case state and failure detail", () => {
+test("provider command receipts are transcript rows that say where the command went and what happened", () => {
   const html = renderToStaticMarkup(<SessionCommandReceipts invocations={[
     invocation("uncertain"),
-    invocation("rejected", { error: "The command is unavailable." }),
-  ]} timelineItems={[]} />);
-  assert.match(html, /Provider Command Receipts/);
+    invocation("rejected", { invocationId: "ci-unavailable", code: "COMMAND_UNAVAILABLE",
+      error: "provider returned COMMAND_UNAVAILABLE for review" }),
+    invocation("started", { invocationId: "ci-running" }),
+    invocation("sent", { invocationId: "ci-sent" }),
+  ]} timelineItems={[]} agentLabel="Codex" />);
+  assert.doesNotMatch(html, /Provider Command/, "the source is not repeated on every receipt");
+  assert.match(html, /class="tl-row user tl-receipt-row"/);
+  assert.match(html, /class="tl-bubble is-command is-failed"/);
   assert.match(html, /Delivery Uncertain/);
-  assert.match(html, /The command is unavailable\./);
+  assert.match(html, /Wollipog couldn&#x27;t confirm this message was delivered\./);
+  assert.match(html, /Rejected/);
+  assert.match(html, /This command isn&#x27;t available right now\./);
+  assert.match(html, /Running in Codex…/);
+  assert.match(html, /Sending to Codex…/);
+  assert.match(html, /Show Details/);
+  assert.doesNotMatch(html, /provider returned COMMAND_UNAVAILABLE/, "raw provider text waits behind Show Details");
   assert.match(html, /\/review storage/);
+});
+
+test("a command receipt line names the agent for every state", () => {
+  assert.deepEqual(commandReceiptLine({ state: "pending" }, "Claude Code"),
+    { status: "sending", progress: "Sending to Claude Code…" });
+  assert.deepEqual(commandReceiptLine({ state: "queued" }, "Claude Code"),
+    { status: "queued", reason: "Waiting for Claude Code." });
+  assert.deepEqual(commandReceiptLine({ state: "started" }, "Claude Code"),
+    { status: "sending", progress: "Running in Claude Code…" });
+  assert.deepEqual(commandReceiptLine({ state: "completed" }, "Claude Code"),
+    { status: "delivered", reason: "Ran in Claude Code." });
+  assert.deepEqual(commandReceiptLine({ state: "rejected", code: "COMMAND_CATALOG_STALE" }, "Claude Code"),
+    { status: "rejected", reason: "The agent's commands changed, so this command wasn't run." });
 });
 
 test("a bounded window is not evidence that a completed command lost its message", () => {
@@ -155,6 +179,7 @@ test("skill receipts use the $name spelling the transcript records", () => {
       invocation("queued", { invocationId: "ci-prompt", commandName: "summarize", argumentText: "" }),
     ],
     timelineItems: [],
+    agentLabel: "Codex",
     isSkillInvocation: (candidate) => candidate.commandName === "review",
   }));
   assert.match(html, /\$review pr 42/);
