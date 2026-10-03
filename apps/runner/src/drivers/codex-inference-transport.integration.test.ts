@@ -143,3 +143,27 @@ test("fallback stderr split at arbitrary byte boundaries never exposes the suffi
     assert.doesNotMatch(h.diagnostics.join("\n"), /secret|private-prompt/);
   } finally { h.driver.dispose(); for (const server of h.servers) server.dispose("done"); }
 });
+
+test("known subagent fallback is scoped without marking the root thread as HTTP", async () => {
+  const h = harness();
+  try {
+    await h.driver.initialize();
+    await h.driver.newSession("/project");
+    h.servers[0]!.notify("item/completed", { threadId: "thread", item: {
+      type: "collabAgentToolCall", id: "spawn", tool: "spawnAgent", status: "completed",
+      senderThreadId: "thread", receiverThreadIds: ["private-child"],
+    } });
+    const message = "Falling back from WebSockets to HTTPS transport. secret";
+    for (let i = 0; i < 2; i++) h.servers[0]!.notify("warning", { threadId: "private-child", message });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.diagnostics.length, 2);
+    assert.equal(JSON.parse(h.diagnostics[1]!).scope, "subagent");
+    assert.equal(JSON.parse(h.diagnostics[1]!).provider, "unknown");
+    await h.driver.newSession("/project");
+    assert.equal(JSON.parse(h.diagnostics[2]!).observedTransport, "unverified");
+    h.servers[0]!.notify("warning", { threadId: "thread", message });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.diagnostics.length, 4, "child fallback does not suppress the root warning");
+    assert.doesNotMatch(h.diagnostics.join("\n"), /private-child|secret/);
+  } finally { h.driver.dispose(); for (const server of h.servers) server.dispose("done"); }
+});

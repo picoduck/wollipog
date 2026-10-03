@@ -18,6 +18,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { CodexAppServerDriver, CodexAppServerResumeError } from "../src/drivers/codex-app-server.js";
 import type { DriverCallbacks, DriverOptions } from "../src/drivers/driver.js";
 import { spawnAgent } from "../src/spawn.js";
+import { codexProbeAccessCredentials } from "../src/drivers/codex-probe-auth.js";
 
 const MODEL = process.env.CODEX_PROBE_MODEL || "gpt-6.1-sol";
 const CODEX = process.env.CODEX_BIN || "codex";
@@ -25,9 +26,11 @@ const forceHttpFallback = process.argv.includes("--force-http-fallback");
 const SOURCE_AUTH = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
 const SOURCE_DIGEST = () => createHash("sha256").update(readFileSync(SOURCE_AUTH)).digest("hex");
 let authBefore: string;
+let accessCredentials: ReturnType<typeof codexProbeAccessCredentials>;
 try {
   const auth = JSON.parse(readFileSync(SOURCE_AUTH, "utf8"));
-  if (auth.auth_mode !== "chatgpt" || !auth.tokens || !/^[A-Za-z0-9._:-]+$/.test(MODEL)) throw new Error();
+  accessCredentials = codexProbeAccessCredentials(auth);
+  if (!/^[A-Za-z0-9._:-]+$/.test(MODEL)) throw new Error();
   authBefore = SOURCE_DIGEST();
 } catch {
   console.log(JSON.stringify({ event: "codex_inference_probe", passed: false, reason: "existing_auth_or_model_unavailable" }));
@@ -36,15 +39,10 @@ try {
 const root = mkdtempSync(join(tmpdir(), "codex-inference-transport-"));
 const codexHome = join(root, "codex");
 const cwd = join(root, "project");
-mkdirSync(codexHome, { mode: 0o700 });
-mkdirSync(cwd, { mode: 0o700 });
-// A provider refresh may replace auth.json. Keep that write confined to the temporary home;
-// linking the source file could allow refresh to modify the persistent account's credentials.
-writeFileSync(join(codexHome, "auth.json"), readFileSync(SOURCE_AUTH), { mode: 0o600 });
 // The preset requires a Wollipog MCP inventory entry. Supply an inert, local stdio server with
 // no tools so the verifier cannot reach campaign management or grant any new capability.
 const inertMcp = join(root, "inert-mcp.mjs");
-writeFileSync(inertMcp, `import { createInterface } from 'node:readline';
+const inertMcpSource = `import { createInterface } from 'node:readline';
 createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line);
   if (message.id == null) return;
@@ -52,7 +50,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     ? { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'inert-transport-probe', version: '1' } }
     : { tools: [] };
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');
-});`, { mode: 0o600 });
+});`;
 
 interface Observation {
   upstreamWebsocketConnections: number;
@@ -72,16 +70,29 @@ function emptyObservation(): Observation {
 }
 let current = emptyObservation();
 const sockets = new Set<WebSocket>();
+const httpRequests = new Set<ReturnType<typeof httpsRequest>>();
 const observer = new WebSocketServer({ noServer: true });
 const server = createServer((req, res) => {
   if (!req.url?.startsWith("/backend-api/codex/")) { res.writeHead(404).end(); return; }
-  if (req.url.split("?")[0] === "/backend-api/codex/responses") current.httpModelRequests++;
+  const observation = current;
+  if (req.url.split("?")[0] === "/backend-api/codex/responses") observation.httpModelRequests++;
   const upstream = httpsRequest({ hostname: "chatgpt.com", path: req.url, method: req.method,
     headers: { ...req.headers, host: "chatgpt.com" } }, reply => {
+    reply.on("error", () => upstream.destroy(new Error("upstream_response_error")));
+    if (res.destroyed) { reply.destroy(); return; }
     res.writeHead(reply.statusCode ?? 502, reply.headers);
     reply.pipe(res);
   });
-  upstream.on("error", () => { current.protocolFailures++; res.writeHead(502).end(); });
+  httpRequests.add(upstream);
+  upstream.on("close", () => httpRequests.delete(upstream));
+  upstream.setTimeout(120_000, () => upstream.destroy(new Error("upstream_timeout")));
+  upstream.on("error", () => {
+    observation.protocolFailures++;
+    if (res.destroyed) return;
+    if (res.headersSent) res.destroy();
+    else res.writeHead(502).end();
+  });
+  res.on("close", () => upstream.destroy());
   req.pipe(upstream);
 });
 server.on("upgrade", (req, socket, head) => {
@@ -152,6 +163,12 @@ async function bounded<T>(operation: Promise<T>): Promise<T> {
 
 const results: unknown[] = [];
 try {
+  mkdirSync(codexHome, { mode: 0o700 });
+  mkdirSync(cwd, { mode: 0o700 });
+  // Access-only credentials cannot rotate the shared account's server-side refresh token.
+  // Codex's required refresh_token field is empty; failed/expired access needs human recovery.
+  writeFileSync(join(codexHome, "auth.json"), JSON.stringify(accessCredentials), { mode: 0o600 });
+  writeFileSync(inertMcp, inertMcpSource, { mode: 0o600 });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const port = (server.address() as { port: number }).port;
@@ -247,6 +264,8 @@ try {
         await bounded(exited);
         for (const socket of sockets) socket.terminate();
         sockets.clear();
+        for (const request of httpRequests) request.destroy();
+        httpRequests.clear();
       }
     }
   }
@@ -260,6 +279,7 @@ try {
   process.exitCode = 1;
 } finally {
   for (const socket of sockets) socket.terminate();
+  for (const request of httpRequests) request.destroy();
   observer.close();
   server.closeAllConnections();
   server.close();

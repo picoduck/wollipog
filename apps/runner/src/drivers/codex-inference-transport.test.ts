@@ -40,6 +40,8 @@ test("missing, malformed, or inherited provider config never claims successful t
 test("fallback warnings classify without returning provider-controlled text", () => {
   assert.equal(codexHttpFallbackWarning("Falling back from WebSockets to HTTPS transport. token=secret; private prompt"), true);
   assert.equal(codexHttpFallbackWarning("WARN codex_core::client: falling back to HTTP"), true);
+  assert.equal(codexHttpFallbackWarning("MCP transport: falling back to HTTP SSE"), false);
+  assert.equal(codexHttpFallbackWarning("configuration mentions falling back from WebSockets to HTTPS transport"), false);
   assert.equal(codexHttpFallbackWarning({ message: "Falling back from WebSockets to HTTPS transport" }), false);
   assert.equal(codexHttpFallbackWarning("HTTPS configured by custom provider"), false);
 });

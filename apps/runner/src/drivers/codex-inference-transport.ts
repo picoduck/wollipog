@@ -45,6 +45,8 @@ function record(value: unknown): Record<string, unknown> | null {
 /** Match Codex's fixed warning, then discard its provider-controlled error suffix. That suffix
  * may contain response bodies, URLs, or credentials. Configuration alone never proves traffic. */
 export function codexHttpFallbackWarning(value: unknown): boolean {
-  return typeof value === "string" &&
-    /Falling back from WebSockets to HTTPS transport\b|\bfalling back to HTTP\b/i.test(value);
+  if (typeof value !== "string") return false;
+  const prefix = value.slice(0, 1_024).replace(/\x1b\[[0-9;]*m/g, "");
+  return /^Falling back from WebSockets to HTTPS transport(?:[.:]|$)/i.test(prefix) ||
+    /\bcodex_core::client:\s*falling back to HTTP(?:\s|$)/i.test(prefix);
 }

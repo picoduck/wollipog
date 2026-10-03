@@ -1003,39 +1003,6 @@ option, exits before initialization; the driver suppresses that expected probe e
 exactly once as `codex app-server`. The session then retains the prior prose-question behavior and
 all existing app-server capabilities. Other startup failures are not retried or hidden.
 
-#### OpenAI Inference Transport
-
-The supported Codex App Server builds use WebSockets by default for the built-in OpenAI Responses
-provider. This is Codex-to-model traffic; Wollipog's manager connection remains stdio. Native defaults
-are verified in official source at [0.147.0](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/model-provider-info/src/lib.rs)
-and [0.160.0](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/model-provider-info/src/lib.rs).
-Wollipog preserves that provider identity across standard and Orchestrator launches, resume, and
-relaunch. It does not redefine the reserved `openai` provider or set the removed
-`responses_websockets` / `responses_websockets_v2` feature flags.
-
-Custom providers retain their own [documented `supports_websockets` setting](https://learn.chatgpt.com/docs/config-file/config-reference).
-The driver reads the provider returned by thread start/resume and, for custom providers, the
-effective config with a bounded `config/read`. Accounts, endpoint selection, models, and permission
-policy are unchanged. Missing config or an unverified running version produces `unknown`.
-
-Structured `codex_inference_transport` diagnostics distinguish `configuredTransport` from
-`observedTransport`. Configuration diagnostics always report traffic as `unverified`. A provider
-HTTP-fallback warning reports `http`, with a fixed reason and no raw error suffix. Diagnostics contain
-only bounded classifications and a per-driver launch counter; provider names, URLs, credentials,
-prompts, and response content are excluded. Split stderr warnings are framed before classification.
-Some Codex upgrade failures (for example HTTP 426) switch directly to HTTP without a warning;
-configuration remains `unverified` in that case, and the live observer's HTTP request counts reveal
-the fallback. Absence of a warning is never reported as successful WebSocket use.
-
-Run `pnpm probe:codex-inference-transport` to verify real traffic using existing file-backed ChatGPT
-authentication. It launches temporary driver processes and forwards inference through a loopback
-observer to the fixed official TLS endpoint. It records protocol counts and booleans, matches newly
-observed tool-call ids to tool-result continuations on the same socket, and exercises standard,
-additive Orchestrator, and preset sessions both fresh and after resume/relaunch. The preset receives
-an inert local MCP entry with no tools. No login, persistent config/grant, or hosting-service changes
-are performed. `--force-http-fallback` rejects only these processes' WebSocket upgrades while
-forwarding HTTP inference, verifying that degraded transport is distinguishable from WebSocket use.
-
 1. `initialize` (request) `{clientInfo, capabilities:{experimentalApi:true}}` → result; then send
    `initialized` (notification). Any call before this errors "Not initialized".
 2. For a new session, `thread/start {cwd}` → the durable `thread.id`. For a stored session,
@@ -1087,6 +1054,40 @@ forwarding HTTP inference, verifying that degraded transport is distinguishable 
 
 Reasoning effort: `-c model_reasoning_effort="<level>"` at spawn, or per-turn config override. Models +
 their `supportedReasoningEfforts` come from the `model/list` request (also used by discovery).
+
+#### OpenAI Inference Transport
+
+The supported Codex App Server builds use WebSockets by default for the built-in OpenAI Responses
+provider. This is Codex-to-model traffic; Wollipog's manager connection remains stdio. Native defaults
+are verified in official source at [0.147.0](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/model-provider-info/src/lib.rs)
+and [0.160.0](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/model-provider-info/src/lib.rs).
+Wollipog preserves that provider identity across standard and Orchestrator launches, resume, and
+relaunch. It does not redefine the reserved `openai` provider or set the removed
+`responses_websockets` / `responses_websockets_v2` feature flags.
+
+Custom providers retain their own [documented `supports_websockets` setting](https://learn.chatgpt.com/docs/config-file/config-reference).
+The driver reads the provider returned by thread start/resume and, for custom providers, the
+effective config with a bounded `config/read`. Accounts, endpoint selection, models, and permission
+policy are unchanged. Missing config or an unverified running version produces `unknown`.
+
+Structured `codex_inference_transport` diagnostics distinguish `configuredTransport` from
+`observedTransport`. Configuration alone reports traffic as `unverified`. A provider
+HTTP-fallback warning reports `http`, with a fixed reason and no raw error suffix. Diagnostics contain
+only bounded classifications and a per-driver launch counter; provider names, URLs, credentials,
+prompts, and response content are excluded. Split stderr warnings are framed before classification.
+Some Codex upgrade failures (for example HTTP 426) switch directly to HTTP without a warning;
+configuration remains `unverified` in that case, and the live observer's HTTP request counts reveal
+the fallback. Absence of a warning is never reported as successful WebSocket use.
+
+Run `pnpm probe:codex-inference-transport` to verify real traffic using existing file-backed ChatGPT
+authentication. It launches temporary driver processes and forwards inference through a loopback
+observer to the fixed official TLS endpoint. It records protocol counts and booleans, matches newly
+observed tool-call ids to tool-result continuations on the same socket, and exercises standard,
+additive Orchestrator, and preset sessions both fresh and after resume/relaunch. The preset receives
+an inert local MCP entry with no tools. Only currently valid access credentials are staged; the shared refresh token is excluded,
+so verification cannot rotate it. Expired access requires human authentication recovery. No login,
+persistent config/grant, or hosting-service changes are performed. `--force-http-fallback` rejects only these processes' WebSocket upgrades while
+forwarding HTTP inference, verifying that degraded transport is distinguishable from WebSocket use.
 
 ### 3.3 app-server notification → SessionEventPayload mapping
 

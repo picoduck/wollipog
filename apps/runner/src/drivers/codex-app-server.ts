@@ -491,6 +491,7 @@ export class CodexAppServerDriver implements Driver {
   private serverIdentity = "unknown";
   private inferenceLaunch = 0;
   private inferenceHttpFallback = false;
+  private readonly inferenceSubagentFallbacks = new Set<string>();
   private inferenceConfiguration: CodexInferenceConfiguration | null = null;
   private completedTurnId: string | null = null;
   /** A terminal notification can race ahead of both turn/started and the turn/start response.
@@ -724,6 +725,7 @@ export class CodexAppServerDriver implements Driver {
   private async startAppServer(enableDefaultModeQuestions: boolean): Promise<void> {
     this.inferenceLaunch += 1;
     this.inferenceHttpFallback = false;
+    this.inferenceSubagentFallbacks.clear();
     this.inferenceConfiguration = null;
     // Same rule as the exec driver: the coupled preset always isolates configured MCP servers, and
     // the additive role does so exactly when Integration Isolation is enabled. Only the additive
@@ -785,9 +787,10 @@ export class CodexAppServerDriver implements Driver {
       if (this.disposed || this.child !== child) return;
       const s = line.trim();
       if (s && !/DeprecationWarning|trace-deprecation/.test(s)) {
-        if (codexHttpFallbackWarning(s)) this.reportInferenceHttpFallback();
-        else if (isProviderAuthenticationFailure(s)) this.signalAuthenticationFailure();
-        else this.emitProviderStderr(s);
+        const fallback = codexHttpFallbackWarning(s);
+        if (fallback) this.reportInferenceHttpFallback();
+        if (isProviderAuthenticationFailure(s)) this.signalAuthenticationFailure();
+        else if (!fallback) this.emitProviderStderr(s);
       }
     };
     // Provider warnings can be split across arbitrary stdio chunks. Frame before matching so
@@ -970,13 +973,19 @@ export class CodexAppServerDriver implements Driver {
     }));
   }
 
-  private reportInferenceHttpFallback(): void {
-    if (this.inferenceHttpFallback) return;
-    this.inferenceHttpFallback = true;
+  private reportInferenceHttpFallback(subagentThread?: string): void {
+    if (subagentThread) {
+      if (this.inferenceSubagentFallbacks.has(subagentThread)) return;
+      this.inferenceSubagentFallbacks.add(subagentThread);
+    } else {
+      if (this.inferenceHttpFallback) return;
+      this.inferenceHttpFallback = true;
+    }
     this.cb.onStderr(JSON.stringify({
       event: "codex_inference_transport", entryPoint: "provider_warning", launch: this.inferenceLaunch,
-      phase: "fallback", provider: this.inferenceConfiguration?.provider ?? "unknown",
-      configuredTransport: this.inferenceConfiguration?.configuredTransport ?? "unknown",
+      phase: "fallback", ...(subagentThread ? { scope: "subagent" } : {}),
+      provider: subagentThread ? "unknown" : this.inferenceConfiguration?.provider ?? "unknown",
+      configuredTransport: subagentThread ? "unknown" : this.inferenceConfiguration?.configuredTransport ?? "unknown",
       observedTransport: "http", reason: "provider_http_fallback",
     }));
   }
@@ -1713,8 +1722,12 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("skills/changed", () => this.refreshSkillCatalog());
     peer.onNotification("warning", (params: Json) => {
       if (this.disposed || this.peer !== peer) return;
-      if (params?.threadId && params.threadId !== this.threadId) return;
-      if (codexHttpFallbackWarning(params?.message)) this.reportInferenceHttpFallback();
+      if (!codexHttpFallbackWarning(params?.message)) return;
+      if (params?.threadId && params.threadId !== this.threadId) {
+        if (this.subagentToolByThread.has(params.threadId)) this.reportInferenceHttpFallback(params.threadId);
+        return;
+      }
+      this.reportInferenceHttpFallback();
     });
     peer.onNotification("serverRequest/resolved", (params: Json) => {
       const id = String(params?.requestId ?? "");
