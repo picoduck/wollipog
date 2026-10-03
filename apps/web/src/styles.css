@@ -15109,6 +15109,9 @@ body.shell-dock-dragging * {
   margin-left: auto;
   border-radius: var(--radius-sm);
   box-shadow: var(--elev-2);
+  /* The control is outside the reader's scroller, so the browser has nothing to pan when a touch
+     starts on it. TranscriptTailControl hands that drag to the reader instead (#2425). */
+  touch-action: none;
 }
 .transcript-tail-anchor > .btn.transcript-tail-control.is-not-sent { color: var(--danger-text); }
 /* Recovery is a status, not an action: it keeps the control's look but never reacts to a pointer.

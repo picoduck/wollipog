@@ -564,6 +564,8 @@ test("the tail control floats from a zero-height anchor and never takes the read
     "centered on the reading column, and never wider than the pane's gutters");
   assert.match(control, /border-radius:\s*var\(--radius-sm\);/, "an action, so a control radius, never a pill");
   assert.match(control, /box-shadow:\s*var\(--elev-2\);/);
+  assert.match(control, /touch-action:\s*none;/,
+    "a touch drag starting on the control is handed to the reader rather than lost (#2425)");
 
   // No state may take the control out of its absolute layer.
   for (const declaration of allDeclarations(css)) {

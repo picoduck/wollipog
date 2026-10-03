@@ -484,6 +484,7 @@ function Fixture() {
               newRows: followTail.newRowCount,
             })}
             shortcut="End"
+            readerRef={scrollRef}
             onJump={followTail.follow}
             onShowNotSent={() => {}}
             onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}

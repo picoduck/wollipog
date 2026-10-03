@@ -226,3 +226,117 @@ test("a short preview pane keeps the floating control inside the pane", async ({
   expect(recoveryBox.top).toBeGreaterThanOrEqual(main.top - 0.5);
   expect(recoveryBox.bottom).toBeLessThanOrEqual(frame.bottom + 0.5);
 });
+
+/** The reader's `scrollTop` once a wheel's smooth scroll or a fling has come to rest. */
+async function settledScrollTop(page: Page): Promise<number> {
+  let last = Number.NaN;
+  await expect.poll(async () => {
+    const first = await reader(page).evaluate((el) => el.scrollTop);
+    await page.waitForTimeout(150);
+    last = await reader(page).evaluate((el) => el.scrollTop);
+    return first === last;
+  }).toBe(true);
+  return last;
+}
+
+test("the wheel scrolls the transcript over the floating control exactly as beside it (#2425)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/recovery-notice-e2e.html?mode=expanded&height=760&width=1100&settled=1");
+  await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+  await readBack(page);
+  const jump = control(page);
+  await expect(jump).toBeVisible();
+  const jumpBox = await box(jump);
+  const onControl = { x: jumpBox.left + jumpBox.width / 2, y: jumpBox.top + jumpBox.height / 2 };
+  const beside = { x: jumpBox.left - 60, y: onControl.y };
+
+  // Rows are measured as they first scroll into view, which corrects `scrollTop` along the way. Each
+  // wheel therefore starts from the same place, after a first pass has measured the rows it crosses.
+  const start = await settledScrollTop(page);
+  const wheelAt = async (point: { x: number; y: number }, deltaY: number) => {
+    await reader(page).evaluate((el, top) => { el.scrollTop = top; }, start);
+    await settledScrollTop(page);
+    await page.mouse.move(point.x, point.y);
+    await page.mouse.wheel(0, deltaY);
+    return await settledScrollTop(page) - start;
+  };
+  await wheelAt(beside, -300);
+  const overControl = await wheelAt(onControl, -300);
+  const besideControl = await wheelAt(beside, -300);
+  expect(besideControl, "the reader beside the control scrolls").toBeLessThan(-200);
+  expect(Math.abs(overControl - besideControl), "the same wheel moves the transcript the same amount")
+    .toBeLessThanOrEqual(2);
+  await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
+
+  // Wheeling back down over the control reaches the tail and resumes following, as it does beside it.
+  await page.mouse.move(onControl.x, onControl.y);
+  await expect.poll(async () => {
+    await page.mouse.wheel(0, 600);
+    return reader(page).getAttribute("data-follow-tail-state");
+  }).toBe("following");
+  await expect(jump).toHaveCount(0);
+
+  // A click still returns to the tail.
+  await readBack(page);
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "following");
+  await expect(reader(page)).toBeFocused();
+});
+
+test("the wheel over the recovery status pauses following like the reader beside it (#2425)", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 720 });
+  await page.goto("/recovery-notice-e2e.html?mode=expanded&height=640");
+  const recovery = control(page);
+  await expect(recovery).toHaveText("Checking for missed activity…");
+  await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "following");
+  const before = await settledScrollTop(page);
+  const recoveryBox = await box(recovery);
+  await page.mouse.move(recoveryBox.left + recoveryBox.width / 2, recoveryBox.top + recoveryBox.height / 2);
+  await page.mouse.wheel(0, -300);
+  await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
+  expect(await settledScrollTop(page) - before).toBeLessThan(-200);
+});
+
+test.describe("touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("a drag that starts on the floating control scrolls the transcript (#2425)", async ({ page, context }) => {
+    await page.goto("/recovery-notice-e2e.html?mode=expanded&height=700&width=390&settled=1");
+    await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+    await reader(page).dispatchEvent("wheel", { deltaY: -40 });
+    await reader(page).evaluate((el) => { el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 1200); });
+    const jump = control(page);
+    await expect(jump).toBeVisible();
+    const jumpBox = await box(jump);
+    const client = await context.newCDPSession(page);
+    const drag = async (x: number, startY: number, distance: number) => {
+      const before = await settledScrollTop(page);
+      await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: startY, id: 1 }] });
+      for (let step = 1; step <= 10; step += 1) {
+        await client.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [{ x, y: startY - (distance * step) / 10, id: 1 }],
+        });
+        await page.waitForTimeout(16);
+      }
+      // Hold still before lifting, so the drag ends without a fling and both drags compare closely.
+      await page.waitForTimeout(150);
+      await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      return await settledScrollTop(page) - before;
+    };
+    const y = jumpBox.top + jumpBox.height / 2;
+    // Moving the finger down reads back toward earlier activity.
+    const onControl = await drag(jumpBox.left + jumpBox.width / 2, y, -200);
+    const besideControl = await drag(jumpBox.left - 40, y, -200);
+    expect(besideControl, "the reader beside the control scrolls").toBeLessThan(-100);
+    expect(onControl, "a drag starting on the control scrolls the transcript").toBeLessThan(-100);
+    expect(Math.abs(onControl - besideControl)).toBeLessThanOrEqual(24);
+    await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
+
+    // A tap still returns to the tail.
+    await jump.tap();
+    await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "following");
+    await expect(jump).toHaveCount(0);
+  });
+});

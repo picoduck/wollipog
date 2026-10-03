@@ -6114,6 +6114,7 @@ function SessionDetailLoaded({
               shortcut={isMobile
                 ? null
                 : shortcutDisplay(mode === "preview" ? "inbox-follow-latest-end" : "session-reading-latest-end")}
+              readerRef={scrollRef}
               onJump={followTail.follow}
               onShowNotSent={showFirstUndelivered}
               onFocusLost={keepFocusInReader}
