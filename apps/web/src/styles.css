@@ -6950,7 +6950,7 @@ textarea,
 }
 .tl-divider-label {
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-1);
   min-width: 0;
   max-width: calc(100% - 2 * var(--space-6) - 2 * var(--space-3));
@@ -6960,6 +6960,8 @@ textarea,
 .tl-divider-icon {
   display: inline-flex;
   flex: none;
+  align-items: center;
+  height: var(--icon); /* the label's 16px first line, so a wrapped label keeps its icon on line one */
   color: var(--text-faint);
 }
 .tl-divider-event { margin: var(--space-2) 0; }

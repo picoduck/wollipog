@@ -240,7 +240,8 @@ const historyItems: TimelineItem[] = [
     handoff: {
       sourceAgent: "Claude Code",
       destinationAgent: "Codex",
-      disclosure: "Tool output and reasoning were omitted; the destination starts from the visible transcript.",
+      // The shape conversation-handoff.ts writes: several sentences, so the description wraps.
+      disclosure: "Portable visible dialogue through checkpoint event 12; 9 events or messages omitted (including tools, reasoning, questions, approvals and pending prompts). Dialogue was not truncated. Provider-private state and environment metadata are not transferred.",
     },
   },
   { kind: "provider_account_switched", id: 708, providerAccountId: "work", providerAccountLabel: "Work", automatic: true },
