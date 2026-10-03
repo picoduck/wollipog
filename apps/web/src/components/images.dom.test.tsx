@@ -221,6 +221,20 @@ test("each attached image keeps the name of the file it came from, for its alt t
     // is the same image, so it keeps its name.
     assert.equal(attachmentFileName({ ...first! }), "diagram.png");
     assert.equal(attachmentFileName(structuredClone(second!)), "screenshot.png");
+    // Two different images of one length with the same header and trailer (as two JPEGs from one
+    // encoder have) keep their own names: the whole content tells them apart, not its ends.
+    const bytes = (middle: number) => {
+      const data = new Uint8Array(4096).fill(7);
+      data[2048] = middle;
+      return data;
+    };
+    await mounted.add([
+      new File([bytes(1)], "before.jpg", { type: "image/png" }),
+      new File([bytes(2)], "after.jpg", { type: "image/png" }),
+    ]);
+    const [, , before, after] = mounted.hook().images;
+    assert.equal(attachmentFileName(before!), "before.jpg");
+    assert.equal(attachmentFileName(after!), "after.jpg");
     // A restored draft's image has no name, and is numbered instead.
     assert.equal(attachedImageAlt(1, attachmentFileName({ mimeType: "image/png", data: "AAAA" })), "Attached image 1");
   } finally {

@@ -32,21 +32,36 @@ function fileToImage(file: File): Promise<PromptImage | null> {
 // What the protocol does not carry: the file an image was picked, dropped or pasted from, for its alt
 // text and the broken-image notice. Drafts are copied attachment by attachment on their way through
 // queued edits, Edit as a New Turn and failed sends, so a name follows the image's content rather than
-// one object: its type, length and the two ends of its data, which tell picked images apart without
-// hashing megabytes on every render. Only this page's recent picks are remembered; an image the
-// composer never saw picked (a draft restored after a reload, a stored artifact) is numbered instead.
+// one object: a 53-bit hash of all of its data, computed once per attachment object. The key is a new
+// short string, so it never holds a removed image's data alive. Only this page's recent picks are
+// remembered; an image the composer never saw picked (a draft restored after a reload, a stored
+// artifact) is numbered instead.
 const MAX_REMEMBERED_FILE_NAMES = 64;
 const attachmentFileNames = new Map<string, string>();
 const contentKeys = new WeakMap<PromptImageInput, string | null>();
 const attachmentKeys = new WeakMap<PromptImageInput, string>();
 let nextAttachmentKey = 0;
 
+/** cyrb53: a fast, well-distributed 53-bit string hash. Not cryptographic; it tells images apart. */
+function hash53(text: string): number {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ code, 2654435761);
+    h2 = Math.imul(h2 ^ code, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+
 function contentKey(image: PromptImageInput): string | null {
   let key = contentKeys.get(image);
   if (key === undefined) {
     key = isPromptImageReference(image)
       ? null
-      : `${image.mimeType}\u0000${image.data.length}\u0000${image.data.slice(0, 96)}\u0000${image.data.slice(-96)}`;
+      : `${image.mimeType.length}:${image.data.length}:${hash53(image.mimeType)}:${hash53(image.data)}`;
     contentKeys.set(image, key);
   }
   return key;
