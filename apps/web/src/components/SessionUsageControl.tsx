@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { SessionUsageResponse, SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatCost, formatTokens } from "../format.js";
@@ -92,7 +92,12 @@ export function SessionUsageControl({ session, placement }: { session: SessionVi
     "aria-controls": panelId,
     "aria-label": label.ariaLabel,
     title: label.priced ? `Session usage — ${label.text} so far` : "Session usage — cost unavailable for this session",
-    onClick: popover.toggle,
+    // The bar's ComposerButton keeps the composer focused through the press; the trigger takes focus
+    // once the click lands, so Escape closes the panel and returns here (#1796).
+    onClick: (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.currentTarget.focus();
+      popover.toggle();
+    },
     children: label.text,
   };
 

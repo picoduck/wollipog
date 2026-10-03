@@ -1,4 +1,4 @@
-import { useId } from "react";
+import React, { useId } from "react";
 import type { SessionView } from "@wollipog/protocol";
 import { compactionNote, computeContextFill, type ContextFillTone } from "../context-meter.js";
 import type { ContextWindowCapacity } from "../context-window-capacity.js";
@@ -84,8 +84,13 @@ export function ContextWindowMeter({ session, resolution, placement }: {
     title: summary,
     // Click or keyboard only: the ring sits among dense controls, and a hover-opened panel was
     // getting in the way of pointer travel to neighbouring controls. Escape or an outside
-    // pointer closes it as well.
-    onClick: popover.toggle,
+    // pointer closes it as well. The bar's ComposerButton keeps the composer focused through the
+    // press, so the trigger takes focus once the click lands: Escape then closes the panel and
+    // the next one leaves the composer, one layer each (#1796).
+    onClick: (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.currentTarget.focus();
+      popover.toggle();
+    },
     children: <>
       <ContextRing fillPct={fill.fillPct} size={placement === "bar" ? 14 : 16} />
       <span className="context-ring-label">{fill.formatPct}</span>

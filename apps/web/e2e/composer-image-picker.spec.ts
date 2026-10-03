@@ -344,7 +344,8 @@ test("the Add and Modes icon stays centered independently of font metrics", asyn
         text: element.textContent?.trim() ?? "",
       };
     });
-    expect(geometry.button, `${state}: preserve the circular trigger geometry`).toEqual({ width: 30, height: 30 });
+    // The composer bar recipe (#2174): a --composer-ctl square, 32px under a mouse.
+    expect(geometry.button, `${state}: keep the square trigger geometry`).toEqual({ width: 32, height: 32 });
     expect(geometry.icon, `${state}: preserve the shared icon geometry`).toEqual({ width: 16, height: 16 });
     expect(geometry.text, `${state}: do not fall back to a font glyph`).toBe("");
     expect(geometry.centerDeltaX, `${state}: horizontal center`).toBeLessThanOrEqual(0.5);
