@@ -119,8 +119,10 @@ function parseDraft(draft: GuardrailDraft) {
   } satisfies Record<GuardrailField, FieldResult<unknown>>;
 }
 
-/** One field's error, or null when its value is legal. */
-export function guardrailFieldError(field: GuardrailField, text: string): string | null {
+/** One field's error, or null when its value is legal or is still the text it opened with (a limit
+ * the server accepted is never an error, as in guardrailPatch). */
+export function guardrailFieldError(field: GuardrailField, text: string, opened?: GuardrailDraft): string | null {
+  if (opened && text === opened[field]) return null;
   const result = parseDraft({ costBudgetUsd: "", costCheckpointsUsd: "", maxToolCalls: "", maxChildSessions: "", [field]: text })[field];
   return result.ok ? null : result.error;
 }
@@ -153,8 +155,8 @@ export function guardrailPatch(
   const edited = (field: GuardrailField) => draft[field] !== opened[field];
   const errors: Partial<Record<GuardrailField, string>> = {};
   for (const field of GUARDRAIL_FIELDS) {
-    const result = parsed[field];
-    if (edited(field) && !result.ok) errors[field] = result.error;
+    const error = guardrailFieldError(field, draft[field], opened);
+    if (error) errors[field] = error;
   }
   if (Object.keys(errors).length) return { ok: false, errors };
   const { costBudgetUsd: budget, costCheckpointsUsd: checkpoints, maxToolCalls: toolCalls, maxChildSessions: children } = parsed;

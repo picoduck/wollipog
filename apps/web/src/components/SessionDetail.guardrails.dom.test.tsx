@@ -360,6 +360,32 @@ test("a guardrail field is checked when it loses focus after an edit, not before
   }
 });
 
+test("restoring a field's opening value clears its error, even one the validator would not accept typed", async () => {
+  const fixture = await mountGuardrails();
+  try {
+    await fixture.render({ maxToolCalls: 1e21 });
+    await openGuardrails();
+    const input = fieldInput("Tool-Call Threshold");
+    const opening = input.value;
+    assert.equal(opening, "1000000000000000000000", "the accepted limit opens as plain digits");
+    await typeInto(input, "abc");
+    await act(async () => {
+      input.dispatchEvent(new domWindow.FocusEvent("focusout", { bubbles: true }) as unknown as Event);
+    });
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    await typeInto(input, opening);
+    await act(async () => {
+      input.dispatchEvent(new domWindow.FocusEvent("focusout", { bubbles: true }) as unknown as Event);
+    });
+    assert.equal(input.hasAttribute("aria-invalid"), false, "the limit the server accepted is not an error");
+    await typeInto(fieldInput("Live Child Limit"), "9");
+    await saveGuardrails();
+    assert.deepEqual(fixture.saved, [{ maxChildSessions: 9 }], "and it never blocks saving another field");
+  } finally {
+    await unmountGuardrails(fixture);
+  }
+});
+
 test("a checkpoint at or above the recurring threshold warns and still saves", async () => {
   const fixture = await mountGuardrails();
   try {

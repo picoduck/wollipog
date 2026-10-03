@@ -53,7 +53,8 @@ export function GuardrailsDialog({
   // The limits as the dialog opened: a change the server reports meanwhile does not move a field
   // the person is reading, and a save compares against what they saw.
   const [opened] = useState(() => session);
-  const [draft, setDraft] = useState<GuardrailDraft>(() => guardrailDraft(session));
+  const [openedDraft] = useState<GuardrailDraft>(() => guardrailDraft(session));
+  const [draft, setDraft] = useState<GuardrailDraft>(openedDraft);
   const [edited, setEdited] = useState<ReadonlySet<GuardrailField>>(() => new Set());
   const [errors, setErrors] = useState<Partial<Record<GuardrailField, string>>>({});
   const [failure, setFailure] = useState<string | null>(null);
@@ -135,11 +136,11 @@ export function GuardrailsDialog({
               setDraft((current) => ({ ...current, [name]: next }));
               setEdited((current) => new Set(current).add(name));
               // An error showing clears as soon as the value is valid (§8.5).
-              if (error) setErrors((current) => ({ ...current, [name]: guardrailFieldError(name, next) ?? undefined }));
+              if (error) setErrors((current) => ({ ...current, [name]: guardrailFieldError(name, next, openedDraft) ?? undefined }));
             }}
             onBlur={() => {
               if (!edited.has(name) || savingRef.current) return;
-              setErrors((current) => ({ ...current, [name]: guardrailFieldError(name, draft[name]) ?? undefined }));
+              setErrors((current) => ({ ...current, [name]: guardrailFieldError(name, draft[name], openedDraft) ?? undefined }));
             }}
           />
         </span>
