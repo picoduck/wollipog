@@ -5087,3 +5087,89 @@ test("the /respond app command enters Answer Mode and submits without sending an
     await unmountFixture(fixture);
   }
 });
+
+const PAUSED_LOOK_CAPABILITIES = {
+  models: [{ id: "gpt-5.5", displayName: "GPT-5.5", efforts: ["low", "high"] }],
+  effortLevels: ["low", "high"],
+  permissionModes: ["default", "acceptEdits", "bypassPermissions"],
+  slashCommands: [],
+  supportsImages: true,
+  supportsApprovals: true,
+  supportsSteering: true,
+} as unknown as SessionView["agentCapabilities"];
+
+class FakeSpeechRecognition {
+  continuous = false;
+  interimResults = false;
+  lang = "";
+  onresult = null;
+  onerror = null;
+  onend = null;
+  start() {}
+  stop() {}
+  abort() {}
+}
+
+for (const [status, reason] of [
+  ["failed", "This session failed and can't take new messages."],
+  ["stopped", "This session is stopped. Restart it to send a message."],
+] as const) {
+  test(`a ${status} session's composer reads as paused: controls stay, disabled with the reason (#2154)`, async () => {
+    const speech = domWindow as unknown as { SpeechRecognition?: unknown };
+    speech.SpeechRecognition = FakeSpeechRecognition;
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, {
+      sessionCapabilities: PAUSED_LOOK_CAPABILITIES,
+      sessionPatch: { status, model: "gpt-5.5", effort: "high", permissionMode: "default" },
+    });
+    try {
+      const box = fixture.composer.closest(".composer-box");
+      assert.ok(box?.classList.contains("is-disabled"), "the card takes the disabled fill");
+      assert.equal(fixture.composer.disabled, true);
+      assert.equal(fixture.composer.placeholder, reason);
+      const described = (control: HTMLButtonElement | null | undefined, name: string) => {
+        assert.ok(control, `${name} stays rendered`);
+        assert.equal(control.disabled, true, `${name} is disabled`);
+        const ids = control.getAttribute("aria-describedby")?.split(/\s+/u) ?? [];
+        const text = ids.map((id: string) => domWindow.document.getElementById(id)?.textContent ?? "").join(" ");
+        assert.ok(text.includes(reason), `${name} says why: ${text}`);
+      };
+      described(box?.querySelector<HTMLButtonElement>(".permission-mode-menu > .cbar-trigger"), "the permission control");
+      described(box?.querySelector<HTMLButtonElement>(".model-settings-menu > .cbar-trigger"), "the model control");
+      described(box?.querySelector<HTMLButtonElement>(".voice-btn"), "the mic");
+      const plus = box?.querySelector<HTMLButtonElement>(".plus-btn");
+      assert.equal(plus?.disabled, true, "+ is disabled as before");
+    } finally {
+      await unmountFixture(fixture);
+      delete speech.SpeechRecognition;
+    }
+  });
+}
+
+test("a composer that can send keeps its controls enabled and its card undimmed (#2154)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    sessionCapabilities: PAUSED_LOOK_CAPABILITIES,
+    sessionPatch: { model: "gpt-5.5", effort: "high", permissionMode: "default" },
+  });
+  try {
+    const box = fixture.composer.closest(".composer-box");
+    assert.equal(box?.classList.contains("is-disabled"), false);
+    // The fixture runner predates workspace references, so @ is not offered.
+    assert.equal(fixture.composer.placeholder, "Message Codex. Type / for commands.");
+    assert.equal(fixture.composer.getAttribute("rows"), "1", "the idle composer starts at one line");
+    for (const selector of [".permission-mode-menu > .cbar-trigger", ".model-settings-menu > .cbar-trigger"]) {
+      const control: HTMLButtonElement | null | undefined = box?.querySelector<HTMLButtonElement>(selector);
+      assert.equal(control?.disabled, false, `${selector} is enabled`);
+    }
+    await fixture.pushSession({ status: "running", activeTurnId: "turn-1" });
+    assert.equal(fixture.composer.placeholder, "Add a message. It sends when this turn ends.");
+    await fixture.pushSession({
+      status: "input_required",
+      pendingApproval: { requestId: "approval-1", kind: "permission", title: "Run a Command", options: [] },
+    } as Partial<SessionView>);
+    assert.equal(fixture.composer.placeholder, "Messages you send now wait until you answer the request above.");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

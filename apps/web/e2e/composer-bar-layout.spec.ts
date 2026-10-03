@@ -43,7 +43,7 @@ test("Pi exposes verified permission choices and their delivery outcomes", async
 });
 
 async function expandComposer(page: Page) {
-  await page.getByRole("button", { name: "Edit Message" }).click();
+  await page.locator(".composer-idle-preview").click();
   await expect(page.locator(".composer-input")).toBeVisible();
   await expect(page.locator(".composer-input")).toBeFocused();
 }
@@ -234,4 +234,117 @@ for (const kind of ["claude", "codex"] as const) {
       await page.screenshot({ path: `${EVIDENCE}/after-${theme}-${kind}-unrestricted.png` });
     });
   }
+}
+
+/** The computed colour a token resolves to on this page, for comparing against computed borders. */
+async function tokenColor(page: Page, token: string): Promise<string> {
+  return page.evaluate((name) => {
+    const probe = document.createElement("div");
+    probe.style.color = `var(${name})`;
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }, token);
+}
+
+for (const { width, height } of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  for (const theme of ["dark", "light"] as const) {
+    test(`${width}px ${theme}: a focused composer shows one edge in --focus and nothing teal (#2154)`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await page.goto(`/session-usage-e2e.html?width=${width}&height=${height - 40}&composer=codex&draft=Ship%20it`);
+      await page.evaluate((nextTheme) => { document.documentElement.dataset.theme = nextTheme; }, theme);
+      const box = page.locator(".composer-box");
+      await expect(box).toBeVisible();
+      if (width < 761) await page.locator(".composer-idle-preview").click();
+      const input = page.locator(".composer-input");
+      await input.focus();
+      await expect(input).toBeFocused();
+      const [focus, accent] = await Promise.all([tokenColor(page, "--focus"), tokenColor(page, "--accent")]);
+      const painted = await box.evaluate((card) => {
+        const edges = (element: Element) => {
+          const style = getComputedStyle(element);
+          return {
+            borders: (["Top", "Right", "Bottom", "Left"] as const)
+              .filter((side) => style.getPropertyValue(`border-${side.toLowerCase()}-style`) !== "none" &&
+                Number.parseFloat(style.getPropertyValue(`border-${side.toLowerCase()}-width`)) > 0)
+              .map((side) => style.getPropertyValue(`border-${side.toLowerCase()}-color`)),
+            outline: style.outlineStyle !== "none" && Number.parseFloat(style.outlineWidth) > 0 ? style.outlineColor : null,
+            ring: style.boxShadow,
+          };
+        };
+        return {
+          card: edges(card),
+          inner: [...card.querySelectorAll("*")].map((element) => ({ name: element.className.toString(), ...edges(element) })),
+        };
+      });
+      expect(new Set(painted.card.borders)).toEqual(new Set([focus]));
+      expect(painted.card.outline).toBeNull();
+      expect(painted.card.ring).toBe("none");
+      const field = painted.inner.find((element) => element.name.includes("composer-input"));
+      expect(field?.outline).toBeNull();
+      for (const element of [painted.card, ...painted.inner]) {
+        expect(element.borders).not.toContain(accent);
+        expect(element.outline).not.toBe(accent);
+      }
+      await page.screenshot({ path: `${EVIDENCE}/after-${width}-${theme}-focused-draft.png` });
+    });
+  }
+}
+
+test("the placeholder takes --text-faint (#2154)", async ({ page }) => {
+  await openFixture(page, 1440, "codex");
+  const faint = await tokenColor(page, "--text-faint");
+  const placeholder = await page.locator(".composer-input").evaluate((input) => getComputedStyle(input, "::placeholder").color);
+  expect(placeholder).toBe(faint);
+});
+
+for (const width of [390, 834]) {
+  test(`${width}px: the card keeps a 12px gutter on both sides of the column (#2154)`, async ({ page }) => {
+    await openFixture(page, width, "codex", "&draft=Line%20one%5CnLine%20two");
+    const gutters = await page.locator(".composer").evaluate((column) => {
+      const outer = column.getBoundingClientRect();
+      const card = column.querySelector(".composer-box")!.getBoundingClientRect();
+      return { left: card.left - outer.left, right: outer.right - card.right };
+    });
+    expect(gutters.left).toBeCloseTo(12, 0);
+    expect(gutters.right).toBeCloseTo(12, 0);
+  });
+}
+
+test("an empty desktop card is one line tall, and a long draft stops growing at 12 lines (#2154)", async ({ page }) => {
+  await openFixture(page, 1440, "codex");
+  const box = page.locator(".composer-box");
+  const empty = await box.boundingBox();
+  expect(empty!.height).toBeLessThanOrEqual(88);
+  const input = page.locator(".composer-input");
+  await input.fill(Array.from({ length: 20 }, (_, index) => `Line ${index + 1}`).join("\n"));
+  const grown = await input.evaluate((element) => ({
+    height: element.getBoundingClientRect().height,
+    scrollHeight: element.scrollHeight,
+    clientHeight: element.clientHeight,
+  }));
+  expect(grown.height).toBeCloseTo(12 * 22, 0);
+  expect(grown.scrollHeight).toBeGreaterThan(grown.clientHeight);
+});
+
+for (const { name, query, reason } of [
+  { name: "failed", query: "&status=failed", reason: "This session failed and can't take new messages." },
+  { name: "stopped", query: "&action=restart", reason: "This session is stopped. Restart it to send a message." },
+]) {
+  test(`a ${name} session's bar reads as paused with its reason (#2154)`, async ({ page }) => {
+    await openFixture(page, 1440, "codex", query);
+    const box = page.locator(".composer-box");
+    await expect(box).toHaveClass(/is-disabled/);
+    await expect(page.locator(".composer-input")).toHaveAttribute("placeholder", reason);
+    for (const control of [
+      page.getByRole("button", { name: /^Permission Mode:/ }),
+      page.getByRole("button", { name: /^Model Settings:/ }),
+      page.getByRole("button", { name: "Hold to Dictate" }),
+    ]) {
+      await expect(control).toBeVisible();
+      await expect(control).toBeDisabled();
+      await expect(control).toHaveAccessibleDescription(reason);
+    }
+  });
 }

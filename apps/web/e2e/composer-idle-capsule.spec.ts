@@ -33,7 +33,7 @@ for (const width of [320, 360, 393, 430]) {
     await openComposer(page, width);
     const composer = page.locator(".composer-box");
     await expect(composer).toHaveClass(/idle-collapsed/);
-    await expect(page.getByRole("button", { name: "Edit Message: Do anything" })).toHaveText("Do anything");
+    await expect(page.getByRole("button", { name: "Message Codex" })).toHaveText("Message Codex");
 
     const geometry = await composer.evaluate((element) => {
       const outer = element.getBoundingClientRect();
@@ -68,7 +68,7 @@ test("a single-line preview truncates visually while expansion preserves and foc
   const draft = "Keep this complete single-line draft while its compact preview becomes deliberately much wider than a phone";
   await openComposer(page, 320, `&draft=${encodeURIComponent(draft)}`);
   const composer = page.locator(".composer-box");
-  const preview = page.getByRole("button", { name: `Edit Message: ${draft}` });
+  const preview = page.getByRole("button", { name: `Edit Draft: ${draft}` });
   await expect(composer).toHaveClass(/idle-collapsed/);
   await expect(preview).toHaveText(draft);
   const clipping = await preview.evaluate((element) => ({
@@ -108,7 +108,7 @@ for (const exception of [
     await expect(page.locator(".composer-box")).not.toHaveClass(/idle-collapsed/);
     await expect(page.locator(".composer-input")).toBeVisible();
     await expect(page.locator(exception.visible)).toBeVisible();
-    await expect(page.getByRole("button", { name: /^Edit Message:/ })).toBeHidden();
+    await expect(page.locator(".composer-idle-preview")).toBeHidden();
   });
 }
 
@@ -166,7 +166,7 @@ test.describe("touch dismissal", () => {
   test("outside taps and canceled scroll gestures collapse after relinquishing focus", async ({ page }) => {
     await openComposer(page, 393);
     const composer = page.locator(".composer-box");
-    const preview = page.getByRole("button", { name: /^Edit Message:/ });
+    const preview = page.getByRole("button", { name: "Message Codex" });
     await preview.tap();
     await expect(page.locator(".composer-input")).toBeFocused();
     await page.locator(".detail-reader").tap({ position: { x: 8, y: 8 } });
@@ -217,5 +217,5 @@ test("desktop keeps the expanded composer", async ({ page }) => {
   await openComposer(page, 900, "&draft=Desktop%20draft");
   await expect(page.locator(".composer-box")).not.toHaveClass(/idle-collapsed/);
   await expect(page.locator(".composer-input")).toBeVisible();
-  await expect(page.getByRole("button", { name: /^Edit Message:/ })).toBeHidden();
+  await expect(page.locator(".composer-idle-preview")).toBeHidden();
 });

@@ -25,7 +25,7 @@ for (const width of [390, 1280]) for (const theme of ["dark", "light"] as const)
     await banner.getByRole("button", { name: "Dismiss Notice" }).click();
     await expect(banner).toHaveCount(0);
     await expect(composer).toBeEnabled();
-    if (width < 768) await page.getByRole("button", { name: /^Edit Message:/ }).click();
+    if (width < 768) await page.locator(".composer-idle-preview").click();
     await composer.fill("Continue the campaign");
     await expect(composer).toBeFocused();
     await expect(composer).toHaveValue("Continue the campaign");

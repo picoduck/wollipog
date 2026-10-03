@@ -2380,3 +2380,10 @@ These trade-offs are deliberate. Keep them in mind when a screen seems to argue 
 7. **Danger fill in other schemes.** `--danger-bg` is set for the Wollipog scheme only. Until the
    scheme generator emits a checked `--danger-bg`, destructive confirm buttons in Dracula, Monokai,
    GitHub and One Dark use the Wollipog red.
+8. **The composer's one-edge focus.** The composer is a card that is focused almost all the time,
+   so it shows focus as its own 1px edge in `--focus` instead of the §16.1 input recipe's edge plus
+   ring. A 2px near-white ring around a card that is almost always focused reads as an alarm, and a
+   teal edge would compete with Send. The card rests on `--control-outline`, so rest to focus
+   still measures at least 3:1 in both Wollipog themes. Other inputs keep §16.1. One Dark (both
+   themes) and Dracula's dark theme measure 2.3–2.8:1 until their `--control-outline` is
+   re-derived.

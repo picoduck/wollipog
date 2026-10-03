@@ -42,7 +42,7 @@ async function openSession(page: Page, scenario = "permission-mode-layout") {
 
 /** Puts the page in the state the bug needs: composer focused, rail removed. */
 async function focusComposer(page: Page) {
-  const idlePreview = page.getByRole("button", { name: /^Edit Message:/ });
+  const idlePreview = page.locator(".composer-idle-preview");
   if (await idlePreview.isVisible()) await idlePreview.tap();
   const composer = page.locator(".composer-input");
   await composer.focus();

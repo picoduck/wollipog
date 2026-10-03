@@ -724,3 +724,30 @@ test("a state that tints a pinned rule's fill names its own ink, so the pair is 
     }
   }
 });
+
+test("the composer's placeholder reads at 4.5:1 in every palette, and its focus edge moves 3:1 from rest (#2154)", () => {
+  const declared = (selector: string, prop: string) => allDeclarations(css)
+    .filter((declaration) => declaration.selector === selector && declaration.prop === prop)
+    .map(({ value }) => value);
+  assert.deepEqual(declared(".composer-input::placeholder", "color"), ["var(--text-faint)"]);
+  assert.deepEqual(declared(".composer-box:focus-within", "border-color"), ["var(--focus)"],
+    "a focused composer shows one edge in --focus, never --accent");
+  assert.deepEqual(declared(".composer-box", "border"), ["1px solid var(--control-outline)"]);
+  for (const palette of PALETTES) {
+    const color = (token: string) => {
+      const value = resolve(`var(${token})`, palette);
+      assert.ok(value, `${token} resolves in ${palette}`);
+      return value;
+    };
+    // The idle card is --bg-elev and the paused card is --bg; the placeholder sits on both.
+    for (const surface of ["--bg-elev", "--bg"]) {
+      const ratio = contrast(color("--text-faint"), color(surface));
+      assert.ok(ratio >= AA_NORMAL, `placeholder on ${surface} in ${palette}: ${ratio.toFixed(2)}:1`);
+    }
+    // The Wollipog scheme's two themes hold the 3:1 step; One Dark and Dracula do not yet, because
+    // their --control-outline sits close to --text (docs/design-system.md §21).
+    if (!palette.startsWith("wollipog:")) continue;
+    const edge = contrast(color("--focus"), color("--control-outline"));
+    assert.ok(edge >= AA_NON_TEXT, `rest to focus edge in ${palette}: ${edge.toFixed(2)}:1`);
+  }
+});

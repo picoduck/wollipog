@@ -359,6 +359,9 @@ if (params.get("action") === "stop") {
 } else if (params.get("action") === "restart") {
   session.status = "stopped";
 }
+// The composer's other blocked states (#2154).
+if (params.get("status") === "failed") session.status = "failed";
+if (params.get("offline") === "1") runner.status = "offline";
 if (params.get("quarantine") === "1") {
   session.historyQuarantine = {
     reason: "oversized_tool_call",

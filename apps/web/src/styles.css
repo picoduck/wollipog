@@ -1038,9 +1038,14 @@ kbd {
   justify-content: center;
   cursor: pointer;
 }
-.voice-btn:hover {
+.voice-btn:hover:not(:disabled) {
   color: var(--text);
   border-color: var(--accent);
+}
+/* Disabled with the composer it dictates into (#2154), like + and Send beside it. */
+.voice-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .voice-btn.voice-recording {
   background: var(--red);
@@ -5256,9 +5261,11 @@ textarea {
   /* The composer box is the pane's last child inside an overflow-hidden pane; without a bottom
      inset its border renders on the clipped edge and disappears. */
   padding-bottom: 12px;
-  /* Track the centered transcript column; the divider above still spans the full pane. */
-  padding-left: max(0px, calc((100% - var(--chat-max)) / 2));
-  padding-right: max(0px, calc((100% - var(--chat-max)) / 2));
+  /* Track the centered transcript column; the divider above still spans the full pane. A column
+     narrower than --chat-max keeps a 12px gutter, so the card, the phone capsule and everything
+     above the card stay off the screen edge (#2154). */
+  padding-left: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
+  padding-right: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
 }
 .retitle-receipt {
   display: grid;
@@ -5632,14 +5639,23 @@ textarea {
   flex-direction: column;
   gap: 8px;
   background: var(--bg-elev);
-  border: 1px solid var(--border-strong);
+  /* The card is the input, so it rests on the field edge (§8.1). */
+  border: 1px solid var(--control-outline);
   border-radius: var(--radius);
   /* Bottom inset matches the 8px column gap above the control bar, so the send/stop and mic
      buttons sit vertically centered between the textarea and the card's bottom border. */
   padding: 10px 12px 8px;
 }
+/* A composer that cannot send reads as paused, not broken (#2154): the page's fill and a quiet
+   edge, with every control in it disabled. */
+.composer-box.is-disabled {
+  background: var(--bg);
+  border-color: var(--border-strong);
+}
+/* The composer is focused almost all the time, so focus is its own 1px edge in --focus, never
+   teal and never the input recipe's extra ring (docs/design-system.md §21). */
 .composer-box:focus-within {
-  border-color: var(--accent);
+  border-color: var(--focus);
 }
 .composer-box.answer-mode {
   border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
@@ -5806,16 +5822,21 @@ textarea {
   width: 100%;
   background: transparent;
   border: none;
+  padding: 0;
   resize: none;
   color: var(--text);
-  font-size: 14px;
-  line-height: 1.5;
-  min-height: 54px;
-  max-height: 240px;
-  /* JS auto-grows height to fit content up to max-height; past that it scrolls internally. */
+  /* The transcript's reading size (§2.3): one 22px line when idle, growing to twelve. */
+  font: var(--type-reading);
+  max-height: calc(12 * 22px);
+  /* The browser grows it to its content where it can; elsewhere JS does, up to max-height. Past
+     that it scrolls internally. */
+  field-sizing: content;
   overflow-y: auto;
   outline: none;
-  font-family: inherit;
+}
+.composer-input::placeholder {
+  color: var(--text-faint);
+  opacity: 1;
 }
 /* The Reply keycap (§11.5) at the end of the idle composer's placeholder row (#2166). The row takes
    no height: its negative margin returns the box's 8px gap, so the textarea does not move. */
@@ -13806,11 +13827,10 @@ body.shell-dock-dragging * {
   .evidence-review-summary > strong {
     white-space: nowrap;
   }
-  /* Composer: shallower default. */
-  .composer-input {
-    min-height: 42px;
-    max-height: 170px;
-  }
+  /* Composer: six lines at most, above the software keyboard. The bar's leading group keeps the
+     capsule's 4px gap, so the model label still has room inside the 12px gutter at 320px. */
+  .composer-input { max-height: calc(6 * 22px); }
+  .cbar-left { gap: var(--space-1); }
   .composer-box.idle-collapsed {
     gap: 0;
     padding: 5px 7px;
@@ -13849,6 +13869,8 @@ body.shell-dock-dragging * {
     white-space: nowrap;
     cursor: text;
   }
+  /* An empty capsule names the agent in the placeholder's tier (#2154). */
+  .composer-box.idle-collapsed .composer-idle-preview.is-empty { color: var(--text-faint); }
 
   /* The palette fills the screen (§15.1), inside the safe areas so its edge controls stay
      tappable, with 48px rows so two-line results fit a finger. */

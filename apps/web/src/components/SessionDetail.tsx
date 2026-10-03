@@ -234,7 +234,12 @@ import {
 import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
-import { resizeComposerToContent } from "../composer-autogrow.js";
+import { composerFieldSizesToContent, resizeComposerToContent } from "../composer-autogrow.js";
+import {
+  composerAgentName,
+  composerPlaceholder as composerPlaceholderText,
+  composerUnavailableReason,
+} from "../composer-placeholder.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
 import { workerRoster, isCurrentWorker } from "../worker-roster.js";
@@ -2706,9 +2711,10 @@ function SessionDetailLoaded({
   );
 
   // Auto-grow the composer to its content. The probe is confined to the composer box so a draft
-  // keystroke can never reflow — and scroll-clamp — the transcript above it (BUG-017).
+  // keystroke can never reflow — and scroll-clamp — the transcript above it (BUG-017). A browser
+  // with `field-sizing: content` grows it from the stylesheet instead (#2154).
   useLayoutEffect(() => {
-    if (mode !== "expanded") return;
+    if (mode !== "expanded" || composerFieldSizesToContent()) return;
     const el = inputRef.current;
     if (!el) return;
     resizeComposerToContent(el);
@@ -2816,17 +2822,29 @@ function SessionDetailLoaded({
   ].filter((condition) => condition !== undefined).sort(compareSessionNotices)[0]?.reason;
   // A person the server refuses a prompt (a Viewer) gets a read-only composer that says why.
   const promptRefusal = sessionCommandRefusal(session, "prompt");
-  // Why the composer cannot send a new message now. Edit & Resend states the same reason. An
-  // archived session is also stopped; its notice is in the slot, so the slot's order decides.
-  const promptUnavailableReason = promptRefusal !== null ? promptRefusal
-    : archivedOrder && sessionNoticeReason !== undefined ? sessionNoticeReason
-    : terminal ? `Session is ${session.status}.`
-    : !runnerOnline ? "Runner is offline."
-    : sessionNoticeReason !== undefined ? sessionNoticeReason
-    : policyPaused ? "Session is paused by guardrails. Review the pending decision to continue."
-    : null;
+  // Friendly machine label (hostname + local/SSH) instead of the raw random box runner id.
+  const runnerDisp = runnerDisplay(runner, box, session.runnerId);
+  // Why the composer cannot send a new message now (#2154). Edit & Resend states the same reason.
+  // An archived session is also stopped; its notice is in the slot, so the slot's order decides.
+  const promptUnavailableReason = composerUnavailableReason({
+    refusal: promptRefusal,
+    archivedReason: archivedOrder ? sessionNoticeReason : undefined,
+    status: session.status,
+    runnerOnline,
+    machineName: runnerDisp.name,
+    noticeReason: sessionNoticeReason,
+    policyPaused,
+  });
   const canPrompt = promptUnavailableReason === null;
-  const composerPlaceholder = promptUnavailableReason ?? "Do anything";
+  const composerAgent = composerAgentName(session.driver, session.agentName, session.agentId);
+  const composerPlaceholder = composerPlaceholderText({
+    unavailableReason: promptUnavailableReason,
+    agent: composerAgent,
+    narrow: isMobile,
+    inputPending: pendingRequests(session.pendingApproval).some((request) => !request.async),
+    turnActive: session.status === "running",
+    fileReferences: runnerSupportsProtocol(runner?.protocolVersion, "workspaceReferences"),
+  });
   const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
   const composerQuestions = (() => {
     const approvalQuestions = pendingQuestion?.questions ?? [];
@@ -3735,9 +3753,6 @@ function SessionDetailLoaded({
     }
   }, [api, closeMessageAction, forkRefusal, instanceScope, navigate, sessionId]);
 
-  // Friendly machine label (hostname + local/SSH) instead of the raw random box runner id.
-  const runnerDisp = runnerDisplay(runner, box, session.runnerId);
-
   // The session's problem states, shown one at a time in the notice slot above the composer
   // (#1966). An action a person cannot take now says why in a visible line it is described by.
   const runnerOfflineReason = runnerOnline ? null : `${runnerDisp.name || "This machine"} is offline.`;
@@ -4207,7 +4222,10 @@ function SessionDetailLoaded({
     images.length === 0 && session.pendingApproval == null &&
     !historyQuarantine && !queuedEdit && !error && !retitleFeedback && !dictation.recording &&
     !dragActive && !paletteOpen && !workspacePickerOpen;
-  const composerIdlePreview = text.trim() ? text : composerPlaceholder;
+  // The phone capsule's preview (#2154): the draft's first line to edit, or who a new message goes
+  // to. A composer that cannot send says why instead.
+  const composerIdleDraft = text.trim();
+  const composerIdlePreview = composerIdleDraft || (canPrompt ? `Message ${composerAgent}` : composerPlaceholder);
   // R focuses the composer from the reader; the idle, unfocused composer says so (#2166).
   const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && text === "" &&
     !composerIdleCollapsed && !composerAnswerActive;
@@ -4243,6 +4261,18 @@ function SessionDetailLoaded({
   // reason, and nothing is applied (#1857).
   const configRefusal = sessionCommandRefusal(session, "configure");
   const configRefusalId = `config-refusal-${session.id}`;
+  // A composer the session cannot send from reads as paused (#2154): its permission, Plan and model
+  // controls stay in the bar, disabled, with the reason it cannot send. Each refusal is per command,
+  // so a person refused only prompts keeps the configuration they are allowed (#1857).
+  const composerControlsDisabledReason = configRefusal ??
+    (promptRefusal === null ? promptUnavailableReason : null);
+  const composerUnavailableId = `composer-unavailable-${session.id}`;
+  // A disabled mic never sees the pointerup that ends a hold, so a hold the composer loses mid-way
+  // ends here.
+  const stopDictation = dictation.stop;
+  useEffect(() => {
+    if (!canPrompt && dictation.recording) stopDictation();
+  }, [canPrompt, dictation.recording, stopDictation]);
   // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
   // bar has no room for them (#2166).
   const [composerBoxRef, composerColumnNarrow] = useNarrowerThanRem<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_REM);
@@ -4254,7 +4284,7 @@ function SessionDetailLoaded({
   );
   const usagePlacement = composerUsagePlacement({
     narrow: composerUsageNarrow,
-    modelSettingsOpenable: modelSettingsAvailable && configRefusal === null,
+    modelSettingsOpenable: modelSettingsAvailable && composerControlsDisabledReason === null,
   });
   const applyConfig = useCallback(
     (patch: Partial<SessionConfig>) => {
@@ -5839,7 +5869,7 @@ function SessionDetailLoaded({
             )}
             <div
               ref={composerBoxRef}
-              className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}`}
+              className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}${canPrompt ? "" : " is-disabled"}`}
               onBlur={(event) => {
                 const blurredTarget = event.target as HTMLElement;
                 if (blurredTarget === inputRef.current || blurredTarget.classList.contains("composer-idle-preview")) {
@@ -6014,7 +6044,7 @@ function SessionDetailLoaded({
                 onKeyDown={onKeyDown}
                 onPaste={onPaste}
                 placeholder={composerPlaceholder}
-                rows={2}
+                rows={1}
                 disabled={!canPrompt}
                 tabIndex={composerIdleCollapsed ? -1 : undefined}
               />
@@ -6055,20 +6085,19 @@ function SessionDetailLoaded({
                   />
                   <button
                     type="button"
-                    className="composer-idle-preview"
-                    aria-label={`Edit Message: ${composerIdlePreview}`}
-                    title="Edit Message"
+                    className={`composer-idle-preview${composerIdleDraft ? "" : " is-empty"}`}
+                    aria-label={composerIdleDraft ? `Edit Draft: ${composerIdleDraft}` : composerIdlePreview}
                     onPointerDown={(event) => event.preventDefault()}
                     onClick={expandIdleComposer}
                   >
                     {composerIdlePreview}
                   </button>
-                  <ApprovalsControl session={session} apply={applyConfig} disabledReason={configRefusal} />
+                  <ApprovalsControl session={session} apply={applyConfig} disabledReason={composerControlsDisabledReason} />
                   {planActive && (
                     <button
                       type="button"
                       className="mode-pill"
-                      disabled={configRefusal !== null}
+                      disabled={composerControlsDisabledReason !== null}
                       // Keep the composer focused until the click lands, like Send: blurring it on
                       // pointerdown brings the phone rail back and moves this pill out from under the
                       // finger (#1903).
@@ -6077,9 +6106,9 @@ function SessionDetailLoaded({
                         togglePlan(false);
                         if (planSupported) keepFocusInComposer(event.currentTarget);
                       }}
-                      aria-describedby={configRefusal !== null ? configRefusalId : undefined}
-                      title={configRefusal !== null
-                        ? `Plan mode is on. ${configRefusal}`
+                      aria-describedby={composerControlsDisabledReason !== null ? configRefusalId : undefined}
+                      title={composerControlsDisabledReason !== null
+                        ? `Plan mode is on. ${composerControlsDisabledReason}`
                         : "Plan mode is on — the agent researches + proposes, no edits. Click to turn off."}
                     >
                       ◒ Plan
@@ -6091,18 +6120,21 @@ function SessionDetailLoaded({
                     pendingModel={() => pendingConfig.current.model}
                     pendingEffort={() => pendingConfig.current.effort}
                     pendingServiceTier={() => pendingConfig.current.serviceTier}
-                    disabledReason={configRefusal}
+                    disabledReason={composerControlsDisabledReason}
                     sessionUsage={usagePlacement === "model-settings"
                       ? <SessionUsageMenuGroup session={session} resolution={contextWindow} />
                       : null}
                   />
-                  {configRefusal !== null && planActive && (
-                    <span className="sr-only" id={configRefusalId}>{configRefusal}</span>
+                  {composerControlsDisabledReason !== null && planActive && (
+                    <span className="sr-only" id={configRefusalId}>{composerControlsDisabledReason}</span>
                   )}
                 </div>
                 <div className="cbar-right">
                   {cancelTurnRefusal !== null && (
                     <span className="sr-only" id={`stop-turn-refusal-${session.id}`}>{cancelTurnRefusal}</span>
+                  )}
+                  {dictation.supported && !canPrompt && (
+                    <span className="sr-only" id={composerUnavailableId}>{promptUnavailableReason}</span>
                   )}
                   {usagePlacement === "bar" && <>
                     {/* Context, then cost (#781): occupancy and spend, each opening its own popover. */}
@@ -6113,6 +6145,9 @@ function SessionDetailLoaded({
                     <button
                       type="button"
                       className={`voice-btn${dictation.recording ? " voice-recording" : ""}`}
+                      // A composer that cannot send takes no dictation either (#2154).
+                      disabled={!canPrompt}
+                      aria-describedby={canPrompt ? undefined : composerUnavailableId}
                       onPointerDown={(e) => {
                         // Only a primary left-button press dictates — a right-click's context menu
                         // swallows the pointerup on some platforms and would leave the mic hot.

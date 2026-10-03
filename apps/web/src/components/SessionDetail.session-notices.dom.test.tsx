@@ -667,7 +667,8 @@ test("reasons that are not slot conditions keep their place around the slot's", 
     historyQuarantine: quarantine, providerAccountSwitchFailure: accountFailure("Work"),
   }), false);
   try {
-    assert.equal(offline.composer().placeholder, "Runner is offline.", "an offline runner still comes first");
+    assert.equal(offline.composer().placeholder, "Build Box is offline. You can send again when it reconnects.",
+      "an offline runner still comes first");
   } finally {
     await offline.unmount();
   }

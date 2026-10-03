@@ -15,7 +15,7 @@ async function openApprovals(page: Page, theme: string) {
       "An Unusually Long Permission Mode Label That Must Wrap on a Phone",
     ]);
   }, theme);
-  const idlePreview = page.getByRole("button", { name: /^Edit Message:/ });
+  const idlePreview = page.locator(".composer-idle-preview");
   if (await idlePreview.isVisible()) await idlePreview.click();
   const trigger = page.locator(".cbar-trigger").filter({ has: page.locator(".cbar-approvals") });
   await trigger.click();

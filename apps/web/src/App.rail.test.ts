@@ -176,7 +176,7 @@ test("the transcript's lower edge has one floating tail control, and context and
   assert.match(detail, /<ModelEffortControl[\s\S]*sessionUsage=\{usagePlacement === "model-settings"\s*\? <SessionUsageMenuGroup session=\{session\} resolution=\{contextWindow\} \/>\s*: null\}/,
     "otherwise Model Settings opens with the Session Usage group, and only then");
   assert.match(detail, /const composerUsageNarrow = isMobile \|\| composerColumnNarrow;/);
-  assert.match(detail, /const usagePlacement = composerUsagePlacement\(\{\s*narrow: composerUsageNarrow,\s*modelSettingsOpenable: modelSettingsAvailable && configRefusal === null,\s*\}\);/);
+  assert.match(detail, /const usagePlacement = composerUsagePlacement\(\{\s*narrow: composerUsageNarrow,\s*modelSettingsOpenable: modelSettingsAvailable && composerControlsDisabledReason === null,\s*\}\);/);
   // A narrow column whose Model Settings cannot open gives the figures a row above the bar.
   assert.match(detail, /\{usagePlacement === "row" && \([\s\S]*<div className="composer-usage-row">\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/div>\s*\)\}\s*<div className="composer-bar">/);
   assert.match(detail, /<div\s+ref=\{composerBoxRef\}\s+className=\{`composer-box/, "the column measured is the composer card's own");

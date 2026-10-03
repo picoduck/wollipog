@@ -23,7 +23,7 @@ for (const width of [390, 1440]) {
       await expect(sessionHeading).toBeVisible();
       await expect(page.locator(".composer-box")).toHaveCount(1);
       // A collapsed phone composer shows the figures once it opens (#2166).
-      const editMessage = page.getByRole("button", { name: /^Edit Message/ });
+      const editMessage = page.locator(".composer-idle-preview");
       if (await editMessage.isVisible()) await editMessage.click();
 
       const trigger = page.locator(`${popover.trigger}:visible`);

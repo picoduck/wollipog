@@ -140,6 +140,17 @@ export const CSS_FEATURES: readonly CssFeature[] = [
       + "becomes unreachable, and the only difference is that the scrollbar is the platform's "
       + "default rather than the app's thinner tinted one.",
   },
+  {
+    kind: "degrades",
+    id: "field-sizing",
+    detect: /\bfield-sizing\s*:/i,
+    support: { chrome: [123, 0], edge: [123, 0], firefox: [152, 0], safari: [26, 2] },
+    source: "caniuse.com/mdn-css_properties_field-sizing, retrieved 2026-10-03",
+    fallback:
+      "The composer's textarea is grown to its content by the existing JS autosize instead "
+      + "(composer-autogrow.ts), which runs only where the engine reports no support. The card grows "
+      + "the same way; nothing moves or becomes unreachable.",
+  },
 ];
 
 /**
@@ -180,7 +191,7 @@ export const CSS_SURFACE = {
   "border-radius", "border-right", "border-style", "border-top", "border-top-color",
   "border-top-left-radius", "border-top-right-radius", "bottom", "box-shadow", "box-sizing",
   "clip", "clip-path", "color", "color-scheme", "column-gap", "container", "container-type", "content",
-  "counter-increment", "counter-reset", "cursor", "display", "fill", "filter", "flex",
+  "counter-increment", "counter-reset", "cursor", "display", "field-sizing", "fill", "filter", "flex",
   "flex-basis", "flex-direction", "flex-shrink", "flex-wrap", "font", "font-display",
   "font-family", "font-size", "font-style", "font-variant-numeric", "font-weight", "gap",
   "grid-area", "grid-auto-columns", "grid-auto-flow", "grid-column", "grid-row",
@@ -204,7 +215,7 @@ export const CSS_SURFACE = {
   pseudos: [
   "active", "after", "before", "checked", "disabled", "empty", "first-child", "first-of-type", "focus",
   "focus-visible", "focus-within", "has", "hover", "is", "last-child", "not", "nth-child",
-  "root", "where",
+  "placeholder", "root", "where",
   ],
   /** Function names appearing in declaration values. */
   functions: [

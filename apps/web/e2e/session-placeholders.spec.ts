@@ -159,7 +159,7 @@ test("at 390px Unarchive and Restart from the keyboard hands focus to the collap
   await page.keyboard.press("Enter");
   await expect(page.locator(".session-notice-slot")).toHaveCount(0);
   // The collapsed composer's own control takes focus, so the layout does not change under the person.
-  const edit = page.getByRole("button", { name: /^Edit Message:/u });
+  const edit = page.locator(".composer-idle-preview");
   await expect(edit).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.locator(".composer-box textarea")).toBeFocused();

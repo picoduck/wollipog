@@ -6,6 +6,11 @@ export interface ComposerAutoGrowElement {
   parentElement: { offsetHeight: number; style: { height: string } } | null;
 }
 
+/** Whether the browser sizes the composer to its content itself (`field-sizing: content`). */
+export function composerFieldSizesToContent(): boolean {
+  return typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("field-sizing", "content");
+}
+
 /**
  * Fits the composer textarea to its content, up to the CSS max-height (then it scrolls internally).
  *

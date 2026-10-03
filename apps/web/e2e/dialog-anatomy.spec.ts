@@ -188,7 +188,7 @@ test.describe("phone", () => {
   test("the composer's model-settings sheet shows the same 36px grabber", async ({ page }) => {
     await page.goto("/session-usage-e2e.html?width=390&height=804&composer=orchestrator");
     await expect(page.locator(".composer-box")).toBeVisible();
-    await page.getByRole("button", { name: "Edit Message" }).click();
+    await page.locator(".composer-idle-preview").click();
     await page.getByRole("button", { name: /^Model Settings:/ }).click();
     const grabber = page.locator('.menu[aria-label="Model Settings"] .sheet-grabber');
     await expect(grabber).toBeVisible();

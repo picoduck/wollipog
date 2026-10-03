@@ -347,26 +347,28 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
         document.documentElement.style.colorScheme = theme;
       }, theme);
       const composer = page.locator(".composer-input");
+      // The ready sentence names the agent; under 760px it drops the / and @ hints (#2154).
+      const ready = viewport.width > 760 ? "Message Codex. Type / for commands or @ for files." : "Message Codex";
       await expect(composer).toBeEnabled();
-      await expect(composer).toHaveAttribute("placeholder", "Do anything");
+      await expect(composer).toHaveAttribute("placeholder", ready);
       await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
         status: "input_required",
         pendingApproval: { kind: "cost_budget", requestId: "budget-copy", title: "Cost Budget Reached", options: [] },
       }));
       await expect(composer).toBeDisabled();
-      await expect(composer).toHaveAttribute("placeholder", "Session is paused by guardrails. Review the pending decision to continue.");
+      await expect(composer).toHaveAttribute("placeholder", "Paused by a guardrail. Continue or stop in the request above.");
       await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
       await expect(composer).toBeDisabled();
-      await expect(composer).toHaveAttribute("placeholder", "Runner is offline.");
+      await expect(composer).toHaveAttribute("placeholder", /^\S.* is offline\. You can send again when it reconnects\.$/u);
       await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "stopped" }));
       await expect(composer).toBeDisabled();
-      await expect(composer).toHaveAttribute("placeholder", "Session is stopped.");
+      await expect(composer).toHaveAttribute("placeholder", "This session is stopped. Restart it to send a message.");
       await page.evaluate(() => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("online");
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "idle", pendingApproval: null });
       });
       await expect(composer).toBeEnabled();
-      await expect(composer).toHaveAttribute("placeholder", "Do anything");
+      await expect(composer).toHaveAttribute("placeholder", ready);
     });
   }
 }

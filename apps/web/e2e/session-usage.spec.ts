@@ -595,7 +595,7 @@ test.describe("the Reply keycap with a fine pointer", () => {
     expect(cap!.x + cap!.width).toBeCloseTo(field!.x + field!.width, 0);
     expect(cap!.y).toBeGreaterThanOrEqual(field!.y);
     expect(cap!.y + cap!.height).toBeLessThanOrEqual(field!.y + 24);
-    await expect(input).toHaveAttribute("placeholder", "Do anything");
+    await expect(input).toHaveAttribute("placeholder", /^Message \S/u);
     await page.locator(".composer-box").screenshot({ path: `${SHOT}/composer-reply-keycap.png` });
 
     await page.getByRole("region", { name: "Session Activity" }).focus();
@@ -632,7 +632,7 @@ test("mobile: Model Settings opens with the Session Usage group, and the bar sta
   await expect(page.locator(".composer-bar")).toBeVisible();
   await expect(page.locator(".composer-bar :is(.context-control, .session-usage)")).toHaveCount(0);
   // The idle phone composer is a pill; opening it shows Model Settings in the bar.
-  await page.getByRole("button", { name: /^Edit Message/ }).click();
+  await page.locator(".composer-idle-preview").click();
   const bar = await readBar(page);
   expect(bar.rows, "the bar's controls share one row").toBe(1);
   expect(bar.overflow).toBeLessThanOrEqual(0);
@@ -659,7 +659,7 @@ test("mobile: without Model Settings the figures take their own row, and cost op
   // The collapsed pill hides the row, as it hides Model Settings; opening the composer shows it.
   const row = page.locator(".composer-usage-row");
   await expect(row).toBeHidden();
-  await page.getByRole("button", { name: /^Edit Message/ }).click();
+  await page.locator(".composer-idle-preview").click();
   const cost = row.getByRole("button", { name: "Session Usage: $1.37" });
   await expect(cost).toHaveText("$1.37");
   // The cost remains its own control rather than repeating the context meter (#781).
@@ -702,7 +702,7 @@ test.describe("with a touch pointer", () => {
   test("mobile: the pricing source link is a 44px touch target inside the popover", async ({ page }) => {
     // #1799: an inline link gets a 44px band centred on its line from the one coarse-pointer block.
     await page.goto("/session-usage-e2e.html?width=390&height=800");
-    await page.getByRole("button", { name: /^Edit Message/ }).click();
+    await page.locator(".composer-idle-preview").click();
     await page.locator(".composer-usage-row").getByRole("button", { name: /^Session Usage: / }).click();
     const usage = page.locator(".session-usage-popover").first();
     const link = usage.getByRole("link", { name: "Estimated API Costs" });
@@ -740,7 +740,7 @@ for (const root of [16, 32]) {
     await expect(page.locator(".composer-bar")).toBeVisible();
     expect(await composerOverlaps(page)).toEqual([]);
     expect((await readBar(page)).overflow).toBeLessThanOrEqual(0);
-    await page.getByRole("button", { name: /^Edit Message/ }).click();
+    await page.locator(".composer-idle-preview").click();
     const cost = page.locator(".composer-usage-row").getByRole("button", { name: "Session Usage: $12,345.67" });
     await expect(cost).toBeVisible();
     const legible = await cost.evaluate((button) => ({ visible: button.clientWidth, needed: button.scrollWidth }));
@@ -757,7 +757,7 @@ test("mobile light theme: the estimated cost source stays compact", async ({ pag
   await page.goto("/session-usage-e2e.html?width=390&height=800");
   await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await page.getByRole("button", { name: /^Edit Message/ }).click();
+  await page.locator(".composer-idle-preview").click();
   await page.getByRole("button", { name: "Session Usage: $1.37" }).click();
   const usage = page.locator(".session-usage-popover").first();
   await expect(usage.getByRole("link", { name: "Estimated API Costs" })).toBeVisible();

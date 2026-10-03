@@ -819,7 +819,7 @@ test("Edit as a New Turn stays listed and says why while the composer cannot sen
     await fixture.pushSession({ status: "stopped" });
     assert.ok(dialog(), "the open dialog stays open");
     assert.equal(loadIntoComposer()?.disabled, true);
-    assert.match(dialog()?.textContent ?? "", /Session is stopped\./u, "the dialog names the specific reason");
+    assert.match(dialog()?.textContent ?? "", /This session is stopped\. Restart it to send a message\./u, "the dialog names the specific reason");
     assert.doesNotMatch(dialog()?.textContent ?? "", /cannot accept a new turn right now/u);
     assertNoDomNode(button(fixture, edit));
   } finally {
