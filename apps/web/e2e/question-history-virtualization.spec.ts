@@ -3,8 +3,8 @@ import { expect, test } from "@playwright/test";
 test("resolved question disclosure survives virtual recycling and transcript reprojection", async ({ page }) => {
   await page.goto("/timeline-reflow-e2e.html?question-history=1");
   const reader = page.getByTestId("reader");
-  const first = page.locator('[data-virtual-key="item:question:301"] .question-history');
-  const second = page.locator('[data-virtual-key="item:question:302"] .question-history');
+  const first = page.locator('[data-virtual-key="item:question:301"] .tl-question > details');
+  const second = page.locator('[data-virtual-key="item:question:302"] .tl-question > details');
   await expect(first).not.toHaveAttribute("open");
   await expect(second).not.toHaveAttribute("open");
   await first.locator("summary").click();
@@ -20,8 +20,8 @@ test("resolved question disclosure survives virtual recycling and transcript rep
   await reader.evaluate((element) => { element.scrollTop = 0; });
   await expect(first).toHaveAttribute("open");
   await expect(second).not.toHaveAttribute("open");
-  await expect(first.locator(".question-history-body strong")).toHaveText("destination 1");
-  await expect(first.locator(".question-history-context code")).toHaveText("staging");
+  await expect(first.locator(".tl-question-body strong")).toHaveText("destination 1");
+  await expect(first.locator(".tl-question-context code")).toHaveText("staging");
   await expect(first.getByRole("link", { name: "release checklist" })).toBeVisible();
 
   // Changing row positions must not transfer the first question's state to another event.
