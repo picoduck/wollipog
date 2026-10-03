@@ -12697,6 +12697,63 @@ test("an answer to a question parked before its request event arrived is restore
   answeredAfter(1);
 });
 
+test("an answer to a snapshot-parked question attaches when its request frame then arrives live (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const questions = [{ id: "q", question: "Where?", options: [{ label: "Staging" }, { label: "Production" }] }];
+  const request = { kind: "question_request" as const, requestId: "late", occurrenceId: "request_late", questions };
+  db.reconcileRunnerHistory(id, 1, 0);
+  db.setPendingApproval(id, { requestId: "late", occurrenceId: "request_late", kind: "question", title: "Where?", options: [], questions });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(id, "late", { q: "Staging" }, undefined, "submit", undefined, "request_late").ok);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
+
+  svc.onSessionEvent(id, request, 1, 100);
+  svc.onSessionEvent(id, { kind: "question_resolved", requestId: "late", occurrenceId: "request_late", answered: true }, 2, 101);
+  const kinds = db.listEvents(id).map((event) => event.payload.kind);
+  assert.deepEqual(kinds, ["question_request", "question_answered", "question_resolved"]);
+  const summary = db.listEvents(id)[1]!.payload as Extract<SessionEventPayload, { kind: "question_answered" }>;
+  assert.equal(summary.questionEventSeq, db.listEvents(id)[0]!.seq);
+
+  // Bound now, it is restored once after a cache reset and is not bound again by a live replay.
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 2);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "late", occurrenceId: "request_late", answered: true } },
+    ],
+    page: { logEpoch: 1, throughSeq: 2, nextAfterSeq: 2, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+});
+
+test("an occurrence-less older request matches its own answer, but never a settled one for a newer occurrence (#2188)", () => {
+  const { db, hub, svc } = makeHarness();
+  const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
+  // An older runner's request carries no occurrence; the control plane mints the pending one.
+  const legacy = seedSession(svc, hub);
+  db.reconcileRunnerHistory(legacy, 1, 1);
+  svc.onSessionEvent(legacy, { kind: "question_request", requestId: "ask", questions }, 1, 100);
+  const minted = db.getSession(legacy)?.pendingApproval?.occurrenceId;
+  assert.ok(minted);
+  assert.ok(svc.answerQuestion(legacy, "ask", { q: "Yes" }, undefined, "submit", undefined, minted).ok);
+  const legacySummary = db.listEvents(legacy).find((event) => event.payload.kind === "question_answered");
+  assert.equal(legacySummary?.payload.kind === "question_answered" ? legacySummary.payload.questionEventSeq : null,
+    db.listEvents(legacy).find((event) => event.payload.kind === "question_request")!.seq);
+
+  // After an upgrade, a settled occurrence-less request must not take a newer occurrence's answer.
+  const upgraded = seedSession(svc, hub);
+  db.reconcileRunnerHistory(upgraded, 1, 2);
+  svc.onSessionEvent(upgraded, { kind: "question_request", requestId: "ask", questions }, 1, 100);
+  svc.onSessionEvent(upgraded, { kind: "question_resolved", requestId: "ask", answered: true }, 2, 101);
+  db.setPendingApproval(upgraded, { requestId: "ask", occurrenceId: "request_new", kind: "question", title: "Go?", options: [], questions });
+  db.updateSessionStatus(upgraded, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(upgraded, "ask", { q: "No" }, undefined, "submit", undefined, "request_new").ok);
+  assert.equal(db.listEvents(upgraded).some((event) => event.payload.kind === "question_answered"), false,
+    "the answer waits, unbound, for its own occurrence");
+});
+
 test("restoring a stored answer never moves the session's last activity backward (#2188)", async () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

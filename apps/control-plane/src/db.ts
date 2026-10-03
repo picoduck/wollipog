@@ -18103,6 +18103,12 @@ export class ControlPlaneDb {
       const payload = JSON.parse(row.payload) as SessionEventPayload;
       if (payload.kind !== "question_request") continue;
       if (occurrenceId !== undefined && payload.occurrenceId !== undefined && payload.occurrenceId !== occurrenceId) continue;
+      // An older runner's request carries no occurrence (the control plane mints the pending one),
+      // so it can match; but one already resolved is a settled earlier use of a reused request id.
+      if (occurrenceId !== undefined && payload.occurrenceId === undefined && this.stmt(
+        `SELECT 1 FROM session_events WHERE session_id=? AND kind='question_resolved' AND seq>?
+           AND json_extract(payload,'$.requestId')=? LIMIT 1`,
+      ).get(sessionId, row.seq, requestId)) continue;
       return { id: row.id, sessionId, seq: row.seq, ts: row.ts, payload };
     }
     return null;
@@ -18142,6 +18148,7 @@ export class ControlPlaneDb {
    * binds to the occurrence so it is restored once. */
   restorableQuestionAnswerSummary(
     event: SessionEvent,
+    options?: { unboundOnly?: boolean },
   ): { payload: Extract<SessionEventPayload, { kind: "question_answered" }>; timestamp: number } | null {
     if (event.payload.kind !== "question_request") return null;
     const cached = this.stmt("SELECT runner_seq FROM session_events WHERE id=? AND session_id=?")
@@ -18153,7 +18160,7 @@ export class ControlPlaneDb {
       WHERE session_id=? AND request_id=? AND question_digest=? AND runner_seq=? AND history_epoch=?`).get(
         event.sessionId, event.payload.requestId, digest, cached.runner_seq, epoch,
       ) as { payload: string; created_at: number } | undefined;
-    if (bound) return { payload: JSON.parse(bound.payload), timestamp: bound.created_at };
+    if (bound) return options?.unboundOnly ? null : { payload: JSON.parse(bound.payload), timestamp: bound.created_at };
     const unbound = this.stmt(`SELECT rowid AS row_id, payload, created_at FROM question_answer_summaries
       WHERE session_id=? AND request_id=? AND occurrence_id=? AND question_digest=? AND runner_seq IS NULL
       ORDER BY created_at LIMIT 1`).get(
