@@ -1733,9 +1733,20 @@ export class IncrementalTimelineRows {
   }
 
   private patchVisibleItem(previous: TimelineItem, changed: TimelineItem): void {
-    const index = this.rowIndexes.get(this.itemKey(previous));
+    const key = this.itemKey(previous);
+    const index = this.rowIndexes.get(key);
     const row = index == null ? undefined : this.rows[index];
     if (row?.kind === "item") this.rows[index!] = { ...row, item: changed };
+    // An agent call renders as its agent row and output row, keyed by the same identity as its
+    // item key, which disambiguates a tool id two calls share; `patchToolRows` sees unique ids only.
+    if (changed.kind !== "tool_call" || !key.startsWith("item:tool:")) return;
+    const identity = key.slice("item:tool:".length);
+    const summaryIndex = this.rowIndexes.get(`agent:${identity}`);
+    const summary = summaryIndex == null ? undefined : this.rows[summaryIndex];
+    if (summary?.kind === "subagent_summary") this.rows[summaryIndex!] = { ...summary, tool: changed };
+    const outputIndex = this.rowIndexes.get(`agent-output:${identity}`);
+    const output = outputIndex == null ? undefined : this.rows[outputIndex];
+    if (output?.kind === "subagent_output") this.rows[outputIndex!] = { ...output, tool: changed };
   }
 
   private patchToolRows(tools: ReadonlyMap<string, ToolItem>): void {

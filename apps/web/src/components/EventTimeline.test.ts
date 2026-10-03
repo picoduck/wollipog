@@ -3,7 +3,7 @@ import test from "node:test";
 import * as React from "react";
 import type { SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { renderToStaticMarkup } from "react-dom/server";
-import { deriveTimeline, groupTimeline, SubagentTreeProjector, TimelineBuilder, type TimelineItem } from "../timeline.js";
+import { deriveTimeline, groupTimeline, publishTimelineSnapshotDelta, SubagentTreeProjector, TimelineBuilder, type TimelineItem } from "../timeline.js";
 import {
   automaticSubagentOpen,
   automaticSubagentOpenAfterChange,
@@ -1874,4 +1874,33 @@ test("an agent's output row appears when its call first reports output, and clos
 
   const closed = projector.project(builder.snapshot(), new Map([["work:head", true], ["agent:task", false]]));
   assert.deepEqual(agentRowShape(closed.rows), ["work:head", "agent:task@0"], "collapsing the agent hides its output with its steps");
+});
+
+test("an in-place update of one of two agent calls sharing an id reaches its own agent and output rows (#2183)", () => {
+  const agentCall = (id: number, status: string, text: string): TimelineItem =>
+    ({ kind: "tool_call", id, toolCallId: "duplicate", title: `Agent ${id}`, toolKind: "agent", status, text });
+  const before: TimelineItem[] = [agentCall(1, "running", "input"), agentCall(2, "running", "input")];
+  const disclosure = new Map<string, boolean>([
+    ["work:head", true],
+    ["agent:duplicate:1", true],
+    ["agent:duplicate:2", true],
+  ]);
+  const projector = new IncrementalTimelineRows();
+  projector.project(before, disclosure);
+
+  const after: TimelineItem[] = [agentCall(1, "completed", "result"), before[1]!];
+  publishTimelineSnapshotDelta(after, { previous: before, dirtyFrom: 0, dirtyIndexes: [0], dirtyHasParentItems: false });
+  const updated = projector.project(after, disclosure);
+  const fresh = new IncrementalTimelineRows().project(after, disclosure);
+  const view = (rows: readonly TimelineRenderRow[]) => rows.map((row) => row.kind === "work_summary"
+    ? row.key
+    : row.kind === "item" ? `${row.key}:${row.item.kind}` : `${row.key}:${row.tool.status}:${row.tool.text}`);
+  assert.deepEqual(view(updated.rows), view(fresh.rows), "the retained rows equal a fresh projection");
+  assert.deepEqual(view(updated.rows), [
+    "work:head",
+    "agent:duplicate:1:completed:result",
+    "agent-output:duplicate:1:completed:result",
+    "agent:duplicate:2:running:input",
+    "agent-output:duplicate:2:running:input",
+  ]);
 });
