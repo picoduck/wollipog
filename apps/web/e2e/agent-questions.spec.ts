@@ -103,11 +103,14 @@ test("320 px Interactive Form safely formats rich text and keeps resolved questi
   await page.getByRole("button", { name: "Submit" }).click();
   await expect(page.getByRole("status")).toHaveText("Question Answered");
   const history = page.locator(".tl-question");
-  await expect(history.locator("summary")).toContainText("Choose one deployment target.");
+  await expect(history.locator(".tl-step-title")).toHaveText("Target");
+  await expect(history.locator(".tl-step-detail")).toHaveText("Answer: Staging");
+  await expect(history.locator(".tl-step-status")).toHaveText("Answered");
   expect((await geometry(history)).height).toBeLessThan(80);
   expect(await history.innerText()).not.toContain("X-Amz-Signature");
   await history.locator("summary").click();
-  await expect(history.locator(".question-history-body")).toBeVisible();
+  await expect(history.locator(".tl-question-body")).toBeVisible();
+  await expect(history.locator("li.chosen")).toHaveText("Staging (Chosen)");
   await expect(history.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveAttribute("href", signedEvidenceUrl);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
 });
@@ -131,10 +134,12 @@ test("390 px Composer Answer Mode formats multi-question text and discloses the 
   await input.press("Enter");
   await expect(page.getByRole("status")).toHaveText("Question Answered");
   const history = page.locator(".tl-question");
-  await expect(history.locator("summary")).toContainText("(+1 more)");
+  await expect(history.locator(".tl-step-title")).toHaveText("Target, Checks");
+  await expect(history.locator(".tl-step-detail")).toHaveText("Answers: Staging · Unit Tests, Browser Tests");
   expect((await geometry(history)).height).toBeLessThan(80);
   await history.locator("summary").click();
-  await expect(history.locator(".question-history-item")).toHaveCount(2);
+  await expect(history.locator(".tl-question-item")).toHaveCount(2);
+  await expect(history.locator("li.chosen")).toHaveText(["Staging (Chosen)", "Unit Tests (Chosen)", "Browser Tests (Chosen)"]);
   await expect(history.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveCount(2);
   await expect(history.locator("img, video")).toHaveCount(0);
   expect(await history.innerText()).not.toContain("X-Amz-Signature");
@@ -495,4 +500,36 @@ test("an online question becoming offline remains keyboard-discoverable without 
   await firstRadio.press("Space");
   await expect(firstRadio).toHaveAttribute("aria-checked", "false");
   await expect(page.getByRole("checkbox", { name: /Unit Tests/ })).toHaveAttribute("tabindex", "0");
+});
+
+test("every question row reads its outcome and answer without arrows or emoji (#2188)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=gallery");
+  const rows = page.locator(".tl-question");
+  await expect(rows).toHaveCount(8);
+  await expect(rows.locator(".tl-step-status")).toHaveText([
+    "Answered", "Answered", "Answered", "Answered", "Answered", "Dismissed", "Answered by Policy", "Awaiting Answer",
+  ]);
+  await expect(rows.nth(0).locator(".tl-step-detail")).toHaveText("Answer: Destination 1 (Production)");
+  await expect(rows.nth(1).locator(".tl-step-detail")).toHaveText("Answer: Unit Tests, Smoke Test");
+  await expect(rows.nth(2).locator(".tl-step-detail")).toHaveText(
+    "Answer: “Ship after the Friday freeze, and page the on-call reviewer first.”");
+  await expect(rows.nth(3).locator(".tl-step-detail")).toHaveText("Answer not shown");
+  await expect(rows.nth(4).locator(".tl-step-title")).toHaveText("Destination, Checks, Note");
+  await expect(rows.nth(5).locator(".tl-step-detail")).toHaveCount(0);
+  await expect(rows.nth(6).locator(".tl-step-detail")).toHaveText("Answer: Proceed · Policy: Review Sharing and Retries");
+  expect(await page.locator("#question-frame").innerText()).not.toMatch(/[→❓]/u);
+  for (const row of await rows.all()) {
+    const height = (await row.locator("summary").boundingBox())!.height;
+    expect(height).toBeGreaterThanOrEqual(28);
+    expect(height).toBeLessThan(60);
+  }
+
+  await rows.nth(1).locator("summary").click();
+  await expect(rows.nth(1).locator("li.chosen")).toHaveText(["Unit Tests (Chosen)", "Smoke Test (Chosen)"]);
+  await expect(rows.nth(1).getByText("Which checks should run before the release is promoted?")).toHaveCount(1);
+  await expect(rows.nth(1).locator(".tl-question-resolution")).toHaveText(/^Answered by you at /);
+  await rows.nth(3).locator("summary").click();
+  await expect(rows.nth(3).locator(".tl-question-withheld")).toHaveText("Answer not shown");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });

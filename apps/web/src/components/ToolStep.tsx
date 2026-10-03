@@ -64,6 +64,7 @@ export function ToolStep({
   icon,
   verb,
   object,
+  detail,
   trail,
   timing,
   status,
@@ -76,6 +77,8 @@ export function ToolStep({
   verb: ReactNode;
   /** The thing acted on: a path, a command, a query. Rendered in mono 12px. */
   object?: string;
+  /** A second line under the title, such as a question's answer. */
+  detail?: ReactNode;
   /** The one trailing fact: a duration, a line count or a result count. */
   trail?: ReactNode;
   /** "Started …, finished … (26s)", shown on the trailing fact's hover and the summary's focus. */
@@ -94,10 +97,17 @@ export function ToolStep({
         ? <ChevronRightIcon size={14} className="disclosure-chevron" />
         : <span className="tl-step-chevron-space" aria-hidden="true" />}
       <span className="tl-step-icon">{icon}</span>
-      <span className="tl-step-title">
-        {verb}
-        {object && <> <span className="tl-step-object">{object}</span></>}
-      </span>
+      {detail ? (
+        <span className="tl-step-lines">
+          <span className="tl-step-title">{verb}</span>
+          <span className="tl-step-detail">{detail}</span>
+        </span>
+      ) : (
+        <span className="tl-step-title">
+          {verb}
+          {object && <> <span className="tl-step-object">{object}</span></>}
+        </span>
+      )}
       {(trail || timing) && (
         <span className="tl-step-trail">
           {trail}

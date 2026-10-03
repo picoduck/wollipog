@@ -100,7 +100,21 @@ const EVERY_PAYLOAD = {
     questions: [{ id: "ANSWER_KEY_LEAK", question: "QUESTION_TEXT_LEAK", options: [] }],
   },
   question_resolved: { kind: "question_resolved", requestId: "QUESTION_RESOLUTION_LEAK", answered: true },
-  question_policy_answered: { kind: "question_policy_answered", requestId: "POLICY_REQUEST_LEAK", policies: [{ policyId: "POLICY_LEAK", name: "POLICY_NAME_LEAK" }] },
+  question_policy_answered: {
+    kind: "question_policy_answered",
+    requestId: "POLICY_REQUEST_LEAK",
+    policies: [{ policyId: "POLICY_LEAK", name: "POLICY_NAME_LEAK" }],
+    answers: [{ questionId: "POLICY_ANSWER_KEY_LEAK", selected: ["POLICY_ANSWER_LABEL_LEAK"] }],
+  },
+  question_answered: {
+    kind: "question_answered",
+    requestId: "ANSWERED_REQUEST_LEAK",
+    answers: [
+      { questionId: "ANSWERED_KEY_LEAK", selected: ["ANSWERED_LABEL_LEAK"] },
+      { questionId: "ANSWERED_TEXT_KEY_LEAK", text: "ANSWERED_TEXT_LEAK" },
+    ],
+    answeredBy: { kind: "parent", sessionId: "ANSWERED_PARENT_LEAK" },
+  },
   checkpoint: { kind: "checkpoint", turn: 1, tree: "CHECKPOINT_TREE_LEAK" },
   checkpoint_restored: { kind: "checkpoint_restored", turn: 2 },
   conversation_checkpoint: { kind: "conversation_checkpoint", turn: 3 },

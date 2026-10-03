@@ -32,6 +32,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   runnerSupportsProtocol,
   validatePromptImageInputs,
   validatePromptImages,
+  summarizeQuestionAnswers,
   validateQuestionAnswers,
   worktreeRecoveryAction,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
@@ -9456,6 +9457,7 @@ export class SessionsService {
         now,
         { content: auditContent },
       );
+      this.recordQuestionAnswer(sessionId, pending, answers, resolvedByParentSessionId, now);
       this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
       try {
@@ -9505,11 +9507,48 @@ export class SessionsService {
       now,
       { content: auditContent },
     );
+    if (action === "submit") this.recordQuestionAnswer(sessionId, pending, answers, resolvedByParentSessionId, now);
     this.gateOnPolicy(sessionId, now);
     this.reconcilePolicyHookTimeouts(now, sessionId);
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(campaignBefore);
     return ok(this.db.getSession(sessionId)!);
+  }
+
+  /** Store what was answered (#2188) as a control-plane event beside its question, so the
+   * transcript can show it after a reload. Free text is redacted like transcript text, and secret
+   * and email answers keep no content. The governance audit stays digest-only. The answer has
+   * already been delivered, so a failure here costs only the summary. */
+  private recordQuestionAnswer(
+    sessionId: string,
+    pending: PendingApproval,
+    answers: Record<string, string | string[]>,
+    resolvedByParentSessionId: string | undefined,
+    now: number,
+  ): void {
+    try {
+      const sensitivePaths = this.db.sessionSensitivePaths(sessionId);
+      const question = this.db.questionRequestEvent(sessionId, pending.requestId, pending.occurrenceId);
+      const payload: Extract<SessionEventPayload, { kind: "question_answered" }> = {
+        kind: "question_answered",
+        requestId: pending.requestId,
+        ...(pending.occurrenceId ? { occurrenceId: pending.occurrenceId } : {}),
+        ...(question ? { questionEventSeq: question.seq } : {}),
+        answers: summarizeQuestionAnswers(
+          pending.questions ?? [],
+          answers,
+          (text) => redactOperationalTranscriptText(text, sensitivePaths),
+        ),
+        answeredBy: resolvedByParentSessionId ? { kind: "parent", sessionId: resolvedByParentSessionId } : { kind: "person" },
+      };
+      this.db.recordQuestionAnswerSummary(sessionId, pending.questions ?? [], question !== null, payload, now);
+      // A question parked from a reconnect snapshot before its request event arrived has no row to
+      // attach to yet; the summary is restored right after that request when it arrives, live or
+      // from history.
+      if (question) this.hub.sessionEvent(this.db.appendEvent(sessionId, payload, now));
+    } catch (error) {
+      this.log.warn(`question answer summary not stored for ${sessionId}: ${(error as Error).message}`);
+    }
   }
 
   approve(
@@ -12461,7 +12500,7 @@ export class SessionsService {
     // Preserve the authoritative history event, but never let a late permission/question/policy
     // event recreate an approval card or move the control-plane session out of stopped.
     if (this.db.hasSessionStopIntent(sessionId)) {
-      if (payload.kind === "question_request") this.hub.sessionEvent(ev, { suppressReminderWake: true });
+      if (payload.kind === "question_request") this.publishQuestionRequest(ev, { suppressReminderWake: true });
       this.db.updateSessionStatus(sessionId, "stopped", now, { cause: "requested" });
       this.sendStopCommand(session.runnerId, sessionId);
       this.hub.sessionChangedById(sessionId);
@@ -12783,13 +12822,13 @@ export class SessionsService {
       if (occupiedHook?.kind === "policy_hook" && payload.async) {
         // The hook owns a blocking decision, but an async question can remain answerable behind
         // it. Preserve both instead of dismissing a non-blocking question at the turn barrier.
-        this.hub.sessionEvent(ev, { suppressReminderWake: true });
+        this.publishQuestionRequest(ev, { suppressReminderWake: true });
         this.db.setPendingApproval(sessionId, appendPendingApproval(occupiedHook, approval));
         this.hub.sessionChangedById(sessionId);
         return;
       }
       if (occupiedHook?.kind === "policy_hook") {
-        this.hub.sessionEvent(ev, { suppressReminderWake: true });
+        this.publishQuestionRequest(ev, { suppressReminderWake: true });
         const sent = this.hub.sendToRunner(session.runnerId, {
           type: "answer_question",
           sessionId,
@@ -12825,9 +12864,12 @@ export class SessionsService {
           const requests = this.automaticQuestions.get(sessionId) ?? new Set<string>();
           requests.add(approval.requestId);
           this.automaticQuestions.set(sessionId, requests);
+          const sensitivePaths = this.db.sessionSensitivePaths(sessionId);
           const attribution: Extract<SessionEventPayload, { kind: "question_policy_answered" }> = {
             kind: "question_policy_answered", requestId: approval.requestId, questionEventSeq: ev.seq,
             policies: automatic.policies.map(({ policyId, name }) => ({ policyId, name })),
+            answers: summarizeQuestionAnswers(payload.questions, automatic.answers,
+              (text) => redactOperationalTranscriptText(text, sensitivePaths)),
           };
           this.db.recordQuestionPolicyAnswer(sessionId, payload.questions, attribution, now, runnerSeq);
           this.hub.sessionEvent(this.db.appendEvent(sessionId, attribution, now));
@@ -12836,7 +12878,7 @@ export class SessionsService {
           return;
         }
       }
-      this.hub.sessionEvent(ev, suppressRequestReminder ? { suppressReminderWake: true } : undefined);
+      this.publishQuestionRequest(ev, suppressRequestReminder ? { suppressReminderWake: true } : undefined);
       this.db.setPendingApproval(
         sessionId,
         addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
@@ -13500,7 +13542,26 @@ export class SessionsService {
     if (event.payload.kind !== "question_request") return null;
     const stored = this.db.questionPolicyAnswer(event);
     if (!stored) return null;
-    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp);
+    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp,
+      { restored: true });
+  }
+
+  /** Publish a live question request, then the stored answer it already has: a reconnect snapshot
+   * may have parked the occurrence, and it may have been answered, before this frame arrived. */
+  private publishQuestionRequest(ev: SessionEvent, options?: { suppressReminderWake?: boolean }): void {
+    this.hub.sessionEvent(ev, options);
+    const answer = this.restoreQuestionAnswerSummary(ev);
+    if (answer) this.hub.sessionEvent(answer);
+  }
+
+  /** Restore a stored answer summary (#2188) after its question's request: after a runner-history
+   * cache reset, or for an answer accepted before that request arrived. */
+  private restoreQuestionAnswerSummary(event: SessionEvent): SessionEvent | null {
+    if (event.payload.kind !== "question_request") return null;
+    const stored = this.db.restorableQuestionAnswerSummary(event);
+    if (!stored) return null;
+    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp,
+      { restored: true });
   }
 
   private settleHydratedAsk(sessionId: string, trailingAsk: PendingApproval | null): void {
@@ -13666,6 +13727,8 @@ export class SessionsService {
         for (const event of applied.events) {
           const attribution = this.restoreQuestionPolicyAttribution(event);
           if (attribution) this.hub.sessionEvent(attribution);
+          const answer = this.restoreQuestionAnswerSummary(event);
+          if (answer) this.hub.sessionEvent(answer);
         }
         if (projectedBackgroundDelivery || projectedSteering) this.hub.sessionChangedById(sessionId);
         afterSeq = page.nextAfterSeq;
@@ -13725,6 +13788,8 @@ export class SessionsService {
         const attribution = this.restoreQuestionPolicyAttribution(ev);
         this.hub.sessionEvent(ev, { suppressReminderWake: attribution !== null });
         if (attribution) this.hub.sessionEvent(attribution);
+        const answer = this.restoreQuestionAnswerSummary(ev);
+        if (answer) this.hub.sessionEvent(answer);
         trailingAsk = this.updateTrailingAsk(trailingAsk, ev.payload);
         this.settleHydratedQuestionResolution(sessionId, ev.payload);
         if (this.reconcileSteeringFromUserMessage(sessionId, ev.payload, ev.ts)) projectedSteering = true;

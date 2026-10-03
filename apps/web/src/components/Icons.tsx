@@ -426,7 +426,7 @@ export function FolderUpIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCornerUpLeft} {...props} />;
 }
 
-export function HelpIcon(props: IconProps) {
+export function QuestionIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideMessageCircleQuestion} {...props} />;
 }
 

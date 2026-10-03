@@ -3872,6 +3872,76 @@ export function validateQuestionAnswers(
   return null;
 }
 
+/** The most free text a stored answer summary keeps (#2188). */
+export const QUESTION_ANSWER_SUMMARY_TEXT_MAX_LENGTH = 500;
+
+/**
+ * One question's answer as the session event log keeps it (#2188). Chosen option labels are kept:
+ * they are the agent's own offered labels. Free text is kept only for a question that is neither
+ * `secret` nor an `email` field, redacted like transcript text and bounded; otherwise `withheld`
+ * records that an answer was given without its content. A `secret` question keeps nothing but that.
+ */
+export interface QuestionAnswerSummaryEntry {
+  /** The answered `AgentQuestion.id`, verbatim. */
+  questionId: string;
+  /** The offered option labels chosen, in submitted order. */
+  selected?: string[];
+  /** Free text, redacted and bounded to `QUESTION_ANSWER_SUMMARY_TEXT_MAX_LENGTH` characters. */
+  text?: string;
+  /** The stored text was cut at the bound. */
+  truncated?: true;
+  /** An answer was given and deliberately not stored. */
+  withheld?: true;
+}
+
+/**
+ * Build the stored summary of a validated answer map, one entry per answered question in question
+ * order. `redact` is the transcript redaction the control plane applies to free text before it is
+ * bounded, so a credential that straddles the bound is still caught whole.
+ */
+export function summarizeQuestionAnswers(
+  questions: readonly AgentQuestion[],
+  answers: Readonly<Record<string, string | string[]>>,
+  redact: (text: string) => string = (text) => text,
+): QuestionAnswerSummaryEntry[] {
+  const entries: QuestionAnswerSummaryEntry[] = [];
+  for (const question of questions) {
+    if (!Object.hasOwn(answers, question.id)) continue;
+    const value = answers[question.id];
+    const questionId = question.id;
+    if (question.secret) {
+      entries.push({ questionId, withheld: true });
+      continue;
+    }
+    const offered = new Set(question.options.map((option) => option.label));
+    if (Array.isArray(value)) {
+      entries.push({ questionId, selected: value.filter((label) => typeof label === "string" && offered.has(label)) });
+      continue;
+    }
+    if (typeof value !== "string") continue;
+    if (offered.has(value)) {
+      entries.push({ questionId, selected: [value] });
+      continue;
+    }
+    if (question.inputFormat === "email") {
+      entries.push({ questionId, withheld: true });
+      continue;
+    }
+    const characters = Array.from(redact(value));
+    entries.push(characters.length > QUESTION_ANSWER_SUMMARY_TEXT_MAX_LENGTH
+      ? { questionId, text: characters.slice(0, QUESTION_ANSWER_SUMMARY_TEXT_MAX_LENGTH).join(""), truncated: true }
+      : { questionId, text: characters.join("") });
+  }
+  return entries;
+}
+
+/** Who answered a question, as its stored summary records it. A policy answer is recorded on
+ * `question_policy_answered` instead, which names the policies. */
+export type QuestionAnswerResolver =
+  | { kind: "person" }
+  /** The controlling parent session, through Parent Control. */
+  | { kind: "parent"; sessionId: string };
+
 export type ApprovalKind =
   | "permission"
   | "authentication"
@@ -4992,7 +5062,28 @@ export type SessionEventPayload =
       resolvedByParentSessionId?: string;
     }
   | { kind: "question_request"; requestId: string; occurrenceId?: string; questions: AgentQuestion[]; ownerToolUseId?: string; async?: boolean }
-  | { kind: "question_policy_answered"; requestId: string; questionEventSeq?: number; policies: { policyId: string; name: string }[] }
+  | {
+      kind: "question_policy_answered";
+      requestId: string;
+      questionEventSeq?: number;
+      policies: { policyId: string; name: string }[];
+      /** The policy's answer (#2188). Absent from older control planes. */
+      answers?: QuestionAnswerSummaryEntry[];
+    }
+  /**
+   * Control-plane-authored summary of a submitted answer (#2188), written when the control plane
+   * accepts it and correlated to its `question_request` by `questionEventSeq`, else by request and
+   * occurrence id. Older control planes never write it; a dismissal never does. Shared transcripts
+   * exclude it like every question event.
+   */
+  | {
+      kind: "question_answered";
+      requestId: string;
+      occurrenceId?: string;
+      questionEventSeq?: number;
+      answers: QuestionAnswerSummaryEntry[];
+      answeredBy: QuestionAnswerResolver;
+    }
   | {
       kind: "question_resolved";
       requestId: string;

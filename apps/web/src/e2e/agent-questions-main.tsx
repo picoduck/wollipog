@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { AgentQuestion, SessionView } from "@wollipog/protocol";
+import { summarizeQuestionAnswers, type AgentQuestion, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { SessionQuestionBanner } from "../components/SessionApproval.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
 import { EventTimeline } from "../components/EventTimeline.js";
+import { QuestionRowGallery } from "./question-row-gallery.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
 import { inTypingContext } from "../shortcuts.js";
 import { isFollowTailResumeKey } from "../useFollowTail.js";
@@ -29,6 +30,7 @@ declare global {
 }
 
 const params = new URLSearchParams(window.location.search);
+if (params.has("theme")) document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
 setQuestionResponseStyle(["composer", "text"].includes(params.get("style") ?? "") ? "composer" : "interactive");
 const initialOnline = params.get("offline") !== "1";
 const shouldFail = params.get("failure") === "1";
@@ -167,6 +169,7 @@ const formQuestions: AgentQuestion[] = [
 ];
 
 window.agentQuestionCalls = [];
+const askedAt = Date.UTC(2026, 9, 3, 7, 30, 0);
 
 function Fixture() {
   const responseStyle = useQuestionResponseStyle();
@@ -219,6 +222,9 @@ function Fixture() {
     },
   }), []) as ApiClient;
 
+  // The control plane stores a summary of what was submitted (#2188); a dismissal stores none.
+  const lastCall = resolved ? [...window.agentQuestionCalls].reverse().find((call) => call.requestId === requestId) : undefined;
+  const dismissed = lastCall?.action === "dismiss";
   const questionContent = resolved ? (
     <>
       <p role="status">Question Answered</p>
@@ -227,7 +233,10 @@ function Fixture() {
         id: 1,
         requestId,
         questions,
-        answered: true,
+        createdAt: askedAt,
+        answered: !dismissed,
+        resolvedAt: askedAt + 60_000,
+        ...(lastCall && !dismissed ? { answers: summarizeQuestionAnswers(questions, lastCall.answers) } : {}),
       }]} />
     </>
   ) : (
@@ -289,4 +298,6 @@ function Fixture() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(params.get("set") === "gallery"
+  ? <main id="question-frame" className="timeline"><QuestionRowGallery /></main>
+  : <Fixture />);

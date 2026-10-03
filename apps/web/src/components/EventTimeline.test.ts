@@ -62,10 +62,10 @@ test("timeline row estimates match one quiet step row", () => {
     id: "choice", question: "Pick one", options: [{ label: "A" }, { label: "B" }],
   }] };
   assert.equal(estimateTimelineRow({ kind: "item", key: "question", item: question, inWork: false, depth: 0 }, "ask"), 264);
-  assert.equal(estimateTimelineRow({ kind: "item", key: "orphan", item: question, inWork: false, depth: 0 }), 52);
+  assert.equal(estimateTimelineRow({ kind: "item", key: "orphan", item: question, inWork: false, depth: 0 }), 44);
   assert.equal(estimateTimelineRow({
     kind: "item", key: "answered-question", item: { ...question, answered: true }, inWork: false, depth: 0,
-  }), 52);
+  }), 44);
 });
 
 test("auto-approved reviews expose an exact count and highest risk while expanded order stays exact", () => {
@@ -305,9 +305,10 @@ test("a resolved question keeps one compact outcome card at the same timeline ro
   }));
 
   assert.doesNotMatch(html, /aria-label="Agent Questions"/);
-  assert.equal((html.match(/Which language\?/g) ?? []).length, 2,
-    "the concise summary and collapsed complete-question body retain the text");
-  assert.match(html, /→ Replaced/);
+  assert.equal((html.match(/Which language\?/g) ?? []).length, 3,
+    "the row's title, its accessible name and its collapsed complete-question body retain the text");
+  assert.match(html, /<span class="status sm t-neutral inline tl-step-status">Replaced<\/span>/);
+  assert.doesNotMatch(html, /→/);
   assert.doesNotMatch(html, /role="radiogroup"/);
 });
 
@@ -332,9 +333,11 @@ test("resolved question cards keep a concise summary and disclose complete rich 
     }],
   }));
 
-  assert.match(html, /<details class="question-history">/);
-  assert.match(html, /Choose one target using evidence\.example\/capture\.png \(\+1 more\)/);
-  assert.match(html, /→ Answered/);
+  assert.match(html, /<details class="tl-step disclosure">/);
+  assert.match(html, /<span class="tl-step-title">Target \(\+1 more\)<\/span>/, "line 1 is the header when there is one");
+  assert.match(html, /<span class="status sm t-success inline tl-step-status">Answered<\/span>/);
+  assert.doesNotMatch(html, /→|❓/);
+  assert.doesNotMatch(html, /tl-step-detail/, "an answer an older control plane recorded has no answer line");
   assert.match(html, /<strong>one<\/strong>/);
   assert.match(html, /<li>staging<\/li>/);
   assert.match(html, /<code>build-42<\/code>/);
@@ -357,7 +360,8 @@ test("delegated question and approval histories identify the controlling parent"
       },
     ],
   }));
-  assert.match(html, /Answered by Parent parent-session/);
+  assert.match(html, /<span class="status sm t-success inline tl-step-status">Answered by Parent<\/span>/);
+  assert.match(html, /Answered by parent session parent-sessi…\./);
   assert.match(html, /Approved by Parent parent-session/);
 });
 

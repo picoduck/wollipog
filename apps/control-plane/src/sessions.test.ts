@@ -4091,6 +4091,14 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
       type: "answer_question", sessionId: grandchild.id, requestId: "provider-reused-id",
       answers: { q: "Continue" }, action: "submit", resolvedByParentSessionId: parent.data.id,
     });
+    const summary = db.listEvents(grandchild.id).find((event) => event.payload.kind === "question_answered")?.payload;
+    assert.deepEqual(summary && summary.kind === "question_answered"
+      ? { occurrenceId: summary.occurrenceId, answers: summary.answers, answeredBy: summary.answeredBy }
+      : null, {
+      occurrenceId: questionOccurrence,
+      answers: [{ questionId: "q", selected: ["Continue"] }],
+      answeredBy: { kind: "parent", sessionId: parent.data.id },
+    }, "a Parent Control answer records the parent session as its resolver");
     assert.equal(svc.resolveDescendantRequest(parent.data.id, grandchild.id, questionOccurrence, {
       action: "dismiss",
     }, () => true).status, 409, "the same occurrence cannot be resolved twice");
@@ -6560,7 +6568,10 @@ test("question policy answers avoid input state, record provenance, and survive 
   assert.equal(audit?.outcome, "answered");
   assert.equal(audit?.governancePolicyId, "routine");
   assert.equal(JSON.stringify(audit).includes("Proceed"), false);
-  assert.ok(db.listEvents(id).some((event) => event.payload.kind === "question_policy_answered"));
+  const policyAnswer = db.listEvents(id).find((event) => event.payload.kind === "question_policy_answered")?.payload;
+  assert.deepEqual(policyAnswer?.kind === "question_policy_answered" ? policyAnswer.answers : null,
+    [{ questionId: "q", selected: ["Proceed"] }], "a policy answer records what it answered (#2188)");
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
   svc.onSessionEvent(id, { kind: "question_resolved", requestId: "ask", answered: true });
   db.clearSessionEvents(id);
   db.reconcileRunnerHistory(id, 1, 3);
@@ -12556,6 +12567,463 @@ test("governance audit records permission request and device resolution without 
   assert.deepEqual(entries[1]!.actor, { kind: "human", id: "device-42" });
   assert.equal(JSON.stringify(entries).includes(secret), false);
   assert.equal(db.getSession(id)!.pendingApproval, null);
+});
+
+test("an answered question stores its answer summary beside the question, and the audit stays digest-only (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.reconcileRunnerHistory(id, 1, 1);
+  const request = {
+    kind: "question_request" as const,
+    requestId: "ask-summary",
+    occurrenceId: "request_ask_summary",
+    questions: [
+      { id: "destination", header: "Destination", question: "Where should this deploy?",
+        options: [{ label: "Destination 1 (Production)" }, { label: "Destination 2 (Staging)" }] },
+      { id: "checks", question: "Which checks?", multiSelect: true,
+        options: [{ label: "Unit Tests" }, { label: "Browser Tests" }, { label: "Smoke Test" }] },
+      { id: "note", question: "Anything else?", options: [], allowOther: true, required: false },
+      { id: "token", question: "Paste the token.", options: [], allowOther: true, secret: true },
+      { id: "email", question: "Who should be notified?", options: [], allowOther: true, inputFormat: "email" as const },
+    ],
+  };
+  svc.onSessionEvent(id, request, 1, 100);
+  const note = `Use TOKEN=super-secret-note then ${"x".repeat(600)}`;
+  const answers = {
+    destination: "Destination 1 (Production)",
+    checks: ["Unit Tests", "Smoke Test"],
+    note,
+    token: "TOP-SECRET-VALUE",
+    email: "person@example.com",
+  };
+  assert.ok(svc.answerQuestion(id, "ask-summary", answers, { kind: "human", id: "device-7" }, "submit").ok);
+
+  const stored = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(stored.length, 1);
+  const payload = stored[0]!.payload as Extract<SessionEventPayload, { kind: "question_answered" }>;
+  const questionEvent = db.listEvents(id).find((event) => event.payload.kind === "question_request")!;
+  assert.equal(payload.questionEventSeq, questionEvent.seq);
+  assert.deepEqual(payload.answeredBy, { kind: "person" });
+  assert.deepEqual(payload.answers.slice(0, 2), [
+    { questionId: "destination", selected: ["Destination 1 (Production)"] },
+    { questionId: "checks", selected: ["Unit Tests", "Smoke Test"] },
+  ]);
+  const noteEntry = payload.answers[2]!;
+  assert.equal(noteEntry.questionId, "note");
+  assert.equal(noteEntry.truncated, true);
+  assert.equal(Array.from(noteEntry.text!).length, 500);
+  assert.ok(noteEntry.text!.startsWith("Use TOKEN="));
+  assert.equal(noteEntry.text!.includes("super-secret-note"), false, "free text passes through transcript redaction");
+  assert.deepEqual(payload.answers.slice(3), [
+    { questionId: "token", withheld: true },
+    { questionId: "email", withheld: true },
+  ]);
+  const rows = JSON.stringify(db.listEvents(id));
+  assert.equal(rows.includes("TOP-SECRET-VALUE"), false, "a secret answer is never written to the event log");
+  assert.equal(rows.includes("person@example.com"), false, "an email answer is never written to the event log");
+  assert.equal(hub.sessionEventCalls.some((event) => event.payload.kind === "question_answered"), true);
+
+  const audit = svc.governanceAudit(id).filter((entry) => entry.requestId === "ask-summary");
+  assert.deepEqual(audit.map((entry) => [entry.stage, entry.outcome]), [["request", "pending"], ["resolution", "answered"]]);
+  assert.match(audit[1]!.contentDigest ?? "", /^[a-f0-9]{64}$/);
+  const auditJson = JSON.stringify(audit);
+  for (const answer of ["Destination 1 (Production)", "Smoke Test", "super-secret-note", "TOP-SECRET-VALUE", "person@example.com"]) {
+    assert.equal(auditJson.includes(answer), false, `the audit keeps only a digest of ${answer}`);
+  }
+
+  // The runner's own resolution arrives later; then the event cache is rebuilt from runner history.
+  svc.onSessionEvent(id, { kind: "question_resolved", requestId: "ask-summary", answered: true }, 2, 101);
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 3);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "ask-summary", answered: true } },
+      { seq: 3, ts: 102, payload: request },
+    ],
+    page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
+  await svc.hydrateHistory(id);
+  const restored = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(restored.length, 1, "the summary survives a history cache reset, once, even when its occurrence is re-emitted");
+  const firstRequest = db.listEvents(id).find((event) => event.payload.kind === "question_request")!;
+  assert.deepEqual(restored[0]!.payload, { ...payload, questionEventSeq: firstRequest.seq });
+  assert.equal(restored[0]!.ts, stored[0]!.ts);
+  assert.equal(hub.sentOfType("answer_question").length, 1, "restoring never delivers another answer");
+});
+
+test("an answer to a question parked before its request event arrived is restored when history brings it (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const questions = [{ id: "q", header: "Target", question: "Where?", options: [{ label: "Staging" }, { label: "Production" }] }];
+  const request = { kind: "question_request" as const, requestId: "reused", occurrenceId: "request_new", questions };
+  // An older occurrence of the same provider request id is already settled in the cache.
+  db.reconcileRunnerHistory(id, 1, 2);
+  svc.onSessionEvent(id, { ...request, occurrenceId: "request_old" }, 1, 100);
+  svc.onSessionEvent(id, { kind: "question_resolved", requestId: "reused", occurrenceId: "request_old", answered: true }, 2, 101);
+  // A reconnect snapshot parks the newer occurrence before its request event reaches the cache.
+  db.setPendingApproval(id, { requestId: "reused", occurrenceId: "request_new", kind: "question", title: "Where?", options: [], questions });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(id, "reused", { q: "Production" }, undefined, "submit", undefined, "request_new").ok);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false,
+    "no summary is shown until its question exists, so it cannot attach to the older occurrence");
+
+  const page = (events: Array<{ seq: number; ts: number; payload: SessionEventPayload }>, throughSeq: number) => {
+    hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+      sessionId: id, ok: true, events, page: { logEpoch: 1, throughSeq, nextAfterSeq: throughSeq, hasMore: false } });
+  };
+  const history = [
+    { seq: 1, ts: 100, payload: { ...request, occurrenceId: "request_old" } },
+    { seq: 2, ts: 101, payload: { kind: "question_resolved" as const, requestId: "reused", occurrenceId: "request_old", answered: true } },
+    { seq: 3, ts: 102, payload: request },
+    { seq: 4, ts: 103, payload: { kind: "question_resolved" as const, requestId: "reused", occurrenceId: "request_new", answered: true } },
+  ];
+  db.reconcileRunnerHistory(id, 1, 4);
+  page(history.slice(2), 4);
+  await svc.hydrateHistory(id);
+  const answeredAfter = (expectedCount: number) => {
+    const events = db.listEvents(id);
+    const summaries = events.filter((event) => event.payload.kind === "question_answered");
+    assert.equal(summaries.length, expectedCount);
+    const newer = events.find((event) => event.payload.kind === "question_request" && event.payload.occurrenceId === "request_new")!;
+    const summary = summaries[0]!.payload as Extract<SessionEventPayload, { kind: "question_answered" }>;
+    assert.equal(summary.questionEventSeq, newer.seq, "the summary binds to the occurrence that was answered");
+    assert.deepEqual(summary.answers, [{ questionId: "q", selected: ["Production"] }]);
+  };
+  answeredAfter(1);
+
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 4);
+  page(history, 4);
+  await svc.hydrateHistory(id);
+  answeredAfter(1);
+});
+
+test("an answer to a snapshot-parked question attaches when its request frame then arrives live (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const questions = [{ id: "q", question: "Where?", options: [{ label: "Staging" }, { label: "Production" }] }];
+  const request = { kind: "question_request" as const, requestId: "late", occurrenceId: "request_late", questions };
+  db.reconcileRunnerHistory(id, 1, 0);
+  db.setPendingApproval(id, { requestId: "late", occurrenceId: "request_late", kind: "question", title: "Where?", options: [], questions });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(id, "late", { q: "Staging" }, undefined, "submit", undefined, "request_late").ok);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
+
+  svc.onSessionEvent(id, request, 1, 100);
+  svc.onSessionEvent(id, { kind: "question_resolved", requestId: "late", occurrenceId: "request_late", answered: true }, 2, 101);
+  const kinds = db.listEvents(id).map((event) => event.payload.kind);
+  assert.deepEqual(kinds, ["question_request", "question_answered", "question_resolved"]);
+  const summary = db.listEvents(id)[1]!.payload as Extract<SessionEventPayload, { kind: "question_answered" }>;
+  assert.equal(summary.questionEventSeq, db.listEvents(id)[0]!.seq);
+
+  // Bound now, it is restored once after a cache reset and is not bound again by a live replay.
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 2);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "late", occurrenceId: "request_late", answered: true } },
+    ],
+    page: { logEpoch: 1, throughSeq: 2, nextAfterSeq: 2, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+});
+
+test("an occurrence-less older request matches its own answer, but never a settled one for a newer occurrence (#2188)", () => {
+  const { db, hub, svc } = makeHarness();
+  const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
+  // An older runner's request carries no occurrence; the control plane mints the pending one.
+  const legacy = seedSession(svc, hub);
+  db.reconcileRunnerHistory(legacy, 1, 1);
+  svc.onSessionEvent(legacy, { kind: "question_request", requestId: "ask", questions }, 1, 100);
+  const minted = db.getSession(legacy)?.pendingApproval?.occurrenceId;
+  assert.ok(minted);
+  assert.ok(svc.answerQuestion(legacy, "ask", { q: "Yes" }, undefined, "submit", undefined, minted).ok);
+  const legacySummary = db.listEvents(legacy).find((event) => event.payload.kind === "question_answered");
+  assert.equal(legacySummary?.payload.kind === "question_answered" ? legacySummary.payload.questionEventSeq : null,
+    db.listEvents(legacy).find((event) => event.payload.kind === "question_request")!.seq);
+
+  // After an upgrade, a settled occurrence-less request must not take a newer occurrence's answer.
+  const upgraded = seedSession(svc, hub);
+  db.reconcileRunnerHistory(upgraded, 1, 2);
+  svc.onSessionEvent(upgraded, { kind: "question_request", requestId: "ask", questions }, 1, 100);
+  svc.onSessionEvent(upgraded, { kind: "question_resolved", requestId: "ask", answered: true }, 2, 101);
+  db.setPendingApproval(upgraded, { requestId: "ask", occurrenceId: "request_new", kind: "question", title: "Go?", options: [], questions });
+  db.updateSessionStatus(upgraded, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(upgraded, "ask", { q: "No" }, undefined, "submit", undefined, "request_new").ok);
+  assert.equal(db.listEvents(upgraded).some((event) => event.payload.kind === "question_answered"), false,
+    "the answer waits, unbound, for its own occurrence");
+});
+
+test("an answer accepted before the runner's history epoch is known is restored after it is adopted (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const request = { kind: "question_request" as const, requestId: "early", occurrenceId: "request_early",
+    questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }] };
+  assert.equal(db.getRunnerHistoryState(id)?.historyEpoch ?? null, null);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "early", { q: "Yes" }, undefined, "submit", undefined, "request_early").ok);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+
+  db.reconcileRunnerHistory(id, 0, 2);
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 2);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "early", occurrenceId: "request_early", answered: true } },
+    ],
+    page: { logEpoch: 0, throughSeq: 2, nextAfterSeq: 2, hasMore: false } });
+  await svc.hydrateHistory(id);
+  const restored = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0]!.payload.kind === "question_answered" ? restored[0]!.payload.questionEventSeq : null,
+    db.listEvents(id).find((event) => event.payload.kind === "question_request")!.seq);
+});
+
+test("a re-emitted occurrence whose answer never reached the provider is not shown as answered again (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const request = { kind: "question_request" as const, requestId: "retry", occurrenceId: "request_retry", async: true,
+    questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }] };
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "retry", { q: "Yes" }, undefined, "submit", undefined, "request_retry").ok);
+  db.reconcileRunnerHistory(id, 0, 1);
+  svc.onSessionEvent(id, { kind: "question_resolved", requestId: "retry", occurrenceId: "request_retry", answered: true }, 2, 101);
+  // The runner reopens the same occurrence after a pre-provider delivery failure.
+  svc.onSessionEvent(id, request, 3, 102);
+  const summaries = () => db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  const firstRequestSeq = () => db.listEvents(id).find((event) => event.payload.kind === "question_request")!.seq;
+  assert.equal(summaries().length, 1);
+  assert.equal(summaries()[0]!.payload.kind === "question_answered" ? summaries()[0]!.payload.questionEventSeq : null, firstRequestSeq());
+
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 3);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "retry", occurrenceId: "request_retry", answered: true } },
+      { seq: 3, ts: 102, payload: request },
+    ],
+    page: { logEpoch: 0, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.equal(summaries().length, 1);
+  assert.equal(summaries()[0]!.payload.kind === "question_answered" ? summaries()[0]!.payload.questionEventSeq : null, firstRequestSeq());
+});
+
+test("each answer to a re-emitted occurrence stays with its own request through a reset (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const request = { kind: "question_request" as const, requestId: "again", occurrenceId: "request_again", async: true,
+    questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }] };
+  db.reconcileRunnerHistory(id, 0, 0);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "again", { q: "Yes" }, undefined, "submit", undefined, "request_again").ok);
+  // The answer never reached the provider; the runner reopens the same occurrence, answered anew.
+  const delivery = hub.sentOfType("durable_session_command").at(-1)!;
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update", commandId: delivery.commandId, sessionId: id, state: "failed", revision: 1,
+  }), true);
+  svc.onSessionEvent(id, request, 2, 101);
+  const retried = svc.answerQuestion(id, "again", { q: "No" }, undefined, "submit", undefined, "request_again");
+  assert.ok(retried.ok, retried.error);
+  const shown = () => {
+    const events = db.listEvents(id);
+    const requests = events.filter((event) => event.payload.kind === "question_request").map((event) => event.seq);
+    return events.flatMap((event) => event.payload.kind === "question_answered"
+      ? [[requests.indexOf(event.payload.questionEventSeq!), event.payload.answers[0]!.selected![0]]] : []);
+  };
+  assert.deepEqual(shown(), [[0, "Yes"], [1, "No"]]);
+
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 2);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: request }, { seq: 2, ts: 101, payload: request }],
+    page: { logEpoch: 0, throughSeq: 2, nextAfterSeq: 2, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.deepEqual(shown(), [[0, "Yes"], [1, "No"]]);
+});
+
+test("a request reopened without a new request event keeps its latest answer through a reset (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
+  const request = { kind: "question_request" as const, requestId: "refused", occurrenceId: "request_refused", async: true, questions };
+  db.reconcileRunnerHistory(id, 0, 0);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "refused", { q: "Yes" }, undefined, "submit", undefined, "request_refused").ok);
+  // The runner refuses the delivery at once and restores the same pending request from its snapshot.
+  const delivery = hub.sentOfType("durable_session_command").at(-1)!;
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update", commandId: delivery.commandId, sessionId: id, state: "failed", revision: 1,
+  }), true);
+  db.setPendingApproval(id, { requestId: "refused", occurrenceId: "request_refused", recoveryId: "request_refused",
+    kind: "question", title: "Go?", options: [], questions, async: true });
+  const retried = svc.answerQuestion(id, "refused", { q: "No" }, undefined, "submit", undefined, "request_refused");
+  assert.ok(retried.ok, retried.error);
+  const latest = () => {
+    const summaries = db.listEvents(id).flatMap((event) => event.payload.kind === "question_answered" ? [event.payload] : []);
+    return summaries.at(-1)?.answers[0]?.selected;
+  };
+  assert.deepEqual(latest(), ["No"]);
+
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 1);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: request }],
+    page: { logEpoch: 0, throughSeq: 1, nextAfterSeq: 1, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+  assert.deepEqual(latest(), ["No"]);
+});
+
+test("a snapshot-parked async question answered behind a policy-hook card shows its answer when its request arrives (#2188)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.upsertGovernancePolicy({
+    policyId: "ask-before-write", name: "Ask Before Write", effect: "ask", priority: 100, enabled: true,
+    scope: { toolName: "Write" },
+  });
+  svc.evaluatePolicyHook(id, {
+    hookEventName: "PreToolUse", providerSessionId: "provider-hook-summary", permissionMode: "plan",
+    toolUseId: "write-hook-summary", context: { toolName: "Write" },
+  }, true);
+  const hook = db.getSession(id)!.pendingApproval!;
+  assert.equal(hook.kind, "policy_hook");
+  const questions = [{ id: "choice", question: "Which option?", options: [{ label: "A" }, { label: "B" }] }];
+  db.setPendingApproval(id, { ...hook, additionalRequests: [...(hook.additionalRequests ?? []), {
+    requestId: "behind-hook", occurrenceId: "request_behind_hook", recoveryId: "request_behind_hook", kind: "question",
+    title: "Which option?", options: [], questions, async: true,
+  }] });
+  assert.ok(svc.answerQuestion(id, "behind-hook", { choice: "B" }, undefined, "submit", undefined, "request_behind_hook").ok);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
+
+  svc.onSessionEvent(id, { kind: "question_request", async: true, requestId: "behind-hook",
+    occurrenceId: "request_behind_hook", questions });
+  const summaries = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(summaries.length, 1);
+  assert.deepEqual(summaries[0]!.payload.kind === "question_answered" ? summaries[0]!.payload.answers : null,
+    [{ questionId: "choice", selected: ["B"] }]);
+});
+
+test("a snapshot-parked answer whose request arrives live before the history epoch is known survives a later reset (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
+  const request = { kind: "question_request" as const, requestId: "parked", occurrenceId: "request_parked", questions };
+  assert.equal(db.getRunnerHistoryState(id)?.historyEpoch ?? null, null);
+  db.setPendingApproval(id, { requestId: "parked", occurrenceId: "request_parked", kind: "question", title: "Go?", options: [], questions });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(id, "parked", { q: "No" }, undefined, "submit", undefined, "request_parked").ok);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+
+  db.reconcileRunnerHistory(id, 0, 1);
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 1);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: request }],
+    page: { logEpoch: 0, throughSeq: 1, nextAfterSeq: 1, hasMore: false } });
+  await svc.hydrateHistory(id);
+  const restored = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(restored.length, 1);
+  assert.deepEqual(restored[0]!.payload.kind === "question_answered" ? restored[0]!.payload.answers : null,
+    [{ questionId: "q", selected: ["No"] }]);
+});
+
+test("an older runner's snapshot-parked answer is never guessed onto an occurrence-less request (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
+  const request = { kind: "question_request" as const, requestId: "legacy", questions };
+  const parkAndAnswer = (id: string, answer: string) => {
+    db.setPendingApproval(id, { requestId: "legacy", kind: "question", title: "Go?", options: [], questions });
+    db.updateSessionStatus(id, "input_required", Date.now());
+    const minted = db.getSession(id)?.pendingApproval?.occurrenceId;
+    assert.ok(minted, "the control plane mints the pending occurrence an older runner omits");
+    assert.ok(svc.answerQuestion(id, "legacy", { q: answer }, undefined, "submit", undefined, minted).ok);
+    assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
+  };
+  const summaries = (id: string) => db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+
+  // A request id alone cannot say which use of it was answered, so neither a live frame nor
+  // history attaches the answer: the row keeps the older-runner fallback, and a later reuse of the
+  // id never inherits it.
+  const live = seedSession(svc, hub);
+  db.reconcileRunnerHistory(live, 1, 0);
+  parkAndAnswer(live, "Yes");
+  svc.onSessionEvent(live, request, 1, 100);
+  svc.onSessionEvent(live, { kind: "question_resolved", requestId: "legacy", answered: true }, 2, 101);
+  svc.onSessionEvent(live, request, 3, 102);
+  assert.deepEqual(summaries(live), []);
+
+  const hydrated = seedSession(svc, hub);
+  db.reconcileRunnerHistory(hydrated, 1, 0);
+  parkAndAnswer(hydrated, "No");
+  db.reconcileRunnerHistory(hydrated, 1, 4);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: hydrated, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "legacy", answered: true } },
+      { seq: 3, ts: 102, payload: request },
+      { seq: 4, ts: 103, payload: { kind: "question_resolved", requestId: "legacy", answered: true } },
+    ],
+    page: { logEpoch: 1, throughSeq: 4, nextAfterSeq: 4, hasMore: false } });
+  await svc.hydrateHistory(hydrated);
+  assert.deepEqual(summaries(hydrated), []);
+  db.clearSessionEvents(hydrated);
+  db.reconcileRunnerHistory(hydrated, 1, 4);
+  await svc.hydrateHistory(hydrated);
+  assert.deepEqual(summaries(hydrated), [], "a cache reset does not guess either");
+});
+
+test("restoring a stored answer never moves the session's last activity backward (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const request = { kind: "question_request" as const, requestId: "ask", occurrenceId: "request_ask",
+    questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }] }] };
+  db.reconcileRunnerHistory(id, 1, 1);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "ask", { q: "Yes" }).ok);
+  const answeredAt = db.listEvents(id).find((event) => event.payload.kind === "question_answered")!.ts;
+  const laterMessage = answeredAt + 60_000;
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 3);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: answeredAt + 1, payload: { kind: "question_resolved", requestId: "ask", answered: true } },
+      { seq: 3, ts: laterMessage, payload: { kind: "agent_message", text: "Done.", final: true } },
+    ],
+    page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+  assert.equal(db.getSession(id)?.lastEventAt, laterMessage);
+});
+
+test("a dismissed question stores no answer summary (#2188)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, {
+    kind: "question_request", requestId: "ask-dismiss",
+    questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }],
+  });
+  assert.ok(svc.answerQuestion(id, "ask-dismiss", {}, undefined, "dismiss").ok);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
+  assert.deepEqual(svc.governanceAudit(id).map((entry) => [entry.stage, entry.outcome]),
+    [["request", "pending"], ["resolution", "dismissed"]]);
+});
+
+test("an undeliverable answer stores no answer summary (#2188)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, {
+    kind: "question_request", requestId: "ask-offline",
+    questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }] }],
+  });
+  hub.deliver = false;
+  assert.equal(svc.answerQuestion(id, "ask-offline", { q: "Yes" }).ok, false);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
 });
 
 test("governance audit records explicit cancellation as dismissed", () => {
