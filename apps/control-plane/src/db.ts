@@ -18148,7 +18148,7 @@ export class ControlPlaneDb {
    * binds to the occurrence so it is restored once. */
   restorableQuestionAnswerSummary(
     event: SessionEvent,
-    options?: { unboundOnly?: boolean },
+    options?: { unboundOnly?: boolean; live?: boolean },
   ): { payload: Extract<SessionEventPayload, { kind: "question_answered" }>; timestamp: number } | null {
     if (event.payload.kind !== "question_request") return null;
     const cached = this.stmt("SELECT runner_seq FROM session_events WHERE id=? AND session_id=?")
@@ -18162,9 +18162,11 @@ export class ControlPlaneDb {
       ) as { payload: string; created_at: number } | undefined;
     if (bound) return options?.unboundOnly ? null : { payload: JSON.parse(bound.payload), timestamp: bound.created_at };
     // An older runner's request carries no occurrence, while the answer kept the one the control
-    // plane minted for its pending card. Such a request takes the answer only as the newest cached
-    // request with its id, so a settled earlier use of a reused id never does.
+    // plane minted for its pending card. Only a live frame can take it: live frames are contiguous,
+    // so the newest request with its id is the one answered. History may still be missing the
+    // answered request, so there such an answer stays unbound and the row reads "Answered".
     const legacy = event.payload.occurrenceId === undefined;
+    if (legacy && !options?.live) return null;
     if (legacy && this.stmt(
       `SELECT 1 FROM session_events WHERE session_id=? AND kind='question_request' AND seq>?
          AND json_extract(payload,'$.requestId')=? LIMIT 1`,
