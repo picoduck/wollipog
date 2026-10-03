@@ -2,6 +2,8 @@ import { expect, test, type Locator } from "@playwright/test";
 import { pinWidestFace } from "./font-geometry";
 import { expectGeometry } from "./geometry-margins";
 
+// Insets are measured to the text column: the description's --space-6 gutters are its own inline
+// padding (#2184), so its border box may span the row on a phone while its text stays inset.
 const readDescriptionLayout = (description: Locator) => description.evaluate((element) => {
   const descriptionRect = element.getBoundingClientRect();
   const eventRect = element.parentElement!.getBoundingClientRect();
@@ -9,8 +11,8 @@ const readDescriptionLayout = (description: Locator) => description.evaluate((el
   return {
     textAlign: style.textAlign,
     overflowWrap: style.overflowWrap,
-    leftInset: descriptionRect.left - eventRect.left,
-    rightInset: eventRect.right - descriptionRect.right,
+    leftInset: descriptionRect.left + Number.parseFloat(style.paddingLeft) - eventRect.left,
+    rightInset: eventRect.right - descriptionRect.right + Number.parseFloat(style.paddingRight),
     scrollWidth: element.scrollWidth,
     clientWidth: element.clientWidth,
   };
@@ -78,7 +80,8 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     const description = page.locator(`[id="${handoffDescriptionId}"]`);
     await expect(description).toContainText("Fresh provider conversation");
     const descriptionLayout = await readDescriptionLayout(description);
-    expect(descriptionLayout.textAlign).toBe("start");
+    // #2184: the description shares the divider label's centred axis.
+    expect(descriptionLayout.textAlign).toBe("center");
     expect(descriptionLayout.overflowWrap).toBe("anywhere");
     expectGeometry(
       Math.abs(descriptionLayout.leftInset - descriptionLayout.rightInset),
