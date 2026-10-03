@@ -184,19 +184,6 @@ for (const banner of [false, true]) {
         trigger: page.locator(".session-usage > button").first(),
         panel: page.locator(".session-usage-popover").first(),
       },
-      {
-        // The + menu's guardrail help: the menu itself is portalled, the help inside it is not.
-        name: "budget help",
-        open: async () => {
-          if (await menu.count() === 0) {
-            await page.getByRole("button", { name: "Add and Modes" }).click();
-            await dialogMotionSettled(page);
-          }
-          await menu.getByRole("button", { name: "About Recurring Cost Threshold" }).click();
-        },
-        trigger: menu.getByRole("button", { name: "About Recurring Cost Threshold" }),
-        panel: menu.locator(".plus-budget-help-popover"),
-      },
     ];
     const opened: Rect[] = [];
     for (const surface of cases) {

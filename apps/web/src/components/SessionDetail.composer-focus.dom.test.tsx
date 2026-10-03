@@ -5137,8 +5137,21 @@ for (const [status, reason] of [
       described(box?.querySelector<HTMLButtonElement>(".permission-mode-menu > .cbar-trigger"), "the permission control");
       described(box?.querySelector<HTMLButtonElement>(".model-settings-menu > .cbar-trigger"), "the model control");
       described(box?.querySelector<HTMLButtonElement>(".voice-btn"), "the mic");
+      // + stays openable while paused (#2175), so Guardrails can be read and changed; the rows
+      // that would act on the composer refuse with the same reason.
       const plus = box?.querySelector<HTMLButtonElement>(".plus-btn");
-      assert.equal(plus?.disabled, true, "+ is disabled as before");
+      assert.ok(plus);
+      assert.equal(plus.disabled, false, "+ opens while the composer is paused");
+      await act(async () => fireDomEvent.click(plus));
+      const menu = domWindow.document.querySelector('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
+      assert.ok(menu, "+ opens its menu on a paused composer");
+      const row = (label: string) => ([...menu.querySelectorAll("button.menu-item")] as unknown as HTMLButtonElement[])
+        .find((item) => item.querySelector(".menu-text")?.textContent === label);
+      const attach = row("Attach Image");
+      assert.equal(attach?.disabled, true, "Attach Image refuses on a paused composer");
+      assert.equal(attach?.querySelector(".menu-desc")?.textContent, reason, "Attach Image says why");
+      const guardrails = row("Guardrails…");
+      assert.equal(guardrails?.disabled, false, "Guardrails… stays available on a paused composer");
     } finally {
       await unmountFixture(fixture);
       delete speech.SpeechRecognition;

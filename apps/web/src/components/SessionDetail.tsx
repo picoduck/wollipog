@@ -17,8 +17,6 @@ import {
 import { flushSync } from "react-dom";
 import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
-  DEFAULT_LIVE_CHILD_LIMIT,
-  MAX_LIVE_CHILD_LIMIT,
   MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
   validatePromptImageInputs,
@@ -184,7 +182,8 @@ import { ContextWindowMeter } from "./ContextWindowMeter.js";
 import { resolveContextWindowCapacity } from "../context-window-capacity.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
 import { SessionUsageMenuGroup } from "./SessionUsageMenuGroup.js";
-import { useAnchoredPopover } from "./anchored-popover.js";
+import { GuardrailsDialog } from "./GuardrailsDialog.js";
+import { guardrailSummary } from "../guardrail-values.js";
 import {
   hasSavedFollowTailAnchor,
   isFollowTailResumeKey,
@@ -209,7 +208,7 @@ import {
 import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
 import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId, receiptRowIds } from "./TranscriptReceipt.js";
-import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, ImageOffIcon, InfoIcon, MicIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, ImageOffIcon, MicIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   durableCommandAttachmentNote,
   buildComposerCommandRegistry,
@@ -4553,6 +4552,17 @@ function SessionDetailLoaded({
     },
     [api, configRefusal, sessionId],
   );
+  // The Guardrails dialog (#2175) waits for its one request, so a refused or failed save stays in
+  // the dialog instead of being fired and forgotten. A saved change joins the pending configuration
+  // the next prompt carries, as applyConfig's changes do.
+  const saveGuardrails = useCallback(
+    async (patch: Partial<SessionConfig>) => {
+      if (configRefusal !== null) throw new Error(configRefusal);
+      await api.setConfig(sessionId, patch);
+      pendingConfig.current = { ...pendingConfig.current, ...patch };
+    },
+    [api, configRefusal, sessionId],
+  );
 
   const planActive = session.permissionMode === "plan";
   const togglePlan = (on = !planActive) => {
@@ -6362,7 +6372,8 @@ function SessionDetailLoaded({
                     planActive={planActive}
                     planSupported={planSupported}
                     onTogglePlan={togglePlan}
-                    onApply={applyConfig}
+                    onSaveGuardrails={saveGuardrails}
+                    configRefusal={configRefusal}
                     onSetParentControl={(mode) => {
                       void api.setParentControl(sessionId, mode).then(loadSession, (cause) => {
                         setError((cause as Error).message);
@@ -6379,6 +6390,7 @@ function SessionDetailLoaded({
                       });
                     }}
                     disabled={!canPrompt}
+                    {...(promptUnavailableReason !== null ? { disabledReason: promptUnavailableReason } : {})}
                     imageMimeTypes={allowedImageMimeTypes}
                     imagesRefusedReason={modelRefusesImages}
                     onAttachImages={addFiles}
@@ -7112,16 +7124,19 @@ export function CampaignContinuationNotice({
   );
 }
 
-/** Codex-style "+" menu in the composer: Attach Image, Plan mode, and the cost budget. */
+/** Codex-style "+" menu in the composer: Attach Image, Plan mode, and Guardrails…, which opens the
+ * Guardrails dialog (#2175). */
 export function ComposerPlusMenu({
   session,
   planActive,
   planSupported,
   onTogglePlan,
-  onApply,
+  onSaveGuardrails,
+  configRefusal = null,
   onSetParentControl,
   onSetParentControlPolicy,
   disabled,
+  disabledReason = "This session cannot accept a prompt right now.",
   imageMimeTypes,
   imagesRefusedReason = modelRefusesImagesSentence(null),
   onAttachImages,
@@ -7130,10 +7145,18 @@ export function ComposerPlusMenu({
   planActive: boolean;
   planSupported: boolean;
   onTogglePlan: (on?: boolean) => void;
-  onApply: (patch: Partial<SessionConfig>) => void;
+  /** Sends the Guardrails dialog's changes in one configuration request; rejects on failure. */
+  onSaveGuardrails: (patch: Partial<SessionConfig>) => Promise<void>;
+  /** Why this person may not change the session's configuration (#1857): Plan Mode and the
+   * Orchestrator controls are disabled with it, and Guardrails opens read-only. */
+  configRefusal?: string | null;
   onSetParentControl?: (mode: ParentControlMode) => void;
   onSetParentControlPolicy?: (category: DelegatableWorkflowDecisionCategory, authority: WorkflowDecisionAuthority) => void;
+  /** The composer cannot send. The menu still opens, so Guardrails can be read and changed while
+   * the session is paused, stopped or read-only; only Attach Image and Plan Mode refuse. */
   disabled: boolean;
+  /** Why the composer cannot send, shown under the rows that refuse while `disabled`. */
+  disabledReason?: string;
   /** Exactly the types the connected runner and selected model accept; empty when images cannot be sent. */
   imageMimeTypes: readonly string[];
   /** Why images cannot be attached when `imageMimeTypes` is empty: the composer's one sentence for a
@@ -7142,9 +7165,13 @@ export function ComposerPlusMenu({
   onAttachImages: (files: File[]) => void | Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
+  const [guardrailsOpen, setGuardrailsOpen] = useState(false);
   const popover = useDismissiblePopover(open, setOpen, "composer-modes-popover");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imagesSupported = imageMimeTypes.length > 0;
+  // Plan Mode changes the configuration, so it refuses for the same reasons the bar's Plan toggle
+  // does: a composer that cannot send, or a person refused configuration.
+  const planRefusal = disabled ? disabledReason : configRefusal;
   // Attachment follows the composer, exactly as paste (a disabled textarea) and drop (its own
   // `canPrompt` guard) already do. `disabled` can flip while the panel — or the native chooser —
   // is already open, so the item and the change handler are gated separately.
@@ -7184,7 +7211,6 @@ export function ComposerPlusMenu({
         ref={popover.triggerRef}
         square
         className="plus-btn"
-        disabled={disabled}
         aria-label="Add and Modes"
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -7196,7 +7222,7 @@ export function ComposerPlusMenu({
         <PlusIcon size={16} />
       </ComposerButton>
       {open && (
-        // Menu-shaped, but it holds the guardrail fields too, so it is a dialog rather than a menu.
+        // Menu-shaped, but it holds the Orchestrator selects too, so it is a dialog rather than a menu.
         <MenuSurface
           surfaceRef={popover.panelRef}
           anchor={{ trigger: popover.triggerRef }}
@@ -7217,7 +7243,7 @@ export function ComposerPlusMenu({
             description={!imagesSupported
               ? imagesRefusedReason
               : disabled
-                ? "This session cannot accept a prompt right now."
+                ? disabledReason
                 : `Photos, camera, or files · up to ${MAX_PROMPT_IMAGES}`}
             disabled={!canAttach}
             onClick={() => {
@@ -7234,7 +7260,8 @@ export function ComposerPlusMenu({
               <MenuItem
                 role="checkbox"
                 checked={planActive}
-                description={<>Research + propose a plan, no edits. Or type <code>/plan</code>.</>}
+                description={planRefusal ?? <>Research + propose a plan, no edits. Or type <code>/plan</code>.</>}
+                disabled={planRefusal !== null}
                 onClick={() => {
                   onTogglePlan();
                   popover.close(true);
@@ -7246,48 +7273,19 @@ export function ComposerPlusMenu({
           )}
 
           <MenuLabel>Guardrails</MenuLabel>
-          <GuardrailInput
-            prefix="$"
-            label="Recurring Cost Threshold"
-            step="0.5"
-            value={session.costBudgetUsd}
-            hint="Pauses when spend reaches this amount. Continue advances the next threshold by another equal allowance."
-            onCommit={(v) => onApply({ costBudgetUsd: v })}
-          />
-          <CheckpointsInput
-            value={session.costCheckpointsUsd ?? null}
-            approvedUsd={session.costCheckpointApprovedUsd ?? null}
-            onCommit={(list) => onApply({ costCheckpointsUsd: list })}
-          />
-          <GuardrailInput
-            prefix="#"
-            label="Tool-Call Threshold"
-            step="1"
-            integer
-            value={session.maxToolCalls}
-            hint={
-              "Pauses after this many tool calls." +
-              (session.maxToolCalls != null && session.toolCallCount != null ? ` ${session.toolCallCount} used.` : "")
-            }
-            onCommit={(v) => onApply({ maxToolCalls: v })}
-          />
-          <GuardrailInput
-            prefix="↳"
-            label="Live Child Limit"
-            step="1"
-            integer
-            value={session.maxChildSessions}
-            placeholder={String(DEFAULT_LIVE_CHILD_LIMIT)}
-            max={String(MAX_LIVE_CHILD_LIMIT)}
-            emptyMeansNoop
-            hint={session.liveChildCapacity
-              ? `${session.liveChildCapacity.limit} limit · ${session.liveChildCapacity.occupied} occupied · ${session.liveChildCapacity.remaining} remaining. Set 0 to pause new child admission. Terminal and archived children release their slots.`
-              : "A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."}
-            onCommit={(v) => onApply({ maxChildSessions: v })}
-          />
+          <MenuItem
+            role="button"
+            description={guardrailSummary(session)}
+            onClick={() => {
+              popover.close(false);
+              setGuardrailsOpen(true);
+            }}
+          >
+            Guardrails…
+          </MenuItem>
           {sessionRole(session) === "orchestrator" && (
-            <div className="plus-budget">
-              <span className="plus-budget-prefix" aria-hidden="true">↯</span>
+            <div className="plus-orchestrator">
+              <span className="plus-orchestrator-prefix" aria-hidden="true">↯</span>
               <div className="parent-control-settings">
                 {session.orchestratorPolicy && <section className="active-campaign-policy" aria-label="Active Campaign Behavior">
                   <strong>Campaign Behavior</strong>
@@ -7342,6 +7340,7 @@ export function ComposerPlusMenu({
                   <span className="parent-control-setting-label">Descendant Requests</span>
                   <Select<ParentControlMode>
                     label="Parent Control"
+                    disabled={configRefusal !== null}
                     value={session.parentControl ?? "off"}
                     onChange={(value) => onSetParentControl?.(value)}
                     options={[
@@ -7362,6 +7361,7 @@ export function ComposerPlusMenu({
                     <span className="parent-control-setting-label">{label}</span>
                     <Select<WorkflowDecisionAuthority>
                       label={label}
+                      disabled={configRefusal !== null}
                       value={session.parentControlPolicy!.decisions[category]}
                       onChange={(value) => onSetParentControlPolicy?.(category, value)}
                       options={[
@@ -7372,170 +7372,23 @@ export function ComposerPlusMenu({
                     {category === "ui_evidence_approval" && <span className="muted parent-control-help">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</span>}
                   </div>
                 ))}
+                {configRefusal !== null && <span className="muted parent-control-help">{configRefusal}</span>}
                 <span className="muted parent-control-help">Only an authenticated human can change these assignments. Existing unconsumed approvals are revoked when the policy changes. Secrets, authentication, persistent grants, governance, budgets, and tool guardrails remain human-only.</span>
               </div>
             </div>
           )}
         </MenuSurface>
       )}
-    </div>
-  );
-}
-
-/**
- * Soft cost checkpoints as a comma-separated dollar list ("1, 2.5"). Each parks the session once
- * with a Continue/Stop card ahead of the hard budget; an empty commit clears them.
- */
-function CheckpointsInput({
-  value,
-  approvedUsd,
-  onCommit,
-}: {
-  value: number[] | null;
-  approvedUsd: number | null;
-  onCommit: (list: number[]) => void;
-}) {
-  const live = (value ?? []).join(", ");
-  const [draft, setDraft] = useState<string | null>(null);
-  const inputId = useId();
-  const hint = `Enter absolute spend amounts separated by commas. Each pauses once; after approval, it does not ask again. ` +
-    `Checkpoints at or above the recurring cost threshold do not pause separately.` +
-    (approvedUsd != null ? ` Approved through $${approvedUsd.toFixed(2)}.` : "");
-  const commit = () => {
-    if (draft === null) return;
-    const list = draft.split(/[\s,]+/).map(Number).filter((usd) => Number.isFinite(usd) && usd > 0);
-    setDraft(null);
-    if (list.join(",") !== (value ?? []).join(",")) onCommit(list);
-  };
-  return (
-    <div className="plus-budget">
-      <span className="plus-budget-prefix" aria-hidden="true">$…</span>
-      <input
-        id={inputId}
-        type="text"
-        inputMode="decimal"
-        placeholder="none"
-        value={draft ?? live}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={commit}
-        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }}
-      />
-      <span className="plus-budget-copy">
-        <span className="plus-budget-label-row">
-          <label className="plus-budget-label" htmlFor={inputId}>Cost Checkpoints</label>
-          <GuardrailHelp label="Cost Checkpoints" hint={hint} />
-        </span>
-      </span>
-    </div>
-  );
-}
-
-/**
- * A guardrail numeric input. A controlled draft shadows the server value only WHILE editing, so a
- * WebSocket echo (or another dashboard's change) can't remount the input mid-edit and discard
- * typing; unfocused, it tracks the live value. Typos (badInput like "1e", or sub-1 values for
- * integer fields that would floor into the clear sentinel) are a no-op + display resync — only a
- * deliberate empty/0 reaches the caller. Spend/tool callers treat that as clear; the live-child
- * caller treats it as pausing new child admission.
- */
-function GuardrailInput({
-  prefix,
-  label,
-  step,
-  integer,
-  value,
-  placeholder = "∞",
-  max,
-  emptyMeansNoop,
-  hint,
-  onCommit,
-}: {
-  prefix: string;
-  label: string;
-  step: string;
-  integer?: boolean;
-  value: number | null | undefined;
-  placeholder?: string;
-  max?: string;
-  /** This field has no clear sentinel: zero is meaningful, while an empty edit is a no-op. */
-  emptyMeansNoop?: boolean;
-  hint: string;
-  onCommit: (v: number) => void;
-}) {
-  const [draft, setDraft] = useState<string | null>(null); // null = not editing
-  const inputId = useId();
-  return (
-    <div className="plus-budget">
-      <span className="plus-budget-prefix" aria-hidden="true">{prefix}</span>
-      <input
-        id={inputId}
-        type="number"
-        min="0"
-        max={max}
-        step={step}
-        placeholder={placeholder}
-        value={draft ?? (value ?? "")}
-        onFocus={(e) => setDraft(e.target.value)}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={(e) => {
-          if (draft === null) return;
-          if (emptyMeansNoop && draft.trim() === "") {
-            setDraft(null);
-            return;
-          }
-          const v = parseFloat(draft);
-          if (e.target.validity.badInput || e.target.validity.rangeOverflow || e.target.validity.rangeUnderflow ||
-              (integer && Number.isFinite(v) && v > 0 && v < 1)) {
-            setDraft(null); // typo — resync to the live value, don't clear an armed limit
-            return;
-          }
-          setDraft(null);
-          onCommit(Number.isFinite(v) && v > 0 ? (integer ? Math.floor(v) : v) : 0);
-        }}
-      />
-      <span className="plus-budget-copy">
-        <span className="plus-budget-label-row">
-          <label className="plus-budget-label" htmlFor={inputId}>{label}</label>
-          <GuardrailHelp label={label} hint={hint} />
-        </span>
-      </span>
-    </div>
-  );
-}
-
-/** Compact, keyboard-dismissible disclosure for guardrail guidance that would otherwise dominate the menu. */
-function GuardrailHelp({ label, hint }: { label: string; hint: string }) {
-  const popover = useAnchoredPopover<HTMLSpanElement, HTMLButtonElement>({
-    width: 224,
-    height: 96,
-    consumeEscape: true,
-  });
-  const popoverId = useId();
-  return (
-    <span
-      ref={popover.rootRef}
-      className={`plus-budget-help${popover.open ? " is-open" : ""}`}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) popover.close();
-      }}
-    >
-      <button
-        ref={popover.anchorRef}
-        className="plus-budget-info"
-        type="button"
-        aria-label={`About ${label}`}
-        aria-expanded={popover.open}
-        aria-controls={popoverId}
-        aria-describedby={popover.open ? popoverId : undefined}
-        title={`About ${label}`}
-        onClick={popover.toggle}
-      >
-        <InfoIcon size={14} />
-      </button>
-      {popover.open && (
-        <span className="plus-budget-help-popover" id={popoverId} role="note" style={popover.style}>{hint}</span>
+      {guardrailsOpen && (
+        <GuardrailsDialog
+          session={session}
+          configRefusal={configRefusal}
+          onSave={onSaveGuardrails}
+          onClose={() => setGuardrailsOpen(false)}
+          returnFocusRef={popover.triggerRef}
+        />
       )}
-    </span>
+    </div>
   );
 }
 

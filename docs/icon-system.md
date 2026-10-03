@@ -49,6 +49,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
+| `CostIcon` | Lucide | `DollarSign` | A dollar amount inside a field, such as the Guardrails cost thresholds. |
+| `CountIcon` | Lucide | `Hash` | A whole count inside a field, such as the Guardrails tool-call and live-child limits. |
 | `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability; a skill step in the transcript. |
 | `RecommendedIcon` | Lucide | `Sparkles` | Something Wollipog recommends, such as a built-in skill. |
 | `ArchiveIcon` | Lucide | `Archive` | Archived Sessions destination, outline like every rail glyph. |

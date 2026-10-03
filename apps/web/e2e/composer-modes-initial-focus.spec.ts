@@ -3,11 +3,11 @@ import { devices, expect, test, type Page } from "@playwright/test";
 /**
  * Where focus lands when the composer's Add and Modes panel opens (#1904).
  *
- * The panel focuses its first enabled control. With Attach Image disabled (no image support) and no
- * Plan Mode item, that control is the Recurring Cost Threshold number field — and on a phone,
- * focusing a text field summons the software keyboard over the sheet the user just opened. A coarse
- * pointer therefore lands on the panel itself instead of a text-entry field, while a keyboard user
- * on a fine pointer keeps moving straight into the first control.
+ * The panel focuses its first enabled control. On a phone, focusing a text field would summon the
+ * software keyboard over the sheet the user just opened, so a coarse pointer must never land on one.
+ * Since the guardrail fields moved into the Guardrails dialog (#2175) the panel holds no text field:
+ * with Attach Image disabled (no image support) and no Plan Mode item, the first enabled control is
+ * the Guardrails… row, on either pointer.
  */
 
 const phone = devices["Pixel 7"];
@@ -60,7 +60,7 @@ test.describe("on a coarse pointer", () => {
     deviceScaleFactor: phone.deviceScaleFactor,
   });
 
-  test("opening with images and Plan both unsupported focuses the panel, not the threshold field", async ({ page }) => {
+  test("opening with images and Plan both unsupported focuses the Guardrails… row, not a field", async ({ page }) => {
     await openSession(page, { images: false, plan: false });
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches),
       "this emulation must report the coarse pointer the rule is keyed on").toBe(true);
@@ -68,14 +68,14 @@ test.describe("on a coarse pointer", () => {
     await page.getByRole("button", { name: "Add and Modes" }).tap();
     const panel = page.getByRole("dialog", { name: PANEL });
     await expect(panel).toBeVisible();
-    // The case the bug needs: nothing above the threshold field can take focus.
+    // The case the bug needed: nothing above the guardrail rows can take focus.
     await expect(page.getByRole("button", { name: "Attach Image", exact: true })).toBeDisabled();
     await expect(page.getByRole("checkbox", { name: "Plan Mode" })).toHaveCount(0);
     await settle(page);
 
     const state = await focused(page);
     expect(["input", "textarea", "select"], "no text-entry field may take focus on open").not.toContain(state.tag);
-    expect(state.isPanel, "focus lands on the panel itself").toBe(true);
+    await expect(page.getByRole("button", { name: "Guardrails…" }), "focus lands on the first enabled row").toBeFocused();
     await expect(panel).toHaveAttribute("aria-label", PANEL);
   });
 
@@ -111,8 +111,8 @@ test.describe("on a fine pointer", () => {
 
       const state = await focused(page);
       expect(state.inPanel, "keyboard opening moves focus into the panel").toBe(true);
-      // Today's rule, unchanged: the first enabled control, here the threshold field.
-      expect(state.tag).toBe("input");
+      // Today's rule, unchanged: the first enabled control, here the Guardrails… row.
+      await expect(page.getByRole("button", { name: "Guardrails…" })).toBeFocused();
 
       await page.keyboard.press("Escape");
       await expect(page.getByRole("dialog", { name: PANEL })).toHaveCount(0);

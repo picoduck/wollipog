@@ -5698,8 +5698,9 @@ textarea {
   font: var(--type-body);
 }
 /* Move to Project, Move to Workspace and New Workspace (#2163). Why the primary is disabled
-   (§7.3): the footer's left slot, small and dim; its own row on a phone, above the two buttons. */
-.modal-foot > :is(.session-move-reason, .switch-account-reason) {
+   (§7.3): the footer's left slot, small and dim; its own row on a phone, above the two buttons.
+   Guardrails (#2175) puts its one footer line here too: what empty means, or a Viewer's refusal. */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -5707,7 +5708,7 @@ textarea {
   font: var(--type-small);
 }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -5968,21 +5969,23 @@ textarea {
   color: var(--text-dim);
   line-height: 1.55;
 }
-.plus-budget {
+/* The Orchestrator block in the + menu: a leading glyph column, then its settings. It moves into
+   the Orchestrator Controls dialog with #2192. */
+.plus-orchestrator {
   display: grid;
-  grid-template-columns: 20px 68px minmax(0, 1fr);
+  grid-template-columns: 20px minmax(0, 1fr);
   align-items: start;
-  column-gap: 6px;
-  padding: 2px 8px 8px;
+  column-gap: var(--space-2);
+  padding: 0 var(--space-2) var(--space-2);
 }
-.plus-budget-prefix {
+.plus-orchestrator-prefix {
   color: var(--text-faint);
-  font-size: 13px;
+  font-size: var(--text-base);
   line-height: 29px;
   text-align: center;
 }
 .parent-control-settings {
-  grid-column: 2 / -1;
+  grid-column: 2;
   display: grid;
   gap: 6px;
   min-width: 0;
@@ -6006,73 +6009,6 @@ textarea {
 }
 .parent-control-setting .ui-select-trigger { font-size: var(--text-sm); }
 .parent-control-help { line-height: var(--leading-normal); }
-.plus-budget input {
-  width: 68px;
-  padding: 5px 7px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 12.5px;
-}
-.plus-budget-copy {
-  display: block;
-  min-width: 0;
-}
-.plus-budget-label-row {
-  display: flex;
-  align-items: center;
-  min-height: 29px;
-  gap: 4px;
-}
-.plus-budget-label {
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-tight);
-}
-.plus-budget-help {
-  position: relative;
-  display: inline-flex;
-  flex: 0 0 auto;
-}
-.plus-budget-info {
-  display: inline-grid;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  place-items: center;
-  border: 0;
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-}
-.plus-budget-info:hover,
-.plus-budget-info:focus-visible,
-.plus-budget-help.is-open .plus-budget-info {
-  background: var(--bg-elev-2);
-  color: var(--text);
-}
-.plus-budget-help-popover {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  right: -6px;
-  z-index: var(--z-popovercontent);
-  width: min(224px, calc(100vw - 32px));
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-  box-shadow: var(--shadow);
-  font-size: var(--text-xs);
-  color: var(--text-dim);
-  font-weight: var(--weight-normal);
-  line-height: 1.4;
-  overflow-y: auto;
-  overflow-wrap: anywhere;
-}
-
 /* ---------------------------- Broad polish sweep ------------------------- */
 /* Smooth interactive transitions across the common controls */
 button,

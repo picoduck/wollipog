@@ -23,6 +23,7 @@ import {
   Code as LucideCode,
   Columns3 as LucideColumns3,
   Copy as LucideCopy,
+  DollarSign as LucideDollarSign,
   Download as LucideDownload,
   CornerUpLeft as LucideCornerUpLeft,
   Ellipsis as LucideEllipsis,
@@ -48,6 +49,7 @@ import {
   GitFork as LucideGitFork,
   GitPullRequest as LucideGitPullRequest,
   Globe as LucideGlobe,
+  Hash as LucideHash,
   Grid2X2 as LucideGrid2X2,
   Hammer as LucideHammer,
   History as LucideHistory,
@@ -217,6 +219,14 @@ export function AutomationsIcon(props: IconProps) {
 
 export function ServiceTierIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideGauge} {...props} />;
+}
+
+export function CostIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideDollarSign} {...props} />;
+}
+
+export function CountIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideHash} {...props} />;
 }
 
 export function SkillsIcon(props: IconProps) {
