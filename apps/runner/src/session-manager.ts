@@ -61,6 +61,9 @@ import type {
   SubscriptionUsageSnapshot,
   RunnerToControlPlane,
   SessionConfig,
+  PrepareSessionRoleMessage,
+  CommitSessionRoleMessage,
+  SessionRoleResultMessage,
   SessionCommandInvocationErrorCode,
   SessionEventPayload,
   PolicyHookDecisionEvent,
@@ -1999,6 +2002,7 @@ export class SessionManager {
   }
 
   private runWorktreeOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    if (this.roleConversionPending(sessionId)) return Promise.reject(new Error("wait for the session role change to finish before changing worktrees"));
     const prior = this.worktreeOperations.get(sessionId) ?? Promise.resolve();
     const current = prior.catch(() => undefined).then(operation);
     this.worktreeOperations.set(sessionId, current);
@@ -2560,6 +2564,7 @@ export class SessionManager {
     request: { baseRef?: string; branch: string },
     onProgress?: (phase: SessionWorktreeProgressPhase) => void,
   ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }> {
+    if (this.roleConversionPending(sessionId)) return Promise.reject(new Error("wait for the session role change to finish before creating a worktree"));
     const key = JSON.stringify([sessionId, request.baseRef ?? null, request.branch]);
     const existing = this.worktreeCreates.get(key);
     if (existing) {
@@ -2851,6 +2856,7 @@ export class SessionManager {
 
   /** Select one already-attributed worktree as the target for every session Git action. */
   async selectWorktree(sessionId: string, path: string): Promise<SessionSnapshot> {
+    if (this.roleConversionPending(sessionId)) throw new Error("wait for the session role change to finish before selecting a worktree");
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -5356,6 +5362,11 @@ export class SessionManager {
       reportMaterialized(false);
       return false;
     }
+    if (this.roleConversionPending(spec.sessionId)) {
+      durable?.failed("wait for the session role change to finish before restarting", "COMMAND_CANCELLED");
+      reportMaterialized(false);
+      return false;
+    }
     if (this.deleted.has(spec.sessionId) || this.deleting.has(spec.sessionId) ||
         this.store.isDeleted(spec.sessionId)) {
       durable?.failed("session deletion is in progress", "COMMAND_CANCELLED");
@@ -6593,7 +6604,7 @@ export class SessionManager {
 
   sessionCanOpen(sessionId: string): boolean {
     return !this.deleted.has(sessionId) && !this.deleting.has(sessionId) &&
-      !this.store.isDeleted(sessionId) && this.store.has(sessionId);
+      !this.store.isDeleted(sessionId) && this.store.has(sessionId) && !this.roleConversionPending(sessionId);
   }
 
   /** A completed replacement must still invalidate asynchronous TUI launch preparation. */
@@ -8417,6 +8428,10 @@ export class SessionManager {
     /** The launch's own initial prompt, which precedes whatever queued up while it was admitted. */
     launchInitialPrompt = false,
   ): boolean {
+    if (this.roleConversionPending(sessionId)) {
+      durable?.failed("wait for the session role change to finish before sending a message", "COMMAND_CANCELLED");
+      return false;
+    }
     if (durable && this.store.readEvents(sessionId).some((event) =>
       recoveredQuestion
         ? (event.payload.kind === "question_resolved" || event.payload.kind === "user_message") &&
@@ -8707,6 +8722,10 @@ export class SessionManager {
     message: InvokeSessionCommandMessage,
     lifecycle: SessionCommandInvocationLifecycle,
   ): boolean {
+    if (this.roleConversionPending(message.sessionId)) {
+      lifecycle.failed("wait for the session role change to finish before invoking a provider command", "COMMAND_UNAVAILABLE");
+      return false;
+    }
     const entry = this.active.get(message.sessionId);
     if (!entry || !this.store.has(message.sessionId)) {
       lifecycle.failed(
@@ -11149,6 +11168,7 @@ export class SessionManager {
     sessionId: string,
     providerAccountId: string,
   ): Promise<{ ok: boolean; scheduled?: boolean; error?: string }> {
+    if (this.roleConversionPending(sessionId)) return { ok: false, error: "wait for the session role change to finish before switching accounts" };
     const meta = this.store.readMeta(sessionId);
     if (!meta) return { ok: false, error: "session not found" };
     if (!meta.providerAccountId || !meta.providerAccountProvider || !meta.providerCredentialHome) {
@@ -11189,6 +11209,162 @@ export class SessionManager {
     }
     await this.rebindSelectedProviderAccount(sessionId, entry);
     return { ok: true, scheduled: false };
+  }
+
+  private roleConversionPending(sessionId: string): boolean {
+    const conversion = this.store.readMeta(sessionId)?.roleConversion;
+    return Boolean(conversion && conversion.state !== "applied");
+  }
+
+  private readonly rolePreparations = new Map<string, { conversionId: string; promise: Promise<SessionRoleResultMessage> }>();
+
+  async prepareSessionRole(command: PrepareSessionRoleMessage,
+    revokeCredentials: () => void, hasLiveNativeTui: () => boolean = () => false): Promise<SessionRoleResultMessage> {
+    const running = this.rolePreparations.get(command.sessionId);
+    if (running) {
+      if (running.conversionId !== command.conversionId) return {
+        type: "session_role_result", requestId: command.requestId, sessionId: command.sessionId,
+        conversionId: command.conversionId, ok: false, pending: true, error: "Another role change must finish first.",
+      };
+      return { ...await running.promise, requestId: command.requestId };
+    }
+    const preparation = { conversionId: command.conversionId, promise: this.prepareSessionRoleOnce(command, revokeCredentials, hasLiveNativeTui) };
+    this.rolePreparations.set(command.sessionId, preparation);
+    try { return await preparation.promise; }
+    finally { if (this.rolePreparations.get(command.sessionId) === preparation) this.rolePreparations.delete(command.sessionId); }
+  }
+
+  /** Park only a quiet, resumable provider. No fresh conversation, prompt, or permission change. */
+  private async prepareSessionRoleOnce(command: PrepareSessionRoleMessage,
+    revokeCredentials: () => void, hasLiveNativeTui: () => boolean): Promise<SessionRoleResultMessage> {
+    const { sessionId, conversionId } = command;
+    const reply = (ok: boolean, error?: string, pending?: boolean): SessionRoleResultMessage => ({
+      type: "session_role_result", requestId: command.requestId, sessionId, conversionId, ok,
+      ...(error ? { error } : {}), ...(pending ? { pending } : {}),
+      ...(ok ? { receipt: { conversionId, state: "prepared" } } : {}),
+    });
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "sessionRoleConversion")) {
+      return reply(false, "Update both peers before converting an existing session.");
+    }
+    const prior = meta.roleConversion;
+    if (prior?.command.conversionId === conversionId && prior.state === "prepared") return reply(true);
+    if (prior?.command.conversionId === conversionId && prior.state === "applied") {
+      return { ...reply(true), receipt: { conversionId, state: "applied" } };
+    }
+    if (prior && prior.state !== "applied" && prior.command.conversionId !== conversionId) {
+      return reply(false, "Another role change must finish first.", true);
+    }
+    const role = meta.orchestrator || meta.config.permissionMode === "orchestrator" ? "orchestrator" : "normal";
+    if (role !== command.expectedRole || (meta.config.permissionMode ?? null) !== command.permissionMode ||
+        meta.config.permissionMode === "orchestrator" || !canResumeSession(meta) ||
+        meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host") ||
+        command.command !== meta.command || !meta.agentSessionId ||
+        (meta.driver === "claude-code" && command.claudeMutableSystemPromptFlag !== "--system-prompt-recording" &&
+          command.claudeMutableSystemPromptFlag !== "--system-prompt-snapshot") ||
+        (command.targetRole === "orchestrator") !== Boolean(command.orchestrator) ||
+        command.orchestrator?.strictProjectIsolation) {
+      return reply(false, "The provider role, permissions, installation, or resumable conversation changed. Reload the session and choose a compatible configuration.");
+    }
+    const entry = this.active.get(sessionId);
+    if (hasLiveNativeTui()) return reply(false, "Close the Native TUI before changing roles so the previous provider tools can be retired safely.");
+    const resumingRetirement = prior?.state === "retiring" && prior.command.conversionId === conversionId;
+    if (resumingRetirement && prior.runnerPid !== process.pid && prior.providerPid !== null) {
+      let providerMayBeAlive = true;
+      if (prior.providerPid) {
+        try { process.kill(prior.providerPid, 0); }
+        catch (error) { providerMayBeAlive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+      }
+      if (providerMayBeAlive) return reply(false,
+        "The interrupted conversion's provider may still be alive. Stop that provider before retrying; its credentials and role have not changed.", true);
+    }
+    if (!resumingRetirement && ((entry && !this.idleProviderCanPark(sessionId, entry)) || meta.status !== "idle" ||
+        this.worktreeRebindings.has(sessionId) || this.worktreeOperations.has(sessionId) ||
+        [...this.worktreeCreates.keys()].some((key) => JSON.parse(key)[0] === sessionId) ||
+        this.providerAccountSwitches.has(sessionId) ||
+        this.launchGenerations.has(sessionId) || this.resumeLockGenerations.has(sessionId) ||
+        this.forking.has(sessionId) || this.rewinding.has(sessionId) || this.deleting.has(sessionId) ||
+        this.loggingOut.has(sessionId) || this.preLaunchQueues.get(sessionId)?.length ||
+        pendingRequests(meta.pendingApproval).length || meta.pendingProviderAccountId ||
+        meta.providerHistoryBlock || meta.providerAuthBlock || meta.worktreeRecovery || meta.backgroundWorkState ||
+        meta.pendingBackgroundTaskIds?.length || (meta.backgroundJobs ?? []).some((job) => !job.terminalStatus))) {
+      return reply(false, "Finish active or queued provider work, pending requests, and other session transitions before changing roles.");
+    }
+    if (!this.store.acquireLock(sessionId, this.lockOwner)) return reply(false, "Another runner owns this provider. Retry after it releases the session.");
+    try {
+      this.store.patchMeta(sessionId, { roleConversion: resumingRetirement ? prior : {
+        command, state: "retiring", runnerPid: process.pid, providerPid: entry?.client.pid ?? null,
+      } });
+      this.store.flush(sessionId);
+      if (entry) {
+        this.captureAgentSessionId(sessionId, entry.client);
+        this.deleteActiveSession(sessionId, entry, false, false);
+        await this.beginProviderRetirement(sessionId, entry, { preserveLock: true }).promise;
+      } else if (this.closing.has(sessionId)) {
+        await this.closing.get(sessionId)!.promise;
+      }
+      if (this.closing.has(sessionId)) return reply(false, "The previous provider has not confirmed retirement. Retry this role change after it exits.", true);
+      const fresh = this.store.readMeta(sessionId);
+      if (!fresh || fresh.roleConversion?.command.conversionId !== conversionId) {
+        return reply(false, "The session lifecycle changed during retirement. Retry to reconcile the role change.", true);
+      }
+      if (fresh.status !== "idle") {
+        this.store.patchMeta(sessionId, { roleConversion: undefined });
+        this.store.flush(sessionId);
+        return reply(false, "The session stopped or changed lifecycle during retirement. Its role is unchanged. Resume it and wait until it is idle before trying again.");
+      }
+      revokeCredentials();
+      const updated = this.store.patchMeta(sessionId, { roleConversion: { command, state: "prepared" } })!;
+      this.store.flush(sessionId);
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      this.log(`session_role_conversion_prepared ${sessionId} ${conversionId}`);
+      return reply(true);
+    } catch {
+      return reply(false, "Provider retirement could not be confirmed. Retry this role change to reconcile it.", true);
+    } finally {
+      if (!this.closing.has(sessionId)) this.store.releaseLock(sessionId, this.lockOwner);
+    }
+  }
+
+  commitSessionRole(command: CommitSessionRoleMessage): SessionRoleResultMessage {
+    const { sessionId, conversionId } = command;
+    const conversion = this.store.readMeta(sessionId)?.roleConversion;
+    const reply: SessionRoleResultMessage = {
+      type: "session_role_result", requestId: command.requestId, sessionId, conversionId, ok: false,
+    };
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "sessionRoleConversion") ||
+        !conversion || conversion.command.conversionId !== conversionId || conversion.state === "retiring") {
+      return { ...reply, error: "This exact role conversion has not been prepared. Retry to reconcile it." };
+    }
+    if (conversion.state === "prepared") {
+      if (this.active.has(sessionId) || this.closing.has(sessionId)) {
+        return { ...reply, pending: true, error: "Wait for provider retirement before applying the role change." };
+      }
+      let args = [...conversion.command.args];
+      if (conversion.command.claudeMutableSystemPromptFlag) {
+        args = this.mutableClaudeRoleArgs(args, conversion.command.claudeMutableSystemPromptFlag);
+      }
+      const updated = this.store.patchMeta(sessionId, {
+        orchestrator: conversion.command.orchestrator,
+        command: conversion.command.command,
+        args,
+        env: {},
+        // Provider catalogs may encode role-specific tools. Rediscover after the same conversation
+        // resumes rather than advertising the old role's overlay through reconnect.
+        sessionSlashCommands: undefined, sessionSlashCommandProvenance: undefined,
+        roleConversion: { ...conversion, state: "applied" },
+      })!;
+      this.store.flush(sessionId);
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      this.log(`session_role_conversion_applied ${sessionId} ${conversionId}`);
+    }
+    return { ...reply, ok: true, receipt: { conversionId, state: "applied" } };
+  }
+
+  private mutableClaudeRoleArgs(args: string[], flag: NonNullable<PrepareSessionRoleMessage["claudeMutableSystemPromptFlag"]>): string[] {
+    const flags = ["--system-prompt-recording", "--system-prompt-snapshot"];
+    return [...args.filter((arg, index) => !flags.includes(args[index - 1] ?? "") &&
+      !flags.some((item) => arg === item || arg.startsWith(`${item}=`))), flag, "off"];
   }
 
   /** Card-scoped checks shared by identity inspection and account selection. Only the session

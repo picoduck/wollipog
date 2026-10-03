@@ -262,6 +262,7 @@ import { buildAuthorizedSessionTranscriptExport, type TranscriptExportFormat } f
 import { principalCanReadWorkflowArtifact } from "./artifact-exports.js";
 import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js";
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
+import { SessionRoleConversions, registerSessionRoleRoutes } from "./session-role-conversion.js";
 import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
 import { builtInSkills, seedBuiltInSkills } from "./built-in-skills.js";
 import { repairLegacySkillDescriptions } from "./skills.js";
@@ -949,6 +950,8 @@ const svc = new SessionsService(
   VIDEO_FRAME_VALIDATION_SESSION_ID !== undefined,
   VIDEO_FRAME_VALIDATION_SESSION_ID,
 );
+const roleConversions = new SessionRoleConversions(db, hub, (event, fields) =>
+  app.log.info({ event, ...fields }, "session role conversion"));
 if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
   app.log.warn({ controllingSessionId: VIDEO_FRAME_VALIDATION_SESSION_ID },
     "experimental video-frame review validation is enabled for one controlling Session");
@@ -1283,6 +1286,7 @@ app.register(async (instance) => {
         for (const shellId of shellRegistry.pendingCloseIds(runnerId)) {
           hub.sendToRunner(runnerId, { type: "shell_close", shellId });
         }
+        for (const snapshot of msg.sessionSnapshots ?? []) roleConversions.reconcile(runnerId, snapshot);
         svc.recoverPendingSteeringResolutions(runnerId);
         svc.recoverPendingSessionCommands(runnerId);
         svc.retryDuePrompts(Date.now(), runnerId);
@@ -1397,6 +1401,7 @@ app.register(async (instance) => {
         break;
       case "session_runtime_updated":
         {
+          roleConversions.reconcile(runnerId!, msg.snapshot);
           const startedAt = performance.now();
           if (!runtimeAttentionBatch) {
             runtimeAttentionBatch = svc.beginRunnerAttentionBatch(runnerId!);
@@ -1637,6 +1642,7 @@ app.register(async (instance) => {
       case "workspace_worktree_setup_result":
       case "logout_agent_result":
       case "switch_session_provider_account_result":
+      case "session_role_result":
       case "inspect_provider_authentication_result":
       case "select_provider_authentication_account_result":
       case "acp_registry_approval_result":
@@ -3463,6 +3469,7 @@ async function openSessionShell(
   }
   const kind = body.kind === "agent_tui" ? "agent_tui" : "shell";
   if (kind === "agent_tui") {
+    if (db.roleConversionBlocksSession(sessionId)) return { ok: false, status: 409, error: "wait for the session role change to finish before opening the Native TUI" };
     const tuiUnsupported = nativeTuiSessionError(db, hub, session, options.initialNativeTui === true);
     if (tuiUnsupported) return { ok: false, ...tuiUnsupported };
     if (shellRegistry.list(sessionId).some((shell) => shell.kind === "agent_tui" && shell.status !== "exited")) {
@@ -3817,6 +3824,12 @@ app.get("/api/sessions/:id", async (req, reply) => {
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
   return { session: withSessionCommandPermissions(db, requestPrincipals.get(req) ?? requestPrincipal(req), session) };
+});
+
+registerSessionRoleRoutes(app, {
+  db, conversions: roleConversions, requestHuman,
+  defaultsFor: (human) => orchestratorSettings.view(human),
+  validatePolicy: (human, policy) => orchestratorSettings.compatibilityError(human, policy),
 });
 
 app.post("/api/sessions/:id/parent-control", async (req, reply) => {

@@ -855,6 +855,13 @@ export function createApiClient(transport: ApiTransport) {
     ),
 
   restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
+  sessionRolePreview: (id: string, role: import("@wollipog/protocol").SessionRole) =>
+    req<import("@wollipog/protocol").SessionRoleConversionPreview>(`/api/sessions/${encodeURIComponent(id)}/role?role=${role}`),
+  changeSessionRole: (id: string, role: import("@wollipog/protocol").SessionRole,
+    expectedRole: import("@wollipog/protocol").SessionRole) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/role`, {
+      method: "POST", body: JSON.stringify({ role, expectedRole }),
+    }),
   sessionProviderAccounts: (id: string) =>
     req<SessionProviderAccountOptionsResponse>(
       `/api/sessions/${encodeURIComponent(id)}/provider-accounts`,

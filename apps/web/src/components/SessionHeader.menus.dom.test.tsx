@@ -279,7 +279,7 @@ test("More Actions has no section labels, separates its groups once each, and en
     assert.equal(menu.querySelectorAll(".menu-note").length, 0, "no shared caution note");
     const labels = rows(menu);
     assert.deepEqual(labels.filter((label) => label !== "Switch Account…"), [
-      "Rename…", "Snooze Again…", "Dismiss Reminder", "Fork Conversation…",
+      "Rename…", "Change Session Role…", "Snooze Again…", "Dismiss Reminder", "Fork Conversation…",
       "—", "Reprocess Transcript", "Sign Out of Agent…",
       "—", "Archive and Stop…",
       "—", "Stop Session…",
@@ -301,7 +301,7 @@ test("an archived session offers no Snooze item and ends with Delete Session… 
   const header = await renderHeader({ session: { ...idle, status: "completed", archived: true } as SessionView });
   try {
     const menu = await open("More Actions");
-    assert.deepEqual(rows(menu), ["Rename…", "—", "Unarchive", "Restart Session", "—", "Delete Session…"]);
+    assert.deepEqual(rows(menu), ["Rename…", "Change Session Role…", "—", "Unarchive", "Restart Session", "—", "Delete Session…"]);
     assert.ok(item(menu, "Delete Session…").classList.contains("danger"));
   } finally {
     await header.unmount();
@@ -312,7 +312,7 @@ test("a stopped session reads Restart Session beside its archive item, and a fre
   const header = await renderHeader({ session: { ...idle, status: "stopped" } as SessionView });
   try {
     const menu = await open("More Actions");
-    assert.deepEqual(rows(menu), ["Rename…", "Snooze…", "—", "Archive", "Restart Session"]);
+    assert.deepEqual(rows(menu), ["Rename…", "Change Session Role…", "Snooze…", "—", "Archive", "Restart Session"]);
   } finally {
     await header.unmount();
   }

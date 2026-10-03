@@ -97,6 +97,7 @@ export async function handleShellOpenCommand(
         value.root, value.context, value.meta.agentId, value.meta.driver,
         value.meta.command, value.meta.args, value.meta.config,
         value.meta.executionTarget, value.meta.providerCredentialScopeId, value.meta.status,
+        value.meta.orchestrator, value.meta.roleConversion,
       ]);
       const identity = launchIdentity(target);
       const epoch = dependencies.launchEpoch(message.sessionId);
