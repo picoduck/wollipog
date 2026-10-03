@@ -1868,7 +1868,7 @@ exactly one: the most severe, then the lowest rank.
   message's text and attachments into the composer and focuses it; over a draft it first confirms
   "Replace Draft". While the copy is there the slot reads "Editing a copy of your Turn N message.
   Earlier turns stay as they are." with **Discard Edit**, which puts back the draft it replaced (or
-  clears the composer). Sending the copy ends it, and a send that fails gives it back. It is kept
+  clears the composer). An accepted send of the copy ends it; a send that fails leaves it. It is kept
   with the draft, so leaving the session or reloading keeps Discard Edit; while a queued message is
   being edited it waits, since that edit owns the composer.
 - **Drop target** (#2156): files dragged over the composer turn the card's own edge dashed

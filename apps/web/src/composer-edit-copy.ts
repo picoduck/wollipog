@@ -90,3 +90,35 @@ export function forgetComposerEditCopiesForInstance(instanceScope: string): void
   const prefix = `${instanceScope}\u0000`;
   for (const key of [...copies.keys()]) if (key.startsWith(prefix)) copies.delete(key);
 }
+
+/** Copies whose send or steer is in flight. Module state, so a send that outlives its view (a
+ * remount, a session switch) still settles its own copy and no other. */
+const sending = new Set<string>();
+
+function sendingKey(sessionId: string, instanceScope: string, id: string): string {
+  return `${memoryKey(sessionId, instanceScope)}\u0000${id}`;
+}
+
+export function markComposerEditCopySending(sessionId: string, instanceScope: string, id: string): void {
+  sending.add(sendingKey(sessionId, instanceScope, id));
+}
+
+/** Whether this copy is already on its way: an edit made now starts from the draft the person has
+ * then, not from the draft the sent copy replaced. */
+export function composerEditCopySending(sessionId: string, instanceScope: string, id: string): boolean {
+  return sending.has(sendingKey(sessionId, instanceScope, id));
+}
+
+/** A send of the copy settled. Once it is accepted the edit is over, unless a newer copy has
+ * replaced it since; one that did not land leaves the edit, and its way back, in place. */
+export function finishComposerEditCopySend(
+  sessionId: string,
+  instanceScope: string,
+  id: string,
+  accepted: boolean,
+): void {
+  sending.delete(sendingKey(sessionId, instanceScope, id));
+  if (accepted && loadComposerEditCopy(sessionId, instanceScope)?.id === id) {
+    clearComposerEditCopy(sessionId, instanceScope);
+  }
+}

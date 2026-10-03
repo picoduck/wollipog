@@ -38,6 +38,7 @@ import {
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { clearSessionDetailComposerRuntimeForInstance, SessionDetail } from "./SessionDetail.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
+import { loadComposerEditCopy, saveComposerEditCopy } from "../composer-edit-copy.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withCapturedAnimationFrames, withScopedClockOverrides } from "./test-clock-overrides.js";
@@ -4613,7 +4614,7 @@ test("a send still in flight does not end an edit made after it, and a failed se
     await act(async () => { sendButton(fixture).click(); });
     await flushAsyncWork();
     assert.equal(sends.length, 1);
-    assertNoDomNode(editingCopyNotice(fixture), "sending the copy ends the edit");
+    assert.ok(discardEditButton(fixture), "the edit holds until the send is accepted");
 
     // The send fails: the copy is still in the composer, so its edit comes back.
     await act(async () => { sends[0]!.reject(new Error("transport rejected")); });
@@ -4648,6 +4649,105 @@ test("a send still in flight does not end an edit made after it, and a failed se
     await act(async () => { discard.click(); });
     await act(async () => { flushFrames(); });
     assert.equal(fixture.composer.value, "a newer draft", "Discard Edit puts back the draft written during the send");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+for (const outcome of ["fails", "lands"] as const) {
+  test(`a send that ${outcome} after the view remounts settles the edit it sent (#2185)`, async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const sends: Array<Deferred<void>> = [];
+    const fixture = await mountFixture(draft, {
+      mainEventPayloads: EDITABLE_TURN,
+      client: {
+        prompt: async () => {
+          const pending = deferred<void>();
+          sends.push(pending);
+          await pending.promise;
+          return undefined as never;
+        },
+      },
+    });
+    try {
+      await resolveDraft(draft, "my own draft");
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+      await clickEdit(fixture);
+      await replaceDraft();
+      await act(async () => { sendButton(fixture).click(); });
+      await flushAsyncWork();
+      assert.equal(sends.length, 1);
+
+      await fixture.remountWithDraftLoader(async () => ({ text: "original prompt", images: [submittedImage], updatedAt: 2 }));
+      await flushAsyncWork();
+      if (outcome === "fails") {
+        await act(async () => { sends[0]!.reject(new Error("transport rejected")); });
+        await flushAsyncWork();
+        await act(async () => { flushFrames(); });
+        assert.ok(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), "the edit stays stored");
+        const dismiss = fixture.container.querySelector<HTMLButtonElement>('.session-notice-slot button[aria-label="Dismiss"]');
+        if (dismiss) await act(async () => { dismiss.click(); });
+        const discard = discardEditButton(fixture);
+        assert.ok(discard, "the remounted view still offers Discard Edit");
+        await act(async () => { discard.click(); });
+        await act(async () => { flushFrames(); });
+        assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "my own draft");
+      } else {
+        await act(async () => { sends[0]!.resolve(); });
+        await flushAsyncWork();
+        assert.equal(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), null, "the accepted send ends the edit");
+        assertNoDomNode(editingCopyNotice(fixture), "and the remounted view follows");
+      }
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+}
+
+test("Use as New Message for a recovered queued edit ends the copy it displaced (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 106,
+    mainEventPayloads: EDITABLE_TURN,
+    sessionPatch: {
+      queued: [{ id: "queue-1", text: "Changed on another client", liveQueueObserved: true, editable: true, editRevision: "qer_newer" }],
+    },
+  });
+  const recoveryScope = {
+    instanceScope: fixture.instanceScope,
+    accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+    sessionId: fixture.sessionId,
+  };
+  try {
+    await resolveDraft(draft, "original prompt");
+    // A loaded copy was the ordinary draft when a queued edit displaced it, and that edit failed.
+    saveComposerEditCopy(fixture.sessionId, {
+      id: "copy-1", turn: 3, previous: { text: "my own draft", images: [] },
+    }, fixture.instanceScope);
+    assert.equal(saveDurableQueuedEditRecovery(recoveryScope, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "original prompt", images: [] },
+      },
+      draft: { text: "Recovered queued content", images: [] },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+    await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assertNoDomNode(editingCopyNotice(fixture), "the recovered queued edit owns the composer");
+
+    const reuse = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Use as New Message") as HTMLButtonElement | undefined;
+    assert.ok(reuse);
+    await act(async () => { reuse.click(); });
+    await flushAsyncWork(450);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "Recovered queued content");
+    assertNoDomNode(editingCopyNotice(fixture), "no Editing a Copy notice for a message that is not the copy");
+    assert.equal(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), null);
   } finally {
     await unmountFixture(fixture);
   }

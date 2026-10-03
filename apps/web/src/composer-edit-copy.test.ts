@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import {
   clearComposerEditCopy,
+  composerEditCopySending,
+  finishComposerEditCopySend,
   forgetComposerEditCopiesForInstance,
   loadComposerEditCopy,
+  markComposerEditCopySending,
   parseComposerEditCopy,
   saveComposerEditCopy,
   type ComposerEditCopy,
@@ -62,6 +65,28 @@ test("when storage refuses a copy, this page keeps it and an older stored copy c
   assert.deepEqual(loadComposerEditCopy("s1", "instance-a"), newer, "the page's memory holds the newer copy");
   forgetComposerEditCopiesForInstance("instance-a");
   assert.equal(loadComposerEditCopy("s1", "instance-a"), null, "the refused save removed the older stored copy");
+});
+
+test("a send settles only the copy it sent: accepted ends it, a failure keeps it, a newer copy is untouched", () => {
+  saveComposerEditCopy("s1", COPY, "instance-a");
+  markComposerEditCopySending("s1", "instance-a", COPY.id);
+  assert.equal(composerEditCopySending("s1", "instance-a", COPY.id), true);
+  assert.equal(composerEditCopySending("s1", "instance-b", COPY.id), false);
+  finishComposerEditCopySend("s1", "instance-a", COPY.id, false);
+  assert.equal(composerEditCopySending("s1", "instance-a", COPY.id), false);
+  assert.deepEqual(loadComposerEditCopy("s1", "instance-a"), COPY, "a send that did not land keeps the edit");
+
+  markComposerEditCopySending("s1", "instance-a", COPY.id);
+  const newer: ComposerEditCopy = { id: "copy-2", previous: { text: "written during the send", images: [] } };
+  saveComposerEditCopy("s1", newer, "instance-a");
+  finishComposerEditCopySend("s1", "instance-a", COPY.id, true);
+  assert.deepEqual(loadComposerEditCopy("s1", "instance-a"), newer, "an accepted older send leaves a newer copy");
+
+  markComposerEditCopySending("s1", "instance-a", newer.id);
+  finishComposerEditCopySend("s1", "instance-a", newer.id, true);
+  assert.equal(loadComposerEditCopy("s1", "instance-a"), null, "an accepted send of the current copy ends the edit");
+  forgetComposerEditCopiesForInstance("instance-a");
+  assert.equal(loadComposerEditCopy("s1", "instance-a"), null, "in storage too");
 });
 
 test("a stored copy that is not well formed is ignored", () => {

@@ -176,8 +176,11 @@ import {
 } from "../turn-action-confirmations.js";
 import {
   clearComposerEditCopy,
+  composerEditCopySending,
+  finishComposerEditCopySend,
   forgetComposerEditCopiesForInstance,
   loadComposerEditCopy,
+  markComposerEditCopySending,
   saveComposerEditCopy,
   type ComposerEditCopy,
 } from "../composer-edit-copy.js";
@@ -3877,6 +3880,12 @@ function SessionDetailLoaded({
   // kept with the copy, so Discard Edit can put it back; sending the copy ends the edit.
   const canPromptRef = useRef(canPrompt);
   canPromptRef.current = canPrompt;
+  // A send that outlived an earlier view of this session settles its copy in the store and then
+  // releases the composer mutation, which re-renders this view: follow the store.
+  useEffect(() => {
+    const stored = loadComposerEditCopy(sessionId, instanceScope);
+    if ((stored?.id ?? null) !== (editCopyRef.current?.id ?? null)) setEditCopyState(stored);
+  }, [activeComposerMutation, instanceScope, sessionId]);
   const putComposerDraft = useCallback((draft: ComposerDraftContent) => {
     draftDirty.current = true;
     composerDraftVersionRef.current += 1;
@@ -3897,9 +3906,14 @@ function SessionDetailLoaded({
     if (!canPromptRef.current) return;
     const current = draftState.current;
     // A second edit replaces the first copy, not the person's own draft: Discard Edit still
-    // restores what they had written before either.
-    const previous = editCopyRef.current
-      ? editCopyRef.current.previous
+    // restores what they had written before either. A copy already being sent is not replaced; the
+    // draft written since is.
+    const loaded = editCopyRef.current &&
+      !composerEditCopySending(sessionId, instanceScope, editCopyRef.current.id)
+      ? editCopyRef.current
+      : null;
+    const previous = loaded
+      ? loaded.previous
       : current.text || current.images.length
         ? { text: current.text, images: current.images.map((image) => ({ ...image })) }
         : null;
@@ -3907,7 +3921,7 @@ function SessionDetailLoaded({
     putComposerDraft({ text: item.text, images: (item.images ?? []).map((image) => ({ ...image })) });
     const turn = item.turn ?? userRewindTurns(itemsRef.current).get(item.id);
     updateEditCopy({ id: browserRandomUUID(), ...(turn !== undefined ? { turn } : {}), previous });
-  }, [confirm, putComposerDraft, updateEditCopy]);
+  }, [confirm, instanceScope, putComposerDraft, sessionId, updateEditCopy]);
   const discardEditCopy = useCallback(() => {
     const copy = editCopyRef.current;
     if (!copy) return;
@@ -4677,17 +4691,12 @@ function SessionDetailLoaded({
     }
   };
 
-  /** A send or steer of the copy that did not land leaves the copy in the composer, so its edit and
-   * Discard Edit come back, unless the composer has since moved on to another draft or edit. */
-  const restoreUnsentEditCopy = (
-    copy: ComposerEditCopy | null,
-    accepted: boolean,
-    generation: number,
-    submissionVersion: number,
-  ) => {
-    if (!copy || accepted || viewGenerationRef.current !== generation ||
-      composerDraftVersionRef.current !== submissionVersion || editCopyRef.current !== null) return;
-    updateEditCopy(copy);
+  /** A send or steer of a copy settled. The stored edit ends only when the send was accepted and no
+   * newer copy has replaced it; this view follows the store. */
+  const settleSentEditCopy = (copy: ComposerEditCopy | null, accepted: boolean) => {
+    if (!copy) return;
+    finishComposerEditCopySend(sessionId, instanceScope, copy.id, accepted);
+    if (accepted && editCopyRef.current?.id === copy.id) updateEditCopy(null);
   };
   const send = async () => {
     if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || retitleInFlightRef.current) return;
@@ -4778,10 +4787,10 @@ function SessionDetailLoaded({
     const generation = viewGenerationRef.current;
     const mutation = reserveComposerMutation(mutationKey, "send", submittedDraft);
     if (!mutation) return;
-    // Sending the copy ends the edit now, so an edit made while this send is in flight starts from
-    // the draft the person has then. A send that does not land gives the edit back below.
+    // Sending the copy ends the edit once the send is accepted. Until then the edit, and Discard
+    // Edit's way back, stay stored, so a send that fails after the view has gone keeps them.
     const submittedCopy = editCopyRef.current;
-    if (submittedCopy) updateEditCopy(null);
+    if (submittedCopy) markComposerEditCopySending(sessionId, instanceScope, submittedCopy.id);
     consumedDraftsRef.current.set(mutationKey, {
       ...submittedDraft,
       draftVersion: submissionVersion,
@@ -4890,6 +4899,7 @@ function SessionDetailLoaded({
         }
       }
     } finally {
+      settleSentEditCopy(submittedCopy, providerAccepted);
       releaseComposerMutation(
         mutationKey,
         mutation.token,
@@ -4897,7 +4907,6 @@ function SessionDetailLoaded({
           ? submittedDraft
           : undefined,
       );
-      restoreUnsentEditCopy(submittedCopy, providerAccepted, generation, submissionVersion);
       if (viewGenerationRef.current === generation) setBusy(false);
     }
   };
@@ -4926,7 +4935,7 @@ function SessionDetailLoaded({
     const mutation = reserveComposerMutation(mutationKey, "steer", submittedDraft);
     if (!mutation) return;
     const submittedCopy = editCopyRef.current;
-    if (submittedCopy) updateEditCopy(null);
+    if (submittedCopy) markComposerEditCopySending(sessionId, instanceScope, submittedCopy.id);
     consumedDraftsRef.current.set(mutationKey, {
       ...submittedDraft,
       draftVersion: submissionVersion,
@@ -4997,6 +5006,7 @@ function SessionDetailLoaded({
         }
       }
     } finally {
+      settleSentEditCopy(submittedCopy, providerAccepted);
       releaseComposerMutation(
         mutationKey,
         mutation.token,
@@ -5004,7 +5014,6 @@ function SessionDetailLoaded({
           ? submittedDraft
           : undefined,
       );
-      restoreUnsentEditCopy(submittedCopy, providerAccepted, generation, submissionVersion);
       if (viewGenerationRef.current === generation) setSteeringBusy(false);
     }
   };
@@ -5140,6 +5149,9 @@ function SessionDetailLoaded({
       queuedEditRef.current = null;
       setQueuedEdit(null);
       setQueuedEditRecovered(false);
+      // The recovered message replaces the displaced draft, which held any loaded copy, so that
+      // copy's edit and Discard Edit go with it.
+      updateEditCopy(null);
       draftState.current = recoveredDraft;
       replace(recoveredDraft.images);
       setHistIdx(-1);
