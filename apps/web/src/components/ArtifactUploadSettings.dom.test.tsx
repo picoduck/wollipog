@@ -32,6 +32,7 @@ test("artifact preference defaults to Manual and confirms both saved modes only 
   try {
     await act(async () => root.render(<ArtifactUploadSettings />));
     assert.equal(saves.length, 0, "opening Settings must never save or enable uploads");
+    assert.match(container.textContent ?? "", /Native TUI sessions do not receive this guidance automatically/, "Settings must explain the native TUI delivery limit");
     const trigger = () => [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.getAttribute("aria-label")?.startsWith("Artifact Uploads:"))!;
     assert.equal(trigger().getAttribute("aria-label"), "Artifact Uploads: Manual");
     for (const [label, value] of [["Use Wollipog Automatically", "wollipog_automatic"], ["Use External Hosting", "external_hosting"]]) {

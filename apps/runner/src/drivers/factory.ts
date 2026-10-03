@@ -1,4 +1,3 @@
-import { appendArtifactSystemPrompt } from "../artifact-guidance.js";
 import type { AgentDriverKind } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./driver.js";
 import { AcpDriver } from "./acp-driver.js";
@@ -12,9 +11,7 @@ export function makeDriver(
   opts: DriverOptions,
   cb: DriverCallbacks,
 ): Driver {
-  if (opts.artifactGuidance && driver === "claude-code") {
-    opts = { ...opts, args: appendArtifactSystemPrompt(opts.args, opts.artifactGuidance) };
-  } else if (opts.artifactGuidance && driver === "pi") {
+  if (opts.artifactGuidance && driver === "pi") {
     // Pi accumulates append flags and resolves each text/file argument in its own execution
     // context. Preserve all originals (including extension flags), then add our own note.
     opts = { ...opts, args: [...opts.args, "--append-system-prompt", opts.artifactGuidance] };

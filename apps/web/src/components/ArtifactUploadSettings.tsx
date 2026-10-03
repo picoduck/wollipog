@@ -78,7 +78,7 @@ function ArtifactUploadSettingsEditor() {
   return <>
     <SelectRow
       title="Artifact Uploads"
-      description={<>Saved for your sessions on this instance. Applies when sessions launch or resume; live sessions keep their current instructions until then. Explicit task and project hosting requirements take priority. Native Codex TUI does not receive this guidance automatically; use explicit task instructions or the opt-in using-wollipog skill.</>}
+      description={<>Saved for your sessions on this instance. Applies when sessions launch or resume; live sessions keep their current instructions until then. Explicit task and project hosting requirements take priority. Native TUI sessions do not receive this guidance automatically; use explicit task instructions or the opt-in using-wollipog skill.</>}
       options={OPTIONS}
       value={settings?.preference ?? "manual"}
       disabled={!settings || loading || saving || !!error?.unsupported}

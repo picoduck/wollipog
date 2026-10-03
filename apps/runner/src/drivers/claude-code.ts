@@ -395,9 +395,11 @@ export function claudeRoutineControlChannelMode(mode: string, orchestrator: bool
  * Build a stream-json user message carrying text plus base64 image blocks (the
  * Anthropic Messages API content shape, which `claude -p` accepts). Exported for tests.
  */
-export function buildClaudeUserMessage(promptText: string, images: PromptImage[], uuid?: string): Json {
+export function buildClaudeUserMessage(promptText: string, images: PromptImage[], uuid?: string, artifactGuidance?: string): Json {
   const content: Json[] = [];
   if (promptText) content.push({ type: "text", text: promptText });
+  // Current authorization belongs with this task, not a cached system-prompt snapshot.
+  if (artifactGuidance) content.push({ type: "text", text: artifactGuidance });
   for (const img of images) {
     content.push({ type: "image", source: { type: "base64", media_type: img.mimeType, data: img.data } });
   }
@@ -1183,7 +1185,7 @@ export class ClaudeCodeDriver implements Driver {
       const routineChannelMode = this.routineControlChannelMode();
       const perm = claudePermissionArgs(
         this.launchedPermissionMode(),
-        imgs.length > 0,
+        imgs.length > 0 || Boolean(this.opts.artifactGuidance),
         routineChannelMode !== null,
       );
       this.interactive = perm.interactive;
@@ -1324,9 +1326,9 @@ export class ClaudeCodeDriver implements Driver {
         if (perm.streamInput) {
           // Deliver the prompt (and any images) as a stream-json user message. Interactive
           // turns keep stdin OPEN to write control_responses (approvals), closing it on the
-          // `result` event; a non-interactive stream-json turn (images only) has no approvals,
+          // `result` event; a non-interactive stream-json turn (images or task context) has no approvals,
           // so close stdin now to start the turn.
-          child.stdin.write(JSON.stringify(buildClaudeUserMessage(promptText, imgs)) + "\n", accepted);
+          child.stdin.write(JSON.stringify(buildClaudeUserMessage(promptText, imgs, undefined, this.opts.artifactGuidance)) + "\n", accepted);
           if (!this.interactive) child.stdin.end();
         } else {
           // `claude -p` accepts a plain-text prompt from stdin. This also keeps CR/LF and
@@ -1540,7 +1542,7 @@ export class ClaudeCodeDriver implements Driver {
       return;
     }
     turn.launchAttempts += 1;
-    const payload = JSON.stringify(buildClaudeUserMessage(turn.promptText, turn.images)) + "\n";
+    const payload = JSON.stringify(buildClaudeUserMessage(turn.promptText, turn.images, undefined, this.opts.artifactGuidance)) + "\n";
     const attempt = turn.launchAttempts;
     const generation = this.persistentGeneration;
     try {

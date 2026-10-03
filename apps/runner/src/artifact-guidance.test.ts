@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { artifactGuidance, appendArtifactSystemPrompt } from "./artifact-guidance.js";
+import { artifactGuidance } from "./artifact-guidance.js";
 import { makeDriver, type DriverOptions } from "./drivers/factory.js";
+import { windowsCmdInvocationSpec } from "./windows-cmd.js";
 import type { SessionMeta } from "./session-store.js";
 
 const meta = { driver: "codex-app-server" as const, env: { WOLLIPOG_CLI: "/private/cli", SECRET: "never-print-me" },
@@ -41,16 +42,6 @@ test("commands match provisioned MCP, CLI, context and peer capabilities", () =>
   assert.doesNotMatch(artifactGuidance(meta, 168), /artifact attach|attach_session_artifact/);
 });
 
-test("append instructions retain user and Orchestrator instructions without changing permission flags", () => {
-  for (const args of [["--append-system-prompt", "user instructions", "--permission-mode", "default"],
-    ["--append-system-prompt=user instructions", "--permission-mode", "default"]]) {
-    const result = appendArtifactSystemPrompt(args, "artifact guidance");
-    assert.deepEqual(result, ["--permission-mode", "default", "--append-system-prompt", "user instructions\n\nartifact guidance"]);
-    assert.equal(args.length > 0, true);
-  }
-});
-
-
 test("Pi launch preserves repeatable, file and extension append arguments in every context", () => {
   const args = ["--append-system-prompt", "team rules", "--append-system-prompt", "orchestrator governance",
     "--append-system-prompt", "prompt.md", "--append-system-prompt=extension-owned", "--no-skills"];
@@ -62,5 +53,19 @@ test("Pi launch preserves repeatable, file and extension append arguments in eve
     const effective = (driver as unknown as { opts: DriverOptions }).opts;
     assert.deepEqual(effective.args, [...args, "--append-system-prompt", "artifact guidance"]);
     assert.deepEqual(opts.args, args, "shared agent definition arguments are never mutated");
+  }
+});
+
+test("Windows Pi guidance is one argument safely quoted through cmd without overriding Claude policy", () => {
+  const note = artifactGuidance({ ...meta, driver: "pi" }, 198, "win32");
+  assert.doesNotMatch(note, /[\r\n]/);
+  const args = ["--append-system-prompt", "existing policy", "--append-system-prompt-file", "policy.txt"];
+  for (const kind of ["pi", "claude-code"] as const) {
+    const opts: DriverOptions = { command: `${kind}.cmd`, args, cwd: "C:\\workspace", env: {}, config: {},
+      context: { kind: "native" }, artifactGuidance: note };
+    const driver = makeDriver(kind, opts, { onEvent: () => {}, onStderr: () => {}, onExit: () => {} });
+    const actual = (driver as unknown as { opts: DriverOptions }).opts.args;
+    assert.doesNotThrow(() => windowsCmdInvocationSpec(opts.command, actual, { platform: "win32", comspec: "cmd.exe" }));
+    assert.deepEqual(actual, kind === "pi" ? [...args, "--append-system-prompt", note] : args);
   }
 });

@@ -394,7 +394,7 @@ test("a TUI launch keeps an inline --settings JSON document and still drops a mi
 });
 
 
-test("Claude TUI gets additive artifact awareness while Codex TUI retains provider policy", async () => {
+test("native TUI retains provider policy because mutable artifact guidance has no safe update surface", async () => {
   for (const driver of ["claude-code", "codex-app-server"] as const) {
     const original = meta({ driver, artifactUploads: "manual" });
     const launch = await prepareAgentTuiLaunch(original, { controlPlaneProtocolVersion: PROTOCOL_VERSION,
@@ -403,10 +403,8 @@ test("Claude TUI gets additive artifact awareness while Codex TUI retains provid
       permissionProfile: async () => ({ active: false, reason: "test", args: original.args }),
     });
     assert.ok(launch);
-    if (driver === "claude-code") {
-      assert.match(launch.args.at(-1)!, /Manual/);
-      assert.match(launch.args.at(-1)!, /file attachment is unavailable/);
-    } else assert.deepEqual(launch.args, original.args);
+    assert.deepEqual(launch.args, original.args);
+    assert.doesNotThrow(() => agentTuiLaunch(original, { platform: "win32", comspec: "cmd.exe" }));
     assert.deepEqual(original.args, ["--profile", "team profile"], "durable launch metadata is unchanged");
   }
 });
