@@ -193,3 +193,24 @@ test("required checks read passing only when GitHub's merge state confirms none 
   const none = await observeForgeStatus([REF], stub(answer({ r0: { pullRequest: pr({ mergeStateStatus: "BLOCKED" }, [check("Unit", "SUCCESS", false)]) } })));
   assert.equal(none.ok && none.results[0]!.ok && none.results[0]!.observation.requiredChecks.state, "none");
 });
+
+test("gh runs with the Orchestrator's agent environment, so its configured login is the one used", { skip: process.platform === "win32" }, async () => {
+  const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { contextGhRunner } = await import("./campaign-forge-status.js");
+  const dir = mkdtempSync(join(tmpdir(), "forge-gh-"));
+  try {
+    // A fake gh that reports which login settings reached it.
+    writeFileSync(join(dir, "gh"), "#!/bin/sh\nprintf '%s|%s|%s' \"$GH_TOKEN\" \"$GH_CONFIG_DIR\" \"$GH_PROMPT_DISABLED\"\n");
+    chmodSync(join(dir, "gh"), 0o755);
+    const run = contextGhRunner({ kind: "native" }, dir, {
+      PATH: [dir, process.env.PATH ?? ""].join(":"), GH_TOKEN: "agent-token", GH_CONFIG_DIR: "/agent/gh", GH_PROMPT_DISABLED: "0",
+    });
+    const outcome = await run(["api", "graphql"]);
+    assert.equal(outcome.code, null);
+    assert.equal(outcome.stdout, "agent-token|/agent/gh|1", "the agent's login reaches gh; prompts stay disabled");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

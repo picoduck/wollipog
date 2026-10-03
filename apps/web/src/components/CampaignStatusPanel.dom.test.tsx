@@ -461,7 +461,7 @@ test("observed GitHub facts stay apart from the reported stage, and stale or una
     await click(panel.container.querySelector(".campaign-work-row")!);
     let facts = deliveryFacts(panel.container);
 
-    assert.equal(facts[0], "Reported Stage: Merge QueuedReported by the Orchestrator 5m ago. Not observed.",
+    assert.equal(facts[0], "Reported Stage: Merge QueuedReported by the Orchestrator 5m ago. Wollipog has not observed this stage.",
       "the reported stage names its source and time and says it is not an observation");
     assert.deepEqual(pullRequestGroup(facts, 2462), [
       "PR #2462: OpenObserved on GitHub 1m ago",
@@ -469,7 +469,8 @@ test("observed GitHub facts stay apart from the reported stage, and stale or una
       "Required Checks: Passing1 passing.",
       "All Checks: Pending1 pending, 8 passing.",
       "Merge Queue: Awaiting Checks, Position 2",
-      "Head: 44579c6On main.",
+      "Head: 44579c6",
+      "Base Branch: main",
     ], "a merge-queue wait reads as observed facts with their time");
     const stale = pullRequestGroup(facts, 2430);
     assert.equal(stale[0], "PR #2430: Last Seen MergedStale: observed on GitHub 20m ago. It may have changed since.");
@@ -533,7 +534,7 @@ test("details without pull requests say none was reported, and a reader without 
     await click(panel.container.querySelector(".campaign-detail-back")!);
     await click(panel.container.querySelectorAll(".campaign-work-row")[1]!);
     const facts = deliveryFacts(panel.container);
-    assert.equal(facts[0], "Reported Stage: In ReviewReported by a deleted Orchestrator session 1m ago. Not observed.");
+    assert.equal(facts[0], "Reported Stage: In ReviewReported by a deleted Orchestrator session 1m ago. Wollipog has not observed this stage.");
     assert.equal(pullRequestGroup(facts, 5)[0],
       "PR #5: UnavailableGitHub status is read through the campaign runner's GitHub CLI, and you don't have access to that runner.");
     assert.deepEqual(calls.forge, [], "nothing to refresh for a reader who may not see the facts");

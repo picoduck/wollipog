@@ -844,7 +844,7 @@ function CampaignWorkItemDetailView({
                   {REPORTED_STAGE_LABELS[detail.stage.stage]}
                   <span className="campaign-status-meta">
                     {detail.stage.sourceSessionId ? "Reported by the Orchestrator" : "Reported by a deleted Orchestrator session"}{" "}
-                    <RecordedTime at={detail.stage.reportedAt} now={now} />. Not observed.
+                    <RecordedTime at={detail.stage.reportedAt} now={now} />. Wollipog has not observed this stage.
                   </span>
                   {detail.stage.note && <span className="campaign-status-note">{detail.stage.note}</span>}
                 </>

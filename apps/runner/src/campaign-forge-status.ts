@@ -38,14 +38,18 @@ export interface GhOutcome {
 
 export type GhRunner = (args: string[]) => Promise<GhOutcome>;
 
-export function contextGhRunner(context: AgentContext, cwd: string): GhRunner {
+/** `gh` in the root Orchestrator's agent context and repository, with the environment its agent is
+ * launched with (`agentEnv`: the runner-local agent configuration, never persisted), so a
+ * `GH_TOKEN`, `GH_CONFIG_DIR`, or `HOME` configured for that agent selects the same login the
+ * Orchestrator's own `gh` uses. */
+export function contextGhRunner(context: AgentContext, cwd: string, agentEnv: Record<string, string> = {}): GhRunner {
   return async (args) => {
     try {
       const { stdout, stderr } = await runContextCommand(context, "gh", args, {
         cwd,
         timeoutMs: GH_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,
-        env: { GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", NO_COLOR: "1" },
+        env: { ...agentEnv, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", NO_COLOR: "1" },
       });
       return { stdout, stderr, code: null, timedOut: false };
     } catch (error) {

@@ -399,7 +399,9 @@ export function forgePullRequestView(
         : "Not Queued"),
       note: null,
     },
-    { label: "Head", text: value.headSha.slice(0, 7), note: `On ${value.baseRef}.` },
+    // The head SHA says nothing about where the commit is; the base branch is only the target.
+    { label: "Head", text: value.headSha.slice(0, 7), note: null },
+    { label: "Base Branch", text: value.baseRef, note: null },
   ];
   if (value.mergeCommitSha) rows.push({ label: "Merge Commit", text: value.mergeCommitSha.slice(0, 7), note: null });
   return { kind: "observed", current, observedAt: fact.observedAt, status: seen(status), rows };

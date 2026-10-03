@@ -2114,7 +2114,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "campaign_forge_observe": {
-      runCommandTask("campaign_forge_observe", sessions.campaignForgeObserve(msg).then(sendUp));
+      // The same runner-local environment the Orchestrator's agent launches with (see prepareLaunch).
+      runCommandTask("campaign_forge_observe", sessions.campaignForgeObserve(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
       break;
     }
     case "reconcile_workflow_action": {

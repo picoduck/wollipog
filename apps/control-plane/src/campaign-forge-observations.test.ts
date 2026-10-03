@@ -537,3 +537,46 @@ test("a failed read waits the background interval like a successful one, and the
   assert.notEqual(mutationAuthorizationError("POST", "/api/sessions/:id/orchestrator-campaign/plan", viewer), null,
     "only the read-only refresh is exempt");
 });
+
+test("a read that stored nothing still backs off, and the interval runs from when a queued read finished", async () => {
+  // Every read of this campaign times out; it must not be retried every tick.
+  const failing = forgeFixture(PROTOCOL_VERSION, Array.from({ length: 16 }, (_, index) => ({ ...PR, number: index + 1 })));
+  try {
+    const more = failing.svc.recordCampaignPlan(failing.root, { items: [{ key: "more" }], planComplete: true });
+    assert.ok(failing.svc.updateCampaignWorkItem(failing.root, {
+      workItemId: more.data!.items[0]!.workItemId,
+      stage: { stage: "in_review", pullRequests: Array.from({ length: 16 }, (_, index) => ({ ...PR, number: 100 + index })) },
+    }).ok);
+    let now = Date.now();
+    const runner = fakeRunner(() => new Error("runner request timed out"));
+    const forge = observer(failing, runner, { now: () => now });
+    await forge.backgroundPass();
+    assert.equal(runner.requests.length, 2);
+    now += CAMPAIGN_FORGE_OBSERVATION.backgroundTickMs;
+    await forge.backgroundPass();
+    assert.equal(runner.requests.length, 2, "timed-out reads wait the background interval too");
+    now += CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs;
+    await forge.backgroundPass();
+    assert.equal(runner.requests.length, 4);
+  } finally {
+    failing.db.close();
+  }
+
+  const queued = forgeFixture(PROTOCOL_VERSION, [PR, { ...PR, number: 1 }, { ...PR, number: 2 }]);
+  try {
+    let now = Date.now();
+    const runner = fakeRunner(allOk());
+    const forge = observer(queued, runner, { now: () => now });
+    runner.hold();
+    const reads = [forge.refresh(queued.root, [PR]), forge.refresh(queued.root, [{ ...PR, number: 1 }]), forge.refresh(queued.root, [{ ...PR, number: 2 }])];
+    // The third read waits behind the concurrency limit for longer than the minimum interval.
+    now += CAMPAIGN_FORGE_OBSERVATION.minIntervalMs + 1;
+    runner.release();
+    await Promise.all(reads);
+    assert.equal(runner.requests.length, 3);
+    await forge.refresh(queued.root, [{ ...PR, number: 2 }]);
+    assert.equal(runner.requests.length, 3, "a pull request just read is not read again at once");
+  } finally {
+    queued.db.close();
+  }
+});

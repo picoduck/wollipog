@@ -268,6 +268,16 @@ test("GitHub facts: no required checks is not passing, an unconfirmed rollup is 
   assert.deepEqual(row("Required Checks"), { label: "Required Checks", text: "None Reported", note: "GitHub reports no required checks yet. This is not passing." });
   assert.equal(row("All Checks").text, "Unknown");
   assert.equal(row("Merge Queue").text, "Not Queued");
+  // The head is only a SHA, and the base branch is the target, never "on main" (which reads as merged).
+  assert.deepEqual(row("Head"), { label: "Head", text: "44579c6", note: null });
+  assert.deepEqual(row("Base Branch"), { label: "Base Branch", text: "main", note: null });
+  const stale = forgePullRequestView({ availability: "stale", value: forgeObservation(), observedAt: now - 20 * MINUTE }, now);
+  assert.ok(stale.kind === "observed");
+  if (stale.kind !== "observed") return;
+  for (const entry of [...view.rows, ...stale.rows]) {
+    assert.doesNotMatch(`${entry.text} ${entry.note ?? ""}`, /\bOn main\b/u, `${entry.label} never says a commit is on a branch`);
+  }
+  assert.deepEqual(stale.rows.find((candidate) => candidate.label === "Base Branch"), { label: "Base Branch", text: "main", note: null });
   for (const label of view.rows.map((candidate) => candidate.label).concat([view.status])) {
     assert.equal(titleCaseLabel(label), label, `${label} is Title Case`);
   }

@@ -393,10 +393,12 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   is `unavailable{forge_unsupported}` and is never put in a query.
 - **Credentials:** the control plane stores no forge credential and never sees a token. It asks the
   runner hosting the **root campaign session** to read, and that runner runs `gh api graphql
-  --hostname github.com` in the root Orchestrator's own repository context (its agent context and
-  repository path, as the Orchestrator itself would run `gh`), so the credential is wherever that
-  `gh` keeps its login (`gh auth status`; `GH_TOKEN`/`GITHUB_TOKEN` in that environment, or `gh`'s
-  own configuration). A root whose repository is not runner-local is `forge_unsupported`.
+  --hostname github.com` in the root Orchestrator's own repository context: its agent context,
+  repository path, and the runner-local environment its agent is launched with (the agent's
+  configured environment, which is never persisted), as the Orchestrator itself would run `gh`. The
+  credential is therefore wherever that `gh` keeps its login (`gh auth status`; `GH_TOKEN`,
+  `GITHUB_TOKEN`, `GH_CONFIG_DIR`, or `HOME` in that environment, or `gh`'s own configuration). A
+  root whose repository is not runner-local is `forge_unsupported`.
 - **What is read:** only the pull requests named by work items' reported stages
   (`stage.pullRequests`), never a search. For each: state, draft, head SHA, base branch, review
   decision, the check rollup of every check on the head (from GitHub's own rollup state, with
@@ -416,10 +418,12 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   the panel sends when an item's details open and every 60 seconds while they stay open; it waits
   at most 20 seconds and returns the item's facts (`CampaignForgeRefreshResponse`). In the
   background, every `backgroundTickMs` (1 minute) the control plane reads the pull requests of
-  **unfinished** items whose last successful read is older than `backgroundIntervalMs` (5 minutes),
+  **unfinished** items whose last read, successful or not (a timed-out or rejected read included),
+  finished more than `backgroundIntervalMs` (5 minutes) ago,
   oldest first, at most `backgroundRefsPerTick` (32) per pass, skipping a pull request last seen
   merged or closed (on-demand reads still refresh it) and campaigns whose root is archived.
-- **Bounds:** one pull request is read at most once per `minIntervalMs` (30 seconds) whoever asks;
+- **Bounds:** one pull request is read at most once per `minIntervalMs` (30 seconds, counted from
+  when the previous read finished) whoever asks;
   a read already in flight is shared; at most `concurrentRequests` (2) runner requests run at once,
   a bounded queue sits behind them, and past it new reads are dropped (their facts keep aging).
   Reads run off the session-update path: a slow or hung `gh` (30-second runner timeout,

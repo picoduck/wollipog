@@ -216,7 +216,7 @@ export class CampaignForgeObserver {
     if (!runner || !runner.online || !runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus")) return;
     const now = this.now();
     if (this.lastRead.size > 4_096) {
-      for (const [key, at] of this.lastRead) if (now - at >= CAMPAIGN_FORGE_OBSERVATION.minIntervalMs) this.lastRead.delete(key);
+      for (const [key, at] of this.lastRead) if (now - at >= CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs) this.lastRead.delete(key);
     }
     const waits: Promise<void>[] = [];
     const due: CampaignPullRequestRef[] = [];
@@ -236,7 +236,13 @@ export class CampaignForgeObserver {
       const keys = batch.map((ref) => `${campaignId}|${forgeRefKey(ref)}`);
       for (const key of keys) this.lastRead.set(key, now);
       const read = this.limited(() => this.read(campaignId, runner.runnerId, batch)).finally(() => {
-        for (const key of keys) if (this.inFlight.get(key) === read) this.inFlight.delete(key);
+        // The interval runs from when the read finished, whatever it learned: a read that waited in
+        // the queue or timed out is not repeated at once, by a caller or by the background pass.
+        const finished = this.now();
+        for (const key of keys) {
+          this.lastRead.set(key, finished);
+          if (this.inFlight.get(key) === read) this.inFlight.delete(key);
+        }
       });
       for (const key of keys) this.inFlight.set(key, read);
       waits.push(read);
@@ -262,7 +268,8 @@ export class CampaignForgeObserver {
         for (const ref of refs) {
           const stored = state.get(forgeRefKey(ref));
           if (stored?.finished) continue;
-          const readAt = stored?.readAt ?? 0;
+          // A read that stored nothing (timed out, disconnected, malformed) still counts.
+          const readAt = Math.max(stored?.readAt ?? 0, this.lastRead.get(`${campaignId}|${forgeRefKey(ref)}`) ?? 0);
           if (now - readAt >= CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs) due.push({ campaignId, ref, readAt });
         }
       }

@@ -15773,7 +15773,7 @@ export class SessionManager {
    * data crosses; a failure is a fixed reason, never `gh` output. */
   async campaignForgeObserve(
     message: CampaignForgeObserveMessage,
-    gh?: GhRunner,
+    options: { gh?: GhRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<CampaignForgeObserveResultMessage> {
     const base = { type: "campaign_forge_observe_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
@@ -15781,7 +15781,8 @@ export class SessionManager {
       return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
     }
     try {
-      const outcome = await observeForgeStatus(message.pullRequests, gh ?? contextGhRunner(meta.context, meta.repoPath));
+      const outcome = await observeForgeStatus(message.pullRequests,
+        options.gh ?? contextGhRunner(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {}));
       return outcome.ok
         ? { ...base, observedAt: Date.now(), ok: true, results: outcome.results }
         : { ...base, observedAt: Date.now(), ok: false, failure: outcome.failure };

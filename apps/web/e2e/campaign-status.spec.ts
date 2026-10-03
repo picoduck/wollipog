@@ -114,7 +114,7 @@ test("details show observed GitHub facts beside the reported stage, with stale a
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.forgeRefreshes()))
     .toEqual(["s_root/cwi_2"]);
   const facts = await deliveryFacts(page);
-  expect(facts[0]).toBe("Reported Stage: Merge QueuedReported by the Orchestrator 20m ago. Not observed.Binding to the merged contract.");
+  expect(facts[0]).toBe("Reported Stage: Merge QueuedReported by the Orchestrator 20m ago. Wollipog has not observed this stage.Binding to the merged contract.");
   const at = (term: string) => facts.indexOf(facts.find((fact) => fact.startsWith(term))!);
   const fresh = facts.slice(at("PR #2440:"), at("PR #2436:"));
   expect(fresh).toEqual([
@@ -123,8 +123,11 @@ test("details show observed GitHub facts beside the reported stage, with stale a
     "Required Checks: Passing1 passing.",
     "All Checks: Pending1 pending, 8 passing.",
     "Merge Queue: Awaiting Checks, Position 2",
-    "Head: 44579c6On main.",
+    "Head: 44579c6",
+    "Base Branch: main",
   ]);
+  // Nothing says a commit is on a branch: an open pull request's head is not on main.
+  expect(facts.join("\n")).not.toMatch(/\bOn main\b/);
   const stale = facts.slice(at("PR #2436:"), at("PR #2441:"));
   expect(stale[0]).toBe("PR #2436: Last Seen MergedStale: observed on GitHub 25m ago. It may have changed since.");
   expect(stale).toContain("Review: Last Seen Approved");
