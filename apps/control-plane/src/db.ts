@@ -15551,9 +15551,9 @@ export class ControlPlaneDb {
 
   /** The one ancestry walk every campaign read and write resolves through (#2451): the outermost
    * Orchestrator-role session at or above `sessionId`. Ordinary sessions anywhere in the chain are
-   * walked through, not stopped at. `refused`
-   * means the ancestry is malformed (a cycle, a missing session, or more than 64 parent hops), so
-   * no caller may name a campaign for it; `none` means it is sound but holds no Orchestrator.
+   * walked through, not stopped at. `refused` means the ancestry is malformed (a cycle, a missing
+   * session, or a chain longer than 64 sessions), so no caller may name a campaign for it; `none`
+   * means it is sound but holds no Orchestrator.
    * `hasPolicy` is false only for a legacy or unreadable campaign policy: that root still owns its
    * typed gates (human-only by default) but has no campaign to project. */
   campaignAncestryRoot(sessionId: string): { id: string; hasPolicy: boolean } | "none" | "refused" {
@@ -15571,8 +15571,10 @@ export class ControlPlaneDb {
     const seen = new Set<string>([current.id]);
     for (let depth = 0; current.parent_session_id; depth += 1) {
       // A walk cut off by the bound has not found the root; naming the Orchestrator it stopped at
-      // would key rows to a campaign that a shallower caller resolves past (#1462).
-      if (depth >= 64 || seen.has(current.parent_session_id)) return "refused";
+      // would key rows to a campaign that a shallower caller resolves past (#1462). The chain is
+      // capped at 64 sessions including `sessionId`, the most the typed-gate walk ever examined, so
+      // a gate can only be refused at the bound, never handed to an Orchestrator further out.
+      if (depth >= 63 || seen.has(current.parent_session_id)) return "refused";
       const parent = read(current.parent_session_id);
       if (!parent) return "refused";
       seen.add(parent.id);

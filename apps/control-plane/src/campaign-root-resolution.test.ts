@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { RunnerMetadata, SessionView, WorkflowDecisionView } from "@wollipog/protocol";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -145,20 +145,26 @@ test("a cyclic ancestry is refused by every campaign path (#2451)", () => {
 test("an ancestry deeper than the walk bound is refused by every campaign path (#2451)", () => {
   const { db, make, ask, campaignController } = harness();
   try {
-    for (let depth = 0; depth <= 65; depth += 1) make(`deep${depth}`, depth ? `deep${depth - 1}` : undefined, true);
-    // deep65 is 65 hops below deep0, one past the bound. A worker's gates and its campaign events
-    // both resolve from its parent, so they agree on which side of the bound it falls.
-    make("worker", "deep65");
+    for (let depth = 0; depth <= 64; depth += 1) make(`deep${depth}`, depth ? `deep${depth - 1}` : undefined, true);
+    // The two outermost Orchestrators own implementation questions differently, so a walk that
+    // reached one level further than the old gate walk would hand a human-owned gate to an agent.
+    db.updateSessionParentControlPolicy("deep0", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, implementation_question: "orchestrator" }, Date.now());
+    db.updateSessionParentControlPolicy("deep1", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY }, Date.now());
+    // From deep64 the chain holds 65 sessions, one more than the old gate walk examined: there it
+    // picked deep1 (human-owned). Now the gate is refused rather than resolved to deep0 (agent-owned).
+    make("worker", "deep64");
     const refused = ask("worker", "too-deep");
     assert.equal(refused.status, 409);
     assert.match(refused.error ?? "", /ancestry is malformed/);
-    assert.equal(campaignController("deep65"), null);
-    assert.equal(db.resolvedCampaignSessionId("deep65"), null);
-    make("shallow-worker", "deep64");
-    assert.equal(decisionOf(ask("shallow-worker", "within-bound")).controllingSessionId, "deep0",
-      "64 hops is within the bound for every path");
-    assert.equal(campaignController("deep64"), "deep0");
-    assert.equal(db.resolvedCampaignSessionId("deep64"), "deep0");
+    assert.equal(campaignController("deep64"), null, "events agree with the gate on the bound");
+    assert.equal(db.resolvedCampaignSessionId("deep64"), null);
+    // From deep63 the chain holds 64 sessions, all of which the old gate walk examined too.
+    make("shallow-worker", "deep63");
+    const withinBound = decisionOf(ask("shallow-worker", "within-bound"));
+    assert.equal(withinBound.controllingSessionId, "deep0", "the owner the old gate walk chose at this depth");
+    assert.equal(withinBound.authority, "orchestrator");
+    assert.equal(campaignController("deep63"), "deep0");
+    assert.equal(db.resolvedCampaignSessionId("deep63"), "deep0");
   } finally {
     db.close();
   }
