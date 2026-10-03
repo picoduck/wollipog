@@ -98,6 +98,9 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
   // The current file has only its header so far: the next header line or binary marker completes
   // it rather than opening another file.
   let headerOnly = false;
+  // A file has one "---"/"+++" pair. A second one before any body line is the body: ACP's bare body
+  // for old text "-- x" and new text "++ x" opens with exactly such a pair.
+  let pairSeen = false;
   const startFile = (): DiffFile => {
     file = { isNew: false, hunks: [] };
     files.push(file);
@@ -106,6 +109,7 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
     newLeft = 0;
     binaryPatch = false;
     headerOnly = true;
+    pairSeen = false;
     return file;
   };
   const bodyLine = (line: string) => {
@@ -171,8 +175,10 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
       continue;
     }
     // A "---"/"+++" pair outside a hunk names a file; one with no "diff" line opens the next file.
-    if (line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ") && !(hunk && !hunk.header)) {
+    if (line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ") && !(hunk && !hunk.header) &&
+        !(file && headerOnly && pairSeen)) {
       const current: DiffFile = file && headerOnly ? file : startFile();
+      pairSeen = true;
       if (line.slice(4).trim() === "/dev/null") current.isNew = true;
       if (lines[index + 1]!.slice(4).trim() === "/dev/null") current.isDeleted = true;
       const target = headerPath(lines[index + 1]!.slice(4)) ?? headerPath(line.slice(4));

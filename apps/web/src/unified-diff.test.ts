@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import fc from "fast-check";
 import { binaryMarkerSides, diffFileIsPlain, diffLineCounts, diffMaxLineNumber, hunkLabel, parseUnifiedDiff } from "./unified-diff.js";
 
 const NEW_FILE = [
@@ -162,6 +163,73 @@ test("a diff --git header whose path contains \" b/\" keeps the whole path", () 
   assert.equal(file!.path, "docs/a b/c.md");
   const [moved] = parseUnifiedDiff("diff --git a/old.ts b/new.ts\nsimilarity index 90%\nrename from old.ts\nrename to new.ts");
   assert.equal(moved!.path, "new.ts");
+});
+
+test("a bare body that opens with ---/+++ lines keeps them as changes, not a second header", () => {
+  // ACP's renderDiff for old text "-- counter;" and new text "++ counter;".
+  const [file, ...rest] = parseUnifiedDiff("--- a/src/counter.cpp\n+++ b/src/counter.cpp\n--- counter;\n+++ counter;");
+  assert.equal(rest.length, 0);
+  assert.equal(file!.path, "src/counter.cpp");
+  assert.deepEqual(file!.hunks[0]!.lines.map((line) => [line.kind, line.text]), [
+    ["removed", "-- counter;"],
+    ["added", "++ counter;"],
+  ]);
+});
+
+test("every ACP diff parses back to exactly its old and new lines (property)", () => {
+  // apps/runner/src/acp.ts renderDiff, verbatim in behaviour.
+  const renderDiff = (path: string, oldText: string, newText: string) => {
+    const minus = oldText ? oldText.split("\n").map((line) => `-${line}`).join("\n") + "\n" : "";
+    const plus = newText.split("\n").map((line) => `+${line}`).join("\n");
+    return `--- a/${path}\n+++ b/${path}\n${minus}${plus}`;
+  };
+  // Lines that look like diff syntax are the interesting ones.
+  const line = fc.oneof(
+    fc.constantFrom("", "-- x", "++ x", "--- a/y", "+++ b/y", "@@ -1 +1 @@", "diff --git a/y b/y", "index 1..2",
+      "new file mode 100644", "Binary files a/y and b/y differ", "GIT binary patch", "\\ No newline at end of file", " ctx"),
+    fc.string({ maxLength: 12 }).filter((text) => !/[\r\n]/.test(text)),
+  );
+  fc.assert(fc.property(fc.array(line, { maxLength: 6 }), fc.array(line, { minLength: 1, maxLength: 6 }), (oldLines, newLines) => {
+    const oldText = oldLines.join("\n");
+    const newText = newLines.join("\n");
+    const files = parseUnifiedDiff(renderDiff("src/x.ts", oldText, newText));
+    assert.equal(files.length, 1);
+    assert.equal(files[0]!.path, "src/x.ts");
+    const parsed = files[0]!.hunks.flatMap((hunk) => hunk.lines);
+    const expected = [
+      ...(oldText ? oldText.split("\n").map((text) => ["removed", text]) : []),
+      ...newText.split("\n").map((text) => ["added", text]),
+    ];
+    assert.deepEqual(parsed.map((entry) => [entry.kind, entry.text]), expected);
+  }), { numRuns: 500 });
+});
+
+test("every counted git hunk, in a diff of several files, parses back to its own lines (property)", () => {
+  const content = fc.oneof(
+    fc.constantFrom("", "-- x", "++ x", "-- a/y", "++ b/y", "@@ -1 +1 @@", "diff --git a/y b/y", "Binary files a/y and b/y differ"),
+    fc.string({ maxLength: 10 }).filter((text) => !/[\r\n]/.test(text) && !text.startsWith("\\")),
+  );
+  const entry = fc.tuple(fc.constantFrom("added", "removed", "context") as fc.Arbitrary<"added" | "removed" | "context">, content);
+  const file = fc.array(entry, { minLength: 1, maxLength: 6 });
+  fc.assert(fc.property(fc.array(file, { minLength: 1, maxLength: 3 }), (bodies) => {
+    const text = bodies.map((body, index) => {
+      const oldCount = body.filter(([kind]) => kind !== "added").length;
+      const newCount = body.filter(([kind]) => kind !== "removed").length;
+      const sign = { added: "+", removed: "-", context: " " } as const;
+      return [
+        `diff --git a/f${index} b/f${index}`,
+        `--- a/f${index}`,
+        `+++ b/f${index}`,
+        `@@ -1,${oldCount} +1,${newCount} @@`,
+        ...body.map(([kind, line]) => `${sign[kind]}${line}`),
+      ].join("\n");
+    }).join("\n");
+    const files = parseUnifiedDiff(text);
+    assert.deepEqual(files.map((parsed) => parsed.path), bodies.map((_, index) => `f${index}`));
+    files.forEach((parsed, index) => {
+      assert.deepEqual(parsed.hunks.flatMap((hunk) => hunk.lines).map((line) => [line.kind, line.text]), bodies[index]);
+    });
+  }), { numRuns: 500 });
 });
 
 test("CRLF line endings are not part of a line's text", () => {
