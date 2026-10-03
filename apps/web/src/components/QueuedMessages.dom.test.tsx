@@ -214,8 +214,11 @@ test("only exceptions carry a status: Steering…, Pending Delivery, Delivery Un
     assert.ok(!tray.row("failed").textContent?.includes("The machine restarted."));
     // A steer in flight takes Steer away; the row says Steering… instead.
     assertNoDomNode(tray.button(tray.row("steering"), "Steer Queued Message"));
-    // A settled receipt is dismissed, never canceled.
+    // A settled receipt is dismissed, never canceled, and it cannot be edited or resent.
     assertNoDomNode(tray.button(tray.row("failed"), "Cancel Queued Message"));
+    const failedEdit = tray.button(tray.row("failed"), "Edit Queued Message")!;
+    assert.equal(failedEdit.disabled, true);
+    assert.equal(failedEdit.title, "Delivery attempts for this message have ended, so it cannot be steered or edited.");
     tray.button(tray.row("failed"), "Dismiss Failed Message")!.click();
     tray.button(tray.row("uncertain"), "Dismiss Uncertain Message")!.click();
     assert.deepEqual(tray.calls.dismiss, ["failed", "uncertain"]);
