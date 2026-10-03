@@ -215,6 +215,8 @@ export interface DriverOptions {
   cwd: string;
   env: Record<string, string>;
   projectMemoryDirectory?: string;
+  /** Non-secret artifact capability/policy note, re-created at launch/resume. */
+  artifactGuidance?: string;
   config: SessionConfig;
   orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[] };
   context: AgentContext;

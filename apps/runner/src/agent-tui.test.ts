@@ -392,3 +392,23 @@ test("a TUI launch keeps an inline --settings JSON document and still drops a mi
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test("native TUI retains provider policy because mutable artifact guidance has no safe update surface", async () => {
+  for (const driver of ["claude-code", "codex-app-server"] as const) {
+    const original = meta({ driver, artifactUploads: "manual" });
+    const launch = await prepareAgentTuiLaunch(original, { controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      provision: () => {}, assertSessionNotDeleted: stillPresent,
+      provisionManagedWorktreeGuard: unguarded, prepareScratch: async () => "/scratch",
+      permissionProfile: async () => ({ active: false, reason: "test", args: original.args }),
+    });
+    assert.ok(launch);
+    assert.deepEqual(launch.args, agentTuiLaunch(original)?.args);
+    for (const platform of ["linux", "win32"] as const) {
+      const expectedArgs = platform === "win32"
+        ? ["/d", "/v:off", "/s", "/c", '"claude --profile "team profile""'] : original.args;
+      assert.deepEqual(agentTuiLaunch(original, { platform, comspec: "cmd.exe" })?.args, expectedArgs);
+    }
+    assert.deepEqual(original.args, ["--profile", "team profile"], "durable launch metadata is unchanged");
+  }
+});

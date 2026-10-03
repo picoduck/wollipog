@@ -193,6 +193,7 @@ import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
 import { OrchestratorSettings } from "./orchestrator-settings.js";
+import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
@@ -955,6 +956,7 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
+registerArtifactUploadSettingsRoutes(app, db, hub, requestPrincipal);
 registerCampaignStatusRoutes(app, { db, requestPrincipal });
 
 // An attempt session's observed status moves its work item without a ledger write; give such

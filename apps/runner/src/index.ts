@@ -2195,6 +2195,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`agent control ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
       break;
+    case "set_session_artifact_uploads":
+      sessions.setArtifactUploads(msg.sessionId, msg.preference);
+      break;
     case "set_session_project_memory":
       sessions.setProjectMemory(msg.sessionId, msg.projectMemory);
       break;
@@ -2235,6 +2238,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log("ignored prompt_session with malformed prompt images");
         break;
       }
+      if (msg.artifactUploads) sessions.setArtifactUploads(msg.sessionId, msg.artifactUploads);
       if (msg.projectMemory) sessions.setProjectMemory(msg.sessionId, msg.projectMemory);
       sessions.prompt(msg.sessionId, msg.text, msg.images, msg.slashCommand, msg.config);
       break;
@@ -2319,6 +2323,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       sendUp(response);
       if (!("handle" in claim)) break;
       const lifecycle = durableLifecycle(claim.handle);
+      if (msg.artifactUploads) {
+        if (msg.command.type === "start_session") msg.command.spec.artifactUploads = msg.artifactUploads;
+        else sessions.setArtifactUploads(msg.command.sessionId, msg.artifactUploads);
+      }
       if (msg.projectMemory) {
         if (msg.command.type === "start_session") msg.command.spec.projectMemory = msg.projectMemory;
         else sessions.setProjectMemory(msg.command.sessionId, msg.projectMemory);

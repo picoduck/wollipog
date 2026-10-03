@@ -4348,3 +4348,42 @@ test("resolved default Codex model prices usage without pinning future requests"
   assert.equal(usage?.kind === "token_usage" ? usage.model : undefined, "gpt-6.1-sol");
   assert.equal((h.driver as any).config.model, "default", "provider resolution must not pin the user configuration");
 });
+
+
+for (const lifecycle of ["fresh", "resume", "fork"] as const) {
+  test(`artifact guidance uses current turn context and preserves ${lifecycle} developer policy`, async () => {
+    const currentGuidance = lifecycle === "fresh" ? "Automatic: relevant evidence only" : "Manual: no upload authority";
+    const threadId = lifecycle === "fork" ? "forked-thread" : "thread";
+    const h = makeHarness({ artifactGuidance: currentGuidance, ...(lifecycle !== "fresh" ? { resumeId: threadId } : {}) });
+    const calls: Array<{ method: string; params: any }> = [];
+    const notifications = notificationHandlers(h.driver);
+    let turnNumber = 0;
+    (h.driver as any).peer = {
+      request: async (method: string, params: any) => {
+        calls.push({ method, params });
+        return method === "turn/start" ? { turn: { id: `current-turn-${++turnNumber}`, status: "inProgress" } }
+          : { thread: { id: method === "thread/fork" ? "next-fork" : threadId, status: { type: "idle" } } };
+      },
+      requestWithDeadline: async (method: string) => {
+        assert.notEqual(method, "config/read", "discovery never needs to read or override developer policy");
+        return { data: [] };
+      },
+    };
+    assert.equal(await h.driver.newSession("/project"), threadId);
+    if (lifecycle === "fork") assert.equal(await h.driver.forkSession("historical-turn", "/fork"), "next-fork");
+    for (const call of calls.filter((call) => ["thread/start", "thread/resume", "thread/fork"].includes(call.method))) {
+      assert.ok(!("developerInstructions" in call.params), "upload authorization must not survive as higher-priority provider policy");
+    }
+    for (let turn = 0; turn < 2; turn++) {
+      const pending = h.driver.prompt("original task");
+      await nextTask();
+      const request = calls.filter((call) => call.method === "turn/start").at(-1)!;
+      assert.deepEqual(request.params.input, [
+        { type: "text", text: "original task" },
+        { type: "text", text: currentGuidance },
+      ]);
+      notifications.get("turn/completed")!({ threadId, turn: { id: `current-turn-${turnNumber}`, status: "completed" } });
+      assert.equal(await pending, "end_turn");
+    }
+  });
+}

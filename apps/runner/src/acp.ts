@@ -109,6 +109,7 @@ export class AcpClient {
   private disposed = false;
   private transportClosed = false;
   private supportsImages = false;
+  private readonly artifactGuidance?: string;
   private suppressUpdates = false;
   private negotiation: AcpNegotiation | null = null;
   private modes: SafeAcpModeState | null = null;
@@ -133,6 +134,7 @@ export class AcpClient {
       env: Record<string, string>;
       context?: AgentContext;
       initialCommands?: AgentSlashCommand[];
+      artifactGuidance?: string;
       sessionContext?: AcpSessionContextConfig;
       isolation?: SpawnIsolation;
       containerAgentLaunch?: boolean;
@@ -152,6 +154,7 @@ export class AcpClient {
     private readonly ev: AcpEvents,
     deps: Partial<AcpClientDeps> = {},
   ) {
+    this.artifactGuidance = opts.artifactGuidance;
     this.orchestrator = opts.orchestrator === true;
     // `||`, not `??`: the role can only ever widen the assertion. An explicit `false` alongside the
     // coupled preset must not be able to switch the pinned-identity check off.
@@ -565,6 +568,10 @@ export class AcpClient {
     }
     const promptText = slashCommand ? `/${slashCommand}${text ? ` ${text}` : ""}` : text;
     if (promptText) content.push({ type: "text", text: promptText });
+    // ACP providers differ in native slash parsing; command turns are not instruction updates.
+    if (this.artifactGuidance && !slashCommand && !promptText.trimStart().startsWith("/")) {
+      content.push({ type: "text", text: this.artifactGuidance });
+    }
     if (images.length) {
       if (this.supportsImages) {
         for (const img of images) {

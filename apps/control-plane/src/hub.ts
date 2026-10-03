@@ -8,7 +8,7 @@
  * The DB is the source of truth; the hub broadcasts deltas built from it.
  */
 
-import { PROJECT_MEMORY_MIN_PROTOCOL, isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
+import { runnerSupportsProtocol, PROJECT_MEMORY_MIN_PROTOCOL, isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
 import type {
   ControlPlaneToRunner,
   ControlPlaneToUi,
@@ -417,8 +417,39 @@ export class Hub {
     return msg;
   }
 
+  private withArtifactUploads(runnerId: string, msg: ControlPlaneToRunner): ControlPlaneToRunner {
+    const command = msg.type === "durable_session_command" ? msg.command : msg;
+    const sessionId = command.type === "start_session" ? command.spec.sessionId
+      : "sessionId" in command ? command.sessionId : undefined;
+    if (!sessionId || !["start_session", "prompt_session", "answer_recovered_question"].includes(command.type)) return msg;
+    if (!runnerSupportsProtocol(this.db.getRunner?.(runnerId)?.protocolVersion, "artifactSessionGuidance")) return msg;
+    const session = this.db.getSession(sessionId);
+    if (!session || session.runnerId !== runnerId) return msg;
+    const owner = this.db.sessionOwnerUser(sessionId);
+    const artifactUploads = this.db.artifactUploadPreference(owner?.userId);
+    if (msg.type === "durable_session_command") return { ...msg, artifactUploads };
+    if (msg.type === "start_session") return { ...msg, spec: { ...msg.spec, artifactUploads } };
+    if (msg.type === "prompt_session") return { ...msg, artifactUploads };
+    return msg;
+  }
+
+  private syncSessionArtifactUploads(session: SessionView, userId?: string): void {
+    const owner = this.db.sessionOwnerUser(session.id);
+    if (userId && owner?.userId !== userId) return;
+    if (!runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "artifactSessionGuidance")) return;
+    this.sendToRunner(session.runnerId, { type: "set_session_artifact_uploads", sessionId: session.id,
+      preference: this.db.artifactUploadPreference(owner?.userId) });
+  }
+
+  syncArtifactUploads(userId?: string, runnerId?: string): void {
+    for (const session of this.db.listSessions({ includeArchived: true })) {
+      if (runnerId && session.runnerId !== runnerId) continue;
+      this.syncSessionArtifactUploads(session, userId);
+    }
+  }
+
   sendToRunner(runnerId: string, msg: ControlPlaneToRunner): boolean {
-    msg = this.withProjectMemory(runnerId, msg);
+    msg = this.withArtifactUploads(runnerId, this.withProjectMemory(runnerId, msg));
     const socket = this.runnerSockets.get(runnerId);
     if (!socket) return false;
     try {
@@ -983,7 +1014,11 @@ export class Hub {
 
   syncProjectMemory(projectId?: string, runnerId?: string): void {
     for (const session of this.db.listSessions({ includeArchived: true })) {
-      if (projectId && session.projectId !== projectId || runnerId && session.runnerId !== runnerId) continue;
+      if (runnerId && session.runnerId !== runnerId) continue;
+      // Reconnect already hydrates every retained session; share that scan so artifact metadata
+      // does not add another synchronous full inventory before credential handshakes can run.
+      if (runnerId) this.syncSessionArtifactUploads(session);
+      if (projectId && session.projectId !== projectId) continue;
       this.syncSessionProjectMemory(session);
     }
   }

@@ -425,6 +425,7 @@ export class CodexAppServerDriver implements Driver {
   private lastTurnId: string | null = null;
   private cwd: string;
   private config: SessionConfig;
+  private artifactPromptGuidance?: string;
   private disposed = false;
   private cancelled = false;
   private turnResolve: ((r: StopReason) => void) | null = null;
@@ -919,6 +920,10 @@ export class CodexAppServerDriver implements Driver {
     await this.reconcilePlugins("session_start");
     if (this.disposed || !this.peer) throw new Error("codex app-server is not running");
     const resumeId = this.opts.resumeId;
+    // Keep mutable upload authorization in each current turn, never in persisted developer
+    // instructions. Codex may replay stale developer text after a cold resume/fork (#19045).
+    // This also preserves layered and thread-specific provider instructions without replacing them.
+    this.artifactPromptGuidance = this.opts.artifactGuidance;
     let res: Json;
     try {
       if (resumeId) {
@@ -1205,6 +1210,7 @@ export class CodexAppServerDriver implements Driver {
       this.setSteeringTurn(null);
 
       const input: Json[] = base || !staged.inputs.length ? [{ type: "text", text: base }] : [];
+      if (this.artifactPromptGuidance) input.push({ type: "text", text: this.artifactPromptGuidance });
       input.push(...commandItems, ...staged.inputs);
       const protections = this.opts.managedWorktreeProtections?.() ?? [];
       const params = buildCodexTurnParams(

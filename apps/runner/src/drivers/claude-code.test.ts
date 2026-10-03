@@ -5377,3 +5377,74 @@ test("resume accounting probe authentication failure signals existing recovery",
   assert.equal(failures, 1);
   driver.dispose();
 });
+
+for (const persistent of [false, true]) {
+  for (const lifecycle of ["fresh", "resume-manual", "resume-external"] as const) {
+    test(`Claude ${persistent ? "persistent" : "one-shot"} ${lifecycle} delivers current artifact preference after exact task text`, async () => {
+      const child = fakeProcess();
+      const writes: string[] = [];
+      child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+      const note = lifecycle === "fresh" ? "Automatic: relevant task evidence" : lifecycle === "resume-manual"
+        ? "Manual: awareness grants no upload authority" : "External: never silently fall back";
+      const sourceArgs = ["--append-system-prompt", "original policy", "--append-system-prompt-file", "provider-policy.txt"];
+      let launchArgs: string[] = [];
+      const driver = new ClaudeCodeDriver({ ...baseOpts, args: sourceArgs, artifactGuidance: note,
+        env: { [CLAUDE_PERSISTENT_FLAG]: persistent ? "1" : "0" }, config: { permissionMode: "acceptEdits" },
+        ...(lifecycle !== "fresh" ? { resumeId: "existing-session" } : {}) }, noopCb,
+        { spawn: (spec: { args: string[] }) => { launchArgs = spec.args; return child; }, kill: () => {} } as any);
+      const pending = driver.prompt("focus task");
+      await nextTask();
+      const messages = writes.join("").trim().split("\n").map((line) => JSON.parse(line));
+      const user = messages.find((message) => message.type === "user");
+      assert.ok(user, "fixed-rule one-shot also uses stream-json when guidance requires separate context");
+      assert.deepEqual(user.message.content, [{ type: "text", text: "focus task" }, { type: "text", text: note }]);
+      assert.ok(launchArgs.includes("--input-format"));
+      assert.ok(!launchArgs.some((arg) => arg.includes(note)), "mutable upload authority never enters sticky system argv");
+      assert.deepEqual(launchArgs.slice(0, sourceArgs.length), sourceArgs, "original inline and file append flags remain exact");
+      if (lifecycle !== "fresh") assert.ok(launchArgs.includes("--resume"));
+      child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+      if (!persistent) child.emit("close", 0);
+      assert.equal(await pending, "end_turn");
+      driver.dispose();
+    });
+  }
+}
+
+test("Claude native commands retain their one-block dispatch and next normal task receives current guidance", async () => {
+  const child = fakeProcess();
+  const writes: string[] = [];
+  child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+  const note = "Manual: no implicit file transfer authority";
+  const driver = new ClaudeCodeDriver({ ...baseOpts, artifactGuidance: note,
+    env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" } }, noopCb,
+    { spawn: () => child, kill: () => {} } as any);
+  for (const [text, command, expected] of [["", "cost", "/cost"], [" /cost", undefined, " /cost"],
+    ["normal task", undefined, "normal task"]] as const) {
+    const pending = driver.prompt(text, [], command);
+    await nextTask();
+    const users = writes.join("").trim().split("\n").map((line) => JSON.parse(line)).filter((message) => message.type === "user");
+    assert.deepEqual(users.at(-1).message.content, expected.trimStart().startsWith("/")
+      ? [{ type: "text", text: expected }] : [{ type: "text", text: expected }, { type: "text", text: note }]);
+    child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+    assert.equal(await pending, "end_turn");
+  }
+  driver.dispose();
+});
+
+test("fixed-rule one-shot native command keeps plain stdin and exact text despite artifact awareness", async () => {
+  const child = fakeProcess();
+  const writes: string[] = [];
+  child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+  let args: string[] = [];
+  const driver = new ClaudeCodeDriver({ ...baseOpts, artifactGuidance: "Manual awareness", env: { [CLAUDE_PERSISTENT_FLAG]: "0" },
+    config: { permissionMode: "acceptEdits" } }, noopCb,
+    { spawn: (spec: { args: string[] }) => { args = spec.args; return child; }, kill: () => {} } as any);
+  const pending = driver.prompt("", [], "cost");
+  await nextTask();
+  assert.equal(writes.join(""), "/cost");
+  assert.ok(!args.includes("--input-format"));
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  child.emit("close", 0);
+  assert.equal(await pending, "end_turn");
+  driver.dispose();
+});
