@@ -587,13 +587,13 @@ test("selected checkpoints refuse damaged guards, proofs, resurrected identities
       const entry = value.checkpoint.retired.find((entry: { directory: string; hash: string }) => entry.directory === "root" && entry.hash === value.checkpoint.previousTipHash);
       const path = join(root, entry.name);
       fs.writeFileSync(path, value.checkpoint.previousTip, { mode: 0o600 });
-      const reused = (stat: fs.Stats) => String(stat.dev) === entry.device && String(stat.ino) === entry.inode;
-      if (reused(fs.statSync(path))) {
+      const reused = (stat: fs.BigIntStats) => String(stat.dev) === entry.device && String(stat.ino) === entry.inode;
+      if (reused(fs.statSync(path, { bigint: true }))) {
         const fresh = join(home, "resurrected-tip");
         fs.writeFileSync(fresh, value.checkpoint.previousTip, { mode: 0o600 });
         fs.renameSync(fresh, path);
       }
-      assert.equal(reused(fs.statSync(path)), false);
+      assert.equal(reused(fs.statSync(path, { bigint: true })), false);
     }
     if (mutation === "storage") for (let i = 0; i < LIMITS.directoryEntries; i++) {
       fs.writeFileSync(join(root, `.provider-home-lease-${randomUUID()}.tmp`), "{}", { mode: 0o600 });
