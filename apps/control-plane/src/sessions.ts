@@ -12436,10 +12436,9 @@ export class SessionsService {
       if (started.ok) void started.data!.completion;
     }
 
-    // Parented usage is a display-only subagent breakdown. The provider's top-level result is the
-    // authoritative session total and already includes delegated work, so accruing both would
-    // inflate context meters and budget gates.
-    if (payload.kind === "token_usage" && !payload.parentToolUseId) {
+    // Claude's parented breakdown is already included in root totals. Codex child requests are
+    // independent: acknowledge their price and apply live budget gates before the root settles.
+    if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true)) {
       // v106 runners enforce this authoritative cumulative price during the live turn. The frame
       // carries no provider credential or transcript content, and older runners retain their
       // provider-reported local-cost behavior.

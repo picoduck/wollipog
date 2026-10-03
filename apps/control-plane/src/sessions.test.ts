@@ -24410,3 +24410,19 @@ test("a nested Orchestrator's work-item verification lands in the root ledger an
     db.close();
   }
 });
+
+for (const priced of [true, false]) test(`independent Codex child usage applies live ${priced ? "priced budget" : "unpriced"} governance before root settlement`, () => {
+  const { db, hub, svc } = makeHarness();
+  db.setUsageRateTable(parseRateTable({ example: { input_cost_per_token: 0.000002, output_cost_per_token: 0.00001 } }));
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  svc.setConfig(id, { costBudgetUsd: 0.002 });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", inputTokens: 1000, outputTokens: 100,
+    model: priced ? "example" : "<unknown-subagent>", parentToolUseId: "codex-child", independentUsage: true,
+    pricingContext: { requestInputTokens: 1000, serviceTier: "default" } });
+  const session = db.getSession(id)!;
+  assert.equal(session.costUsd, priced ? 0.003 : 0);
+  assert.equal(hub.sentOfType("priced_session_cost").at(-1)?.costUsd, session.costUsd);
+  assert.equal(session.pendingApproval?.kind, priced ? "cost_budget" : "cost_unpriced");
+  assert.equal(session.status, "input_required", "child spending must not wait for root usage or idle");
+});

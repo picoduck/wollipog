@@ -17040,7 +17040,7 @@ export class SessionManager {
       if (entry.toolCallIds.size >= meta.config.maxToolCalls) tripped = "max_tool_calls";
     } else if (
       payload.kind === "token_usage" &&
-      !payload.parentToolUseId &&
+      (!payload.parentToolUseId || payload.independentUsage === true) &&
       meta.config.costBudgetUsd &&
       meta.costUsd >= meta.config.costBudgetUsd
     ) {
