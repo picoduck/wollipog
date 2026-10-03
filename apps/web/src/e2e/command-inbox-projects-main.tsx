@@ -955,6 +955,7 @@ class FixtureSocket implements UiSocket {
  */
 const OFFLINE_BANNER = FIXTURE_QUERY.get("offlineBanner") === "1";
 let offlineBannerLost = false;
+let offlineBannerSocket: NeverOpenSocket | null = null;
 
 class NeverOpenSocket implements UiSocket {
   readonly readyState = 0;
@@ -970,7 +971,7 @@ const connection: UiConnectionRuntime = {
   instanceId: "project-inbox-e2e",
   runtimeKey: "project-inbox-e2e:1",
   createSocket() {
-    if (offlineBannerLost) return new NeverOpenSocket();
+    if (offlineBannerLost) return offlineBannerSocket = new NeverOpenSocket();
     if (PAIRING_REQUIRED) {
       const unpaired = new NeverOpenSocket();
       window.setTimeout(() => unpaired.onclose?.({ code: 1008 }), 0);
@@ -2424,6 +2425,7 @@ declare global {
     /** Raises toasts through the real provider, for the placement and stacking specs. */
     __WOLLIPOG_TOASTS_E2E__?: { show(message: string, options?: Omit<ToastOptions, "action"> & { actionLabel?: string }): number };
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
+      failOfflineAttempt(): void;
       failNextProjectUpdate(message?: string): void;
       updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults" | "memorySharing">>): void;
       updateSession(
@@ -2529,6 +2531,7 @@ declare global {
 }
 
 window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
+  failOfflineAttempt() { offlineBannerSocket?.onclose?.({ code: 1006 }); },
   workspaceMoveCount: () => workspaceMoveCount,
   setIdentityTeams(teams) {
     identityTeams = structuredClone(teams);

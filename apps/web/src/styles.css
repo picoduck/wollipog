@@ -2141,6 +2141,13 @@ button.status { cursor: pointer; }
   column-gap: var(--space-3);
 }
 .notice.page-banner .notice-actions { margin-top: 0; }
+/* The reconnecting message wraps in its own column; Retry Now stays at the top right. */
+.notice.page-banner.offline-banner { align-items: start; }
+.notice.page-banner.offline-banner .notice-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
 @media (max-width: 760px) {
   .notice.page-banner {
     padding-inline: max(var(--space-4), env(safe-area-inset-left, 0px)) max(var(--space-4), env(safe-area-inset-right, 0px));
