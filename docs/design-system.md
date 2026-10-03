@@ -1868,7 +1868,9 @@ exactly one: the most severe, then the lowest rank.
   message's text and attachments into the composer and focuses it; over a draft it first confirms
   "Replace Draft". While the copy is there the slot reads "Editing a copy of your Turn N message.
   Earlier turns stay as they are." with **Discard Edit**, which puts back the draft it replaced (or
-  clears the composer). Sending the copy ends it.
+  clears the composer). Sending the copy ends it, and a send that fails gives it back. It is kept
+  with the draft, so leaving the session or reloading keeps Discard Edit; while a queued message is
+  being edited it waits, since that edit owns the composer.
 - **Drop target** (#2156): files dragged over the composer turn the card's own edge dashed
   `--text-dim` and change only the bar row, to "Drop to attach 2 images"; the draft and its
   attachments stay in view. A model without image input refuses the drop in the same row, with the

@@ -174,6 +174,13 @@ import {
   rewindFilesConfirmation,
   type TurnActionConfirmationCopy,
 } from "../turn-action-confirmations.js";
+import {
+  clearComposerEditCopy,
+  forgetComposerEditCopiesForInstance,
+  loadComposerEditCopy,
+  saveComposerEditCopy,
+  type ComposerEditCopy,
+} from "../composer-edit-copy.js";
 import { SessionApprovalRegion, focusSessionRequest, standaloneApprovalForReview } from "./SessionApproval.js";
 import {
   requestTypeLabel,
@@ -361,6 +368,7 @@ export function clearSessionDetailComposerRuntimeForInstance(instanceScope: stri
     }
   }
   clearRuntimeQueuedEditRecoveriesForInstance(instanceScope);
+  forgetComposerEditCopiesForInstance(instanceScope);
   for (const key of affected) notifyComposerMutation(key);
 }
 
@@ -544,14 +552,6 @@ export type SessionDetailProps = {
 };
 
 type ComposerDraftContent = { text: string; images: PromptImageInput[] };
-
-/** A copy of an earlier message loaded into the composer by Edit as a New Turn (#2185). */
-type EditCopy = {
-  /** The copied message's turn, as the transcript numbers it, when known. */
-  turn: number | undefined;
-  /** The draft the copy replaced, restored by Discard Edit; null when the composer was empty. */
-  previous: ComposerDraftContent | null;
-};
 
 /** A turn action's confirmation copy as `confirm()` options, its note as the dim second line. */
 function turnActionConfirmation({ note, ...copy }: TurnActionConfirmationCopy): ConfirmationOptions {
@@ -1190,7 +1190,18 @@ function SessionDetailLoaded({
   const setError = useCallback((message: string | null, title = "Action Failed") => {
     showComposerError("action", message === null ? null : { title, message });
   }, [showComposerError]);
-  const [editCopy, setEditCopy] = useState<EditCopy | null>(null);
+  // Edit as a New Turn's copy in the composer and the draft it replaced (#2185), kept per session
+  // with the draft so leaving the session or reloading does not lose Discard Edit.
+  const [editCopy, setEditCopyState] = useState<ComposerEditCopy | null>(() =>
+    loadComposerEditCopy(sessionId, instanceScope));
+  const editCopyRef = useRef(editCopy);
+  editCopyRef.current = editCopy;
+  const updateEditCopy = useCallback((next: ComposerEditCopy | null) => {
+    editCopyRef.current = next;
+    setEditCopyState(next);
+    if (next) saveComposerEditCopy(sessionId, next, instanceScope);
+    else clearComposerEditCopy(sessionId, instanceScope);
+  }, [instanceScope, sessionId]);
   const revealOrdinaryComposerRef = useRef<(focus: "always" | "answer-owned") => void>(() => {});
   const forkInFlightRef = useRef(false);
   const readForkInProgress = useCallback(() => sessionForkInProgress(sessionId), [sessionId]);
@@ -1547,7 +1558,7 @@ function SessionDetailLoaded({
     setSteeringBusy(false);
     setQueueSteeringPending(new Set());
     setSteeringResolutionPending(new Map());
-    setEditCopy(null);
+    setEditCopyState(loadComposerEditCopy(sessionId, instanceScope));
     if (sessionChanged) setComposerExpanded(false);
   }, [sessionId]);
 
@@ -3863,9 +3874,7 @@ function SessionDetailLoaded({
   }, [api, busy, completedConversationTurns, forkRefusal, items, pendingQueuedPrompts, runner?.protocolVersion, runnerOnline, session.driver, session.status, session.worktreePath]);
 
   // Edit as a New Turn loads the message straight into the composer (#2185). A draft it replaces is
-  // kept here, so Discard Edit can put it back; sending the copy ends the edit.
-  const editCopyRef = useRef(editCopy);
-  editCopyRef.current = editCopy;
+  // kept with the copy, so Discard Edit can put it back; sending the copy ends the edit.
   const canPromptRef = useRef(canPrompt);
   canPromptRef.current = canPrompt;
   const putComposerDraft = useCallback((draft: ComposerDraftContent) => {
@@ -3896,15 +3905,16 @@ function SessionDetailLoaded({
         : null;
     revealOrdinaryComposerRef.current("always");
     putComposerDraft({ text: item.text, images: (item.images ?? []).map((image) => ({ ...image })) });
-    setEditCopy({ turn: item.turn ?? userRewindTurns(itemsRef.current).get(item.id), previous });
-  }, [confirm, putComposerDraft]);
+    const turn = item.turn ?? userRewindTurns(itemsRef.current).get(item.id);
+    updateEditCopy({ id: browserRandomUUID(), ...(turn !== undefined ? { turn } : {}), previous });
+  }, [confirm, putComposerDraft, updateEditCopy]);
   const discardEditCopy = useCallback(() => {
     const copy = editCopyRef.current;
     if (!copy) return;
     putComposerDraft(copy.previous ?? { text: "", images: [] });
-    setEditCopy(null);
+    updateEditCopy(null);
     focusComposerAtDraftEnd();
-  }, [focusComposerAtDraftEnd, putComposerDraft]);
+  }, [focusComposerAtDraftEnd, putComposerDraft, updateEditCopy]);
 
   const prepareFork = useCallback(async (
     forkTurn: number,
@@ -4507,7 +4517,9 @@ function SessionDetailLoaded({
       ),
     });
   }
-  if (editCopy) {
+  // A queued message being edited owns the composer and keeps the copy aside as its displaced draft,
+  // so Discard Edit waits until that edit ends rather than overwriting the queued message.
+  if (editCopy && !queuedEdit) {
     sessionNotices.push({
       key: "editing-copy",
       severity: "info",
@@ -4665,6 +4677,18 @@ function SessionDetailLoaded({
     }
   };
 
+  /** A send or steer of the copy that did not land leaves the copy in the composer, so its edit and
+   * Discard Edit come back, unless the composer has since moved on to another draft or edit. */
+  const restoreUnsentEditCopy = (
+    copy: ComposerEditCopy | null,
+    accepted: boolean,
+    generation: number,
+    submissionVersion: number,
+  ) => {
+    if (!copy || accepted || viewGenerationRef.current !== generation ||
+      composerDraftVersionRef.current !== submissionVersion || editCopyRef.current !== null) return;
+    updateEditCopy(copy);
+  };
   const send = async () => {
     if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || retitleInFlightRef.current) return;
     const outgoing = text.trim();
@@ -4754,6 +4778,10 @@ function SessionDetailLoaded({
     const generation = viewGenerationRef.current;
     const mutation = reserveComposerMutation(mutationKey, "send", submittedDraft);
     if (!mutation) return;
+    // Sending the copy ends the edit now, so an edit made while this send is in flight starts from
+    // the draft the person has then. A send that does not land gives the edit back below.
+    const submittedCopy = editCopyRef.current;
+    if (submittedCopy) updateEditCopy(null);
     consumedDraftsRef.current.set(mutationKey, {
       ...submittedDraft,
       draftVersion: submissionVersion,
@@ -4809,10 +4837,7 @@ function SessionDetailLoaded({
         pendingConfig.current = {};
       }
       providerAccepted = true;
-      if (viewGenerationRef.current === generation) {
-        clearComposerErrors();
-        setEditCopy(null);
-      }
+      if (viewGenerationRef.current === generation) clearComposerErrors();
       if (viewGenerationRef.current === generation &&
           composerDraftVersionRef.current === submissionVersion) {
         draftDirty.current = true;
@@ -4872,6 +4897,7 @@ function SessionDetailLoaded({
           ? submittedDraft
           : undefined,
       );
+      restoreUnsentEditCopy(submittedCopy, providerAccepted, generation, submissionVersion);
       if (viewGenerationRef.current === generation) setBusy(false);
     }
   };
@@ -4899,6 +4925,8 @@ function SessionDetailLoaded({
     const submissionVersion = composerDraftVersionRef.current;
     const mutation = reserveComposerMutation(mutationKey, "steer", submittedDraft);
     if (!mutation) return;
+    const submittedCopy = editCopyRef.current;
+    if (submittedCopy) updateEditCopy(null);
     consumedDraftsRef.current.set(mutationKey, {
       ...submittedDraft,
       draftVersion: submissionVersion,
@@ -4930,10 +4958,7 @@ function SessionDetailLoaded({
         return;
       }
       providerAccepted = true;
-      if (viewGenerationRef.current === generation) {
-        clearComposerErrors();
-        setEditCopy(null);
-      }
+      if (viewGenerationRef.current === generation) clearComposerErrors();
       if (viewGenerationRef.current === generation &&
           composerDraftVersionRef.current === submissionVersion) {
         draftDirty.current = true;
@@ -4979,6 +5004,7 @@ function SessionDetailLoaded({
           ? submittedDraft
           : undefined,
       );
+      restoreUnsentEditCopy(submittedCopy, providerAccepted, generation, submissionVersion);
       if (viewGenerationRef.current === generation) setSteeringBusy(false);
     }
   };
