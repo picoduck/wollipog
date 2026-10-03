@@ -763,6 +763,38 @@ test.describe("on a coarse pointer", () => {
     await expect(strip).toHaveCount(0);
   });
 
+  // The tray docks on the card, so the strip's actions sit just under the last queued row's. Their
+  // touch areas must not meet (§2.8): a tap meant for the row would otherwise cancel the edit.
+  for (const width of [1000, 390]) {
+    test(`at ${width}px Cancel Edit's touch area stays clear of the last queued row's (#2194)`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await seedEditableQueue(page);
+      if (width <= 760) {
+        await page.getByTestId("queued-prompt-queue-edit").getByRole("button", { name: "Queued Message Actions" }).click();
+        await page.getByRole("menu", { name: "Queued Message Actions" }).getByRole("menuitem", { name: "Edit Message" })
+          .click();
+      } else {
+        await page.getByTestId("queued-prompt-queue-edit").getByRole("button", { name: "Edit Queued Message" }).click();
+      }
+      await expect(page.locator(".composer-box > .composer-mode")).toBeVisible();
+      // Each control's reach: its box, extended by a negative-inset `::after` hit area.
+      const reaches = (buttons: Element[]) => buttons.map((button) => {
+        const box = button.getBoundingClientRect();
+        const after = getComputedStyle(button, "::after");
+        const top = after.content === "none" ? 0 : Number.parseFloat(after.top) || 0;
+        const bottom = after.content === "none" ? 0 : Number.parseFloat(after.bottom) || 0;
+        return { top: box.top + Math.min(top, 0), bottom: box.bottom - Math.min(bottom, 0) };
+      });
+      const rowLowest = Math.max(...(await page.getByTestId("queued-prompt-queue-other").locator("button")
+        .evaluateAll(reaches)).map((reach) => reach.bottom));
+      const [cancel] = await page.getByRole("button", { name: "Cancel Edit", exact: true })
+        .evaluateAll(reaches);
+      if (!cancel) throw new Error("Cancel Edit is missing");
+      expect(cancel.top, "Cancel Edit's touch area starts below the row's").toBeGreaterThanOrEqual(rowLowest);
+      expect(cancel.bottom - cancel.top, "Cancel Edit keeps a 44px touch area").toBeGreaterThanOrEqual(44);
+    });
+  }
+
   test("a recovered edit's Use as New Message and Dismiss Recovery each have a 44px hit area at 390px (#2194)", async ({ page }) => {
     await seedStaleRecoveredEdit(page);
     await reopenSteeringSession(page);
