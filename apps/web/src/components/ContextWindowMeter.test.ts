@@ -36,7 +36,7 @@ test("the meter consumes the one capacity resolution SessionDetail makes", () =>
 });
 
 test("the two controls stay visually distinct and their popovers stay separate", () => {
-  assert.match(meter, /aria-label=\{`Context Window \$\{fill\.formatPct\} Used`\}/);
+  assert.match(meter, /"aria-label": `Context Window \$\{fill\.formatPct\} Used`/);
   assert.match(css, /\.context-ring-fill\s*\{/, "only the context control draws a ring");
   assert.doesNotMatch(css, /\.context-popover-model/,
     "the per-model rules moved to the Session Usage popover rather than being shared");

@@ -1,4 +1,11 @@
-import React, { useRef, useState, type ReactNode } from "react";
+import React, {
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  type Ref,
+} from "react";
 import type {
   AgentCapabilities,
   AgentDriverKind,
@@ -33,9 +40,65 @@ import { AgentIcon } from "./AgentIcon.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSurface } from "./Menu.js";
 import { Modal } from "./common.js";
-import { CloseIcon, InfoIcon, ServiceTierIcon, ShieldIcon } from "./Icons.js";
+import {
+  ChevronDownIcon,
+  CloseIcon,
+  InfoIcon,
+  ServiceTierIcon,
+  ShieldAlertIcon,
+  ShieldCheckIcon,
+  ShieldIcon,
+} from "./Icons.js";
 
 type Apply = (patch: Partial<SessionConfig>) => void;
+
+/** The §3.1 variant a composer control wears; `plain` draws no button recipe at all (the phone
+ * capsule's draft preview). */
+export type ComposerButtonVariant = "ghost" | "primary" | "secondary" | "plain";
+
+/**
+ * Every composer bar control (docs/design-system.md §16.2, #2174). The composer holds focus while
+ * the person types, so each control calls `preventDefault` on `pointerdown`: a tap that blurred the
+ * textarea first would close the phone keyboard and bring the rail back, moving the control out
+ * from under the finger before the click lands (#1797, #1903). The rule lives here so a new control
+ * cannot forget it; callers have no `onPointerDown` of their own, and `onPress` runs after it.
+ */
+export function ComposerButton({
+  variant = "ghost",
+  square = false,
+  className,
+  onPress,
+  ref,
+  type = "button",
+  ...props
+}: Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onPointerDown"> & {
+  variant?: ComposerButtonVariant;
+  /** Icon only: as wide as it is tall. */
+  square?: boolean;
+  onPress?: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  ref?: Ref<HTMLButtonElement>;
+}) {
+  return (
+    <button
+      {...props}
+      ref={ref}
+      type={type}
+      className={[
+        variant === "plain" ? ""
+          : variant === "primary" ? "btn primary composer-btn"
+          : variant === "secondary" ? "btn composer-btn"
+          : "btn ghost composer-btn",
+        square ? "square" : "",
+        className ?? "",
+      ].filter(Boolean).join(" ") || undefined}
+      data-composer-button=""
+      onPointerDown={(event) => {
+        event.preventDefault();
+        onPress?.(event);
+      }}
+    />
+  );
+}
 
 /** Caps-derived session config (model / effort / approvals) for the composer-bar controls. Model/effort
  * appear only when the agent advertises them; approvals excludes `plan` (that lives in the + menu). */
@@ -137,10 +200,10 @@ export function BarMenu({
   const disabled = disabledReason !== null;
   return (
     <div className={`cbar-menu ${align}${permissionMode ? " permission-mode-menu" : ""}${modelSettings ? " model-settings-menu" : ""}`}>
-      <button
+      <ComposerButton
         ref={menu.triggerRef}
-        type="button"
-        className="cbar-trigger"
+        square={permissionMode}
+        className={`cbar-trigger${modelSettings ? " model-chip" : ""}`}
         title={disabledReason ?? title}
         aria-label={ariaLabel}
         aria-haspopup="menu"
@@ -148,14 +211,12 @@ export function BarMenu({
         aria-controls={menu.menuId}
         aria-describedby={disabled ? disabledReasonId : undefined}
         disabled={disabled}
-        // Keep the composer focused until the click lands, like Send: blurring it on pointerdown
-        // brings the phone rail back and moves this trigger out from under the finger (#1797).
-        onPointerDown={(event) => event.preventDefault()}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
       >
-        {label} {showCaret && <span className="caret">▾</span>}
-      </button>
+        {label}
+        {showCaret && <ChevronDownIcon size={14} className="cbar-caret" />}
+      </ComposerButton>
       {disabled && <span className="sr-only" id={disabledReasonId}>{disabledReason}</span>}
       {open && !disabled && (
         <MenuSurface
@@ -395,6 +456,8 @@ export function ModelEffortControl(
   const modelLabel = modelEffortControlLabel(pickerModel, modelVal);
   const effortSuffix = effortVal ? effortLabel(effortVal) : "";
   const tooltip = `${modelLabel}${effortSuffix ? ` · ${effortSuffix}` : ""}. Opens Model Settings for model${contextChoice ? ", context window" : ""}, reasoning effort${serviceTierState ? ", and service tier" : ""}.`;
+  // The model name is the chip's only truncating label. A phone hides the context size, and with
+  // Plan on also the mark and the effort, so the accessible name is what keeps all of them (#2174).
   const label = (
     <span className="cbar-model-label">
       <AgentIcon driver={session.driver} agentName={session.agentName} size={14} />
@@ -403,6 +466,7 @@ export function ModelEffortControl(
       {effortSuffix && <span className="cbar-effort">{effortSuffix}</span>}
     </span>
   );
+  const accessibleFacts = [modelLabel, selectedWindow?.label, effortSuffix].filter(Boolean).join(", ");
   return (
     <BarMenu
       align="left"
@@ -410,7 +474,7 @@ export function ModelEffortControl(
       menuTitle="Model Settings"
       label={label}
       title={modelSource === "cached" ? `${tooltip} Model metadata is cached; Rediscover to refresh.` : tooltip}
-      ariaLabel={`Model Settings: ${modelLabel}${effortSuffix ? `, ${effortSuffix}` : ""}`}
+      ariaLabel={`Model Settings: ${accessibleFacts}`}
       disabledReason={disabledReason}
     >
       {(close) => <>{sessionUsage}<ModelEffortMenuChoices
@@ -776,7 +840,7 @@ export function ApprovalsControl({ session, apply, disabledReason = null }: {
         aria-label={accessibleLabel}
         title={approvalOptionTitle(`${accessibleLabel}. Fixed for this Orchestrator session.`, currentOutcome)}
       >
-        <ShieldIcon size={14} />
+        <ShieldCheckIcon size={16} />
       </span>
     );
   }
@@ -787,8 +851,10 @@ export function ApprovalsControl({ session, apply, disabledReason = null }: {
         menuLabel="Permission Mode"
         showCaret={false}
         label={
+          // A mode that skips approvals is a risk warning, not a request: amber on the icon only,
+          // never a pill (docs/design-system.md §21 item 5).
           <span className={`cbar-approvals${unrestricted ? " unrestricted" : ""}`}>
-            <ShieldIcon size={14} />
+            {unrestricted ? <ShieldAlertIcon size={16} /> : <ShieldIcon size={16} />}
           </span>
         }
         ariaLabel={accessibleLabel}

@@ -59,6 +59,7 @@ import {
   Link as LucideLink,
   List as LucideList,
   ListChecks as LucideListChecks,
+  ListTodo as LucideListTodo,
   ChartGantt as LucideChartGantt,
   Lock as LucideLock,
   Mail as LucideMail,
@@ -80,6 +81,8 @@ import {
   Settings as LucideSettings,
   Share as LucideShare,
   Shield as LucideShield,
+  ShieldAlert as LucideShieldAlert,
+  ShieldCheck as LucideShieldCheck,
   SlidersHorizontal as LucideSlidersHorizontal,
   Smartphone as LucideSmartphone,
   Sparkles as LucideSparkles,
@@ -558,6 +561,21 @@ export function ZedEditorIcon(props: IconProps) {
 /** Filled to preserve the approvals status mark's intentional visual weight. */
 export function ShieldIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideShield} fill="currentColor" stroke="none" {...props} />;
+}
+
+/** A permission mode that skips approval checks: the composer bar's shield, amber on the icon only. */
+export function ShieldAlertIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideShieldAlert} {...props} />;
+}
+
+/** An Orchestrator's fixed permission mode, which nobody changes from the composer bar. */
+export function ShieldCheckIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideShieldCheck} {...props} />;
+}
+
+/** Plan mode: the composer bar's Plan toggle. `ListChecks` already means the background job list. */
+export function PlanIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideListTodo} {...props} />;
 }
 
 export function ArrowUpIcon(props: IconProps) {

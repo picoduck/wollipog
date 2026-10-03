@@ -115,6 +115,7 @@ test("every referenced custom property is defined in the shared root scope", () 
   // declared on the one component rule that owns it, and only that component reads it.
   const COMPONENT_LOCAL = new Map([
     ["--summary-w", ".detail-body"], // the Pinned Summary's width, read by the body grid and `.ps`
+    ["--composer-ctl", ".composer-box"], // the composer bar's control height (#2174), read by `.composer-btn`
   ]);
   for (const [name, owner] of COMPONENT_LOCAL) {
     assert.ok(soleRuleProps(owner).has(name), `${name} is declared on ${owner}`);

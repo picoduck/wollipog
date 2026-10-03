@@ -22,7 +22,7 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   const composer = page.locator(".composer-input");
   const stop = page.getByRole("button", { name: "Stop Turn" });
   await expect(stop).toBeVisible();
-  await expect(stop).toHaveAttribute("title", "Stop Turn (Shift+Esc)");
+  await expect(stop).toHaveAttribute("title", "Stop turn (Shift+Esc)");
   const stopBox = await stop.boundingBox();
   expect(stopBox?.width).toBe(32);
   expect(stopBox?.height).toBe(32);

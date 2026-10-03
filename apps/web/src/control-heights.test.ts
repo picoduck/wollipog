@@ -171,9 +171,10 @@ test("no per-selector 44px patch remains on a control; only listed bars, rows an
 test("the hit areas are drawn once, in the coarse-pointer block", () => {
   // Each inset is measured from the control's PADDING edge, so a 1px border adds a pixel: the
   // target still ends 4px past the visible edge (e2e specs check it with elementFromPoint).
-  assert.equal(coarseRule(":is(.btn.sm, .icon-btn.sm, button.chip)::after").get("inset"), "-4px");
-  assert.equal(coarseRule(":is(.btn.sm, button.chip)::after").get("inset"), "-5px", "bordered small controls");
-  assert.equal(coarseRule(":where(.btn.sm, .icon-btn.sm, button.chip)").get("position"), "relative");
+  assert.equal(coarseRule(":is(.btn.sm, .icon-btn.sm, button.chip, .composer-btn)::after").get("inset"), "-4px");
+  assert.equal(coarseRule(":is(.btn.sm, button.chip, .composer-btn)::after").get("inset"), "-5px",
+    "bordered small controls, and the composer bar's controls (#2174)");
+  assert.equal(coarseRule(":where(.btn.sm, .icon-btn.sm, button.chip, .composer-btn)").get("position"), "relative");
   assert.equal(coarseRule(".seg-option::after").get("inset"), "-4px 0",
     "38px option + 2px inset + 1px edge on each side, from inside the option's 1px border");
   assert.equal(coarseRule(".seg.sm").get("height"), "var(--control-h)",

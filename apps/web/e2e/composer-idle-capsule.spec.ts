@@ -47,7 +47,7 @@ for (const width of [320, 360, 393, 430]) {
         plus: bounds(".plus-btn"),
         preview: bounds(".composer-idle-preview"),
         dictation: bounds(".voice-btn"),
-        action: bounds(".send-btn"),
+        action: bounds(".composer-btn.primary"),
         horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       };
     });
@@ -158,6 +158,52 @@ test("active dictation expands the capsule on the initial press", async ({ page 
   });
   await expect(dictation).toHaveAttribute("aria-pressed", "true");
   await expect(composer).not.toHaveClass(/idle-collapsed/);
+});
+
+test.describe("a touch capsule (#2174)", () => {
+  test.use({ hasTouch: true });
+
+  for (const theme of ["dark", "light"] as const) {
+    test(`${theme}: +, the mic and Send are 36px with 44px hit areas, and the corners match the open card`, async ({ page }) => {
+      await openComposer(page, 390);
+      await page.evaluate((nextTheme) => { document.documentElement.dataset.theme = nextTheme; }, theme);
+      const composer = page.locator(".composer-box");
+      await expect(composer).toHaveClass(/idle-collapsed/);
+      const capsule = await composer.evaluate((card) => {
+        const cardBox = card.getBoundingClientRect();
+        const controls = ["Add and Modes", "Hold to Dictate", "Send"].map((name) => {
+          const control = card.querySelector<HTMLElement>(`button[aria-label="${name}"]`)!;
+          const box = control.getBoundingClientRect();
+          const centerX = box.left + box.width / 2;
+          const centerY = box.top + box.height / 2;
+          // 3px past each visible edge, inside the last pixel of the 4px each side borrows.
+          const hits = (x: number, y: number) => {
+            const target = document.elementFromPoint(x, y);
+            return target !== null && (target === control || control.contains(target));
+          };
+          return {
+            name,
+            width: box.width,
+            height: box.height,
+            hitArea: [hits(centerX, box.top - 3), hits(centerX, box.bottom + 3), hits(box.left - 3, centerY), hits(box.right + 3, centerY)],
+          };
+        });
+        return { height: cardBox.height, radius: getComputedStyle(card).borderTopLeftRadius, controls };
+      });
+      expect(capsule.height).toBeLessThanOrEqual(44);
+      for (const control of capsule.controls) {
+        expect(control.width, `${control.name} is square`).toBeCloseTo(36, 0);
+        expect(control.height, `${control.name} is 36px`).toBeCloseTo(36, 0);
+        expect(control.hitArea, `${control.name} has a 44px hit area`).toEqual([true, true, true, true]);
+      }
+      await page.locator(".composer").screenshot({ path: `${EVIDENCE}/after-390-${theme}-touch-capsule.png` });
+
+      // Expanding changes only the height: the card keeps its corners.
+      await page.locator(".composer-idle-preview").tap();
+      await expect(composer).not.toHaveClass(/idle-collapsed/);
+      expect(await composer.evaluate((card) => getComputedStyle(card).borderTopLeftRadius)).toBe(capsule.radius);
+    });
+  }
 });
 
 test.describe("touch dismissal", () => {

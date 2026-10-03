@@ -1025,33 +1025,8 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Hold-to-talk mic in the composer bar (hidden when SpeechRecognition is unsupported). */
-.voice-btn {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  border: 1px solid var(--border-strong);
-  background: transparent;
-  color: var(--text-dim);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
-.voice-btn:hover:not(:disabled) {
-  color: var(--text);
-  border-color: var(--accent);
-}
-/* Disabled with the composer it dictates into (#2154), like + and Send beside it. */
-.voice-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-.voice-btn.voice-recording {
-  background: var(--red);
-  border-color: var(--red);
-  animation: voice-pulse 1.2s ease-in-out infinite;
-}
+/* Hold-to-talk mic in the composer bar (hidden when SpeechRecognition is unsupported): its listening
+   fill is with the composer bar's controls, below. */
 /* The GLYPH carries the colour, not the button. The 3:1 non-text threshold applies to an icon and
    not to a label, and hanging that exemption on `.voice-btn.voice-recording` made it a promise
    about a selector: give the button a visible label later and the looser threshold silently covers
@@ -5480,6 +5455,8 @@ textarea {
 }
 
 .composer-box {
+  /* The composer bar's control height (#2174): see the composer bar's controls below. */
+  --composer-ctl: var(--control-h);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -5798,13 +5775,21 @@ textarea {
   border-radius: 50%;
   background: var(--text-faint);
 }
-/* Composer bar: fixed controls surround one truncating model label; Send never yields its seat. */
+/* Composer bar (#2174): every control is a `ComposerButton`, one recipe on the shared button
+   variants (§3.1): ghost squares, Send the one primary, Stop Turn the neutral secondary, and no
+   circles or pills. `--composer-ctl` is their height: the default control on a fine pointer, and the
+   coarse small recipe on touch, 36px to look with a 44px hit area from the one hit-area block (§2.8),
+   8px apart so neighbouring hit areas never overlap. The model name is the only label that
+   truncates; Send never yields its seat. `--composer-ctl` is declared on `.composer-box`. */
+@media (pointer: coarse) {
+  .composer-box { --composer-ctl: var(--control-h-sm); }
+}
 .composer-bar {
   position: relative;
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .composer-idle-preview {
   display: none;
@@ -5814,17 +5799,14 @@ textarea {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .cbar-left { flex: 1 1 auto; }
 .cbar-right {
   flex: none;
   margin-left: auto;
 }
-.cbar-left > .composer-plus,
-.cbar-left > .permission-mode-menu,
-.cbar-left > .cbar-permission-badge,
-.cbar-left > .mode-pill { flex: none; }
+.cbar-left > :is(.composer-plus, .permission-mode-menu, .cbar-permission-badge, .plan-toggle) { flex: none; }
 .cbar-menu {
   position: relative;
 }
@@ -5834,49 +5816,61 @@ textarea {
   max-width: 360px;
   flex: 0 1 auto;
 }
-.cbar-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-size: 13px;
-  padding: 5px 10px;
-  border-radius: 999px;
-  cursor: pointer;
+.composer-btn {
+  height: var(--composer-ctl);
+  padding: 0 var(--space-2);
+  gap: var(--space-1);
+  font: var(--type-body);
 }
-.model-settings-menu > .cbar-trigger {
-  min-width: 0;
-  max-width: 100%;
-  white-space: nowrap;
+/* Icon only: as wide as it is tall. The recipe caps a button at its content width, which would
+   leave a square only as wide as its icon. */
+.composer-btn.square {
+  width: var(--composer-ctl);
+  max-width: none;
+  padding: 0;
 }
-.cbar-trigger:hover:not(:disabled) {
+/* A toggle that is on (§3.1): the ghost recipe's transparent edge would hide the pressed edge. */
+.composer-btn[aria-pressed="true"] {
+  background: var(--bg-elev-3);
+  border-color: var(--control-outline);
+  color: var(--text);
+}
+/* An open menu keeps its trigger in the hover state, like the context and cost triggers. */
+:is(.cbar-trigger, .plus-btn)[aria-expanded="true"] {
   background: var(--bg-elev-2);
   color: var(--text);
 }
-/* A setting the person may not change (#1857) stays readable but plainly unavailable. */
-.cbar-trigger:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+/* Listening: the mic fills, outranking the recipe's pressed and hover fills. */
+.btn.voice-btn.voice-recording:is(*, :hover, :active) {
+  background: var(--red);
+  border-color: var(--red);
+  animation: voice-pulse 1.2s ease-in-out infinite;
 }
-.cbar-trigger .caret {
-  font-size: 9px;
-  color: var(--text-faint);
+/* Stopping is busy, not refused (§3.1): the spinner keeps the enabled ink. */
+.stop-turn-btn.is-stopping:disabled {
+  color: var(--text);
+  cursor: progress;
 }
+/* The model chip: the agent mark, the model name, the context size, the effort and a chevron. */
+.model-chip {
+  min-width: 0;
+  max-width: 100%;
+}
+.model-chip > .cbar-caret { flex: none; }
 .cbar-model {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.model-chip:disabled .cbar-model { color: inherit; }
 .cbar-model-label {
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1);
   overflow: hidden;
   white-space: nowrap;
 }
@@ -5893,37 +5887,29 @@ textarea {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+/* The shield is --text-dim at rest, like every ghost control. A mode that skips approvals is a risk
+   warning, not a request: amber on the icon only, never a fill or an edge (§21 item 5). */
 .cbar-approvals {
   display: inline-flex;
-  width: 100%;
-  height: 100%;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  color: var(--accent);
-  border: 1px solid transparent;
-  border-radius: var(--radius-pill);
-  box-sizing: border-box;
-}
-.permission-mode-menu > .cbar-trigger,
-.cbar-permission-badge {
-  display: inline-flex;
-  width: 30px;
-  height: 30px;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  padding: 0;
-  border-radius: var(--radius-pill);
-}
-.cbar-permission-badge {
-  color: var(--accent);
-  border: 1px solid transparent;
 }
 .cbar-approvals.unrestricted {
-  color: var(--amber-on-tint);
-  border-color: currentColor;
-  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  color: var(--amber);
+}
+/* An Orchestrator's fixed mode is a mark, not a control, on the same square. */
+.cbar-permission-badge {
+  display: inline-flex;
+  width: var(--composer-ctl);
+  height: var(--composer-ctl);
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+}
+@media (max-width: 760px) {
+  /* A phone keeps the model name readable: the context size goes (the accessible name keeps it),
+     and with Plan on the mark, the effort and the chevron go too. Effort stays one tap away in
+     Model Settings. */
+  .model-chip .cbar-context { display: none; }
+  .composer-bar:has(.plan-toggle) .model-chip :is(.agent-icon, .cbar-effort, .cbar-caret) { display: none; }
 }
 .cbar-permission-row {
   display: grid;
@@ -5964,51 +5950,6 @@ textarea {
   margin: 0;
   color: var(--text-dim);
   line-height: 1.55;
-}
-/* Accent-filled, not near-white: the previous rgba(233,236,242,.92) fill sat on the light theme's
-   #ffffff composer with no border, which made the send button invisible in light mode. */
-.send-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  border: none;
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 16px;
-  font-weight: 700;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-}
-.send-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 85%, var(--text));
-}
-.send-btn:disabled {
-  background: var(--bg-elev-3);
-  color: var(--text-faint);
-  cursor: default;
-}
-.send-btn.stop-turn-btn {
-  background: color-mix(in srgb, var(--red) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
-  color: var(--red-on-strong-tint);
-}
-.send-btn.stop-turn-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--red) 22%, transparent);
-  border-color: color-mix(in srgb, var(--red) 58%, transparent);
-  color: var(--red-on-strong-tint);
-}
-/* Refused rather than busy (#1857): the red Stop Turn must not look actionable. */
-.send-btn.stop-turn-btn:disabled:not(.is-stopping) {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.send-btn.stop-turn-btn.is-stopping:disabled {
-  background: color-mix(in srgb, var(--red) 30%, transparent);
-  border-color: color-mix(in srgb, var(--red) 68%, transparent);
-  color: var(--red-on-strong-tint);
 }
 .plus-budget {
   display: grid;
@@ -6121,8 +6062,6 @@ button,
 select,
 input,
 textarea,
-.cbar-trigger,
-.plus-btn,
 .dir-entry {
   transition:background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
@@ -6151,26 +6090,6 @@ textarea,
 .composer-plus {
   position: relative;
 }
-.plus-btn {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.plus-btn:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--bg-elev-2);
-}
-.plus-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
 /*
   Clipped, not `display: none` or `hidden`: the native chooser must be openable from script, and
   browsers decline to open one for an input that was never laid out.
@@ -6184,22 +6103,6 @@ textarea,
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
   border: 0;
-}
-.mode-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent-on-tint);
-  cursor: pointer;
-}
-.mode-pill:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
 }
 
 /* --- Composer pickers (§9.1, #2155) ---
@@ -6492,8 +6395,8 @@ textarea,
   background: var(--bg-elev-2);
 }
 .session-cost-button:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
-/* In the composer bar both are borderless small ghost buttons in the small type (§3.1); an open
-   popover keeps its trigger in the hover state. */
+/* In the composer bar both are borderless ghost `ComposerButton`s (#2174), `--composer-ctl` tall, in
+   the small type; an open popover keeps its trigger in the hover state. */
 .cbar-right > :is(.context-control, .session-usage) { flex: none; }
 /* Their own row above the bar, for a narrow column whose Model Settings cannot open (#2166). A
    collapsed phone composer hides it, as it hides Model Settings, until the composer opens. */
@@ -13753,28 +13656,27 @@ body.shell-dock-dragging * {
   .evidence-review-summary > strong {
     white-space: nowrap;
   }
-  /* Composer: six lines at most, above the software keyboard. The bar's leading group keeps the
-     capsule's 4px gap, so the model label still has room inside the 12px gutter at 320px. */
+  /* Composer: six lines at most, above the software keyboard. */
   .composer-input { max-height: calc(6 * 22px); }
-  .cbar-left { gap: var(--space-1); }
+  /* The idle capsule (#2174): the card's own 12px corners and side insets, so expanding it changes
+     only its height, and one bar row with 4px above and below counting the edge: 44px on touch,
+     around the 36px +, mic and Send, whose hit areas are 44px too. */
   .composer-box.idle-collapsed {
+    justify-content: center;
+    height: calc(var(--composer-ctl) + 2 * var(--space-1));
     gap: 0;
-    padding: 5px 7px;
-    border-radius: var(--radius-pill);
+    padding-block: 0;
+    border-radius: var(--radius-lg);
   }
   .composer-box.idle-collapsed > .composer-input {
     display: none;
   }
   .composer-box.idle-collapsed .composer-bar {
     width: 100%;
-    gap: 6px;
-  }
-  .composer-box.idle-collapsed .cbar-left {
-    gap: 4px;
   }
   .composer-box.idle-collapsed .cbar-left > .permission-mode-menu,
   .composer-box.idle-collapsed .cbar-left > .cbar-permission-badge,
-  .composer-box.idle-collapsed .cbar-left > .mode-pill,
+  .composer-box.idle-collapsed .cbar-left > .plan-toggle,
   .composer-box.idle-collapsed .cbar-left > .model-settings-menu {
     display: none;
   }
@@ -16633,18 +16535,19 @@ body.shell-dock-dragging * {
     --row-h-2: 68px;
     --row-h-dense: 48px;
   }
-  /* Small buttons and clickable chips stay 36px to look, and borrow 4px on every side for a 44px
-     target. Neighbours must sit at least 8px away for that to work (§2.8).
+  /* Small buttons, clickable chips and the composer bar's controls (`--composer-ctl`) stay 36px to
+     look, and borrow 4px on every side for a 44px target. Neighbours must sit at least 8px away for
+     that to work (§2.8).
      An absolutely positioned box is placed from its parent's PADDING edge, so a control with a
      1px border reaches one pixel further to borrow the same 4px past its visible edge. */
-  :where(.btn.sm, .icon-btn.sm, button.chip) { position: relative; }
+  :where(.btn.sm, .icon-btn.sm, button.chip, .composer-btn) { position: relative; }
   button.chip { height: var(--control-h-sm); }
-  :is(.btn.sm, .icon-btn.sm, button.chip)::after {
+  :is(.btn.sm, .icon-btn.sm, button.chip, .composer-btn)::after {
     content: "";
     position: absolute;
     inset: -4px;
   }
-  :is(.btn.sm, button.chip)::after { inset: -5px; }
+  :is(.btn.sm, button.chip, .composer-btn)::after { inset: -5px; }
   /* A segmented option cannot borrow from its neighbours, so it borrows the track's inset and edge
      instead: 38px option + 2px inset + 1px edge on each side = 44px, plus the option's own 1px
      border for the padding-edge reason above. A dense toolbar's track is a full control tall on

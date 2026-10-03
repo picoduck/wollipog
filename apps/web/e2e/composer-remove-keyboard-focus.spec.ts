@@ -52,7 +52,7 @@ for (const [keyName, key] of [["Enter", "Enter"], ["Space", " "]] as const) {
         permissionMode: "plan",
       }));
       await composer.fill("Draft");
-      await activateFromKeyboard(page, composer, page.getByRole("button", { name: "◒ Plan" }), key);
+      await activateFromKeyboard(page, composer, page.getByRole("button", { name: "Plan", exact: true }), key);
     });
 
     test("removes an image, and focuses the composer", async ({ page }) => {
@@ -113,7 +113,7 @@ test.describe("Enter on a composer control that removes itself, with the compose
     }));
     // The pill needs configuration allowed; a refused one is disabled and cannot be activated.
     await refuseCommands(page, composer, ["configure"]);
-    await expectFocusMovesToSessionActivity(page, page.getByRole("button", { name: "◒ Plan" }));
+    await expectFocusMovesToSessionActivity(page, page.getByRole("button", { name: "Plan", exact: true }));
   });
 
   test("removes an image", async ({ page }) => {

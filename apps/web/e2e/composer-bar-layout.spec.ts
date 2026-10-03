@@ -70,7 +70,7 @@ for (const width of [320, 360, 393, 430]) {
             bottom: composerBounds.bottom,
           },
           bar: rect(".composer-bar"),
-          send: rect(".send-btn"),
+          send: rect(".composer-btn.primary"),
           model: rect(".cbar-model"),
           modelClientHeight: (model as HTMLElement).clientHeight,
           modelWhiteSpace: modelStyle.whiteSpace,
@@ -168,7 +168,7 @@ for (const { frameWidth, plan } of [
   test(`desktop Model Settings stays inside a ${frameWidth}px clipped pane${plan ? " with Plan" : ""}`, async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 844 });
     await page.goto(`/session-usage-e2e.html?width=${frameWidth}&height=804&tiers=1${plan ? "&plan=1" : ""}`);
-    if (plan) await expect(page.getByRole("button", { name: "◒ Plan" })).toBeVisible();
+    if (plan) await expect(page.getByRole("button", { name: "Plan", exact: true })).toBeVisible();
     const trigger = page.getByRole("button", { name: /^Model Settings:/ });
     await trigger.click();
     const popover = page.locator('.menu[aria-label="Model Settings"]');
@@ -231,6 +231,20 @@ for (const kind of ["claude", "codex"] as const) {
         return (Math.max(foreground, surface) + 0.05) / (Math.min(foreground, surface) + 0.05);
       });
       expect(ratio).toBeGreaterThanOrEqual(3);
+      // Amber on the icon only (§21 item 5): a shield-alert glyph, and no amber fill or edge on the
+      // icon or on the control around it (#2174).
+      await expect(warning.locator("svg.lucide-shield-alert")).toHaveCount(1);
+      expect(await warning.evaluate((element) => getComputedStyle(element).color)).toBe(await tokenColor(page, "--amber"));
+      const trigger = page.getByRole("button", { name: /^Permission Mode:/ });
+      for (const element of [warning, trigger]) {
+        const paint = await element.evaluate((node) => {
+          const style = getComputedStyle(node);
+          const edged = style.borderTopStyle !== "none" && Number.parseFloat(style.borderTopWidth) > 0;
+          return { background: style.backgroundColor, border: edged ? style.borderTopColor : null };
+        });
+        expect(paint.background).toBe("rgba(0, 0, 0, 0)");
+        expect(paint.border).not.toBe(await tokenColor(page, "--amber"));
+      }
       await page.screenshot({ path: `${EVIDENCE}/after-${theme}-${kind}-unrestricted.png` });
     });
   }
@@ -348,3 +362,177 @@ for (const { name, query, reason } of [
     }
   });
 }
+
+/**
+ * One recipe for every bar control (#2174): `--composer-ctl` tall (32px on a fine pointer; 36px on
+ * a coarse one, with a 44px hit area and 8px between neighbours), square-cornered, and Send the only
+ * accent fill.
+ */
+async function readBarControls(page: Page) {
+  // Fills ease between states (Send turns from disabled to primary once the draft loads): read the
+  // settled colours, not a frame of the transition.
+  await page.evaluate(() => Promise.all(document.getAnimations()
+    .filter((animation) => animation instanceof CSSTransition)
+    .map((animation) => animation.finished.catch(() => undefined))));
+  return page.locator(".composer-bar").evaluate((bar) => {
+    const controls = [...bar.querySelectorAll<HTMLElement>(".composer-btn, .cbar-permission-badge")]
+      .filter((element) => element.getClientRects().length > 0);
+    return controls.map((element) => {
+      const box = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      // A hit test 3px past each visible edge, inside the last pixel of the 4px each side borrows:
+      // on a coarse pointer it must still land on the control (44px). Neighbours 8px apart meet
+      // exactly between them, so this also proves neither takes the other's taps.
+      const centerX = box.left + box.width / 2;
+      const centerY = box.top + box.height / 2;
+      const hits = (x: number, y: number) => {
+        const target = document.elementFromPoint(x, y);
+        return target !== null && (target === element || element.contains(target));
+      };
+      return {
+        name: element.getAttribute("aria-label") ?? element.textContent ?? "",
+        left: box.left,
+        right: box.right,
+        top: box.top,
+        height: box.height,
+        width: box.width,
+        radius: Number.parseFloat(style.borderTopLeftRadius),
+        background: style.backgroundColor,
+        hitArea: {
+          above: hits(centerX, box.top - 3),
+          below: hits(centerX, box.bottom + 3),
+          left: hits(box.left - 3, centerY),
+          right: hits(box.right + 3, centerY),
+        },
+      };
+    });
+  });
+}
+
+for (const { name, width, height, touch } of [
+  { name: "1440px fine pointer", width: 1440, height: 900, touch: false },
+  { name: "1440px coarse pointer", width: 1440, height: 900, touch: true },
+  { name: "390px coarse pointer", width: 390, height: 844, touch: true },
+]) {
+  test.describe(name, () => {
+    test.use({ hasTouch: touch });
+
+    test(`every bar control is one recipe at ${name} (#2174)`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await page.goto(`/session-usage-e2e.html?width=${width}&height=${height - 40}&composer=codex&plan=1&draft=Ship%20it`);
+      await expect(page.locator(".composer-box")).toBeVisible();
+      if (width < 761) await expandComposer(page);
+      expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(touch);
+
+      const controls = await readBarControls(page);
+      const names = controls.map((control) => control.name);
+      for (const expected of ["Add and Modes", /^Permission Mode:/, /^Model Settings:/, "Plan", "Hold to Dictate", "Send"]) {
+        expect(names.some((controlName) => typeof expected === "string" ? controlName === expected : expected.test(controlName)),
+          `${String(expected)} is in the bar: ${names.join(", ")}`).toBe(true);
+      }
+      if (width > 760) {
+        // The context and cost triggers #2166 seats in the bar wear the same recipe.
+        expect(names.some((controlName) => /^Context Window .* Used$/.test(controlName))).toBe(true);
+        expect(names.some((controlName) => /^Session Usage: /.test(controlName))).toBe(true);
+      }
+
+      const primary = await tokenColor(page, "--primary-bg");
+      const accent = await tokenColor(page, "--accent");
+      const visible = touch ? 36 : 32;
+      const sorted = [...controls].sort((a, b) => a.left - b.left);
+      for (const control of controls) {
+        expect(control.height, `${control.name} is ${visible}px tall`).toBeCloseTo(visible, 0);
+        // No circle and no pill (§2.5): the control radius, never half the height.
+        expect(control.radius, `${control.name} is a rounded square`).toBeLessThanOrEqual(6);
+        if (control.name !== "Send") {
+          expect([primary, accent], `${control.name} has no accent fill`).not.toContain(control.background);
+        }
+        if (touch) {
+          expect(control.hitArea, `${control.name} has a 44px hit area`).toEqual({ above: true, below: true, left: true, right: true });
+        }
+      }
+      expect(controls.find((control) => control.name === "Send")?.background).toBe(primary);
+      expect(new Set(controls.map((control) => Math.round(control.top + control.height / 2))).size, "one row").toBe(1);
+      for (let index = 1; index < sorted.length; index += 1) {
+        expect(sorted[index]!.left - sorted[index - 1]!.right,
+          `${sorted[index - 1]!.name} and ${sorted[index]!.name} are 8px apart`).toBeGreaterThanOrEqual(touch ? 8 : 4);
+      }
+      await page.locator(".composer-box").screenshot({ path: `${EVIDENCE}/after-${width}-${touch ? "coarse" : "fine"}-plan.png` });
+    });
+  });
+}
+
+for (const theme of ["dark", "light"] as const) {
+  test(`${theme}: Stop Turn is a neutral square named for its shortcut, with no red (#2174)`, async ({ page }) => {
+    await openFixture(page, 1440, "codex", "&action=stop");
+    await page.evaluate((nextTheme) => { document.documentElement.dataset.theme = nextTheme; }, theme);
+    const stop = page.getByRole("button", { name: "Stop Turn", exact: true });
+    await expect(stop).toBeVisible();
+    await expect(stop).toHaveAttribute("title", /^Stop turn \(.+\)$/);
+    const paint = await stop.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const icon = element.querySelector("svg")!;
+      return [style.color, style.backgroundColor, style.borderTopColor, getComputedStyle(icon).color, getComputedStyle(icon).fill];
+    });
+    const reddish = (value: string) => {
+      const channels = value.match(/[\d.]+/g)?.map(Number) ?? [];
+      const [r = 0, g = 0, b = 0, alpha = 1] = channels;
+      return alpha > 0 && r - Math.max(g, b) > 40;
+    };
+    for (const value of paint) expect(reddish(value), `Stop Turn paints ${value}`).toBe(false);
+    const box = await stop.boundingBox();
+    expect(box?.width).toBeCloseTo(32, 0);
+    expect(box?.height).toBeCloseTo(32, 0);
+    await page.locator(".composer-box").screenshot({ path: `${EVIDENCE}/after-${theme}-stop-turn.png` });
+  });
+}
+
+test.describe("390px phone with Plan on", () => {
+  test.use({ hasTouch: true });
+
+  test("the chip keeps the start of a long model name and every control stays on one row (#2174)", async ({ page }) => {
+    await openFixture(page, 390, "codex", "&plan=1");
+    await expandComposer(page);
+    const chip = page.getByRole("button", { name: /^Model Settings:/ });
+    // The accessible name keeps what the phone chip hides: the context size and the effort.
+    await expect(chip).toHaveAttribute("aria-label", "Model Settings: GPT-6-Astra Extended Context Preview, 1M, High");
+    const plan = page.getByRole("button", { name: "Plan", exact: true });
+    await expect(plan).toHaveAttribute("aria-pressed", "true");
+    const shown = await chip.evaluate((element) => {
+      const visible = (selector: string) => {
+        const node = element.querySelector(selector);
+        return node !== null && node.getClientRects().length > 0;
+      };
+      const model = element.querySelector<HTMLElement>(".cbar-model")!;
+      return {
+        mark: visible(".agent-icon"),
+        context: visible(".cbar-context"),
+        effort: visible(".cbar-effort"),
+        caret: visible(".cbar-caret"),
+        modelWidth: model.getBoundingClientRect().width,
+        truncated: model.scrollWidth > model.clientWidth,
+      };
+    });
+    expect(shown).toMatchObject({ mark: false, context: false, effort: false, caret: false, truncated: true });
+    // "GPT-6-…" at least: the start of the name, not an ellipsis alone.
+    expect(shown.modelWidth).toBeGreaterThanOrEqual(40);
+    const controls = await readBarControls(page);
+    expect(new Set(controls.map((control) => Math.round(control.top + control.height / 2))).size, "one row").toBe(1);
+    const composer = await page.locator(".composer-box").boundingBox();
+    for (const control of controls) expect(control.right).toBeLessThanOrEqual(composer!.x + composer!.width);
+    await page.screenshot({ path: `${EVIDENCE}/after-390-plan-long-model.png` });
+  });
+
+  test("Plan off, the phone chip shows the mark, the effort and the chevron but not the context size (#2174)", async ({ page }) => {
+    await openFixture(page, 390, "codex");
+    await expandComposer(page);
+    const chip = page.getByRole("button", { name: /^Model Settings:/ });
+    const shown = await chip.evaluate((element) => Object.fromEntries(
+      [".agent-icon", ".cbar-context", ".cbar-effort", ".cbar-caret"].map((selector) => {
+        const node = element.querySelector(selector);
+        return [selector, node !== null && node.getClientRects().length > 0];
+      }),
+    ));
+    expect(shown).toEqual({ ".agent-icon": true, ".cbar-context": false, ".cbar-effort": true, ".cbar-caret": true });
+  });
+});

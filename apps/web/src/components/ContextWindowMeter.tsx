@@ -5,6 +5,7 @@ import type { ContextWindowCapacity } from "../context-window-capacity.js";
 import { contextWindowDiscrepancy, formatContextWindow } from "../context-window-options.js";
 import { formatTokens } from "../format.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
+import { ComposerButton } from "./ComposerControls.js";
 
 const RING_RADIUS = 6;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
@@ -75,28 +76,30 @@ export function ContextWindowMeter({ session, resolution, placement }: {
 
   const remaining = Math.max(0, contextWindow! - used);
   const summary = `${used.toLocaleString()} / ${contextWindow!.toLocaleString()} context tokens (${fill.formatPct})`;
+  const trigger = {
+    ref: popover.anchorRef,
+    "aria-expanded": popover.open,
+    "aria-controls": panelId,
+    "aria-label": `Context Window ${fill.formatPct} Used`,
+    title: summary,
+    // Click or keyboard only: the ring sits among dense controls, and a hover-opened panel was
+    // getting in the way of pointer travel to neighbouring controls. Escape or an outside
+    // pointer closes it as well.
+    onClick: popover.toggle,
+    children: <>
+      <ContextRing fillPct={fill.fillPct} size={placement === "bar" ? 14 : 16} />
+      <span className="context-ring-label">{fill.formatPct}</span>
+    </>,
+  };
 
   return (
     <span
       className={`context-control${contextToneClass(fill.tone)}${popover.open ? " is-open" : ""}`}
       ref={popover.rootRef}
     >
-      <button
-        ref={popover.anchorRef}
-        type="button"
-        className={placement === "bar" ? "btn sm ghost cbar-usage" : "context-ring-button"}
-        aria-expanded={popover.open}
-        aria-controls={panelId}
-        aria-label={`Context Window ${fill.formatPct} Used`}
-        title={summary}
-        // Click or keyboard only: the ring sits among dense controls, and a hover-opened panel was
-        // getting in the way of pointer travel to neighbouring controls. Escape or an outside
-        // pointer closes it as well.
-        onClick={popover.toggle}
-      >
-        <ContextRing fillPct={fill.fillPct} size={placement === "bar" ? 14 : 16} />
-        <span className="context-ring-label">{fill.formatPct}</span>
-      </button>
+      {placement === "bar"
+        ? <ComposerButton {...trigger} className="cbar-usage" />
+        : <button type="button" {...trigger} className="context-ring-button" />}
       {popover.open && (
         <div
           className="context-popover"

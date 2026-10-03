@@ -48,7 +48,6 @@ const TERMINAL = "Terminal epic (not yet filed)";
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/AutomationsView.tsx", "▸", "▸", AUTOMATIONS],
   ["components/AutomationsView.tsx", "×", "×", AUTOMATIONS],
-  ["components/ComposerControls.tsx", "▾", "▾", COMPOSER],
   ["components/EventTimeline.tsx", "→", "→ Dismissed by Parent", TRANSCRIPT],
   ["components/EventTimeline.tsx", "→", "→ Approved by Parent", TRANSCRIPT],
   ["components/EventTimeline.tsx", "→", "→ Denied by Parent", TRANSCRIPT],
@@ -91,7 +90,6 @@ const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/SessionApproval.tsx", "○", "○", APPROVALS],
   ["components/SessionDetail.tsx", "ⓘ", "ⓘ", COMPOSER],
   ["components/SessionDetail.tsx", "✕", "✕", COMPOSER],
-  ["components/SessionDetail.tsx", "◒", "◒ Plan", COMPOSER],
   ["components/SessionDetail.tsx", "↳", "↳", COMPOSER],
   ["components/SessionDetail.tsx", "↯", "↯", COMPOSER],
   ["components/ShellDock.tsx", "×", "×", TERMINAL],

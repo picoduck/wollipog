@@ -73,11 +73,12 @@ test("the ring is neutral below 75%, warning from 75% and danger from 90%, and i
   }
 });
 
-test("in the composer bar the ring is a small ghost button with a 14px ring and the percentage", async () => {
+test("in the composer bar the ring is a ghost ComposerButton with a 14px ring and the percentage", async () => {
   const view = await render(<ContextWindowMeter session={session()} resolution={CAPACITY} placement="bar" />);
   try {
     const button = view.container.querySelector<HTMLButtonElement>("button")!;
-    assert.equal(button.className, "btn sm ghost cbar-usage");
+    assert.equal(button.className, "btn ghost composer-btn cbar-usage");
+    assert.equal(button.hasAttribute("data-composer-button"), true);
     assert.equal(button.getAttribute("aria-label"), "Context Window 36% Used");
     assert.equal(button.querySelector("svg")!.getAttribute("width"), "14");
     assert.equal(button.textContent, "36%");

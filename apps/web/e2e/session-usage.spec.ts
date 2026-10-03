@@ -432,7 +432,7 @@ test.describe("desktop: context and cost sit in the composer bar before the mic"
       expect(bar.overflow).toBeLessThanOrEqual(0);
       expect(bar.meter!.right).toBeLessThanOrEqual(bar.cost!.left);
       expect(bar.cost!.right).toBeLessThanOrEqual(bar.trailing!.left);
-      // Borderless small ghost buttons in the small type, dim until hovered.
+      // Borderless ghost ComposerButtons, --composer-ctl tall (#2174), in the small type, dim until hovered.
       const look = await ring.evaluate((element) => {
         const style = getComputedStyle(element);
         return { border: style.borderTopColor, fontSize: style.fontSize, fontWeight: style.fontWeight, height: element.getBoundingClientRect().height };
@@ -440,7 +440,7 @@ test.describe("desktop: context and cost sit in the composer bar before the mic"
       expect(look.border).toBe("rgba(0, 0, 0, 0)");
       expect(look.fontSize).toBe("12px");
       expect(look.fontWeight).toBe("400");
-      expect(look.height).toBe(28);
+      expect(look.height).toBe(32);
       expect(await ring.locator("svg").getAttribute("width")).toBe("14");
       await page.locator(".composer-box").screenshot({ path: `${SHOT}/composer-bar-${viewport.name}.png` });
 

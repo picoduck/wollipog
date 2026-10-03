@@ -112,7 +112,7 @@ import {
   useOffscreenReceipts,
   useRecoveryAnnouncement,
 } from "./TranscriptTailControl.js";
-import { ApprovalsControl, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
+import { ApprovalsControl, ComposerButton, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
 import { PinnedSummaryDock } from "./PinnedSummaryDock.js";
@@ -209,7 +209,7 @@ import {
 import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
 import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId, receiptRowIds } from "./TranscriptReceipt.js";
-import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, ImageOffIcon, InfoIcon, MicIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, ImageOffIcon, InfoIcon, MicIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   durableCommandAttachmentNote,
   buildComposerCommandRegistry,
@@ -6383,37 +6383,15 @@ function SessionDetailLoaded({
                     imagesRefusedReason={modelRefusesImages}
                     onAttachImages={addFiles}
                   />
-                  <button
-                    type="button"
+                  <ComposerButton
+                    variant="plain"
                     className={`composer-idle-preview${composerIdleDraft ? "" : " is-empty"}`}
                     aria-label={composerIdleDraft ? `Edit Draft: ${composerIdleDraft}` : composerIdlePreview}
-                    onPointerDown={(event) => event.preventDefault()}
                     onClick={expandIdleComposer}
                   >
                     {composerIdlePreview}
-                  </button>
+                  </ComposerButton>
                   <ApprovalsControl session={session} apply={applyConfig} disabledReason={composerControlsDisabledReason} />
-                  {planActive && (
-                    <button
-                      type="button"
-                      className="mode-pill"
-                      disabled={composerControlsDisabledReason !== null}
-                      // Keep the composer focused until the click lands, like Send: blurring it on
-                      // pointerdown brings the phone rail back and moves this pill out from under the
-                      // finger (#1903).
-                      onPointerDown={(event) => event.preventDefault()}
-                      onClick={(event) => {
-                        togglePlan(false);
-                        if (planSupported) keepFocusInComposer(event.currentTarget);
-                      }}
-                      aria-describedby={composerControlsDisabledReason !== null ? configRefusalId : undefined}
-                      title={composerControlsDisabledReason !== null
-                        ? `Plan mode is on. ${composerControlsDisabledReason}`
-                        : "Plan mode is on — the agent researches + proposes, no edits. Click to turn off."}
-                    >
-                      ◒ Plan
-                    </button>
-                  )}
                   <ModelEffortControl
                     session={session}
                     apply={applyConfig}
@@ -6425,6 +6403,26 @@ function SessionDetailLoaded({
                       ? <SessionUsageMenuGroup session={session} resolution={contextWindow} />
                       : null}
                   />
+                  {/* After the model chip, so turning Plan on or off never moves the chip (#2174). */}
+                  {planActive && (
+                    <ComposerButton
+                      className="plan-toggle"
+                      aria-pressed="true"
+                      disabled={composerControlsDisabledReason !== null}
+                      onClick={(event) => {
+                        togglePlan(false);
+                        // The toggle unmounts with the mode it shows (#1913).
+                        if (planSupported) keepFocusInComposer(event.currentTarget);
+                      }}
+                      aria-describedby={composerControlsDisabledReason !== null ? configRefusalId : undefined}
+                      title={composerControlsDisabledReason !== null
+                        ? `Plan mode is on. ${composerControlsDisabledReason}`
+                        : "Plan mode is on: the agent researches and proposes without editing. Turn it off."}
+                    >
+                      <PlanIcon size={16} />
+                      Plan
+                    </ComposerButton>
+                  )}
                   {composerControlsDisabledReason !== null && planActive && (
                     <span className="sr-only" id={configRefusalId}>{composerControlsDisabledReason}</span>
                   )}
@@ -6442,17 +6440,16 @@ function SessionDetailLoaded({
                     <SessionUsageControl session={session} placement="bar" />
                   </>}
                   {dictation.supported && (
-                    <button
-                      type="button"
+                    <ComposerButton
+                      square
                       className={`voice-btn${dictation.recording ? " voice-recording" : ""}`}
                       // A composer that cannot send takes no dictation either (#2154).
                       disabled={!canPrompt}
                       aria-describedby={canPrompt ? undefined : composerUnavailableId}
-                      onPointerDown={(e) => {
+                      onPress={(e) => {
                         // Only a primary left-button press dictates — a right-click's context menu
                         // swallows the pointerup on some platforms and would leave the mic hot.
                         if (!e.isPrimary || e.button !== 0) return;
-                        e.preventDefault(); // keep focus in the textarea
                         dictation.start();
                       }}
                       onPointerUp={dictation.stop}
@@ -6462,32 +6459,30 @@ function SessionDetailLoaded({
                       aria-label="Hold to Dictate"
                       aria-pressed={dictation.recording}
                     >
-                      <MicIcon size={14} />
-                    </button>
+                      <MicIcon size={16} />
+                    </ComposerButton>
                   )}
+                  {/* One seat for the primary action: Send is the bar's only accent fill, Restart
+                      takes its place on a stopped session, and Stop Turn is a neutral outlined
+                      square during a turn, since red means "failed" (#2174). */}
                   {composerRestartOffered ? (
-                    <button
-                      type="button"
-                      className="send-btn"
-                      onPointerDown={(e) => e.preventDefault()}
+                    <ComposerButton
+                      variant="primary"
+                      square
                       onClick={() => void restartFromComposer()}
                       disabled={!runnerOnline || composerRequestBusy || restartRefusal !== null ||
                         retryingTurnPromptId !== undefined}
                       title={restartPending ? "Restarting Session" : restartRefusal ?? "Restart Session"}
                       aria-label={restartPending ? "Restarting Session" : "Restart Session"}
                     >
-                      {restartPending ? <Spinner /> : <RefreshIcon size={14} />}
-                    </button>
+                      {restartPending ? <Spinner /> : <RefreshIcon size={16} />}
+                    </ComposerButton>
                   ) : primaryComposerAction === "send" ? (
-                    <button
-                      className="send-btn"
-                      /* Keep focus in the textarea, like the dictation button above. On a phone
-                         the tap otherwise blurs the composer, and the blur closes the keyboard
-                         and brings the bottom rail back — a layout shift between touchstart and
-                         click that moved this button out from under the finger, so the first tap
-                         collapsed the keyboard instead of sending. Retained focus also keeps the
-                         keyboard open after sending, which is the chat convention. */
-                      onPointerDown={(e) => e.preventDefault()}
+                    <ComposerButton
+                      variant="primary"
+                      square
+                      // Focus stays in the textarea, which also keeps a phone keyboard open after
+                      // sending: the chat convention.
                       onClick={queuedEdit ? saveQueuedPromptEdit : send}
                       disabled={!canSend || composerRequestBusy || (queuedEdit !== null && !queuedEditRetryable)}
                       title={queuedEdit
@@ -6503,23 +6498,23 @@ function SessionDetailLoaded({
                           : isTouchPhone ? "Send" : "Send (Shift+Enter)"}
                       aria-label={queuedEdit ? "Save Queued Message" : "Send"}
                     >
-                      {busy || queuedEditBusy ? <Spinner /> : <ArrowUpIcon size={14} />}
-                    </button>
+                      {busy || queuedEditBusy ? <Spinner /> : <ArrowUpIcon size={16} />}
+                    </ComposerButton>
                   ) : (
-                    <button
-                      className={`send-btn stop-turn-btn${primaryComposerAction === "stopping" ? " is-stopping" : ""}`}
-                      /* Same tap-vs-reflow race as the Send button it replaces in this slot. */
-                      onPointerDown={(e) => e.preventDefault()}
+                    <ComposerButton
+                      variant="secondary"
+                      square
+                      className={`stop-turn-btn${primaryComposerAction === "stopping" ? " is-stopping" : ""}`}
                       onClick={() => void stopTurn()}
                       disabled={primaryComposerAction === "stopping" || cancelTurnRefusal !== null}
                       title={primaryComposerAction === "stopping"
                         ? "Stopping Turn"
-                        : cancelTurnRefusal ?? `Stop Turn (${shortcutDisplay("stop-turn")})`}
+                        : cancelTurnRefusal ?? `Stop turn (${shortcutDisplay("stop-turn")})`}
                       aria-label={primaryComposerAction === "stopping" ? "Stopping Turn" : "Stop Turn"}
                       aria-describedby={cancelTurnRefusal !== null ? `stop-turn-refusal-${session.id}` : undefined}
                     >
-                      {primaryComposerAction === "stopping" ? <Spinner /> : <StopTurnIcon size={14} />}
-                    </button>
+                      {primaryComposerAction === "stopping" ? <Spinner /> : <StopTurnIcon size={16} />}
+                    </ComposerButton>
                   )}
                 </div>
               </div>
@@ -7185,9 +7180,9 @@ export function ComposerPlusMenu({
           if (canAttach && files.length) void onAttachImages(files);
         }}
       />
-      <button
+      <ComposerButton
         ref={popover.triggerRef}
-        type="button"
+        square
         className="plus-btn"
         disabled={disabled}
         aria-label="Add and Modes"
@@ -7195,14 +7190,11 @@ export function ComposerPlusMenu({
         aria-expanded={open}
         aria-controls={popover.panelId}
         title="Attach, Modes & Budget"
-        // Keep the composer focused until the click lands, like Send: blurring it on pointerdown
-        // brings the phone rail back and moves this button out from under the finger (#1797).
-        onPointerDown={(event) => event.preventDefault()}
         onClick={popover.toggle}
         onKeyDown={popover.onTriggerKeyDown}
       >
         <PlusIcon size={16} />
-      </button>
+      </ComposerButton>
       {open && (
         // Menu-shaped, but it holds the guardrail fields too, so it is a dialog rather than a menu.
         <MenuSurface

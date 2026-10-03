@@ -4,6 +4,7 @@ import { useApi } from "../api-context.js";
 import { formatCost, formatTokens } from "../format.js";
 import { costProvenanceNote, estimatedCostSourceUrl, sessionCostLabel, sessionUsageTotals } from "../session-cost.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
+import { ComposerButton } from "./ComposerControls.js";
 import { InfoIcon } from "./Icons.js";
 
 function ProtocolUsageInfo({ detailId }: { detailId: string }) {
@@ -84,21 +85,22 @@ export function SessionUsageControl({ session, placement }: { session: SessionVi
   // detail is pending, failed, or stale instead of making the heading disagree with the control.
   const headCost = formatCost(totals.costUsd)
     || (label.priced ? "$0.00" : "Not Priced");
+  const unpriced = label.priced ? "" : " is-unpriced";
+  const trigger = {
+    ref: popover.anchorRef,
+    "aria-expanded": popover.open,
+    "aria-controls": panelId,
+    "aria-label": label.ariaLabel,
+    title: label.priced ? `Session usage — ${label.text} so far` : "Session usage — cost unavailable for this session",
+    onClick: popover.toggle,
+    children: label.text,
+  };
 
   return (
     <span className={`session-usage${popover.open ? " is-open" : ""}`} ref={popover.rootRef}>
-      <button
-        ref={popover.anchorRef}
-        type="button"
-        className={`${placement === "bar" ? "btn sm ghost cbar-usage" : "session-cost-button"}${label.priced ? "" : " is-unpriced"}`}
-        aria-expanded={popover.open}
-        aria-controls={panelId}
-        aria-label={label.ariaLabel}
-        title={label.priced ? `Session usage — ${label.text} so far` : "Session usage — cost unavailable for this session"}
-        onClick={popover.toggle}
-      >
-        {label.text}
-      </button>
+      {placement === "bar"
+        ? <ComposerButton {...trigger} className={`cbar-usage${unpriced}`} />
+        : <button type="button" {...trigger} className={`session-cost-button${unpriced}`} />}
       {popover.open && (
         <div
           className="session-usage-popover"

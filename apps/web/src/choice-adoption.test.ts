@@ -83,8 +83,9 @@ type Pattern = keyof typeof PATTERNS;
  *
  * Two entries are DELIBERATE and stay: both `aria-pressed` groups are genuine toggles — the
  * Pinned Summary, Terminal and Side Panel buttons in `SessionPanelToggles` (#2164), and the
- * follow-tail control in `SessionDetail`. A toggle is what `aria-pressed` is for; it is only wrong
- * when it describes one of N alternatives. They are counted rather than exempted so that a FOURTH
+ * composer bar's hold-to-dictate mic and Plan toggle (#2174) in `SessionDetail`. A toggle is what
+ * `aria-pressed` is for; it is only wrong when it describes one of N alternatives. They are
+ * counted rather than exempted so that a FOURTH
  * one in `SessionPanelToggles.tsx` fails here instead of hiding behind a whole-file exemption.
  */
 const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
@@ -101,7 +102,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/SessionApproval.tsx", "question-option", 2],
   // A fenced block's Wrap Lines button (#2152): one on/off toggle per block, not one of N options.
   ["components/Markdown.tsx", "aria-pressed", 1],
-  ["components/SessionDetail.tsx", "aria-pressed", 1],
+  ["components/SessionDetail.tsx", "aria-pressed", 2],
   ["components/SessionPanelToggles.tsx", "aria-pressed", 3],
   // Instructions' file chips (#1980): §11.3 meta chips (`button.chip` with `aria-pressed`, as the
   // issue specifies) that choose which file the one view shows. A view switch, not a form choice.

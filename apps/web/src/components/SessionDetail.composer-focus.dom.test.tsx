@@ -3546,7 +3546,7 @@ test("the send button's press keeps focus in the composer", async () => {
   try {
     await resolveComposerDraft(draft, { text: "ready to send", images: [], updatedAt: 1 });
     await focusRequestedComposer(fixture);
-    const sendButton = fixture.container.querySelector(".send-btn") as HTMLElement;
+    const sendButton = fixture.container.querySelector(".composer-btn.primary") as HTMLElement;
     assert.ok(sendButton, "the composer must render its send button");
     // Cancelling the press's default is what stops the tap from blurring the textarea. On a
     // phone that blur closed the keyboard and brought the bottom rail back BETWEEN touchstart
@@ -3714,7 +3714,7 @@ test("a Viewer's Stop Turn, queued-message actions and Plan control are disabled
       const steer = fixture.container.querySelector('button[aria-label="Steer Queued Message"]') as HTMLButtonElement;
       const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
       const cancel = fixture.container.querySelector(".queued-cancel") as HTMLButtonElement;
-      const plan = fixture.container.querySelector(".mode-pill") as HTMLButtonElement;
+      const plan = fixture.container.querySelector(".plan-toggle") as HTMLButtonElement;
       for (const [name, control] of Object.entries({ stopTurn, steer, edit, cancel, plan })) {
         assert.ok(control, `${label}: ${name} stays in place`);
       }
@@ -4003,7 +4003,7 @@ test("the send tooltip stops advertising Enter on the touch-phone layout", async
     const fixture = await mountFixture(draft);
     try {
       await resolveComposerDraft(draft, { text: "draft", images: [], updatedAt: 1 });
-      assert.equal(fixture.container.querySelector(".send-btn")?.getAttribute("title"), "Send",
+      assert.equal(fixture.container.querySelector(".composer-btn.primary")?.getAttribute("title"), "Send",
         "the tooltip must not advertise an Enter that inserts a newline here");
     } finally {
       await unmountFixture(fixture);
@@ -4017,7 +4017,7 @@ test("the send tooltip stops advertising Enter on the touch-phone layout", async
   const fixture = await mountFixture(draft);
   try {
     await resolveComposerDraft(draft, { text: "draft", images: [], updatedAt: 1 });
-    assert.equal(fixture.container.querySelector(".send-btn")?.getAttribute("title"), "Send (Enter)",
+    assert.equal(fixture.container.querySelector(".composer-btn.primary")?.getAttribute("title"), "Send (Enter)",
       "off the phone layout the Enter shortcut exists and stays advertised");
   } finally {
     await unmountFixture(fixture);
@@ -4031,7 +4031,7 @@ test("the send tooltip stops advertising Enter on the touch-phone layout", async
     const storedFixture = await mountFixture(storedDraft);
     try {
       await resolveComposerDraft(storedDraft, { text: "draft", images: [], updatedAt: 1 });
-      assert.equal(storedFixture.container.querySelector(".send-btn")?.getAttribute("title"), "Send (Shift+Enter)",
+      assert.equal(storedFixture.container.querySelector(".composer-btn.primary")?.getAttribute("title"), "Send (Shift+Enter)",
         "the tooltip must advertise the binding that actually sends");
     } finally {
       await unmountFixture(storedFixture);
@@ -5145,6 +5145,56 @@ for (const [status, reason] of [
     }
   });
 }
+
+test("every composer bar control is a ComposerButton that keeps the composer focused on pointerdown (#2174)", async () => {
+  const speech = domWindow as unknown as { SpeechRecognition?: unknown };
+  speech.SpeechRecognition = FakeSpeechRecognition;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionCapabilities: {
+      ...PAUSED_LOOK_CAPABILITIES,
+      permissionModes: ["default", "acceptEdits", "plan", "bypassPermissions"],
+    } as unknown as SessionView["agentCapabilities"],
+    sessionPatch: { model: "gpt-5.5", effort: "high", permissionMode: "plan" },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+    // A control that declared its own `onPointerDown` instead would either lose the
+    // `preventDefault` (a first tap that only blurs the composer, #1797) or not be a ComposerButton.
+    const expectComposerButtons = (state: string, expected: string[]) => {
+      const bar = fixture.container.querySelector(".composer-bar");
+      assert.ok(bar, `${state}: the bar renders`);
+      const buttons = [...bar.querySelectorAll<HTMLButtonElement>("button")];
+      const nameOf = (button: HTMLButtonElement) => button.getAttribute("aria-label") ?? button.textContent ?? "";
+      for (const name of expected) {
+        assert.ok(buttons.some((button) => nameOf(button) === name), `${state}: ${name} renders in the bar`);
+      }
+      for (const button of buttons) {
+        assert.ok(button.hasAttribute("data-composer-button"), `${state}: ${nameOf(button)} is a ComposerButton`);
+        if (button.disabled) continue;
+        const pointerDown = new domWindow.PointerEvent("pointerdown", { bubbles: true, cancelable: true }) as never;
+        assert.equal(button.dispatchEvent(pointerDown), false, `${state}: ${nameOf(button)} keeps the composer focused`);
+      }
+    };
+
+    expectComposerButtons("idle with Plan on", ["Add and Modes", "Plan", "Hold to Dictate", "Send"]);
+    const plan = fixture.container.querySelector<HTMLButtonElement>(".plan-toggle");
+    assert.equal(plan?.getAttribute("aria-pressed"), "true", "Plan is a pressed toggle");
+    assert.equal(plan?.textContent, "Plan", "Plan has an icon and a word, not a text glyph");
+    const chip = fixture.container.querySelector(".model-chip");
+    assert.equal(chip?.closest(".cbar-menu")?.nextElementSibling, plan, "Plan follows the model chip, which never moves");
+
+    await fixture.pushSession({ status: "running", activeTurnId: "turn-1" });
+    expectComposerButtons("during a turn", ["Stop Turn"]);
+    const stop = fixture.container.querySelector<HTMLButtonElement>(".stop-turn-btn");
+    assert.ok(stop?.classList.contains("composer-btn") && !stop.classList.contains("primary"),
+      "Stop Turn is the neutral recipe, not an accent or a red fill");
+  } finally {
+    await unmountFixture(fixture);
+    delete speech.SpeechRecognition;
+  }
+});
 
 test("a composer that can send keeps its controls enabled and its card undimmed (#2154)", async () => {
   const draft = deferred<ComposerDraft | null>();

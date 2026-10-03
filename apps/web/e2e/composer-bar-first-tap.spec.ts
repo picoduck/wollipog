@@ -126,13 +126,14 @@ test.describe("with the composer focused, one tap", () => {
       fixture.setSlashCommands([], ["default", "acceptEdits", "plan"]);
       fixture.updateSession("session-alpha", { permissionMode: "plan" });
     });
-    // The idle phone composer collapses the bar; focusing it shows the pill.
+    // The idle phone composer collapses the bar; focusing it shows the Plan toggle (#2174).
     const composer = await focusComposer(page);
-    const pill = page.getByRole("button", { name: "◒ Plan" });
+    const pill = page.getByRole("button", { name: "Plan", exact: true });
     await expect(pill).toBeVisible();
+    await expect(pill).toHaveAttribute("aria-pressed", "true");
     await tapOnce(page, pill);
     await expect(pill).toHaveCount(0);
-    // The pill unmounts with the mode it shows, so focus must not have gone to it.
+    // The toggle unmounts with the mode it shows, so focus must not have gone to it.
     await expect(composer).toBeFocused();
   });
 
