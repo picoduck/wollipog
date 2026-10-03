@@ -7421,7 +7421,11 @@ textarea,
   visibility: visible;
   opacity: 1;
 }
-.tl-working-step > .tl-tooltip { max-width: min(280px, 100%); }
+/* A plan step can be one long path or identifier; it wraps inside the tooltip, never past it. */
+.tl-working-step > .tl-tooltip {
+  max-width: min(280px, 100%);
+  overflow-wrap: anywhere;
+}
 .tl-working-tip { display: block; }
 .tl-working-action { flex: none; }
 .tl-working-note { font: var(--type-small); }

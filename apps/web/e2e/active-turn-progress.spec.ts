@@ -105,6 +105,16 @@ test("a running turn without failures is one line with no exception line", async
   await expect(progress.getByRole("status")).toHaveText("Working");
 });
 
+test("a long unbroken plan step wraps inside the step tooltip at 390px", async ({ page }) => {
+  const plan = `apps/web/src/components/${"VeryLongIdentifierWithoutBreaks".repeat(6)}`;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/active-turn-progress-e2e.html?scenario=running&plan=${encodeURIComponent(plan)}`);
+  const tooltip = page.locator(".tl-working [role='tooltip']");
+  await expect(tooltip).toContainText(plan);
+  await expect.poll(() => tooltip.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await expectNoHorizontalOverflow(page);
+});
+
 test("a silent turn says how long it has been quiet", async ({ page }) => {
   const progress = await openScenario(page, "silent", { width: 390, height: 844 });
   await expect(progress.locator(".tl-working-note")).toHaveText("No new output for 3m");

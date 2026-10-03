@@ -7,8 +7,8 @@ import type { TimelineItem } from "../timeline.js";
 import { deriveActiveTurnProgress } from "../turn-progress.js";
 import "../styles.css";
 
-/** `?scenario=` picks the turn: running, failing (the default), silent or approval. `?theme=light`
- * switches theme. */
+/** `?scenario=` picks the turn: running, failing (the default), silent or approval. `?plan=` replaces
+ * the current plan step's text. `?theme=light` switches theme. */
 type Scenario = "running" | "failing" | "silent" | "approval";
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -24,7 +24,7 @@ const latestOutputAt = scenario === "silent" ? fixtureNow - 185_000 : fixtureNow
 const retryError = "Release validation failed because the compatibility marker did not match the expected control-plane service identity in the packaged desktop application.";
 const planEntries = [
   { content: "Inspect release metadata", status: "completed" as const },
-  { content: "Validate compatibility release", status: "in_progress" as const },
+  { content: params.get("plan") ?? "Validate compatibility release", status: "in_progress" as const },
   { content: "Publish verified artifacts", status: "pending" as const },
 ];
 
