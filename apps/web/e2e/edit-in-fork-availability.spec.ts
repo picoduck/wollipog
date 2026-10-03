@@ -35,5 +35,9 @@ test("an Edit in a Fork that is temporarily blocked stays listed and says why (#
   menu = await openMenu();
   await expect(edit).toBeEnabled();
   await edit.click();
-  await expect(page.getByRole("dialog")).toBeVisible();
+  // #2185: a confirmation that names where the edit continues, not an edit form.
+  const dialog = page.getByRole("dialog", { name: "Edit in a Fork" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("textarea")).toHaveCount(0);
+  await expect(dialog.locator(".modal-foot > button")).toHaveText(["Cancel", "Edit in a Fork"]);
 });

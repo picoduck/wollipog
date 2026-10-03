@@ -87,7 +87,13 @@ import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
 import { sessionArchivedAtRest, statusMeta } from "../status-meta.js";
 import { shownWatchdogDelivery } from "../background-delivery-status.js";
-import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest, type TurnRetryControl } from "./EventTimeline.js";
+import {
+  EventTimeline,
+  TranscriptErrorAlert,
+  userRewindTurns,
+  type TimelineRevealRequest,
+  type TurnRetryControl,
+} from "./EventTimeline.js";
 import { TURN_RETRY_IN_FLIGHT_REASON, turnRetryPlan } from "../turn-retry.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
@@ -159,6 +165,15 @@ import {
   type ConversationForkAvailability,
   type EditInForkAvailability,
 } from "../session-actions.js";
+import {
+  editInForkConfirmation,
+  editingCopyMessage,
+  forkConversationConfirmation,
+  recoverSessionConfirmation,
+  REPLACE_DRAFT_CONFIRMATION,
+  rewindFilesConfirmation,
+  type TurnActionConfirmationCopy,
+} from "../turn-action-confirmations.js";
 import { SessionApprovalRegion, focusSessionRequest, standaloneApprovalForReview } from "./SessionApproval.js";
 import {
   requestTypeLabel,
@@ -177,7 +192,7 @@ import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Markdown } from "./Markdown.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import { useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
 import { resolveContextWindowCapacity } from "../context-window-capacity.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
@@ -528,11 +543,20 @@ export type SessionDetailProps = {
   composerDraftCleanup?: typeof deleteComposerDraftIfMatches;
 };
 
-type MessageActionState = {
-  mode: "resend" | "fork";
-  item: Extract<TimelineItem, { kind: "user_message" }>;
-  forkTurn?: number;
+type ComposerDraftContent = { text: string; images: PromptImageInput[] };
+
+/** A copy of an earlier message loaded into the composer by Edit as a New Turn (#2185). */
+type EditCopy = {
+  /** The copied message's turn, as the transcript numbers it, when known. */
+  turn: number | undefined;
+  /** The draft the copy replaced, restored by Discard Edit; null when the composer was empty. */
+  previous: ComposerDraftContent | null;
 };
+
+/** A turn action's confirmation copy as `confirm()` options, its note as the dim second line. */
+function turnActionConfirmation({ note, ...copy }: TurnActionConfirmationCopy): ConfirmationOptions {
+  return { ...copy, ...(note ? { details: <p className="confirmation-note">{note}</p> } : {}) };
+}
 
 class AmbiguousForkError extends Error {}
 
@@ -1166,8 +1190,7 @@ function SessionDetailLoaded({
   const setError = useCallback((message: string | null, title = "Action Failed") => {
     showComposerError("action", message === null ? null : { title, message });
   }, [showComposerError]);
-  const [messageAction, setMessageAction] = useState<MessageActionState | null>(null);
-  const messageActionReturnFocusRef = useRef<HTMLElement | null>(null);
+  const [editCopy, setEditCopy] = useState<EditCopy | null>(null);
   const revealOrdinaryComposerRef = useRef<(focus: "always" | "answer-owned") => void>(() => {});
   const forkInFlightRef = useRef(false);
   const readForkInProgress = useCallback(() => sessionForkInProgress(sessionId), [sessionId]);
@@ -1524,6 +1547,7 @@ function SessionDetailLoaded({
     setSteeringBusy(false);
     setQueueSteeringPending(new Set());
     setSteeringResolutionPending(new Map());
+    setEditCopy(null);
     if (sessionChanged) setComposerExpanded(false);
   }, [sessionId]);
 
@@ -3434,16 +3458,22 @@ function SessionDetailLoaded({
   forkRefusalRef.current = forkRefusal;
   const rewindRefusalRef = useRef(rewindRefusal);
   rewindRefusalRef.current = rewindRefusal;
+  // Read by the turn actions' confirmations, which quote a turn's prompt, without giving the
+  // memoized handlers below a new identity on every transcript update.
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
   // Rewind FILES to a per-turn checkpoint (T3-style). Stable identity (useCallback) — it rides
   // into the memoized timeline rows. The confirm copy is explicit that the conversation is not
   // rewound: the agent may still reference later changes in its context.
   const onRewind = useCallback(
     async (turn: number) => {
       if (rewindRefusal !== null) return;
+      const timeline = itemsRef.current;
+      const rewindTurns = userRewindTurns(timeline);
+      const prompt = timeline.find((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
+        item.kind === "user_message" && rewindTurns.get(item.id) === turn);
       if (!await confirm({
-        title: "Restore Files",
-        message: `Files revert to the checkpoint before turn ${turn}, but the conversation does not. The agent keeps its memory of later turns.`,
-        confirmLabel: "Restore Files",
+        ...turnActionConfirmation(rewindFilesConfirmation(turn, prompt?.text)),
         tone: "danger",
       }) || rewindRefusalRef.current !== null) return;
       await api.rewind(sessionId, turn).catch((e) => setError((e as Error).message));
@@ -3454,19 +3484,8 @@ function SessionDetailLoaded({
   const onFork = useCallback(
     async (turn: number) => {
       if (busy || forkInFlightRef.current || forkRefusal !== null) return;
-      const provider = session?.driver === "claude-code"
-        ? "Claude session"
-        : session?.driver === "pi"
-          ? "Pi session"
-          : "Codex thread";
-      const providerNote = session?.driver === "claude-code" || session?.driver === "pi"
-        ? ` ${session.driver === "pi" ? "Pi" : "Claude Code"} can fork only the latest completed conversation turn.`
-        : "";
-      if (!await confirm({
-        title: "Create Fork",
-        message: `A new ${provider} and isolated worktree are created after turn ${turn}; this session stays unchanged.${providerNote}`,
-        confirmLabel: "Create Fork",
-      }) || forkRefusalRef.current !== null) return;
+      if (!await confirm(turnActionConfirmation(forkConversationConfirmation(turn, session?.driver))) ||
+        forkRefusalRef.current !== null) return;
       const releaseFork = acquireSessionFork(sessionId);
       if (!releaseFork) {
         const message = "A conversation fork is already in progress for this session. Wait for it to appear on the Board.";
@@ -3516,13 +3535,9 @@ function SessionDetailLoaded({
       setError("This session's machine no longer has its agent, so a new conversation can't start from it.", "Session Not Recovered");
       return;
     }
-    if (!await confirm({
-      title: "Recover Session",
-      message: handoff
-        ? `A new session starts a fresh provider conversation seeded with a bounded, redacted summary of the visible dialogue through turn ${quarantine.recoveryTurn}, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`
-        : `A new session forks the provider conversation at turn ${quarantine.recoveryTurn}, which excludes the rejected item, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`,
-      confirmLabel: "Recover Session",
-    }) || forkRefusalRef.current !== null) return;
+    if (!await confirm(turnActionConfirmation(
+      recoverSessionConfirmation(quarantine.recoveryTurn, handoff ? "handoff" : "fork"),
+    )) || forkRefusalRef.current !== null) return;
     const releaseFork = acquireSessionFork(sessionId);
     if (!releaseFork) {
       const message = "A conversation fork is already in progress for this session. Wait for it to appear on the Board.";
@@ -3847,51 +3862,57 @@ function SessionDetailLoaded({
     return targets;
   }, [api, busy, completedConversationTurns, forkRefusal, items, pendingQueuedPrompts, runner?.protocolVersion, runnerOnline, session.driver, session.status, session.worktreePath]);
 
-  const openMessageAction = useCallback((next: MessageActionState) => {
-    messageActionReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setMessageAction(next);
-  }, []);
-  const openResendAction = useCallback(
-    (item: Extract<TimelineItem, { kind: "user_message" }>) => openMessageAction({ mode: "resend", item }),
-    [openMessageAction],
-  );
-  const openForkEditAction = useCallback(
-    (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) =>
-      openMessageAction({ mode: "fork", item, forkTurn }),
-    [openMessageAction],
-  );
-
-  const closeMessageAction = useCallback((restoreFocus = true) => {
-    setMessageAction(null);
-    if (restoreFocus) window.setTimeout(() => messageActionReturnFocusRef.current?.focus(), 0);
-  }, []);
-
-  useEffect(() => {
-    if (mode === "expanded") return;
-    setMessageAction(null);
-    messageActionReturnFocusRef.current = null;
-  }, [mode]);
-
-  const prepareResend = useCallback((draft: { text: string; images: PromptImageInput[] }) => {
-    if (!canPrompt) throw new Error("This session cannot accept a new turn right now.");
-    revealOrdinaryComposerRef.current("always");
+  // Edit as a New Turn loads the message straight into the composer (#2185). A draft it replaces is
+  // kept here, so Discard Edit can put it back; sending the copy ends the edit.
+  const editCopyRef = useRef(editCopy);
+  editCopyRef.current = editCopy;
+  const canPromptRef = useRef(canPrompt);
+  canPromptRef.current = canPrompt;
+  const putComposerDraft = useCallback((draft: ComposerDraftContent) => {
     draftDirty.current = true;
     composerDraftVersionRef.current += 1;
     draftState.current = draft;
     setProgrammaticComposerText(draft.text);
-    replace(draft.images);
+    if (draft.images.length) replace(draft.images);
+    else clear();
     setHistIdx(-1);
-    clearComposerErrors();
-    messageActionReturnFocusRef.current = inputRef.current;
-    closeMessageAction(false);
-  }, [canPrompt, closeMessageAction, replace, setProgrammaticComposerText]);
+  }, [clear, replace, setProgrammaticComposerText]);
+  const openResendAction = useCallback(async (item: Extract<TimelineItem, { kind: "user_message" }>) => {
+    if (!canPromptRef.current) return;
+    const held = draftState.current;
+    if ((held.text.trim() || held.images.length > 0) && !await confirm({
+      ...REPLACE_DRAFT_CONFIRMATION,
+      returnFocus: inputRef,
+    })) return;
+    // The session can stop taking turns, or the draft can change, while the confirmation is open.
+    if (!canPromptRef.current) return;
+    const current = draftState.current;
+    // A second edit replaces the first copy, not the person's own draft: Discard Edit still
+    // restores what they had written before either.
+    const previous = editCopyRef.current
+      ? editCopyRef.current.previous
+      : current.text || current.images.length
+        ? { text: current.text, images: current.images.map((image) => ({ ...image })) }
+        : null;
+    revealOrdinaryComposerRef.current("always");
+    putComposerDraft({ text: item.text, images: (item.images ?? []).map((image) => ({ ...image })) });
+    setEditCopy({ turn: item.turn ?? userRewindTurns(itemsRef.current).get(item.id), previous });
+  }, [confirm, putComposerDraft]);
+  const discardEditCopy = useCallback(() => {
+    const copy = editCopyRef.current;
+    if (!copy) return;
+    putComposerDraft(copy.previous ?? { text: "", images: [] });
+    setEditCopy(null);
+    focusComposerAtDraftEnd();
+  }, [focusComposerAtDraftEnd, putComposerDraft]);
 
   const prepareFork = useCallback(async (
     forkTurn: number,
-    draft: { text: string; images: PromptImageInput[] },
+    draft: ComposerDraftContent,
   ) => {
-    if (forkInFlightRef.current) return;
-    if (forkRefusal !== null) throw new Error(forkRefusal);
+    if (forkInFlightRef.current) throw new Error("A conversation fork is already in progress for this session.");
+    // Read now rather than when the confirmation opened: a refusal can arrive while it is open.
+    if (forkRefusalRef.current !== null) throw new Error(forkRefusalRef.current);
     const releaseFork = acquireSessionFork(sessionId);
     if (!releaseFork) throw new Error("A conversation fork is already in progress for this session.");
     const generation = viewGenerationRef.current;
@@ -3902,21 +3923,32 @@ function SessionDetailLoaded({
       const forked = await api.fork(sessionId, forkTurn);
       stageComposerDraftHandoff(forked.id, draft.text, draft.images, instanceScope);
       await saveComposerDraft(forked.id, draft.text, draft.images, instanceScope);
-      if (viewGenerationRef.current === generation) {
-        closeMessageAction(false);
-        navigate({ name: "session", id: forked.id });
-      }
+      if (viewGenerationRef.current === generation) navigate({ name: "session", id: forked.id });
     } catch (cause) {
+      // The confirmation shows the failure as its danger notice. An ambiguous fork keeps the lock,
+      // so trying again says a fork is already in progress rather than creating a second one.
       const ambiguous = ambiguousForkError(cause);
       if (ambiguous) releaseOnFinish = false;
-      if (viewGenerationRef.current === generation) setError((ambiguous ?? cause as Error).message);
       throw ambiguous ?? cause;
     } finally {
       if (releaseOnFinish) releaseFork();
       forkInFlightRef.current = false;
       setBusy(false);
     }
-  }, [api, closeMessageAction, forkRefusal, instanceScope, navigate, sessionId]);
+  }, [api, instanceScope, navigate, sessionId]);
+  const openForkEditAction = useCallback(
+    (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => {
+      const draft = { text: item.text, images: (item.images ?? []).map((image) => ({ ...image })) };
+      void confirm({
+        ...turnActionConfirmation(editInForkConfirmation(forkTurn + 1)),
+        progress: "Creating the fork…",
+        // The fork cannot be withdrawn once requested, and it opens its session when it lands.
+        cancelWhileRunning: false,
+        onConfirm: () => prepareFork(forkTurn, draft),
+      });
+    },
+    [confirm, prepareFork],
+  );
 
   // The session's problem states, shown one at a time in the notice slot above the composer
   // (#1966). An action a person cannot take now says why in a visible line it is described by.
@@ -3969,7 +4001,7 @@ function SessionDetailLoaded({
             <>
               <p>
                 {recoverable
-                  ? `Recovering continues from the checkpoint after turn ${quarantine.recoveryTurn} in a new session with the same files. This session stays here, unchanged, for inspection.`
+                  ? `Recovering continues from the checkpoint after Turn ${quarantine.recoveryTurn} in a new session with the same files. This session stays here, unchanged, for inspection.`
                   : "There is no earlier checkpoint to recover from. Start a new session to continue the work; the files in this session's worktree are unchanged."}
                 {recoverable && quarantine.retainedPrompt
                   ? " Your unsent message moves to the recovered session's composer."
@@ -4475,6 +4507,21 @@ function SessionDetailLoaded({
       ),
     });
   }
+  if (editCopy) {
+    sessionNotices.push({
+      key: "editing-copy",
+      severity: "info",
+      rank: SESSION_NOTICE_RANK.editingCopy,
+      title: "Editing a Copy",
+      // Not dismissible: Discard Edit is the way out, and sending the copy ends it.
+      render: ({ trailing }) => (
+        <Notice tone="info" compact role="status" ariaLabel="Editing a Copy" trailing={trailing}
+          actions={<button type="button" className="btn sm" onClick={discardEditCopy}>Discard Edit</button>}>
+          <p>{editingCopyMessage(editCopy.turn)}</p>
+        </Notice>
+      ),
+    });
+  }
   const composerIdleCollapsed = isMobile && !composerExpanded && !/[\r\n]/u.test(text) &&
     images.length === 0 && session.pendingApproval == null &&
     !historyQuarantine && !queuedEdit && composerErrorEntries.length === 0 && !retitleFeedback && !dictation.recording &&
@@ -4762,7 +4809,10 @@ function SessionDetailLoaded({
         pendingConfig.current = {};
       }
       providerAccepted = true;
-      if (viewGenerationRef.current === generation) clearComposerErrors();
+      if (viewGenerationRef.current === generation) {
+        clearComposerErrors();
+        setEditCopy(null);
+      }
       if (viewGenerationRef.current === generation &&
           composerDraftVersionRef.current === submissionVersion) {
         draftDirty.current = true;
@@ -4880,7 +4930,10 @@ function SessionDetailLoaded({
         return;
       }
       providerAccepted = true;
-      if (viewGenerationRef.current === generation) clearComposerErrors();
+      if (viewGenerationRef.current === generation) {
+        clearComposerErrors();
+        setEditCopy(null);
+      }
       if (viewGenerationRef.current === generation &&
           composerDraftVersionRef.current === submissionVersion) {
         draftDirty.current = true;
@@ -6662,137 +6715,7 @@ function SessionDetailLoaded({
             throw cause;
           } finally { if (releaseOnFinish) release(); }
         }} />}
-      {mode === "expanded" && messageAction && (
-        <MessageActionDialog
-          key={`${messageAction.mode}-${messageAction.item.id}`}
-          action={messageAction}
-          existingDraftPresent={Boolean(text || images.length)}
-          resendUnavailableReason={promptUnavailableReason}
-          forkRefusal={forkRefusal}
-          busy={busy}
-          returnFocusRef={messageActionReturnFocusRef}
-          onClose={() => closeMessageAction(true)}
-          onPrepareResend={prepareResend}
-          onPrepareFork={(draft) => prepareFork(messageAction.forkTurn!, draft)}
-        />
-      )}
     </div>
-  );
-}
-
-function MessageActionDialog({
-  action,
-  existingDraftPresent,
-  resendUnavailableReason,
-  forkRefusal,
-  busy,
-  returnFocusRef,
-  onClose,
-  onPrepareResend,
-  onPrepareFork,
-}: {
-  action: MessageActionState;
-  existingDraftPresent: boolean;
-  /** Why the session cannot accept a new turn, when that changes while the dialog is open. */
-  resendUnavailableReason: string | null;
-  /** Why the signed-in person may not fork, when that changes while the dialog is open (#1864). */
-  forkRefusal: string | null;
-  busy: boolean;
-  returnFocusRef: { current: HTMLElement | null };
-  onClose: () => void;
-  onPrepareResend: (draft: { text: string; images: PromptImageInput[] }) => void;
-  onPrepareFork: (draft: { text: string; images: PromptImageInput[] }) => Promise<void>;
-}) {
-  const [draftText, setDraftText] = useState(action.item.text);
-  const [submitting, setSubmitting] = useState(false);
-  const [dialogError, setDialogError] = useState<string | null>(null);
-  const [retryBlocked, setRetryBlocked] = useState(false);
-  const submitLock = useRef(false);
-  const retainedImages = action.item.images ?? [];
-  const formId = `message-action-${action.item.id}`;
-  const refusal = action.mode === "fork" ? forkRefusal : null;
-
-  const submit = async () => {
-    if (submitLock.current || refusal !== null) return;
-    if (!draftText.trim() && retainedImages.length === 0) {
-      setDialogError("Enter a message or retain at least one attachment.");
-      return;
-    }
-    submitLock.current = true;
-    setSubmitting(true);
-    setDialogError(null);
-    const draft = { text: draftText, images: retainedImages };
-    try {
-      if (action.mode === "resend") onPrepareResend(draft);
-      else await onPrepareFork(draft);
-    } catch (cause) {
-      if (cause instanceof AmbiguousForkError) setRetryBlocked(true);
-      setDialogError((cause as Error).message);
-    } finally {
-      submitLock.current = false;
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <Modal
-      title={action.mode === "resend" ? "Edit as a New Turn" : "Edit in a Conversation Fork"}
-      onClose={submitting ? () => {} : onClose}
-      returnFocusRef={returnFocusRef}
-      footer={(
-        <>
-          <button className="btn" type="button" onClick={onClose} disabled={submitting}>Cancel</button>
-          <button
-            className="btn primary"
-            type="submit"
-            form={formId}
-            disabled={submitting || retryBlocked || (action.mode === "fork" && busy) || (action.mode === "resend" && resendUnavailableReason !== null) ||
-              refusal !== null}
-            title={refusal ?? undefined}
-            aria-describedby={refusal !== null ? `${formId}-refusal` : undefined}
-          >
-            {submitting ? "Preparing…" : action.mode === "resend" ? "Load into Composer" : "Create Fork"}
-          </button>
-        </>
-      )}
-    >
-      <form
-        id={formId}
-        className="message-action-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-      >
-        <p className="muted">
-          {action.mode === "resend"
-            ? "This prepares a deliberate new turn in the current conversation. Nothing is sent until you press Send."
-            : `The new conversation starts after turn ${action.forkTurn}. Nothing is sent until you review the child draft and press Send.`}
-        </p>
-        {existingDraftPresent && action.mode === "resend" && (
-          <p className="message-action-warning" role="note">Loading this message replaces the current composer draft.</p>
-        )}
-        {refusal !== null && (
-          <p id={`${formId}-refusal`} className="message-action-warning" role="status">{refusal}</p>
-        )}
-        {action.mode === "resend" && resendUnavailableReason !== null && (
-          <p className="message-action-warning" role="status">{resendUnavailableReason}</p>
-        )}
-        <label className="field-label" htmlFor={`${formId}-text`}>Message</label>
-        <textarea
-          id={`${formId}-text`}
-          className="input message-action-input"
-          value={draftText}
-          onChange={(event) => setDraftText(event.target.value)}
-          rows={7}
-          autoFocus
-        />
-        {retainedImages.length > 0 && (
-          <p className="muted">Retains {retainedImages.length} original attachment{retainedImages.length === 1 ? "" : "s"}.</p>
-        )}
-        {dialogError && <div className="form-error" role="alert">{dialogError}</div>}
-      </form>
-    </Modal>
   );
 }
 

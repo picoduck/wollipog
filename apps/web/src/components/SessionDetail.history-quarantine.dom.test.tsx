@@ -205,7 +205,7 @@ test("a quarantined session closes the composer and explains why retrying cannot
     assert.equal(toggle.textContent, "Hide Details");
     const details = fixture.container.querySelector(`#${toggle.getAttribute("aria-controls")}`);
     assert.ok(details, "Show Details opens the recovery explanation");
-    assert.match(details.textContent ?? "", /checkpoint after turn 2/);
+    assert.match(details.textContent ?? "", /checkpoint after Turn 2/);
     assert.match(details.textContent ?? "", /stays here, unchanged, for inspection/);
     assert.match(details.textContent ?? "", /unsent message moves to the recovered session/);
     assert.equal(details.querySelector(".code-well code")?.textContent, "oversized_tool_call",
@@ -220,12 +220,15 @@ test("a quarantined session closes the composer and explains why retrying cannot
 
 test("recovery asks the runner for the recorded safe checkpoint and opens the new session", async () => {
   const calls: Array<{ id: string; turn: number; handoff: unknown }> = [];
+  const asked: ConfirmationOptions[] = [];
   const fixture = await mount(
     { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork" },
     (async (id: string, turn: number, handoff?: unknown) => {
       calls.push({ id, turn, handoff });
       return { ...session("s_recovered", undefined), retainedPrompt: { text: "kept for me", images: [] } };
     }) as never,
+    {},
+    async (options) => { asked.push(options); return true; },
   );
   try {
     const action = fixture.banner()!.querySelector("button") as HTMLButtonElement;
@@ -236,6 +239,15 @@ test("recovery asks the runner for the recorded safe checkpoint and opens the ne
     assert.equal(calls[0]!.handoff, undefined, "a fork recovery never asks for a handoff destination");
     assert.deepEqual(fixture.navigated, ["s_recovered"], "the usable conversation is opened");
     assert.equal(fixture.confirmations.length, 1, "recovery is confirmed before it runs");
+    // The confirmation names the outcome and the turn as the transcript does (#2185).
+    assert.deepEqual(
+      asked.map(({ title, message, confirmLabel }) => ({ title, message, confirmLabel })),
+      [{
+        title: "Recover Session",
+        message: "A new session continues from Turn 2, before the item the provider rejected, with the files from that turn. This session stays as it is so you can inspect it.",
+        confirmLabel: "Recover Session",
+      }],
+    );
   } finally {
     await fixture.unmount();
   }
@@ -243,12 +255,15 @@ test("recovery asks the runner for the recorded safe checkpoint and opens the ne
 
 test("a fallback recovery hands the same provider a fresh conversation", async () => {
   const calls: Array<{ turn: number; handoff: unknown }> = [];
+  const asked: ConfirmationOptions[] = [];
   const fixture = await mount(
     { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "handoff" },
     (async (_id: string, turn: number, handoff?: unknown) => {
       calls.push({ turn, handoff });
       return { ...session("s_fresh", undefined), handoffDraft: { text: "context", images: [], disclosure: "bounded" } };
     }) as never,
+    {},
+    async (options) => { asked.push(options); return true; },
   );
   try {
     const action = fixture.banner()!.querySelector("button") as HTMLButtonElement;
@@ -259,6 +274,9 @@ test("a fallback recovery hands the same provider a fresh conversation", async (
       handoff: { agentId: "codex", config: { model: "gpt-5.6-sol", effort: "high" } },
     }]);
     assert.deepEqual(fixture.navigated, ["s_fresh"]);
+    assert.equal(asked[0]?.message,
+      "A new session starts a fresh conversation from a summary of Turns 1 to 2, with the files from that turn. This session stays as it is so you can inspect it.");
+    assert.equal(asked[0]?.confirmLabel, "Recover Session");
   } finally {
     await fixture.unmount();
   }

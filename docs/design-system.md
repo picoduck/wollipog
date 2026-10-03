@@ -1841,15 +1841,15 @@ exactly one: the most severe, then the lowest rank.
 - Ranks live in one table, `SESSION_NOTICE_RANK`: worktree missing 1, conversation quarantined 2,
   worktree setup failed 3, invalid worktree setup configuration 4, account switch failed 5, session
   archived 7, skills unavailable 8, setup suggestion 9, composer error 10, attachment error 11,
-  attachment note 12. A new entry adds its rank there.
+  attachment note 12, editing a copy 13. A new entry adds its rank there.
 - The others are a `.btn.sm.ghost` "+N More" in the shown notice's title row. It opens a menu (§9.1)
   of their tone icons and one-line titles; choosing one shows it until the set of conditions changes,
   and focus moves to the new notice's "+N More".
 - `render` returns one `Notice` and passes the slot's `trailing` to it. Info conditions are
   dismissible per session (the slot passes `onDismiss`); danger and warning ones are not, except where
   the condition has its own dismissal (a failed account switch, which lets the person send with the
-  session's configured account). Session Archived is the info exception: it is the way back, so it
-  is not dismissible.
+  session's configured account). Session Archived and Editing a Copy are the info exceptions: each
+  has its own way out, so neither is dismissible.
 - **Session Archived** (info, #2202): an archived session that has stopped reads "This session is
   archived and stopped." with **Unarchive and Restart** (the control plane's one preflighted
   operation) or, on an older control plane, **Unarchive**. A person the server would refuse sees it
@@ -1864,6 +1864,11 @@ exactly one: the most severe, then the lowest rank.
   accepted. A command that keeps the attached images for the next message is an info entry ("/review
   doesn't send images. They stay here for your next message."), dismissible like other info entries.
   Nothing renders inside the composer card or between it and the slot.
+- **Editing a Copy** (info, compact, #2185): Edit as a New Turn opens no dialog. It loads the
+  message's text and attachments into the composer and focuses it; over a draft it first confirms
+  "Replace Draft". While the copy is there the slot reads "Editing a copy of your Turn N message.
+  Earlier turns stay as they are." with **Discard Edit**, which puts back the draft it replaced (or
+  clears the composer). Sending the copy ends it.
 - **Drop target** (#2156): files dragged over the composer turn the card's own edge dashed
   `--text-dim` and change only the bar row, to "Drop to attach 2 images"; the draft and its
   attachments stay in view. A model without image input refuses the drop in the same row, with the

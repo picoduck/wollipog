@@ -70,6 +70,8 @@ export const SESSION_NOTICE_RANK = {
   composerError: 10,
   attachmentError: 11,
   attachmentNote: 12,
+  // A copy of an earlier message loaded by Edit as a New Turn, with Discard Edit (#2185).
+  editingCopy: 13,
 } as const;
 
 const SEVERITY_ORDER: Record<SessionNoticeSeverity, number> = { danger: 0, warning: 1, info: 2 };

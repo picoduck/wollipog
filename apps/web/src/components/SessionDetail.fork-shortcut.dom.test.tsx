@@ -226,8 +226,8 @@ test("F on the transcript opens the same fork confirmation as More Actions' Fork
     await view.press();
     assert.equal(view.confirmations.length, 2, "F asks too");
     assert.deepEqual(view.confirmations[1], view.confirmations[0], "with the same confirmation");
-    assert.equal(view.confirmations[1]!.title, "Create Fork");
-    assert.match(view.confirmations[1]!.message, /after turn 1/);
+    assert.equal(view.confirmations[1]!.title, "Fork Conversation");
+    assert.match(view.confirmations[1]!.message, /from after Turn 1 in its own worktree/);
     assert.deepEqual(view.forks, [], "declining the confirmation forks nothing");
   } finally {
     await view.unmount();
