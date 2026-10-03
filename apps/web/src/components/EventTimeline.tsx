@@ -1,4 +1,5 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
+import { useShowAgentLogs } from "../agent-logs.js";
 import type { AgentDriverKind, WorkflowArtifactView } from "@wollipog/protocol";
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
@@ -25,13 +26,14 @@ import {
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
-import { ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, RewindFilesIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { AccountIcon, AgentLogIcon, ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, RewindFilesIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
 import { formatClock, formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import {
   activitySpanDescription,
+  agentLogOnly,
   diffLineCounts,
   foldRetries,
   mergeWork,
@@ -499,8 +501,8 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
         (height, question) => height + 64 + question.options.length * 44 + (question.allowOther ? 44 : 0),
         0,
       );
-    case "command_output":
-    case "stderr": return 96;
+    case "command_output": return 96;
+    case "stderr": return 28;
     case "tool_call": return 28;
     case "conversation_forked": return row.item.handoff ? 76 : 52;
     case "provider_account_switched": return 52;
@@ -541,6 +543,7 @@ export const EventTimeline = memo(function EventTimeline({
   questionContext,
   approvalContext,
   workspaceRoot,
+  onOpenSession,
 }: {
   handoff?: { open: (turn: number) => void; reason?: string };
   items: TimelineItem[];
@@ -581,11 +584,14 @@ export const EventTimeline = memo(function EventTimeline({
   approvalContext?: TimelineApprovalContext;
   /** The session's root, so a step names a file by its workspace-relative path. */
   workspaceRoot?: string;
+  /** Open another session, such as a fork's source; must be identity-stable. */
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
     <HandoffContext.Provider value={handoff}>
+    <TimelineSessionLinkContext.Provider value={onOpenSession}>
     <TranscriptImageCacheProvider key={effectiveHistoryKey} enabled={historyKey !== undefined}>
     <EventTimelineBody
       key={effectiveHistoryKey}
@@ -616,6 +622,7 @@ export const EventTimeline = memo(function EventTimeline({
       workspaceRoot={workspaceRoot}
     />
     </TranscriptImageCacheProvider>
+    </TimelineSessionLinkContext.Provider>
     </HandoffContext.Provider>
   );
 });
@@ -679,7 +686,11 @@ function EventTimelineBody({
   const preparedRevealRef = useRef<{ eventId: number; requestId: number } | null>(null);
   const unresolvedRevealRef = useRef<number | null>(null);
   const [disclosure, setDisclosure] = useState<Map<string, boolean>>(() => new Map());
-  const projection = useMemo(() => projector.current!.project(items, disclosure), [items, disclosure]);
+  const showAgentLogs = useShowAgentLogs();
+  const projection = useMemo(
+    () => projector.current!.project(items, disclosure, showAgentLogs),
+    [items, disclosure, showAgentLogs],
+  );
   const { rows } = projection;
   const forkTurns = useMemo(() => assistantForkTurns(items), [items]);
   const rewindTurns = useMemo(() => userRewindTurns(items), [items]);
@@ -940,6 +951,9 @@ const TimelineDriverContext = createContext<AgentDriverKind | undefined>(undefin
 /** The session root that step titles and edit paths are shown relative to. */
 const WorkspaceRootContext = createContext<string | undefined>(undefined);
 
+/** Opens another session in the app; absent where the transcript cannot navigate (a shared page). */
+const TimelineSessionLinkContext = createContext<((sessionId: string) => void) | undefined>(undefined);
+
 function TimelineClockProvider({ enabled, sessionActive, driver, children }: {
   enabled: boolean;
   sessionActive: boolean;
@@ -985,6 +999,7 @@ export class IncrementalTimelineRows {
   private groups: TimelineGroup[] = [];
   private rows: TimelineRenderRow[] = [];
   private disclosure: ReadonlyMap<string, boolean> | null = null;
+  private showAgentLogs = true;
   private latestCheckpointTurn = 0;
   private revision = 0;
   private readonly toolNodes = new Map<string, ToolItem>();
@@ -1002,8 +1017,11 @@ export class IncrementalTimelineRows {
   private ownedTools = new WeakSet<ToolItem>();
   private readonly itemLocations = new Map<number, ItemLocation>();
 
-  project(items: TimelineItem[], disclosure: ReadonlyMap<string, boolean>): TimelineRowsProjection {
-    if (items === this.items && disclosure === this.disclosure) {
+  /** `showAgentLogs` false leaves out every run of work whose only steps are Agent Logs (#2184). */
+  project(items: TimelineItem[], disclosure: ReadonlyMap<string, boolean>, showAgentLogs = true): TimelineRowsProjection {
+    // A disclosure or Show Agent Logs change re-flattens every row on the full path.
+    const sameView = disclosure === this.disclosure && showAgentLogs === this.showAgentLogs;
+    if (items === this.items && sameView) {
       return {
         rows: this.rows,
         latestCheckpointTurn: this.latestCheckpointTurn,
@@ -1020,7 +1038,7 @@ export class IncrementalTimelineRows {
     // one structural item. Patch every settled object generation first, then let the ordinary
     // one-item paths consume the optional remainder so work scales with the changed batch instead
     // of the full transcript.
-    if (delta?.previous === this.items && disclosure === this.disclosure && previousLength > 0 &&
+    if (delta?.previous === this.items && sameView && previousLength > 0 &&
         items.length >= previousLength && items.length <= previousLength + 1) {
       const settlementIndexes = delta.dirtyIndexes.filter((index) => index < previousLength &&
         timelineItemIsStreaming(this.items[index]!) && !timelineItemIsStreaming(items[index]!));
@@ -1056,7 +1074,7 @@ export class IncrementalTimelineRows {
         };
       }
     }
-    const indexedUpdate = delta?.previous === this.items && disclosure === this.disclosure &&
+    const indexedUpdate = delta?.previous === this.items && sameView &&
       items.length === previousLength && delta.dirtyIndexes.length === 1
       ? this.projectExistingItemUpdate(items, delta.dirtyIndexes[0]!, disclosure)
       : null;
@@ -1065,7 +1083,7 @@ export class IncrementalTimelineRows {
         ? { ...indexedUpdate, processedItems: indexedUpdate.processedItems + settlementPatched }
         : indexedUpdate;
     }
-    const parentTail = delta?.previous === this.items && disclosure === this.disclosure
+    const parentTail = delta?.previous === this.items && sameView
       ? this.projectParentTail(items, delta, disclosure)
       : null;
     if (parentTail) {
@@ -1074,7 +1092,7 @@ export class IncrementalTimelineRows {
         : parentTail;
     }
     const tailSafe = this.groups.length > 0 && delta?.previous === this.items &&
-      !delta.dirtyHasParentItems && disclosure === this.disclosure &&
+      !delta.dirtyHasParentItems && sameView &&
       delta.dirtyFrom >= Math.max(0, previousLength - 1);
 
     if (tailSafe) {
@@ -1099,7 +1117,11 @@ export class IncrementalTimelineRows {
       // A newly materialized root tool may claim an older orphan child. That changes earlier
       // topology, so only the full projector may handle it.
       const canAppendWithoutTopologyChange = !appendedToolIds.some((id) => this.unresolvedParentIds.has(id));
-      if (joinsLastWork && !foldsIntoLast && appendedItems.every(isCollapsibleWorkItem) && !hasToolCollision && canAppendWithoutTopologyChange) {
+      // A hidden Agent Log run that gains other work needs the summary row it never had.
+      const revealsHiddenWork = joinsLastWork && !showAgentLogs &&
+        agentLogOnly(previousLastGroup.items) && !agentLogOnly(appendedItems);
+      if (joinsLastWork && !foldsIntoLast && !revealsHiddenWork && appendedItems.every(isCollapsibleWorkItem) &&
+          !hasToolCollision && canAppendWithoutTopologyChange) {
         const oldRowLength = this.rows.length;
         previousLastGroup.items.push(...appendedItems);
         const summaryIndex = this.rowIndexes.get(`work:${previousLastGroup.id}`);
@@ -1158,7 +1180,7 @@ export class IncrementalTimelineRows {
             id: timelineBoundaryKey(items[previousLength - 1]!),
         };
         }
-        const suffixRows = flattenTimelineRows(suffixGroups, disclosure);
+        const suffixRows = flattenTimelineRows(suffixGroups, disclosure, showAgentLogs);
         const groupStart = this.groups.length;
         this.groups.push(...suffixGroups);
         this.rows.push(...suffixRows);
@@ -1195,10 +1217,11 @@ export class IncrementalTimelineRows {
 
     const projected = this.subagents.project(items);
     this.groups = stabilizeWorkGroupKeys(groupTimeline(projected), this.groups);
-    const nextRows = flattenTimelineRows(this.groups, disclosure);
+    const nextRows = flattenTimelineRows(this.groups, disclosure, showAgentLogs);
     this.rows = stabilizeTimelineRowKeys(nextRows, this.rows);
     this.items = items;
     this.disclosure = disclosure;
+    this.showAgentLogs = showAgentLogs;
     this.latestCheckpointTurn = items.reduce(
       (latest, item) => item.kind === "checkpoint" || item.kind === "conversation_checkpoint"
         ? Math.max(latest, item.turn)
@@ -1227,6 +1250,8 @@ export class IncrementalTimelineRows {
     const group = this.groups[location.groupIndex];
     if (!group) return null;
 
+    // A hidden Agent Log run has no row to reveal.
+    if (group.kind === "work" && !this.showAgentLogs && agentLogOnly(group.items)) return null;
     const disclosureKeys: string[] = [];
     if (group.kind === "work") disclosureKeys.push(`work:${group.id}`);
 
@@ -1878,6 +1903,7 @@ function workSummaryRow(
 export function flattenTimelineRows(
   groups: ReturnType<typeof groupTimeline>,
   disclosure: ReadonlyMap<string, boolean>,
+  showAgentLogs = true,
 ): TimelineRenderRow[] {
   const rows: TimelineRenderRow[] = [];
   const toolIds = new Map<string, number>();
@@ -1895,6 +1921,7 @@ export function flattenTimelineRows(
       rows.push(...flattenTimelineItemRows([group.item], disclosure, false, 0, toolIds));
       continue;
     }
+    if (!showAgentLogs && agentLogOnly(group.items)) continue;
     const key = `work:${group.id}`;
     const open = disclosure.get(key) ?? false;
     rows.push({ kind: "work_summary", key, firstItemId: group.items[0]?.id, ...summarizeWork(group.items), open });
@@ -2051,7 +2078,6 @@ const TimelineRow = memo(function TimelineRow({
   questionContext?: TimelineQuestionContext;
   approvalContext?: TimelineApprovalContext;
 }) {
-  const timingDescriptionId = useId();
   const sessionActive = useContext(TimelineActivityContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
   switch (item.kind) {
@@ -2059,55 +2085,16 @@ const TimelineRow = memo(function TimelineRow({
       return <TranscriptArtifact artifact={item.artifact} />;
     case "checkpoint_restored":
       return (
-        <div
-          className="tl-checkpoint restored"
-          role="separator"
-          aria-label={`Files Rewound to Before Turn ${item.turn}`}
+        <HistoryDivider
+          icon={<RewindFilesIcon size={14} />}
+          label={`Files Rewound to Before Turn ${item.turn}`}
           title={`Files restored to the checkpoint before turn ${item.turn}`}
-        >
-          <span className="checkpoint-line" />
-          <span className="checkpoint-label"><span aria-hidden="true">⤺ </span>Files Rewound to Before Turn {item.turn}</span>
-          <span className="checkpoint-line" />
-        </div>
+        />
       );
-    case "conversation_forked": {
-      if (!item.handoff) {
-        const label = `Forked from Turn ${item.turn}`;
-        return (
-          <div
-            className="tl-checkpoint restored"
-            role="separator"
-            aria-label={label}
-            title={`Conversation forked from turn ${item.turn}`}
-          >
-            <span className="checkpoint-line" />
-            <span className="checkpoint-label">{label}</span>
-            <span className="checkpoint-line" />
-          </div>
-        );
-      }
-      const label = `Handoff from ${item.handoff.sourceAgent} to ${item.handoff.destinationAgent} After Turn ${item.turn}`;
-      const descriptionId = `${timingDescriptionId}-handoff`;
-      return (
-        <div className="tl-checkpoint-event">
-          <div
-            className="tl-checkpoint restored"
-            role="separator"
-            aria-label={label}
-            aria-describedby={descriptionId}
-          >
-            <span className="checkpoint-line" />
-            <span className="checkpoint-label">{label}</span>
-            <span className="checkpoint-line" />
-          </div>
-          <p id={descriptionId} className="checkpoint-description">
-            Fresh provider conversation. {item.handoff.disclosure}
-          </p>
-        </div>
-      );
-    }
+    case "conversation_forked":
+      return <ForkDivider item={item} />;
     case "provider_account_switched":
-      return <AccountSwitchCheckpoint item={item} />;
+      return <AccountSwitchDivider item={item} />;
     case "user_message":
       return (
         <div className="tl-row user">
@@ -2190,13 +2177,7 @@ const TimelineRow = memo(function TimelineRow({
         </div>
       );
     case "stderr":
-      return (
-        <div className="tl-stderr">
-          <EventPayloadContent preview={item.text} references={item.textRefs} mimeType="text/plain" label="STDERR">
-            {(text) => <pre>{text}</pre>}
-          </EventPayloadContent>
-        </div>
-      );
+      return <AgentLogStep item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "error":
       return <div className="tl-error">⚠ {item.message}</div>;
     case "turn_interrupted":
@@ -2549,6 +2530,37 @@ function FileEditStep({ item, open, onToggle, onOpenSourceLocation }: {
   );
 }
 
+/**
+ * A harness's own output (stderr, such as a boot line) as a quiet step in its run of work (#2184):
+ * its text in the neutral well, never the danger tone. A run with nothing else in it renders only
+ * while Show Agent Logs is on.
+ */
+function AgentLogStep({ item, open, onToggle }: {
+  item: Extract<TimelineItem, { kind: "stderr" }>;
+  open: boolean;
+  onToggle?: () => void;
+}) {
+  // A preview cut short by stored references would undercount, so only a complete text is counted.
+  const lineCount = item.text && !item.textRefs?.length ? item.text.replace(/\n$/, "").split("\n").length : 0;
+  const fact = lineCount ? `${lineCount} Line${lineCount === 1 ? "" : "s"}` : undefined;
+  return (
+    <ToolStep
+      icon={<AgentLogIcon size={16} />}
+      verb="Agent Log"
+      trail={fact}
+      label={fact ? `Agent Log · ${fact}` : "Agent Log"}
+      open={open}
+      onToggle={onToggle}
+    >
+      {item.text || item.textRefs?.length ? (
+        <EventPayloadContent preview={item.text} references={item.textRefs} mimeType="text/plain" label="Agent Log">
+          {(text) => <StepOutput text={text} />}
+        </EventPayloadContent>
+      ) : null}
+    </ToolStep>
+  );
+}
+
 function TimelineTimestamp({ label, timestamp }: { label: "Recorded" | "Started" | "Last Activity"; timestamp?: number }) {
   const now = useContext(TimelineClockContext);
   const sessionActive = useContext(TimelineActivityContext);
@@ -2893,17 +2905,75 @@ function DiffBlock({ diff }: { diff: string }) {
   );
 }
 
+/**
+ * A history divider (docs/design-system.md §11.3; #2184): a hairline with a centred quiet label and
+ * a faint 14px icon, and an optional one-line description on the same axis. Neutral in every
+ * theme: history is a fact, not an action or a status.
+ */
+function HistoryDivider({ icon, label, title, description }: {
+  icon: ReactNode;
+  label: string;
+  title?: string;
+  description?: ReactNode;
+}) {
+  const descriptionId = useId();
+  const divider = (
+    <div
+      className="tl-divider"
+      role="separator"
+      aria-label={label}
+      aria-describedby={description ? descriptionId : undefined}
+      title={title}
+    >
+      <span className="tl-divider-label">
+        <span className="tl-divider-icon" aria-hidden="true">{icon}</span>
+        {label}
+      </span>
+    </div>
+  );
+  if (!description) return divider;
+  return (
+    <div className="tl-divider-event">
+      {divider}
+      <p id={descriptionId} className="tl-divider-desc">{description}</p>
+    </div>
+  );
+}
+
+/** A fork or handoff names its turn; where the app can navigate, its source session is a link. */
+function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversation_forked" }> }) {
+  const openSession = useContext(TimelineSessionLinkContext);
+  const sourceLink = openSession && (
+    <button type="button" className="link" onClick={() => openSession(item.sourceSessionId)}>Open Source Session</button>
+  );
+  if (!item.handoff) {
+    return (
+      <HistoryDivider
+        icon={<ThreadForkIcon size={14} />}
+        label={`Forked from Turn ${item.turn}`}
+        title={`Conversation forked from turn ${item.turn}`}
+        description={sourceLink || undefined}
+      />
+    );
+  }
+  return (
+    <HistoryDivider
+      icon={<HandOffIcon size={14} />}
+      label={`Handoff from ${item.handoff.sourceAgent} to ${item.handoff.destinationAgent} After Turn ${item.turn}`}
+      description={<>Fresh provider conversation. {item.handoff.disclosure}{sourceLink && <> {sourceLink}</>}</>}
+    />
+  );
+}
+
 /** A structured account checkpoint follows privacy without changing transcript text. */
-function AccountSwitchCheckpoint({ item }: { item: Extract<TimelineItem, { kind: "provider_account_switched" }> }) {
+function AccountSwitchDivider({ item }: { item: Extract<TimelineItem, { kind: "provider_account_switched" }> }) {
   const privacy = useAccountEmailPrivacy();
   const account = accountLabelText(item.providerAccountLabel, undefined, privacy.hide);
-  const label = `${item.automatic ? "Automatically Switched" : "Switched"} Account to ${account}`;
   return (
-    <div className="tl-checkpoint restored" role="separator" aria-label={label}
-      title={`Provider conversation resumed with ${account}`}>
-      <span className="checkpoint-line" />
-      <span className="checkpoint-label">{label}</span>
-      <span className="checkpoint-line" />
-    </div>
+    <HistoryDivider
+      icon={<AccountIcon size={14} />}
+      label={`${item.automatic ? "Automatically Switched" : "Switched"} Account to ${account}`}
+      title={`Provider conversation resumed with ${account}`}
+    />
   );
 }

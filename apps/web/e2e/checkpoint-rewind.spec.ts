@@ -39,7 +39,7 @@ test("rewind stays compact on its user turn across pointer interactions", async 
   expect(handoffDescriptionId).toBeTruthy();
   await expect(page.locator(`[id="${handoffDescriptionId}"]`))
     .toHaveText("Fresh provider conversation. Tool output and reasoning were omitted.");
-  await expect(page.locator(".tl-checkpoint").filter({ hasText: "Rewind Files" })).toHaveCount(0);
+  await expect(page.locator(".tl-divider").filter({ hasText: "Rewind Files" })).toHaveCount(0);
 
   // More Turn Actions is visible at rest, quietly, and stays put while the footer is hovered.
   const more = page.getByRole("button", { name: "More Turn Actions" });

@@ -225,6 +225,32 @@ const ledgerItems: TimelineItem[] = [
   ledgerTool(619, "Bash: npm test", "execute", "failed", 80, 6, "Exit code 1\nPASS src/release.test.ts\nFAIL src/header.test.ts\nError: expected \"Your Sessions\" to be \"Sessions\""),
   { kind: "agent_message", id: 620, text: "Validation passes after the marker fix; one header test still expects the old copy.", createdAt: ledgerStart + 87_000 },
 ];
+// History dividers and Agent Logs (#2184): a turn whose only work is a harness boot line, the four
+// history dividers, and a turn whose commands sit beside a stderr line.
+const historyStart = Date.now() - 900_000;
+const historyItems: TimelineItem[] = [
+  { kind: "user_message", id: 701, text: "Start the release check.", createdAt: historyStart },
+  { kind: "stderr", id: 702, text: "codex-cli 0.48.0 starting (model gpt-5.5, sandbox workspace-write)\n" },
+  { kind: "agent_message", id: 703, text: "Started the release check; it runs in the background.", createdAt: historyStart + 4_000 },
+  { kind: "conversation_checkpoint", id: 704, turn: 1 },
+  { kind: "checkpoint_restored", id: 705, turn: 1 },
+  { kind: "conversation_forked", id: 706, sourceSessionId: "release-check", turn: 1 },
+  {
+    kind: "conversation_forked", id: 707, sourceSessionId: "release-check", turn: 1,
+    handoff: {
+      sourceAgent: "Claude Code",
+      destinationAgent: "Codex",
+      disclosure: "Tool output and reasoning were omitted; the destination starts from the visible transcript.",
+    },
+  },
+  { kind: "provider_account_switched", id: 708, providerAccountId: "work", providerAccountLabel: "Work", automatic: true },
+  { kind: "user_message", id: 711, text: "Run the tests.", createdAt: historyStart + 60_000 },
+  ledgerTool(712, "Bash: npm test", "execute", "completed", 61, 6, "PASS src/release.test.ts\nPASS src/header.test.ts"),
+  { kind: "stderr", id: 713, text: "npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported\nnpm warn deprecated rimraf@3.0.2\n" },
+  ledgerTool(714, "Bash: npm run lint", "execute", "completed", 68, 3, "No problems found"),
+  { kind: "agent_message", id: 715, text: "All tests and lint pass.", createdAt: historyStart + 72_000 },
+  { kind: "conversation_checkpoint", id: 716, turn: 2 },
+];
 type TranscriptItem = Extract<TimelineItem, { kind: "agent_message" | "user_message" }>;
 const baseItems: TranscriptItem[] = Array.from({ length: 30 }, (_, index) => index % 2 === 0
   ? { kind: "agent_message" as const, id: index + 1, text: `${index + 1}. ${sentence.repeat(30)}`, createdAt: Date.now() - index * 1_000 }
@@ -242,6 +268,7 @@ function Fixture() {
   const markdownFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("markdown") === "1", []);
   const ledgerFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("ledger") === "1", []);
   const questionHistoryFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("question-history") === "1", []);
+  const historyFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("history") === "1", []);
   const [panelWidth, setPanelWidth] = useState(0);
   const [composerHeight, setComposerHeight] = useState(0);
   const [noticeMounted, setNoticeMounted] = useState(true);
@@ -275,6 +302,7 @@ function Fixture() {
     if (overflowFixtureEnabled) return structuredItems;
     if (markdownFixtureEnabled) return markdownItems;
     if (ledgerFixtureEnabled) return ledgerItems;
+    if (historyFixtureEnabled) return historyItems;
     const prefix = Array.from({ length: currentHistoryPrepend }, (_, index): TimelineItem => ({
       kind: "agent_message",
       id: -(index + 1),
@@ -327,7 +355,7 @@ function Fixture() {
     }] : [];
     const complete = [...prefix, ...historicalQuestions, ...current, ...liveReply, ...revealItems];
     return currentHistoryLimit == null ? complete : complete.slice(0, currentHistoryLimit);
-  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, ledgerFixtureEnabled, liveReplyTicks, markdownFixtureEnabled, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
+  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, historyFixtureEnabled, ledgerFixtureEnabled, liveReplyTicks, markdownFixtureEnabled, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
   const followTail = useFollowTail({
     scrollRef: followTailEnabled ? scrollRef : disabledFollowScrollRef,
     contentRevision: `${sessionId}:${currentHistoryPrepend}:${currentHistoryReplacement}:${currentHistoryLimit ?? "all"}:${headStreamTicks}:${tailStreamTicks}:${liveReplyTicks}`,
@@ -421,6 +449,7 @@ function Fixture() {
             <EventTimeline
               items={items}
               workspaceRoot={ledgerFixtureEnabled ? "/workspace/app" : undefined}
+              onOpenSession={historyFixtureEnabled ? openFixtureSession : undefined}
               ariaLabel={timelineAriaLabel}
               revealRequest={revealRequest}
               onRevealHandled={handleReveal}
@@ -551,6 +580,8 @@ function Fixture() {
     </main>
   );
 }
+
+const openFixtureSession = (sessionId: string) => { document.body.dataset.openedSession = sessionId; };
 
 const fixtureTheme = new URLSearchParams(window.location.search).get("theme");
 if (fixtureTheme === "light" || fixtureTheme === "dark") document.documentElement.setAttribute("data-theme", fixtureTheme);

@@ -137,6 +137,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `FileSearchIcon` | Lucide | `FileSearch` | A search step in the transcript; distinct from the Search action's magnifier. |
 | `TerminalIcon` | Lucide | `Terminal` | A command step in the transcript; distinct from the Command Line destination's framed terminal. |
 | `ThoughtIcon` | Lucide | `Brain` | A thought step in the transcript. |
+| `AgentLogIcon` | Lucide | `ScrollText` | An Agent Log step (a harness's own output) in the transcript. |
 | `BotIcon` | Lucide | `Bot` | An agent step in the transcript. |
 | `ToolIcon` | Lucide | `Hammer` | A tool step of any other kind; distinct from the project setup wrench. |
 

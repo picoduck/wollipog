@@ -6930,6 +6930,49 @@ textarea,
   font: var(--type-reading);
   padding: 0 2px;
 }
+/* History dividers (#2184, §11.3): files rewound, forked, handed off, account switched. A hairline
+   with a centred quiet label and a faint icon, and an optional description on the same axis.
+   Neutral in every theme: history is a fact, not an action or a status. */
+.tl-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-2) 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.tl-divider::before,
+.tl-divider::after {
+  content: "";
+  flex: 1 1 var(--space-6);
+  height: 1px;
+  background: var(--border);
+}
+.tl-divider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: calc(100% - 2 * var(--space-6) - 2 * var(--space-3));
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.tl-divider-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-faint);
+}
+.tl-divider-event { margin: var(--space-2) 0; }
+.tl-divider-event > .tl-divider { margin: 0; }
+.tl-divider-desc {
+  max-width: 60ch;
+  margin: var(--space-1) auto 0;
+  padding-inline: var(--space-6);
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
 /* Work ledger (#2168, §5.5): a run of work collapses to one line, "Worked for 26s" and its counts
    12px apart. The line never wraps; on a narrow screen its meta clips at the end. */
 .tl-work { min-width: 0; }
@@ -7202,8 +7245,7 @@ textarea,
 .d-ctx {
   color: var(--text-dim);
 }
-.tl-output pre,
-.tl-stderr pre {
+.tl-output pre {
   width: 100%;
   max-width: 100%;
   margin: 0;
@@ -7218,11 +7260,6 @@ textarea,
   background: var(--code-bg);
   border: 1px solid var(--border);
   color: var(--code-muted);
-}
-.tl-stderr pre {
-  background: color-mix(in srgb, var(--red) 6%, transparent);
-  border: 1px solid color-mix(in srgb, var(--red) 20%, transparent);
-  color: var(--danger-text);
 }
 .event-payload-content { min-width: 0; }
 .event-payload-actions {
@@ -13052,40 +13089,6 @@ body.shell-dock-dragging * {
   border-radius: var(--radius-sm);
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-/* --------- Per-turn checkpoints (rewind) ---------- */
-.tl-checkpoint {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 10px 0;
-  color: var(--text-faint);
-  font-size: 11px;
-}
-.tl-checkpoint .checkpoint-line {
-  flex: 1;
-  height: 1px;
-  background: var(--border);
-}
-.tl-checkpoint.restored .checkpoint-label {
-  color: var(--teal);
-}
-.tl-checkpoint-event {
-  margin: 10px 0;
-}
-.tl-checkpoint-event .tl-checkpoint {
-  margin: 0;
-}
-.checkpoint-description {
-  width: calc(100% - var(--space-6) - var(--space-6));
-  max-width: 60ch;
-  margin: var(--space-1) auto 0;
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-  text-align: start;
 }
 
 /* --------- Cmd+K search palette (#1978; docs/design-system.md §4.1 Search) ----------

@@ -39,6 +39,7 @@ import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/Sett
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
+import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
 import {
   setQuestionResponseStyle,
   useQuestionResponseStyle,
@@ -394,6 +395,7 @@ export function BehaviorPanel({
   const privacy = useAccountEmailPrivacy();
   const enterKey = useEnterKeyBehavior();
   const questionResponseStyle = useQuestionResponseStyle();
+  const agentLogs = useShowAgentLogs();
   return (
     <>
       <SettingsGroup title="Defaults">
@@ -451,6 +453,14 @@ export function BehaviorPanel({
           reason="Chosen per session when you create it; defaults are not available in this client."
         />
       )}
+      </SettingsGroup>
+      <SettingsGroup title="Transcript">
+        <SwitchRow
+          title="Show Agent Logs"
+          description="Show work that holds only an agent harness's own output, such as its startup line. Stored on this device."
+          checked={agentLogs}
+          onClick={() => setShowAgentLogs(!agentLogs)}
+        />
       </SettingsGroup>
       <SettingsGroup title="Privacy">
         <SwitchRow

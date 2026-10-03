@@ -73,6 +73,7 @@ import {
   Pin as LucidePin,
   Plus as LucidePlus,
   RefreshCw as LucideRefreshCw,
+  ScrollText as LucideScrollText,
   Search as LucideSearch,
   Settings as LucideSettings,
   Share as LucideShare,
@@ -700,6 +701,11 @@ export function TerminalIcon(props: IconProps) {
 
 export function ThoughtIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideBrain} {...props} />;
+}
+
+/** A harness's own output (stderr) as an Agent Log step in the transcript (#2184). */
+export function AgentLogIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideScrollText} {...props} />;
 }
 
 export function BotIcon(props: IconProps) {

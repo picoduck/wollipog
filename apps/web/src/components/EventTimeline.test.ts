@@ -432,31 +432,79 @@ test("checkpoints stay in the model but render no Start Turn or End Turn separat
   assert.deepEqual([...assistantForkTurns(items)], [[3, 19]], "fork still reads the conversation checkpoint");
 });
 
-test("rewind, fork, and handoff dividers expose concise accessible semantics", () => {
-  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
-    items: [
-      { kind: "checkpoint_restored", id: 1, turn: 7 },
-      { kind: "conversation_forked", id: 2, sourceSessionId: "source", turn: 8 },
-      {
-        kind: "conversation_forked", id: 3, sourceSessionId: "source", turn: 9,
-        handoff: {
-          sourceAgent: "Claude Code",
-          destinationAgent: "Codex",
-          disclosure: "Tool output and reasoning were omitted.",
-        },
-      },
-    ],
-  }));
+const historyDividers: TimelineItem[] = [
+  { kind: "checkpoint_restored", id: 1, turn: 7 },
+  { kind: "conversation_forked", id: 2, sourceSessionId: "source", turn: 8 },
+  {
+    kind: "conversation_forked", id: 3, sourceSessionId: "source", turn: 9,
+    handoff: {
+      sourceAgent: "Claude Code",
+      destinationAgent: "Codex",
+      disclosure: "Tool output and reasoning were omitted.",
+    },
+  },
+  { kind: "provider_account_switched", id: 4, providerAccountId: "work", providerAccountLabel: "Work", automatic: true },
+];
 
-  assert.match(html, /role="separator" aria-label="Files Rewound to Before Turn 7" title="Files restored to the checkpoint before turn 7"/);
-  assert.match(html, /<span class="checkpoint-label"><span aria-hidden="true">⤺ <\/span>Files Rewound to Before Turn 7<\/span>/);
-  assert.match(html, /role="separator" aria-label="Forked from Turn 8" title="Conversation forked from turn 8"/);
-  assert.match(html, /<span class="checkpoint-label">Forked from Turn 8<\/span>/);
+test("rewind, fork, handoff and account dividers expose concise accessible semantics", () => {
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, { items: historyDividers }));
+
+  assert.match(html, /class="tl-divider" role="separator" aria-label="Files Rewound to Before Turn 7" title="Files restored to the checkpoint before turn 7"/);
+  assert.match(html, /class="tl-divider" role="separator" aria-label="Forked from Turn 8" title="Conversation forked from turn 8"/);
+  assert.match(html, /class="tl-divider" role="separator" aria-label="Automatically Switched Account to Work" title="Provider conversation resumed with Work"/);
   const descriptionId = html.match(/aria-label="Handoff from Claude Code to Codex After Turn 9" aria-describedby="([^"]+)"/)?.[1];
   assert.ok(descriptionId, "the concise handoff separator names its visible secondary description");
-  assert.ok(html.includes(`<p id="${descriptionId}" class="checkpoint-description">Fresh provider conversation. Tool output and reasoning were omitted.</p>`));
+  assert.ok(html.includes(`<p id="${descriptionId}" class="tl-divider-desc">Fresh provider conversation. Tool output and reasoning were omitted.</p>`));
   assert.doesNotMatch(html, /aria-label="[^"]*Tool output and reasoning/,
     "the longer handoff disclosure does not overload the separator name");
+});
+
+test("every history divider is one neutral label with a faint 14px icon and no glyph", () => {
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, { items: historyDividers }));
+  const labels = [...html.matchAll(/<span class="tl-divider-label"><span class="tl-divider-icon" aria-hidden="true">(<svg[^>]*>)[\s\S]*?<\/svg><\/span>([^<]*)<\/span>/g)];
+  assert.deepEqual(labels.map((match) => match[2]), [
+    "Files Rewound to Before Turn 7",
+    "Forked from Turn 8",
+    "Handoff from Claude Code to Codex After Turn 9",
+    "Automatically Switched Account to Work",
+  ]);
+  for (const [, svg] of labels) assert.match(svg!, /width="14"/);
+  assert.deepEqual(labels.map(([, svg]) => svg!.match(/lucide-([a-z-]+)/)?.[1]),
+    ["file-clock", "git-fork", "arrow-right-left", "circle-user-round"]);
+  assert.doesNotMatch(html, /⤺|class="[^"]*(checkpoint|restored)/, "no retired glyph or teal checkpoint class remains");
+});
+
+test("the retired rewind glyph is gone from the transcript source", async () => {
+  const { readFile } = await import("node:fs/promises");
+  assert.doesNotMatch(await readFile(new URL("./EventTimeline.tsx", import.meta.url), "utf8"), /⤺/);
+});
+
+test("history dividers are neutral: no accent or teal in either theme", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  const rules = [...css.matchAll(/(^|\n)([^{}\n]*\.tl-divider[^{}]*)\{([^}]*)\}/g)];
+  assert.ok(rules.length >= 4, "the divider block is in the stylesheet");
+  for (const [, , selector, body] of rules) {
+    assert.doesNotMatch(body!, /--accent|--teal/, `${selector!.trim()} stays neutral`);
+  }
+  assert.doesNotMatch(css, /\.checkpoint-(line|label|description)|\.tl-checkpoint|\.tl-stderr/,
+    "the checkpoint and red stderr rules are gone");
+});
+
+test("a fork or handoff links its source session only where the app can navigate", () => {
+  const opened: string[] = [];
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: historyDividers,
+    onOpenSession: (id: string) => opened.push(id),
+  }));
+  const forkDescription = html.match(/aria-label="Forked from Turn 8" aria-describedby="([^"]+)"/)?.[1];
+  assert.ok(forkDescription, "the fork separator names its description");
+  assert.match(html, new RegExp(`<p id="${forkDescription}" class="tl-divider-desc"><button type="button" class="link">Open Source Session</button></p>`));
+  assert.equal((html.match(/<button type="button" class="link">Open Source Session<\/button>/g) ?? []).length, 2,
+    "the fork and the handoff each link their source in the shared link style");
+  const shared = renderToStaticMarkup(React.createElement(EventTimeline, { items: historyDividers }));
+  assert.doesNotMatch(shared, /Open Source Session/, "a transcript that cannot navigate shows no link");
+  assert.deepEqual(opened, []);
 });
 
 test("handoff dividers reserve space for their visible secondary description", () => {
@@ -1678,4 +1726,71 @@ test("a subagent's retried call folds under its agent too", () => {
   const nested = rows.filter((row) => row.kind === "item" && row.depth === 1);
   assert.equal(nested.length, 1);
   assert.deepEqual(nested[0]!.kind === "item" ? nested[0]!.attempts?.map((attempt) => attempt.toolCallId) : null, ["c1", "c2"]);
+});
+
+test("a run of work holding only Agent Logs renders only with Show Agent Logs on (#2184)", () => {
+  const items: TimelineItem[] = [
+    { kind: "user_message", id: 1, text: "Start" },
+    { kind: "stderr", id: 2, text: "codex 1.2.3 booting" },
+    { kind: "agent_message", id: 3, text: "Started." },
+    { kind: "user_message", id: 4, text: "Test it" },
+    { kind: "tool_call", id: 5, toolCallId: "test", title: "Bash: npm test", toolKind: "execute", status: "completed", text: "" },
+    { kind: "stderr", id: 6, text: "warning: deprecated flag" },
+    { kind: "agent_message", id: 7, text: "Passed." },
+  ];
+  const groups = groupTimeline(items);
+  const open = new Map(groups.flatMap((group) => group.kind === "work" ? [[`work:${group.id}`, true] as const] : []));
+  const inWork = (rows: TimelineRenderRow[]) => rows.flatMap((row) => row.kind === "item" && row.inWork ? [row.item.id] : []);
+
+  const hidden = flattenTimelineRows(groups, open, false);
+  assert.equal(hidden.filter((row) => row.kind === "work_summary").length, 1, "only the run with a command renders");
+  assert.deepEqual(inWork(hidden), [5, 6], "an Agent Log beside other work always renders");
+
+  const shown = flattenTimelineRows(groups, open, true);
+  assert.equal(shown.filter((row) => row.kind === "work_summary").length, 2, "the boot line's run renders when asked");
+  assert.deepEqual(inWork(shown), [2, 5, 6]);
+  assert.deepEqual(flattenTimelineRows(groups, open), shown, "a caller that does not choose keeps every row");
+});
+
+test("the incremental projector hides an Agent Log run until other work joins it, and follows the setting", () => {
+  const builder = new TimelineBuilder();
+  let sequence = 0;
+  const push = (payload: SessionEventPayload) => {
+    sequence += 1;
+    builder.push({ id: sequence, sessionId: "agent-logs", seq: sequence, ts: sequence, payload });
+  };
+  const disclosure = new Map<string, boolean>();
+  const fresh = (showAgentLogs: boolean) =>
+    new IncrementalTimelineRows().project(builder.snapshot(), disclosure, showAgentLogs).rows;
+  const projector = new IncrementalTimelineRows();
+
+  push({ kind: "user_message", text: "Start" });
+  push({ kind: "stderr", text: "codex 1.2.3 booting\n" });
+  let projection = projector.project(builder.snapshot(), disclosure, false);
+  assert.deepEqual(projection.rows.map((row) => row.kind), ["item"], "the boot-only run has no ledger line");
+  assert.equal(projector.resolveRevealTarget(2), null, "a hidden Agent Log has no row to reveal");
+
+  push({ kind: "stderr", text: "model: gpt\n" });
+  projection = projector.project(builder.snapshot(), disclosure, false);
+  assert.deepEqual(projection.rows, fresh(false), "more harness output keeps the run hidden");
+
+  push({ kind: "tool_call", toolCallId: "ls", title: "Bash: ls", toolKind: "execute", status: "completed" } as SessionEventPayload);
+  projection = projector.project(builder.snapshot(), disclosure, false);
+  assert.deepEqual(projection.rows, fresh(false), "other work joining the run reveals its ledger line");
+  assert.equal(projection.rows.filter((row) => row.kind === "work_summary").length, 1);
+  assert.ok(projector.resolveRevealTarget(2), "the Agent Log is reachable once its run renders");
+
+  push({ kind: "agent_message", text: "Listed." });
+  push({ kind: "user_message", text: "Again" });
+  push({ kind: "stderr", text: "codex reconnected\n" });
+  projection = projector.project(builder.snapshot(), disclosure, false);
+  assert.deepEqual(projection.rows, fresh(false), "a new boot-only run appended at the tail stays hidden");
+  assert.equal(projection.rows.filter((row) => row.kind === "work_summary").length, 1);
+
+  const shown = projector.project(builder.snapshot(), disclosure, true);
+  assert.equal(shown.incremental, false, "turning the setting on re-projects every row");
+  assert.deepEqual(shown.rows, fresh(true));
+  assert.equal(shown.rows.filter((row) => row.kind === "work_summary").length, 2);
+  const hiddenAgain = projector.project(builder.snapshot(), disclosure, false);
+  assert.deepEqual(hiddenAgain.rows, fresh(false), "and turning it off hides the run again");
 });

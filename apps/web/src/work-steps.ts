@@ -14,6 +14,13 @@ type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
 /** An agent tool call owns a subagent summary and its nested rows, so it never folds. */
 const ownsSubagent = (item: ToolItem): boolean => item.toolKind === "agent" || Boolean(item.children?.length);
 
+/**
+ * A run of work whose only steps are Agent Logs: a harness's own output, such as a boot line
+ * (#2184). It renders only while Show Agent Logs is on; an Agent Log beside other work always does.
+ */
+export const agentLogOnly = (items: readonly TimelineItem[]): boolean =>
+  items.length > 0 && items.every((item) => item.kind === "stderr");
+
 /** Consecutive calls with this identity are attempts at the same step; `null` never folds. */
 export function retryIdentity(item: TimelineItem | undefined): string | null {
   if (item?.kind !== "tool_call" || ownsSubagent(item)) return null;

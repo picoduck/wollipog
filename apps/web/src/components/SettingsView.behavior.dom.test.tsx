@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
 import { QUESTION_RESPONSE_STYLE_STORAGE_KEY } from "../question-response-style.js";
+import { SHOW_AGENT_LOGS_STORAGE_KEY } from "../agent-logs.js";
 import { BehaviorPanel } from "./SettingsView.js";
 
 /**
@@ -110,6 +111,37 @@ test("the Question Response Style row defaults to Interactive Form and announces
     assert.equal(optionByName("Interactive Form").getAttribute("aria-checked"), "true");
   } finally {
     domWindow.localStorage.removeItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY);
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the Show Agent Logs switch is off by default and stores the choice on this device", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<BehaviorPanel />));
+    const toggle = () => {
+      const match = [...container.querySelectorAll<HTMLElement>("[role=switch]")].find((control) => {
+        const title = domWindow.document.getElementById(control.getAttribute("aria-labelledby") ?? "");
+        return title?.textContent === "Show Agent Logs";
+      });
+      assert.ok(match, "Behavior offers a Show Agent Logs switch row");
+      return match;
+    };
+
+    assert.equal(domWindow.localStorage.getItem(SHOW_AGENT_LOGS_STORAGE_KEY), null,
+      "rendering the panel must not write the default");
+    assert.equal(toggle().getAttribute("aria-checked"), "false", "off by default");
+    await act(async () => { toggle().click(); });
+    assert.equal(domWindow.localStorage.getItem(SHOW_AGENT_LOGS_STORAGE_KEY), "true");
+    assert.equal(toggle().getAttribute("aria-checked"), "true");
+    await act(async () => { toggle().click(); });
+    assert.equal(domWindow.localStorage.getItem(SHOW_AGENT_LOGS_STORAGE_KEY), "false");
+    assert.equal(toggle().getAttribute("aria-checked"), "false");
+  } finally {
+    domWindow.localStorage.removeItem(SHOW_AGENT_LOGS_STORAGE_KEY);
     await act(async () => root.unmount());
     container.remove();
   }
