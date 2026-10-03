@@ -344,7 +344,7 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 | `--control-h-lg` | 40px | 48px | Empty-state primary, onboarding, phone sheet footers. |
 | `--row-h` | 40px | 48px | Single-line list rows, table rows, settings nav rows. |
 | `--row-h-2` | 56px | 64px | Two-line list rows (title plus meta). |
-| `--row-h-dense` | 32px | 44px | Dense rows in trees and file lists only (§5.2). |
+| `--row-h-dense` | 32px | 44px | Dense rows in trees and file lists (§5.2); minimum hit area for Checkbox rows (§8.4). |
 | `--icon-sm` / `--icon` / `--icon-lg` | 14 / 16 / 20px | same | Icon sizes; 24px only for empty-state tiles and the phone tab bar. |
 
 Menu rows use `--control-h` (a menu row is a control; there is no `--row-h-sm`, which would have had
@@ -854,8 +854,8 @@ may contain rows, never another Surface. Inside dialogs, Surfaces are allowed on
 
 Rules
 
-- Fixed heights: a list never mixes row heights except for group headers. Virtualised lists use one
-  estimate.
+- Fixed heights: entity lists never mix row heights except for group headers. Virtualised lists use
+  one estimate. Form choice groups and checkbox rows follow the content-height rule in §8.4.
 - Text clamps: titles 1 line; descriptions 1 line in rows, 2 lines in cards (`line-clamp: 2`), full
   text only in the detail view.
 - Metadata placement: identity (agent icon, machine, project) on line 2, left; time and counts
@@ -1259,6 +1259,16 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. **Selection follows the checked input**: the row's selected look and its `aria-checked` (or `:checked`) come from one value, so the look never disagrees with what is announced. Built by `ChoiceRows` (`.choice-rows`; `multiple` for checkboxes) over `ChoiceRow` (`.choice-row`, a `<label>` around a native radio or checkbox): the marker sits on the title's first line, the description is one ellipsized line on desktop and at most two on phones (full text in the tooltip and the accessible description), and rows are `--row-h` tall at least (40px, 48px coarse). An unavailable row keeps its size, reads faint, shows its reason in place of the description, and is `aria-disabled` rather than `disabled`, so arrows still reach it and announce the reason while selection is refused. `ChoiceList` (`.choice-list`) is the compact form: radio rows with a trailing value and no description, for pickers inside sheets. A list beside a detail (Import from Git's skills beside their files) passes `show`: the marker becomes a target of its own, the rest of the row is a button that shows the row without changing its marker, the fill follows the row shown (`aria-current`), and the meta moves onto the title's line so the description has the row's width. |
 | File picker | A dropzone row: icon, "Drop files here or", `.btn.sm` "Choose Folder…". Never the native "Choose Files / No file chosen". |
 | Number with unit | `.w-xs` input with the unit as a suffix inside the field ("30 s"). |
+
+**Form heights and alignment.** Select and combobox triggers and single-line text fields in one
+form share `--control-h` (32px fine, 44px coarse). ChoiceRow and ChoiceList form rows use `--row-h`
+as a minimum (40px fine, 48px coarse); Checkbox rows use `--row-h-dense` as a minimum (32px fine,
+44px coarse). Comfortable density raises row minima through the existing tokens (§2.8). Form
+choice and checkbox rows may differ in rendered height for descriptions, disabled reasons, helpers
+and wrapped labels. Controls align at their outer left edge; within each choice group, leading
+markers share one x position and align with the title's first line. Unavailable rows retain their
+minimum and padding; visible reasons may add height. The §5.2 fixed-height list rule applies to
+entity and virtualised lists, not these form choice groups.
 
 ### 8.5 Validation
 
