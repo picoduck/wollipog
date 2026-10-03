@@ -398,11 +398,14 @@ export function useCampaignStatus({
   // re-read waits, and it runs once the list settles: a Show More only appends its page, so the rows
   // above it would otherwise keep their older cost. The fresh rows replace the shown ones only when
   // nothing else changed the list meanwhile; when something did, this runs again on the settled list.
-  // A refusal (the ledger moved, which reloads anyway) or a failure leaves the shown rows as they are.
   // A further cost change never cancels a re-read in flight, or a walk slower than the window would
   // never land while usage streams: it is gathered behind that re-read, which re-reads once more on
-  // landing. Only a change to the list itself (or going offline) abandons it.
+  // landing. Only a change to the list itself (or going offline) abandons it. A `revision_changed`
+  // refusal partway restarts the walk a bounded number of times: in the cost sort, usage itself
+  // reorders the rows between pages, and a moved revision reloads the list anyway. Any other failure
+  // leaves the shown rows as they are, and retries once more if cost changes arrived meanwhile.
   const quietRead = useRef<{ controller: AbortController; shown: typeof list } | null>(null);
+  const [rowRetries, setRowRetries] = useState(0);
   useEffect(() => {
     if (costReads !== seenCostReads.current) {
       seenCostReads.current = costReads;
@@ -419,21 +422,35 @@ export function useCampaignStatus({
     const controller = new AbortController();
     const current = { controller, shown };
     quietRead.current = current;
-    const tick = seenCostReads.current;
     const live = () => !controller.signal.aborted && listRef.current === shown;
     const settled = () => { if (quietRead.current === current) quietRead.current = null; };
-    readRows(shown.state.items.length, controller.signal, live).then((read) => {
-      settled();
-      if (!read || !live()) return;
-      // Cost changes that arrived while this read was in flight leave the rows stale, so the list
-      // this sets re-runs the effect and reads once more.
-      rowsStale.current = seenCostReads.current !== tick;
-      setList({ key: listKey, state: { ...shown.state, items: read.rows, total: read.total, hasMore: read.cursor !== null }, cursor: read.cursor });
-    }).catch(() => {
-      settled();
-      // The shown rows stay; a new revision, a settled page, or the next cost change re-reads them.
-    });
-  }, [costReads, list, listKey, online, readRows]);
+    void (async () => {
+      for (let restarts = 0; ; restarts += 1) {
+        const tick = seenCostReads.current;
+        try {
+          const read = await readRows(shown.state.items.length, controller.signal, live);
+          settled();
+          if (!read || !live()) return;
+          // Cost changes that arrived while this read was in flight leave the rows stale, so the
+          // list this sets re-runs the effect and reads once more.
+          rowsStale.current = seenCostReads.current !== tick;
+          setList({ key: listKey, state: { ...shown.state, items: read.rows, total: read.total, hasMore: read.cursor !== null }, cursor: read.cursor });
+          return;
+        } catch (cause) {
+          if (!live() || isAbort(cause)) {
+            settled();
+            return;
+          }
+          if (isRevisionChanged(cause) && restarts < MAX_REVISION_RESTARTS) continue;
+          settled();
+          // The shown rows stay. Changes gathered behind this read get one more attempt; otherwise
+          // a new revision, a settled page, or the next cost change re-reads them.
+          if (seenCostReads.current !== tick) setRowRetries((count) => count + 1);
+          return;
+        }
+      }
+    })();
+  }, [costReads, list, listKey, online, readRows, rowRetries]);
   useEffect(() => () => {
     quietRead.current?.controller.abort();
     quietRead.current = null;
@@ -482,6 +499,15 @@ export function useCampaignStatus({
   const openDetail = useRef({ key: detailKey, itemId: selectedItemId, online });
   openDetail.current = { key: detailKey, itemId: selectedItemId, online };
   const costDetail = useRef({ busy: false, pending: false });
+  // A read still in flight when the panel closes may settle later; it must not start another.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      costDetail.current.pending = false;
+    };
+  }, []);
   useEffect(() => {
     if (costReads === 0) return;
     const gate = costDetail.current;
@@ -491,7 +517,7 @@ export function useCampaignStatus({
     }
     const read = () => {
       const { key, itemId, online: connected } = openDetail.current;
-      if (!key || !itemId || !connected) return;
+      if (!mounted.current || !key || !itemId || !connected) return;
       gate.busy = true;
       gate.pending = false;
       const sequence = ++detailOrder.current.issued;
@@ -503,7 +529,7 @@ export function useCampaignStatus({
         // The shown details stay; the next revision or cost change reads them again.
       }).finally(() => {
         gate.busy = false;
-        if (gate.pending) read();
+        if (gate.pending && mounted.current) read();
       });
     };
     read();

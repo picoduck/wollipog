@@ -1082,8 +1082,10 @@ function costServer(initialUsd: number, rows = 1) {
     hold: Promise<void> | null;
     rows: Promise<void> | null;
     manual: boolean;
+    /** Errors the next row reads fail with, in order, once any hold is released. */
+    refuse: Error[];
     pending: Array<(outcome?: Error) => void>;
-  } = { hold: null, rows: null, manual: false, pending: [] };
+  } = { hold: null, rows: null, manual: false, pending: [], refuse: [] };
   const client = {
     ...base.client,
     campaignWorkItems: async (id: string, query: string, signal?: AbortSignal) => {
@@ -1091,6 +1093,8 @@ function costServer(initialUsd: number, rows = 1) {
       signal?.addEventListener("abort", () => { calls.rowsAborted += 1; });
       const held = slow.rows;
       if (held) await held;
+      const refusal = slow.refuse.shift();
+      if (refusal) throw refusal;
       return base.client.campaignWorkItems(id, query, signal);
     },
     campaignWorkItem: async (id: string, itemId: string, signal?: AbortSignal) => {
@@ -1112,14 +1116,15 @@ function costServer(initialUsd: number, rows = 1) {
     client,
     calls,
     slow,
-    /** Usage arrives: every item now costs `usd`, and the root summary says so at `revision`. */
+    /** Usage arrives: every item now costs `usd`, and the root summary says so at `revision`. Its
+     * coordination share differs from the fixture's, so every call moves the summary cost. */
     use(usd: number, revision = state.revision) {
       state.usd = usd;
       state.revision = revision;
       refreshDetails();
       const base = workSummary();
       return session({ orchestratorCampaign: campaign(workSummary({
-        revision, cost: { ...base.cost!, total: knownCost(usd * rows + 0.5), workItems: knownCost(usd * rows) },
+        revision, cost: { ...base.cost!, total: knownCost(usd * rows + 0.25), workItems: knownCost(usd * rows) },
       })) });
     },
   };
@@ -1152,7 +1157,7 @@ test("member usage re-sent on the root re-reads the open details and the shown r
     assert.doesNotMatch(server.calls.list.at(-1)!, /cursor=/, "at the same revision, from the first page");
 
     await click(panel.container.querySelector(".campaign-detail-back")!);
-    assert.match(summaryText(), /\$3\.75/, "the summary shows the new campaign cost");
+    assert.match(summaryText(), /\$3\.50/, "the summary shows the new campaign cost");
     const row = panel.container.querySelector(".campaign-work-row")!;
     assert.match(row.textContent ?? "", /\$3\.25/, "the row shows the new cost too");
     assertNoDomNode(panel.container.querySelector('[role="alert"]'), "a cost refresh is not an error");
@@ -1247,6 +1252,60 @@ test("rows slower than the window still land while usage streams, with no re-rea
   } finally {
     await panel.dispose();
   }
+});
+
+test("a refused or failed quiet re-read still brings the rows to the latest cost", async () => {
+  const server = costServer(1);
+  const panel = await mount({ initial: rootSession, client: server.client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const rowCost = () => /\$\d+\.\d{2}/u.exec(panel.container.querySelector(".campaign-work-row")?.textContent ?? "")?.[0];
+    for (const [usd, refusal] of [
+      // In the cost sort, usage can reorder the rows between pages, and the server refuses the cursor.
+      [3, new ApiError("revision changed", 409, "revision_changed")],
+      // Any other failure, with a change gathered behind the read, gets one more attempt.
+      [5, new ApiError("unavailable", 503)],
+    ] as const) {
+      let release!: () => void;
+      server.slow.rows = new Promise<void>((done) => { release = done; });
+      await panel.setSession(server.use(usd - 1));
+      await pause(CAMPAIGN_COST_REFRESH_MS + 100);
+      // The last change of the stream arrives while that re-read is in flight, which then fails.
+      await panel.setSession(server.use(usd));
+      server.slow.refuse.push(refusal);
+      server.slow.rows = null;
+      await act(async () => { release(); });
+      await settle();
+      assert.equal(rowCost(), `$${usd}.00`, `rows follow the latest cost after a ${refusal.status}`);
+      assertNoDomNode(panel.container.querySelector('[role="alert"]'), "a quiet re-read's failure is not shown");
+      await pause(CAMPAIGN_COST_REFRESH_MS + 100);
+    }
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a cost re-read gathered behind a slow one never starts after the panel closes", async () => {
+  const server = costServer(1);
+  const panel = await mount({ initial: rootSession, client: server.client });
+  let release!: () => void;
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    server.slow.hold = new Promise<void>((done) => { release = done; });
+    await panel.setSession(server.use(2));
+    await pause(CAMPAIGN_COST_REFRESH_MS + 100);
+    await panel.setSession(server.use(3));
+  } finally {
+    await panel.dispose();
+  }
+  const issued = server.calls.detail.length;
+  server.slow.hold = null;
+  await act(async () => { release(); });
+  await settle();
+  assert.equal(server.calls.detail.length, issued, "the closed panel reads nothing more");
 });
 
 test("detail outcomes apply in the order their reads were issued, whichever path issued them", async () => {
