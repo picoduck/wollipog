@@ -252,7 +252,7 @@ export interface SessionCommandPermissionSource {
  * campaign; any other agent able to read the root session sees the projection without it, as the
  * Campaign Status routes refuse it (docs/campaign-work-ledger.md). It rides only on the root's own
  * view, so the campaign is the session itself. */
-function withCampaignWorkFor<T extends SessionView>(
+export function withCampaignWorkFor<T extends SessionView>(
   source: SessionCommandPermissionSource,
   principal: AuthPrincipal,
   session: T,
@@ -265,6 +265,43 @@ function withCampaignWorkFor<T extends SessionView>(
   if (own === session.id) return session;
   const { work: _hidden, ...withoutWork } = campaign;
   return { ...session, orchestratorCampaign: withoutWork };
+}
+
+function isSessionViewWithWork(value: unknown): value is SessionView {
+  const candidate = value as Partial<SessionView> | null;
+  return typeof candidate === "object" && candidate !== null && typeof candidate.id === "string" &&
+    candidate.orchestratorCampaign?.work !== undefined;
+}
+
+/**
+ * Apply the campaign-work rule to a whole response body for an agent, the way
+ * `withVisibleCampaignChildren` narrows held children: a session view or array of views at the top
+ * level or under any first-level key. Session reads already project per principal; mutation
+ * responses (config, stop, restart, archive, prompt) return the service's raw view, and an agent may
+ * command a campaign root it is an ancestor of, so every agent-bound API body passes through here.
+ */
+export function withCampaignWorkForResponse(
+  source: Pick<SessionCommandPermissionSource, "resolvedCampaignSessionId">,
+  principal: AuthPrincipal | null | undefined,
+  payload: unknown,
+): unknown {
+  if (principal?.kind !== "agent") return payload;
+  const projectView = (value: unknown): unknown => isSessionViewWithWork(value)
+    ? withCampaignWorkFor(source as SessionCommandPermissionSource, principal, value)
+    : value;
+  const project = (value: unknown): unknown => {
+    if (!Array.isArray(value)) return projectView(value);
+    const projected = value.map(projectView);
+    return projected.some((item, index) => item !== value[index]) ? projected : value;
+  };
+  const top = project(payload);
+  if (typeof top !== "object" || top === null || Array.isArray(top)) return top;
+  let result = top as Record<string, unknown>;
+  for (const [key, value] of Object.entries(top)) {
+    const projected = project(value);
+    if (projected !== value) result = { ...result, [key]: projected };
+  }
+  return result;
 }
 
 function permissionFacts(

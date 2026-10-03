@@ -31,6 +31,7 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { withSessionCommandPermissions } from "./session-command-permissions.js";
+import { registerVisibleCampaignChildrenHook } from "./visible-campaign-children-hook.js";
 import { SessionsService } from "./sessions.js";
 
 const RUNNER_ID = "campaign-status-runner";
@@ -484,6 +485,47 @@ test("Campaign Status routes authorize humans by the root and Orchestrators by t
       const route = `/api/sessions/:id/campaign/${path}`;
       assert.equal(isAgentControlApiRouteAllowed("GET", route, "orchestrator"), true, route);
       assert.equal(isAgentControlApiRouteAllowed("GET", route, "default"), false, route);
+    }
+  } finally {
+    await app.close();
+    db.close();
+  }
+});
+
+test("mutation responses carry the summary only to readers entitled to it (#2417)", async () => {
+  const { db, root } = campaignFixture();
+  // An ordinary agent session whose child is a campaign root: it may command that root.
+  db.createSession({
+    id: "plain-parent", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "child-agent", title: "Plain Parent",
+    useWorktree: false, driver: "claude-code", config: {}, now: Date.now(),
+  });
+  db.createSession({
+    id: "parented-root", parentSessionId: "plain-parent", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+    agentId: "test-orchestrator", title: "Parented Root", useWorktree: false, driver: "claude-code", config: {},
+    role: "orchestrator", orchestratorPolicy: db.getSession(root)!.orchestratorPolicy!, now: Date.now(),
+  });
+  assert.ok(db.getSession("parented-root")!.orchestratorCampaign?.work, "a root under an ordinary parent carries the summary");
+  const principals: Record<string, AuthPrincipal> = {
+    parent: agent("plain-parent", false), orchestrator: agent("parented-root", true), owner: human("owner", "owner"),
+  };
+  const app = Fastify();
+  registerVisibleCampaignChildrenHook(app, { db, requestPrincipal: (req) => principals[String(req.headers["x-test-principal"])] ?? null });
+  // Routes that return the view they changed, as the control plane's session commands do.
+  app.post("/api/sessions/:id/config", async (req) => db.getSession((req.params as { id: string }).id));
+  app.post("/api/sessions/:id/stop", async (req) => ({ session: db.getSession((req.params as { id: string }).id) }));
+  await app.ready();
+  try {
+    const work = async (who: string, path: "config" | "stop") => {
+      const response = await app.inject({ method: "POST", url: `/api/sessions/parented-root/${path}`, headers: { "x-test-principal": who } });
+      const body = response.json() as SessionView | { session: SessionView };
+      return ("session" in body ? body.session : body).orchestratorCampaign;
+    };
+    for (const path of ["config", "stop"] as const) {
+      const parentView = await work("parent", path);
+      assert.ok(parentView, "the ordinary parent still receives the projection");
+      assert.equal(parentView.work, undefined, `the ordinary parent agent receives no summary from ${path}`);
+      assert.ok((await work("orchestrator", path))?.work, "the campaign's own Orchestrator does");
+      assert.ok((await work("owner", path))?.work, "a human reader of the root does");
     }
   } finally {
     await app.close();
