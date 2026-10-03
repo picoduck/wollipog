@@ -59,3 +59,25 @@ test("ACP accepts a final JSON-RPC response delivered between exit and close", a
   assert.deepEqual(exits, [0]);
   client.dispose();
 });
+
+test("ACP passthrough and native slash commands stay exact before the next task's artifact guidance", async () => {
+  const child = fakeAgentProcess();
+  const writes: string[] = [];
+  child.stdin.setEncoding("utf8");
+  child.stdin.on("data", (chunk: string) => writes.push(chunk));
+  const client = new AcpClient({ command: "agent", args: [], cwd: process.cwd(), env: {},
+    initialCommands: [{ name: "review", source: "builtin" }], artifactGuidance: "Manual awareness" },
+    { onEvent: () => {}, onStderr: () => {}, onExit: () => {} }, { spawn: () => child, kill: () => {} });
+  for (const [text, command, expected] of [["focus", "review", "/review focus"], [" /cost", undefined, " /cost"],
+    ["normal task", undefined, "normal task"]] as const) {
+    const pending = client.prompt(text, [], command);
+    await nextTask();
+    const request = JSON.parse(writes.join("").trim().split("\n").at(-1)!);
+    assert.equal(request.method, "session/prompt");
+    assert.deepEqual(request.params.prompt, expected.trimStart().startsWith("/")
+      ? [{ type: "text", text: expected }] : [{ type: "text", text: expected }, { type: "text", text: "Manual awareness" }]);
+    child.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { stopReason: "end_turn" } }) + "\n");
+    assert.equal(await pending, "end_turn");
+  }
+  client.dispose();
+});

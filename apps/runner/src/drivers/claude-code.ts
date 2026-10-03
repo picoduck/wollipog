@@ -399,7 +399,8 @@ export function buildClaudeUserMessage(promptText: string, images: PromptImage[]
   const content: Json[] = [];
   if (promptText) content.push({ type: "text", text: promptText });
   // Current authorization belongs with this task, not a cached system-prompt snapshot.
-  if (artifactGuidance) content.push({ type: "text", text: artifactGuidance });
+  // Native slash dispatch examines the last text block, so command turns remain exact.
+  if (artifactGuidance && !promptText.trimStart().startsWith("/")) content.push({ type: "text", text: artifactGuidance });
   for (const img of images) {
     content.push({ type: "image", source: { type: "base64", media_type: img.mimeType, data: img.data } });
   }
@@ -1185,7 +1186,7 @@ export class ClaudeCodeDriver implements Driver {
       const routineChannelMode = this.routineControlChannelMode();
       const perm = claudePermissionArgs(
         this.launchedPermissionMode(),
-        imgs.length > 0 || Boolean(this.opts.artifactGuidance),
+        imgs.length > 0 || Boolean(this.opts.artifactGuidance && !promptText.trimStart().startsWith("/")),
         routineChannelMode !== null,
       );
       this.interactive = perm.interactive;
