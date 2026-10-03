@@ -4192,10 +4192,10 @@ function SessionDetailLoaded({
     }
     let current = true;
     // Busy from the keystroke, not from the debounced request: a query is never reported as
-    // matching nothing before it has been searched.
+    // matching nothing, or as failing with the previous query's error, before it has been searched.
     setWorkspaceSearchBusy(true);
+    setWorkspaceSearchError(null);
     const timer = window.setTimeout(() => {
-      setWorkspaceSearchError(null);
       void api.searchWorkspaceReferences(sessionId, workspaceTrigger.query).then((result) => {
         if (!current) return;
         setWorkspaceResults(result.results);
