@@ -60,9 +60,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       expect(scroller.y).toBeGreaterThanOrEqual(box.y + box.height);
       // The reader opens at the tail, and the notice is still in view there.
       await expect(notice).toBeInViewport();
-      // Scrolled to the top, the first row starts below the notice and is fully readable.
-      await reader.evaluate((element) => { element.scrollTop = 0; });
-      await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBe(0);
+      // Scrolled to the top, the first row starts below the notice and is fully readable. The reader
+      // opens following the tail, and a bare scrollTop assignment carries no reader intent: a row
+      // measurement landing in that settle window follows the tail again after a single jump. Each
+      // poll returns to the top and reads it back two frames later, so it passes only once the reader
+      // stays there.
+      const topAfterTwoFrames = () => reader.evaluate(async (element) => {
+        element.scrollTop = 0;
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return element.scrollTop;
+      });
+      await expect.poll(topAfterTwoFrames).toBe(0);
       // The virtual list re-renders its window and corrects its anchor as rows are measured, which
       // can move the reader off the top after a single jump. Each poll returns to the top, then reads
       // the head row (index 0); until it is mounted the poll reads null and keeps waiting, so an
