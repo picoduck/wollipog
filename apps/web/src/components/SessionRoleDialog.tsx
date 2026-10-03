@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { sessionRole, type OrchestratorDefaults, type SessionRoleConversionPreview, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions } from "../store.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { roleSettingsError, SessionRoleSettings } from "./SessionRoleSettings.js";
@@ -60,8 +61,8 @@ export function SessionRoleDialog({ session, supported, onClose, returnFocusRef 
   return <Modal title="Change Session Role" onClose={busy ? () => {} : onClose} returnFocusRef={returnFocusRef}
     footer={<>
       <button className="btn" disabled={busy} onClick={onClose}>Cancel</button>
-      <button className="btn primary" disabled={busy || !supported || !canChange}
-        onClick={() => void change()}>{busy ? "Changing Role…" : session.roleConversion ? "Retry Role Change" : `Change to ${targetLabel}`}</button>
+      <BusyButton className="btn primary" busy={busy} progress="Changing the session role…" disabled={!supported || !canChange}
+        onClick={() => void change()}>{session.roleConversion ? "Retry Role Change" : `Change to ${targetLabel}`}</BusyButton>
     </>}>
     <p>Current Role: <strong>{current === "orchestrator" ? "Orchestrator" : "Standard"}</strong></p>
     <p>The idle provider will close. Its existing conversation resumes with the new role's tools and instructions when you send the next message. Your conversation history, account, project, and worktree stay with this session.</p>
