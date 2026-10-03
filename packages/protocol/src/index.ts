@@ -615,7 +615,11 @@
 //      is docs/campaign-work-ledger.md. Older control planes omit `OrchestratorCampaignProjection.work`
 //      and `SessionView.campaignMembership`, which clients present as unsupported, never as empty.
 // 197: request pricing coordinates, independent child usage, and raw cumulative Claude checkpoints.
-export const PROTOCOL_VERSION = 197;
+// 198: campaign forge status (#2417 slice 8): the control plane asks the runner hosting a root
+//      campaign to read the GitHub pull requests its work items name (`campaign_forge_observe`)
+//      through the runner's existing `gh` login, and the runner answers with status data only.
+//      Older runners are never asked; their campaigns show `unavailable{runner_unsupported}`.
+export const PROTOCOL_VERSION = 198;
 export const PROJECT_MEMORY_MIN_PROTOCOL = 195;
 /** Only Claude versions whose directory override we have verified are advertised as supported.
  * Codex native memory combines projects in a database and cannot be shared project by project. */
@@ -678,7 +682,10 @@ export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MAR
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
 export * from "./campaign-work-ledger.js";
 import type {
+  CampaignForgePullRequestObservation,
   CampaignMembershipView,
+  CampaignObservationUnavailableReason,
+  CampaignPullRequestRef,
   CampaignRecommendationDisposition,
   CampaignWorkItemVerification,
   CampaignWorkSummary,
@@ -858,6 +865,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
+  /** v198 runner reads a campaign's GitHub pull-request status through its `gh` login. */
+  campaignForgeStatus: 198,
   orchestratorAdditiveRole: 160,
   orchestratorAdditiveCodex: 162,
   orchestratorAdditivePi: 163,
@@ -7720,6 +7729,38 @@ export interface GithubIssueClosureResultMessage {
   error?: string;
 }
 
+/** Slice 8 of #2417: read the GitHub pull requests a campaign's work items name, on the runner
+ * hosting the root campaign session, through that runner's existing `gh` login. Read-only. The
+ * control plane bounds `pullRequests` by `CAMPAIGN_FORGE_OBSERVATION.refsPerRequest`. */
+export interface CampaignForgeObserveMessage {
+  type: "campaign_forge_observe";
+  requestId: string;
+  /** The root campaign Orchestrator session whose repository context runs `gh`. */
+  sessionId: string;
+  pullRequests: CampaignPullRequestRef[];
+}
+
+/** Why a forge read failed, for the whole request or one pull request. */
+export type CampaignForgeObservationFailure = Extract<CampaignObservationUnavailableReason,
+  "forge_cli_missing" | "forge_unauthenticated" | "forge_unreachable" | "forge_unsupported" |
+  "forge_not_found" | "forge_rate_limited" | "forge_error">;
+
+/** Status data only: never a token, an account, or raw `gh` output. */
+export interface CampaignForgeObserveResultMessage {
+  type: "campaign_forge_observe_result";
+  requestId: string;
+  sessionId: string;
+  observedAt: number;
+  ok: boolean;
+  /** Set when `ok` is false: the whole read failed. */
+  failure?: CampaignForgeObservationFailure;
+  /** Set when `ok` is true, one entry per requested pull request. */
+  results?: Array<
+    | { ref: CampaignPullRequestRef; ok: true; observation: CampaignForgePullRequestObservation }
+    | { ref: CampaignPullRequestRef; ok: false; failure: CampaignForgeObservationFailure }
+  >;
+}
+
 /** Read-only request to prove that an already-armed canonical PR merge command completed and the
  * forge merged the exact approved head. It never invokes or retries the command. */
 export interface ReconcileWorkflowActionMessage {
@@ -8164,6 +8205,7 @@ export type RunnerToControlPlane =
   | WorkflowActionAdmissionRecordedMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
+  | CampaignForgeObserveResultMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
   | SessionWorktreeRetirementRefusedMessage
@@ -9865,6 +9907,7 @@ export type ControlPlaneToRunner =
   | RecordWorkflowActionAdmissionMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage
+  | CampaignForgeObserveMessage
   | AgentControlCredentialRegisteredMessage
   | { type: "set_session_project_memory"; sessionId: string; projectMemory: SessionProjectMemory }
   | StartSessionMessage

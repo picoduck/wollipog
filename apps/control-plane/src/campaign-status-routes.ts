@@ -9,7 +9,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
   CampaignCostSummary,
   CampaignCostValue,
+  CampaignForgeRefreshResponse,
   CampaignMetric,
+  CampaignPullRequestRef,
   CampaignRecommendationsQuery,
   CampaignWorkItemDetail,
   CampaignWorkItemDetailResponse,
@@ -18,6 +20,7 @@ import type {
   CampaignWorkSummary,
   CampaignWorkSummaryResponse,
 } from "@wollipog/protocol";
+import { FORGE_NOT_AUTHORIZED } from "./campaign-forge-observations.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal } from "./identity.js";
 
@@ -63,6 +66,26 @@ export function workItemForPrincipal<T extends CampaignWorkItemSummary>(
   };
 }
 
+/* ------------------------------ Forge visibility ------------------------------ */
+
+/**
+ * Forge facts are read through the `gh` login of the runner hosting the root campaign. Reading the
+ * campaign is not enough to see them: a human also needs access to that runner, so a shared
+ * campaign never extends a personal runner owner's GitHub visibility. An agent reaches these routes
+ * only as the campaign's own Orchestrator. Everyone else gets `unavailable{not_authorized}`, with
+ * no last value; reported stages and pull-request references stay visible to every reader.
+ */
+export function forgeFactsForPrincipal<T extends CampaignWorkItemDetail>(item: T, visible: boolean): T {
+  if (visible || !item.observed.pullRequests) return item;
+  return {
+    ...item,
+    observed: {
+      ...item.observed,
+      pullRequests: item.observed.pullRequests.map((entry) => ({ ref: entry.ref, fact: FORGE_NOT_AUTHORIZED })),
+    },
+  };
+}
+
 /* ------------------------------ Routes ------------------------------ */
 
 interface CampaignReader {
@@ -70,6 +93,8 @@ interface CampaignReader {
   rootId: string;
   /** Session-cost visibility for this principal; null is a deleted attempt session. */
   canSee(sessionId: string | null): boolean;
+  /** Whether this principal may see forge facts read by the runner hosting the root. */
+  forgeVisible(): boolean;
 }
 
 function text(query: Record<string, unknown>, name: string): string | undefined {
@@ -87,6 +112,8 @@ export function registerCampaignStatusRoutes(
   deps: {
     db: ControlPlaneDb;
     requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
+    /** Slice 8: read these pull requests now, subject to the rate limit; never rejects. */
+    refreshForge?(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<void>;
   },
 ): void {
   const { db } = deps;
@@ -131,7 +158,16 @@ export function registerCampaignStatusRoutes(
       }
       return result;
     };
-    return { principal, rootId, canSee };
+    let forge: boolean | undefined;
+    const forgeVisible = (): boolean => {
+      if (forge === undefined) {
+        // The agent branch above already limited an agent to its own campaign's Orchestrator.
+        const runner = principal.kind === "agent" ? null : db.campaignForgeObservingRunner(rootId);
+        forge = principal.kind === "agent" || (runner !== null && db.canAccessRunner(principal, runner.runnerId));
+      }
+      return forge;
+    };
+    return { principal, rootId, canSee, forgeVisible };
   };
 
   const everySessionVisible = (read: CampaignReader) =>
@@ -183,7 +219,33 @@ export function registerCampaignStatusRoutes(
     if (!item) return reply.code(404).send({ error: "work item not found in this campaign" });
     const response: CampaignWorkItemDetailResponse = {
       revision: ledger.revision(read.rootId),
-      item: workItemForPrincipal(item, item.attempts.map((attempt) => attempt.sessionId), read.canSee),
+      item: forgeFactsForPrincipal(
+        workItemForPrincipal(item, item.attempts.map((attempt) => attempt.sessionId), read.canSee),
+        read.forgeVisible(),
+      ),
+    };
+    return reply.send(response);
+  });
+
+  /** Slice 8 on-demand read, sent while the details are visible. A reader who may not see forge
+   * facts cannot cause a forge read either. The wait is bounded; the read itself runs off the
+   * session-update path and later changes reach readers through the revision. */
+  app.post("/api/sessions/:id/campaign/work-items/:itemId/forge-refresh", async (req, reply) => {
+    const { id, itemId } = req.params as { id: string; itemId: string };
+    const read = reader(req, reply, id);
+    if (!read) return reply;
+    if (!read.forgeVisible()) {
+      return reply.code(403).send({ error: "forge status requires access to the runner that reads it" });
+    }
+    const ledger = db.campaignWorkLedger;
+    const before = itemId.length <= 256 ? ledger.detail(read.rootId, itemId, Date.now()) : null;
+    if (!before) return reply.code(404).send({ error: "work item not found in this campaign" });
+    const refs = before.observed.pullRequests?.map((entry) => entry.ref) ?? [];
+    if (refs.length > 0 && deps.refreshForge) await deps.refreshForge(read.rootId, refs);
+    const item = ledger.detail(read.rootId, itemId, Date.now());
+    const response: CampaignForgeRefreshResponse = {
+      revision: ledger.revision(read.rootId),
+      pullRequests: item?.observed.pullRequests ?? [],
     };
     return reply.send(response);
   });

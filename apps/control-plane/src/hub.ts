@@ -56,6 +56,7 @@ import type {
   WorkflowActionAdmissionRecordedMessage,
   WorkflowActionReconciliationResultMessage,
   GithubIssueClosureResultMessage,
+  CampaignForgeObserveResultMessage,
   SessionEvent,
   SessionEventPayload,
   SessionHistoryResultMessage,
@@ -253,6 +254,7 @@ export type RunnerRequestResult =
   | WorkflowActionAdmissionRecordedMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
+  | CampaignForgeObserveResultMessage
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage;
 

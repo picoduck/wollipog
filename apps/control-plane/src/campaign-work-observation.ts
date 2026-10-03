@@ -69,6 +69,12 @@ export class CampaignWorkObservations {
     }
   }
 
+  /** A stored forge fact (slice 8) changed its value or availability. Details read it, so it moves
+   * the revision exactly like an observed session change, coalesced with them per campaign. */
+  forgeChanged(campaignSessionId: string): void {
+    this.schedule(campaignSessionId, true);
+  }
+
   /** Apply every pending bump and refresh now. Used by tests and on shutdown. */
   flush(): void {
     if (this.timer) clearTimeout(this.timer);

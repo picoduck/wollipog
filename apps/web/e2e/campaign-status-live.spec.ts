@@ -272,6 +272,11 @@ test("Campaign Status reads the live Read API for a campaign, its items and a me
   await expect(panel).toContainText("Waiting for a merge decision on the storage pull request.");
   await expect(panel).toContainText("Rebase onto main once storage merges.");
   await expect(panel.locator("dd", { hasText: /Observed|Stale, observed/u }).first()).toBeVisible();
+  // Forge facts (slice 8) from the control plane's store, beside the Orchestrator's claim.
+  await expect(panel).toContainText("Reported by the Orchestrator");
+  await expect(panel.locator("dd", { hasText: "Observed on GitHub" })).toContainText("Open");
+  await expect(panel.locator(".campaign-forge-fact", { hasText: "Required Checks" }))
+    .toContainText("GitHub reports no required checks yet. This is not passing.");
   await page.getByRole("button", { name: "Back to Work Items" }).click();
 
   // The delivered, archived item keeps its history behind the finished filter.
@@ -281,6 +286,9 @@ test("Campaign Status reads the live Read API for a campaign, its items and a me
   await rows.filter({ hasText: "Campaign Work Ledger Contract" }).click();
   await expect(panel).toContainText("Verified Delivered");
   await expect(panel).toContainText("archived");
+  // Never read, and no runner is connected in this test: unavailable with the reason, not passing.
+  await expect(panel.locator(".campaign-forge-pr", { hasText: "PR #2430" }))
+    .toContainText("UnavailableThe campaign's runner is disconnected, so GitHub can't be read.");
   await page.getByRole("button", { name: "Back to Work Items" }).click();
 
   // Member: the child's own assignment is highlighted from its membership.

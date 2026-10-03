@@ -2,6 +2,8 @@ import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryAr
 import { isTerminal } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
+import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage } from "@wollipog/protocol";
+import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 /**
  * Runner-side session orchestration. For each control-plane `start_session`:
  *  - optionally create an isolated git worktree,
@@ -15764,6 +15766,28 @@ export class SessionManager {
       historyEpoch,
       eventSeq: stored.seq,
     };
+  }
+
+  /** Read-only GitHub status of the pull requests a campaign's work items name (#2417 slice 8),
+   * through this runner's `gh` login in the root Orchestrator's repository context. Only status
+   * data crosses; a failure is a fixed reason, never `gh` output. */
+  async campaignForgeObserve(
+    message: CampaignForgeObserveMessage,
+    gh?: GhRunner,
+  ): Promise<CampaignForgeObserveResultMessage> {
+    const base = { type: "campaign_forge_observe_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    const meta = this.store.readMeta(message.sessionId);
+    if (!meta?.orchestrator || !meta.repoPath || (meta.executionTarget && meta.executionTarget.kind !== "local")) {
+      return { ...base, observedAt: Date.now(), ok: false, failure: "forge_unsupported" };
+    }
+    try {
+      const outcome = await observeForgeStatus(message.pullRequests, gh ?? contextGhRunner(meta.context, meta.repoPath));
+      return outcome.ok
+        ? { ...base, observedAt: Date.now(), ok: true, results: outcome.results }
+        : { ...base, observedAt: Date.now(), ok: false, failure: outcome.failure };
+    } catch {
+      return { ...base, observedAt: Date.now(), ok: false, failure: "forge_error" };
+    }
   }
 
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */

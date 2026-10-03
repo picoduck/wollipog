@@ -15,6 +15,7 @@ import type {
   CampaignObservedCleanup,
   CampaignObservedFact,
   CampaignObservedSessionStatus,
+  CampaignPullRequestRef,
   CampaignWorkItemSummary,
   SessionHoldView,
   SessionView,
@@ -35,6 +36,7 @@ import {
   durationMetricView,
   filtersAreDefault,
   issueRefHref,
+  forgePullRequestView,
   issueRefLabel,
   observationUnavailableText,
   stateCauseText,
@@ -522,21 +524,6 @@ const END_REASON_LABELS = {
   failed: "Failed",
 } as const;
 
-const PR_STATE_LABELS: Record<CampaignForgePullRequestObservation["state"], string> = { open: "Open", closed: "Closed", merged: "Merged" };
-/** The pull request phrase follows its state word, so these read in sentence case. */
-const REVIEW_LABELS: Record<CampaignForgePullRequestObservation["reviewDecision"], string> = {
-  approved: "review approved",
-  changes_requested: "changes requested",
-  review_required: "review required",
-  none: "no review decision",
-};
-const CHECK_LABELS: Record<CampaignForgePullRequestObservation["checks"], string> = {
-  passing: "checks passing",
-  failing: "checks failing",
-  pending: "checks pending",
-  none: "no checks",
-};
-
 function SessionLink({ sessionId, onOpen, children }: { sessionId: string; onOpen: (sessionId: string) => void; children: ReactNode }) {
   return (
     <a
@@ -598,10 +585,52 @@ function cleanupText(value: CampaignObservedCleanup): string {
   return value.worktrees.map((worktree, index) => index === 0 ? titleCaseLabel(worktree.status) : worktree.status).join(", ");
 }
 
-function pullRequestText(value: CampaignForgePullRequestObservation): string {
-  const parts = [PR_STATE_LABELS[value.state], CHECK_LABELS[value.checks], REVIEW_LABELS[value.reviewDecision]];
-  if (value.mergeQueue) parts.push(value.mergeQueue.position === null ? "in merge queue" : `merge queue position ${value.mergeQueue.position}`);
-  return parts.join(", ");
+/** One pull request as GitHub was observed: its status line says when, and a stale observation's
+ * values all read "Last Seen …". An unavailable one says why and shows no value at all. */
+function ForgePullRequestFacts({
+  entry,
+  now,
+}: {
+  entry: { ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgePullRequestObservation> };
+  now: number;
+}) {
+  const view = forgePullRequestView(entry.fact, now);
+  const label = `PR #${entry.ref.number}`;
+  if (view.kind === "unavailable") {
+    return (
+      <div className="campaign-forge-pr">
+        <dt>{label}</dt>
+        <dd>
+          {UNAVAILABLE}
+          <span className="campaign-status-meta">
+            {view.reason}
+            {view.lastObservedAt !== null && <> Last observed on GitHub <RecordedTime at={view.lastObservedAt} now={now} />.</>}
+          </span>
+        </dd>
+      </div>
+    );
+  }
+  return (
+    <>
+      <div className="campaign-forge-pr">
+        <dt>{label}</dt>
+        <dd>
+          {view.status}
+          <span className="campaign-status-meta">
+            {view.current
+              ? <RecordedTime at={view.observedAt} now={now} prefix="Observed on GitHub" />
+              : <>Stale: <RecordedTime at={view.observedAt} now={now} prefix="observed on GitHub" />. It may have changed since.</>}
+          </span>
+        </dd>
+      </div>
+      {view.rows.map((row) => (
+        <div key={row.label} className="campaign-forge-fact">
+          <dt>{row.label}</dt>
+          <dd>{row.text}{row.note && <span className="campaign-status-meta">{row.note}</span>}</dd>
+        </div>
+      ))}
+    </>
+  );
 }
 
 function CampaignWorkItemDetailView({
@@ -814,7 +843,8 @@ function CampaignWorkItemDetailView({
                 <>
                   {REPORTED_STAGE_LABELS[detail.stage.stage]}
                   <span className="campaign-status-meta">
-                    Reported by the Orchestrator <RecordedTime at={detail.stage.reportedAt} now={now} />
+                    {detail.stage.sourceSessionId ? "Reported by the Orchestrator" : "Reported by a deleted Orchestrator session"}{" "}
+                    <RecordedTime at={detail.stage.reportedAt} now={now} />. Not observed.
                   </span>
                   {detail.stage.note && <span className="campaign-status-note">{detail.stage.note}</span>}
                 </>
@@ -826,15 +856,14 @@ function CampaignWorkItemDetailView({
             </div>
             {detail.observed.pullRequests && detail.observed.pullRequests.length > 0
               ? detail.observed.pullRequests.map((entry) => (
-                <div key={`${entry.ref.repository}#${entry.ref.number}`}>
-                  <dt>PR #{entry.ref.number}</dt>
-                  <dd><ObservedValue fact={entry.fact} now={now} render={pullRequestText} /></dd>
-                </div>
+                <ForgePullRequestFacts key={`${entry.ref.repository}#${entry.ref.number}`} entry={entry} now={now} />
               ))
               : (
                 <div>
                   <dt>Review and Checks</dt>
-                  <dd><ObservedValue fact={undefined} now={now} render={() => null} /></dd>
+                  <dd>{detail.observed.pullRequests
+                    ? <>No Pull Request Reported<span className="campaign-status-meta">GitHub status is observed for the pull requests the Orchestrator reports.</span></>
+                    : <ObservedValue fact={undefined} now={now} render={() => null} />}</dd>
                 </div>
               )}
             <div>

@@ -29,7 +29,7 @@ import type { RightPanelMode } from "../right-panel.js";
 import { StoreProvider } from "../store.js";
 import type { ViewNavigation } from "../navigation.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
-import { MINUTE, campaignProjection, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
+import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
 
 declare global {
@@ -45,6 +45,8 @@ declare global {
       bumpRevision(): void;
       /** Navigates the harness to another session, as the app does. */
       navigate(sessionId: string): void;
+      /** Every on-demand GitHub read the details asked for, as `session/item`. */
+      forgeRefreshes(): string[];
     };
   }
 }
@@ -66,7 +68,13 @@ const items: CampaignWorkItemSummary[] = [
     title: "Campaign Status Panel", queuePosition: 2, primaryState: "running",
     currentAttempt: { id: "catt_2", sessionId: "s_child", sessionTitle: "#2417 Slice 7: Campaign Status Panel" },
     elapsed: { startedAt: NOW - 95 * MINUTE, endedAt: null }, cost: knownCost(6.4, "modelPriced", 3), activityAt: NOW - MINUTE,
-    stage: { stage: "implementing", note: "Binding to the merged contract.", pullRequests: [], sourceSessionId: "s_root", reportedAt: NOW - 20 * MINUTE },
+    stage: {
+      stage: "merge_queued",
+      note: "Binding to the merged contract.",
+      pullRequests: [2440, 2436, 2441].map((number) => ({ repository: "picoduck/wollipog", number })),
+      sourceSessionId: "s_root",
+      reportedAt: NOW - 20 * MINUTE,
+    },
   }),
   itemSummary("cwi_3", NOW, {
     title: "Ledger Read API", queuePosition: 3, primaryState: "blocked", stateCauses: ["recorded_blocker"],
@@ -134,15 +142,29 @@ details.cwi_2 = itemDetail(items[1]!, {
   },
   observed: {
     session: { availability: "fresh", value: { sessionId: "s_child", status: "running", archived: false, held: false, pendingRequests: 0 }, observedAt: NOW - MINUTE },
-    pullRequests: [{
-      ref: { repository: "picoduck/wollipog", number: 2440 },
-      fact: { availability: "unavailable", reason: "forge_unauthenticated" },
-    }],
+    // Slice 8: a merge-queue wait observed a minute ago, an older observation now stale, and one
+    // the runner could not read.
+    pullRequests: [
+      { ref: { repository: "picoduck/wollipog", number: 2440 }, fact: { availability: "fresh", value: forgeObservation(), observedAt: NOW - MINUTE } },
+      {
+        ref: { repository: "picoduck/wollipog", number: 2436 },
+        fact: {
+          availability: "stale",
+          value: forgeObservation({ state: "merged", reviewDecision: "approved", mergeQueue: null, mergeCommitSha: "dd08b41b6a0e2c4f1f0b7d4e5b9a3c2d1e0f9a8b",
+            checks: { state: "passing", passing: 9, failing: 0, pending: 0 } }),
+          observedAt: NOW - 25 * MINUTE,
+        },
+      },
+      { ref: { repository: "picoduck/wollipog", number: 2441 }, fact: { availability: "unavailable", reason: "forge_unauthenticated" } },
+    ],
   },
 });
 details.cwi_3 = itemDetail(items[2]!, {
   nextAction: "Answer the merge decision in Requests.",
+  stage: { stage: "in_review", note: null, pullRequests: [{ repository: "picoduck/wollipog", number: 2436 }], sourceSessionId: "s_root", reportedAt: NOW - 30 * MINUTE },
   observed: {
+    // A reader who can open the campaign but not the runner whose GitHub CLI reads it.
+    pullRequests: [{ ref: { repository: "picoduck/wollipog", number: 2436 }, fact: { availability: "unavailable", reason: "not_authorized" } }],
     session: { availability: "stale", value: { sessionId: "s_child_3", status: "idle", archived: false, held: true, pendingRequests: 1 }, observedAt: NOW - 6 * MINUTE },
     cleanup: { availability: "fresh", value: { sessionId: "s_child_3", worktrees: [{ path: "/w/3", status: "pending", reason: null }] }, observedAt: NOW - 6 * MINUTE },
   },
@@ -239,6 +261,7 @@ const descendantRequests: DescendantRequestView[] = scenario === "campaign" ? [{
 }] : [];
 
 const queries: string[] = [];
+const forgeRefreshes: string[] = [];
 let openedSession: string | null = null;
 let selectedRequestKey: string | null = null;
 
@@ -270,6 +293,12 @@ const client = {
     const item = details[itemId];
     if (!item) throw new ApiError("work item not found", 404);
     return { revision, item };
+  },
+  campaignForgeRefresh: async (id: string, itemId: string) => {
+    forgeRefreshes.push(`${id}/${itemId}`);
+    const item = details[itemId];
+    if (!item) throw new ApiError("work item not found", 404);
+    return { revision, pullRequests: item.observed.pullRequests ?? [] };
   },
 } as ApiClient;
 
@@ -411,6 +440,7 @@ window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__ = {
     setRevision?.(revision);
   },
   navigate: (sessionId) => navigateTo?.(sessionId),
+  forgeRefreshes: () => [...forgeRefreshes],
 };
 
 createRoot(document.getElementById("root")!).render(

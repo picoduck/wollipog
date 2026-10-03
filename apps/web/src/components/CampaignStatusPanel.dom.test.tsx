@@ -4,6 +4,7 @@ import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
+  CampaignForgeRefreshResponse,
   CampaignWorkItemDetail,
   CampaignWorkItemSummary,
   CampaignWorkItemsPage,
@@ -27,6 +28,7 @@ import { useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { CAMPAIGN_STATUS_UNSUPPORTED_REASON } from "../campaign-status.js";
 import {
   campaignProjection,
+  forgeObservation,
   itemDetail,
   itemSummary,
   MINUTE,
@@ -118,12 +120,16 @@ function detailOf(base: CampaignWorkItemSummary, overrides: Partial<CampaignWork
   });
 }
 
-interface Calls { list: string[]; detail: string[] }
+interface Calls { list: string[]; detail: string[]; forge: string[] }
 
 type FixturePage = Omit<CampaignWorkItemsPage, "total"> & { total?: number };
 
-function fakeClient(pages: (query: string) => FixturePage | Error, details: Record<string, CampaignWorkItemDetail> = {}) {
-  const calls: Calls = { list: [], detail: [] };
+function fakeClient(
+  pages: (query: string) => FixturePage | Error,
+  details: Record<string, CampaignWorkItemDetail> = {},
+  forge: (itemId: string) => CampaignForgeRefreshResponse | Error = () => new ApiError("not found", 404),
+) {
+  const calls: Calls = { list: [], detail: [], forge: [] };
   const client = {
     ...api,
     childSessions: () => Promise.reject(new ApiError("No registry in this fixture.", 404)),
@@ -138,6 +144,12 @@ function fakeClient(pages: (query: string) => FixturePage | Error, details: Reco
       const found = details[itemId];
       if (!found) throw new ApiError("not found", 404);
       return { revision: 1, item: found };
+    },
+    campaignForgeRefresh: async (id: string, itemId: string) => {
+      calls.forge.push(`${id}/${itemId}`);
+      const response = forge(itemId);
+      if (response instanceof Error) throw response;
+      return response;
     },
   } as ApiClient;
   return { client, calls };
@@ -403,6 +415,128 @@ test("filters reload the list, and returning from details restores filters, posi
     const stateTrigger = [...panel.container.querySelectorAll("button")].find((button) => button.getAttribute("aria-label")?.startsWith("State:"));
     assert.equal(stateTrigger?.getAttribute("aria-label"), "State: All States", "the filter is kept");
     assert.equal(calls.list.at(-1), "s_root?limit=50&sort=queue&state=all", "no filter reset on the way back");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+/** The facts of the details' Delivery section as `term: description` pairs, in order. */
+function deliveryFacts(container: HTMLElement): string[] {
+  const section = [...container.querySelectorAll("section.campaign-detail-section")]
+    .find((candidate) => candidate.querySelector("h4")?.textContent === "Delivery")!;
+  return [...section.querySelectorAll("dl > div")].map((row) =>
+    `${row.querySelector("dt")?.textContent}: ${row.querySelector("dd")?.textContent}`);
+}
+
+/** The Delivery rows that belong to one pull request: its own row and the facts that follow it. */
+function pullRequestGroup(facts: string[], number: number): string[] {
+  const start = facts.findIndex((fact) => fact.startsWith(`PR #${number}:`));
+  assert.ok(start >= 0, `PR #${number} is shown`);
+  const end = facts.findIndex((fact, index) => index > start && /^(PR #|Verification:)/u.test(fact));
+  return facts.slice(start, end);
+}
+
+test("observed GitHub facts stay apart from the reported stage, and stale or unavailable ones never read as passing", async () => {
+  const PR = (number: number) => ({ repository: "picoduck/wollipog", number });
+  const base = item("cwi_9", {
+    stage: { stage: "merge_queued", note: null, pullRequests: [PR(2462), PR(2430), PR(7), PR(8)], sourceSessionId: "s_root", reportedAt: NOW - 5 * MINUTE },
+  });
+  const detail = detailOf(base, {
+    observed: {
+      pullRequests: [
+        { ref: PR(2462), fact: { availability: "fresh", value: forgeObservation(), observedAt: NOW - MINUTE } },
+        { ref: PR(2430), fact: { availability: "stale", value: forgeObservation({ state: "merged", reviewDecision: "approved", mergeQueue: null, mergeCommitSha: "dd08b41b0000000000000000000000000000beef" }), observedAt: NOW - 20 * MINUTE } },
+        { ref: PR(7), fact: { availability: "unavailable", reason: "forge_rate_limited", lastValue: forgeObservation({ reviewDecision: "approved" }), lastObservedAt: NOW - 30 * MINUTE } },
+        // Fresh when served, but older than the documented age by now: the client reads it as stale.
+        { ref: PR(8), fact: { availability: "fresh", value: forgeObservation({ reviewDecision: "approved" }), observedAt: NOW - 11 * MINUTE } },
+      ],
+    },
+  });
+  let refreshed: CampaignForgeRefreshResponse | Error = new ApiError("not yet", 503);
+  const { client, calls } = fakeClient(() => ({ revision: 1, items: [base], nextCursor: null }), { cwi_9: detail }, () => refreshed);
+  const panel = await mount({ initial: rootSession, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    let facts = deliveryFacts(panel.container);
+
+    assert.equal(facts[0], "Reported Stage: Merge QueuedReported by the Orchestrator 5m ago. Not observed.",
+      "the reported stage names its source and time and says it is not an observation");
+    assert.deepEqual(pullRequestGroup(facts, 2462), [
+      "PR #2462: OpenObserved on GitHub 1m ago",
+      "Review: No Review Decision",
+      "Required Checks: Passing1 passing.",
+      "All Checks: Pending1 pending, 8 passing.",
+      "Merge Queue: Awaiting Checks, Position 2",
+      "Head: 44579c6On main.",
+    ], "a merge-queue wait reads as observed facts with their time");
+    const stale = pullRequestGroup(facts, 2430);
+    assert.equal(stale[0], "PR #2430: Last Seen MergedStale: observed on GitHub 20m ago. It may have changed since.");
+    assert.ok(stale.includes("Review: Last Seen Approved"));
+    assert.ok(stale.includes("Required Checks: Last Seen Passing1 passing."));
+    const unavailable = pullRequestGroup(facts, 7);
+    assert.deepEqual(unavailable, [
+      "PR #7: UnavailableGitHub's rate limit for the runner's GitHub CLI is used up. It will be read again later. Last observed on GitHub 30m ago.",
+    ], "an unavailable fact shows why and when, and none of its last values");
+    assert.ok(pullRequestGroup(facts, 8).includes("Review: Last Seen Approved"), "an aged fresh fact reads as stale");
+    for (const fact of facts) {
+      if (/: (Passing|Approved|Merged)/u.test(fact)) {
+        assert.ok(pullRequestGroup(facts, 2462).includes(fact), `only a current observation reads as passing: ${fact}`);
+      }
+    }
+    assert.deepEqual(calls.forge, ["s_root/cwi_9"], "opening the details asks for a read once");
+
+    // A refresh answer replaces the facts in place.
+    refreshed = {
+      revision: 2,
+      pullRequests: detail.observed.pullRequests!.map((entry) => entry.ref.number === 2462
+        ? { ref: entry.ref, fact: { availability: "fresh", value: forgeObservation({ state: "merged", mergeQueue: null, reviewDecision: "approved" }), observedAt: Date.now() } }
+        : entry),
+    };
+    await click(panel.container.querySelector(".campaign-detail-back")!);
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    facts = deliveryFacts(panel.container);
+    assert.equal(pullRequestGroup(facts, 2462)[0], "PR #2462: MergedObserved on GitHub just now");
+    assert.ok(pullRequestGroup(facts, 2462).includes("Merge Queue: Not Queued"));
+    assert.equal(calls.forge.length, 2);
+
+    // A late answer naming a pull request the reloaded details no longer show cannot bring it back.
+    refreshed = {
+      revision: 3,
+      pullRequests: [{ ref: PR(9999), fact: { availability: "fresh", value: forgeObservation(), observedAt: Date.now() } }],
+    };
+    await click(panel.container.querySelector(".campaign-detail-back")!);
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    facts = deliveryFacts(panel.container);
+    assert.ok(!facts.some((fact) => fact.startsWith("PR #9999")), "only the shown pull requests are updated");
+    assert.ok(facts.some((fact) => fact.startsWith("PR #2462:")));
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("details without pull requests say none was reported, and a reader without runner access is never refreshed", async () => {
+  const none = item("cwi_1");
+  const hidden = item("cwi_2", { stage: { stage: "in_review", note: null, pullRequests: [{ repository: "picoduck/wollipog", number: 5 }], sourceSessionId: null, reportedAt: NOW - MINUTE } });
+  const { client, calls } = fakeClient(() => ({ revision: 1, items: [none, hidden], nextCursor: null }), {
+    cwi_1: detailOf(none, { observed: { pullRequests: [] } }),
+    cwi_2: detailOf(hidden, { observed: { pullRequests: [{ ref: { repository: "picoduck/wollipog", number: 5 }, fact: { availability: "unavailable", reason: "not_authorized" } }] } }),
+  });
+  const panel = await mount({ initial: rootSession, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelectorAll(".campaign-work-row")[0]!);
+    assert.ok(deliveryFacts(panel.container).includes(
+      "Review and Checks: No Pull Request ReportedGitHub status is observed for the pull requests the Orchestrator reports."));
+    await click(panel.container.querySelector(".campaign-detail-back")!);
+    await click(panel.container.querySelectorAll(".campaign-work-row")[1]!);
+    const facts = deliveryFacts(panel.container);
+    assert.equal(facts[0], "Reported Stage: In ReviewReported by a deleted Orchestrator session 1m ago. Not observed.");
+    assert.equal(pullRequestGroup(facts, 5)[0],
+      "PR #5: UnavailableGitHub status is read through the campaign runner's GitHub CLI, and you don't have access to that runner.");
+    assert.deepEqual(calls.forge, [], "nothing to refresh for a reader who may not see the facts");
   } finally {
     await panel.dispose();
   }

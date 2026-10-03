@@ -154,11 +154,28 @@ export type CampaignObservationUnavailableReason =
   | "not_collected"
   /** The session the fact belongs to was deleted; its snapshot remains on the attempt. */
   | "session_deleted"
-  /** Forge observation: the repository's forge is not supported (GitHub only). */
-  | "forge_unsupported"
-  /** Forge observation: no runner with an authenticated `gh` could be reached. */
+  /** The reader may access the campaign but not the runner whose `gh` login read the fact. */
+  | "not_authorized"
+  /** Forge observation (slice 8): nothing has been read for this pull request yet. */
+  | "not_observed"
+  /** The runner hosting the campaign is disconnected, so nothing can be read now. */
+  | "runner_disconnected"
+  /** The runner hosting the campaign predates forge observation (`campaignForgeStatus`). */
+  | "runner_unsupported"
+  /** The runner has no `gh` executable. */
+  | "forge_cli_missing"
+  /** `gh` is not signed in to github.com, or GitHub refused its credentials. */
   | "forge_unauthenticated"
+  /** GitHub could not be reached (offline, DNS, proxy, or timeout). */
   | "forge_unreachable"
+  /** The repository is not a GitHub repository this runner can observe (GitHub only), or the
+   * campaign's repository is not runner-local. */
+  | "forge_unsupported"
+  /** The repository or pull request does not exist, or the runner's `gh` login cannot see it. */
+  | "forge_not_found"
+  /** GitHub's API rate limit for the runner's `gh` login is exhausted. */
+  | "forge_rate_limited"
+  /** Any other failure; never surfaced as raw `gh` output. */
   | "forge_error";
 
 /** A server-observed fact. `stale` keeps the last value with its age; `unavailable` never implies
@@ -195,16 +212,62 @@ export interface CampaignObservedCleanup {
   }>;
 }
 
-/** Slice 8: GitHub pull-request observation read on a runner through its existing `gh` login. */
+/** A check rollup. `none`: no check reported (for required checks this is GitHub's ambiguous "no
+ * required checks reported", which is never passing). `unknown`: GitHub returned more checks than
+ * one bounded read covers and none of those seen failed, so the rollup cannot be proven. */
+export interface CampaignForgeCheckRollup {
+  state: "passing" | "failing" | "pending" | "none" | "unknown";
+  passing: number;
+  failing: number;
+  pending: number;
+}
+
+/** GitHub's merge-queue entry states, lower-cased. `unknown` is a state this server does not know. */
+export type CampaignForgeMergeQueueState =
+  "queued" | "awaiting_checks" | "mergeable" | "unmergeable" | "locked" | "unknown";
+
+/** Slice 8: GitHub pull-request observation read on a runner through its existing `gh` login.
+ * Status data only: no token, account, or raw `gh` output crosses. */
 export interface CampaignForgePullRequestObservation {
   state: "open" | "closed" | "merged";
   draft: boolean;
   headSha: string;
   baseRef: string;
   reviewDecision: "approved" | "changes_requested" | "review_required" | "none";
-  checks: "passing" | "failing" | "pending" | "none";
-  mergeQueue: { state: string; position: number | null } | null;
+  /** Every check on the head commit, from GitHub's own rollup state. */
+  checks: CampaignForgeCheckRollup;
+  /** Only the checks the base branch's rules require for this pull request. */
+  requiredChecks: CampaignForgeCheckRollup;
+  /** The pull request's merge-queue entry, or null when it is not queued. */
+  mergeQueue: { state: CampaignForgeMergeQueueState; position: number | null } | null;
   mergeCommitSha: string | null;
+}
+
+/** Slice 8 bounds and timings, documented in docs/campaign-work-ledger.md "Forge Status". */
+export const CAMPAIGN_FORGE_OBSERVATION = {
+  /** A fresh observation becomes `stale` once it is this old. */
+  staleAfterMs: 10 * 60_000,
+  /** An unfinished item's pull requests are re-read in the background at most this often. */
+  backgroundIntervalMs: 5 * 60_000,
+  /** How often the background pass looks for due pull requests. */
+  backgroundTickMs: 60_000,
+  /** Pull requests one background pass reads, across every campaign. */
+  backgroundRefsPerTick: 32,
+  /** One pull request is read at most once in this window, on demand or not; a repeat is coalesced. */
+  minIntervalMs: 30_000,
+  /** Pull requests one runner request reads (one GraphQL call). */
+  refsPerRequest: 16,
+  /** Runner requests in flight across the control plane. */
+  concurrentRequests: 2,
+  /** How long the control plane waits for one runner request. */
+  requestTimeoutMs: 45_000,
+} as const;
+
+/** `POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh` (slice 8): reads the item's
+ * pull requests now, subject to the rate limit, and returns their facts afterwards. */
+export interface CampaignForgeRefreshResponse {
+  revision: number;
+  pullRequests: Array<{ ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgePullRequestObservation> }>;
 }
 
 /* ------------------------------ Attempts and verification ------------------------------ */
@@ -464,7 +527,8 @@ export interface CampaignWorkItemDetail extends CampaignWorkItemSummary {
     session?: CampaignObservedFact<CampaignObservedSessionStatus>;
     /** Slice 5. Worktree cleanup of the latest attempt's session. Omitted means not collected. */
     cleanup?: CampaignObservedFact<CampaignObservedCleanup>;
-    /** Slice 8. Omitted means not collected. */
+    /** Slice 8. One entry per pull request the item's reported stage names, in that order (empty
+     * when it names none). Omitted means not collected. */
     pullRequests?: Array<{
       ref: CampaignPullRequestRef;
       fact: CampaignObservedFact<CampaignForgePullRequestObservation>;

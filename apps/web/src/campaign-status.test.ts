@@ -18,14 +18,16 @@ import {
   costWithProvenance,
   durationMetricView,
   elapsedMs,
+  forgePullRequestView,
   issueRefHref,
+  observationUnavailableText,
   measuredDuration,
   workItemOriginLabel,
   workItemTimeView,
   workItemTitle,
 } from "./campaign-status.js";
 import { titleCaseLabel } from "./format.js";
-import { MINUTE, campaignProjection, itemSummary, knownCost, workSummary } from "./e2e/campaign-status-fixtures.js";
+import { MINUTE, campaignProjection, forgeObservation, itemSummary, knownCost, workSummary } from "./e2e/campaign-status-fixtures.js";
 
 const NOW = 100 * MINUTE;
 const withWork = campaignProjection(workSummary(NOW));
@@ -245,4 +247,35 @@ test("Every visible label follows Title Case", () => {
     ...CAMPAIGN_SORT_OPTIONS.map((option) => option.label),
   ];
   for (const label of labels) assert.equal(titleCaseLabel(label), label, label);
+});
+
+test("GitHub facts: no required checks is not passing, an unconfirmed rollup is Unknown, and every reason reads in plain words", () => {
+  const now = 10 * 60 * MINUTE;
+  const view = forgePullRequestView({
+    availability: "fresh",
+    value: forgeObservation({
+      requiredChecks: { state: "none", passing: 0, failing: 0, pending: 0 },
+      checks: { state: "unknown", passing: 100, failing: 0, pending: 0 },
+      draft: true,
+      mergeQueue: null,
+    }),
+    observedAt: now,
+  }, now);
+  assert.equal(view.kind, "observed");
+  if (view.kind !== "observed") return;
+  assert.equal(view.status, "Draft");
+  const row = (label: string) => view.rows.find((candidate) => candidate.label === label)!;
+  assert.deepEqual(row("Required Checks"), { label: "Required Checks", text: "None Reported", note: "GitHub reports no required checks yet. This is not passing." });
+  assert.equal(row("All Checks").text, "Unknown");
+  assert.equal(row("Merge Queue").text, "Not Queued");
+  for (const label of view.rows.map((candidate) => candidate.label).concat([view.status])) {
+    assert.equal(titleCaseLabel(label), label, `${label} is Title Case`);
+  }
+  for (const reason of ["not_authorized", "not_observed", "runner_disconnected", "runner_unsupported", "forge_cli_missing",
+    "forge_unauthenticated", "forge_unreachable", "forge_unsupported", "forge_not_found", "forge_rate_limited", "forge_error"] as const) {
+    const text = observationUnavailableText(reason);
+    assert.match(text, /^[A-Z].*\.$/u, `${reason} reads as a sentence`);
+    assert.doesNotMatch(text, /passing|approved|merged/iu, `${reason} never suggests a favourable value`);
+    assert.deepEqual(forgePullRequestView({ availability: "unavailable", reason }, now), { kind: "unavailable", reason: text, lastObservedAt: null });
+  }
 });

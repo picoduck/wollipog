@@ -79,6 +79,11 @@ export function mutationAuthorizationError(
   if (routePath === "/api/projects/:id/worktree-setup-notice/dismiss") {
     return null;
   }
+  // Refreshing a work item's GitHub status only reads it (#2417 slice 8). The route separately
+  // requires campaign read access and access to the runner that reads it.
+  if (routePath === "/api/sessions/:id/campaign/work-items/:itemId/forge-refresh") {
+    return null;
+  }
   // Dismissing a built-in skill's recommendation hides it for the requesting user only.
   if (routePath === "/api/skills/:id/recommendation") {
     return null;

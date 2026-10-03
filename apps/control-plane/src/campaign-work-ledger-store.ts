@@ -247,6 +247,10 @@ export interface CampaignWorkLedgerHooks {
   observeCleanup(sessionId: string): CampaignObservedCleanup["worktrees"] | null;
   boundary(sessionId: string): CampaignAttemptBoundary;
   atomic<T>(work: () => T): T;
+  /** Slice 8: the stored GitHub facts of these pull requests, one per ref in order. Status data
+   * only; the read routes narrow it for readers who may not see the observing runner. */
+  forgePullRequests?(campaignId: string, refs: readonly CampaignPullRequestRef[], now: number):
+    NonNullable<CampaignWorkItemDetail["observed"]["pullRequests"]>;
 }
 
 /** What `summary` derives from the ledger alone. Cached per campaign under the revision plus the
@@ -336,6 +340,22 @@ function validQueuePosition(value: unknown): value is number | null {
 
 function validPullRequests(value: unknown): value is CampaignPullRequestRef[] {
   return Array.isArray(value) && value.length <= L.pullRequestsPerStage && value.every(validIssue);
+}
+
+/** Pull requests in first-seen order, one per repository (case-insensitive) and number. */
+function uniquePullRequests(refs: readonly CampaignPullRequestRef[]): CampaignPullRequestRef[] {
+  const seen = new Set<string>();
+  return refs.filter((ref) => {
+    const key = `${ref.repository.toLowerCase()}#${ref.number}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** The pull requests an item's reported stage names (slice 8 observes these). */
+function stagePullRequests(item: ItemRow): CampaignPullRequestRef[] {
+  return uniquePullRequests(item.stage_pull_requests ? JSON.parse(item.stage_pull_requests) as CampaignPullRequestRef[] : []);
 }
 
 function newId(prefix: string): string {
@@ -1572,8 +1592,33 @@ export class CampaignWorkLedgerStore {
       sourceRecommendation: recommendations.find((recommendation) =>
         recommendation.disposition === "accepted" && recommendation.resultingWorkItemId === item.id) ?? null,
       recommendations: recommendations.filter((recommendation) => recommendation.originWorkItemIds.includes(item.id)),
-      observed: latest ? this.observedFacts(latest.session_id, open ? observation : undefined, now) : {},
+      observed: {
+        ...(latest ? this.observedFacts(latest.session_id, open ? observation : undefined, now) : {}),
+        ...(this.hooks.forgePullRequests
+          ? { pullRequests: this.hooks.forgePullRequests(campaignId, stagePullRequests(item), now) }
+          : {}),
+      },
     };
+  }
+
+  /** Slice 8 background targets: the reported pull requests of every unfinished item, per campaign
+   * whose root session is not archived, among campaigns naming any pull request at all. */
+  forgeBackgroundTargets(
+    include: (campaignId: string) => boolean = () => true,
+  ): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
+    const campaigns = (this.stmt(
+      `SELECT DISTINCT item.campaign_session_id AS id FROM campaign_work_items item
+       JOIN sessions root ON root.id=item.campaign_session_id AND root.archived=0
+       WHERE item.commitment='committed' AND item.stage_pull_requests IS NOT NULL AND item.stage_pull_requests <> '[]'`,
+    ).all() as Array<{ id: string }>).map((row) => row.id).filter(include);
+    const unfinished = new Set<string>(CAMPAIGN_WORK_ITEM_UNFINISHED_STATES);
+    return campaigns.map((campaignId) => {
+      const snapshot = this.snapshot(campaignId);
+      const refs = uniquePullRequests(snapshot.items
+        .filter((item) => unfinished.has(snapshot.derived.get(item.id)?.state ?? "blocked"))
+        .flatMap(stagePullRequests));
+      return { campaignId, refs };
+    }).filter((target) => target.refs.length > 0);
   }
 
   /** Observed facts of the latest attempt's session, open or closed: a delivered item still shows

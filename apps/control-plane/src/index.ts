@@ -173,6 +173,7 @@ import {
 import { registerBoxLegacyAdoptionRoute } from "./box-legacy-adoption-route.js";
 import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
+import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
@@ -955,14 +956,43 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
-registerCampaignStatusRoutes(app, { db, requestPrincipal });
-
 // An attempt session's observed status moves its work item without a ledger write; give such
 // changes a coalesced ledger revision so Campaign Status lists and details reload (#2417).
 const campaignWorkObservations = new CampaignWorkObservations({
   db,
   refresh: (campaignSessionId) => svc.campaignWorkObserved(campaignSessionId),
   warn: (message) => app.log.warn(message),
+});
+
+// Slice 8 of #2417: GitHub status of the pull requests campaign work items name, read on the
+// runner hosting the root campaign through its own `gh` login, on demand and in a bounded
+// background pass. Changes ride the same coalesced revision as observed session changes.
+const campaignForgeObserver = new CampaignForgeObserver({
+  observingRunner: (campaignId) => {
+    const runner = db.campaignForgeObservingRunner(campaignId);
+    return runner ? { ...runner, online: runner.online && hub.isRunnerOnline(runner.runnerId) } : null;
+  },
+  requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
+  store: db.campaignForgeObservations,
+  backgroundTargets: (include) => db.campaignWorkLedger.forgeBackgroundTargets(include),
+  changed: (campaignId) => campaignWorkObservations.forgeChanged(campaignId),
+  warn: (message) => app.log.warn(message),
+  newRequestId: () => `campaign_forge_${randomUUID()}`,
+});
+campaignForgeObserver.start();
+/** An on-demand read waits at most this long before the route answers with what is stored. */
+const CAMPAIGN_FORGE_REFRESH_WAIT_MS = 20_000;
+registerCampaignStatusRoutes(app, {
+  db,
+  requestPrincipal,
+  refreshForge: (campaignId, refs) => new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, CAMPAIGN_FORGE_REFRESH_WAIT_MS);
+    timer.unref?.();
+    void campaignForgeObserver.refresh(campaignId, refs).finally(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  }),
 });
 hub.observeSessions({
   changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),
@@ -1338,6 +1368,9 @@ app.register(async (instance) => {
         }
         break;
       case "github_issue_closure_result":
+        if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
+        break;
+      case "campaign_forge_observe_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
       case "workflow_action_reconciliation_result":
@@ -6121,6 +6154,7 @@ const runnerLivenessTimer = setInterval(() => {
 }, HEARTBEAT_INTERVAL_MS);
 runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
+  campaignForgeObserver.dispose();
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
   clearInterval(outboundEventTimer);

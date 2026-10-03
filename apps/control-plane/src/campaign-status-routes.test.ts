@@ -269,6 +269,8 @@ test("the summary is cached under the revision and still follows observed status
     assert.deepEqual(detail.observed, {
       session: { availability: "unavailable", reason: "session_deleted" },
       cleanup: { availability: "unavailable", reason: "session_deleted" },
+      // Collected (slice 8), and empty because this item's stage names no pull request.
+      pullRequests: [],
     });
   } finally {
     db.close();
@@ -736,7 +738,7 @@ test("item details keep archived and deleted children's history and report obser
       { path: "/worktrees/kept", status: "deferred", reason: "the provider still holds it" },
       { path: "/worktrees/old", status: "retired", reason: null },
     ]);
-    assert.equal(kept.observed.pullRequests, undefined, "forge observations belong to slice 8");
+    assert.deepEqual(kept.observed.pullRequests, [], "forge facts are collected; this item reports no pull request");
     assert.equal(kept.times, undefined, "time metrics belong to slice 6");
 
     // Facts from a disconnected runner are the last known values, marked stale with their age.

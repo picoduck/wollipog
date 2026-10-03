@@ -107,7 +107,7 @@ value seen for display only.
 - **Cleanup** (slice 5) of the latest attempt's session: each worktree as `pending`, `deferred`,
   `refused` (the existing campaign cleanup vocabulary, with its reason) or `retired`.
 - Read API, Observed Facts in Details, describes freshness.
-- **Forge facts** (slice 8): see Forge Status Scope.
+- **Forge facts** (slice 8): see Forge Status.
 
 ## Derived Primary State
 
@@ -269,6 +269,8 @@ mechanism (`apps/control-plane/src/campaign-work-observation.ts`):
   valid.
 - A campaign that has never recorded ledger state has no revision to move and no cursor to
   invalidate.
+- A stored forge fact (slice 8) whose value or availability changes schedules the same coalesced
+  revision and root refresh. A read that only renews the observation time moves nothing.
 
 The revision therefore counts ledger writes and observed changes; reads still never move it. The
 alternative of leaving observations out of the revision was rejected because a list stitched across
@@ -289,7 +291,9 @@ only the open attempt.
   (`pending` with the existing reason, or a recorded `deferred` or `refused`), plus `retired` for a
   worktree the cleanup records name but the session no longer holds. A live session's worktrees read
   `pending` with "the session archive is still pending".
-- **Forge facts** stay omitted until slice 8; time and cost fields stay omitted until slice 6.
+- **Forge facts** (slice 8): `observed.pullRequests`, one fact per pull request the item's reported
+  stage names, in that order, or an empty list when it names none. See Forge Status.
+- Time and cost fields stay omitted until slice 6.
 
 ## Authorization and Cost Visibility
 
@@ -310,6 +314,15 @@ only the open attempt.
   only when the principal can access that attempt's session (or the session was deleted and the
   principal can access the root). A campaign bucket is `unavailable{not_authorized}` when the
   principal cannot access every session contributing to it.
+- **Forge facts** (slice 8) need more than campaign access. They are read through the `gh` login of
+  the runner hosting the root campaign, so a human also needs access to that runner
+  (`canAccessRunner`); a shared campaign never extends a personal runner owner's GitHub visibility.
+  Everyone else receives each fact as `unavailable{not_authorized}`, with no last value, while the
+  pull-request references and the reported stage stay visible to every campaign reader. An agent
+  reads them only as the campaign's own Orchestrator (the credential rule above). The on-demand
+  refresh route follows the same rule and refuses with `403` before any forge read, so a reader who
+  may not see the facts cannot cause one. Forge facts are never part of a session view or the
+  summary, so no shared hub payload, cached summary, or command response carries them.
 - The browser routes apply this rule to whatever cost the ledger carries
   (`apps/control-plane/src/campaign-status-routes.ts`). Until slice 6 fills cost in there is none to
   hide. The summary that rides on the root's session view is broadcast to everyone who can access
@@ -370,17 +383,75 @@ existed is reported through `attributedSince` and makes affected buckets `partia
 Budgets show their actual scope: a parent-session budget is never presented as a campaign-wide
 budget. Forecasts and ETA are out of scope.
 
-## Forge Status Scope (Slice 8)
+## Forge Status (Slice 8)
 
-- **Forge:** GitHub only, read on a runner through its existing `gh` login. The control plane
-  stores no forge credentials.
-- **Data:** pull-request state, head SHA, review decision, check rollup, and merge-queue entry, only
-  for pull requests referenced by the campaign's work items.
-- **Refresh:** on demand while the panel is visible, plus a bounded background refresh for
-  unfinished items.
-- **Freshness:** an observation becomes `stale` after a fixed age. When `gh` is missing,
-  unauthenticated, offline, or the forge is unsupported, the fact is `unavailable` with that reason.
-  Unavailable data never implies passing checks.
+Server-observed review, check, and merge-queue facts for the pull requests a campaign's work items
+name. The implementation is `apps/control-plane/src/campaign-forge-observations.ts` (storage,
+derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
+
+- **Supported forge:** GitHub (github.com) only. A repository that is not a GitHub `owner/name`
+  is `unavailable{forge_unsupported}` and is never put in a query.
+- **Credentials:** the control plane stores no forge credential and never sees a token. It asks the
+  runner hosting the **root campaign session** to read, and that runner runs `gh api graphql
+  --hostname github.com` in the root Orchestrator's own repository context (its agent context and
+  repository path, as the Orchestrator itself would run `gh`), so the credential is wherever that
+  `gh` keeps its login (`gh auth status`; `GH_TOKEN`/`GITHUB_TOKEN` in that environment, or `gh`'s
+  own configuration). A root whose repository is not runner-local is `forge_unsupported`.
+- **What is read:** only the pull requests named by work items' reported stages
+  (`stage.pullRequests`), never a search. For each: state, draft, head SHA, base branch, review
+  decision, the check rollup of every check on the head (from GitHub's own rollup state, with
+  counts), the rollup of only the checks the base branch requires for that pull request, the
+  merge-queue entry (state and position), and the merge commit. One GraphQL call reads a batch of up
+  to `refsPerRequest` (16). Only these status fields cross from the runner; a failure crosses as a
+  fixed reason, never as `gh` output.
+- **Fail closed:** a check counts as passing only on GitHub's known-good results. No required check
+  reported is `none` (GitHub's ambiguous "no required checks reported"), never passing. A required
+  check that has not reported yet has no entry at all, and branch rulesets are not readable through
+  this query, so the required checks seen read `passing` only when GitHub's own `mergeStateStatus`
+  is `CLEAN`, `HAS_HOOKS`, or `UNSTABLE` (nothing required is missing); otherwise, including while
+  GitHub still computes it, they read `unknown`. A seen failure or pending check is reported as
+  such. When more checks exist than one read covers (100) and none of those seen failed, the
+  required rollup is `unknown` too.
+- **Refresh:** on demand, `POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh`, which
+  the panel sends when an item's details open and every 60 seconds while they stay open; it waits
+  at most 20 seconds and returns the item's facts (`CampaignForgeRefreshResponse`). In the
+  background, every `backgroundTickMs` (1 minute) the control plane reads the pull requests of
+  **unfinished** items whose last successful read is older than `backgroundIntervalMs` (5 minutes),
+  oldest first, at most `backgroundRefsPerTick` (32) per pass, skipping a pull request last seen
+  merged or closed (on-demand reads still refresh it) and campaigns whose root is archived.
+- **Bounds:** one pull request is read at most once per `minIntervalMs` (30 seconds) whoever asks;
+  a read already in flight is shared; at most `concurrentRequests` (2) runner requests run at once,
+  a bounded queue sits behind them, and past it new reads are dropped (their facts keep aging).
+  Reads run off the session-update path: a slow or hung `gh` (30-second runner timeout,
+  `requestTimeoutMs` 45 seconds) never delays a session update.
+- **Freshness:** each pull request stores its last successful value with its observation time and,
+  separately, the latest failure. A fact is `fresh` until it is `staleAfterMs` (10 minutes) old,
+  then `stale` with that value and time. The browser applies the same age, so a page that has not
+  refetched never shows an old answer as current, and every stale value reads "Last Seen …".
+- **Unavailable:** the latest read failed, or nothing can be read. A stored last value travels only
+  as `lastValue`/`lastObservedAt` for history; the panel shows its time, never its values.
+
+| Reason | Meaning |
+| --- | --- |
+| `not_observed` | The runner is reachable but this pull request has not been read yet. |
+| `runner_disconnected` | Nothing was ever read and the root's runner is disconnected. |
+| `runner_unsupported` | The root's runner predates `campaignForgeStatus` (protocol v198) and is never asked. |
+| `forge_cli_missing` | The runner has no `gh` executable. |
+| `forge_unauthenticated` | `gh` is not signed in to github.com, or GitHub refused its credentials. |
+| `forge_unreachable` | GitHub could not be reached (offline, DNS, proxy, or timeout). |
+| `forge_unsupported` | Not a GitHub repository, or the root's repository is not runner-local. |
+| `forge_not_found` | The repository or pull request does not exist, or the runner's `gh` login cannot see it. |
+| `forge_rate_limited` | GitHub's API rate limit for that login is exhausted. |
+| `forge_error` | Any other failure, or an answer that does not validate. |
+| `not_authorized` | The reader may read the campaign but not the observing runner (see Authorization). |
+
+A read that never completes (the runner disconnected or timed out mid-request) changes nothing: the
+facts keep their last state and age into `stale`. Unavailable and stale data never imply passing,
+approved, or merged, and no observed fact changes the primary state: an observed merged pull request
+does not make an item delivered.
+
+**Retention:** observations are keyed by the root campaign with `ON DELETE CASCADE` and hold status
+data only.
 
 ## Compatibility
 
@@ -393,6 +464,11 @@ budget. Forecasts and ETA are out of scope.
   signal, and the control plane accepts every browser version.
 - Optional fields owned by later slices (`cost`, `times`, `attemptCosts`, `observed.pullRequests`)
   mean "not collected here" when omitted.
+- Protocol v198 adds `campaign_forge_observe` / `campaign_forge_observe_result` behind the
+  `campaignForgeStatus` capability. The control plane never sends it to an older runner; that
+  campaign's facts read `unavailable{runner_unsupported}`. An older control plane omits
+  `observed.pullRequests`, which the panel shows as "This server does not observe it", and has no
+  refresh route.
 
 ## Deviations From the Posted Plan
 
@@ -447,3 +523,14 @@ starting contract. This document refines it as follows:
 22. **Only the root's view carries `work`.** The posted plan put the summary on the projection
     every campaign view embeds; a nested Orchestrator's reader may not be allowed the root, so its
     view omits the summary and reaches it through membership.
+23. **Forge facts follow the stage's pull requests** (slice 8). The plan said "PR refs recorded with
+    reported stages and work-item links"; the ledger records pull requests only on the reported
+    stage, so those are the ones observed.
+24. **Forge visibility needs runner access** (slice 8, an implementation decision at claim time):
+    campaign access plus access to the runner whose `gh` reads the facts; see Authorization.
+25. **Check rollups are objects** (slice 8): `checks` and `requiredChecks` carry a state (`passing`,
+    `failing`, `pending`, `none`, `unknown`) and counts, replacing the contract's single `checks`
+    string, and the merge-queue state is GitHub's own vocabulary.
+26. **More unavailable reasons** (slice 8): `not_authorized`, `not_observed`, `runner_disconnected`,
+    `runner_unsupported`, `forge_cli_missing`, `forge_not_found`, and `forge_rate_limited` join the
+    contract's forge reasons.

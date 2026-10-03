@@ -290,6 +290,11 @@ import {
 import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } from "./web-push.js";
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
+import {
+  CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
+  CampaignForgeObservationStore,
+  type ForgeObserverState,
+} from "./campaign-forge-observations.js";
 import type { CampaignAttemptSessionObservation } from "./campaign-work-state.js";
 import {
   executionTargetsForHost,
@@ -892,6 +897,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_follow_up_unique
 CREATE INDEX IF NOT EXISTS idx_orchestrator_follow_up_campaign
   ON orchestrator_campaign_follow_ups(campaign_session_id, created_at, id);
 ${CAMPAIGN_WORK_LEDGER_SCHEMA}
+${CAMPAIGN_FORGE_OBSERVATION_SCHEMA}
 
 -- Descendant transitions are durable before a synthetic parent turn is admitted. Stable event
 -- identities make repeated projection/reconnect passes harmless, while the continuation range is
@@ -4674,8 +4680,35 @@ export class ControlPlaneDb {
       observeCleanup: (sessionId) => this.campaignAttemptCleanupObservation(sessionId),
       boundary: (sessionId) => this.campaignAttemptBoundary(sessionId),
       atomic: (work) => this.atomic(work),
+      forgePullRequests: (campaignId, refs, now) => this.campaignForgeObservations.facts(campaignId, refs, now),
     });
     return this.campaignWorkLedgerStore;
+  }
+
+  private campaignForgeObservationStore: CampaignForgeObservationStore | null = null;
+
+  /** Slice 8 GitHub observations of the pull requests a campaign's work items name (#2417). */
+  get campaignForgeObservations(): CampaignForgeObservationStore {
+    this.campaignForgeObservationStore ??= new CampaignForgeObservationStore(
+      this.db,
+      (campaignId) => this.campaignForgeObserverState(campaignId),
+    );
+    return this.campaignForgeObservationStore;
+  }
+
+  /** The runner hosting the root campaign session reads its forge status (slice 8). */
+  campaignForgeObservingRunner(campaignId: string): { runnerId: string; protocolVersion: number | null; online: boolean } | null {
+    const row = this.stmt("SELECT runner_id FROM sessions WHERE id=?").get(campaignId) as { runner_id: string } | undefined;
+    if (!row) return null;
+    const runner = this.getRunner(row.runner_id);
+    return { runnerId: row.runner_id, protocolVersion: runner?.protocolVersion ?? null, online: runner?.status === "online" };
+  }
+
+  private campaignForgeObserverState(campaignId: string): ForgeObserverState {
+    const runner = this.campaignForgeObservingRunner(campaignId);
+    if (!runner) return "offline";
+    if (!runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus")) return "unsupported";
+    return runner.online ? "online" : "offline";
   }
 
   /** The root campaign any session at or below it resolves to, through the one ancestry walk every

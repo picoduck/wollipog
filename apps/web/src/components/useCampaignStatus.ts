@@ -26,6 +26,9 @@ const CAMPAIGN_WORK_PAGE_CEILING = CAMPAIGN_WORK_LEDGER_LIMITS.pageSizeMax;
 const MAX_REVISION_RESTARTS = 3;
 /** A member whose browser does not hold the root session re-reads it on this cadence. */
 const ROOT_SESSION_POLL_MS = 30_000;
+/** While details show pull requests, their GitHub status is re-read on this cadence (slice 8). The
+ * server reads each pull request at most every 30 seconds whoever asks. */
+export const CAMPAIGN_FORGE_REFRESH_MS = 60_000;
 
 export type CampaignLoadStatus = "loading" | "ready" | "error";
 
@@ -356,6 +359,52 @@ export function useCampaignStatus({
       controller.abort();
     };
   }, [api, detailKey, online, revision, reconnects, retries, selectedItemId, session.id]);
+
+  /* ---------------------------------------------------------------- forge refresh */
+  // While an item's details are showing, ask the server to read its pull requests on GitHub: once
+  // when they open and then on a fixed cadence. The server rate-limits and coalesces these, and a
+  // reader without access to the observing runner is never sent (their facts say not authorized).
+  const shownDetail = detail?.key === detailKey ? detail.state.detail : null;
+  const forgeRefreshable = Boolean(shownDetail?.observed.pullRequests?.some((entry) =>
+    entry.fact.availability !== "unavailable" || entry.fact.reason !== "not_authorized"));
+  useEffect(() => {
+    if (!selectedItemId || !detailKey || !online || !forgeRefreshable) return;
+    const controller = new AbortController();
+    const refresh = () => {
+      api.campaignForgeRefresh(session.id, selectedItemId, controller.signal).then((response) => {
+        if (controller.signal.aborted) return;
+        // Merge by pull request into whatever is shown now: details reloaded while this read was in
+        // flight may name other pull requests, and a late answer must not bring back old ones.
+        const fresh = new Map(response.pullRequests.map((entry) => [`${entry.ref.repository.toLowerCase()}#${entry.ref.number}`, entry.fact]));
+        setDetail((current) => current?.key === detailKey && current.state.detail?.observed.pullRequests
+          ? {
+            key: detailKey,
+            state: {
+              ...current.state,
+              detail: {
+                ...current.state.detail,
+                observed: {
+                  ...current.state.detail.observed,
+                  pullRequests: current.state.detail.observed.pullRequests.map((entry) => ({
+                    ref: entry.ref,
+                    fact: fresh.get(`${entry.ref.repository.toLowerCase()}#${entry.ref.number}`) ?? entry.fact,
+                  })),
+                },
+              },
+            },
+          }
+          : current);
+      }).catch(() => {
+        // The shown facts already explain what is unavailable; a failed refresh changes nothing.
+      });
+    };
+    refresh();
+    const timer = setInterval(refresh, CAMPAIGN_FORGE_REFRESH_MS);
+    return () => {
+      clearInterval(timer);
+      controller.abort();
+    };
+  }, [api, detailKey, forgeRefreshable, online, selectedItemId, session.id]);
 
   return {
     summary,

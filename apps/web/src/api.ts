@@ -1,4 +1,5 @@
 import type {
+  CampaignForgeRefreshResponse,
   CampaignWorkItemDetailResponse,
   CampaignWorkItemsPage,
   AddBoxRequest,
@@ -1074,6 +1075,12 @@ export function createApiClient(transport: ApiTransport) {
     req<CampaignWorkItemDetailResponse>(
       `/api/sessions/${encodeURIComponent(id)}/campaign/work-items/${encodeURIComponent(itemId)}`,
       { signal },
+    ),
+  /** Read the item's pull requests on GitHub now (rate-limited server-side), then return their facts. */
+  campaignForgeRefresh: (id: string, itemId: string, signal?: AbortSignal) =>
+    req<CampaignForgeRefreshResponse>(
+      `/api/sessions/${encodeURIComponent(id)}/campaign/work-items/${encodeURIComponent(itemId)}/forge-refresh`,
+      { method: "POST", signal },
     ),
   childSessions: (id: string, eventEpoch: number, after = 0, limit = 50) => {
     const query = new URLSearchParams({ eventEpoch: String(eventEpoch), after: String(after), limit: String(limit) });

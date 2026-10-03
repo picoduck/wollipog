@@ -124,7 +124,19 @@ export function seedCampaignStatus(databasePath: string, workspacePath: string) 
     assign("read-api", readApi);
     assert.ok(svc.updateCampaignWorkItem(root, { workItemId: id("read-api"),
       blocker: { reason: "Waiting for a merge decision on the storage pull request.", responsibleActor: "human" },
-      nextAction: "Rebase onto main once storage merges." }).ok);
+      nextAction: "Rebase onto main once storage merges.",
+      stage: { stage: "in_review", pullRequests: [{ repository: repo, number: 2436 }] } }).ok);
+    // Slice 8: what the runner's GitHub CLI last read for that pull request, a minute ago.
+    db.campaignForgeObservations.record(root, RUNNER_ID, [{
+      ref: { repository: repo, number: 2436 },
+      observation: {
+        state: "open", draft: false, headSha: "dd08b41b6a0e2c4f1f0b7d4e5b9a3c2d1e0f9a8b", baseRef: "main",
+        reviewDecision: "review_required",
+        checks: { state: "pending", passing: 6, failing: 0, pending: 3 },
+        requiredChecks: { state: "none", passing: 0, failing: 0, pending: 0 },
+        mergeQueue: null, mergeCommitSha: null,
+      },
+    }], now - MINUTE);
     assign("time-cost", timeCost);
     assert.ok(svc.updateCampaignWorkItem(root, { workItemId: id("legacy-import"),
       commitment: { state: "scope_removed", reason: "Older campaigns show partial coverage instead." } }).ok);

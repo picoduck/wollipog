@@ -162,6 +162,7 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "GET /api/sessions/:id/campaign/work-items",
   "GET /api/sessions/:id/campaign/work-items/:itemId",
   "GET /api/sessions/:id/campaign/recommendations",
+  "POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh",
   "POST /api/sessions","POST /api/sessions/:id/prompt", "POST /api/sessions/:id/stop",
   "POST /api/sessions/:id/restart", "POST /api/sessions/:id/config", "POST /api/sessions/:id/archive",
   "POST /api/sessions/:id/background-jobs/:jobId/stop",

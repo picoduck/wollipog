@@ -4,6 +4,7 @@
  */
 import type {
   CampaignCostValue,
+  CampaignForgePullRequestObservation,
   CampaignMetric,
   CampaignWorkItemDetail,
   CampaignWorkItemSummary,
@@ -12,6 +13,23 @@ import type {
 } from "@wollipog/protocol";
 
 export const MINUTE = 60_000;
+
+/** A GitHub observation (slice 8): an open pull request waiting in the merge queue, required checks
+ * passing, the rest still running, and no review decision. */
+export function forgeObservation(overrides: Partial<CampaignForgePullRequestObservation> = {}): CampaignForgePullRequestObservation {
+  return {
+    state: "open",
+    draft: false,
+    headSha: "44579c6c25235598f1a28f8ccb0449cb8dbbc810",
+    baseRef: "main",
+    reviewDecision: "none",
+    checks: { state: "pending", passing: 8, failing: 0, pending: 1 },
+    requiredChecks: { state: "passing", passing: 1, failing: 0, pending: 0 },
+    mergeQueue: { state: "awaiting_checks", position: 2 },
+    mergeCommitSha: null,
+    ...overrides,
+  };
+}
 
 export function knownCost(usd: number, source: CampaignCostValue["source"] = "providerReported", unpricedRecords = 0): CampaignMetric<CampaignCostValue> {
   return { availability: "known", value: { usd, source, unpricedRecords } };

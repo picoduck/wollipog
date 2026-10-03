@@ -2113,6 +2113,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       runCommandTask("github_issue_closure", sessions.githubIssueClosure(msg).then(sendUp));
       break;
     }
+    case "campaign_forge_observe": {
+      runCommandTask("campaign_forge_observe", sessions.campaignForgeObserve(msg).then(sendUp));
+      break;
+    }
     case "reconcile_workflow_action": {
       runCommandTask("reconcile_workflow_action", sessions.reconcileWorkflowAction(msg.sessionId, {
         occurrenceId: msg.occurrenceId,

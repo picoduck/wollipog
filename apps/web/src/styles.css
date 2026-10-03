@@ -4515,6 +4515,15 @@ textarea {
   color: var(--text-dim);
   font: var(--type-small);
 }
+/* One observed pull request (#2417 slice 8): a rule above heads its group, and its facts sit
+   indented under it so two pull requests never read as one list. */
+.campaign-forge-pr > dt,
+.campaign-forge-pr > dd {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.campaign-forge-pr > dt { color: var(--text); }
+.campaign-forge-fact > dt { padding-left: var(--space-3); }
 .campaign-cost > .campaign-status-meta {
   display: inline;
   margin-left: var(--space-2);

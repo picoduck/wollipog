@@ -106,7 +106,9 @@ CLI). Every record lands in the root campaign, including from a nested Orchestra
   verification and accounting.
 - `update_campaign_work_item` records reported stages, blockers, next actions, cancellations, and
   scope removals, and closes a failed or abandoned attempt with `endAttempt` so the item waits for
-  dispatch again. A reported stage is a claim: `merged` does not mark the item delivered.
+  dispatch again. A reported stage is a claim: `merged` does not mark the item delivered. Name the
+  item's pull requests in the stage (`pullRequests`); Wollipog observes their GitHub review,
+  checks, and merge-queue state separately, through the runner's `gh` login, beside your claim.
 - `adjudicate_campaign_recommendation` records accepted, rejected, deferred, or duplicate for a
   recorded follow-up; pass `originWorkItemIds` when recording it.
 - `get_campaign_work_items` reads the summary and a page or one item. Restart from the first page

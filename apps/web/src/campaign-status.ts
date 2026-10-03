@@ -7,14 +7,19 @@
  * zero; and a cost says where it came from (provider-reported, estimated, partially priced).
  */
 import {
+  CAMPAIGN_FORGE_OBSERVATION,
   CAMPAIGN_WORK_ITEM_PRIMARY_STATES,
   CAMPAIGN_WORK_ITEM_UNFINISHED_STATES,
   type CampaignCostValue,
   type CampaignElapsed,
+  type CampaignForgeCheckRollup,
+  type CampaignForgeMergeQueueState,
+  type CampaignForgePullRequestObservation,
   type CampaignIssueRef,
   type CampaignMetric,
   type CampaignMetricGapReason,
   type CampaignObservationUnavailableReason,
+  type CampaignObservedFact,
   type CampaignReportedStageKind,
   type CampaignResponsibleActor,
   type CampaignWorkItemOrigin,
@@ -291,14 +296,113 @@ export const REPORTED_STAGE_LABELS: Record<CampaignReportedStageKind, string> = 
 const OBSERVATION_UNAVAILABLE_TEXT: Record<CampaignObservationUnavailableReason, string> = {
   not_collected: "This server does not observe it.",
   session_deleted: "The session was deleted.",
-  forge_unsupported: "Only GitHub repositories are observed.",
-  forge_unauthenticated: "No runner has a signed-in GitHub CLI.",
-  forge_unreachable: "GitHub could not be reached.",
+  not_authorized: "GitHub status is read through the campaign runner's GitHub CLI, and you don't have access to that runner.",
+  not_observed: "GitHub hasn't been read for this pull request yet.",
+  runner_disconnected: "The campaign's runner is disconnected, so GitHub can't be read.",
+  runner_unsupported: "The campaign's runner is too old to read GitHub status. Update the runner.",
+  forge_cli_missing: "The campaign's runner has no GitHub CLI (gh).",
+  forge_unauthenticated: "The GitHub CLI on the campaign's runner isn't signed in to github.com.",
+  forge_unreachable: "GitHub couldn't be reached from the campaign's runner.",
+  forge_unsupported: "Only GitHub repositories of a campaign on its own runner are observed.",
+  forge_not_found: "GitHub has no such pull request, or the runner's GitHub CLI can't see it.",
+  forge_rate_limited: "GitHub's rate limit for the runner's GitHub CLI is used up. It will be read again later.",
   forge_error: "GitHub returned an error.",
 };
 
 export function observationUnavailableText(reason: CampaignObservationUnavailableReason): string {
   return OBSERVATION_UNAVAILABLE_TEXT[reason] ?? "It is not available.";
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Observed GitHub status (slice 8)
+ * ---------------------------------------------------------------------------------------------- */
+
+const PR_STATE_LABELS: Record<CampaignForgePullRequestObservation["state"], string> = {
+  open: "Open",
+  closed: "Closed",
+  merged: "Merged",
+};
+const REVIEW_LABELS: Record<CampaignForgePullRequestObservation["reviewDecision"], string> = {
+  approved: "Approved",
+  changes_requested: "Changes Requested",
+  review_required: "Review Required",
+  none: "No Review Decision",
+};
+const CHECK_STATE_LABELS: Record<CampaignForgeCheckRollup["state"], string> = {
+  passing: "Passing",
+  failing: "Failing",
+  pending: "Pending",
+  none: "None Reported",
+  unknown: "Unknown",
+};
+const MERGE_QUEUE_LABELS: Record<CampaignForgeMergeQueueState, string> = {
+  queued: "Queued",
+  awaiting_checks: "Awaiting Checks",
+  mergeable: "Mergeable",
+  unmergeable: "Unmergeable",
+  locked: "Locked",
+  unknown: "In Queue",
+};
+
+export interface ForgeFactRow {
+  label: string;
+  text: string;
+  note: string | null;
+}
+
+/** How one observed pull request reads. `current` is false for a stale observation: every value
+ * then reads "Last Seen …", so nothing stale reads as passing, approved, or merged now. */
+export type ForgePullRequestView =
+  | { kind: "observed"; current: boolean; observedAt: number; status: string; rows: ForgeFactRow[] }
+  | { kind: "unavailable"; reason: string; lastObservedAt: number | null };
+
+function checkNote(rollup: CampaignForgeCheckRollup, required: boolean): string | null {
+  if (rollup.state === "none") {
+    return required
+      ? "GitHub reports no required checks yet. This is not passing."
+      : "GitHub reports no checks on this head.";
+  }
+  if (rollup.state === "unknown") {
+    return required
+      ? "GitHub hasn't confirmed that every required check has reported, so this isn't shown as passing."
+      : "There are more checks than one read covers, so the result can't be confirmed.";
+  }
+  const parts = [
+    rollup.failing > 0 ? `${rollup.failing} failing` : null,
+    rollup.pending > 0 ? `${rollup.pending} pending` : null,
+    rollup.passing > 0 ? `${rollup.passing} passing` : null,
+  ].filter((part): part is string => part !== null);
+  return parts.length > 0 ? `${parts.join(", ")}.` : null;
+}
+
+/** A fresh observation older than the documented age reads as stale here too, so a client that has
+ * not refetched never shows an old answer as current. */
+export function forgePullRequestView(
+  fact: CampaignObservedFact<CampaignForgePullRequestObservation>,
+  now: number,
+): ForgePullRequestView {
+  if (fact.availability === "unavailable") {
+    return { kind: "unavailable", reason: observationUnavailableText(fact.reason), lastObservedAt: fact.lastObservedAt ?? null };
+  }
+  const current = fact.availability === "fresh" && now - fact.observedAt <= CAMPAIGN_FORGE_OBSERVATION.staleAfterMs;
+  const value = fact.value;
+  const seen = (text: string) => current ? text : `Last Seen ${text}`;
+  const status = value.state === "open" && value.draft ? "Draft" : PR_STATE_LABELS[value.state];
+  const rows: ForgeFactRow[] = [
+    { label: "Review", text: seen(REVIEW_LABELS[value.reviewDecision]), note: null },
+    { label: "Required Checks", text: seen(CHECK_STATE_LABELS[value.requiredChecks.state]), note: checkNote(value.requiredChecks, true) },
+    { label: "All Checks", text: seen(CHECK_STATE_LABELS[value.checks.state]), note: checkNote(value.checks, false) },
+    {
+      label: "Merge Queue",
+      text: seen(value.mergeQueue
+        ? `${MERGE_QUEUE_LABELS[value.mergeQueue.state]}${value.mergeQueue.position === null ? "" : `, Position ${value.mergeQueue.position}`}`
+        : "Not Queued"),
+      note: null,
+    },
+    { label: "Head", text: value.headSha.slice(0, 7), note: `On ${value.baseRef}.` },
+  ];
+  if (value.mergeCommitSha) rows.push({ label: "Merge Commit", text: value.mergeCommitSha.slice(0, 7), note: null });
+  return { kind: "observed", current, observedAt: fact.observedAt, status: seen(status), rows };
 }
 
 const CAMPAIGN_LIFECYCLE_LABELS: Record<OrchestratorCampaignProjection["status"], string> = {
