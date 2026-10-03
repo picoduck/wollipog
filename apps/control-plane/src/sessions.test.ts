@@ -12754,6 +12754,32 @@ test("an occurrence-less older request matches its own answer, but never a settl
     "the answer waits, unbound, for its own occurrence");
 });
 
+test("an answer accepted before the runner's history epoch is known is restored after it is adopted (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const request = { kind: "question_request" as const, requestId: "early", occurrenceId: "request_early",
+    questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }] };
+  assert.equal(db.getRunnerHistoryState(id)?.historyEpoch ?? null, null);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "early", { q: "Yes" }, undefined, "submit", undefined, "request_early").ok);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+
+  db.reconcileRunnerHistory(id, 0, 2);
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 2);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "early", occurrenceId: "request_early", answered: true } },
+    ],
+    page: { logEpoch: 0, throughSeq: 2, nextAfterSeq: 2, hasMore: false } });
+  await svc.hydrateHistory(id);
+  const restored = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0]!.payload.kind === "question_answered" ? restored[0]!.payload.questionEventSeq : null,
+    db.listEvents(id).find((event) => event.payload.kind === "question_request")!.seq);
+});
+
 test("an older runner's snapshot-parked answer is never guessed onto an occurrence-less request (#2188)", async () => {
   const { db, hub, svc } = makeHarness();
   const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];

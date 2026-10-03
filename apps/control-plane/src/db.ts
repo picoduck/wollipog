@@ -18116,9 +18116,11 @@ export class ControlPlaneDb {
 
   /**
    * Keep a stored answer summary beside the exact runner question occurrence it answers, so a
-   * runner-history cache reset can restore it. A question answered before its request event reached
-   * the cache (a reconnect snapshot parked it first) is kept unbound until history brings that
-   * request. A cached request without a runner sequence has nothing to restore from.
+   * runner-history cache reset can restore it. An answer is kept unbound, to be bound by its exact
+   * occurrence when history brings its request, when that request has not reached the cache yet (a
+   * reconnect snapshot parked it first) or when the runner's history epoch is not yet known (its
+   * sequence would name no log). A cached request without a runner sequence has nothing to restore
+   * from.
    */
   recordQuestionAnswerSummary(
     sessionId: string,
@@ -18134,12 +18136,14 @@ export class ControlPlaneDb {
       if (cached?.runner_seq == null) return;
       runnerSeq = cached.runner_seq;
     }
+    const epoch = this.getRunnerHistoryState(sessionId)?.historyEpoch ?? null;
+    const bound = runnerSeq !== null && epoch !== null;
     this.stmt(`INSERT OR REPLACE INTO question_answer_summaries
       (session_id, request_id, occurrence_id, question_digest, runner_seq, history_epoch, payload, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(sessionId, payload.requestId, payload.occurrenceId ?? "",
         createHash("sha256").update(JSON.stringify(questions)).digest("hex"),
-        runnerSeq, runnerSeq === null ? null : this.getRunnerHistoryState(sessionId)?.historyEpoch ?? -1,
+        bound ? runnerSeq : null, bound ? epoch : null,
         JSON.stringify(payload), timestamp);
   }
 
