@@ -64,7 +64,7 @@ test("a single-choice answer reads on line 2 from the stored event (#2188)", () 
   assert.equal(item.resolvedAt, ANSWERED);
   assert.equal(questionOutcome(item), "answered");
   const html = render(item);
-  assert.match(html, /<span class="tl-step-title">Destination<\/span><span class="tl-step-detail">Answer: Destination 1 \(Production\)<\/span>/);
+  assert.match(html, /<span class="tl-step-title"><span class="tl-step-verb">Destination<\/span><\/span><span class="tl-step-detail">Answer: Destination 1 \(Production\)<\/span>/);
   assert.match(html, /<span class="status sm t-success inline tl-step-status">Answered<\/span>/);
   assert.match(html, /aria-label="Destination · Answer: Destination 1 \(Production\) · Answered"/);
   assert.match(html, /<time dateTime="2026-10-03T00:31:00.000Z">/);
@@ -91,7 +91,7 @@ test("several questions in one request are one row listing every answer, free te
     { questionId: "token", withheld: true },
   ])]);
   const html = render(item, true);
-  assert.match(html, /<span class="tl-step-title">Destination, Note, Token<\/span>/);
+  assert.match(html, /<span class="tl-step-title"><span class="tl-step-verb">Destination, Note, Token<\/span><\/span>/);
   assert.match(html, /<span class="tl-step-detail">Answers: Destination 2 \(Staging\) · “Ship after the freeze” · \(not shown\)<\/span>/);
   assert.match(html, /<p class="tl-question-free-text">“Ship after the freeze”<\/p>/);
   assert.match(html, /<p class="tl-question-withheld">Answer not shown<\/p>/);

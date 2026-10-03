@@ -334,7 +334,7 @@ test("resolved question cards keep a concise summary and disclose complete rich 
   }));
 
   assert.match(html, /<details class="tl-step disclosure">/);
-  assert.match(html, /<span class="tl-step-title">Target \(\+1 more\)<\/span>/, "line 1 is the header when there is one");
+  assert.match(html, /<span class="tl-step-title"><span class="tl-step-verb">Target \(\+1 more\)<\/span><\/span>/, "line 1 is the header when there is one");
   assert.match(html, /<span class="status sm t-success inline tl-step-status">Answered<\/span>/);
   assert.doesNotMatch(html, /→|❓/);
   assert.doesNotMatch(html, /tl-step-detail/, "an answer an older control plane recorded has no answer line");
