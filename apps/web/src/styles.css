@@ -6972,6 +6972,77 @@ textarea,
   color: var(--text-dim);
   font: var(--type-small);
 }
+/* A step with a second line under its title, such as a question's answer (#2188). Both lines
+   clip at the end; the row grows to fit them. */
+.tl-step-lines {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.tl-step-lines > .tl-step-title { flex: none; }
+.tl-step > .tl-step-head:has(> .tl-step-lines) { padding-block: var(--space-1); }
+.tl-step-detail {
+  overflow: hidden;
+  color: var(--text-faint);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* An agent's question (#2188): each question once, its options with a check on the chosen ones,
+   free text, and who answered. */
+.tl-question { min-width: 0; }
+.tl-question-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  color: var(--text);
+  font: var(--type-body);
+}
+.tl-question-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tl-question-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-dim);
+}
+.tl-question-context { color: var(--text-dim); }
+.tl-question-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-dim);
+}
+.tl-question-choices > li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.tl-question-choices > li.chosen { color: var(--text); }
+.tl-question-check {
+  display: inline-flex;
+  flex: none;
+  width: var(--icon-sm);
+  color: var(--positive-text);
+}
+.tl-question-free-text { margin: 0; }
+.tl-question-withheld,
+.tl-question-resolution {
+  margin: 0;
+  color: var(--text-faint);
+  font: var(--type-small);
+}
 /* An agent a turn spawned (#2183): a step's row named after its spawning call, its role and step
    count in small meta, its status, then Open. The disclosure is a §5.5 trigger; Open is its
    sibling `.btn.sm.ghost`, 8px away so its 44px touch area (§2.8) never covers the trigger. */
@@ -12933,57 +13004,6 @@ body.shell-dock-dragging * {
   display: block;
   margin-top: 4px;
   font-weight: var(--weight-normal);
-}
-.tl-perm.tl-question { display: block; }
-.question-history {
-  width: 100%;
-  min-width: 0;
-}
-.question-history > summary {
-  cursor: pointer;
-  list-style: none;
-}
-.question-history > summary::-webkit-details-marker { display: none; }
-.question-history > summary::before {
-  content: "▸";
-  flex: none;
-  color: var(--text-faint);
-}
-.question-history[open] > summary::before { content: "▾"; }
-.question-history-summary {
-  flex: 1 1 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.question-history-body {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  margin: 8px 0 2px 25px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-  color: var(--text);
-  font-size: var(--text-sm);
-}
-.question-history-item {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.question-history-item + .question-history-item {
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-.question-history-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-  color: var(--text-dim);
-}
-.question-history-context {
-  margin-top: 6px;
-  color: var(--text-dim);
 }
 .tl-perm-head {
   display: flex;

@@ -98,7 +98,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `FileIcon` | Lucide | `File` | Generic file; a file row in the @ picker beside the folder row. |
 | `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
-| `HelpIcon` | Lucide | `MessageCircleQuestion` | Contextual help. |
+| `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row in the transcript; Side Chat's launcher. |
 | `MicIcon` | Lucide | `Mic` | Dictation action. |
 | `ImageIcon` | Lucide | `Image` | Image attachment. |
 | `ImageOffIcon` | Lucide | `ImageOff` | Transcript media that could not load; the composer's refused drop target when the model can't read images. |

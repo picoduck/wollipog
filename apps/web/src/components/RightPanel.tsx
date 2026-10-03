@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { CampaignIcon, ChevronLeftIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, HelpIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
+import { CampaignIcon, ChevronLeftIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -774,7 +774,7 @@ function Launcher({
         label="Side Chat"
         onClick={() => onPick("sidechat")}
         icon={
-          <HelpIcon size={14} />
+          <QuestionIcon size={14} />
         }
       />
     </div>

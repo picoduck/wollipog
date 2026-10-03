@@ -62,7 +62,7 @@ import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { deriveSubagentLifecycle } from "../subagents.js";
 import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
-import { StructuredQuestionText, structuredQuestionSummary } from "./StructuredQuestionText.js";
+import { QuestionHistoryRow } from "./QuestionHistoryRow.js";
 import type { ConversationForkAvailability, EditInForkAvailability } from "../session-actions.js";
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
@@ -514,7 +514,7 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
     case "user_message": return 72;
     case "file_edit": return 28;
     case "question":
-      if (row.item.answered !== undefined || row.item.requestId !== pendingQuestionRequestId) return 52;
+      if (row.item.answered !== undefined || row.item.requestId !== pendingQuestionRequestId) return 44;
       return 112 + row.item.questions.reduce(
         (height, question) => height + 64 + question.options.length * 44 + (question.allowOther ? 44 : 0),
         0,
@@ -2410,59 +2410,7 @@ const TimelineRow = memo(function TimelineRow({
       );
     }
     case "question": {
-      const firstQuestion = item.questions[0];
-      const summary = firstQuestion ? structuredQuestionSummary(firstQuestion.question) : "Question";
-      const historicalQuestion = (
-        <div className="tl-perm tl-question">
-          <details
-            className="question-history"
-            open={disclosureOpen}
-            onToggle={(event) => {
-              if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
-            }}
-          >
-            <summary className="tl-perm-head">
-              <span className="perm-icon" aria-hidden="true">❓</span>
-              <span className="question-history-summary">
-                {summary}{item.questions.length > 1 ? ` (+${item.questions.length - 1} more)` : ""}
-              </span>
-              {item.answered !== undefined ? (
-                <span className="perm-resolved">
-                  {item.resolvedByParentSessionId
-                    ? item.answered
-                      ? `→ Answered by Parent ${item.resolvedByParentSessionId}`
-                      : `→ Dismissed by Parent ${item.resolvedByParentSessionId}`
-                    : item.answeredByPolicies?.length ? `→ Answered by Policy: ${item.answeredByPolicies.join(", ")}` : item.resolutionReason === "replaced"
-                    ? "→ Replaced"
-                    : item.resolutionReason === "expired"
-                      ? "→ Expired"
-                    : item.resolutionReason === "provider_resolved"
-                      ? "→ Resolved by Provider"
-                      : item.answered ? "→ Answered" : "→ Dismissed"}
-                </span>
-              ) : (
-                <span className="perm-pending">awaiting answer…</span>
-              )}
-            </summary>
-            <div className="question-history-body">
-              {item.questions.map((question, index) => (
-                <section className="question-history-item" key={question.id}>
-                  <div className="question-history-label">
-                    {item.questions.length > 1 && <strong>Question {index + 1}</strong>}
-                    {question.header && <span className="question-chip">{question.header}</span>}
-                  </div>
-                  <StructuredQuestionText>{question.question}</StructuredQuestionText>
-                  {question.context && (
-                    <div className="question-history-context">
-                      <StructuredQuestionText>{question.context}</StructuredQuestionText>
-                    </div>
-                  )}
-                </section>
-              ))}
-            </div>
-          </details>
-        </div>
-      );
+      const historicalQuestion = <QuestionHistoryRow item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
       return questionContext ? (
         <SessionTimelineQuestionRegion
           sessionId={questionContext.sessionId}

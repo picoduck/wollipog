@@ -208,6 +208,19 @@ const VOCABULARY = {
     permanent_failure: danger("Push Failed"),
     expired: danger("Push Expired"),
   },
+  /** An agent's question in the transcript (#2188). The resolved outcomes are the words #2204's
+   * decision records share; Awaiting Answer stays until the pending-question marker replaces it. */
+  question: {
+    awaiting_answer: warning("Awaiting Answer"),
+    answered: success("Answered"),
+    answered_by_policy: success("Answered by Policy"),
+    answered_by_parent: success("Answered by Parent"),
+    dismissed: neutral("Dismissed"),
+    dismissed_by_parent: neutral("Dismissed by Parent"),
+    replaced: neutral("Replaced"),
+    expired: neutral("Expired"),
+    provider_resolved: neutral("Resolved by Provider"),
+  },
   /** A workflow gate, a run decision, and the run itself. */
   workflow: {
     awaiting_decision: warning("Awaiting Decision"),

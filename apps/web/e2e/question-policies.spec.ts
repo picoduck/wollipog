@@ -40,7 +40,10 @@ test("question policy controls fit mobile and expose policy attribution", async 
   await governanceRow.getByRole("group").locator("summary").focus();
   await page.keyboard.press("Enter");
   await expect(governanceRow.getByText("Decided By", { exact: true })).toBeVisible();
-  await expect(page.getByText("→ Answered by Policy: Review Sharing and Retries", { exact: true })).toBeVisible();
+  const policyAnswer = page.getByRole("list", { name: "Policy Attribution Example" }).locator(".tl-question");
+  await expect(policyAnswer.locator(".tl-step-status")).toHaveText("Answered by Policy");
+  await expect(policyAnswer.locator(".tl-step-detail")).toHaveText("Answer: Proceed · Policy: Review Sharing and Retries");
+  await expect(policyAnswer).not.toContainText("→");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole("switch").nth(1).click();
   await expect(page.getByRole("switch").nth(1)).toHaveAttribute("aria-checked", "true");

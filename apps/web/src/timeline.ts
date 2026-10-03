@@ -15,6 +15,7 @@ import type {
   SessionCommandExecutionMode,
   SessionEvent,
   WorkflowArtifactView,
+  QuestionAnswerSummaryEntry,
   StructuredRequestResolutionReason,
 } from "@wollipog/protocol";
 
@@ -200,11 +201,18 @@ export type TimelineItem =
       id: number;
       requestId: string;
       questions: AgentQuestion[];
+      /** When the agent asked. */
+      createdAt?: number;
       /** undefined = still pending; true = answered; false = dismissed. */
       answered?: boolean;
       answeredByPolicies?: string[];
       resolutionReason?: StructuredRequestResolutionReason;
       resolvedByParentSessionId?: string;
+      /** What was answered (#2188), from the control plane's stored summary. Absent for a dismissal
+       * and for an answer an older control plane recorded. */
+      answers?: QuestionAnswerSummaryEntry[];
+      /** When it was answered or otherwise resolved. */
+      resolvedAt?: number;
     }
   /** A content-safe policy-hook outcome. Current histories use the runner event sequence as `id`;
    * legacy histories synthesize a negative id from the audit and anchor it chronologically. */
@@ -1254,19 +1262,34 @@ export class TimelineBuilder {
       case "question_request": {
         this.breakText();
         const i =
-          this.items.push({ kind: "question", id: ev.seq, requestId: p.requestId, questions: p.questions }) - 1;
+          this.items.push({
+            kind: "question",
+            id: ev.seq,
+            requestId: p.requestId,
+            questions: p.questions,
+            ...(Number.isFinite(ev.ts) ? { createdAt: ev.ts } : {}),
+          }) - 1;
         this.permIndex.set(p.requestId, i);
         this.markDirty(i);
         break;
       }
-      case "question_policy_answered": {
+      case "question_policy_answered":
+      case "question_answered": {
         const idx = p.questionEventSeq !== undefined
           ? this.items.findIndex((item) => item.kind === "question" && item.id === p.questionEventSeq && item.requestId === p.requestId)
           : this.permIndex.get(p.requestId);
         if (idx != null && idx >= 0 && this.items[idx]?.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
           if (it.answered === false) break;
-          this.items[idx] = { ...it, answered: true, answeredByPolicies: p.policies.map((policy) => policy.name) };
+          this.items[idx] = {
+            ...it,
+            answered: true,
+            ...(p.kind === "question_policy_answered"
+              ? { answeredByPolicies: p.policies.map((policy) => policy.name) }
+              : p.answeredBy.kind === "parent" ? { resolvedByParentSessionId: p.answeredBy.sessionId } : {}),
+            ...(p.answers ? { answers: p.answers } : {}),
+            ...(Number.isFinite(ev.ts) ? { resolvedAt: ev.ts } : {}),
+          };
           this.markDirty(idx);
         }
         break;
@@ -1282,7 +1305,8 @@ export class TimelineBuilder {
             ...(p.resolvedByParentSessionId
               ? { resolvedByParentSessionId: p.resolvedByParentSessionId }
               : {}),
-            ...(!p.answered ? { answeredByPolicies: undefined } : {}) };
+            ...(it.resolvedAt === undefined && Number.isFinite(ev.ts) ? { resolvedAt: ev.ts } : {}),
+            ...(!p.answered ? { answeredByPolicies: undefined, answers: undefined } : {}) };
           this.markDirty(idx);
         }
         break;

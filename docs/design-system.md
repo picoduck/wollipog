@@ -1474,6 +1474,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
 | Message receipt (`messageReceipt`: the one line under a sent message in the transcript — pending prompts, steering, provider commands, the rename) | Sending: a spinner and the word, no badge · Queued, Canceled, Dismissed: neutral · Delivered, Steered the Current Turn: success (inline) · Delivery Uncertain: warning · Delivery Failed, Not Sent, Not Accepted, Rejected, Rename Failed: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
+| Agent question (`question`: the transcript's question row) | Answered, Answered by Policy, Answered by Parent: success · Dismissed, Dismissed by Parent, Replaced, Expired, Resolved by Provider: neutral · Awaiting Answer: warning, until the pending-question marker (#2205) replaces it. Rendered as the inline badge; the resolved words are the decision-record outcomes #2204 shares. |
 | Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out: neutral |
@@ -1527,6 +1528,18 @@ An edited file's added and removed lines take a 9% wash of their tone; a new fil
 green + signs. After 8 lines the rest waits behind Show N More Lines. A binary, renamed or empty
 change has no lines; it says what changed in one sentence instead ("Binary file changed."). The
 runner's per-turn capture names every file it shows, even a lone one.
+
+**Question rows** (#2188). An agent's question is one step (`QuestionHistoryRow`): the §5.5
+chevron, a 16px `MessageCircleQuestion` (§18), line 1 the question's header or first line (several
+questions in one request name every header), line 2 in `--type-small` `--text-faint` with the answer
+("Answer: Destination 1 (Production)", free text in quotes, "Answer not shown" for a secret or email
+answer, "Policy: <name>" after a policy's answer), then the clock time and the inline `question`
+status above. Both lines clip at the end. The body shows each question once, its options with a 14px
+success check on the chosen ones, free text in quotes, and one faint sentence saying who settled it:
+"Answered by you at 12:31 AM", the policy, or the parent session. The answer comes from the summary
+the control plane stores when it accepts an answer (`question_answered`, or `answers` on
+`question_policy_answered`); a dismissal stores none, and an answer recorded before the summary
+existed reads "Answered" with no second line. Shared transcripts exclude every question event.
 
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;

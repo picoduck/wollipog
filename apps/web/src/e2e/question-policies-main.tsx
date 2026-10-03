@@ -58,7 +58,7 @@ createRoot(document.getElementById("root")!).render(<ApiProvider client={client}
   <main className="settings-panel" style={{ maxWidth: 760, margin: "24px auto", padding: 20 }}>
     <h2>Behavior</h2><QuestionPoliciesPanel />
     <EventTimeline ariaLabel="Policy Attribution Example" items={[{ kind: "question", id: 1, requestId: "review", answered: true,
-      answeredByPolicies: ["Review Sharing and Retries"],
+      answeredByPolicies: ["Review Sharing and Retries"], answers: [{ questionId: "q", selected: ["Proceed"] }],
       questions: [{ id: "q", question: "May I send this diff for review?", options: [{ label: "Proceed" }] }],
     }, {
       kind: "governance_decision", id: -1, decision: hookDecisions[0]!,
