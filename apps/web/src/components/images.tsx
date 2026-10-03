@@ -30,15 +30,42 @@ function fileToImage(file: File): Promise<PromptImage | null> {
 }
 
 // What the protocol does not carry: the file an image was picked, dropped or pasted from, for its alt
-// text and the broken-image notice, and a stable React key. Both follow the attachment object, so a
-// draft restored from storage has no name and its images are numbered instead.
-const attachmentFileNames = new WeakMap<PromptImageInput, string>();
+// text and the broken-image notice. Drafts are copied attachment by attachment on their way through
+// queued edits, Edit as a New Turn and failed sends, so a name follows the image's content rather than
+// one object: its type, length and the two ends of its data, which tell picked images apart without
+// hashing megabytes on every render. Only this page's recent picks are remembered; an image the
+// composer never saw picked (a draft restored after a reload, a stored artifact) is numbered instead.
+const MAX_REMEMBERED_FILE_NAMES = 64;
+const attachmentFileNames = new Map<string, string>();
+const contentKeys = new WeakMap<PromptImageInput, string | null>();
 const attachmentKeys = new WeakMap<PromptImageInput, string>();
 let nextAttachmentKey = 0;
 
-/** The name of the file an attached image came from, when the composer saw one. */
+function contentKey(image: PromptImageInput): string | null {
+  let key = contentKeys.get(image);
+  if (key === undefined) {
+    key = isPromptImageReference(image)
+      ? null
+      : `${image.mimeType}\u0000${image.data.length}\u0000${image.data.slice(0, 96)}\u0000${image.data.slice(-96)}`;
+    contentKeys.set(image, key);
+  }
+  return key;
+}
+
+function rememberFileName(image: PromptImageInput, name: string) {
+  const key = contentKey(image);
+  if (key === null) return;
+  attachmentFileNames.delete(key);
+  attachmentFileNames.set(key, name);
+  if (attachmentFileNames.size > MAX_REMEMBERED_FILE_NAMES) {
+    attachmentFileNames.delete(attachmentFileNames.keys().next().value!);
+  }
+}
+
+/** The name of the file an attached image came from, when this page saw it picked. */
 export function attachmentFileName(image: PromptImageInput): string | undefined {
-  return attachmentFileNames.get(image);
+  const key = contentKey(image);
+  return key === null ? undefined : attachmentFileNames.get(key);
 }
 
 /** A stable key for an attachment while the composer holds it: React keys and notice keys. */
@@ -183,7 +210,7 @@ export function usePastedImages(
     if (unreadable) problem ??= { kind: "unreadable", fileName: unreadable.name };
     parsed.forEach((image, index) => {
       const name = accepted[index]?.name;
-      if (image && name) attachmentFileNames.set(image, name);
+      if (image && name) rememberFileName(image, name);
     });
     const valid = parsed.filter((x): x is PromptImage => x !== null);
     if (valid.length) {

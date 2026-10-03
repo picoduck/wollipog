@@ -211,11 +211,16 @@ test("an unreadable file and an over-budget pick report in words too", async () 
 test("each attached image keeps the name of the file it came from, for its alt text and notices (#2177)", async () => {
   const mounted = await mountHook(PROMPT_IMAGE_MIME_TYPES);
   try {
-    await mounted.add([png("diagram.png"), png("screenshot.png")]);
+    // Two different images: a name follows an image's content.
+    await mounted.add([png("diagram.png", 4), png("screenshot.png", 5)]);
     const [first, second] = mounted.hook().images;
     assert.equal(attachmentFileName(first!), "diagram.png");
     assert.equal(attachmentFileName(second!), "screenshot.png");
     assert.equal(attachedImageAlt(2, attachmentFileName(second!)), "Attached image 2: screenshot.png");
+    // Drafts are cloned on their way through queued edits, Edit as a New Turn and failed sends; a clone
+    // is the same image, so it keeps its name.
+    assert.equal(attachmentFileName({ ...first! }), "diagram.png");
+    assert.equal(attachmentFileName(structuredClone(second!)), "screenshot.png");
     // A restored draft's image has no name, and is numbered instead.
     assert.equal(attachedImageAlt(1, attachmentFileName({ mimeType: "image/png", data: "AAAA" })), "Attached image 1");
   } finally {
