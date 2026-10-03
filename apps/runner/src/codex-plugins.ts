@@ -176,6 +176,17 @@ function providerBoundary(command: string, args: string[], allowEnv = true): num
     ? i + 1 : undefined;
 }
 
+/** Retain only the validated launcher prefix, dropping session-specific Codex arguments. */
+export function codexLauncherBootstrap(command: string, args: string[]): string[] {
+  const boundary = providerBoundary(command, args);
+  if (boundary === undefined) {
+    // Diagnostics must not disclose operator-owned paths, argv, or configuration content.
+    throw new Error("Codex sign-in could not identify a supported launcher form. " +
+      "Use a supported Codex launcher form; see docs/codex-plugin-launchers.md.");
+  }
+  return args.slice(0, boundary);
+}
+
 /** Reconcile immediately before a native account launch, including resumed sessions. No user
  * config is rewritten, and explicit CLI overrides remain last so they retain precedence. */
 export function inheritCodexPlugins(launch: CodexPluginLaunch): string[] {

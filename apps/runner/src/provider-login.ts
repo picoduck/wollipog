@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { agentContextKey, type AgentContext, type AgentDefinition, type ProviderLoginView } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
 import { writeProviderAccountsConfig } from "./config.js";
+import { codexLauncherBootstrap } from "./codex-plugins.js";
 import { runContextCommand } from "./context-command.js";
 import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
 import { launchTargetStillMatches } from "./discovery/resolve.js";
@@ -150,7 +151,8 @@ export interface ProviderLoginSupervisorOptions {
   now?: () => number;
 }
 
-function providerBootstrap(agent: Pick<AgentDefinition, "command" | "args">): string[] {
+function providerBootstrap(agent: Pick<AgentDefinition, "command" | "args">, provider: "claude" | "codex"): string[] {
+  if (provider === "codex") return codexLauncherBootstrap(agent.command, agent.args);
   return agent.args.length && /(?:^|[\\/])node(?:\.exe)?$/iu.test(agent.command)
     ? [agent.args[0]!]
     : [];
@@ -376,7 +378,7 @@ export class ProviderLoginSupervisor {
       provider: account.provider,
       directory: account.directory,
       command: agent.command,
-      args: providerBootstrap(agent),
+      args: providerBootstrap(agent, account.provider),
       context: agent.context ?? { kind: "native" },
       env,
       persistAccount,
