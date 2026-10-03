@@ -517,6 +517,45 @@ test("observed GitHub facts stay apart from the reported stage, and stale or una
   }
 });
 
+test("a forge-refresh answer older than reloaded details never puts back facts that have since changed", async () => {
+  const PR = { repository: "picoduck/wollipog", number: 2462 };
+  const base = item("cwi_7", { stage: { stage: "in_review", note: null, pullRequests: [PR], sourceSessionId: "s_root", reportedAt: NOW - MINUTE } });
+  const withRequired = (state: "passing" | "failing", revision: number) => ({
+    revision,
+    item: detailOf(base, { observed: { pullRequests: [{ ref: PR, fact: { availability: "fresh", value: forgeObservation({
+      requiredChecks: { state, passing: state === "passing" ? 1 : 0, failing: state === "failing" ? 1 : 0, pending: 0 },
+    }), observedAt: Date.now() } }] } }),
+  });
+  let current = withRequired("passing", 1);
+  let releaseRefresh!: () => void;
+  const { client: baseClient } = fakeClient(() => ({ revision: current.revision, items: [base], nextCursor: null }));
+  const client = {
+    ...baseClient,
+    campaignWorkItem: async () => current,
+    // The refresh was read at revision 1 (passing) and answers late.
+    campaignForgeRefresh: () => new Promise<CampaignForgeRefreshResponse>((resolve) => {
+      releaseRefresh = () => resolve({ revision: 1, pullRequests: withRequired("passing", 1).item.observed.pullRequests! });
+    }),
+  } as ApiClient;
+  const panel = await mount({ initial: rootSession, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    assert.ok(deliveryFacts(panel.container).includes("Required Checks: Passing1 passing."));
+    // The ledger moves: the details reload at revision 2 and now show a failing required check.
+    current = withRequired("failing", 2);
+    await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({ revision: 2 })) }));
+    assert.ok(deliveryFacts(panel.container).includes("Required Checks: Failing1 failing."));
+    await act(async () => { releaseRefresh(); });
+    await settle();
+    assert.ok(deliveryFacts(panel.container).includes("Required Checks: Failing1 failing."),
+      "the late revision-1 answer does not bring back Passing");
+  } finally {
+    await panel.dispose();
+  }
+});
+
 test("details without pull requests say none was reported, and a reader without runner access is never refreshed", async () => {
   const none = item("cwi_1");
   const hidden = item("cwi_2", { stage: { stage: "in_review", note: null, pullRequests: [{ repository: "picoduck/wollipog", number: 5 }], sourceSessionId: null, reportedAt: NOW - MINUTE } });

@@ -57,6 +57,8 @@ export interface CampaignDetailState {
   status: CampaignLoadStatus | "missing";
   detail: CampaignWorkItemDetail | null;
   error: string | null;
+  /** Ledger revision the shown detail was read at; an older forge-refresh answer never replaces it. */
+  revision?: number;
 }
 
 export interface CampaignStatusData {
@@ -342,7 +344,7 @@ export function useCampaignStatus({
     let cancelled = false;
     api.campaignWorkItem(session.id, selectedItemId, controller.signal).then((response) => {
       if (cancelled) return;
-      setDetail({ key: detailKey, state: { status: "ready", detail: response.item, error: null } });
+      setDetail({ key: detailKey, state: { status: "ready", detail: response.item, error: null, revision: response.revision } });
     }).catch((cause: unknown) => {
       if (cancelled || isAbort(cause)) return;
       if (cause instanceof ApiError && cause.status === 404) {
@@ -376,11 +378,15 @@ export function useCampaignStatus({
         // Merge by pull request into whatever is shown now: details reloaded while this read was in
         // flight may name other pull requests, and a late answer must not bring back old ones.
         const fresh = new Map(response.pullRequests.map((entry) => [`${entry.ref.repository.toLowerCase()}#${entry.ref.number}`, entry.fact]));
-        setDetail((current) => current?.key === detailKey && current.state.detail?.observed.pullRequests
+        // An answer read at an older revision than the details shown (they reloaded while it was in
+        // flight) could put back facts that have since changed, such as passing checks now failing.
+        setDetail((current) => current?.key === detailKey && current.state.detail?.observed.pullRequests &&
+          response.revision >= (current.state.revision ?? 0)
           ? {
             key: detailKey,
             state: {
               ...current.state,
+              revision: response.revision,
               detail: {
                 ...current.state.detail,
                 observed: {
