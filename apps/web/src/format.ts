@@ -261,6 +261,10 @@ export function permissionModeDescription(id: string, driver?: AgentDriverKind):
       : "The harness keeps implementation approvals blocked";
     return `Manages child sessions without its own shell or file-write tools. ${approvalBoundary}; Wollipog keeps child management and human-only requests under its own controls. Selected at session creation and fixed for that session.`;
   }
+  // Pi has no settings allowlist: its driver refuses every tool call in Don't Ask (pi-rpc.ts).
+  if (driver === "pi" && id === "dontAsk") {
+    return "Every tool call is blocked instead of asking you.";
+  }
   if (driver === "codex" && id === "workspace-write") {
     return "Reads and writes inside the workspace run automatically; files outside it and network access are blocked.";
   }

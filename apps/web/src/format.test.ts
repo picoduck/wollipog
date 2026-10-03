@@ -94,6 +94,8 @@ test("Claude permission labels cover every installed fixed-rule mode", () => {
   assert.equal(permissionModeLabel("manual", "claude-code"), "Manual");
   assert.equal(permissionModeLabel("bypassPermissions", "claude-code"), "Full Access (No Checks)");
   assert.match(permissionModeDescription("dontAsk", "claude-code") ?? "", /blocked instead of asking you/);
+  // Pi's driver refuses every tool call in Don't Ask; it has no settings allowlist to run from.
+  assert.equal(permissionModeDescription("dontAsk", "pi"), "Every tool call is blocked instead of asking you.");
   assert.match(permissionModeDescription("manual", "claude-code") ?? "", /hasn't verified what this mode permits/);
 });
 

@@ -39,7 +39,7 @@ test("Pi describes each verified permission mode on its row and needs no deliver
   await expect(menu.getByRole("menuitemradio", { name: "Default" }))
     .toContainText("You approve each tool call before it runs.");
   await expect(menu.getByRole("menuitemradio", { name: "Don't Ask" }))
-    .toContainText("Only actions your settings already allow run; anything else is blocked instead of asking you.");
+    .toContainText("Every tool call is blocked instead of asking you.");
   await expect(menu.getByRole("menuitemradio", { name: "Full Access (No Checks)" }))
     .toContainText("Everything runs with no command approvals. Use only in isolated environments.");
   await expect(menu.locator(".menu-note")).toHaveCount(0);
