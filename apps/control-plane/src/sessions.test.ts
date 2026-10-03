@@ -4091,6 +4091,14 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
       type: "answer_question", sessionId: grandchild.id, requestId: "provider-reused-id",
       answers: { q: "Continue" }, action: "submit", resolvedByParentSessionId: parent.data.id,
     });
+    const summary = db.listEvents(grandchild.id).find((event) => event.payload.kind === "question_answered")?.payload;
+    assert.deepEqual(summary && summary.kind === "question_answered"
+      ? { occurrenceId: summary.occurrenceId, answers: summary.answers, answeredBy: summary.answeredBy }
+      : null, {
+      occurrenceId: questionOccurrence,
+      answers: [{ questionId: "q", selected: ["Continue"] }],
+      answeredBy: { kind: "parent", sessionId: parent.data.id },
+    }, "a Parent Control answer records the parent session as its resolver");
     assert.equal(svc.resolveDescendantRequest(parent.data.id, grandchild.id, questionOccurrence, {
       action: "dismiss",
     }, () => true).status, 409, "the same occurrence cannot be resolved twice");
@@ -6560,7 +6568,10 @@ test("question policy answers avoid input state, record provenance, and survive 
   assert.equal(audit?.outcome, "answered");
   assert.equal(audit?.governancePolicyId, "routine");
   assert.equal(JSON.stringify(audit).includes("Proceed"), false);
-  assert.ok(db.listEvents(id).some((event) => event.payload.kind === "question_policy_answered"));
+  const policyAnswer = db.listEvents(id).find((event) => event.payload.kind === "question_policy_answered")?.payload;
+  assert.deepEqual(policyAnswer?.kind === "question_policy_answered" ? policyAnswer.answers : null,
+    [{ questionId: "q", selected: ["Proceed"] }], "a policy answer records what it answered (#2188)");
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
   svc.onSessionEvent(id, { kind: "question_resolved", requestId: "ask", answered: true });
   db.clearSessionEvents(id);
   db.reconcileRunnerHistory(id, 1, 3);
@@ -12556,6 +12567,112 @@ test("governance audit records permission request and device resolution without 
   assert.deepEqual(entries[1]!.actor, { kind: "human", id: "device-42" });
   assert.equal(JSON.stringify(entries).includes(secret), false);
   assert.equal(db.getSession(id)!.pendingApproval, null);
+});
+
+test("an answered question stores its answer summary beside the question, and the audit stays digest-only (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.reconcileRunnerHistory(id, 1, 1);
+  const request = {
+    kind: "question_request" as const,
+    requestId: "ask-summary",
+    questions: [
+      { id: "destination", header: "Destination", question: "Where should this deploy?",
+        options: [{ label: "Destination 1 (Production)" }, { label: "Destination 2 (Staging)" }] },
+      { id: "checks", question: "Which checks?", multiSelect: true,
+        options: [{ label: "Unit Tests" }, { label: "Browser Tests" }, { label: "Smoke Test" }] },
+      { id: "note", question: "Anything else?", options: [], allowOther: true, required: false },
+      { id: "token", question: "Paste the token.", options: [], allowOther: true, secret: true },
+      { id: "email", question: "Who should be notified?", options: [], allowOther: true, inputFormat: "email" as const },
+    ],
+  };
+  svc.onSessionEvent(id, request, 1, 100);
+  const note = `Use TOKEN=super-secret-note then ${"x".repeat(600)}`;
+  const answers = {
+    destination: "Destination 1 (Production)",
+    checks: ["Unit Tests", "Smoke Test"],
+    note,
+    token: "TOP-SECRET-VALUE",
+    email: "person@example.com",
+  };
+  assert.ok(svc.answerQuestion(id, "ask-summary", answers, { kind: "human", id: "device-7" }, "submit").ok);
+
+  const stored = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(stored.length, 1);
+  const payload = stored[0]!.payload as Extract<SessionEventPayload, { kind: "question_answered" }>;
+  const questionEvent = db.listEvents(id).find((event) => event.payload.kind === "question_request")!;
+  assert.equal(payload.questionEventSeq, questionEvent.seq);
+  assert.deepEqual(payload.answeredBy, { kind: "person" });
+  assert.deepEqual(payload.answers.slice(0, 2), [
+    { questionId: "destination", selected: ["Destination 1 (Production)"] },
+    { questionId: "checks", selected: ["Unit Tests", "Smoke Test"] },
+  ]);
+  const noteEntry = payload.answers[2]!;
+  assert.equal(noteEntry.questionId, "note");
+  assert.equal(noteEntry.truncated, true);
+  assert.equal(Array.from(noteEntry.text!).length, 500);
+  assert.ok(noteEntry.text!.startsWith("Use TOKEN="));
+  assert.equal(noteEntry.text!.includes("super-secret-note"), false, "free text passes through transcript redaction");
+  assert.deepEqual(payload.answers.slice(3), [
+    { questionId: "token", withheld: true },
+    { questionId: "email", withheld: true },
+  ]);
+  const rows = JSON.stringify(db.listEvents(id));
+  assert.equal(rows.includes("TOP-SECRET-VALUE"), false, "a secret answer is never written to the event log");
+  assert.equal(rows.includes("person@example.com"), false, "an email answer is never written to the event log");
+  assert.equal(hub.sessionEventCalls.some((event) => event.payload.kind === "question_answered"), true);
+
+  const audit = svc.governanceAudit(id).filter((entry) => entry.requestId === "ask-summary");
+  assert.deepEqual(audit.map((entry) => [entry.stage, entry.outcome]), [["request", "pending"], ["resolution", "answered"]]);
+  assert.match(audit[1]!.contentDigest ?? "", /^[a-f0-9]{64}$/);
+  const auditJson = JSON.stringify(audit);
+  for (const answer of ["Destination 1 (Production)", "Smoke Test", "super-secret-note", "TOP-SECRET-VALUE", "person@example.com"]) {
+    assert.equal(auditJson.includes(answer), false, `the audit keeps only a digest of ${answer}`);
+  }
+
+  // The runner's own resolution arrives later; then the event cache is rebuilt from runner history.
+  svc.onSessionEvent(id, { kind: "question_resolved", requestId: "ask-summary", answered: true }, 2, 101);
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 3);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "ask-summary", answered: true } },
+      { seq: 3, ts: 102, payload: request },
+    ],
+    page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
+  await svc.hydrateHistory(id);
+  const restored = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(restored.length, 1, "the summary survives a history cache reset, and a later identical request inherits none");
+  const firstRequest = db.listEvents(id).find((event) => event.payload.kind === "question_request")!;
+  assert.deepEqual(restored[0]!.payload, { ...payload, questionEventSeq: firstRequest.seq });
+  assert.equal(restored[0]!.ts, stored[0]!.ts);
+  assert.equal(hub.sentOfType("answer_question").length, 1, "restoring never delivers another answer");
+});
+
+test("a dismissed question stores no answer summary (#2188)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, {
+    kind: "question_request", requestId: "ask-dismiss",
+    questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }],
+  });
+  assert.ok(svc.answerQuestion(id, "ask-dismiss", {}, undefined, "dismiss").ok);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
+  assert.deepEqual(svc.governanceAudit(id).map((entry) => [entry.stage, entry.outcome]),
+    [["request", "pending"], ["resolution", "dismissed"]]);
+});
+
+test("an undeliverable answer stores no answer summary (#2188)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, {
+    kind: "question_request", requestId: "ask-offline",
+    questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }] }],
+  });
+  hub.deliver = false;
+  assert.equal(svc.answerQuestion(id, "ask-offline", { q: "Yes" }).ok, false);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
 });
 
 test("governance audit records explicit cancellation as dismissed", () => {
