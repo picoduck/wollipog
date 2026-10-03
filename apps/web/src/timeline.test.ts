@@ -1539,6 +1539,67 @@ test("builder: a subagent plan does not overwrite the top-level plan (one plan p
   assert.equal(sub.entries[0]!.content, "sub task", "the subagent plan is untouched");
 });
 
+test("builder: one plan card per turn keeps the turn's earlier versions; a later turn's revision gets its own card", () => {
+  const plan = (...statuses: ("pending" | "in_progress" | "completed")[]) => ev({
+    kind: "plan",
+    entries: statuses.map((status, index) => ({ content: `step ${index + 1}`, status })),
+  });
+  const items = deriveTimeline([
+    ev({ kind: "user_message", text: "first" }),
+    plan("pending", "pending", "pending"),
+    ev({ kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" }),
+    plan("completed", "in_progress", "pending"),
+    plan("completed", "completed", "in_progress"),
+    // An unchanged re-statement is not a revision: it adds no version.
+    plan("completed", "completed", "in_progress"),
+    ev({ kind: "user_message", text: "second" }),
+    // Unchanged since the last turn: no card in this turn.
+    plan("completed", "completed", "in_progress"),
+    ev({ kind: "user_message", text: "third" }),
+    plan("completed", "completed", "completed"),
+  ]);
+  const kinds = items.map((item) => item.kind === "user_message" ? `user:${item.text}` : item.kind);
+  assert.deepEqual(kinds, ["user:first", "plan", "tool_call", "user:second", "user:third", "plan"]);
+  const [first, third] = items.filter((item): item is Extract<TimelineItem, { kind: "plan" }> => item.kind === "plan");
+  assert.deepEqual(first!.entries.map((entry) => entry.status), ["completed", "completed", "in_progress"]);
+  assert.deepEqual(first!.history?.map((version) => version.map((entry) => entry.status)), [
+    ["pending", "pending", "pending"],
+    ["completed", "in_progress", "pending"],
+  ]);
+  assert.deepEqual(third!.entries.map((entry) => entry.status), ["completed", "completed", "completed"]);
+  assert.equal(third!.history, undefined);
+  assert.deepEqual(deriveSidePaneContent(items).plan.map((entry) => entry.status), ["completed", "completed", "completed"],
+    "the side pane shows the latest plan");
+});
+
+test("builder: a steer stays in its turn's plan card; an automatic continuation opens a new one", () => {
+  const items = deriveTimeline([
+    ev({ kind: "user_message", text: "first" }),
+    ev({ kind: "plan", entries: [{ content: "a", status: "pending" }] }),
+    ev({ kind: "user_message", text: "steer", deliveryIntent: "steer", submissionId: "s1" }),
+    ev({ kind: "plan", entries: [{ content: "a", status: "in_progress" }] }),
+    ev({ kind: "conversation_checkpoint", turn: 1 }),
+    ev({ kind: "plan", entries: [{ content: "a", status: "completed" }] }),
+  ]);
+  const plans = items.filter((item): item is Extract<TimelineItem, { kind: "plan" }> => item.kind === "plan");
+  assert.equal(plans.length, 2);
+  assert.equal(plans[0]!.history?.length, 1);
+  assert.equal(plans[1]!.entries[0]!.status, "completed");
+});
+
+test("builder: an async answer that starts a turn opens a new plan card", () => {
+  const items = deriveTimeline([
+    ev({ kind: "user_message", text: "first" }),
+    ev({ kind: "plan", entries: [{ content: "a", status: "in_progress" }] }),
+    ev({ kind: "question_resolved", requestId: "q1", answered: true, startsTurn: true }),
+    ev({ kind: "plan", entries: [{ content: "a", status: "completed" }] }),
+  ]);
+  const plans = items.filter((item): item is Extract<TimelineItem, { kind: "plan" }> => item.kind === "plan");
+  assert.equal(plans.length, 2);
+  assert.equal(plans[0]!.entries[0]!.status, "in_progress", "the interrupted turn's card keeps its own plan");
+  assert.equal(plans[1]!.history, undefined);
+});
+
 test("nestSubagents does not mutate its input array or items", () => {
   const items = deriveTimeline([
     ev({ kind: "tool_call", toolCallId: "task1", title: "Task", status: "in_progress" }),

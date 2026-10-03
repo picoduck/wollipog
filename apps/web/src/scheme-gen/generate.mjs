@@ -199,6 +199,9 @@ function readDemands(cssPath) {
     ["--text-dim", { hue: "--amber", strength: 0.12, base: "--bg-elev" }],
     ["--text", { hue: "--warning", strength: 0.12, base: "--bg-elev" }],
     ["--warning-on-tint", { hue: "--warning", strength: 0.1 }],
+    // The transcript diff's old `.d-add` and `.d-del` rows, retired by #2187 for 9% tone washes.
+    ["--positive-text", { hue: "--diff-add-bg", strength: 1, base: "--diff-add-bg" }],
+    ["--danger-text", { hue: "--diff-delete-bg", strength: 1, base: "--diff-delete-bg" }],
   ]) {
     const list = demands.get(ink) ?? [];
     if (!list.some((d) => d.hue === entry.hue && d.strength === entry.strength && d.base === entry.base)) list.push(entry);

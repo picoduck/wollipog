@@ -236,25 +236,8 @@ export function workspaceRelativePath(path: string, workspaceRoot?: string): str
   return slashed.slice(root.length + 1) || path;
 }
 
-/** "+12 −3" from a unified diff's body lines; headers are not changes. */
-export function diffLineCounts(diff: string | undefined): { added: number; removed: number } | null {
-  if (!diff) return null;
-  const lines = diff.split("\n");
-  // Inside a hunk every +/- line is a change, even "+++counter;"; only a file's header, before its
-  // first "@@", carries ---/+++ paths. A bare body with no hunk header falls back to the prefixes.
-  const hunked = lines.some((line) => line.startsWith("@@"));
-  let inHunk = !hunked;
-  let added = 0;
-  let removed = 0;
-  for (const line of lines) {
-    if (hunked && line.startsWith("diff ")) inHunk = false;
-    else if (hunked && line.startsWith("@@")) inHunk = true;
-    else if (!inHunk) continue;
-    else if (line.startsWith("+") && (hunked || !line.startsWith("+++"))) added += 1;
-    else if (line.startsWith("-") && (hunked || !line.startsWith("---"))) removed += 1;
-  }
-  return { added, removed };
-}
+/** "+12 −3" from a unified diff's change lines; one parser serves the counts and the diff body. */
+export { diffLineCounts } from "./unified-diff.js";
 
 const EXIT_CODE = /^\s*(?:exit(?:ed with)? code|exit status|process exited with code|command exited with code)[:\s]+(-?\d+)\b/i;
 const ERROR_LINE = /\b(?:error|errors|errno|fail|failed|failure|fatal|exception|traceback|panic(?:ked)?)\b/i;

@@ -35,6 +35,7 @@ import {
   FileClock as LucideFileClock,
   FileDiff as LucideFileDiff,
   FilePen as LucideFilePen,
+  FilePlus as LucideFilePlus,
   FileSearch as LucideFileSearch,
   FileText as LucideFileText,
   Files as LucideFiles,
@@ -583,7 +584,8 @@ export function ShieldCheckIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideShieldCheck} {...props} />;
 }
 
-/** Plan mode: the composer bar's Plan toggle. `ListChecks` already means the background job list. */
+/** A plan: the composer bar's Plan toggle and a transcript plan card's head (#2187). `ListChecks`
+ * already means the background job list. */
 export function PlanIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideListTodo} {...props} />;
 }
@@ -721,6 +723,11 @@ export function ReadIcon(props: IconProps) {
 
 export function FileEditIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFilePen} {...props} />;
+}
+
+/** A file edit that created the file (#2187). */
+export function NewFileIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFilePlus} {...props} />;
 }
 
 export function DeleteIcon(props: IconProps) {

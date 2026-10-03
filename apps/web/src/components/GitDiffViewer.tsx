@@ -1,4 +1,4 @@
-import { Fragment, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { normalizeSourcePath, REVIEW_ANCHOR_TEXT_MAX_LENGTH } from "@wollipog/protocol";
 import { StatusBadge } from "./StatusBadge.js";
 import type {
@@ -160,6 +160,13 @@ const BADGE: Record<GitDiffFile["status"], { label: string; kind: string }> = {
   untracked: { label: "??", kind: "untracked" },
 };
 
+/** A request to bring one file's card into view: a transcript edit's Open in Review (#2187). */
+export interface DiffFileFocus {
+  path: string;
+  /** Increases with every request, so asking for the same file again scrolls to it again. */
+  request: number;
+}
+
 export function GitDiffViewer({
   diff,
   staging,
@@ -167,6 +174,9 @@ export function GitDiffViewer({
   onOpenSourceLocation,
   onAttachWorkspaceReference,
   layout = "unified",
+  focus,
+  focusSettled = true,
+  onFocusHandled,
 }: {
   diff: GitDiffInfo;
   staging?: StagingControls;
@@ -174,10 +184,22 @@ export function GitDiffViewer({
   onOpenSourceLocation?: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   layout?: DiffLayout;
+  focus?: DiffFileFocus | null;
+  /** This diff was read after the focus request, so a file missing from it is really absent. */
+  focusSettled?: boolean;
+  /** The focus request was met, or a diff read after it does not hold its file. */
+  onFocusHandled?: () => void;
 }) {
   // Memoized on the diff object rather than repeated for every re-render the surrounding panel
   // causes (typing a commit message, a status poll landing).
   const files = useMemo(() => groupHunksForDisplay(diff.files, COLLAPSE_THRESHOLD), [diff]);
+  const focusedPath = focus && files.some((display) => display.file.path === focus.path) ? focus.path : null;
+  // A file a fresh read does not hold (committed since, or outside this scope) ends the request
+  // rather than waiting to jump the reader later. A diff from before the request may simply
+  // predate the edit, so it only waits.
+  useEffect(() => {
+    if (focus && !focusedPath && focusSettled) onFocusHandled?.();
+  }, [focus, focusedPath, focusSettled, onFocusHandled]);
 
   const lineage = review?.lineage ?? "";
   // Anchored findings grouped by their anchor, once per diff instead of a scan per rendered row.
@@ -272,6 +294,8 @@ export function GitDiffViewer({
           diffHash={diff.diffHash}
           scope={diff.scope}
           layout={layout}
+          focusRequest={display.file.path === focusedPath ? focus?.request : undefined}
+          onFocusHandled={onFocusHandled}
         />
       ))}
     </div>
@@ -289,6 +313,8 @@ function DiffFileCard({
   diffHash,
   scope,
   layout,
+  focusRequest,
+  onFocusHandled,
 }: {
   display: DisplayFile;
   staging?: StagingControls;
@@ -300,8 +326,12 @@ function DiffFileCard({
   diffHash: string;
   scope: GitDiffInfo["scope"];
   layout: DiffLayout;
+  focusRequest?: number;
+  onFocusHandled?: () => void;
 }) {
   const { file, hunks, hiddenCount } = display;
+  const cardRef = useRef<HTMLDivElement>(null);
+  const headRef = useRef<HTMLButtonElement>(null);
   const stagedCount = file.hunks.filter((h) => h.staged).length;
   const [expanded, setExpanded] = useState(true);
   // A per-file "show the collapsed tail" toggle, separate from the whole-file collapse above.
@@ -309,11 +339,22 @@ function DiffFileCard({
   // `?? modified` only satisfies noUncheckedIndexedAccess — BADGE is exhaustive over the status union.
   const badge = BADGE[file.status] ?? BADGE.modified;
   const sourcePath = normalizeSourcePath(file.path);
+  const focusHandledRef = useRef(onFocusHandled);
+  focusHandledRef.current = onFocusHandled;
+  // Open in Review: open this file, scroll it to the top and focus its head, once per request.
+  useLayoutEffect(() => {
+    if (focusRequest === undefined) return;
+    setExpanded(true);
+    cardRef.current?.scrollIntoView?.({ block: "start" });
+    headRef.current?.focus({ preventScroll: true });
+    focusHandledRef.current?.();
+  }, [focusRequest]);
 
   return (
-    <div className="diff-file">
+    <div className="diff-file" ref={cardRef} data-path={file.path}>
       <div className="diff-file-head-row">
         <button
+          ref={headRef}
           className="diff-file-head"
           onClick={() => setExpanded((e) => !e)}
           aria-expanded={expanded}

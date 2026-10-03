@@ -1222,7 +1222,7 @@ test("an old plan update patches one indexed row after 5,000 later messages", ()
   };
   push({ kind: "plan", entries: [{ content: "first", status: "in_progress" }] });
   for (let index = 0; index < 5_000; index += 1) {
-    push({ kind: "user_message", text: `later ${index}` });
+    push({ kind: "agent_message", text: `later ${index}`, final: true });
   }
   const disclosure = new Map<string, boolean>([["work:head", true]]);
   const projector = new IncrementalTimelineRows();

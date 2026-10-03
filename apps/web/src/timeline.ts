@@ -162,7 +162,14 @@ export type TimelineItem =
       completedAt?: number;
       subagentRollup?: SubagentRollup;
     }
-  | { kind: "plan"; id: number; entries: PlanEntry[]; parentToolUseId?: string }
+  | {
+      kind: "plan";
+      id: number;
+      entries: PlanEntry[];
+      /** The turn's earlier versions of this plan, oldest first (#2187). */
+      history?: PlanEntry[][];
+      parentToolUseId?: string;
+    }
   | { kind: "file_edit"; id: number; path: string; diff?: string; diffRefs?: EventPayloadReference[]; parentToolUseId?: string }
   | { kind: "error"; id: number; message: string }
   | { kind: "turn_interrupted"; id: number; createdAt?: number }
@@ -587,8 +594,9 @@ export function deriveSidePaneContent(items: TimelineItem[]): SidePaneContent {
   // (parentToolUseId set) is its own scoped plan and must not masquerade as the top-level one,
   // e.g. when a subagent plans before the top-level agent does. Fall back to any plan only when
   // no top-level plan exists yet, so a subagent-only turn still surfaces something.
+  // Each turn that revised the plan has its own card; the pane shows the latest.
   const plans = items.filter((it): it is Extract<TimelineItem, { kind: "plan" }> => it.kind === "plan");
-  const planItem = plans.find((it) => !it.parentToolUseId) ?? plans[0];
+  const planItem = plans.filter((it) => !it.parentToolUseId).at(-1) ?? plans[0];
   const plan = planItem?.entries ?? [];
   const artifactByPath = new Map<string, { path: string; hasDiff: boolean }>();
   for (const it of items) {
@@ -607,13 +615,16 @@ export function deriveSidePaneContent(items: TimelineItem[]): SidePaneContent {
  * Incremental fold of the raw event stream into renderable items: coalesce consecutive text
  * chunks (agent message / thought / stderr / command output), group tool calls and their
  * updates by toolCallId, collapse repeated file edits by path (except per-turn "worktree"
- * deltas), keep a single live plan, and pair permission requests with their resolutions.
+ * deltas), keep one plan card per turn, and pair permission requests with their resolutions.
  *
  * Push events ONE AT A TIME and read `snapshot()` — re-folding the whole stream per streamed
  * chunk made timeline derivation O(n²) over a session's life. Updates are CLONE-ON-WRITE:
  * an untouched item keeps its object identity across snapshots, so memoized row components
  * skip re-rendering everything except the item that actually changed.
  */
+const samePlan = (a: readonly PlanEntry[], b: readonly PlanEntry[]) =>
+  a.length === b.length && a.every((entry, index) => entry.content === b[index]!.content && entry.status === b[index]!.status);
+
 export class TimelineBuilder {
   private items: TimelineItem[] = [];
   private readonly toolIndex = new Map<string, number>();
@@ -629,6 +640,8 @@ export class TimelineBuilder {
    * active. Keep that episode anchored to its first transcript row; only a resolution ends it. */
   private activeAuthenticationIndex: number | null = null;
   private readonly planIndex = new Map<string, number>();
+  /** Each parent context's latest plan, so an unchanged re-statement is not shown as a revision. */
+  private readonly latestPlans = new Map<string, PlanEntry[]>();
   private readonly pendingSubagentRollups = new Map<string, SubagentRollup>();
   private activeUserIndex: number | null = null;
   /** The current turn's latest error, which a repeat of the same failure merges into. */
@@ -857,6 +870,12 @@ export class TimelineBuilder {
     this.openProviderTexts.clear();
   }
 
+  /** A turn ended: the top-level agent's next plan revision opens a new card in the next turn. A
+   * subagent's plan lives in its spawning call's turn, so its card is never split. */
+  private endTurnPlan(): void {
+    this.planIndex.delete("");
+  }
+
   private breakText(): void {
     if (this.lastText) this.settleText(this.lastText.index);
     this.lastText = null;
@@ -888,6 +907,7 @@ export class TimelineBuilder {
         // turn. It must not replace the original prompt as owner of that turn's duration or
         // conversation checkpoint.
         if (p.deliveryIntent !== "steer") {
+          this.endTurnPlan();
           this.activeUserIndex = userIndex;
           this.pendingConversationUserIndex = userIndex;
           this.usageOwner = { kind: "prompt" };
@@ -1131,13 +1151,17 @@ export class TimelineBuilder {
         break;
       }
       case "plan": {
-        // One live plan PER parent context — a subagent's TodoWrite must not overwrite the
-        // top-level plan (or vice-versa).
+        // One plan card per turn PER parent context — a subagent's TodoWrite must not overwrite
+        // the top-level plan (or vice-versa). The card sits where the plan first changed in its
+        // turn; a later revision in the same turn updates it and keeps the version it replaced.
         const key = p.parentToolUseId ?? "";
+        const latest = this.latestPlans.get(key);
+        if (latest && samePlan(latest, p.entries)) break;
+        this.latestPlans.set(key, p.entries);
         const at = this.planIndex.get(key);
         if (at != null) {
           const it = this.items[at] as Extract<TimelineItem, { kind: "plan" }>;
-          this.items[at] = { ...it, entries: p.entries };
+          this.items[at] = { ...it, entries: p.entries, history: [...(it.history ?? []), it.entries] };
           this.markDirty(at);
         } else {
           this.breakText();
@@ -1248,6 +1272,9 @@ export class TimelineBuilder {
         break;
       }
       case "question_resolved": {
+        // An async answer can start the next provider turn with no prompt or checkpoint
+        // (turn-progress.ts reads the same boundary).
+        if (p.startsTurn) this.endTurnPlan();
         const idx = this.permIndex.get(p.requestId);
         if (idx != null && this.items[idx]!.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
@@ -1269,6 +1296,7 @@ export class TimelineBuilder {
         this.markDirty(index);
         // A prompt's own checkpoint directly follows it; any other opens an automatic continuation.
         if (this.activeUserIndex == null || index - 1 !== this.activeUserIndex) {
+          this.endTurnPlan();
           const previous = this.usageOwner;
           this.usageOwner = { kind: "continuation", anchor: index, pendingUsageAt: null };
           if (previous?.kind === "continuation" && previous.anchor == null && this.usageOwnerCompletedAt == null &&
@@ -1286,6 +1314,7 @@ export class TimelineBuilder {
       case "conversation_checkpoint": {
         this.breakText();
         this.lastErrorIndex = null;
+        this.endTurnPlan();
         const promptTurn = this.pendingConversationUserIndex != null;
         if (this.pendingConversationUserIndex != null) {
           const item = this.items[this.pendingConversationUserIndex];
