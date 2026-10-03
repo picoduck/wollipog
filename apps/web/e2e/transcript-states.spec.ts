@@ -63,8 +63,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       // Scrolled to the top, the first row starts below the notice and is fully readable.
       await reader.evaluate((element) => { element.scrollTop = 0; });
       await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBe(0);
-      const firstRow = (await page.locator("[data-virtual-row]").first().boundingBox())!;
-      expect(firstRow.y).toBeGreaterThanOrEqual(box.y + box.height);
+      // The virtual list re-renders its window after the jump, so wait for the head row to settle.
+      await expect.poll(() => reader.evaluate((element) => {
+        const rows = [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")];
+        return Math.min(...rows.map((row) => row.getBoundingClientRect().top));
+      })).toBeGreaterThanOrEqual(box.y + box.height);
       expect((await notice.boundingBox())!.y).toBe(box.y);
       await notice.getByRole("button", { name: "Show Details" }).click();
       await expect(notice.locator(".notice-details-body")).toHaveText("Could not load complete session activity.");
