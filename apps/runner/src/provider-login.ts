@@ -152,7 +152,10 @@ export interface ProviderLoginSupervisorOptions {
 }
 
 function providerBootstrap(agent: Pick<AgentDefinition, "command" | "args">, provider: "claude" | "codex"): string[] {
-  if (provider === "codex") return codexLauncherBootstrap(agent.command, agent.args);
+  if (provider === "codex") {
+    // A selected direct executable (including discovered codex.js targets) needs no prefix.
+    return agent.args.length === 0 ? [] : codexLauncherBootstrap(agent.command, agent.args);
+  }
   return agent.args.length && /(?:^|[\\/])node(?:\.exe)?$/iu.test(agent.command)
     ? [agent.args[0]!]
     : [];

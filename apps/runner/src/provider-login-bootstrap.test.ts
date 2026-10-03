@@ -159,6 +159,29 @@ test("unsupported bootstrap forms refuse with a fixed diagnostic before leases, 
   }
 });
 
+test("selected zero-argv direct executables keep no-prefix sign-in and app-server behavior", async (t) => {
+  for (const command of ["/fixture/node_modules/@openai/codex/bin/codex.js", "/fixture/bin/codex-target"]) {
+    for (const structured of [false, true]) {
+      const f = fixture(t, command, [], structured);
+      writeFileSync(join(f.root, ".codex/config.toml"), "");
+      await f.supervisor.startAccount({ accountId: "fixture-account" });
+      assert.deepEqual(f.spawns[0]!.args, structured ? ["app-server"] : ["login", "--device-auth"]);
+    }
+  }
+});
+
+test("unknown direct executables still refuse native plugin insertion when inheritance is needed", async (t) => {
+  const f = fixture(t, "/fixture/node_modules/@openai/codex/bin/codex.js", []);
+  await assert.rejects(f.supervisor.startAccount({ accountId: "fixture-account" }), {
+    message: "Codex plugin inheritance could not identify a supported launcher form. " +
+      "Use a supported Codex launcher form; see docs/codex-plugin-launchers.md.",
+  });
+  assert.deepEqual(f.acquisitions, [f.directory]);
+  assert.deepEqual(f.releases, [f.directory]);
+  assert.deepEqual(f.spawns, []);
+  assert.equal(existsSync(join(f.directory, "plugins")), false);
+});
+
 test("Claude retains its existing direct and bare Node bootstrap behavior", async (t) => {
   for (const [command, prefix] of [["claude", []], [process.execPath, ["claude-entry.js"]]] as [string, string[]][]) {
     const f = fixture(t, command, [...prefix, "--verbose"], false, "claude");
@@ -174,8 +197,9 @@ test("actual inert launchers forward supervisor sign-in, status, and app-server 
   // neither the status child nor the injected sign-in spawn can inherit operator credentials.
   process.env = { HOME: root, ...(previousEnv.SystemRoot ? { SystemRoot: previousEnv.SystemRoot } : {}) };
   const record = join(root, "argv.jsonl");
-  const entry = join(root, "receiver.cjs");
-  writeFileSync(entry, `const fs = require("node:fs");
+  const entry = join(root, "codex.js");
+  writeFileSync(entry, `#!${process.execPath}
+const fs = require("node:fs");
 fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(2)) + "\\n");
 process.stdout.write("inert fixture: unauthenticated\\n");
 process.exit(process.argv.includes("app-server") || process.argv.includes("status") ? 1 : 0);
@@ -185,6 +209,8 @@ process.exit(process.argv.includes("app-server") || process.argv.includes("statu
     [process.execPath, ["--no-warnings", "--enable-source-maps", "--", entry]],
   ];
   if (process.platform !== "win32") {
+    chmodSync(entry, 0o700);
+    cases.push([entry, []]);
     cases.push(["/usr/bin/env", ["-u", "UNUSED_FIXTURE", "--", process.execPath, "--no-warnings", entry]]);
     const packageShim = join(root, "npx");
     // This is a local inert argv adapter, never a real package manager. No shell, registry,
@@ -208,11 +234,13 @@ require(${JSON.stringify(entry)});
         const released = new Promise<void>((resolve) => { release = resolve; });
         let releaseCount = 0;
         let accountAddedCount = 0;
+        let configWriteCount = 0;
         const children: AgentProcess[] = [];
         const supervisor = new ProviderLoginSupervisor({
           dataDir: root, configPath: join(root, "unused-config.json"),
           accounts: [{ id: "fixture", label: "Fixture", provider: "codex", directory }],
-          agents: () => [{ id: "fixture", name: "Fixture", command, args: [...prefix, ...sessionArgs],
+          agents: () => [{ id: "fixture", name: "Fixture", command,
+            args: command === entry ? [] : [...prefix, ...sessionArgs],
             env: {}, driver: "codex-app-server", context: { kind: "native" },
             ...(structured ? { codexAppServer: { status: "supported", installedVersion: "0.155.1",
               appServerAvailable: true, transport: "stdio", verification: "generated-schema",
@@ -222,6 +250,7 @@ require(${JSON.stringify(entry)});
           releaseLease: () => { releaseCount++; release(); return true; },
           onUpdate: () => {}, onAccountAdded: () => { accountAddedCount++; },
           identify: async () => undefined,
+          writeAccounts: () => { configWriteCount++; },
           spawn: (options) => {
             spawns.push(options);
             const child = spawn(options.command, options.args, { cwd: options.cwd, env: options.env,
@@ -252,6 +281,7 @@ require(${JSON.stringify(entry)});
           assert.deepEqual(spawns[0]!.args, [...prefix, ...(structured ? ["app-server"] : ["login", "--device-auth"])]);
           assert.equal(supervisor.views()[0]!.status, "failed");
           assert.equal(accountAddedCount, 0, "inert sign-in and status never confirm authentication");
+          assert.equal(configWriteCount, 0, "inert fixtures cannot persist authentication");
           if (!structured) assert.equal(supervisor.views()[0]!.error, "The provider did not confirm authentication.");
           assert.equal(releaseCount, 1);
           assert.equal(existsSync(join(directory, "auth.json")), false);
