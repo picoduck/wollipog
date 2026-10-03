@@ -866,9 +866,9 @@ export function createApiClient(transport: ApiTransport) {
   sessionRolePreview: (id: string, role: import("@wollipog/protocol").SessionRole) =>
     req<import("@wollipog/protocol").SessionRoleConversionPreview>(`/api/sessions/${encodeURIComponent(id)}/role?role=${role}`),
   changeSessionRole: (id: string, role: import("@wollipog/protocol").SessionRole,
-    expectedRole: import("@wollipog/protocol").SessionRole) =>
+    expectedRole: import("@wollipog/protocol").SessionRole, orchestrator?: import("@wollipog/protocol").OrchestratorCampaignOverrides) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/role`, {
-      method: "POST", body: JSON.stringify({ role, expectedRole }),
+      method: "POST", body: JSON.stringify({ role, expectedRole, ...(orchestrator ? { orchestrator } : {}) }),
     }),
   sessionProviderAccounts: (id: string) =>
     req<SessionProviderAccountOptionsResponse>(

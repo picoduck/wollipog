@@ -9,10 +9,14 @@ These actions deliberately preserve the boundary between preparing a prompt and 
 the session ID, transcript, provider conversation, account, Project, worktree, and provider permission
 mode. The authenticated human confirms the change; neither role's agent credential can convert it.
 The next message resumes the same provider conversation with freshly provisioned tools, instructions,
-and credentials. Promotion previews the current human-owned Orchestrator defaults, or inherited
-campaign policy, including the decision owners.
+and credentials. Promotion starts from the current human-owned Orchestrator defaults, or inherited
+campaign policy. Review and edit the supported child harness/model/effort, admission limit, follow-up
+and completion behavior, ordinary requests, typed decision owners, and Integration Isolation before
+confirming. These choices apply to this session and never update saved defaults. A nested session displays its
+controlling campaign policy with locked controls; it cannot override campaign behavior or ownership. Strict Project
+Isolation cannot be enabled during conversion; a strict default can be disabled explicitly here.
 
-Both peers must support protocol v197. Conversion requires a quiet, resumable native Claude Code,
+Both peers must support protocol v198. Conversion requires a quiet, resumable native Claude Code,
 Codex, Codex app-server, or Pi session on the host with advertised additive-role support. Coupled
 Orchestrator presets, Strict Project Isolation, unsupported permissions, workflow/side-chat sessions,
 busy providers, open Native TUIs, queued/background work, account/worktree transitions, live descendants, and unsettled
@@ -28,8 +32,10 @@ The control plane durably records one correlated intent and fences submissions/c
 asking the runner to prepare. The runner confirms provider retirement, removes both management and
 policy-hook credentials, and durably reports preparation. Only that session's owning runner and exact
 conversion receipt can commit role authority. Old hashes cannot be registered again. A second,
-idempotent command applies the launch policy; reconnect inventory reconciles lost replies. Downgraded
-peers cannot advance the intent. An unconfirmed surviving provider leaves it pending rather than
+idempotent command applies the exact selected launch policy; reconnect inventory reconciles lost replies. Downgraded
+peers cannot advance the intent. The recorded policy is immutable during retries, even if saved defaults
+change. Adopted Pi conversations retain their managed session directory on both conversions. Runner
+instance nonces prevent a reused PID from skipping retirement validation. An unconfirmed surviving provider leaves it pending rather than
 granting new authority. Stop during preparation abandons the conversion only after retirement is
 confirmed, preserving the previous role.
 After runner replacement, **Stop Session** can also cancel an unprepared intent whose old provider

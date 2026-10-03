@@ -2126,6 +2126,11 @@ export interface SessionRoleConversionPreview {
   reason?: string;
   permissionMode: string | null;
   orchestratorPolicy?: OrchestratorCampaignPolicy;
+  orchestratorCapabilities?: OrchestratorSettingsCapabilities;
+  /** A nested session inherits its controlling campaign; it cannot shadow that policy. */
+  policyInherited?: boolean;
+  /** Structural checks passed, but these editable settings need correction before confirmation. */
+  policyError?: string;
 }
 
 export interface PrepareSessionRoleMessage {

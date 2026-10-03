@@ -226,6 +226,10 @@ test("PROTOCOL_VERSION is 202", () => {
   assert.equal(runnerSupportsProtocol(198, "campaignForgeStatus"), true);
   assert.equal(runnerSupportsProtocol(198, "costReconciliation"), false);
   assert.equal(runnerSupportsProtocol(199, "costReconciliation"), true);
+  for (const version of [undefined, 197, 198, 199, 200, 201]) {
+    assert.equal(runnerSupportsProtocol(version, "sessionRoleConversion"), false);
+  }
+  assert.equal(runnerSupportsProtocol(202, "sessionRoleConversion"), true);
   assert.equal(runnerSupportsProtocol(195, "campaignWorkLedger"), false);
   assert.equal(runnerSupportsProtocol(196, "campaignWorkLedger"), true);
   assert.equal(runnerSupportsProtocol(192, "archiveWorktreeRetirement"), false);

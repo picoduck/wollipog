@@ -103,6 +103,45 @@ async function settle(predicate: () => boolean, diagnostics?: () => string) {
   assert.ok(predicate(), diagnostics?.() ?? "provider turn did not settle");
 }
 
+test("an adopted Pi conversation keeps its managed session directory through both role conversions and prompt resumes", async () => {
+  const h = fixture("pi");
+  try {
+    await h.manager.start(h.spec);
+    const sessionDir = join(h.root, "managed-pi-copy");
+    h.store.patchMeta("s", { agentSessionId: "same-provider-conversation",
+      args: [...h.spec.args, "--session-dir", sessionDir],
+      adoptedProviderState: { driver: "pi", sessionDir } });
+    for (const target of ["orchestrator", "normal"] as const) {
+      const command = target === "orchestrator" ? h.command() : {
+        ...h.command("demotion"), expectedRole: "orchestrator" as const, targetRole: target, orchestrator: undefined,
+      };
+      assert.equal((await h.manager.prepareSessionRole(command, h.revoke)).ok, true);
+      assert.equal(h.manager.commitSessionRole({ type: "commit_session_role", requestId: "commit", sessionId: "s", conversionId: command.conversionId }).ok, true);
+      assert.equal(h.manager.prompt("s", "Continue the adopted conversation"), true);
+      const count = target === "orchestrator" ? 2 : 3;
+      await settle(() => h.launches.length === count && h.store.readMeta("s")?.status === "idle");
+      assert.equal(h.launches[count - 1]!.resumeId, "same-provider-conversation");
+      assert.deepEqual(h.launches[count - 1]!.args, ["user-arg", "--session-dir", sessionDir]);
+      assert.deepEqual(h.store.readMeta("s")!.adoptedProviderState, { driver: "pi", sessionDir });
+    }
+  } finally { await h.cleanup(); }
+});
+
+test("a reused runner PID cannot attest retirement owned by a previous runner instance", async () => {
+  const h = fixture();
+  try {
+    await h.manager.start(h.spec);
+    h.store.patchMeta("s", { agentSessionId: "same-provider-conversation", roleConversion: {
+      command: h.command(), state: "retiring", runnerPid: process.pid, runnerOwner: "previous-instance", providerPid: process.pid,
+    } });
+    const reply = await h.manager.prepareSessionRole(h.command(), () => assert.fail("unconfirmed provider must retain credentials"));
+    assert.equal(reply.ok, false);
+    assert.equal(reply.pending, true);
+    assert.match(reply.error!, /may still be alive/);
+    assert.equal(h.disposed(), 0);
+  } finally { await h.cleanup(); }
+});
+
 test("a live Native TUI blocks retirement and a prepared conversion blocks new TUI opens", async () => {
   const h = fixture();
   try {
@@ -229,7 +268,7 @@ test("retirement must confirm before credential revocation or prepared receipt; 
     assert.equal((await duplicate).requestId, "duplicate");
     assert.equal(revoked, 1);
     assert.deepEqual(metaToSnapshot(h.store.readMeta("s")!).roleConversionReceipt, { conversionId: "promotion", state: "prepared" });
-    assert.equal(metaToSnapshot(h.store.readMeta("s")!, 196).roleConversionReceipt, undefined);
+    assert.equal(metaToSnapshot(h.store.readMeta("s")!, 197).roleConversionReceipt, undefined);
   } finally { release(); await h.cleanup(); }
 });
 
@@ -319,6 +358,7 @@ test("busy, pending, incompatible, and nonresumable sessions refuse before retir
     { config: { permissionMode: "orchestrator" } },
     { context: { kind: "wsl" as const, distro: "Linux" } },
     { pendingProviderAccountId: "another-account" },
+    { adoptedProviderState: { driver: "pi", sessionDir: "/managed-copy", cleanupContext: { kind: "native" } } },
     { backgroundJobs: [{ id: "job", launchType: "shell", source: "provider", status: "running", startedAt: 1 }] },
   ]) {
     const h = fixture();
