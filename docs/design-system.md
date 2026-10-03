@@ -854,8 +854,9 @@ may contain rows, never another Surface. Inside dialogs, Surfaces are allowed on
 
 Rules
 
-- Fixed heights: entity lists never mix row heights except for group headers. Virtualised lists use
-  one estimate. Form choice groups and checkbox rows follow the content-height rule in §8.4.
+- Fixed heights: a list never mixes row heights except for group headers. Virtualised lists use one
+  estimate. Form choice groups and checkbox rows are the exception and follow the content-height
+  rule in §8.4.
 - Text clamps: titles 1 line; descriptions 1 line in rows, 2 lines in cards (`line-clamp: 2`), full
   text only in the detail view.
 - Metadata placement: identity (agent icon, machine, project) on line 2, left; time and counts
@@ -1267,8 +1268,8 @@ as a minimum (40px fine, 48px coarse); Checkbox rows use `--row-h-dense` as a mi
 choice and checkbox rows may differ in rendered height for descriptions, disabled reasons, helpers
 and wrapped labels. Controls align at their outer left edge; within each choice group, leading
 markers share one x position and align with the title's first line. Unavailable rows retain their
-minimum and padding; visible reasons may add height. The §5.2 fixed-height list rule applies to
-entity and virtualised lists, not these form choice groups.
+minimum and padding; visible reasons may add height. The §5.2 fixed-height list rule does not apply
+to these form choice groups.
 
 ### 8.5 Validation
 
