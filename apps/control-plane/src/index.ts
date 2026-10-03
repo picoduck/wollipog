@@ -6197,6 +6197,9 @@ void (async () => {
     // Shell reconciliation is connection-owned state like the reset above: a duplicate process
     // that loses the port race must not flip the survivor's running shells to reconnecting.
     db.settleStartupState(Date.now());
+    // Settlement stopped mid-flight sessions without the hub seeing it; any open attempt among them
+    // may have changed state, so no work-item cursor from before the restart stays valid (#2417).
+    db.campaignWorkLedger.openAttemptsChanged(Date.now());
     shellRegistry.reconcileStartup(Date.now());
     markStartupReady();
     app.log.info(`control plane listening on http://${HOST}:${PORT}`);

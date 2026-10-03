@@ -259,6 +259,9 @@ mechanism (`apps/control-plane/src/campaign-work-observation.ts`):
   deleted session's ancestry is gone.
 - A ledger write, or a delivered verification, that opens, closes, or replaces a session's open
   attempt also re-sends that session, whose `campaignMembership` names it.
+- Startup settlement stops every mid-flight session without the hub seeing it, so right after it
+  every campaign with an open attempt gets one new revision; no cursor from before a restart stays
+  valid.
 - A campaign that has never recorded ledger state has no revision to move and no cursor to
   invalidate.
 

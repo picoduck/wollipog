@@ -171,8 +171,9 @@ CREATE TRIGGER IF NOT EXISTS campaign_work_attempt_session_deleted
   WHEN OLD.session_id IS NOT NULL AND NEW.session_id IS NULL
 BEGIN
   UPDATE campaign_work_ledgers SET revision=revision+1 WHERE campaign_session_id=NEW.campaign_session_id;
-  INSERT OR IGNORE INTO campaign_work_deleted_attempt_sessions (campaign_session_id)
-    VALUES (NEW.campaign_session_id);
+  -- An upsert, not OR IGNORE: the statement that fired the trigger would override that policy.
+  INSERT INTO campaign_work_deleted_attempt_sessions (campaign_session_id)
+    VALUES (NEW.campaign_session_id) ON CONFLICT(campaign_session_id) DO NOTHING;
 END;
 
 -- Delivery proof for one attempt. A later execution of the same child never invalidates it.
@@ -449,6 +450,15 @@ export class CampaignWorkLedgerStore {
     this.stmt("UPDATE campaign_work_ledgers SET revision=revision+1, updated_at=? WHERE campaign_session_id=?")
       .run(now, campaignId);
     return this.revision(campaignId);
+  }
+
+  /** A new revision for every campaign with an open attempt, after something changed attempt
+   * sessions in bulk without the hub observing it (startup settlement). */
+  openAttemptsChanged(now: number): void {
+    this.stmt(
+      `UPDATE campaign_work_ledgers SET revision=revision+1, updated_at=?
+       WHERE campaign_session_id IN (SELECT DISTINCT campaign_session_id FROM campaign_work_attempts WHERE ended_at IS NULL)`,
+    ).run(now);
   }
 
   /** Campaigns whose attempt sessions were deleted since the last call, for a view refresh. */

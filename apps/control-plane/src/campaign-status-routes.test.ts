@@ -345,6 +345,18 @@ test("deleting an attempt's session refreshes every view of its campaign, observ
     observations.sessionRemoved("unrelated");
     observations.flush();
     assert.deepEqual(refreshed, []);
+
+    // Several attempt sessions of one campaign deleted before any drain queue it once.
+    const first = child(root, "First Late");
+    const second = child(root, "Second Late");
+    assert.ok(svc.assignCampaignWorkItem(root, { workItemId: openId!, childSessionId: first }).ok);
+    assert.ok(svc.assignCampaignWorkItem(root, { workItemId: closedId!, childSessionId: second }).ok);
+    db.deleteSession(first);
+    db.deleteSession(second);
+    observations.sessionRemoved(second);
+    refreshed.length = 0;
+    observations.flush();
+    assert.equal(refreshed.filter((id) => id === root).length, 1);
   } finally {
     observations.dispose();
     db.close();
@@ -352,7 +364,7 @@ test("deleting an attempt's session refreshes every view of its campaign, observ
 });
 
 test("work-item pages stay stable within a revision and refuse a stale cursor with revision_changed (#2417)", async () => {
-  const { db, svc, root, child } = campaignFixture();
+  const { db, svc, root, child, createRoot } = campaignFixture();
   const { app, get } = await routes(db, { owner: human("owner", "owner") });
   try {
     const member = child(root, "Member");
@@ -391,6 +403,19 @@ test("work-item pages stay stable within a revision and refuse a stale cursor wi
     const before = await get<CampaignWorkItemsPage>("owner", `${base}?limit=2`);
     db.campaignWorkLedger.observedChanged(root, Date.now());
     assert.equal((await get("owner", `${base}?limit=2&cursor=${encodeURIComponent(before.body.nextCursor!)}`)).status, 409);
+    // Startup settlement stops mid-flight sessions without the hub; open attempts' campaigns move.
+    const worker = child(root, "Worker");
+    const firstItem = (await get<CampaignWorkItemsPage>("owner", `${base}?limit=1`)).body.items[0]!;
+    assert.ok(svc.assignCampaignWorkItem(root, { workItemId: firstItem.id, childSessionId: worker }).ok);
+    const quiet = createRoot("Quiet Campaign");
+    svc.recordCampaignPlan(quiet, { items: [{ key: "idle" }], planComplete: true });
+    const quietRevision = db.campaignWorkLedger.revision(quiet);
+    const beforeRestart = await get<CampaignWorkItemsPage>("owner", `${base}?limit=2`);
+    db.settleStartupState(Date.now());
+    db.campaignWorkLedger.openAttemptsChanged(Date.now());
+    assert.equal((await get("owner",
+      `${base}?limit=2&cursor=${encodeURIComponent(beforeRestart.body.nextCursor!)}`)).status, 409);
+    assert.equal(db.campaignWorkLedger.revision(quiet), quietRevision, "a campaign without open attempts keeps its revision");
     // A cursor is bound to its filter and sort as well as its revision.
     const current = await get<CampaignWorkItemsPage>("owner", `${base}?limit=2`);
     assert.equal((await get("owner", `${base}?limit=2&sort=activity&cursor=${encodeURIComponent(current.body.nextCursor!)}`)).status, 400);
