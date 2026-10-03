@@ -2000,6 +2000,13 @@ const client = {
     }
     return structuredClone(invocation);
   },
+  // Opening a queued message for editing reads its exact content; the projection is its text.
+  readQueuedPrompt: async (id: string, promptId: string) => {
+    const prompt = model.sessions.find((candidate) => candidate.id === id)?.queued
+      ?.find((candidate) => candidate.id === promptId);
+    if (!prompt?.editRevision) throw new Error("queued prompt not editable");
+    return { prompt: { promptId, text: prompt.text, images: [], editRevision: prompt.editRevision } };
+  },
   steer: async (id: string, request: SteerRequest) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");

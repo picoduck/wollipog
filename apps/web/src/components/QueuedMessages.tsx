@@ -267,7 +267,7 @@ export function QueuedMessages({
           return (
             <li
               key={prompt.id}
-              className={`queue-row${editing ? " is-editing" : ""}`}
+              className="queue-row"
               data-testid={`queued-prompt-${prompt.id}`}
               aria-current={editing ? "true" : undefined}
             >

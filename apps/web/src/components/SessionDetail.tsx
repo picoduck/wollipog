@@ -215,7 +215,7 @@ import {
 } from "../useFollowTail.js";
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT, virtualViewportIntentDirection } from "../viewport-intent.js";
-import { inTypingContext, matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
+import { inTypingContext, isMacPlatform, matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
 import { useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
 import {
   usePreviewNavigationRegistration,
@@ -230,7 +230,7 @@ import {
 import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
 import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId, receiptRowIds } from "./TranscriptReceipt.js";
-import { ArrowUpIcon, AtSignIcon, ChevronDownIcon, FolderIcon, GuardrailsIcon, ImageIcon, ImageOffIcon, MicIcon, OrchestratorControlsIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, AtSignIcon, CheckIcon, ChevronDownIcon, EditIcon, FolderIcon, GuardrailsIcon, ImageIcon, ImageOffIcon, MicIcon, OrchestratorControlsIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon, WarningIcon } from "./Icons.js";
 import {
   durableCommandAttachmentNote,
   buildComposerCommandRegistry,
@@ -3649,6 +3649,13 @@ function SessionDetailLoaded({
     : null;
   const queuedEditRetryable = queuedEditReconciliation === null ||
     queuedEditReconciliation.status === "retryable";
+  // A recovered edit says what happened in one visible sentence (§13.2): why Save is disabled when it
+  // can't be retried, which Save then references, or that it is still unsaved when it can.
+  const queuedEditRecoveryReason = queuedEditReconciliation === null
+    ? null
+    : queuedEditReconciliation.status === "retryable"
+      ? "This edit hasn't been saved yet."
+      : queuedEditReconciliation.reason;
   const canSend = canPrompt && (text.trim().length > 0 || images.length > 0);
   const restartRefusal = sessionCommandRefusal(session, "restart");
   // The control plane refuses to restart an archived session, so the composer offers no Restart
@@ -5522,6 +5529,14 @@ function SessionDetailLoaded({
         return;
       }
     }
+    // With no picker open, Escape cancels an open edit as Cancel Edit does. A recovered edit is the
+    // only copy of its content, so Escape never dismisses it; it keeps its ordinary meaning there.
+    if (queuedEdit && !queuedEditRecovered && !queuedEditBusy && e.key === "Escape" &&
+        !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      cancelQueuedPromptEdit();
+      return;
+    }
     // ↑/↓ recall previous prompts (palette closed, no modifiers). ↑ engages only when the box is
     // empty or already browsing history, so a multi-line draft's caret navigation isn't hijacked.
     // Alt+↑/↓ is Session Reading's Previous/Next Session, never a recall.
@@ -6178,36 +6193,6 @@ function SessionDetailLoaded({
                   ? "Rename failed. Couldn't rename this session."
                   : ""}
             </span>
-            {queuedEdit && (
-              <div className="queued-edit-banner" role="status">
-                <div className="queued-edit-copy">
-                  <span>{queuedEditRecovered ? "Recovered Queued Message" : "Editing Queued Message"}</span>
-                  {queuedEditReconciliation && queuedEditReconciliation.status !== "retryable" && (
-                    <span className="queued-edit-reason">{queuedEditReconciliation.reason}</span>
-                  )}
-                </div>
-                <div className="queued-edit-actions">
-                  {queuedEditRecovered && (
-                    <button
-                      type="button"
-                      className="btn ghost sm"
-                      disabled={queuedEditBusy}
-                      onClick={() => void useRecoveredQueuedEditAsNewMessage()}
-                    >
-                      Use as New Message
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn ghost sm"
-                    disabled={queuedEditBusy}
-                    onClick={cancelQueuedPromptEdit}
-                  >
-                    {queuedEditRecovered ? "Dismiss Recovery" : "Cancel Edit"}
-                  </button>
-                </div>
-              </div>
-            )}
             <QueuedMessages
               sessionId={session.id}
               prompts={queuedPromptControls}
@@ -6272,6 +6257,51 @@ function SessionDetailLoaded({
                 if (files.length) void addFiles(files);
               }}
             >
+              {queuedEdit && !composerAnswerActive && (
+                /* Editing is a mode of the card (#2194): a 40px strip at its top names the mode and
+                   holds the way out. The tray marks which row is being edited, so this doesn't. */
+                <div className={`composer-mode${queuedEditRecovered ? " is-recovered" : ""}`} role="status">
+                  <span className="composer-mode-icon" aria-hidden="true">
+                    {queuedEditRecovered ? <WarningIcon size={16} /> : <EditIcon size={16} />}
+                  </span>
+                  <span className="composer-mode-label">
+                    <span className="composer-mode-title">
+                      {queuedEditRecovered ? "Recovered Queued Message" : "Editing Queued Message"}
+                    </span>
+                    {queuedEditRetryable && (
+                      <span className="shortcut-hint" aria-hidden="true">
+                        <kbd>{enterKeySetting === "send" ? "Enter" : isMacPlatform() ? "⇧Enter" : "Shift+Enter"}</kbd>
+                        <span className="shortcut-hint-label">Save</span>
+                      </span>
+                    )}
+                  </span>
+                  <span className="composer-mode-actions">
+                    {queuedEditRecovered && (
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        disabled={queuedEditBusy}
+                        onClick={() => void useRecoveredQueuedEditAsNewMessage()}
+                      >
+                        Use as New Message
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      disabled={queuedEditBusy}
+                      onClick={cancelQueuedPromptEdit}
+                    >
+                      {queuedEditRecovered ? "Dismiss Recovery" : "Cancel Edit"}
+                    </button>
+                  </span>
+                  {queuedEditRecoveryReason !== null && (
+                    <p className="composer-mode-reason" id={`queued-edit-reason-${session.id}`}>
+                      {queuedEditRecoveryReason}
+                    </p>
+                  )}
+                </div>
+              )}
               {pendingQuestion && (
                 <ComposerQuestionResponse
                   sessionId={session.id}
@@ -6552,19 +6582,24 @@ function SessionDetailLoaded({
                       onClick={queuedEdit ? saveQueuedPromptEdit : send}
                       disabled={!canSend || composerRequestBusy || (queuedEdit !== null && !queuedEditRetryable)}
                       title={queuedEdit
-                        ? !queuedEditRetryable
-                          ? queuedEditReconciliation && "reason" in queuedEditReconciliation
-                            ? queuedEditReconciliation.reason
-                            : "This recovered queued edit cannot be retried yet."
+                        ? !queuedEditRetryable && queuedEditRecoveryReason !== null
+                          ? queuedEditRecoveryReason
                           : enterKeySetting === "send"
-                          ? "Save Queued Message (Enter)"
-                          : isTouchPhone ? "Save Queued Message" : "Save Queued Message (Shift+Enter)"
+                          ? "Save queued message (Enter)"
+                          : isTouchPhone ? "Save queued message" : "Save queued message (Shift+Enter)"
                         : enterKeySetting === "send"
                           ? "Send (Enter)"
                           : isTouchPhone ? "Send" : "Send (Shift+Enter)"}
                       aria-label={queuedEdit ? "Save Queued Message" : "Send"}
+                      // A recovered edit that can't be retried is disabled for the reason the strip
+                      // shows, never only in this tooltip (§13.2).
+                      aria-describedby={queuedEdit && !queuedEditRetryable && queuedEditRecoveryReason !== null
+                        ? `queued-edit-reason-${session.id}`
+                        : undefined}
                     >
-                      {busy || queuedEditBusy ? <Spinner /> : <ArrowUpIcon size={16} />}
+                      {busy || queuedEditBusy
+                        ? <Spinner />
+                        : queuedEdit ? <CheckIcon size={16} /> : <ArrowUpIcon size={16} />}
                     </ComposerButton>
                   ) : (
                     <ComposerButton

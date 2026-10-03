@@ -5294,6 +5294,7 @@ textarea {
   list-style: none;
 }
 .queue-row {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -5302,9 +5303,16 @@ textarea {
   padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
   border-top: 1px solid var(--border);
 }
-.queue-row.is-editing {
-  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
-  box-shadow: inset 2px 0 0 var(--accent);
+/* The row being edited in the composer is the selected row of §5.2, like every other selection. */
+.queue-row[aria-current="true"] { background: var(--surface-selected); }
+.queue-row[aria-current="true"]::before {
+  content: "";
+  position: absolute;
+  top: var(--space-2);
+  bottom: var(--space-2);
+  left: 0;
+  width: 2px;
+  background: var(--accent);
 }
 .queue-text {
   flex: 1 1 0;
@@ -5345,45 +5353,67 @@ textarea {
   width: 44px;
   height: 44px;
 }
-.queued-edit-banner {
+/* The composer's mode strip (#2194): editing a queued message is a state of the card, so it is the
+   card's first row, full bleed across its 10px/12px padding, 40px tall at every width. Its actions
+   are `.btn.sm.ghost`, 8px apart so each keeps its 44px touch area (§2.8). A recovered edit takes
+   the warning tone and puts its one sentence under the title. */
+.composer-mode {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  /* With the hairline under it, the strip is 40px. */
+  grid-template-rows: calc(40px - 1px);
+  align-items: center;
+  column-gap: var(--space-2);
+  margin: -10px -12px 0;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-bottom: 1px solid var(--border);
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
+  color: var(--text);
+}
+.composer-mode-icon {
+  display: inline-flex;
+  color: var(--text-dim);
+}
+.composer-mode-label {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-  padding: 7px 9px;
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
-  color: var(--text);
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-.queued-edit-copy {
-  display: grid;
-  gap: 2px;
+  gap: var(--space-3);
   min-width: 0;
 }
-.queued-edit-reason {
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-  font-weight: 400;
+.composer-mode-title {
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-label);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
-.queued-edit-actions {
+.composer-mode-actions {
   display: flex;
   align-items: center;
-  gap: 5px;
-  flex: none;
+  gap: var(--space-2);
 }
-@media (max-width: 600px) {
-  .queued-edit-banner {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .queued-edit-actions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
+.composer-mode-reason {
+  grid-column: 2 / -1;
+  margin: 0;
+  padding-bottom: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.composer-mode.is-recovered {
+  --tone: var(--warning);
+  border-bottom: 1px solid color-mix(in srgb, var(--tone) 32%, transparent);
+  background: color-mix(in srgb, var(--tone) 7%, var(--bg-elev));
+}
+.composer-mode.is-recovered .composer-mode-icon { color: var(--tone); }
+/* A phone can't fit the recovered title and both actions on one line: the actions follow the
+   sentence on their own row, their labels lined up with it. */
+@media (max-width: 760px) {
+  .composer-mode.is-recovered .composer-mode-actions {
+    grid-column: 2 / -1;
+    grid-row: 3;
+    margin-left: calc(var(--space-2) * -1);
+    padding-bottom: var(--space-2);
   }
 }
 

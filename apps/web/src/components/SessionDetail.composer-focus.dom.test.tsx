@@ -1012,13 +1012,21 @@ test("queued message editing loads exact content and Cancel Edit restores the di
     assert.equal(reads[0]?.promptId, "queue-1");
     assert.equal(fixture.composer.value, "Exact queued content");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1);
-    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Editing Queued Message/);
-    assert.ok(fixture.container.querySelector('button[aria-label="Save Queued Message"]'));
+    // The edit is a strip inside the card, its first row, and no banner sits above the card (#2194).
+    const strip = fixture.container.querySelector(".composer-mode") as HTMLElement;
+    assert.match(strip.textContent ?? "", /Editing Queued Message/);
+    assert.equal(strip.parentElement?.classList.contains("composer-box"), true);
+    assert.ok(strip.parentElement?.firstElementChild === strip, "the strip is the card's first child");
+    assertNoDomNode(strip.querySelector(".composer-mode-reason"), "a plain edit has no reason line");
+    // Save looks like Save: a check, the bar's primary, and its own name and tooltip.
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    assert.ok(save.querySelector("svg.lucide-check"));
+    assertNoDomNode(save.querySelector("svg.lucide-arrow-up"));
+    assert.match(save.title, /^Save queued message/);
+    assert.equal(save.hasAttribute("aria-describedby"), false);
     const selectedRow = fixture.container.querySelector('[data-testid="queued-prompt-queue-1"]') as HTMLElement;
     const otherRow = fixture.container.querySelector('[data-testid="queued-prompt-queue-2"]') as HTMLElement;
-    assert.equal(selectedRow.classList.contains("is-editing"), true);
     assert.equal(selectedRow.getAttribute("aria-current"), "true");
-    assert.equal(otherRow.classList.contains("is-editing"), false);
     assert.equal(otherRow.hasAttribute("aria-current"), false);
 
     const cancel = [...fixture.container.querySelectorAll("button")]
@@ -1039,7 +1047,98 @@ test("queued message editing loads exact content and Cancel Edit restores the di
     await flushAsyncWork(450);
     assert.equal(fixture.composer.value, "Unsent local draft");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 0);
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Escape cancels a queued edit like Cancel Edit, after an open picker takes its own Escape", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: { queued: [{
+      id: "queue-1", text: "Queued projection", liveQueueObserved: true,
+      editable: true, editRevision: "qer_exact",
+    }] },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({ prompt: {
+        promptId, text: "Queued exact content", images: [], editRevision: "qer_exact",
+      } }),
+    },
+  });
+  const escape = async () => {
+    await act(async () => {
+      fireDomEvent.keyDown(fixture.composer, { key: "Escape" });
+    });
+    await flushAsyncWork(450);
+  };
+  try {
+    await resolveDraft(draft, "Unsent local draft");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork(450);
+    assert.equal(fixture.composer.value, "Queued exact content");
+
+    // An open slash picker owns the first Escape; the edit stays open.
+    await act(async () => {
+      fixture.composer.value = "/";
+      fireDomEvent.change(fixture.composer);
+    });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.getAttribute("aria-expanded"), "true");
+    await escape();
+    assert.equal(fixture.composer.getAttribute("aria-expanded"), "false");
+    assert.ok(fixture.container.querySelector(".composer-mode"), "the picker's Escape leaves the edit open");
+
+    // With no picker open, Escape cancels the edit and restores the displaced draft.
+    await escape();
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
+    assert.equal(fixture.composer.value, "Unsent local draft");
+    assert.equal(fixture.container.querySelector('[data-testid="queued-prompt-queue-1"]')?.hasAttribute("aria-current"),
+      false);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Escape never dismisses a recovered queued edit", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: { queued: [{
+      id: "queue-1", text: "Queued projection", liveQueueObserved: true,
+      editable: true, editRevision: "qer_exact",
+    }] },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({ prompt: {
+        promptId, text: "Queued exact content", images: [], editRevision: "qer_exact",
+      } }),
+      editQueuedPrompt: async () => {
+        throw new Error("The request timed out before confirmation.");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Unsent local draft");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork(450);
+    await act(async () => {
+      fixture.composer.value = "Recovered revision";
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork(450);
+    assert.ok(fixture.container.querySelector(".composer-mode.is-recovered"));
+
+    await act(async () => {
+      fireDomEvent.keyDown(fixture.composer, { key: "Escape" });
+    });
+    await flushAsyncWork(450);
+    assert.ok(fixture.container.querySelector(".composer-mode.is-recovered"), "only Dismiss Recovery discards it");
+    assert.equal(fixture.composer.value, "Recovered revision");
   } finally {
     await unmountFixture(fixture);
   }
@@ -1211,14 +1310,14 @@ test("a queued edit that fails after navigation restores its exact retry and kee
 
     await fixture.rerenderSessionWithDraftLoader(fixture.alternateSessionId, async () => null);
     await flushAsyncWork();
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"),
       "the in-flight edit must not leak into another Session");
 
     const pending = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(pending.value, "Revised content awaiting confirmation");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1);
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
     assert.ok(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'));
 
     await act(async () => {
@@ -1248,12 +1347,12 @@ test("a queued edit that fails after navigation restores its exact retry and kee
     await flushAsyncWork();
     assert.equal(recovered.value, "Displaced local draft");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 0);
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
 
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "Displaced local draft");
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"),
       "explicit cancellation must retire the failed edit recovery");
   } finally {
     await unmountFixture(fixture);
@@ -1317,6 +1416,9 @@ test("a live queue revision change disables recovered retry while preserving con
     await flushAsyncWork();
     assert.equal(edits.length, 1);
     assert.equal(save.disabled, false, "the unchanged authoritative target remains retryable");
+    assert.match(fixture.container.querySelector(".composer-mode.is-recovered")?.textContent ?? "",
+      /Recovered Queued Message.*This edit hasn't been saved yet\./);
+    assert.equal(save.hasAttribute("aria-describedby"), false, "a retryable Save is not described by a refusal");
 
     await fixture.pushSession({
       queued: [{
@@ -1328,7 +1430,12 @@ test("a live queue revision change disables recovered retry while preserving con
       }],
     });
     assert.equal(save.disabled, true);
-    assert.match(fixture.container.querySelector(".queued-edit-reason")?.textContent ?? "", /changed elsewhere/i);
+    const reason = fixture.container.querySelector(".composer-mode-reason") as HTMLElement;
+    assert.match(reason.textContent ?? "", /changed elsewhere/i);
+    // The reason Save is disabled is visible, and it is Save's accessible description (§13.2).
+    assert.ok(reason.id);
+    assert.equal(save.getAttribute("aria-describedby"), reason.id);
+    assert.ok(fixture.container.querySelector(".composer-mode.is-recovered"));
     assert.equal(fixture.composer.value, "Recovered revision for reuse");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1);
 
@@ -1343,7 +1450,7 @@ test("a live queue revision change disables recovered retry while preserving con
     });
     await flushAsyncWork();
     assert.deepEqual(prompts, [], "Enter must not send a stale recovered edit as a new turn");
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
     assert.equal(fixture.composer.value, "Recovered revision for reuse");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1);
 
@@ -1353,7 +1460,7 @@ test("a live queue revision change disables recovered retry while preserving con
     exportFailure = new Error("The retained attachment is unavailable.");
     await act(async () => { reuse.click(); });
     await flushAsyncWork();
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"),
+    assert.ok(fixture.container.querySelector(".composer-mode"),
       "a failed materialization must keep the recovery available");
     assert.equal(fixture.composer.value, "Recovered revision for reuse");
     assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "", /attachment could not be retained/i);
@@ -1373,7 +1480,7 @@ test("a live queue revision change disables recovered retry while preserving con
       await act(async () => { frames.flush(); });
       assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
     });
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
     assert.equal(fixture.composer.value, "Recovered revision for reuse");
     assert.ok(exportedArtifacts.includes(materializedImageReference.artifactId));
 
@@ -1450,7 +1557,7 @@ test("Use as New Message preserves workspace references while materializing reco
     assert.ok(exportedArtifacts.length > 0);
     assert.ok(exportedArtifacts.every((artifactId) => artifactId === materializedImageReference.artifactId),
       "workspace references must never be sent to artifact export, including preview exports");
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
     assert.deepEqual(loadDurableQueuedEditRecovery(recoveryScope)?.draft.images,
       [workspaceReference, materializedImageReference],
       "a failed image export must retain the full mixed recovery");
@@ -1458,7 +1565,7 @@ test("Use as New Message preserves workspace references while materializing reco
     exportFailure = null;
     await act(async () => { reuse.click(); });
     await flushAsyncWork(450);
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
     assert.ok(exportedArtifacts.every((artifactId) => artifactId === materializedImageReference.artifactId));
     assert.deepEqual((await loadComposerDraft(fixture.sessionId, fixture.instanceScope))?.images,
       [workspaceReference, submittedImage],
@@ -1525,7 +1632,7 @@ test("malformed recovered image collections stay recoverable without starting ex
 
     assert.equal(exports, previewExports,
       "materialization validation must fail before starting any additional artifact exports");
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"),
+    assert.ok(fixture.container.querySelector(".composer-mode"),
       "invalid retained attachments must leave recovery available");
     assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "",
       new RegExp(`at most ${MAX_PROMPT_IMAGES} images`, "i"));
@@ -1564,7 +1671,7 @@ test("mount hydration cannot restore a recovery cleared while its displaced draf
     await flushAsyncWork();
 
     assert.equal(loadDurableQueuedEditRecovery(recoveryScope), undefined);
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"),
       "a delayed mount result must not restore recovery cleared elsewhere");
     const currentComposer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
     assert.equal(currentComposer.value, "Hydrated ordinary draft",
@@ -1645,7 +1752,7 @@ test("mount hydration reconciles a newer recovery saved while its displaced draf
 
     const currentComposer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
     assert.equal(currentComposer.value, "Newer recovered edit");
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
     assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "", /Newer recovery/);
     await flushAsyncWork(450);
     const reconciled = loadDurableQueuedEditRecovery(recoveryScope);
@@ -1708,7 +1815,7 @@ test("recovery cleanup cannot resurrect an ordinary draft reserved by an in-flig
 
     assert.equal(remounted.value, "",
       "cleanup must not reveal an ordinary draft still owned by an in-flight send");
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -1773,7 +1880,7 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
     await flushAsyncWork();
     assert.equal(reloaded.value, "Durable recovered content");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1);
-    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Recovered Queued Message/);
+    assert.match(fixture.container.querySelector(".composer-mode")?.textContent ?? "", /Recovered Queued Message/);
 
     const retry = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
     await act(async () => { retry.click(); });
@@ -1802,7 +1909,7 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
 
     await fixture.closeSocket(1008);
     await flushAsyncWork();
-    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Recovered Queued Message/);
+    assert.match(fixture.container.querySelector(".composer-mode")?.textContent ?? "", /Recovered Queued Message/);
     assert.ok(loadDurableQueuedEditRecovery({
       instanceScope: fixture.instanceScope,
       accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
@@ -1972,7 +2079,7 @@ test("late identity hydration with durable recovery cannot replace a modified lo
     await flushAsyncWork();
     assert.equal(fixture.composer.value, "Locally revised content");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1);
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
 
     const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
     await act(async () => { save.click(); });
@@ -2032,7 +2139,7 @@ test("switching Sessions restores the destination recovery instead of retaining 
     await flushAsyncWork();
     const destinationComposer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
     assert.equal(destinationComposer.value, "Destination recovered edit");
-    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "",
+    assert.match(fixture.container.querySelector(".composer-mode")?.textContent ?? "",
       /Recovered Queued Message/);
   } finally {
     await unmountFixture(fixture);
@@ -2102,7 +2209,7 @@ test("identity hydration preserves an ordinary draft typed before durable recove
 
     const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
     await act(async () => {
       reloaded.value = "New ordinary draft typed during sign-in";
       fireDomEvent.change(reloaded);
@@ -2118,7 +2225,7 @@ test("identity hydration preserves an ordinary draft typed before durable recove
     });
     await flushAsyncWork();
     assert.equal(reloaded.value, "Recovered queued edit");
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
 
     const dismiss = [...fixture.container.querySelectorAll("button")]
       .find((button) => button.textContent === "Dismiss Recovery") as HTMLButtonElement | undefined;
@@ -2194,7 +2301,7 @@ test("late queued-edit recovery exits Answer Mode and reveals the recovered edit
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
     assert.equal(ordinary?.value, "Recovered queued edit");
     assert.equal(ordinary?.ownerDocument.activeElement, ordinary);
-    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Recovered Queued Message/);
+    assert.match(fixture.container.querySelector(".composer-mode")?.textContent ?? "", /Recovered Queued Message/);
     assert.ok(fixture.container.querySelector('button[aria-label="Save Queued Message"]'));
   } finally {
     await unmountFixture(fixture);
@@ -2249,7 +2356,7 @@ test("recovery appearing after mutation release preserves the dirty ordinary dra
     await act(async () => { prompt.resolve(undefined as never); });
     await flushAsyncWork();
     assert.equal(fixture.composer.value, "Recovered queued edit");
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
 
     const dismiss = [...fixture.container.querySelectorAll("button")]
       .find((button) => button.textContent === "Dismiss Recovery") as HTMLButtonElement | undefined;
@@ -2357,7 +2464,7 @@ test("post-mutation recovery preserves ordinary typing that arrives during displ
     });
     await flushAsyncWork();
     assert.equal(fixture.composer.value, "Recovered queued edit");
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
 
     const dismiss = [...fixture.container.querySelectorAll("button")]
       .find((button) => button.textContent === "Dismiss Recovery") as HTMLButtonElement | undefined;
@@ -2464,7 +2571,7 @@ test("a clear that wins during delayed displaced-draft hydration is not resurrec
     await flushAsyncWork();
 
     assert.equal(loadDurableQueuedEditRecovery(recoveryScope), undefined);
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"),
       "a delayed hydration result must not restore a recovery cleared elsewhere");
   } finally {
     await unmountFixture(fixture);
@@ -2576,7 +2683,7 @@ test("a recovered edit completed after delayed hydration restores the latest ord
     await flushAsyncWork();
     assert.equal(fixture.composer.value, "Latest ordinary draft before recovery completion");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1);
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
 
     const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
@@ -2685,7 +2792,7 @@ test("a queued edit accepted after navigation restores only the displaced draft"
     const pending = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(pending.value, "Successfully revised content");
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
 
     await act(async () => {
       editResult.resolve({
@@ -2700,14 +2807,14 @@ test("a queued edit accepted after navigation restores only the displaced draft"
     });
     await flushAsyncWork();
     assert.equal(pending.value, "Displaced local draft");
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
     assertNoDomNode(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)"));
 
     clearSessionDetailComposerRuntimeForInstance(fixture.instanceScope);
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "Displaced local draft");
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"),
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"),
       "a successful edit must never resurrect as failed recovery");
   } finally {
     await unmountFixture(fixture);
@@ -2769,13 +2876,13 @@ test("a queued edit accepted after navigation clears the composer when its displ
     });
     await flushAsyncWork();
     assert.equal(pending.value, "");
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
 
     clearSessionDetailComposerRuntimeForInstance(fixture.instanceScope);
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "");
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -2835,7 +2942,7 @@ test("typing during a failing queued edit request keeps the latest composer cont
 
     assert.equal(recovered.value, "Submitted revision plus late typing");
     assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "", /not confirmed/i);
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -2894,7 +3001,7 @@ test("a failed queued edit keeps its draft and uses idempotency only for byte-id
     assert.match((edits[0] as { submissionId: string }).submissionId, /.+/);
     assert.equal(fixture.composer.value, "Revised exact content");
     assert.equal(fixture.container.querySelectorAll(".attach-thumb").length, 1);
-    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector(".composer-mode"));
     assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "", /timed out/i);
 
     await act(async () => { save.click(); });
@@ -4931,7 +5038,7 @@ test("Use as New Message for a recovered queued edit ends the copy it displaced 
     assert.ok(reuse);
     await act(async () => { reuse.click(); });
     await flushAsyncWork(450);
-    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assertNoDomNode(fixture.container.querySelector(".composer-mode"));
     assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "Recovered queued content");
     assertNoDomNode(editingCopyNotice(fixture), "no Editing a Copy notice for a message that is not the copy");
     assert.equal(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), null);
@@ -5533,7 +5640,7 @@ test("editing a queued message exits Answer Mode before loading the editor", { t
     assertNoDomNode(fixture.container.querySelector(".composer-answer-input"));
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
     assert.equal(ordinary?.value, "Exact queued content");
-    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Editing Queued Message/);
+    assert.match(fixture.container.querySelector(".composer-mode")?.textContent ?? "", /Editing Queued Message/);
   } finally {
     await unmountFixture(fixture);
     setQuestionResponseStyle("interactive", domWindow as never);
