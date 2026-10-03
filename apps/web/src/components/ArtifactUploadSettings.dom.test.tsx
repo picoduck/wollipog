@@ -7,6 +7,7 @@ import { api, ApiError } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import { instanceStorageKey } from "../instance-storage.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { ArtifactUploadNotice, ARTIFACT_UPLOAD_NOTICE_KEY } from "./ArtifactUploadNotice.js";
 
@@ -93,12 +94,12 @@ test("discovery links to Behavior and dismissal persists only for its instance w
     await act(async () => render("first"));
     assert.equal(container.querySelector("a")?.getAttribute("href"), "/settings/behavior");
     await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
-    assert.equal(container.querySelector("[role=note]"), null);
+    assertNoDomNode(container.querySelector("[role=note]"));
     assert.equal(dom.localStorage.getItem(instanceStorageKey(ARTIFACT_UPLOAD_NOTICE_KEY, "first")), "1");
     await act(async () => render("second"));
     assert.ok(container.querySelector("[role=note]"));
     await act(async () => render("first"));
-    assert.equal(container.querySelector("[role=note]"), null);
+    assertNoDomNode(container.querySelector("[role=note]"));
     assert.equal(saves, 0);
   } finally { await act(async () => root.unmount()); container.remove(); api.updateArtifactUploadSettings = put; dom.localStorage.clear(); }
 });
