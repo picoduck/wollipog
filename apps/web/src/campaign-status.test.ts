@@ -89,6 +89,11 @@ test("Cost labels distinguish provider-reported, estimated, partially priced, un
   assert.equal(costWithProvenance(partial, "Estimated API Cost"), "at least $1.00",
     "the lower bound is in the amount itself, in sentence case inside a list");
   assert.equal(costWithProvenance(partial), "at least $1.00 (estimated API cost)");
+  // An empty bucket of a campaign older than attribution: no records, so no provenance to claim.
+  assert.deepEqual(campaignCostView({ availability: "partial", reason: "history_unavailable",
+    value: { usd: 0, source: "providerReported", unpricedRecords: 0, records: 0 } }), {
+    text: "At least $0.00", provenance: null, note: "It was not recorded for this part of the campaign.", priced: true,
+  });
   const both = campaignCostView({ availability: "partial", value: { usd: 1, source: "unpriced", unpricedRecords: 1 }, reason: "unpriced_usage" });
   assert.equal(both.provenance, "Partially Priced", "unpriced usage still reads Partially Priced");
   assert.equal(campaignCostView(knownCost(0)).text, "$0.00", "a known zero is a real amount");

@@ -148,7 +148,9 @@ export function campaignCostView(metric: CampaignMetric<CampaignCostValue> | und
   // Every recorded amount is priced, but part of its history was never recorded: a lower bound
   // that keeps its real provenance, as a partial duration reads "At least".
   if (metric.availability === "partial") {
-    return { text: `At least ${text}`, provenance, note: metricGapNote(metric.reason), priced: true };
+    // An empty bucket's source is a placeholder (docs/campaign-work-ledger.md): no records, no claim.
+    return { text: `At least ${text}`, provenance: value.records === 0 ? null : provenance,
+      note: metricGapNote(metric.reason), priced: true };
   }
   return provenance === "Provider-Reported"
     ? { text, provenance, note: "Cost as reported by the provider.", priced: true }

@@ -545,14 +545,18 @@ test("AC7 + AC14 (merge-queue waits): observed forge facts are fresh, then stale
     assert.ok(!JSON.stringify(s.db.getSession(s.root)).includes(OPEN_QUEUED.headSha));
     assert.ok(!JSON.stringify(await s.summary()).includes(OPEN_QUEUED.headSha));
 
-    // With the runner gone, a pull request never read says why.
+    // The runner disconnects, with the cleanup index.ts runs: a pull request never read says why,
+    // and the stopped child blocks the item rather than letting a forge fact stand in for progress.
     s.db.raw().prepare("DELETE FROM campaign_forge_observations WHERE number=?").run(neverRead.number);
     s.detachRunner();
-    s.db.raw().prepare("UPDATE runners SET status='offline' WHERE runner_id=?").run(RUNNER_ID);
+    s.db.markOffline(RUNNER_ID, Date.now());
+    s.svc.failRunnerSessions(RUNNER_ID);
     item = await s.detail(itemId);
     assert.deepEqual(item.observed.pullRequests![1]!.fact, { availability: "unavailable", reason: "runner_disconnected" });
+    assert.equal(item.observed.pullRequests![0]!.fact.availability, "unavailable",
+      "the last read still failed; disconnecting makes nothing fresh");
     const page = await s.call<CampaignWorkItemsPage>(`/api/sessions/${s.root}/campaign/work-items?state=all`);
-    assert.equal(page.body.items[0]!.primaryState, "waiting");
+    assert.deepEqual([page.body.items[0]!.primaryState, page.body.items[0]!.stateCauses], ["blocked", ["attempt_session_stopped"]]);
   } finally {
     await s.close();
   }

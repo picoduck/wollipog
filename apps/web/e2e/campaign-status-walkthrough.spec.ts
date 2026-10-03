@@ -62,8 +62,12 @@ class WalkthroughStack {
   }
 
   async start(): Promise<void> {
+    const env = { ...process.env };
+    // Never inherit the hosting Wollipog installation's database, port, credentials, or endpoints:
+    // a VITE_CONTROL_PLANE_* value would be built into the bundle and point the browser at it.
+    for (const key of Object.keys(env)) if (/^(RUNNER_|CONTROL_PLANE_|WOLLIPOG_|VITE_)/u.test(key)) delete env[key];
     const built = spawnSync("pnpm", ["--dir", "apps/web", "exec", "vite", "build", "--outDir", this.webDist], {
-      cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, shell: process.platform === "win32",
+      cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, shell: process.platform === "win32", env,
     });
     if (built.status !== 0 || !existsSync(join(this.webDist, "index.html"))) {
       throw new Error(`web build failed: ${(built.stderr ?? "").slice(-2000)} ${(built.stdout ?? "").slice(-2000)}`);
@@ -71,9 +75,6 @@ class WalkthroughStack {
     const port = await reservePort();
     this.base = `http://127.0.0.1:${port}`;
     recordFreshWalkthroughObservation(this.databasePath, this.seeded.rootId);
-    const env = { ...process.env };
-    // Never inherit the hosting Wollipog installation's database, port, or credentials.
-    for (const key of Object.keys(env)) if (/^(RUNNER_|CONTROL_PLANE_|WOLLIPOG_)/u.test(key)) delete env[key];
     const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
       cwd: REPO_ROOT,
       env: { ...env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
@@ -206,8 +207,9 @@ test("the root campaign summarizes progress, elapsed time, and partially priced 
     await expect(summaryBox(page)).toContainText("Partially Priced");
     // The campaign predates recording, so each bucket is a lower bound with its own provenance.
     await expect(summaryBox(page)).toContainText("coordination at least $0.35 (provider-reported)");
+    // Seeded an hour before the build; the open campaign's clock keeps running while it builds.
     await expect(summaryBox(page).locator("dt", { hasText: /^Elapsed$/u }).locator("xpath=following-sibling::dd[1]"))
-      .toHaveText("1h");
+      .toHaveText(/^1h( \d{1,2}m)?$/u);
     await expect(workRows(page).first()).toContainText("Merge-Queue Wait With Forge Facts");
   });
 });
