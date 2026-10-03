@@ -1,5 +1,3 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
 import { runnerSupportsProtocol, type ArtifactUploadPreference } from "@wollipog/protocol";
 import type { SessionMeta } from "./session-store.js";
 
@@ -28,8 +26,8 @@ export function artifactGuidance(meta: Pick<SessionMeta, "driver" | "env" | "con
   return `[Wollipog Artifact Guidance]\n${capability}\n${policy} Explicit task and project hosting requirements take precedence. Hosting preference does not grant evidence-review or merge authority, and existing privacy and approval rules still apply. Preference changes apply at the next session launch or resume.\n[/Wollipog Artifact Guidance]`;
 }
 
-/** Add an ephemeral instruction without replacing the harness's own append text. */
-export function appendArtifactSystemPrompt(args: readonly string[], guidance: string, fileContext?: { cwd: string }): string[] {
+/** Add an ephemeral Claude instruction while preserving its effective append text. */
+export function appendArtifactSystemPrompt(args: readonly string[], guidance: string): string[] {
   const result: string[] = [];
   let existing = "";
   for (let index = 0; index < args.length; index++) {
@@ -37,13 +35,6 @@ export function appendArtifactSystemPrompt(args: readonly string[], guidance: st
     if (arg === "--append-system-prompt") existing = args[++index] ?? "";
     else if (arg.startsWith("--append-system-prompt=")) existing = arg.slice("--append-system-prompt=".length);
     else result.push(arg);
-  }
-  // Pi accepts either inline text or a filename for this same switch. Resolve its effective
-  // file before appending so the user's prompt does not become a literal path in the new text.
-  if (fileContext && existing && existsSync(resolve(fileContext.cwd, existing))) {
-    const file = resolve(fileContext.cwd, existing);
-    if (statSync(file).size > 96 * 1024) throw new Error("Pi append prompt is too large for artifact guidance");
-    existing = readFileSync(file, "utf8");
   }
   return [...result, "--append-system-prompt", [existing, guidance].filter(Boolean).join("\n\n")];
 }
