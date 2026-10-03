@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import {
-  DURABLE_COMMAND_ATTACHMENT_NOTICE,
+  durableCommandAttachmentNote,
   durableCommandPreservesAttachments,
   groupRankedComposerCommands,
   type ComposerCommand,
@@ -48,7 +48,7 @@ export function SlashCommandMenu({
   const secondLine = (command: ComposerCommand) => !command.available
     ? command.disabledReason ?? "This command is unavailable."
     : command.id === activeCommandId && durableCommandPreservesAttachments(command, hasAttachments)
-      ? DURABLE_COMMAND_ATTACHMENT_NOTICE
+      ? durableCommandAttachmentNote(command.label)
       : null;
 
   return (

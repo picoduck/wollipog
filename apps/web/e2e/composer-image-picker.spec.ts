@@ -87,7 +87,7 @@ test("cancelling the chooser leaves the draft and attachments untouched", async 
 
   await expect(composer).toHaveValue("keep this draft");
   await expect(thumbnails(page)).toHaveCount(1);
-  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveCount(0);
+  await expect(page.locator('.composer .notice.t-danger[role="alert"]')).toHaveCount(0);
 });
 
 test("a text-only model explains itself instead of opening a picker", async ({ page }) => {
@@ -96,7 +96,8 @@ test("a text-only model explains itself instead of opening a picker", async ({ p
 
   const action = attachAction(page);
   await expect(action).toBeDisabled();
-  await expect(page.getByText("The selected model does not support image input.")).toBeVisible();
+  await expect(page.getByText(/^.+ can't read images\. Choose another model in Model Settings to attach them\.$/))
+    .toBeVisible();
 
   let opened = false;
   page.on("filechooser", () => { opened = true; });
@@ -153,7 +154,9 @@ test("rejected selections report accessibly and keep the valid ones", async ({ p
 
   const error = page.getByRole("alert");
   await expect(error).toBeVisible();
-  await expect(error).toContainText(/Unsupported image type image\/gif|exceeds the 8 MiB limit/);
+  // One notice for the pick, the first thing that kept a file out, in words rather than MIME types.
+  await expect(error).toHaveAccessibleName("Image Not Supported");
+  await expect(error.locator(".notice-body")).toHaveText("GIF images aren't supported. Attach a PNG, JPEG or WebP image.");
   // The valid selection and the typed draft both survive a partly-invalid pick.
   await expect(thumbnails(page)).toHaveCount(1);
   await expect(composer).toHaveValue("look at these");
@@ -165,7 +168,7 @@ test("the combined-payload ceiling stops the pick without dropping what already 
   const chunk = Buffer.alloc(6 * 1024 * 1024);
   await pickImages(page, Array.from({ length: 4 }, (_, i) => file(`bulk-${i}.png`, "image/png", chunk)));
 
-  await expect(page.getByRole("alert")).toContainText("Combined image payload exceeds the 28 MiB limit.");
+  await expect(page.getByRole("alert")).toContainText("These images are too large to send together. Remove one to add another.");
   const attached = await thumbnails(page).count();
   expect(attached).toBeGreaterThan(0);
   expect(attached).toBeLessThan(4);
@@ -185,7 +188,7 @@ test("a file the browser cannot read reports instead of attaching silently", asy
   await openSession(page);
   await pickImages(page, [file("corrupt.png", "image/png"), file("fine.png", "image/png")]);
 
-  await expect(page.getByRole("alert")).toContainText("An image could not be read.");
+  await expect(page.getByRole("alert")).toContainText("“corrupt.png” couldn't be read. Try saving it as PNG or JPEG.");
   // The readable half of the pick still lands.
   await expect(thumbnails(page)).toHaveCount(1);
 });
@@ -194,7 +197,7 @@ test("the six-image cap holds and the same file can be chosen again after remova
   await openSession(page);
   await pickImages(page, Array.from({ length: 7 }, (_, i) => file(`shot-${i}.png`, "image/png")));
   await expect(thumbnails(page)).toHaveCount(6);
-  await expect(page.getByRole("alert")).toContainText("At most 6 images may be attached.");
+  await expect(page.getByRole("alert")).toContainText("You can attach up to 6 images. Remove one to add another.");
 
   await thumbnails(page).first().click();
   await expect(thumbnails(page)).toHaveCount(5);
@@ -235,6 +238,72 @@ test("drag-and-drop still attaches on platforms that support it", async ({ page 
     element.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
   });
   await expect(thumbnails(page)).toHaveCount(1);
+});
+
+/** Start dragging two PNGs over the card, as a desktop drag from the file manager does. */
+async function dragTwoImagesOver(page: Page) {
+  await page.locator(".composer-box").evaluate((element) => {
+    const transfer = new DataTransfer();
+    for (const name of ["one.png", "two.png"]) {
+      transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], name, { type: "image/png" }));
+    }
+    (window as unknown as { __dragTransfer: DataTransfer }).__dragTransfer = transfer;
+    element.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  });
+}
+
+async function dropDraggedImages(page: Page) {
+  await page.locator(".composer-box").evaluate((element) => {
+    const transfer = (window as unknown as { __dragTransfer: DataTransfer }).__dragTransfer;
+    element.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  });
+}
+
+test("dragging files keeps the draft and its attachments in view and only the bar says what a drop does (#2156)", async ({ page }) => {
+  await openSession(page);
+  const composer = page.locator(".composer-input");
+  await composer.fill("compare these");
+  await pickImages(page, [file("before.png", "image/png")]);
+  await expect(thumbnails(page)).toHaveCount(1);
+
+  await dragTwoImagesOver(page);
+  const card = page.locator(".composer-box");
+  await expect(card).toHaveClass(/\bis-drop\b/);
+  await expect(card).not.toHaveClass(/\bis-refused\b/);
+  await expect(composer).toBeVisible();
+  await expect(composer).toHaveValue("compare these");
+  await expect(thumbnails(page)).toHaveCount(1);
+  await expect(page.locator(".composer-drop-label")).toHaveText("Drop to attach 2 images");
+  await expect(page.locator(".cbar-left")).toBeHidden();
+  expect(await card.evaluate((element) => getComputedStyle(element).borderTopStyle)).toBe("dashed");
+  await expect(page.locator(".composer-dropzone")).toHaveCount(0);
+
+  await dropDraggedImages(page);
+  await expect(card).not.toHaveClass(/\bis-drop\b/);
+  await expect(thumbnails(page)).toHaveCount(3);
+  await expect(composer).toHaveValue("compare these");
+});
+
+test("a model that can't read images refuses the drop in the bar and attaches nothing (#2156)", async ({ page }) => {
+  await openSession(page, false);
+  await page.locator(".composer-input").fill("keep this");
+  await dragTwoImagesOver(page);
+  const card = page.locator(".composer-box");
+  await expect(card).toHaveClass(/\bis-refused\b/);
+  const sentence = /^.+ can't read images\. Choose another model in Model Settings to attach them\.$/;
+  await expect(page.locator(".composer-drop-label")).toHaveText(sentence);
+  await expect(page.locator(".composer-drop-label svg")).toBeVisible();
+  const dropSentence = await page.locator(".composer-drop-label").textContent();
+
+  await dropDraggedImages(page);
+  await expect(thumbnails(page)).toHaveCount(0);
+  await expect(page.locator(".composer-input")).toHaveValue("keep this");
+  // The same sentence in the notice, the drop target and the + menu row.
+  const dropped = page.locator(".session-notice-slot").getByRole("alert", { name: "Images Not Supported" });
+  await expect(dropped.locator(".notice-body")).toHaveText(dropSentence!);
+  await openPlusMenu(page);
+  await expect(page.getByRole("dialog", { name: "Session Attachments, Modes, and Guardrails" })
+    .getByText(dropSentence!, { exact: true })).toBeVisible();
 });
 
 test("paste still attaches on platforms that support it", async ({ page }) => {

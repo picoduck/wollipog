@@ -99,7 +99,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `HelpIcon` | Lucide | `MessageCircleQuestion` | Contextual help. |
 | `MicIcon` | Lucide | `Mic` | Dictation action. |
 | `ImageIcon` | Lucide | `Image` | Image attachment. |
-| `ImageOffIcon` | Lucide | `ImageOff` | Transcript media that could not load. |
+| `ImageOffIcon` | Lucide | `ImageOff` | Transcript media that could not load; the composer's refused drop target when the model can't read images. |
 | `ChainIcon` | Lucide | `GitCommitVertical` | Worktree or context-chain relationship. |
 | `CodeIcon` | Lucide | `Code` | Generic code destination. |
 | `VisualStudioCodeIcon` | Custom Exception | `Official VS Code Stable Mark (2021-06-21)` | Microsoft's canonical multicolor product mark; Lucide excludes vendor logos. |

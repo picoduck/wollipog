@@ -99,9 +99,15 @@ test("authorized provider commands use durable dispatch and preserve attachments
   await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
 
   await composer.fill("/deploy production");
-  await expect(page.getByText(
-    "Attached images will not be sent with this command. They will remain for your next prompt.",
-  )).toBeVisible();
+  // The note is an info entry of the notice slot (#2156), not a notice inside the card.
+  const note = page.locator(".session-notice-slot").getByRole("status", { name: "Images Kept for Next Message" });
+  await expect(note).toContainText("/deploy doesn't send images. They stay here for your next message.");
+  await expect(page.locator(".composer-box .notice")).toHaveCount(0);
+  await note.getByRole("button", { name: "Dismiss" }).click();
+  await expect(note).toHaveCount(0);
+  await composer.fill("/deploy production now");
+  await expect(note).toHaveCount(0);
+  await composer.fill("/deploy production");
   await page.keyboard.press("Enter");
 
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionCommandRequests()))
@@ -243,7 +249,10 @@ test("a lost command response retries with the same durable submission ID", asyn
   const composer = page.locator(".composer-input");
   await composer.fill("/review storage");
   await page.keyboard.press("Enter");
-  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toContainText("Simulated lost provider command response");
+  // The response never came back, so the machine stopped responding; Retry or Enter reuses the ID.
+  const notSent = page.locator(".session-notice-slot").getByRole("alert", { name: "Message Not Sent" });
+  await expect(notSent.locator(".notice-body")).toHaveText(/^Couldn't send your message\. .+ stopped responding\. Your draft is kept\.$/);
+  await expect(notSent.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(composer).toHaveValue("/review storage");
   await expect(commandReceipt(page, "/review storage")).toContainText("Sending to");
 
@@ -322,7 +331,7 @@ test("forbid attachment metadata blocks provider dispatch and preserves the draf
   await composer.fill("/deploy production");
   await page.keyboard.press("Enter");
 
-  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveText("/deploy cannot run with attachments.");
+  await expect(page.locator('.session-notice-slot .notice.t-danger[role="alert"] .notice-body')).toHaveText("/deploy can't run with attachments. Remove them to run it.");
   await expect(composer).toHaveValue("/deploy production");
   await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(0);
@@ -493,7 +502,7 @@ test("rename-session moves into a retryable status receipt without disturbing th
 
   await composer.fill("/stop");
   await page.keyboard.press("Enter");
-  const composerError = page.locator('.composer > .notice.t-danger[role="alert"]');
+  const composerError = page.locator('.session-notice-slot .notice.t-danger[role="alert"]');
   await expect(composerError).toContainText("There's no turn to stop right now.");
   // The receipt is in the transcript, so the composer's own error never shares its space.
   const [errorBox, receiptBox] = await Promise.all([composerError.boundingBox(), receipt.boundingBox()]);
@@ -501,6 +510,8 @@ test("rename-session moves into a retryable status receipt without disturbing th
   expect(receiptBox).not.toBeNull();
   expect(receiptBox!.y + receiptBox!.height).toBeLessThanOrEqual(errorBox!.y);
   await composer.fill("Draft I care about");
+  // A changed draft is a new message, so the composer's notices about the old one clear (#2156).
+  await expect(composerError).toHaveCount(0);
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
   const retry = receipt.getByRole("button", { name: "Retry Rename" });
@@ -516,7 +527,7 @@ test("rename-session moves into a retryable status receipt without disturbing th
   ]);
   await expect(receipt).toContainText("Renaming session…");
   await expect(receipt).toBeFocused();
-  await expect(composerError).toContainText("There's no turn to stop right now.");
+  await expect(composerError).toHaveCount(0);
   await expect(composer).toHaveValue("Draft I care about");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
     title: "Retitled Session",
@@ -682,8 +693,8 @@ test("wrapped composer errors stay in the composer while status receipts stay in
   await page.getByRole("button", { name: "Send" }).click();
 
   const composerError = page.locator(".composer").getByRole("alert");
-  await expect(composerError).toHaveText(
-    "The selected model does not support image input. Remove the attachment or choose an image-capable model.",
+  await expect(composerError.locator(".notice-body")).toHaveText(
+    /^.+ can't read images\. Choose another model in Model Settings to attach them\.$/,
   );
   await expect.poll(() => composerError.evaluate((element) => getComputedStyle(element).position)).toBe("static");
   const expectSeparated = async () => {
@@ -804,7 +815,7 @@ test("IME owns menu keys and unavailable commands explain without dispatching", 
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(0);
 
   await page.keyboard.press("Enter");
-  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveText("There's no turn to stop right now.");
+  await expect(page.locator('.session-notice-slot .notice.t-danger[role="alert"] .notice-body')).toHaveText("There's no turn to stop right now.");
   await expect(composer).toHaveValue("/stop");
 });
 

@@ -1829,7 +1829,8 @@ exactly one: the most severe, then the lowest rank.
 
 - Ranks live in one table, `SESSION_NOTICE_RANK`: worktree missing 1, conversation quarantined 2,
   worktree setup failed 3, invalid worktree setup configuration 4, account switch failed 5, session
-  archived 7, skills unavailable 8, setup suggestion 9. A new entry adds its rank there.
+  archived 7, skills unavailable 8, setup suggestion 9, composer error 10, attachment error 11,
+  attachment note 12. A new entry adds its rank there.
 - The others are a `.btn.sm.ghost` "+N More" in the shown notice's title row. It opens a menu (§9.1)
   of their tone icons and one-line titles; choosing one shows it until the set of conditions changes,
   and focus moves to the new notice's "+N More".
@@ -1844,6 +1845,19 @@ exactly one: the most severe, then the lowest rank.
   disabled with the reason. The composer's placeholder is "Unarchive the session to send a message."
 - Every session notice above the composer is an entry of this slot: the Composer epic's composer
   errors, attachment notes and queued-message errors join it rather than building a second slot.
+- **Composer entries** (#2156): what the composer couldn't do is danger, titled for the menu
+  ("Message Not Sent", "Image Not Supported"), with one sentence that says what to do and the
+  server's own words behind Show Details. Each has its own Dismiss, and a failed send has Retry, which
+  sends the kept draft again. A failed send and an attachment that did not land are separate entries,
+  so both can wait in the slot; every composer entry clears when the draft changes or the next send is
+  accepted. A command that keeps the attached images for the next message is an info entry ("/review
+  doesn't send images. They stay here for your next message."), dismissible like other info entries.
+  Nothing renders inside the composer card or between it and the slot.
+- **Drop target** (#2156): files dragged over the composer turn the card's own edge dashed
+  `--text-dim` and change only the bar row, to "Drop to attach 2 images"; the draft and its
+  attachments stay in view. A model without image input refuses the drop in the same row, with the
+  image-off icon and the one sentence the notice and the + menu's Attach Image row also use: "<model>
+  can't read images. Choose another model in Model Settings to attach them."
 - A session notice says whether this session can take its next turn. A campaign notice describes an
   Orchestrator campaign instead: Campaign Continuation (the delivery of the campaign's durable events
   to the Orchestrator) and Held Children (the roster of child sessions that cannot start their next

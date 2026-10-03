@@ -62,8 +62,11 @@ export interface ComposerCommand {
   groupLabel: string;
 }
 
-export const DURABLE_COMMAND_ATTACHMENT_NOTICE =
-  "Attached images will not be sent with this command. They will remain for your next prompt.";
+/** The note for a command that keeps the attached images for the next message, naming the command by
+ * the token the person typed ("/review"). */
+export function durableCommandAttachmentNote(commandLabel: string): string {
+  return `${commandLabel} doesn't send images. They stay here for your next message.`;
+}
 
 export function durableCommandPreservesAttachments(
   command: ComposerCommand | undefined,

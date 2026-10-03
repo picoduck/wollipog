@@ -94,7 +94,7 @@ import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
-import { ImageStrip, usePastedImages } from "./images.js";
+import { describeAttachmentProblem, ImageStrip, modelRefusesImagesSentence, usePastedImages, type AttachmentProblem } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
 import {
   hasNewPendingPrompt,
@@ -207,9 +207,9 @@ import {
 import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
 import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId, receiptRowIds } from "./TranscriptReceipt.js";
-import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, InfoIcon, MicIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, ImageOffIcon, InfoIcon, MicIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
-  DURABLE_COMMAND_ATTACHMENT_NOTICE,
+  durableCommandAttachmentNote,
   buildComposerCommandRegistry,
   composerCommandsForTrigger,
   composerCommandsInPickerOrder,
@@ -548,6 +548,41 @@ function ambiguousForkError(cause: unknown): AmbiguousForkError | null {
   return new AmbiguousForkError(
     "The fork outcome is uncertain. Do not retry. Wait for the child to appear on the Board, and reload only after checking there.",
   );
+}
+
+/** What the composer couldn't do, as a notice slot entry (#2156). */
+interface ComposerError {
+  /** One line, Title Case: the "+N More" menu item. */
+  title: string;
+  /** Sentence case: what happened and what to do. */
+  message: string;
+  /** The server's own words, behind Show Details rather than in the sentence (§17.2). */
+  detail?: string;
+  /** The action Retry repeats with the kept draft: a failed send, or a failed direct steer. */
+  retry?: "send" | "steer";
+}
+/** A failed send or another composer action, or an attachment that did not land. */
+type ComposerErrorSource = "action" | "attachment";
+type ComposerErrors = Partial<Record<ComposerErrorSource, ComposerError>>;
+
+/** "Couldn't send your message." with what happened, for a send the server did not accept. A request
+ * that never got an answer is the machine not responding; any other refusal keeps the server's
+ * reason behind Show Details. */
+function messageNotSent(cause: unknown, machineName: string | undefined, retry: "send" | "steer"): ComposerError {
+  if (!(cause instanceof ApiError) || cause.status === 502 || cause.status === 503 || cause.status === 504) {
+    return {
+      title: "Message Not Sent",
+      message: `Couldn't send your message. ${machineName ? `${machineName} stopped responding` : "The runner stopped responding"}. Your draft is kept.`,
+      retry,
+    };
+  }
+  const detail = cause.message.trim();
+  return {
+    title: "Message Not Sent",
+    message: "Couldn't send your message. Your draft is kept.",
+    ...(detail ? { detail } : {}),
+    retry,
+  };
 }
 
 export function SessionDetail(props: SessionDetailProps) {
@@ -1091,7 +1126,27 @@ function SessionDetailLoaded({
   const stopTurnMutationRef = useRef<ComposerMutationEntry | null>(null);
   const stopTurnAttemptRef = useRef(0);
   const stopTurnRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // What the composer couldn't do, as notice slot entries (§13.2; #2156): one per source, so a failed
+  // send and an attachment that did not land can both wait in the slot. Each clears on its own
+  // Dismiss, and every one clears when the draft changes or the next send is accepted.
+  const [composerErrors, setComposerErrors] = useState<ComposerErrors>({});
+  const showComposerError = useCallback((source: ComposerErrorSource, next: ComposerError | null) => {
+    setComposerErrors((current) => {
+      if (next) return { ...current, [source]: next };
+      if (!current[source]) return current;
+      const { [source]: _cleared, ...rest } = current;
+      return rest;
+    });
+  }, []);
+  const clearComposerErrors = useCallback(() => {
+    setComposerErrors((current) => Object.keys(current).length ? {} : current);
+  }, []);
+  // What a composer error's Retry repeats, assigned once `send` and `steerDraft` exist below.
+  const composerRetryRef = useRef<Record<NonNullable<ComposerError["retry"]>, () => Promise<void>> | null>(null);
+  /** A composer action's error, in one sentence that says what to do; null clears it. */
+  const setError = useCallback((message: string | null, title = "Action Failed") => {
+    showComposerError("action", message === null ? null : { title, message });
+  }, [showComposerError]);
   const [messageAction, setMessageAction] = useState<MessageActionState | null>(null);
   const messageActionReturnFocusRef = useRef<HTMLElement | null>(null);
   const revealOrdinaryComposerRef = useRef<(focus: "always" | "answer-owned") => void>(() => {});
@@ -1161,7 +1216,10 @@ function SessionDetailLoaded({
   // The chip never takes focus from a pointer (#1797), so the inspector cannot learn its opener
   // from the focused element at open.
   const workspaceReferenceReturnFocusRef = useRef<HTMLElement | null>(null);
-  const [dragActive, setDragActive] = useState(false);
+  // Files dragged over the card (#2156): the images a drop would attach, counted from the drag's
+  // items, or null when nothing is being dragged over it.
+  const [dropImageCount, setDropImageCount] = useState<number | null>(null);
+  const dragActive = dropImageCount !== null;
   // Up-arrow history recall (-1 = editing/not browsing). Prior prompts come from the timeline.
   const [histIdx, setHistIdx] = useState(-1);
   // Optimistic just-sent message: renders immediately so the send feels instant, then yields to the
@@ -1539,6 +1597,11 @@ function SessionDetailLoaded({
   const sessionCaps = resolveCaps(runner, session);
   const effectiveModel = optimisticModel ?? session?.model;
   const selectedModelSupportsImages = modelSupportsImages(sessionCaps, effectiveModel);
+  // The model a "can't read images" sentence names: the one Model Settings shows.
+  const selectedModelName = (effectiveModel
+    ? sessionCaps?.models.find((model) => model.id === effectiveModel)?.displayName ?? effectiveModel
+    : sessionCaps?.models.find((model) => model.default && !model.hidden)?.displayName) ?? null;
+  const modelRefusesImages = modelRefusesImagesSentence(selectedModelName);
   // Codex app-server forks predate the generic capability bit (rolling-upgrade compatibility).
   // Claude and Pi must explicitly prove their native clone surface before the button appears.
   const supportsConversationFork = session
@@ -1549,17 +1612,23 @@ function SessionDetailLoaded({
       ? CODEX_APP_SERVER_IMAGE_MIME_TYPES
       : PROMPT_IMAGE_MIME_TYPES
     : NO_IMAGE_MIME_TYPES;
+  const imagesRefused = allowedImageMimeTypes.length === 0;
   const markDraftDirty = useCallback(() => {
     draftDirty.current = true;
     commandSubmissionRetryRef.current = null;
     composerInteractionVersionRef.current += 1;
     composerDraftVersionRef.current += 1;
     invalidateComposerMutationRecovery(mutationKey);
-  }, [mutationKey]);
+    clearComposerErrors();
+  }, [clearComposerErrors, mutationKey]);
+  const reportAttachmentProblem = useCallback((problem: AttachmentProblem) => {
+    showComposerError("attachment", describeAttachmentProblem(problem));
+  }, [showComposerError]);
   const { images, onPaste, addFiles, addWorkspaceReference, remove, clear, replace } = usePastedImages(
     markDraftDirty,
-    setError,
+    reportAttachmentProblem,
     allowedImageMimeTypes,
+    selectedModelName,
   );
   const actualImages = images.filter((attachment) => !isWorkspaceReference(attachment));
   const draftState = useRef<{ text: string; images: PromptImageInput[] }>({ text: "", images: [] });
@@ -3075,13 +3144,13 @@ function SessionDetailLoaded({
   const stopTurn = useCallback(async (): Promise<boolean> => {
     if (cancelTurnRefusal !== null) return false;
     if (!canStopTurn) {
-      setError("There's no turn to stop right now.");
+      setError("There's no turn to stop right now.", "Turn Not Stopped");
       return false;
     }
     if (stopTurnPendingRef.current) return false;
     const mutation = reserveComposerMutation(mutationKey, "stop");
     if (!mutation) {
-      setError("A stop request is already in progress.");
+      setError("A stop request is already in progress.", "Turn Not Stopped");
       return false;
     }
     stopTurnMutationRef.current = mutation;
@@ -3098,7 +3167,7 @@ function SessionDetailLoaded({
       stopTurnMutationRef.current = null;
       if (viewGenerationRef.current !== generation) return;
       setStoppingTurn(false);
-      setError("The turn is still active. Try stopping it again or use Stop Session.");
+      setError("The turn is still active. Try stopping it again or use Stop Session.", "Turn Not Stopped");
     }, STOP_TURN_RETRY_MS);
     try {
       await api.cancelTurn(sessionId);
@@ -3107,7 +3176,7 @@ function SessionDetailLoaded({
     } catch (cause) {
       if (stopTurnAttemptRef.current !== attempt) return false;
       clearStopTurnAttempt();
-      setError((cause as Error).message);
+      setError((cause as Error).message, "Turn Not Stopped");
       return false;
     }
   }, [api, canStopTurn, cancelTurnRefusal, clearStopTurnAttempt, mutationKey, sessionId]);
@@ -3415,7 +3484,7 @@ function SessionDetailLoaded({
       forkRefusal !== null) return;
     const handoff = quarantine.recovery === "handoff";
     if (handoff && !session.agentId) {
-      setError("This session has no agent on its runner, so a fresh conversation cannot be started for it.");
+      setError("This session's machine no longer has its agent, so a new conversation can't start from it.", "Session Not Recovered");
       return;
     }
     if (!await confirm({
@@ -4263,9 +4332,59 @@ function SessionDetailLoaded({
   const composerCommandResolution = resolveComposerCommandInvocation(text, composerCommands);
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);
+  // The composer's own slot entries (#2156), behind the session's conditions of the same severity.
+  // An error is danger with its own Dismiss, and Retry where the failed action can be repeated with
+  // the kept draft; the note that a command keeps the attached images is info, dismissed by the slot.
+  const composerErrorEntries = Object.entries(composerErrors) as [ComposerErrorSource, ComposerError][];
+  for (const [source, composerError] of composerErrorEntries) {
+    const retry = composerError.retry;
+    const retryRefusal = retry ? promptUnavailableReason : null;
+    const refusalId = `composer-${source}-retry-refusal`;
+    sessionNotices.push({
+      key: `composer-error:${source}`,
+      severity: "danger",
+      rank: source === "attachment" ? SESSION_NOTICE_RANK.attachmentError : SESSION_NOTICE_RANK.composerError,
+      title: composerError.title,
+      render: ({ trailing }) => (
+        <Notice tone="danger" role="alert" ariaLabel={composerError.title} title={composerError.title}
+          trailing={trailing}
+          onDismiss={() => showComposerError(source, null)}
+          actions={retry && (
+            <button
+              type="button"
+              className="btn primary sm"
+              disabled={composerRequestBusy || retryRefusal !== null}
+              aria-describedby={retryRefusal !== null ? refusalId : undefined}
+              onClick={() => void composerRetryRef.current?.[retry]()}
+            >
+              Retry
+            </button>
+          )}
+          details={composerError.detail && <div className="code-well"><code>{composerError.detail}</code></div>}>
+          <p>{composerError.message}</p>
+          {retryRefusal !== null && <p className="notice-meta" id={refusalId}>{retryRefusal}</p>}
+        </Notice>
+      ),
+    });
+  }
+  if (commandPreservesAttachedImages && composerCommandResolution.kind === "command") {
+    const commandLabel = composerCommandResolution.command.label;
+    sessionNotices.push({
+      key: `attachment-note:${commandLabel}`,
+      severity: "info",
+      rank: SESSION_NOTICE_RANK.attachmentNote,
+      title: "Images Kept for Next Message",
+      render: ({ trailing, onDismiss }) => (
+        <Notice tone="info" role="status" ariaLabel="Images Kept for Next Message" title="Images Kept for Next Message"
+          trailing={trailing} onDismiss={onDismiss}>
+          <p>{durableCommandAttachmentNote(commandLabel)}</p>
+        </Notice>
+      ),
+    });
+  }
   const composerIdleCollapsed = isMobile && !composerExpanded && !/[\r\n]/u.test(text) &&
     images.length === 0 && session.pendingApproval == null &&
-    !historyQuarantine && !queuedEdit && !error && !retitleFeedback && !dictation.recording &&
+    !historyQuarantine && !queuedEdit && composerErrorEntries.length === 0 && !retitleFeedback && !dictation.recording &&
     !dragActive && !paletteOpen && !workspacePickerOpen;
   // The phone capsule's preview (#2154): the draft's first line to edit, or who a new message goes
   // to. A composer that cannot send says why instead.
@@ -4410,11 +4529,11 @@ function SessionDetailLoaded({
     }
     if (invocation.kind === "command") {
       if (!invocation.command.available) {
-        setError(invocation.command.disabledReason ?? "This command is unavailable.");
+        setError(invocation.command.disabledReason ?? "This command isn't available in this session.", "Command Not Run");
         return;
       }
       if (images.length && invocation.command.attachmentPolicy === "forbid") {
-        setError(`${invocation.command.label} cannot run with attachments.`);
+        setError(`${invocation.command.label} can't run with attachments. Remove them to run it.`, "Command Not Run");
         return;
       }
       if (invocation.command.source === "app") {
@@ -4432,7 +4551,7 @@ function SessionDetailLoaded({
         }
         if (invocation.command.name === "respond") {
           if (args) {
-            setError("Direct /respond answers are not supported. Use /respond to enter Answer Mode.");
+            setError("/respond doesn't take an answer. Send /respond on its own to answer in Answer Mode.", "Command Not Run");
             return;
           }
           clearAppCommandText();
@@ -4444,7 +4563,7 @@ function SessionDetailLoaded({
           clearAppCommandText();
           return;
         } else {
-          setError(`No app action is registered for ${invocation.command.label}.`);
+          setError(`${invocation.command.label} can't run here.`, "Command Not Run");
           return;
         }
       }
@@ -4455,7 +4574,7 @@ function SessionDetailLoaded({
     const preservesAttachments = invocation.kind === "command" &&
       invocation.command.attachmentPolicy === "preserve";
     if (actualImages.length && !preservesAttachments && !modelSupportsImages(sessionCaps, effectiveModel)) {
-      setError("The selected model does not support image input. Remove the attachment or choose an image-capable model.");
+      reportAttachmentProblem({ kind: "model-refuses-images", modelName: selectedModelName });
       return;
     }
     if (!canSend) return;
@@ -4539,6 +4658,7 @@ function SessionDetailLoaded({
         pendingConfig.current = {};
       }
       providerAccepted = true;
+      if (viewGenerationRef.current === generation) clearComposerErrors();
       if (viewGenerationRef.current === generation &&
           composerDraftVersionRef.current === submissionVersion) {
         draftDirty.current = true;
@@ -4585,7 +4705,7 @@ function SessionDetailLoaded({
           consumedDraftsRef.current.delete(mutationKey);
         }
         if (viewGenerationRef.current === generation) {
-          setError((e as Error).message);
+          showComposerError("action", messageNotSent(e, runnerDisp.name || undefined, "send"));
           setPending(null); // send failed — retract the optimistic bubble
         }
       }
@@ -4605,16 +4725,16 @@ function SessionDetailLoaded({
     // Direct steering posts to the same route as queued steering, so it follows that verdict (#1857).
     if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || !canSend) return;
     if (queueRefusal !== null) {
-      setError(queueRefusal);
+      setError(queueRefusal, "Message Not Sent");
       return;
     }
     if (!directSteeringAvailability.available) {
-      setError(directSteeringAvailability.reason);
+      setError(directSteeringAvailability.reason, "Message Not Sent");
       return;
     }
     const outgoing = text.trim();
     if (actualImages.length && !modelSupportsImages(sessionCaps, effectiveModel)) {
-      setError("The selected model does not support image input. Remove the attachment or choose an image-capable model.");
+      reportAttachmentProblem({ kind: "model-refuses-images", modelName: selectedModelName });
       return;
     }
 
@@ -4655,6 +4775,7 @@ function SessionDetailLoaded({
         return;
       }
       providerAccepted = true;
+      if (viewGenerationRef.current === generation) clearComposerErrors();
       if (viewGenerationRef.current === generation &&
           composerDraftVersionRef.current === submissionVersion) {
         draftDirty.current = true;
@@ -4687,7 +4808,9 @@ function SessionDetailLoaded({
         if (consumedDraftsRef.current.get(mutationKey)?.draftVersion === submissionVersion) {
           consumedDraftsRef.current.delete(mutationKey);
         }
-        if (viewGenerationRef.current === generation) setError((cause as Error).message);
+        if (viewGenerationRef.current === generation) {
+          showComposerError("action", messageNotSent(cause, runnerDisp.name || undefined, "steer"));
+        }
       }
     } finally {
       releaseComposerMutation(
@@ -4700,6 +4823,7 @@ function SessionDetailLoaded({
       if (viewGenerationRef.current === generation) setSteeringBusy(false);
     }
   };
+  composerRetryRef.current = { send, steer: steerDraft };
 
   const promoteQueuedPrompt = async (prompt: QueuedPromptView) => {
     if (queueRefusal !== null || queueSteeringInFlightRef.current.has(prompt.id) ||
@@ -5741,7 +5865,6 @@ function SessionDetailLoaded({
                   ? "Rename failed. Couldn't rename this session."
                   : ""}
             </span>
-            {error && <Notice tone="danger" compact role="alert">{error}</Notice>}
             {queuedPromptControls.length > 0 && (
               <div className="queued-list" aria-label="Queued Messages">
                 {/* A disabled control's tooltip is announced by nothing, so the refusal is also a
@@ -5929,7 +6052,7 @@ function SessionDetailLoaded({
             )}
             <div
               ref={composerBoxRef}
-              className={`composer-box${dragActive ? " drag-over" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}${canPrompt ? "" : " is-disabled"}`}
+              className={`composer-box${dragActive ? imagesRefused ? " is-drop is-refused" : " is-drop" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}${canPrompt ? "" : " is-disabled"}`}
               onBlur={(event) => {
                 const blurredTarget = event.target as HTMLElement;
                 if (blurredTarget === inputRef.current || blurredTarget.classList.contains("composer-idle-preview")) {
@@ -5949,22 +6072,25 @@ function SessionDetailLoaded({
                 }
               }}
               onDragEnter={(e) => {
-                if (!canPrompt || composerAnswerActive) return;
+                // Only files make the card a drop target; dragged text is the textarea's own.
+                if (!canPrompt || composerAnswerActive || !Array.from(e.dataTransfer.types).includes("Files")) return;
                 e.preventDefault();
                 dragDepth.current += 1; // dragenter/leave fire per child; count so leaving a child doesn't clear
-                setDragActive(true);
+                setDropImageCount(Array.from(e.dataTransfer.items)
+                  .filter((item) => item.kind === "file" && item.type.startsWith("image/")).length);
               }}
               onDragOver={(e) => {
                 if (canPrompt && !composerAnswerActive) e.preventDefault(); // required for the element to be a valid drop target
               }}
               onDragLeave={() => {
-                dragDepth.current = Math.max(0, dragDepth.current - 1);
-                if (dragDepth.current === 0) setDragActive(false);
+                if (dragDepth.current === 0) return;
+                dragDepth.current -= 1;
+                if (dragDepth.current === 0) setDropImageCount(null);
               }}
               onDrop={(e) => {
                 e.preventDefault();
                 dragDepth.current = 0;
-                setDragActive(false);
+                setDropImageCount(null);
                 if (!canPrompt || composerAnswerActive) return;
                 const files = Array.from(e.dataTransfer.files);
                 if (files.length) void addFiles(files);
@@ -5995,11 +6121,6 @@ function SessionDetailLoaded({
                 />
               )}
               {!composerAnswerActive && <>
-              {dragActive && (
-                <div className="composer-dropzone">
-                  {selectedModelSupportsImages ? "Drop images to attach" : "Selected model does not support images"}
-                </div>
-              )}
               {paletteOpen && (
                 <SlashCommandMenu
                   listboxId={slashListboxId}
@@ -6038,9 +6159,6 @@ function SessionDetailLoaded({
                   setInspectedWorkspaceReference(reference);
                 }}
               />
-              {commandPreservesAttachedImages && (
-                <Notice tone="warning" compact role="status">{DURABLE_COMMAND_ATTACHMENT_NOTICE}</Notice>
-              )}
               {composerReplyKeycap && (
                 /* The Reply shortcut's hint (§11.5): a keycap at the end of the idle composer's
                    placeholder row. It takes no height, so it can come and go without moving the
@@ -6097,6 +6215,8 @@ function SessionDetailLoaded({
                   composerInteractionVersionRef.current += 1;
                   composerDraftVersionRef.current += 1;
                   invalidateComposerMutationRecovery(mutationKey);
+                  // A changed draft is a new message: the composer's notices were about the old one.
+                  clearComposerErrors();
                   setText(e.currentTarget.value);
                   updateComposerSelection(
                     e.currentTarget.selectionStart,
@@ -6122,6 +6242,20 @@ function SessionDetailLoaded({
                 </div>
               )}
               <div className="composer-bar">
+                {dragActive && (
+                  /* While files are over the card only this row changes: it says what a drop does,
+                     and the draft and its attachments above stay in view (#2156). */
+                  <div className="composer-drop-label" role="status">
+                    {imagesRefused ? (
+                      <>
+                        <ImageOffIcon size={16} />
+                        <span>{modelRefusesImages}</span>
+                      </>
+                    ) : dropImageCount
+                      ? `Drop to attach ${dropImageCount} ${dropImageCount === 1 ? "image" : "images"}`
+                      : "Drop images to attach"}
+                  </div>
+                )}
                 <div className="cbar-left">
                   <ComposerPlusMenu
                     session={session}
@@ -6146,6 +6280,7 @@ function SessionDetailLoaded({
                     }}
                     disabled={!canPrompt}
                     imageMimeTypes={allowedImageMimeTypes}
+                    imagesRefusedReason={modelRefusesImages}
                     onAttachImages={addFiles}
                   />
                   <button
@@ -6892,6 +7027,7 @@ export function ComposerPlusMenu({
   onSetParentControlPolicy,
   disabled,
   imageMimeTypes,
+  imagesRefusedReason = modelRefusesImagesSentence(null),
   onAttachImages,
 }: {
   session: SessionView;
@@ -6904,6 +7040,9 @@ export function ComposerPlusMenu({
   disabled: boolean;
   /** Exactly the types the connected runner and selected model accept; empty when images cannot be sent. */
   imageMimeTypes: readonly string[];
+  /** Why images cannot be attached when `imageMimeTypes` is empty: the composer's one sentence for a
+   * model without image input. */
+  imagesRefusedReason?: string;
   onAttachImages: (files: File[]) => void | Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -6983,7 +7122,7 @@ export function ComposerPlusMenu({
             role="button"
             icon={<ImageIcon size={16} />}
             description={!imagesSupported
-              ? "The selected model does not support image input."
+              ? imagesRefusedReason
               : disabled
                 ? "This session cannot accept a prompt right now."
                 : `Photos, camera, or files · up to ${MAX_PROMPT_IMAGES}`}

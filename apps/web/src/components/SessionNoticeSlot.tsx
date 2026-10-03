@@ -39,7 +39,7 @@ export interface SessionNoticeContext {
   trailing: ReactNode;
   /** Present only for an info entry: hides it for this session until the page reloads. Danger and
    * warning conditions are not dismissible by the slot; an entry with its own dismissal (the failed
-   * account switch) wires that itself. */
+   * account switch, a composer error) wires that itself. */
   onDismiss?: () => void;
 }
 
@@ -64,6 +64,12 @@ export const SESSION_NOTICE_RANK = {
   archived: 7,
   skillsUnavailable: 8,
   setupSuggestion: 9,
+  // The composer's own entries (#2156), after every session condition of the same severity: a failed
+  // send or other composer action, an attachment that did not land, and the note that a command keeps
+  // the attached images for the next message.
+  composerError: 10,
+  attachmentError: 11,
+  attachmentNote: 12,
 } as const;
 
 const SEVERITY_ORDER: Record<SessionNoticeSeverity, number> = { danger: 0, warning: 1, info: 2 };

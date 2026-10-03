@@ -106,3 +106,72 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     expect(await page.locator("html").evaluate((element) => element.scrollWidth)).toBe(width);
   });
 }
+
+/** #2156: a failed send, then an unsupported file dropped on the card. */
+async function failSendThenDropBmp(page: Page, width: number, height: number) {
+  await page.setViewportSize({ width, height });
+  await page.goto("/command-inbox-projects-e2e.html");
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], [], { supportsImages: true }));
+  await page.getByRole("button", { name: /Alpha Session/ }).click();
+  const expand = page.getByRole("button", { name: "Expand Session" });
+  if (await expand.isVisible()) await expand.click();
+  const edit = page.getByRole("button", { name: /^Edit Message:/ });
+  if (await edit.isVisible()) await edit.click();
+  const composer = page.locator(".composer-input");
+  await composer.fill("Look at this screenshot");
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.failNextPrompt());
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.locator(".session-notice-slot")).toBeVisible();
+  await page.locator(".composer-box").evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([new Uint8Array([66, 77])], "scan.bmp", { type: "image/bmp" }));
+    element.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  });
+  return composer;
+}
+
+for (const [width, height] of [[1440, 900], [390, 844]] as const) {
+  test(`a failed send and an unsupported file are one notice and +1 More at ${width}px (#2156)`, async ({ page }) => {
+    const composer = await failSendThenDropBmp(page, width, height);
+    const slot = page.locator(".session-notice-slot");
+    await expect(slot.getByRole("button", { name: "+1 More" })).toBeVisible();
+    await expect(slot.locator(".notice")).toHaveCount(1);
+    // Nothing else between the slot and the card, and nothing inside the card.
+    await expect(page.locator(".composer .notice")).toHaveCount(1);
+    const sent = slot.getByRole("alert", { name: "Message Not Sent" });
+    await expect(sent.locator(".notice-body")).toHaveText(/^Couldn't send your message\. .+ stopped responding\. Your draft is kept\.$/);
+    await expect(sent.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(sent.getByRole("button", { name: "Dismiss" })).toBeVisible();
+    await expect(composer).toHaveValue("Look at this screenshot");
+
+    await slot.getByRole("button", { name: "+1 More" }).click();
+    await expect(page.getByRole("menu", { name: "Session Notices" }).getByRole("menuitem")).toHaveText(["Image Not Supported"]);
+    await page.keyboard.press("Escape");
+    expect(await page.locator("html").evaluate((element) => element.scrollWidth)).toBe(width);
+  });
+}
+
+test("Retry sends the kept draft once, and Dismiss and typing clear the composer's notices (#2156)", async ({ page }) => {
+  const composer = await failSendThenDropBmp(page, 1440, 900);
+  const slot = page.locator(".session-notice-slot");
+  await slot.getByRole("alert", { name: "Message Not Sent" }).getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().map((request) => request.text)))
+    .toEqual(["Look at this screenshot", "Look at this screenshot"]);
+  // The accepted send clears every composer entry.
+  await expect(slot).toHaveCount(0);
+
+  await composer.fill("Another one");
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.failNextPrompt());
+  await page.getByRole("button", { name: "Send" }).click();
+  const sent = slot.getByRole("alert", { name: "Message Not Sent" });
+  await sent.getByRole("button", { name: "Dismiss" }).click();
+  await expect(slot).toHaveCount(0);
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.failNextPrompt());
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(sent).toBeVisible();
+  await composer.press("End");
+  await composer.pressSequentially(" again");
+  await expect(slot).toHaveCount(0);
+});

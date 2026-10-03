@@ -89,7 +89,7 @@
     "|.column-count|font-size|11",
     "|.column-head|font-size|12",
     "|.compare-agent|font-size|13",
-    "|.composer-dropzone|font-size|13",
+    "|.composer-input|font-size|14",
     "|.connection-access-error|font-size|12.5",
     "|.connection-details-list dd|font-size|12.5",
     "|.connection-details-list dt|font-size|10",
@@ -334,7 +334,6 @@
     "|::-webkit-scrollbar-thumb|border-radius|6"
   ],
   "zIndexLiterals": [
-    "|.composer-dropzone|z-index|5",
     "|.inbox-project-menu|z-index|2",
     "|.inbox-row-shell.stalled::before|z-index|1",
     "|.inbox-splitter|z-index|2",

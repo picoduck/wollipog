@@ -3,6 +3,7 @@
  * severe — and lists the rest behind "+N More", rather than stacking a banner for each.
  */
 
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
@@ -11,7 +12,7 @@ import { Window } from "happy-dom";
 import type {
   ControlPlaneToUi, OrchestratorCampaignProjection, RunnerView, SessionEvent, SessionView,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
@@ -840,6 +841,162 @@ test("clicking away from the slot is a choice, so a later resolution does not pu
     await act(async () => more.blur());
     await fixture.update({ ...session, updatedAt: 2, archived: false });
     assert.ok(domWindow.document.activeElement === (domWindow.document.body as never), "focus stays where the person left it");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+// #2156: the composer's own errors and notes are entries of the slot, never a second notice.
+
+function composerInput(container: HTMLElement): HTMLTextAreaElement {
+  const input = container.querySelector(".composer-input") as HTMLTextAreaElement | null;
+  assert.ok(input, "the composer is mounted");
+  return input;
+}
+
+async function typeDraft(container: HTMLElement, value: string) {
+  const input = composerInput(container);
+  await act(async () => {
+    input.focus();
+    fireDomEvent.change(input, { target: { value } });
+  });
+}
+
+async function sendDraft(container: HTMLElement) {
+  const send = container.querySelector('button[aria-label="Send"]') as HTMLButtonElement | null;
+  assert.ok(send, "the composer can send");
+  await act(async () => { send.click(); });
+  await flush();
+}
+
+/** Drop files on the composer card, as a desktop drag does. */
+async function dropFiles(container: HTMLElement, files: File[]) {
+  const card = container.querySelector(".composer-box");
+  assert.ok(card);
+  const event = new domWindow.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", {
+    value: { files, types: ["Files"], items: files.map((file) => ({ kind: "file", type: file.type })) },
+  });
+  await act(async () => { card.dispatchEvent(event as never); });
+  await flush();
+}
+
+const bmp = () => new File([new Uint8Array([66, 77])], "scan.bmp", { type: "image/bmp" });
+const unreachable = () => Promise.reject(new TypeError("Failed to fetch"));
+
+test("an unsupported file and a failed send show one notice and +1 More, and nothing else above the card", async () => {
+  const fixture = await mount(sessionView({}), { client: { prompt: unreachable } as Partial<ApiClient> });
+  try {
+    await typeDraft(fixture.container, "Look at this");
+    await sendDraft(fixture.container);
+    await dropFiles(fixture.container, [bmp()]);
+
+    assert.equal(fixture.notices().length, 1, "one notice in the slot");
+    assert.equal(fixture.container.querySelectorAll(".composer .notice").length, 1,
+      "no other notice renders between the slot and the card, or inside the card");
+    const shown = fixture.notices()[0]!;
+    assert.equal(shown.getAttribute("aria-label"), "Message Not Sent", "the failed send ranks first");
+    assert.equal(shown.querySelector(".notice-body p")?.textContent,
+      "Couldn't send your message. Build Box stopped responding. Your draft is kept.");
+    assert.equal(composerInput(fixture.container).value, "Look at this", "the draft is kept");
+    assert.ok(fixture.button("Retry"), "a failed send can be retried");
+    assert.ok(shown.querySelector('button[aria-label="Dismiss"]'), "a composer error has its own Dismiss");
+
+    await act(async () => { fixture.button("+1 More")!.click(); });
+    const items = [...domWindow.document.querySelectorAll('[role="menu"] [role="menuitem"]')] as unknown as HTMLElement[];
+    assert.deepEqual(items.map((item) => item.textContent), ["Image Not Supported"]);
+    await act(async () => { items[0]!.click(); });
+    await flush();
+    const image = fixture.notices()[0]!;
+    assert.equal(image.getAttribute("aria-label"), "Image Not Supported");
+    assert.equal(image.querySelector(".notice-body p")?.textContent,
+      "BMP images aren't supported. Attach a PNG, JPEG or WebP image.");
+    for (const notice of fixture.container.querySelectorAll(".notice")) {
+      assert.doesNotMatch(notice.textContent ?? "", /image\/|MiB|payload/u);
+    }
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("Dismiss removes a composer error, and changing the draft clears the rest", async () => {
+  const fixture = await mount(sessionView({}), { client: { prompt: unreachable } as Partial<ApiClient> });
+  try {
+    await typeDraft(fixture.container, "Look at this");
+    await sendDraft(fixture.container);
+    await dropFiles(fixture.container, [bmp()]);
+    const dismiss = fixture.notices()[0]!.querySelector('button[aria-label="Dismiss"]') as HTMLButtonElement;
+    await act(async () => { dismiss.click(); });
+    await flush();
+    assert.equal(fixture.notices().length, 1);
+    assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Image Not Supported", "only the dismissed one goes");
+    assert.equal(fixture.button("+1 More"), undefined);
+
+    await typeDraft(fixture.container, "Look at this one");
+    assertNoDomNode(fixture.slot(), "typing in the draft clears the composer's notices");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("Retry sends the kept draft once, and an accepted send clears the slot", async () => {
+  const prompts: string[] = [];
+  let failures = 1;
+  const fixture = await mount(sessionView({}), {
+    client: {
+      prompt: async (_id: string, text: string) => {
+        prompts.push(text);
+        if (failures-- > 0) throw new TypeError("Failed to fetch");
+        return undefined as never;
+      },
+    } as Partial<ApiClient>,
+  });
+  try {
+    await typeDraft(fixture.container, "Run the tests");
+    await sendDraft(fixture.container);
+    assert.deepEqual(prompts, ["Run the tests"]);
+    const retry = fixture.button("Retry")!;
+    await act(async () => {
+      retry.click();
+      retry.click();
+    });
+    await flush();
+    assert.deepEqual(prompts, ["Run the tests", "Run the tests"], "Retry sends the same draft, once");
+    assertNoDomNode(fixture.slot(), "the accepted send clears the composer error");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a server refusal keeps its words behind Show Details, not in the sentence", async () => {
+  const fixture = await mount(sessionView({}), {
+    client: { prompt: () => Promise.reject(new ApiError("session is not accepting prompts", 409)) } as Partial<ApiClient>,
+  });
+  try {
+    await typeDraft(fixture.container, "Hello");
+    await sendDraft(fixture.container);
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.querySelector(".notice-body p")?.textContent, "Couldn't send your message. Your draft is kept.");
+    assertNoDomNode(notice.querySelector("code"));
+    await act(async () => { fixture.button("Show Details")!.click(); });
+    assert.equal(notice.querySelector(".code-well code")?.textContent, "session is not accepting prompts");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a composer error waits through a pending request and is still there after it resolves", async () => {
+  const session = sessionView({});
+  const fixture = await mount(session, { client: { prompt: unreachable } as Partial<ApiClient> });
+  try {
+    await typeDraft(fixture.container, "Look at this");
+    await sendDraft(fixture.container);
+    await fixture.update({
+      ...session, updatedAt: 2, status: "input_required",
+      pendingApproval: { requestId: "question", title: "Choose a database", options: [], kind: "question" },
+    });
+    await fixture.update({ ...session, updatedAt: 3, status: "idle", pendingApproval: null });
+    assert.equal(fixture.notices()[0]?.getAttribute("aria-label"), "Message Not Sent");
   } finally {
     await fixture.unmount();
   }

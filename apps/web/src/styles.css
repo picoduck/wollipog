@@ -5421,8 +5421,6 @@ textarea {
   }
 }
 
-/* A failed send sits above the input. */
-.composer > .notice { margin-bottom: var(--space-2); }
 /* The one session notice slot (§13.2, #1966): the composer column's first child, on its width and
    gutters. It holds one notice; the rest of the session's conditions are its "+N More" menu. */
 .session-notice-slot { margin-bottom: var(--space-2); }
@@ -5699,10 +5697,28 @@ textarea {
   top: 2px;
   right: 0;
 }
-/* Phase 6: image drag-drop onto the composer */
-.composer-box.drag-over {
-  outline: 2px dashed var(--accent);
-  outline-offset: 2px;
+/* Files dragged over the composer (#2156): the card's own edge turns dashed, so the cue keeps the
+   card's corners (§2.5), and only the bar row changes to say what a drop does. The draft and its
+   attachments stay in view. A model that can't read images refuses the drop in the same row. */
+.composer-box.is-drop,
+.composer-box.is-drop:focus-within {
+  border-style: dashed;
+  border-color: var(--text-dim);
+}
+.composer-box.is-drop .composer-bar > :not(.composer-drop-label) { display: none; }
+.composer-drop-label {
+  display: flex;
+  min-width: 0;
+  min-height: var(--control-h);
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-body-strong);
+}
+.composer-drop-label > svg { flex: none; }
+.composer-box.is-refused .composer-drop-label {
+  color: var(--text);
+  font: var(--type-body);
 }
 /* Move to Project, Move to Workspace and New Workspace (#2163). Why the primary is disabled
    (§7.3): the footer's left slot, small and dim; its own row on a phone, above the two buttons. */
@@ -5781,20 +5797,6 @@ textarea {
   height: 7px;
   border-radius: 50%;
   background: var(--text-faint);
-}
-.composer-dropzone {
-  position: absolute;
-  inset: 0;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--dropzone-bg);
-  color: var(--dropzone-text);
-  font-size: 13px;
-  font-weight: 600;
-  border-radius: var(--radius-sm);
-  pointer-events: none;
 }
 /* Composer bar: fixed controls surround one truncating model label; Send never yields its seat. */
 .composer-bar {

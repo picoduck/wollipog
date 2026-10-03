@@ -28,51 +28,148 @@ function fileToImage(file: File): Promise<PromptImage | null> {
   });
 }
 
+/** Why an attachment did not land, before it is put into words (§17; #2156). */
+export type AttachmentProblem =
+  | { kind: "unsupported-type"; mimeType: string; allowedMimeTypes: readonly string[] }
+  | { kind: "model-refuses-images"; modelName: string | null }
+  | { kind: "too-large"; fileName: string }
+  | { kind: "unreadable"; fileName: string }
+  | { kind: "too-many" }
+  | { kind: "too-large-together" }
+  | { kind: "too-many-references" };
+
+/** A composer notice's words: the "+N More" menu's Title Case title and one sentence-case message. */
+export interface AttachmentProblemText {
+  title: string;
+  message: string;
+}
+
+const IMAGE_TYPE_NAMES: Readonly<Record<string, string>> = {
+  "image/png": "PNG",
+  "image/jpeg": "JPEG",
+  "image/jpg": "JPEG",
+  "image/pjpeg": "JPEG",
+  "image/gif": "GIF",
+  "image/webp": "WebP",
+  "image/svg+xml": "SVG",
+  "image/x-icon": "ICO",
+  "image/vnd.microsoft.icon": "ICO",
+  "image/x-ms-bmp": "BMP",
+};
+
+/** "BMP" for image/bmp: the name a person knows a file type by, never its MIME type. Null when the
+ * type has no short name, so the sentence says "This image type" instead. */
+export function imageTypeName(mimeType: string): string | null {
+  const known = IMAGE_TYPE_NAMES[mimeType.toLowerCase()];
+  if (known) return known;
+  const subtype = /^image\/(?:x-)?([a-z0-9]{2,5})$/i.exec(mimeType)?.[1];
+  return subtype ? subtype.toUpperCase() : null;
+}
+
+/** "PNG, JPEG, GIF or WebP": the types a session accepts, by name, each once. */
+function imageTypeList(mimeTypes: readonly string[]): string {
+  const names = [...new Set(mimeTypes.map(imageTypeName).filter((name): name is string => name !== null))];
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
+}
+
+/** The one sentence for a model without image input, shared by the composer notice, the drop target
+ * and the + menu's Attach Image row. */
+export function modelRefusesImagesSentence(modelName: string | null | undefined): string {
+  return `${modelName?.trim() || "This model"} can't read images. Choose another model in Model Settings to attach them.`;
+}
+
+/** Each outcome in plain words: what happened and what to do, with no MIME types or byte units. */
+export function describeAttachmentProblem(problem: AttachmentProblem): AttachmentProblemText {
+  switch (problem.kind) {
+    case "unsupported-type": {
+      const name = imageTypeName(problem.mimeType);
+      const allowed = imageTypeList(problem.allowedMimeTypes);
+      return {
+        title: "Image Not Supported",
+        message: `${name ? `${name} images aren't` : "This image type isn't"} supported.` +
+          (allowed ? ` Attach a ${allowed} image.` : ""),
+      };
+    }
+    case "model-refuses-images":
+      return { title: "Images Not Supported", message: modelRefusesImagesSentence(problem.modelName) };
+    case "too-large":
+      return {
+        title: "Image Too Large",
+        message: `“${problem.fileName}” is larger than ${MAX_PROMPT_IMAGE_BYTES / 1024 / 1024} MB. Attach a smaller image.`,
+      };
+    case "unreadable":
+      return {
+        title: "Couldn't Read Image",
+        message: `“${problem.fileName}” couldn't be read. Try saving it as PNG or JPEG.`,
+      };
+    case "too-many":
+      return {
+        title: "Too Many Images",
+        message: `You can attach up to ${MAX_PROMPT_IMAGES} images. Remove one to add another.`,
+      };
+    case "too-large-together":
+      return {
+        title: "Images Too Large",
+        message: "These images are too large to send together. Remove one to add another.",
+      };
+    case "too-many-references":
+      return {
+        title: "Too Many References",
+        message: `You can reference up to ${MAX_WORKSPACE_REFERENCES} files. Remove one to add another.`,
+      };
+  }
+}
+
 /** Collect images pasted (or dropped) into a prompt input. */
 export function usePastedImages(
   onUserChange?: () => void,
-  onError?: (message: string) => void,
+  onProblem?: (problem: AttachmentProblem) => void,
   allowedMimeTypes: readonly string[] = PROMPT_IMAGE_MIME_TYPES,
+  /** The selected model, named in the sentence when it cannot read images at all. */
+  modelName: string | null = null,
 ) {
   const [images, setImages] = useState<PromptImageInput[]>([]);
   const imagesRef = useRef<PromptImageInput[]>([]);
   const allowedMimeSet = useMemo(() => new Set<string>(allowedMimeTypes), [allowedMimeTypes]);
 
   const addFiles = useCallback(async (files: File[]) => {
+    // One notice per pick: the first thing that kept a file out. It is reported after the files that
+    // did fit have landed, because a draft change clears the composer's notices.
+    let problem: AttachmentProblem | null = null;
     const unsupported = files.find((f) => f.type.startsWith("image/") && !allowedMimeSet.has(f.type));
     if (unsupported) {
-      onError?.(
-        allowedMimeTypes.length
-          ? `Unsupported image type ${unsupported.type || "unknown"}; allowed: ${allowedMimeTypes.join(", ")}.`
-          : "The selected model does not support image input.",
-      );
+      problem = allowedMimeTypes.length
+        ? { kind: "unsupported-type", mimeType: unsupported.type, allowedMimeTypes }
+        : { kind: "model-refuses-images", modelName };
     }
     const oversized = files.find((f) => allowedMimeSet.has(f.type) && f.size > MAX_PROMPT_IMAGE_BYTES);
-    if (oversized) onError?.(`Image exceeds the ${MAX_PROMPT_IMAGE_BYTES / 1024 / 1024} MiB limit.`);
-    const parsed = await Promise.all(
-      files.filter((f) => allowedMimeSet.has(f.type) && f.size <= MAX_PROMPT_IMAGE_BYTES).map(fileToImage),
-    );
+    if (oversized) problem ??= { kind: "too-large", fileName: oversized.name };
+    const accepted = files.filter((f) => allowedMimeSet.has(f.type) && f.size <= MAX_PROMPT_IMAGE_BYTES);
+    const parsed = await Promise.all(accepted.map(fileToImage));
+    const unreadable = accepted.find((_, index) => parsed[index] === null);
+    if (unreadable) problem ??= { kind: "unreadable", fileName: unreadable.name };
     const valid = parsed.filter((x): x is PromptImage => x !== null);
-    if (parsed.some((x) => x === null)) onError?.("An image could not be read.");
-    if (!valid.length) return;
-    onUserChange?.();
-    const next = [...imagesRef.current];
-    let total = next.reduce((n, img) => n + (isPromptImageReference(img) ? Math.ceil(img.sizeBytes / 3) * 4 : img.data.length), 0);
-    for (const img of valid) {
-      if (next.filter((attachment) => !isWorkspaceReference(attachment)).length >= MAX_PROMPT_IMAGES) {
-        onError?.(`At most ${MAX_PROMPT_IMAGES} images may be attached.`);
-        break;
+    if (valid.length) {
+      onUserChange?.();
+      const next = [...imagesRef.current];
+      let total = next.reduce((n, img) => n + (isPromptImageReference(img) ? Math.ceil(img.sizeBytes / 3) * 4 : img.data.length), 0);
+      for (const img of valid) {
+        if (next.filter((attachment) => !isWorkspaceReference(attachment)).length >= MAX_PROMPT_IMAGES) {
+          problem ??= { kind: "too-many" };
+          break;
+        }
+        if (total + img.data.length > MAX_PROMPT_IMAGE_TOTAL_BASE64_BYTES) {
+          problem ??= { kind: "too-large-together" };
+          break;
+        }
+        next.push(img);
+        total += img.data.length;
       }
-      if (total + img.data.length > MAX_PROMPT_IMAGE_TOTAL_BASE64_BYTES) {
-        onError?.(`Combined image payload exceeds the ${MAX_PROMPT_IMAGE_TOTAL_BASE64_BYTES / 1024 / 1024} MiB limit.`);
-        break;
-      }
-      next.push(img);
-      total += img.data.length;
+      imagesRef.current = next;
+      setImages(next);
     }
-    imagesRef.current = next;
-    setImages(next);
-  }, [allowedMimeSet, allowedMimeTypes, onError, onUserChange]);
+    if (problem) onProblem?.(problem);
+  }, [allowedMimeSet, allowedMimeTypes, modelName, onProblem, onUserChange]);
 
   const onPaste = useCallback(
     (e: ClipboardEvent) => {
@@ -113,7 +210,7 @@ export function usePastedImages(
   const addWorkspaceReference = useCallback((reference: WorkspaceReference) => {
     const currentReferences = imagesRef.current.filter(isWorkspaceReference);
     if (currentReferences.length >= MAX_WORKSPACE_REFERENCES) {
-      onError?.(`At most ${MAX_WORKSPACE_REFERENCES} workspace references may be attached.`);
+      onProblem?.({ kind: "too-many-references" });
       return "limit" as const;
     }
     if (currentReferences.some((candidate) => candidate.targetFingerprint === reference.targetFingerprint &&
@@ -124,7 +221,7 @@ export function usePastedImages(
     imagesRef.current = next;
     setImages(next);
     return "added" as const;
-  }, [onError, onUserChange]);
+  }, [onProblem, onUserChange]);
 
   return { images, onPaste, addFiles, addWorkspaceReference, remove, clear, replace };
 }

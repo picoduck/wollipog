@@ -624,6 +624,7 @@ let failNextCancelTurn = false;
 let deferNextCancelTurnRequest = false;
 let pendingCancelTurnSettlement: (() => void) | null = null;
 let deferNextPromptRequest = false;
+let failNextPromptRequest = false;
 let pendingPromptSettlement: (() => void) | null = null;
 const promptRequests: PromptFixtureRequest[] = [];
 /** Handoff requests the fixture observed, so a spec can prove which config actually crossed the
@@ -1931,6 +1932,10 @@ const client = {
       ...(config ? { config } : {}),
       ...(slashCommand ? { slashCommand } : {}),
     }));
+    if (failNextPromptRequest) {
+      failNextPromptRequest = false;
+      throw new TypeError("Failed to fetch");
+    }
     if (deferNextPromptRequest) {
       deferNextPromptRequest = false;
       await new Promise<void>((resolve) => {
@@ -2517,6 +2522,8 @@ declare global {
       lastCreateSessionRequest(): CreateSessionRequest | null;
       terminalOpenCount(): number;
       cancelTurnCount(): number;
+      /** The next prompt is recorded, then fails as a request that never got an answer (#2156). */
+      failNextPrompt(): void;
       failNextCancelTurn(): void;
       seedQueuedEditRecovery(sessionId: string, recovery: QueuedPromptEditRecovery): void;
       setDescendantRequests(state: "one" | "empty"): void;
@@ -2895,6 +2902,9 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   lastCreateSessionRequest: () => structuredClone(lastCreateSessionRequest),
   terminalOpenCount: () => terminalOpenCount,
   cancelTurnCount: () => cancelTurnCount,
+  failNextPrompt: () => {
+    failNextPromptRequest = true;
+  },
   failNextCancelTurn: () => {
     failNextCancelTurn = true;
   },

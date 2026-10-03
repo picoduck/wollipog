@@ -176,7 +176,7 @@ test("the active row notes that an authorized command keeps attached images", as
   const view = await render({ commands: [durableReview], activeCommandId: durableReview.id, hasAttachments: true });
   try {
     const note = view.container.querySelector(".picker-reason.is-note");
-    assert.match(note?.textContent ?? "", /Attached images will not be sent.*remain for your next prompt\./);
+    assert.match(note?.textContent ?? "", /doesn't send images\. They stay here for your next message\./);
     await view.rerender({ activeCommandId: null });
     assertNoDomNode(view.container.querySelector(".picker-reason"), "only the active row carries the note");
   } finally {

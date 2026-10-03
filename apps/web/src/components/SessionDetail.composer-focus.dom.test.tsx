@@ -5056,7 +5056,7 @@ test("the /respond app command enters Answer Mode and submits without sending an
       ordinary.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
     });
     assert.equal(ordinary.value, "/respond 2", "an unsupported direct answer remains available to edit");
-    assert.match(fixture.container.textContent ?? "", /Direct \/respond answers are not supported/);
+    assert.match(fixture.container.textContent ?? "", /\/respond doesn't take an answer\. Send \/respond on its own to answer in Answer Mode\./);
     assert.equal(prompts.length, 0);
     await act(async () => {
       ordinary.value = "/respond";

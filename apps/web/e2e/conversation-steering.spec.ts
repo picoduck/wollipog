@@ -339,7 +339,10 @@ test("a steering transport failure restores editing without stale draft recovery
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.failNextSteeringRequest());
   await composer.fill("Draft retained after transport failure");
   await page.keyboard.press("Control+Enter");
-  await expect(page.getByText("Simulated steering transport failure", { exact: true })).toBeVisible();
+  // A request that never got an answer reads in plain words, with Retry (#2156).
+  const notSent = page.locator(".session-notice-slot").getByRole("alert", { name: "Message Not Sent" });
+  await expect(notSent.locator(".notice-body")).toHaveText(/^Couldn't send your message\. .+ stopped responding\. Your draft is kept\.$/);
+  await expect(notSent.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(composer).toHaveValue("Draft retained after transport failure");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(1);
 
@@ -395,7 +398,7 @@ test("steering gates fail closed across protocol, provider, active-turn, held-qu
   }));
   await composer.fill("held queue");
   await page.keyboard.press("Control+Enter");
-  await expect(page.getByRole("alert")).toHaveText(
+  await expect(page.getByRole("alert", { name: "Message Not Sent" }).locator(".notice-body")).toHaveText(
     "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
   );
   await expect.poll(requests).toBe(0);
@@ -549,7 +552,7 @@ test("an oversized recovered attachment set stays recoverable and reports the li
 
   await expect(page.getByText("Recovered Queued Message", { exact: true })).toBeVisible();
   await expect(page.locator(".composer-input")).toHaveValue("Keep this oversized recovered message");
-  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toContainText("at most 6 images may be attached");
+  await expect(page.locator('.session-notice-slot .notice.t-danger[role="alert"]')).toContainText("at most 6 images may be attached");
 });
 
 test("a definite direct rejection preserves the draft and never creates a transcript bubble", async ({ page }) => {
