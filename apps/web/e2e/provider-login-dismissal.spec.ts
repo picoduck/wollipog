@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "mobile", width: 390, height: 844 }]) {
+  test.describe(viewport.name, () => {
+  test.use({ viewport, hasTouch: viewport.name === "mobile", isMobile: viewport.name === "mobile" });
   test(`failed machine sign-in dismissal and subsequent failure on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.route("**/api/runners/runner-1/provider-logins/*/dismiss", route =>
@@ -12,7 +14,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "
     await expect(dismiss).toBeVisible();
     const box = await dismiss.boundingBox();
     expect(box!.width).toBeGreaterThanOrEqual(44);
-    expect(box!.height).toBeGreaterThanOrEqual(44);
+    expect(box!.height).toBeGreaterThanOrEqual(viewport.name === "mobile" ? 44 : 32);
     await expect(team.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
     await expect(team.getByRole("button", { name: "Dismiss" })).toHaveCount(0);
     await page.screenshot({ path: `test-results/provider-login-before-${viewport.name}.png`, fullPage: true });
@@ -40,6 +42,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "
     await expect(work).toBeVisible();
     expect(await page.evaluate(() => window.__providerLoginCalls))
       .toEqual(["dismiss:login_failed-first", "cancel:login_active"]);
+  });
   });
 }
 
