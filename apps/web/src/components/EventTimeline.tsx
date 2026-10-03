@@ -18,6 +18,7 @@ import { type TurnUsage,
 } from "../timeline.js";
 import { Markdown } from "./Markdown.js";
 import { Notice } from "./Notice.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { describeTurnError } from "../turn-error.js";
 import {
   MeasuredVirtualList,
@@ -29,7 +30,7 @@ import {
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
-import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, RewindFilesIcon, StoppedIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, RewindFilesIcon, StopTurnIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
@@ -2872,15 +2873,16 @@ function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserM
   const reason = prompt?.commandInvocation ? RETRY_TURN_COMMAND_REASON : retry?.unavailableReason;
   const retrying = prompt !== undefined && retry?.pendingPromptId === prompt.id;
   const actions = retry && prompt && (
-    <button
-      type="button"
+    <BusyButton
       className="btn sm"
-      disabled={reason !== undefined || retry.pendingPromptId !== undefined}
+      busy={retrying}
+      progress="Retrying the turn…"
+      disabled={reason !== undefined || (retry.pendingPromptId !== undefined && !retrying)}
       aria-describedby={reason !== undefined ? reasonId : undefined}
       onClick={() => retry.onRetry(prompt)}
     >
-      {retrying ? "Retrying…" : "Retry Turn"}
-    </button>
+      Retry Turn
+    </BusyButton>
   );
   return (
     <Notice
@@ -2984,7 +2986,7 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, ...messageInput
       {summary.turn !== undefined && <span className="tl-turn-label">Turn {summary.turn}</span>}
       {stopped ? (
         <span className="tl-turn-time tl-turn-stopped">
-          <StoppedIcon size={14} aria-hidden="true" />
+          <StopTurnIcon size={14} aria-hidden="true" />
           {clock ? (
             <>
               Stopped at{" "}

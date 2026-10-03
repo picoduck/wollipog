@@ -109,7 +109,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ShieldIcon` | Lucide | `Shield` | Generic approval status, intentionally filled. |
 | `ArrowUpIcon` | Lucide | `ArrowUp` | Generic upward action. |
 | `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action. |
-| `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance. |
+| `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance; also a stopped turn's footer mark. |
 | `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning. |
 | `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |
 | `NotesIcon` | Lucide | `NotebookText` | Notes summary. |

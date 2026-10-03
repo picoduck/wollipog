@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { SessionEvent } from "@wollipog/protocol";
 import { TimelineBuilder, type TimelineItem } from "../timeline.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { EventTimeline, type TurnRetryControl } from "./EventTimeline.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -89,7 +90,7 @@ test("a provider error reported twice renders one Turn Failed notice, the transc
 test("Show Details reveals the raw provider message in a mono well, and only then", async () => {
   await withView(<EventTimeline items={failedTurnItems()} />, async (view) => {
     const notice = notices(view.container)[0]!;
-    assert.equal(notice.querySelector(".code-well"), null);
+    assertNoDomNode(notice.querySelector(".code-well"), "the raw message is not in the DOM until Show Details");
     assert.doesNotMatch(notice.textContent ?? "", /Rate limit reached/);
 
     await act(async () => button(notice as Element, "Show Details")!.click());
@@ -119,7 +120,9 @@ test("Retry Turn submits the failed turn's prompt, and names why when it cannot"
     assert.ok(reason?.closest(".notice-body"), "the reason is a visible line in the notice body");
 
     await view.rerender(<EventTimeline items={failedTurnItems()} turnRetry={control({ pendingPromptId: 1 })} />);
-    assert.equal(button(view.container, "Retrying…")?.disabled, true);
+    const busy = button(view.container, "Retry Turn")!;
+    assert.equal(busy.getAttribute("aria-busy"), "true", "the label stays and the button shows it is running");
+    assert.equal(busy.getAttribute("aria-disabled"), "true");
   });
 });
 
@@ -175,6 +178,6 @@ test("a stop in a turn no prompt opened still says when it stopped, without a tu
   ]} />, async (view) => {
     const footer = view.container.querySelector(".tl-turn-footer")!;
     assert.ok(footer.querySelector(".tl-turn-stopped"));
-    assert.equal(footer.querySelector(".tl-turn-label"), null);
+    assertNoDomNode(footer.querySelector(".tl-turn-label"), "an unnumbered turn claims no number");
   });
 });
