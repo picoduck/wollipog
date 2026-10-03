@@ -167,17 +167,17 @@ test("pane focus boundaries are not painted by scrolling containers", () => {
 
 test("the disclosures do not claim a height they do not have", () => {
   // `content-visibility: auto` was added to the collapsed disclosures on the theory that an
-  // off-screen collapsed subtree still lays out and paints. It does not: `.tl-work`/`.tl-subagent`
+  // off-screen collapsed subtree still lays out and paints. It does not: `.tl-work`/`.tl-agent`
   // project their children as sibling rows only while OPEN, so a collapsed wrapper holds just its
   // ~32px header — and `contain-intrinsic-size: auto 120px` then invented ~88px per group, shifting
   // a long Side Chat as those groups neared the viewport. A wrong height is worse than no skipping.
   for (const { selector } of declarationsOf(css, "contain-intrinsic-size")) {
-    assert.doesNotMatch(selector, /\.tl-work|\.tl-subagent/,
+    assert.doesNotMatch(selector, /\.tl-work|\.tl-agent(?![\w-])/,
       `${selector} does not own its collapsed subtree, so any intrinsic size it declares is phantom`);
   }
   for (const { selector, value } of declarationsOf(css, "content-visibility")) {
     if (!/^auto$/.test(value.trim())) continue;
-    assert.doesNotMatch(selector, /\.tl-work|\.tl-subagent/,
+    assert.doesNotMatch(selector, /\.tl-work|\.tl-agent(?![\w-])/,
       `${selector} has nothing off-screen to skip when collapsed`);
   }
 });

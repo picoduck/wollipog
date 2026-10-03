@@ -889,12 +889,12 @@ test("semantic reveal opens collapsed ancestors, yields to the reader, and can b
   await expect(target).toHaveAttribute("aria-current", "location");
   await expect.poll(async () => target.evaluate((row) => row === document.activeElement)).toBe(true);
   await expect(page.locator(".tl-work .disclosure-trigger")).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator(".tl-subagent .subagent-toggle")).toHaveCount(2);
-  for (const disclosure of await page.locator(".tl-subagent .subagent-toggle").all()) {
+  await expect(page.locator(".tl-agent-toggle")).toHaveCount(2);
+  for (const disclosure of await page.locator(".tl-agent-toggle").all()) {
     await expect(disclosure).toHaveAttribute("aria-expanded", "true");
   }
 
-  const innerDisclosure = page.locator(".tl-subagent .subagent-toggle").last();
+  const innerDisclosure = page.locator(".tl-agent-toggle").last();
   await innerDisclosure.click();
   await expect(innerDisclosure).toHaveAttribute("aria-expanded", "false");
   await settleLayout(page, 4);

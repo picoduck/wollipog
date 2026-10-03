@@ -188,7 +188,7 @@ test("opening a nested agent from the selected output transfers focus to the new
     if (workDisclosure?.getAttribute("aria-expanded") === "false") {
       await act(async () => workDisclosure.click());
     }
-    const open = container.querySelector<HTMLButtonElement>(".subagent-output .subagent-open")!;
+    const open = container.querySelector<HTMLButtonElement>(".subagent-output .tl-agent > .btn")!;
     assert.ok(open, "the selected root exposes its nested agent action");
     open.focus();
     await act(async () => open.click());
@@ -347,12 +347,15 @@ test("transcript disclosure and Subagents panel action are separate accessible c
     await act(async () => root.render(<EventTimeline items={items} onOpenSubagent={(id) => opened.push(id)} />));
     const worked = container.querySelector<HTMLButtonElement>(".tl-work > .disclosure-trigger")!;
     await act(async () => worked.click());
-    const toggle = container.querySelector<HTMLButtonElement>(".subagent-toggle")!;
-    const open = container.querySelector<HTMLButtonElement>(".subagent-open")!;
+    const toggle = container.querySelector<HTMLButtonElement>(".tl-agent-toggle")!;
+    const open = container.querySelector<HTMLButtonElement>(".tl-agent > .btn")!;
     assert.ok(toggle);
     assert.ok(open);
     assert.equal(toggle.getAttribute("aria-expanded"), "true");
-    assert.equal(open.getAttribute("aria-label"), "Open Agent in Subagents Panel");
+    assert.equal(open.getAttribute("aria-label"), "Open Audit Storage", "the accessible name starts with the visible label");
+    assert.equal(open.textContent, "Open");
+    assert.ok(open.matches(".btn.sm.ghost"), "Open is a small ghost button beside the disclosure");
+    assert.notEqual(open.parentElement, toggle, "Open is the disclosure's sibling, not inside it");
     await act(async () => open.click());
     assert.deepEqual(opened, ["outer"]);
     assert.equal(toggle.getAttribute("aria-expanded"), "true", "opening the panel does not toggle transcript disclosure");

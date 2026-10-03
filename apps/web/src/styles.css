@@ -7136,55 +7136,45 @@ textarea,
   font: var(--type-small);
 }
 .tl-step-link { align-self: flex-start; }
-/* A subagent's work nested under its Task tool call (#2183 restyles the row). */
-.tl-subagent > .subagent-head {
+/* An agent a turn spawned (#2183): a step's row named after its spawning call, its role and step
+   count in small meta, its status, then Open. The disclosure is a §5.5 trigger; Open is its
+   sibling `.btn.sm.ghost`, 8px away so its 44px touch area (§2.8) never covers the trigger. */
+.tl-agent {
   display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  font-size: 12px;
-  width: 100%;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
 }
-.tl-subagent .subagent-toggle {
+/* The name gives way first; only a row too narrow for its fixed parts clips, never overflows. */
+.tl-agent > .tl-agent-toggle {
   display: flex;
   flex: 1;
+  gap: var(--space-2);
   min-width: 0;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding: var(--space-0-5) 0 var(--space-0-5) var(--space-1);
+  overflow: hidden;
+  font: var(--type-body);
+  white-space: nowrap;
+}
+.tl-agent-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-agent-meta {
+  display: flex;
+  flex: none;
+  gap: var(--space-3);
   color: var(--text-faint);
-  cursor: pointer;
-  user-select: none;
-}
-.tl-subagent .subagent-toggle:hover {
-  color: var(--text-dim);
-}
-.tl-subagent.open > .subagent-head .disclosure-chevron { transform: rotate(90deg); }
-.subagent-open {
-  flex-shrink: 0;
-  padding: 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: var(--text-xs);
-  cursor: pointer;
-}
-.subagent-open:hover { background: var(--bg-elev-2); color: var(--text); }
-.subagent-icon {
-  opacity: 0.8;
-}
-.subagent-status {
-  margin-left: auto;
-}
-.subagent-metrics {
-  color: var(--text-faint);
+  font: var(--type-small);
   font-variant-numeric: tabular-nums;
 }
-.tl-subagent-time {
-  flex-basis: 100%;
-  padding-left: 32px;
+.tl-agent-status {
+  flex: none;
+  margin-inline-start: auto;
+}
+/* A phone keeps the name readable: the role (also in the Agents panel) yields to it. */
+@media (max-width: 760px) {
+  .tl-agent-role { display: none; }
 }
 .tl-plan {
   min-width: 0;

@@ -26,7 +26,7 @@ import {
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
-import { AccountIcon, AgentLogIcon, ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, RewindFilesIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, RewindFilesIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
@@ -37,10 +37,12 @@ import {
   diffLineCounts,
   foldRetries,
   mergeWork,
+  ownsSubagent,
   retryIdentity,
   retryNeighbours,
   sameWork,
   splitStepTitle,
+  subagentName,
   summarizeWork,
   workspaceRelativePath,
   type WorkLedger,
@@ -53,6 +55,7 @@ import { ArtifactPreview } from "./ArtifactPreview.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
+import { deriveSubagentLifecycle } from "../subagents.js";
 import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
 import { StructuredQuestionText, structuredQuestionSummary } from "./StructuredQuestionText.js";
 import type { ConversationForkAvailability, EditInForkAvailability } from "../session-actions.js";
@@ -475,6 +478,8 @@ export type TimelineRenderRow =
       open: boolean;
     } & WorkLedger)
   | { kind: "subagent_summary"; key: string; tool: ToolItem; depth: number; open: boolean }
+  /** The spawning call's own output, after an open agent's steps: the tool row it replaces is hidden. */
+  | { kind: "subagent_output"; key: string; tool: ToolItem; depth: number }
   | {
       kind: "item";
       key: string;
@@ -489,7 +494,7 @@ export type TimelineRenderRow =
 const timelineRowKey = (row: TimelineRenderRow) => row.key;
 export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionRequestId: string | null = null): number => {
   if (row.kind === "work_summary") return 28;
-  if (row.kind === "subagent_summary") return 52;
+  if (row.kind === "subagent_summary" || row.kind === "subagent_output") return 28;
   switch (row.item.kind) {
     case "agent_message": return 100;
     case "agent_thought": return 28;
@@ -837,6 +842,15 @@ function EventTimelineBody({
         </WorkRule>
       );
     }
+    if (row.kind === "subagent_output") {
+      const outputKey = `row-details:${row.key}`;
+      const outputOpen = disclosure.get(outputKey) ?? false;
+      return (
+        <WorkRule depth={1 + row.depth}>
+          <SubagentOutput tool={row.tool} open={outputOpen} onToggle={() => toggle(outputKey, outputOpen)} />
+        </WorkRule>
+      );
+    }
     const item = row.item;
     const detailsKey = `row-details:${row.key}`;
     const detailsOpen = disclosure.get(detailsKey) ?? false;
@@ -913,9 +927,10 @@ function EventTimelineBody({
   );
 }
 
-/** A row inside an open work group: a step, a subagent summary or a subagent's nested step. */
+/** A row inside an open work group: a step, a subagent summary, a subagent's nested step or its
+ * output. */
 const rowOnWorkRule = (row: TimelineRenderRow): boolean =>
-  row.kind === "subagent_summary" || (row.kind === "item" && (row.inWork || row.depth > 0));
+  row.kind === "subagent_summary" || row.kind === "subagent_output" || (row.kind === "item" && (row.inWork || row.depth > 0));
 
 /** The run of work still in progress: the transcript's last work group, with nothing after it but
  * its own steps. Every earlier group has settled. */
@@ -980,7 +995,13 @@ export interface TimelineRowsProjection {
 }
 
 const rendersSubagentSummary = (item: TimelineItem): boolean =>
-  item.kind === "tool_call" && (item.toolKind === "agent" || Boolean(item.children?.length));
+  item.kind === "tool_call" && ownsSubagent(item);
+
+/** The rows an item contributes besides nested steps: a step row, or an agent row and, while that
+ * agent is open, its output row. A change of shape inserts or removes rows, so the incremental
+ * paths leave it to the full projector. */
+const rowShape = (item: TimelineItem): "step" | "agent" | "agent_output" =>
+  !rendersSubagentSummary(item) ? "step" : hasToolOutput(item as ToolItem) ? "agent_output" : "agent";
 
 interface ItemLocation {
   groupIndex: number;
@@ -1270,7 +1291,7 @@ export class IncrementalTimelineRows {
       parentId = this.toolParents.get(parentId) ?? null;
     }
     disclosureKeys.push(...ancestors.reverse());
-    return { rowKey: this.revealRowKeys.get(eventId) ?? this.itemKey(location.item), disclosureKeys };
+    return { rowKey: this.revealRowKeys.get(eventId) ?? this.rowKeyOf(location.item), disclosureKeys };
   }
 
   private patchExistingItem(
@@ -1294,9 +1315,10 @@ export class IncrementalTimelineRows {
     const projectedChanged = changed.kind === "tool_call" && location.item.kind === "tool_call" && location.item.children?.length
       ? { ...changed, children: location.item.children }
       : changed;
-    // Changing whether a tool owns a subagent summary inserts or removes structural rows.
-    // Leave that rare transition to the full defensive projector instead of patching payloads.
-    if (rendersSubagentSummary(location.item) !== rendersSubagentSummary(projectedChanged)) return false;
+    // Changing whether a tool owns a subagent summary, or whether that agent has an output row,
+    // inserts or removes structural rows. Leave that rare transition to the full defensive
+    // projector instead of patching payloads.
+    if (rowShape(location.item) !== rowShape(projectedChanged)) return false;
     // So does a change that can join or split a folded retry.
     const container = location.parentId
       ? this.toolNodes.get(location.parentId)?.children
@@ -1380,7 +1402,7 @@ export class IncrementalTimelineRows {
     const projectedChanged = changed.kind === "tool_call" && rendered.kind === "tool_call" && rendered.children?.length
       ? { ...changed, children: rendered.children }
       : changed;
-    if (rendersSubagentSummary(rendered) !== rendersSubagentSummary(projectedChanged)) return null;
+    if (rowShape(rendered) !== rowShape(projectedChanged)) return null;
     if (group.kind === "work" &&
         retryNeighbours(group.items, group.items.length - 1, retryIdentity(rendered), retryIdentity(projectedChanged))) {
       return null;
@@ -1435,8 +1457,7 @@ export class IncrementalTimelineRows {
     const projectedChanged = changed.kind === "tool_call" && previousProjectedTool?.children?.length
       ? { ...changed, children: previousProjectedTool.children }
       : changed;
-    if (previousProjectedTool &&
-        rendersSubagentSummary(previousProjectedTool) !== rendersSubagentSummary(projectedChanged)) return null;
+    if (previousProjectedTool && rowShape(previousProjectedTool) !== rowShape(projectedChanged)) return null;
     const previousChildren = parent.children ?? [];
     // A first attributed child makes an untyped placeholder structurally agent-like. Without an
     // existing summary row there is nowhere to insert that child, so rebuild the visible structure.
@@ -1547,15 +1568,19 @@ export class IncrementalTimelineRows {
           for (const row of removed) if (row.kind === "subagent_summary") this.removeSummaryBoundary(row.key);
           keyDirtyFrom = summaryIndex + 1;
         } else if (!summary.open && nextOpen) {
-          const childRows = flattenTimelineItemRows(children, disclosure, true, summary.depth + 1, this.toolIdCounts);
+          const childRows = flattenTimelineItemRows([], disclosure, true, summary.depth + 1, this.toolIdCounts, committedTools.get(parentId)!);
           this.rows.splice(summaryIndex + 1, 0, ...childRows);
           this.indexInsertedRows(childRows, boundaryKey);
           keyDirtyFrom = summaryIndex + 1;
         } else if (summary.open && nextOpen) {
+          // A new step goes before the agent's output row, which stays last in its body.
+          const outputKey = `agent-output:${parentId}`;
+          const outputIndex = this.rowIndexes.get(outputKey);
+          const insertAt = outputIndex === boundary - 1 ? outputIndex : boundary;
           const childRows = flattenTimelineItemRows([projectedChanged], disclosure, true, summary.depth + 1, this.toolIdCounts);
-          this.rows.splice(boundary, 0, ...childRows);
-          this.indexInsertedRows(childRows, boundaryKey);
-          keyDirtyFrom = boundary;
+          this.rows.splice(insertAt, 0, ...childRows);
+          this.indexInsertedRows(childRows, insertAt === boundary ? boundaryKey : outputKey);
+          keyDirtyFrom = insertAt;
         }
         this.reindexRows(keyDirtyFrom);
       }
@@ -1701,6 +1726,12 @@ export class IncrementalTimelineRows {
     return `item:tool:${identity}`;
   }
 
+  /** The row an item renders as: an agent call is its agent row, every other item its own row. */
+  private rowKeyOf(item: TimelineItem): string {
+    const key = this.itemKey(item);
+    return rendersSubagentSummary(item) ? `agent:${key.slice("item:tool:".length)}` : key;
+  }
+
   private patchVisibleItem(previous: TimelineItem, changed: TimelineItem): void {
     const index = this.rowIndexes.get(this.itemKey(previous));
     const row = index == null ? undefined : this.rows[index];
@@ -1715,6 +1746,9 @@ export class IncrementalTimelineRows {
       const summaryIndex = this.rowIndexes.get(`agent:${toolId}`);
       const summaryRow = summaryIndex == null ? undefined : this.rows[summaryIndex];
       if (summaryRow?.kind === "subagent_summary") this.rows[summaryIndex!] = { ...summaryRow, tool };
+      const outputIndex = this.rowIndexes.get(`agent-output:${toolId}`);
+      const outputRow = outputIndex == null ? undefined : this.rows[outputIndex];
+      if (outputRow?.kind === "subagent_output") this.rows[outputIndex!] = { ...outputRow, tool };
     }
   }
 
@@ -1791,6 +1825,8 @@ export class IncrementalTimelineRows {
       if (row.kind === "item") {
         this.revealRowKeys.set(row.item.id, key);
         for (const attempt of row.attempts ?? []) this.revealRowKeys.set(attempt.id, key);
+      } else if (row.kind === "subagent_summary") {
+        this.revealRowKeys.set(row.tool.id, key);
       }
       this.rowKeys[index] = key;
     }
@@ -1936,6 +1972,8 @@ function flattenTimelineItemRows(
   inWork: boolean,
   depth: number,
   toolIds: ReadonlyMap<string, number>,
+  /** Flatten this open agent's body (its steps and output) instead of `items`. */
+  agentBodyOf?: ToolItem,
 ): TimelineRenderRow[] {
   const rows: TimelineRenderRow[] = [];
   const toolIdentity = (item: ToolItem) => (toolIds.get(item.toolCallId) ?? 0) === 1
@@ -1944,75 +1982,103 @@ function flattenTimelineItemRows(
   const appendSteps = (container: readonly TimelineItem[], nestedInWork: boolean, itemDepth: number) => {
     for (const { item, attempts } of foldRetries(container)) {
       if (!timelineItemRendersRow(item)) continue;
+      // One row, not two (#2183): the agent's row carries its spawning call's name and status, so
+      // that call has no step row of its own. Agent calls never fold, so nothing is lost.
+      if (item.kind === "tool_call" && ownsSubagent(item)) {
+        const key = `agent:${toolIdentity(item)}`;
+        const childCount = item.children?.length ?? 0;
+        const open = disclosure.get(key) ?? automaticSubagentOpen(itemDepth, childCount);
+        rows.push({ kind: "subagent_summary", key, tool: item, depth: itemDepth, open });
+        if (open) appendAgentBody(item, itemDepth + 1);
+        continue;
+      }
       // A folded retry keeps its first attempt's key, so a later attempt never remounts the row.
       const keyed = attempts?.[0] ?? item;
       const itemKey = keyed.kind === "tool_call" ? `item:tool:${toolIdentity(keyed)}` : `item:${keyed.kind}:${keyed.id}`;
       rows.push(attempts
         ? { kind: "item", key: itemKey, item, inWork: nestedInWork, depth: itemDepth, attempts }
         : { kind: "item", key: itemKey, item, inWork: nestedInWork, depth: itemDepth });
-      if (item.kind !== "tool_call" || (item.toolKind !== "agent" && !item.children?.length)) continue;
-      const key = `agent:${toolIdentity(item)}`;
-      const childCount = item.children?.length ?? 0;
-      const open = disclosure.get(key) ?? automaticSubagentOpen(itemDepth, childCount);
-      rows.push({ kind: "subagent_summary", key, tool: item, depth: itemDepth, open });
-      if (open) appendSteps(item.children ?? [], true, itemDepth + 1);
     }
   };
-  appendSteps(items, inWork, depth);
+  // An open agent's steps, then its call's own output last, as a command's output follows it.
+  const appendAgentBody = (tool: ToolItem, bodyDepth: number) => {
+    appendSteps(tool.children ?? [], true, bodyDepth);
+    if (hasToolOutput(tool)) rows.push({ kind: "subagent_output", key: `agent-output:${toolIdentity(tool)}`, tool, depth: bodyDepth });
+  };
+  if (agentBodyOf) appendAgentBody(agentBodyOf, depth);
+  else appendSteps(items, inWork, depth);
   return rows;
 }
 
-/** A recursively nested agent's work. First-level, reasonably sized trees start open; deeper or
- * large trees mount lazily only after disclosure, preventing an event burst from rendering an
- * arbitrarily deep/large hidden subtree. Local state survives streamed child updates. */
+/** The subagent vocabulary (§11.2) for an agent call: the provider's lifecycle when it reported
+ * one, otherwise the call's own status. An unreachable agent is Lost, as in the Agents panel. */
+export function subagentStatusMeta(tool: Pick<ToolItem, "status" | "subagentLifecycle">) {
+  const lifecycle = deriveSubagentLifecycle(tool.status, "running", true, tool.subagentLifecycle);
+  return statusMeta("job", lifecycle === "unreachable" ? "lost" : lifecycle);
+}
+
+/**
+ * One agent a turn spawned (#2183): the §5.5 chevron, a Bot icon, the spawning call's name, its
+ * role when the provider gave one and its step count, then its status (Running a pulsing badge,
+ * every other state inline) and Open. The disclosure shows the agent's steps on the work rule;
+ * deeper or large trees mount lazily only after disclosure, so an event burst never renders an
+ * arbitrarily deep or large hidden subtree. Local state survives streamed child updates.
+ */
 function SubagentSummary({ tool, open, onToggle, onOpen }: {
   tool: ToolItem;
   open: boolean;
   onToggle: () => void;
   onOpen?: () => void;
 }) {
-  const timingDescriptionId = useId();
-  const items = tool.children ?? [];
-  const rollup = tool.subagentRollup;
-  const tokens = (rollup?.inputTokens ?? 0) + (rollup?.outputTokens ?? 0);
-  const metrics = [tokens > 0 ? `${tokens.toLocaleString()} tokens` : null]
-    .filter((value): value is string => !!value);
-  const hasTimingDescription = Number.isFinite(tool.startedAt) || Number.isFinite(tool.lastActivityAt)
-    || (Number.isFinite(tool.completedAt) && Number.isFinite(rollup?.durationMs) && (rollup?.durationMs ?? -1) >= 0);
+  const timingId = useId();
+  const name = subagentName(tool);
+  const role = tool.subagentRole ? titleCaseLabel(tool.subagentRole) : undefined;
+  const steps = foldRetries(tool.children ?? []).filter((step) => timelineItemRendersRow(step.item)).length;
+  const stepCount = `${steps} Step${steps === 1 ? "" : "s"}`;
+  const status = subagentStatusMeta(tool);
+  const span = useStepSpan(tool.startedAt, tool.lastActivityAt, tool.completedAt, status.pulse === true);
   return (
-    <div className={`tl-subagent${open ? " open" : ""}`}>
-      <div className="subagent-head">
-        <button
-          type="button"
-          className="subagent-toggle"
-          aria-expanded={open}
-          aria-label={`Agent · ${items.length} Step${items.length === 1 ? "" : "s"} · ${toolStatusMeta(tool.status).label}${metrics.length > 0 ? ` · ${metrics.join(" · ")}` : ""}`}
-          aria-describedby={hasTimingDescription ? timingDescriptionId : undefined}
-          onClick={onToggle}
-        >
-          <ChevronRightIcon size={14} className="disclosure-chevron" />
-          <span className="subagent-icon">⑃</span>
-          <span>Agent · {items.length} Step{items.length === 1 ? "" : "s"}</span>
-          <StatusBadge meta={toolStatusMeta(tool.status)} inline={tool.status === "completed"} className="subagent-status" />
-          {metrics.length > 0 && <span className="subagent-metrics">· {metrics.join(" · ")}</span>}
-          <ActivityTimestampMeta
-            id={hasTimingDescription ? timingDescriptionId : undefined}
-            className="tl-subagent-time"
-            startedAt={tool.startedAt}
-            lastActivityAt={tool.lastActivityAt}
-            completedAt={tool.completedAt}
-            durationOverrideMs={rollup?.durationMs}
-            pointWhenEqual
-            showDuration
-          />
+    <div className={`tl-agent${open ? " open" : ""}`}>
+      <button
+        type="button"
+        className="disclosure-trigger tl-agent-toggle"
+        aria-expanded={open}
+        aria-label={[name, role, stepCount, status.label].filter(Boolean).join(" · ")}
+        aria-describedby={span.description ? timingId : undefined}
+        onClick={onToggle}
+      >
+        <ChevronRightIcon size={14} className="disclosure-chevron" />
+        <span className="tl-step-icon"><BotIcon size={16} /></span>
+        <span className="tl-agent-name">{name}</span>
+        <span className="tl-agent-meta">
+          {role && <span className="tl-agent-role">{role}</span>}
+          <span>{stepCount}</span>
+        </span>
+        <StatusBadge meta={status} inline={!status.pulse} className="tl-agent-status" />
+        {span.description && <span id={timingId} className="sr-only">{span.description}</span>}
+      </button>
+      {onOpen && (
+        <button type="button" className="btn sm ghost" onClick={onOpen} aria-label={`Open ${name}`}>
+          Open
         </button>
-        {onOpen && (
-          <button type="button" className="subagent-open" onClick={onOpen} aria-label="Open Agent in Subagents Panel">
-            Open
-          </button>
-        )}
-      </div>
+      )}
     </div>
+  );
+}
+
+/** The spawning call's own output, last in an open agent's body: the result it returned, or why it
+ * failed. Collapsed to one quiet line, as a step's output is. */
+function SubagentOutput({ tool, open, onToggle }: { tool: ToolItem; open: boolean; onToggle: () => void }) {
+  return (
+    <ToolStep
+      icon={toolIcon()}
+      verb="Output"
+      label={`Output of ${subagentName(tool)}`}
+      open={open}
+      onToggle={onToggle}
+    >
+      <ToolOutput item={tool} failed={tool.status === "failed"} />
+    </ToolStep>
   );
 }
 

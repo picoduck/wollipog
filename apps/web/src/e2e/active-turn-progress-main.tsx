@@ -7,13 +7,15 @@ import type { TimelineItem } from "../timeline.js";
 import { deriveActiveTurnProgress } from "../turn-progress.js";
 import "../styles.css";
 
-/** `?scenario=` picks the turn: running, failing (the default), silent or approval. `?plan=` replaces
- * the current plan step's text. `?theme=light` switches theme. */
-type Scenario = "running" | "failing" | "silent" | "approval";
+/** `?scenario=` picks the turn: running, failing (the default), silent, approval, or agents (a running,
+ * a completed and a nested agent, #2183). `?plan=` replaces the current plan step's text.
+ * `?theme=light` switches theme. */
+type Scenario = "running" | "failing" | "silent" | "approval" | "agents";
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 const requested = params.get("scenario");
-const scenario: Scenario = requested === "running" || requested === "silent" || requested === "approval"
+const scenario: Scenario = requested === "running" || requested === "silent" || requested === "approval" ||
+  requested === "agents"
   ? requested
   : "failing";
 
@@ -74,7 +76,23 @@ const filler = Array.from({ length: 20 }, (_, index): TimelineItem => ({
 }));
 
 const permissionEventId = events.at(-1)!.seq;
-const items: TimelineItem[] = [
+const at = (secondsAgo: number) => fixtureNow - secondsAgo * 1_000;
+/** One turn that spawned a running agent (which spawned a nested one) and a completed agent. */
+const agentItems: TimelineItem[] = [
+  { kind: "user_message", id: 1, text: "Finish compatibility validation and prepare the release.", createdAt: turnStartedAt },
+  { kind: "tool_call", id: 2, toolCallId: "inspect", title: "Inspect Release Metadata", toolKind: "read", status: "completed", text: "Release metadata is present.", startedAt: at(400), lastActivityAt: at(398), completedAt: at(398) },
+  { kind: "tool_call", id: 3, toolCallId: "release-audit-agent", title: "Coordinate Release Audit", toolKind: "agent", status: "in_progress", subagentLifecycle: "running", subagentRole: "explorer", text: "", startedAt: at(360), lastActivityAt: at(4) },
+  { kind: "agent_message", id: 4, text: "Auditing compatibility gates and packaged artifacts.", parentToolUseId: "release-audit-agent", createdAt: at(350) },
+  { kind: "tool_call", id: 5, toolCallId: "audit-read", title: "Read: release/manifest.json", toolKind: "read", status: "completed", text: "", parentToolUseId: "release-audit-agent", startedAt: at(340), lastActivityAt: at(339), completedAt: at(339) },
+  { kind: "tool_call", id: 6, toolCallId: "gates-agent", title: "Check Compatibility Gates", toolKind: "agent", status: "completed", subagentLifecycle: "completed", text: "All four gates pass.", parentToolUseId: "release-audit-agent", startedAt: at(330), lastActivityAt: at(240), completedAt: at(240) },
+  { kind: "tool_call", id: 7, toolCallId: "gates-read", title: "Read: release/gates.ts", toolKind: "read", status: "completed", text: "", parentToolUseId: "gates-agent", startedAt: at(320), lastActivityAt: at(319), completedAt: at(319) },
+  { kind: "tool_call", id: 8, toolCallId: "gates-run", title: "Bash: pnpm check:gates", toolKind: "execute", status: "completed", text: "4 gates pass", parentToolUseId: "gates-agent", startedAt: at(300), lastActivityAt: at(250), completedAt: at(250) },
+  { kind: "tool_call", id: 9, toolCallId: "notes-agent", title: "Draft Release Notes", toolKind: "agent", status: "completed", subagentLifecycle: "completed", subagentRole: "writer", text: "Drafted the v0.30 release notes.", startedAt: at(230), lastActivityAt: at(120), completedAt: at(120) },
+  { kind: "tool_call", id: 10, toolCallId: "notes-read", title: "Read: CHANGELOG.md", toolKind: "read", status: "completed", text: "", parentToolUseId: "notes-agent", startedAt: at(220), lastActivityAt: at(219), completedAt: at(219) },
+  { kind: "agent_message", id: 11, text: "Release notes drafted from the changelog.", parentToolUseId: "notes-agent", createdAt: at(125) },
+  { kind: "plan", id: 12, entries: planEntries },
+];
+const items: TimelineItem[] = scenario === "agents" ? agentItems : [
   { kind: "user_message", id: 1, text: "Finish compatibility validation and prepare the release.", createdAt: turnStartedAt },
   { kind: "tool_call", id: 2, toolCallId: "inspect", title: "Inspect Release Metadata", toolKind: "read", status: "completed", text: "Release metadata is present." },
   { kind: "tool_call", id: 3, toolCallId: "release-audit-agent", title: "Coordinate Release Audit", toolKind: "agent", status: "running", text: "" },

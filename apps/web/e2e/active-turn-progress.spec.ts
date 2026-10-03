@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-type Scenario = "running" | "failing" | "silent" | "approval";
+type Scenario = "running" | "failing" | "silent" | "approval" | "agents";
 
 async function openScenario(page: Page, scenario: Scenario, viewport: { width: number; height: number }) {
   await page.setViewportSize(viewport);
@@ -129,4 +129,69 @@ test("a pending approval outranks progress and Review moves focus to the request
   await expect(progress.getByRole("status")).toHaveText("Approval Required");
 
   await revealAndSettle(page, progress.getByRole("button", { name: "Review" }), "Publish the compatibility release");
+});
+
+/** Open the turn's work group so its agents' rows are on screen. */
+async function openAgents(page: Page, viewport: { width: number; height: number }) {
+  await page.setViewportSize(viewport);
+  await page.goto("/active-turn-progress-e2e.html?scenario=agents");
+  const ledger = page.locator(".tl-work > .disclosure-trigger");
+  await ledger.click();
+  await expect(ledger).toHaveAttribute("aria-expanded", "true");
+  return page.locator(".tl-agent");
+}
+
+test("each agent is one named row with its role, step count, status and Open (#2183)", async ({ page }) => {
+  const agents = await openAgents(page, { width: 1440, height: 900 });
+  await expect(agents.locator(".tl-agent-name")).toHaveText(["Coordinate Release Audit", "Check Compatibility Gates", "Draft Release Notes"]);
+  await expect(agents.locator(".tl-agent-meta")).toHaveText(["Explorer3 Steps", "2 Steps", "Writer2 Steps"]);
+  await expect(agents.locator(".tl-agent-status")).toHaveText(["Running", "Completed", "Completed"]);
+  await expect(page.getByText("Agent · 1 Step")).toHaveCount(0);
+  // The disclosure and Open sit on one 28px row, Open 8px past the disclosure.
+  const row = agents.first();
+  const toggle = row.locator(".tl-agent-toggle");
+  const open = row.getByRole("button", { name: "Open Coordinate Release Audit" });
+  await expect(open).toHaveText("Open");
+  const [toggleBox, openBox] = [await toggle.boundingBox(), await open.boundingBox()];
+  expect(Math.round(openBox!.height)).toBe(28);
+  expect(openBox!.x - (toggleBox!.x + toggleBox!.width)).toBeGreaterThanOrEqual(8);
+  await open.click();
+  await expect(page.getByTestId("opened-subagent")).toHaveText("release-audit-agent");
+  await expectNoHorizontalOverflow(page);
+});
+
+test.describe("on a coarse pointer at 390px", () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test("Open's hit area is at least 44px tall and the row never overflows (#2183)", async ({ page }) => {
+    const agents = await openAgents(page, { width: 390, height: 844 });
+    await expect(agents).toHaveCount(3);
+    for (const open of await agents.getByRole("button", { name: /^Open / }).all()) {
+      const hit = await open.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const after = getComputedStyle(element, "::after");
+        return { visual: box.height, top: Number.parseFloat(after.top), bottom: Number.parseFloat(after.bottom) };
+      });
+      expect(hit.visual).toBe(36);
+      expect(hit.visual - hit.top - hit.bottom, "the ::after hit area borrows past the visual edge").toBeGreaterThanOrEqual(44);
+    }
+    // The name gives way: the step count and status stay whole inside the disclosure, the name
+    // ellipsizes, and Open stays inside the reader.
+    const fits = await agents.evaluateAll((rows) => rows.map((row) => {
+      const toggle = row.querySelector(".tl-agent-toggle")!.getBoundingClientRect();
+      const name = row.querySelector<HTMLElement>(".tl-agent-name")!;
+      const meta = row.querySelector(".tl-agent-meta")!.getBoundingClientRect();
+      const status = row.querySelector(".tl-agent-status")!.getBoundingClientRect();
+      const open = row.querySelector(".btn")!.getBoundingClientRect();
+      return {
+        whole: meta.right <= toggle.right && status.right <= toggle.right,
+        named: name.getBoundingClientRect().width >= 40,
+        inside: open.right <= document.documentElement.clientWidth,
+      };
+    }));
+    expect(fits).toEqual(Array.from({ length: 3 }, () => ({ whole: true, named: true, inside: true })));
+    await expectNoHorizontalOverflow(page);
+    await agents.first().getByRole("button", { name: "Open Coordinate Release Audit" }).tap();
+    await expect(page.getByTestId("opened-subagent")).toHaveText("release-audit-agent");
+  });
 });

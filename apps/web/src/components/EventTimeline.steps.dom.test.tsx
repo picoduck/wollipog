@@ -208,8 +208,8 @@ test("open work and nested agent steps sit on rules, never on inline margins", a
     return count;
   };
   const steps = [...container.querySelectorAll(".tl-step")];
-  assert.deepEqual(steps.map(depth), [1, 2], "a nested agent's step adds one rule");
-  assert.equal(depth(container.querySelector(".tl-subagent")), 1, "the agent's summary sits on its group's rule");
+  assert.deepEqual(steps.map(depth), [2], "a nested agent's step adds one rule; the agent's call has no step row");
+  assert.equal(depth(container.querySelector(".tl-agent")), 1, "the agent's row sits on its group's rule");
   assert.equal(container.querySelectorAll("[style*='margin']").length, 0, "no inline margin anywhere");
-  assert.ok(container.querySelector(".tl-subagent svg.disclosure-chevron"), "the agent row uses the §5.5 chevron");
+  assert.ok(container.querySelector(".tl-agent svg.disclosure-chevron"), "the agent row uses the §5.5 chevron");
 });

@@ -8,6 +8,7 @@ import {
   mergeWork,
   retryNeighbours,
   splitStepTitle,
+  subagentName,
   summarizeWork,
   workspaceRelativePath,
 } from "./work-steps.js";
@@ -101,4 +102,19 @@ test("a failure's exit code and error lines are found; output with neither is al
   const plain = failureLines("File does not exist.\n");
   assert.deepEqual(plain.failing, [true, false]);
   assert.equal(plain.exitCode, undefined);
+});
+
+test("an agent is named after its spawning call, never the provider's bare tool name (#2183)", () => {
+  assert.equal(subagentName({ title: "Coordinate Release Audit", text: "" }), "Coordinate Release Audit");
+  assert.equal(subagentName({ title: "Agent: Investigate the flaky parser test", text: "" }), "Investigate the flaky parser test",
+    "Codex's spawn label is dropped; the Bot icon already says it is an agent");
+  assert.equal(
+    subagentName({ title: "Task", text: '{"description":"Audit  release\\ngates","prompt":"Check every gate","subagent_type":"Explore"}\nDone.' }),
+    "Audit release gates",
+    "Claude Code titles a spawn just Task; its input leads with the description",
+  );
+  assert.equal(subagentName({ title: "Task", text: '{"description":"Audit rel' }), "Agent", "a truncated description names nothing");
+  assert.equal(subagentName({ title: "Task", text: '{"prompt":"Check every gate","description":"Later"}' }), "Agent",
+    "only a leading description is read, never prose inside the prompt");
+  assert.equal(subagentName({ title: "Agent", text: "" }), "Agent");
 });

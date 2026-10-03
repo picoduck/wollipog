@@ -46,7 +46,8 @@ test("timeline row estimates match one quiet step row", () => {
   const thought = { kind: "agent_thought" as const, id: 2, text: "Thinking" };
   assert.equal(estimateTimelineRow({ kind: "item", key: "tool", item: tool, inWork: false, depth: 0 }), 28);
   assert.equal(estimateTimelineRow({ kind: "item", key: "thought", item: thought, inWork: true, depth: 0 }), 28);
-  assert.equal(estimateTimelineRow({ kind: "subagent_summary", key: "agent", tool, depth: 0, open: false }), 52);
+  assert.equal(estimateTimelineRow({ kind: "subagent_summary", key: "agent", tool, depth: 0, open: false }), 28);
+  assert.equal(estimateTimelineRow({ kind: "subagent_output", key: "agent-output", tool, depth: 1 }), 28);
   assert.equal(estimateTimelineRow({
     kind: "work_summary",
     key: "work",
@@ -152,6 +153,18 @@ test("semantic reveal resolution opens every ancestor for a deeply nested event"
     rowKey: "item:agent_message:3",
     disclosureKeys: ["work:head", "agent:outer", "agent:inner"],
   });
+});
+
+test("an agent's call reveals as its agent row, since it has no step row of its own (#2183)", () => {
+  const projector = new IncrementalTimelineRows();
+  projector.project([
+    { kind: "tool_call", id: 1, toolCallId: "outer", title: "Outer", toolKind: "agent", status: "running", text: "" },
+    { kind: "tool_call", id: 2, toolCallId: "inner", title: "Inner", toolKind: "agent", status: "running", text: "", parentToolUseId: "outer" },
+    { kind: "agent_message", id: 3, text: "Nested result", parentToolUseId: "inner" },
+  ], new Map());
+
+  assert.deepEqual(projector.resolveRevealTarget(1), { rowKey: "agent:outer", disclosureKeys: ["work:head"] });
+  assert.deepEqual(projector.resolveRevealTarget(2), { rowKey: "agent:inner", disclosureKeys: ["work:head", "agent:outer"] });
 });
 
 test("semantic reveal targets duplicate tool ids by unique event id", () => {
@@ -867,14 +880,14 @@ test("an active subagent text stream updates only its retained tail branch", () 
   const projector = new IncrementalTimelineRows();
   const initial = projector.project(builder.snapshot(), disclosure);
   const summaryKey = initial.rows.find((row) => row.kind === "subagent_summary")!.key;
-  const rootRow = initial.rows.find((row) => row.kind === "item" && row.item.kind === "tool_call")!;
+  assert.equal(initial.rows.some((row) => row.kind === "item" && row.item.kind === "tool_call"), false,
+    "the agent's call has no step row of its own (#2183)");
 
   push({ kind: "agent_message", text: "ing", parentToolUseId: "task" });
   const update = projector.project(builder.snapshot(), disclosure);
   assert.equal(update.incremental, true);
   assert.equal(update.processedItems, 1);
   assert.equal(update.rows.find((row) => row.kind === "subagent_summary")!.key, summaryKey);
-  assert.equal(update.rows.find((row) => row.kind === "item" && row.item.kind === "tool_call")!.key, rootRow.key);
   assert.equal(update.rows.some((row) => row.kind === "item" && row.item.kind === "agent_message" && row.item.text === "streaming"), true);
 });
 
@@ -896,15 +909,17 @@ test("a deeply nested subagent stream clones only the active ancestor chain", ()
   ]);
   const projector = new IncrementalTimelineRows();
   const initial = projector.project(builder.snapshot(), disclosure);
-  const outerKey = initial.rows.find((row) => row.kind === "item" && row.item.kind === "tool_call" && row.item.toolCallId === "outer")!.key;
-  const innerKey = initial.rows.find((row) => row.kind === "item" && row.item.kind === "tool_call" && row.item.toolCallId === "inner")!.key;
+  const agentKey = (rows: typeof initial.rows, id: string) =>
+    rows.find((row) => row.kind === "subagent_summary" && row.tool.toolCallId === id)!.key;
+  const outerKey = agentKey(initial.rows, "outer");
+  const innerKey = agentKey(initial.rows, "inner");
 
   push({ kind: "agent_message", text: " work", parentToolUseId: "inner" });
   const update = projector.project(builder.snapshot(), disclosure);
   assert.equal(update.incremental, true);
   assert.equal(update.processedItems, 1);
-  assert.equal(update.rows.find((row) => row.kind === "item" && row.item.kind === "tool_call" && row.item.toolCallId === "outer")!.key, outerKey);
-  assert.equal(update.rows.find((row) => row.kind === "item" && row.item.kind === "tool_call" && row.item.toolCallId === "inner")!.key, innerKey);
+  assert.equal(agentKey(update.rows, "outer"), outerKey);
+  assert.equal(agentKey(update.rows, "inner"), innerKey);
   assert.equal(update.rows.some((row) => row.kind === "item" && row.item.kind === "agent_message" && row.item.text === "deep work"), true);
 });
 
@@ -947,7 +962,7 @@ test("updating a final top-level tool does not delete an earlier nested root", (
   push({ kind: "tool_call_update", toolCallId: "tail", status: "completed" });
   const updated = projector.project(builder.snapshot(), disclosure);
   assert.equal(updated.incremental, true);
-  assert.equal(updated.rows.some((row) => row.kind === "item" && row.item.kind === "tool_call" && row.item.toolCallId === "root"), true);
+  assert.equal(updated.rows.some((row) => row.kind === "subagent_summary" && row.tool.toolCallId === "root"), true);
   assert.equal(updated.rows.some((row) => row.kind === "item" && row.item.kind === "agent_message" && row.item.text === "nested"), true);
   assert.equal(updated.rows.some((row) => row.kind === "item" && row.item.kind === "tool_call" && row.item.toolCallId === "tail"), true);
 });
@@ -1147,9 +1162,9 @@ test("a wide active agent reuses its projector-owned child vector on append", ()
   const disclosure = new Map<string, boolean>([["work:head", true], ["agent:task", true]]);
   const projector = new IncrementalTimelineRows();
   const initial = projector.project(builder.snapshot(), disclosure);
-  const root = initial.rows.find((row) => row.kind === "item" && row.item.kind === "tool_call")!;
-  if (root.kind !== "item" || root.item.kind !== "tool_call") throw new Error("expected root tool");
-  const children = root.item.children!;
+  const root = initial.rows.find((row) => row.kind === "subagent_summary")!;
+  if (root.kind !== "subagent_summary") throw new Error("expected root agent");
+  const children = root.tool.children!;
   const oldRowLength = initial.rows.length;
 
   builder.push({
@@ -1160,12 +1175,12 @@ test("a wide active agent reuses its projector-owned child vector on append", ()
     payload: { kind: "agent_message", text: "last child", final: true, parentToolUseId: "task" },
   });
   const updated = projector.project(builder.snapshot(), disclosure);
-  const updatedRoot = updated.rows.find((row) => row.kind === "item" && row.item.kind === "tool_call")!;
-  if (updatedRoot.kind !== "item" || updatedRoot.item.kind !== "tool_call") throw new Error("expected updated root tool");
+  const updatedRoot = updated.rows.find((row) => row.kind === "subagent_summary")!;
+  if (updatedRoot.kind !== "subagent_summary") throw new Error("expected updated root agent");
   assert.equal(updated.incremental, true);
   assert.equal(updated.processedItems, 1);
-  assert.equal(updatedRoot.item, root.item);
-  assert.equal(updatedRoot.item.children, children);
+  assert.equal(updatedRoot.tool, root.tool);
+  assert.equal(updatedRoot.tool.children, children);
   assert.equal(children.length, 5_001);
   assert.equal(updated.keyDirtyFrom, oldRowLength);
 });
@@ -1793,4 +1808,70 @@ test("the incremental projector hides an Agent Log run until other work joins it
   assert.equal(shown.rows.filter((row) => row.kind === "work_summary").length, 2);
   const hiddenAgain = projector.project(builder.snapshot(), disclosure, false);
   assert.deepEqual(hiddenAgain.rows, fresh(false), "and turning it off hides the run again");
+});
+
+const agentRowShape = (rows: readonly TimelineRenderRow[]) => rows.map((row) =>
+  row.kind === "item" ? `${row.key}@${row.depth}` : row.kind === "work_summary" ? row.key : `${row.key}@${row.depth}`);
+
+test("an open agent's call output follows its steps, and a new step goes before it (#2183)", () => {
+  const builder = new TimelineBuilder();
+  let sequence = 0;
+  const push = (payload: SessionEventPayload) => {
+    sequence += 1;
+    builder.push({ id: sequence, sessionId: "agent-output", seq: sequence, ts: sequence, payload });
+  };
+  push({ kind: "tool_call", toolCallId: "task", title: "Task", toolKind: "agent", status: "running", text: '{"description":"Audit gates"}' });
+  push({ kind: "agent_message", text: "first", final: true, parentToolUseId: "task" });
+  const disclosure = new Map<string, boolean>([["work:head", true]]);
+  const projector = new IncrementalTimelineRows();
+  const initial = projector.project(builder.snapshot(), disclosure);
+  assert.deepEqual(agentRowShape(initial.rows), [
+    "work:head",
+    "agent:task@0",
+    "item:agent_message:2@1",
+    "agent-output:task@1",
+  ]);
+
+  push({ kind: "agent_message", text: "second", final: true, parentToolUseId: "task" });
+  const appended = projector.project(builder.snapshot(), disclosure);
+  assert.equal(appended.incremental, true, "a new step of an agent with output stays on the incremental path");
+  assert.deepEqual(agentRowShape(appended.rows), [
+    "work:head",
+    "agent:task@0",
+    "item:agent_message:2@1",
+    "item:agent_message:3@1",
+    "agent-output:task@1",
+  ]);
+  assert.deepEqual(agentRowShape(appended.rows), agentRowShape(new IncrementalTimelineRows().project(builder.snapshot(), disclosure).rows),
+    "the incremental rows equal a fresh projection");
+
+  push({ kind: "tool_call_update", toolCallId: "task", status: "completed", text: "All gates pass." });
+  const completed = projector.project(builder.snapshot(), disclosure);
+  const output = completed.rows.find((row) => row.kind === "subagent_output");
+  assert.equal(output?.kind === "subagent_output" ? output.tool.status : null, "completed", "the output row carries the settled call");
+  assert.equal(output?.kind === "subagent_output" ? output.tool.text.endsWith("All gates pass.") : false, true);
+  const summary = completed.rows.find((row) => row.kind === "subagent_summary");
+  assert.equal(summary?.kind === "subagent_summary" ? summary.tool.status : null, "completed");
+});
+
+test("an agent's output row appears when its call first reports output, and closes with the agent (#2183)", () => {
+  const builder = new TimelineBuilder();
+  let sequence = 0;
+  const push = (payload: SessionEventPayload) => {
+    sequence += 1;
+    builder.push({ id: sequence, sessionId: "agent-late-output", seq: sequence, ts: sequence, payload });
+  };
+  push({ kind: "tool_call", toolCallId: "task", title: "Coordinate Release Audit", toolKind: "agent", status: "running" });
+  push({ kind: "agent_message", text: "working", final: true, parentToolUseId: "task" });
+  const disclosure = new Map<string, boolean>([["work:head", true]]);
+  const projector = new IncrementalTimelineRows();
+  assert.equal(projector.project(builder.snapshot(), disclosure).rows.some((row) => row.kind === "subagent_output"), false,
+    "a call without output has no output row");
+
+  push({ kind: "tool_call_update", toolCallId: "task", status: "failed", text: "Agent failed: quota exhausted" });
+  const failed = projector.project(builder.snapshot(), disclosure);
+  assert.deepEqual(agentRowShape(failed.rows), ["work:head", "agent:task@0", "item:agent_message:2@1", "agent-output:task@1"]);
+
+  const closed = projector.project(builder.snapshot(), new Map([["work:head", true], ["agent:task", false]]));
+  assert.deepEqual(agentRowShape(closed.rows), ["work:head", "agent:task@0"], "collapsing the agent hides its output with its steps");
 });

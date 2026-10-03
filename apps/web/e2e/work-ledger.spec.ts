@@ -81,7 +81,7 @@ for (const width of [1440, 390]) {
     // The harness's control panel overlaps the first turn on a phone, so toggle it from the keyboard.
     await ledger(page, 0).focus();
     await page.keyboard.press("Enter");
-    const agent = page.locator(".tl-subagent .subagent-toggle");
+    const agent = page.locator(".tl-agent-toggle");
     const agentChevron = await chevronCentre(agent);
     const nested = page.locator(".tl-step", { hasText: "Search" });
     const nestedRules = await rulesUnder(nested);

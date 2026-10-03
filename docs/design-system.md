@@ -1500,6 +1500,14 @@ message was delivered." Raw provider text and attempt counts wait behind Show De
 agent took keeps a quiet "Steered the Current Turn" under its canonical row. A failed message that
 has scrolled out of view raises "1 Message Not Sent" in the floating tail control (#2153).
 
+**Agent rows** (#2183). Each agent a turn spawned is one `.tl-agent` row on the work rule, built
+like a step: the §5.5 chevron on a `button.disclosure-trigger[aria-expanded]`, a `Bot` icon, the
+spawning call's name ("Coordinate Release Audit"), then `--type-small` meta (the role when the
+provider gave one, hidden below 760px, and "N Steps"), the status from the Subagent row above
+(Running a pulsing info badge, every other state inline), and Open, a sibling `.btn.sm.ghost` named
+"Open {name}". The spawning call has no step row of its own; its output, when it has any, is a
+collapsed Output step after the agent's steps. A nested agent's steps add one rule under its chevron.
+
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;
 `STATE_LABELS`, `LIFECYCLE_LABELS` and per-component label tables are deleted.

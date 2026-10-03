@@ -68,7 +68,6 @@ const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/EventTimeline.tsx", "✓", "✓", TRANSCRIPT],
   ["components/EventTimeline.tsx", "◐", "◐", TRANSCRIPT],
   ["components/EventTimeline.tsx", "○", "○", TRANSCRIPT],
-  ["components/EventTimeline.tsx", "⑃", "⑃", TRANSCRIPT],
   ["components/FilesPanel.tsx", "↻", "↻ Refresh", SIDE_PANEL],
   ["components/GitDiffViewer.tsx", "▾", "▾", REVIEW],
   ["components/GitDiffViewer.tsx", "▸", "▸", REVIEW],

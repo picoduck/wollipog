@@ -476,16 +476,16 @@ test("inactive sessions show stable absolute times and bound dangling tools to o
     for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .disclosure-trigger")) {
       await act(async () => disclosure.click());
     }
-    const subagent = container.querySelector<HTMLElement>(".tl-subagent");
+    const subagent = container.querySelector<HTMLElement>(".tl-agent");
     assert.ok(subagent);
-    assert.equal(subagent.textContent?.match(/Duration/g)?.length, 1, "subagent duration is rendered once");
-    const subagentToggle = subagent.querySelector<HTMLButtonElement>(".subagent-toggle");
+    const subagentToggle = subagent.querySelector<HTMLButtonElement>(".tl-agent-toggle");
     assert.ok(subagentToggle);
-    assert.match(subagentToggle.getAttribute("aria-label") ?? "", /^Agent · 1 Step · Completed/);
-    assert.doesNotMatch(subagentToggle.getAttribute("aria-label") ?? "", /Started|Last Activity|2026/);
+    assert.equal(subagentToggle.getAttribute("aria-label"), "Agent · 1 Step · Completed");
     const subagentDescription = subagentToggle.getAttribute("aria-describedby");
     assert.ok(subagentDescription);
-    assert.match(document.getElementById(subagentDescription)?.textContent ?? "", /Started.*Last Activity.*Duration/s);
+    assert.match(document.getElementById(subagentDescription)?.textContent ?? "", /^Started .*, finished .* \(10s\)$/,
+      "the agent's span is its accessible description, as a step's is");
+    assert.doesNotMatch(subagent.querySelector(".tl-agent-toggle > :not(.sr-only)")?.textContent ?? "", /ago|just now/i);
 
     const oneEventTool: TimelineItem[] = [{
       kind: "tool_call",
@@ -532,9 +532,9 @@ test("inactive sessions show stable absolute times and bound dangling tools to o
       },
     ];
     await act(async () => root.render(<EventTimeline items={oneEventSubagent} sessionActive={false} />));
-    assert.equal(container.querySelector(".tl-subagent-time .tl-timestamp-label")?.textContent, "Recorded",
-      "one imported subagent observation uses the same one-point copy as messages and thoughts");
-    assert.equal(container.querySelectorAll(".tl-subagent-time time").length, 1);
+    const singleToggle = container.querySelector<HTMLButtonElement>(".tl-agent-toggle");
+    assert.match(document.getElementById(singleToggle?.getAttribute("aria-describedby") ?? "")?.textContent ?? "", /^Finished /,
+      "one imported subagent observation is described by its one time, as a step's is");
   } finally {
     await act(async () => root.unmount());
     container.remove();

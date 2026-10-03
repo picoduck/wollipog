@@ -12,7 +12,27 @@ import type { TimelineItem } from "./timeline.js";
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
 
 /** An agent tool call owns a subagent summary and its nested rows, so it never folds. */
-const ownsSubagent = (item: ToolItem): boolean => item.toolKind === "agent" || Boolean(item.children?.length);
+export const ownsSubagent = (item: ToolItem): boolean => item.toolKind === "agent" || Boolean(item.children?.length);
+
+/**
+ * The name of the agent a tool call spawned (#2183): the call's title without the provider's
+ * "Task:" or "Agent:" label. Claude Code titles a spawn just "Task", so its name is the
+ * `description` its input leads with, which the call's text records. "Agent" when neither names it.
+ */
+export function subagentName(tool: Pick<ToolItem, "title" | "text">): string {
+  const title = tool.title.trim().replace(/^(?:Task|Agent):\s*/i, "");
+  if (title && !/^(?:Task|Agent)$/i.test(title)) return title;
+  const description = /^\{\s*"description"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(tool.text ?? "")?.[1];
+  if (description) {
+    try {
+      const parsed = (JSON.parse(description) as string).replace(/\s+/g, " ").trim();
+      if (parsed) return parsed;
+    } catch {
+      // A truncated or malformed input names nothing.
+    }
+  }
+  return "Agent";
+}
 
 /**
  * A run of work whose only steps are Agent Logs: a harness's own output, such as a boot line

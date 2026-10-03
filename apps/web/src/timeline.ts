@@ -141,6 +141,8 @@ export type TimelineItem =
       parentToolUseId?: string;
       /** Provider-observed lifecycle that remains independent of foreground session state. */
       subagentLifecycle?: AuthoritativeSubagentLifecycle;
+      /** The provider's explicit role for an agent it spawned ("Explore"); never parsed from prose. */
+      subagentRole?: string;
       /** Subagent items nested under this Task call — populated only by nestSubagents(). */
       children?: TimelineItem[];
       /**
@@ -967,6 +969,7 @@ export class TimelineBuilder {
             ...((p.subagentLifecycle ?? item.subagentLifecycle)
               ? { subagentLifecycle: p.subagentLifecycle ?? item.subagentLifecycle }
               : {}),
+            ...((p.subagentRole ?? item.subagentRole) ? { subagentRole: p.subagentRole ?? item.subagentRole } : {}),
             ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
             ...(statementCount > 1 ? { statementCount } : {}),
           };
@@ -988,6 +991,7 @@ export class TimelineBuilder {
             ...(p.textRefs?.length ? { referencedText: [{ preview: p.text ?? "", refs: p.textRefs }] } : {}),
             parentToolUseId: p.parentToolUseId,
             ...(p.subagentLifecycle ? { subagentLifecycle: p.subagentLifecycle } : {}),
+            ...(p.subagentRole ? { subagentRole: p.subagentRole } : {}),
             ...(statementCount > 1 ? { statementCount } : {}),
             ...(Number.isFinite(ev.ts) ? { startedAt: ev.ts, lastActivityAt: ev.ts } : {}),
             ...(isTerminalToolStatus(p.status) && Number.isFinite(ev.ts) ? { completedAt: ev.ts } : {}),
