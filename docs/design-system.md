@@ -2431,3 +2431,11 @@ These trade-offs are deliberate. Keep them in mind when a screen seems to argue 
    composer on phones too, with 44px rows and no footer keys, instead of becoming a bottom sheet
    (§9.2). A sheet would cover the caret and compete with the software keyboard while the person is
    still typing the query the picker filters on.
+10. **Disabled composer bar controls.** A ghost control rests in `--text-dim`, and §3.1's disabled
+    `--text-faint` is only about 1.2:1 from it, so on a stopped or failed session the bar's +,
+    shield, model chip and mic read as enabled. In the composer bar only, a disabled ghost
+    `ComposerButton` (glyph, label and agent mark) draws in
+    `color-mix(in srgb, var(--text-faint) 75%, var(--bg))`. That is at least 3:1 on `--bg` and
+    `--bg-elev` in every scheme (the glyph floor, #1880) and about 2:1 below rest (1.9–2:1 in the
+    Wollipog themes), with no opacity (#2174). Forced colors stays `GrayText`, and filled controls
+    (Send, Stop Turn) keep §3.1. Every disabled control still says why.

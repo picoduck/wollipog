@@ -342,25 +342,68 @@ test("an empty desktop card is one line tall, and a long draft stops growing at 
   expect(grown.scrollHeight).toBeGreaterThan(grown.clientHeight);
 });
 
+/** WCAG contrast between two computed colours, both opaque: `rgb()` channels are 0–255, and a
+ * `color-mix()` computes to `color(srgb …)` with 0–1 channels. */
+function contrast(a: string, b: string): number {
+  const luminance = (value: string) => {
+    const channels = value.match(/[\d.]+/g)!.map(Number).slice(0, 3);
+    const scale = value.startsWith("color(") ? 1 : 255;
+    return channels.reduce((sum, channel, index) => {
+      const c = channel / scale;
+      const linear = c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+      return sum + linear * [0.2126, 0.7152, 0.0722][index]!;
+    }, 0);
+  };
+  const [high, low] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (high! + 0.05) / (low! + 0.05);
+}
+
 for (const { name, query, reason } of [
   { name: "failed", query: "&status=failed", reason: "This session failed and can't take new messages." },
   { name: "stopped", query: "&action=restart", reason: "This session is stopped. Restart it to send a message." },
 ]) {
-  test(`a ${name} session's bar reads as paused with its reason (#2154)`, async ({ page }) => {
-    await openFixture(page, 1440, "codex", query);
-    const box = page.locator(".composer-box");
-    await expect(box).toHaveClass(/is-disabled/);
-    await expect(page.locator(".composer-input")).toHaveAttribute("placeholder", reason);
-    for (const control of [
-      page.getByRole("button", { name: /^Permission Mode:/ }),
-      page.getByRole("button", { name: /^Model Settings:/ }),
-      page.getByRole("button", { name: "Hold to Dictate" }),
-    ]) {
-      await expect(control).toBeVisible();
-      await expect(control).toBeDisabled();
-      await expect(control).toHaveAccessibleDescription(reason);
-    }
-  });
+  for (const theme of ["dark", "light"] as const) {
+    test(`${theme}: a ${name} session's bar reads as paused with its reason (#2154, #2174)`, async ({ page }) => {
+      await openFixture(page, 1440, "codex", query);
+      await page.evaluate((nextTheme) => { document.documentElement.dataset.theme = nextTheme; }, theme);
+      const box = page.locator(".composer-box");
+      await expect(box).toHaveClass(/is-disabled/);
+      await expect(page.locator(".composer-input")).toHaveAttribute("placeholder", reason);
+      const plus = page.getByRole("button", { name: "Add and Modes" });
+      await expect(plus).toBeDisabled();
+      const controls = [
+        page.getByRole("button", { name: /^Permission Mode:/ }),
+        page.getByRole("button", { name: /^Model Settings:/ }),
+        page.getByRole("button", { name: "Hold to Dictate" }),
+      ];
+      for (const control of controls) {
+        await expect(control).toBeVisible();
+        await expect(control).toBeDisabled();
+        await expect(control).toHaveAccessibleDescription(reason);
+      }
+      await page.evaluate(() => Promise.all(document.getAnimations()
+        .filter((animation) => animation instanceof CSSTransition)
+        .map((animation) => animation.finished.catch(() => undefined))));
+      // A disabled control must look disabled: its ink well below a ghost control at rest
+      // (--text-dim), yet still at least the 3:1 glyph floor on either page fill (§21 item 10).
+      const [rest, bg, elev] = await Promise.all([
+        tokenColor(page, "--text-dim"), tokenColor(page, "--bg"), tokenColor(page, "--bg-elev"),
+      ]);
+      const inks = {
+        plus: await plus.evaluate((element) => getComputedStyle(element).color),
+        shield: await controls[0]!.evaluate((element) => getComputedStyle(element.querySelector("svg")!).color),
+        modelName: await controls[1]!.locator(".cbar-model").evaluate((element) => getComputedStyle(element).color),
+        agentMark: await controls[1]!.locator(".agent-icon").evaluate((element) => getComputedStyle(element).color),
+        mic: await controls[2]!.evaluate((element) => getComputedStyle(element).color),
+      };
+      for (const [control, ink] of Object.entries(inks)) {
+        expect(contrast(ink, rest), `${control} is clearly dimmer than rest`).toBeGreaterThanOrEqual(1.8);
+        expect(contrast(ink, bg), `${control} stays legible on --bg`).toBeGreaterThanOrEqual(3);
+        expect(contrast(ink, elev), `${control} stays legible on --bg-elev`).toBeGreaterThanOrEqual(3);
+      }
+      expect(new Set(Object.values(inks)).size, "one disabled ink, agent mark included").toBe(1);
+    });
+  }
 }
 
 /**
@@ -495,9 +538,10 @@ for (const forcedColors of [false, true]) {
     await expect(plan).toBeDisabled();
     await expect(plan).toHaveAttribute("aria-pressed", "true");
     const disabledInk = await page.evaluate((forced) => {
-      // What a plain disabled secondary button paints here: the recipe the toggle must keep.
+      // What a disabled ghost ComposerButton paints here (in forced colors, any disabled button's
+      // GrayText ink and edge): the recipe the toggle must keep.
       const probe = document.createElement("button");
-      probe.className = "btn";
+      probe.className = forced ? "btn" : "btn ghost composer-btn";
       probe.disabled = true;
       probe.textContent = "Probe";
       document.querySelector(".composer-box")!.append(probe);
@@ -516,11 +560,11 @@ for (const forcedColors of [false, true]) {
   });
 }
 
-/** What a plain disabled secondary button paints inside the composer: the ink every disabled control keeps. */
+/** What a disabled ghost ComposerButton paints inside the composer: the ink every disabled bar control keeps. */
 async function disabledInk(page: Page): Promise<string> {
   return page.evaluate(() => {
     const probe = document.createElement("button");
-    probe.className = "btn";
+    probe.className = "btn ghost composer-btn";
     probe.disabled = true;
     probe.textContent = "Probe";
     document.querySelector(".composer-box")!.append(probe);

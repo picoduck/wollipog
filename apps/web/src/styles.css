@@ -5869,8 +5869,19 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* A disabled chip reads in the disabled ink throughout; the effort is already the faint tier. */
-.model-chip:disabled :is(.cbar-model, .cbar-context) { color: inherit; }
+/* A disabled ghost control in the bar (a stopped or failed session, a Viewer) draws in an ink below
+   --text-faint: a ghost control already rests in --text-dim, which --text-faint is barely 1.2:1
+   from, so §3.1's disabled ink alone read as enabled. 75% --text-faint toward the page fill stays
+   at least 3:1 on --bg and --bg-elev in every scheme, the glyph floor (#1880), and about 2:1 below
+   rest. Composer bar only, and no opacity (§21 item 10). Filled controls keep §3.1. */
+.btn.ghost.composer-btn:disabled {
+  color: color-mix(in srgb, var(--text-faint) 75%, var(--bg));
+}
+/* A disabled chip reads in that ink throughout, its agent mark included (the §9.1 brand-mark rule). */
+.model-chip:disabled :is(.cbar-model, .cbar-context, .cbar-effort, .agent-icon) { color: inherit; }
+@media (forced-colors: active) {
+  .btn.ghost.composer-btn:disabled { color: GrayText; }
+}
 .cbar-model-label {
   display: inline-flex;
   min-width: 0;
