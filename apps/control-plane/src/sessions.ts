@@ -9541,9 +9541,10 @@ export class SessionsService {
         ),
         answeredBy: resolvedByParentSessionId ? { kind: "parent", sessionId: resolvedByParentSessionId } : { kind: "person" },
       };
-      this.db.recordQuestionAnswerSummary(sessionId, pending.questions ?? [], question, payload, now);
+      this.db.recordQuestionAnswerSummary(sessionId, pending.questions ?? [], payload, now);
       // A question parked from a reconnect snapshot before its request event arrived has no row to
-      // attach to yet; history restores the summary right after that request when it arrives.
+      // attach to yet; the summary is restored right after that request when it arrives, live or
+      // from history.
       if (question) this.hub.sessionEvent(this.db.appendEvent(sessionId, payload, now));
     } catch (error) {
       this.log.warn(`question answer summary not stored for ${sessionId}: ${(error as Error).message}`);
@@ -12880,7 +12881,7 @@ export class SessionsService {
       this.hub.sessionEvent(ev, suppressRequestReminder ? { suppressReminderWake: true } : undefined);
       // A reconnect snapshot may have parked this occurrence, and it may have been answered, before
       // this frame arrived; its stored answer belongs right after it.
-      const answer = this.restoreQuestionAnswerSummary(ev, { unboundOnly: true });
+      const answer = this.restoreQuestionAnswerSummary(ev);
       if (answer) this.hub.sessionEvent(answer);
       this.db.setPendingApproval(
         sessionId,
@@ -13551,9 +13552,9 @@ export class SessionsService {
 
   /** Restore a stored answer summary (#2188) after a runner-history cache reset, or bind one that
    * was answered before its question's request event arrived. */
-  private restoreQuestionAnswerSummary(event: SessionEvent, options?: { unboundOnly?: boolean }): SessionEvent | null {
+  private restoreQuestionAnswerSummary(event: SessionEvent): SessionEvent | null {
     if (event.payload.kind !== "question_request") return null;
-    const stored = this.db.restorableQuestionAnswerSummary(event, options);
+    const stored = this.db.restorableQuestionAnswerSummary(event);
     if (!stored) return null;
     return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp,
       { restored: true });

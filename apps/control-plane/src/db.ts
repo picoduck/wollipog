@@ -1482,23 +1482,21 @@ CREATE TABLE IF NOT EXISTS question_policy_answers (
   created_at INTEGER NOT NULL,
   PRIMARY KEY(session_id, runner_seq, history_epoch)
 );
--- Stored answer summaries (#2188), keyed like question_policy_answers by the exact runner
--- question occurrence so a runner-history cache reset can restore the control-plane event. A
--- question answered before its request event reached the cache is stored unbound (runner_seq
--- NULL) and bound when history brings that request.
+-- Stored answer summaries (#2188), keyed by the question's occurrence: the unique identity a
+-- current runner stamps on every request. The control-plane event is restored after its request
+-- whenever history brings that request into a cache that does not already hold it.
 CREATE TABLE IF NOT EXISTS question_answer_summaries (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   request_id TEXT NOT NULL,
-  occurrence_id TEXT NOT NULL DEFAULT '',
+  occurrence_id TEXT NOT NULL,
   question_digest TEXT NOT NULL,
-  runner_seq INTEGER,
-  history_epoch INTEGER,
   payload TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  UNIQUE(session_id, runner_seq, history_epoch)
+  PRIMARY KEY(session_id, request_id, occurrence_id)
 );
-CREATE INDEX IF NOT EXISTS idx_question_answer_summaries_request
-  ON question_answer_summaries(session_id, request_id);
+CREATE INDEX IF NOT EXISTS idx_session_events_question_answered_occurrence
+  ON session_events(session_id, json_extract(payload,'$.occurrenceId'))
+  WHERE kind='question_answered';
 CREATE INDEX IF NOT EXISTS idx_session_events_question_request_id
   ON session_events(session_id, json_extract(payload,'$.requestId'), seq)
   WHERE kind='question_request';
@@ -18115,71 +18113,45 @@ export class ControlPlaneDb {
   }
 
   /**
-   * Keep a stored answer summary beside the exact runner question occurrence it answers, so a
-   * runner-history cache reset can restore it. An answer is kept unbound, to be bound by its exact
-   * occurrence when history brings its request, when that request has not reached the cache yet (a
-   * reconnect snapshot parked it first) or when the runner's history epoch is not yet known (its
-   * sequence would name no log). A cached request without a runner sequence has nothing to restore
-   * from.
+   * Keep a stored answer summary under its question's occurrence, so the control-plane event can be
+   * restored after its request when history brings that request (after a cache reset, or for a
+   * question parked from a reconnect snapshot before its request event arrived).
    */
   recordQuestionAnswerSummary(
     sessionId: string,
     questions: readonly AgentQuestion[],
-    question: SessionEvent | null,
     payload: Extract<SessionEventPayload, { kind: "question_answered" }>,
     timestamp: number,
   ): void {
-    let runnerSeq: number | null = null;
-    if (question) {
-      const cached = this.stmt("SELECT runner_seq FROM session_events WHERE id=? AND session_id=?")
-        .get(question.id, question.sessionId) as { runner_seq: number | null } | undefined;
-      if (cached?.runner_seq == null) return;
-      runnerSeq = cached.runner_seq;
-    }
-    const epoch = this.getRunnerHistoryState(sessionId)?.historyEpoch ?? null;
-    const bound = runnerSeq !== null && epoch !== null;
+    if (!payload.occurrenceId) return;
     this.stmt(`INSERT OR REPLACE INTO question_answer_summaries
-      (session_id, request_id, occurrence_id, question_digest, runner_seq, history_epoch, payload, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(sessionId, payload.requestId, payload.occurrenceId ?? "",
-        createHash("sha256").update(JSON.stringify(questions)).digest("hex"),
-        bound ? runnerSeq : null, bound ? epoch : null,
-        JSON.stringify(payload), timestamp);
+      (session_id, request_id, occurrence_id, question_digest, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(sessionId, payload.requestId, payload.occurrenceId,
+        createHash("sha256").update(JSON.stringify(questions)).digest("hex"), JSON.stringify(payload), timestamp);
   }
 
   /**
-   * The stored answer summary for a cached `question_request`: the one bound to its exact runner
-   * occurrence, else an unbound one for the same request, occurrence and questions, which this
-   * binds to the occurrence so it is restored once. An older runner's request carries no
-   * occurrence (the answer kept the one the control plane minted for its pending card), and a
-   * request id alone cannot tell which use of it was answered, so such an answer is never bound:
-   * its row shows the older-runner fallback rather than risk another question's answer.
+   * The stored answer summary to show after a cached `question_request`: the one for its exact
+   * occurrence and questions, unless the cache already holds that occurrence's summary (a runner
+   * may re-emit an occurrence whose answer never reached the provider; the reopened question is not
+   * answered). An older runner's request carries no occurrence, and a request id alone cannot tell
+   * which use of it was answered, so its row keeps the older-runner fallback.
    */
   restorableQuestionAnswerSummary(
     event: SessionEvent,
-    options?: { unboundOnly?: boolean },
   ): { payload: Extract<SessionEventPayload, { kind: "question_answered" }>; timestamp: number } | null {
-    if (event.payload.kind !== "question_request") return null;
-    const cached = this.stmt("SELECT runner_seq FROM session_events WHERE id=? AND session_id=?")
-      .get(event.id, event.sessionId) as { runner_seq: number | null } | undefined;
-    if (cached?.runner_seq == null) return null;
-    const digest = createHash("sha256").update(JSON.stringify(event.payload.questions)).digest("hex");
-    const epoch = this.getRunnerHistoryState(event.sessionId)?.historyEpoch ?? -1;
-    const bound = this.stmt(`SELECT payload, created_at FROM question_answer_summaries
-      WHERE session_id=? AND request_id=? AND question_digest=? AND runner_seq=? AND history_epoch=?`).get(
-        event.sessionId, event.payload.requestId, digest, cached.runner_seq, epoch,
+    if (event.payload.kind !== "question_request" || !event.payload.occurrenceId) return null;
+    const row = this.stmt(`SELECT payload, created_at FROM question_answer_summaries
+      WHERE session_id=? AND request_id=? AND occurrence_id=? AND question_digest=?`).get(
+        event.sessionId, event.payload.requestId, event.payload.occurrenceId,
+        createHash("sha256").update(JSON.stringify(event.payload.questions)).digest("hex"),
       ) as { payload: string; created_at: number } | undefined;
-    if (bound) return options?.unboundOnly ? null : { payload: JSON.parse(bound.payload), timestamp: bound.created_at };
-    if (event.payload.occurrenceId === undefined) return null;
-    const unbound = this.stmt(`SELECT rowid AS row_id, payload, created_at FROM question_answer_summaries
-      WHERE session_id=? AND request_id=? AND occurrence_id=? AND question_digest=? AND runner_seq IS NULL
-      ORDER BY created_at LIMIT 1`).get(
-        event.sessionId, event.payload.requestId, event.payload.occurrenceId, digest,
-      ) as { row_id: number; payload: string; created_at: number } | undefined;
-    if (!unbound) return null;
-    this.stmt("UPDATE question_answer_summaries SET runner_seq=?, history_epoch=? WHERE rowid=?")
-      .run(cached.runner_seq, epoch, unbound.row_id);
-    return { payload: JSON.parse(unbound.payload), timestamp: unbound.created_at };
+    if (!row) return null;
+    if (this.stmt(`SELECT 1 FROM session_events WHERE session_id=? AND kind='question_answered'
+        AND json_extract(payload,'$.occurrenceId')=? LIMIT 1`).get(event.sessionId, event.payload.occurrenceId)) {
+      return null;
+    }
+    return { payload: JSON.parse(row.payload), timestamp: row.created_at };
   }
 
   listGovernancePolicies(): GovernancePolicy[] {
