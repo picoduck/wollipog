@@ -12754,7 +12754,7 @@ test("an occurrence-less older request matches its own answer, but never a settl
     "the answer waits, unbound, for its own occurrence");
 });
 
-test("an older runner's snapshot-parked answer attaches to its occurrence-less request live, and history never guesses (#2188)", async () => {
+test("an older runner's snapshot-parked answer is never guessed onto an occurrence-less request (#2188)", async () => {
   const { db, hub, svc } = makeHarness();
   const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
   const request = { kind: "question_request" as const, requestId: "legacy", questions };
@@ -12766,19 +12766,19 @@ test("an older runner's snapshot-parked answer attaches to its occurrence-less r
     assert.ok(svc.answerQuestion(id, "legacy", { q: answer }, undefined, "submit", undefined, minted).ok);
     assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false);
   };
-  const summaries = (id: string) => db.listEvents(id).flatMap((event) =>
-    event.payload.kind === "question_answered" ? [event.payload] : []);
+  const summaries = (id: string) => db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
 
+  // A request id alone cannot say which use of it was answered, so neither a live frame nor
+  // history attaches the answer: the row keeps the older-runner fallback, and a later reuse of the
+  // id never inherits it.
   const live = seedSession(svc, hub);
   db.reconcileRunnerHistory(live, 1, 0);
   parkAndAnswer(live, "Yes");
   svc.onSessionEvent(live, request, 1, 100);
-  assert.deepEqual(summaries(live).map((summary) => [summary.questionEventSeq, summary.answers[0]!.selected]),
-    [[db.listEvents(live)[0]!.seq, ["Yes"]]]);
+  svc.onSessionEvent(live, { kind: "question_resolved", requestId: "legacy", answered: true }, 2, 101);
+  svc.onSessionEvent(live, request, 3, 102);
+  assert.deepEqual(summaries(live), []);
 
-  // History can arrive before the answered request does (paged, or the legacy path), and an
-  // occurrence-less request cannot say which use of a reused id it is, so history never binds the
-  // answer: the row keeps the older-runner fallback rather than risk another question's answer.
   const hydrated = seedSession(svc, hub);
   db.reconcileRunnerHistory(hydrated, 1, 0);
   parkAndAnswer(hydrated, "No");

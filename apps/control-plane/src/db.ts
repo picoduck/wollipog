@@ -18143,12 +18143,17 @@ export class ControlPlaneDb {
         JSON.stringify(payload), timestamp);
   }
 
-  /** The stored answer summary for a cached `question_request`: the one bound to its exact runner
+  /**
+   * The stored answer summary for a cached `question_request`: the one bound to its exact runner
    * occurrence, else an unbound one for the same request, occurrence and questions, which this
-   * binds to the occurrence so it is restored once. */
+   * binds to the occurrence so it is restored once. An older runner's request carries no
+   * occurrence (the answer kept the one the control plane minted for its pending card), and a
+   * request id alone cannot tell which use of it was answered, so such an answer is never bound:
+   * its row shows the older-runner fallback rather than risk another question's answer.
+   */
   restorableQuestionAnswerSummary(
     event: SessionEvent,
-    options?: { unboundOnly?: boolean; live?: boolean },
+    options?: { unboundOnly?: boolean },
   ): { payload: Extract<SessionEventPayload, { kind: "question_answered" }>; timestamp: number } | null {
     if (event.payload.kind !== "question_request") return null;
     const cached = this.stmt("SELECT runner_seq FROM session_events WHERE id=? AND session_id=?")
@@ -18161,20 +18166,11 @@ export class ControlPlaneDb {
         event.sessionId, event.payload.requestId, digest, cached.runner_seq, epoch,
       ) as { payload: string; created_at: number } | undefined;
     if (bound) return options?.unboundOnly ? null : { payload: JSON.parse(bound.payload), timestamp: bound.created_at };
-    // An older runner's request carries no occurrence, while the answer kept the one the control
-    // plane minted for its pending card. Only a live frame can take it: live frames are contiguous,
-    // so the newest request with its id is the one answered. History may still be missing the
-    // answered request, so there such an answer stays unbound and the row reads "Answered".
-    const legacy = event.payload.occurrenceId === undefined;
-    if (legacy && !options?.live) return null;
-    if (legacy && this.stmt(
-      `SELECT 1 FROM session_events WHERE session_id=? AND kind='question_request' AND seq>?
-         AND json_extract(payload,'$.requestId')=? LIMIT 1`,
-    ).get(event.sessionId, event.seq, event.payload.requestId)) return null;
+    if (event.payload.occurrenceId === undefined) return null;
     const unbound = this.stmt(`SELECT rowid AS row_id, payload, created_at FROM question_answer_summaries
-      WHERE session_id=? AND request_id=? AND (? OR occurrence_id=?) AND question_digest=? AND runner_seq IS NULL
+      WHERE session_id=? AND request_id=? AND occurrence_id=? AND question_digest=? AND runner_seq IS NULL
       ORDER BY created_at LIMIT 1`).get(
-        event.sessionId, event.payload.requestId, legacy ? 1 : 0, event.payload.occurrenceId ?? "", digest,
+        event.sessionId, event.payload.requestId, event.payload.occurrenceId, digest,
       ) as { row_id: number; payload: string; created_at: number } | undefined;
     if (!unbound) return null;
     this.stmt("UPDATE question_answer_summaries SET runner_seq=?, history_epoch=? WHERE rowid=?")
