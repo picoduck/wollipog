@@ -108,6 +108,8 @@ const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{
   { method: "POST", route: route("/api/skill-git/preview"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
   // Opening a pull request and forge review syncs wait 60s (other Git actions 30s, same route).
   { method: "POST", route: route("/api/sessions/:id/git"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
+  // Role conversion prepares and commits sequentially, with a 30s runner wait for each phase.
+  { method: "POST", route: route("/api/sessions/:id/role"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
   // Choosing a provider account waits 60s; a subscription refresh is capped at 60s.
   { method: "POST", route: route("/api/sessions/:id/authentication/account"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
   { method: "POST", route: route("/api/usage/subscriptions/refresh"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },

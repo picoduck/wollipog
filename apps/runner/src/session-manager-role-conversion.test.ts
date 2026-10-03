@@ -99,7 +99,7 @@ for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const
 }
 
 for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const) {
-  test(driver + " refuses protocol201 prepare and commit without retirement or credential mutation", async () => {
+  test(driver + " refuses protocol202 prepare and commit without retirement or credential mutation", async () => {
     const h = fixture(driver);
     try {
       assert.equal(await h.manager.start(h.spec), true);
@@ -107,7 +107,7 @@ for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const
       const setPeer = (version: number) => {
         (h.manager as unknown as { controlPlaneProtocolVersion: () => number }).controlPlaneProtocolVersion = () => version;
       };
-      setPeer(201);
+      setPeer(202);
       let revoked = 0;
       for (const role of ["normal", "orchestrator"] as const) {
         h.store.patchMeta("s", { orchestrator: role === "orchestrator" ? { strictProjectIsolation: false, integrationIsolation: false } : undefined });
@@ -123,15 +123,15 @@ for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const
         assert.equal(h.launches.length, 1);
       }
       h.store.patchMeta("s", { orchestrator: undefined });
-      setPeer(202);
+      setPeer(203);
       assert.equal((await h.manager.prepareSessionRole(h.command(), () => revoked++)).ok, true);
       const prepared = structuredClone(h.store.readMeta("s")!);
-      setPeer(201);
+      setPeer(202);
       const commit = { type: "commit_session_role" as const, requestId: "commit", sessionId: "s", conversionId: "promotion" };
       assert.equal(h.manager.commitSessionRole(commit).ok, false);
       assert.deepEqual(h.store.readMeta("s"), prepared);
       assert.equal(revoked, 1);
-      setPeer(202);
+      setPeer(203);
       assert.equal(h.manager.commitSessionRole(commit).ok, true);
     } finally { await h.cleanup(); }
   });

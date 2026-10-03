@@ -21,6 +21,7 @@ import {
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
   advertisesOrchestratorAdditiveRole,
   PROTOCOL_VERSION,
+  UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL,
   SESSION_NAMING_CLEANUP_BUDGET_MS,
   SESSION_NAMING_GENERATION_BUDGET_MS,
   SESSION_NAMING_PREPARATION_BUDGET_MS,
@@ -218,18 +219,19 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 202", () => {
-  assert.equal(PROTOCOL_VERSION, 202);
+test("PROTOCOL_VERSION is 203", () => {
+  assert.equal(PROTOCOL_VERSION, 203);
+  assert.equal(UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL, 202, "the settled question contract stays at its own boundary");
   assert.equal(runnerSupportsProtocol(200, "artifactSessionGuidance"), false);
   assert.equal(runnerSupportsProtocol(201, "artifactSessionGuidance"), true);
   assert.equal(runnerSupportsProtocol(197, "campaignForgeStatus"), false);
   assert.equal(runnerSupportsProtocol(198, "campaignForgeStatus"), true);
   assert.equal(runnerSupportsProtocol(198, "costReconciliation"), false);
   assert.equal(runnerSupportsProtocol(199, "costReconciliation"), true);
-  for (const version of [undefined, 197, 198, 199, 200, 201]) {
+  for (const version of [undefined, 197, 198, 199, 200, 201, 202]) {
     assert.equal(runnerSupportsProtocol(version, "sessionRoleConversion"), false);
   }
-  assert.equal(runnerSupportsProtocol(202, "sessionRoleConversion"), true);
+  assert.equal(runnerSupportsProtocol(203, "sessionRoleConversion"), true);
   assert.equal(runnerSupportsProtocol(195, "campaignWorkLedger"), false);
   assert.equal(runnerSupportsProtocol(196, "campaignWorkLedger"), true);
   assert.equal(runnerSupportsProtocol(192, "archiveWorktreeRetirement"), false);

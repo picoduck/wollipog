@@ -200,6 +200,8 @@ test("the deadline table names retitle and the two exports, and bounds everythin
   for (const [method, path] of [
     ["GET", "/api/sessions/s_1/retitle"],
     ["POST", "/api/sessions/s_1/retitle/extra"],
+    ["GET", "/api/sessions/s_1/role?role=orchestrator"],
+    ["POST", "/api/sessions/s_1/role/extra"],
     ["POST", "/api/sessions/s_1/export"],
     ["GET", "/api/sessions/s_1"],
     ["POST", "/api/sessions/s_1/parent-control-policy"],
@@ -214,6 +216,7 @@ test("routes the server bounds past the default get that bound plus a margin, or
   // Each server bound is the one the control plane applies to that route today.
   for (const [method, path, serverBoundMs] of [
     ["POST", "/api/sessions/s_1/git", 60_000],
+    ["POST", "/api/sessions/s_1/role", 60_000],
     ["POST", "/api/sessions/s_1/authentication/account", 60_000],
     ["POST", "/api/usage/subscriptions/refresh", 60_000],
     ["POST", "/api/sessions/adopt", 45_000],
@@ -273,6 +276,68 @@ function slowTransport(delayMs: number, body: () => Response) {
     })) as typeof fetch,
   });
 }
+
+test("role conversion can finish both runner phases after the default client deadline", withMockedTimeouts(async () => {
+  let submitted: unknown;
+  const transport = createBrowserApiTransport({
+    instanceId: "a", origin: "http://127.0.0.1:4317",
+    fetch: ((_input: RequestInfo | URL, init?: RequestInit) => {
+      submitted = JSON.parse(String(init?.body));
+      return new Promise<Response>((resolve, reject) => {
+        setTimeout(() => resolve(Response.json({ id: "s_1", role: "orchestrator" })), 59_000);
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    }) as typeof fetch,
+  });
+  const client = createApiClient(transport);
+  const selected = { behavior: { maximumConcurrentChildren: 6 } };
+  const pending = outcome(client.changeSessionRole("s_1", "orchestrator", "normal", selected));
+  mock.timers.tick(API_REQUEST_DEADLINE_MS);
+  await settle();
+  assert.equal(pending.settled, false, "the client still waits for the bounded commit phase");
+  mock.timers.tick(14_000);
+  await settle();
+  assert.equal(pending.error, undefined);
+  assert.deepEqual(pending.value, { id: "s_1", role: "orchestrator" });
+  assert.deepEqual(submitted, { role: "orchestrator", expectedRole: "normal", orchestrator: selected });
+  transport.close();
+}));
+
+test("a stalled role conversion has a 90s deadline while preview keeps the default", withMockedTimeouts(async () => {
+  const transport = createBrowserApiTransport({ instanceId: "a", origin: "http://127.0.0.1:4317", fetch: stalledFetch() });
+  const post = outcome(transport.request("/api/sessions/s_1/role", { method: "POST", body: "{}" }));
+  const preview = outcome(transport.request("/api/sessions/s_1/role?role=orchestrator"));
+  mock.timers.tick(API_REQUEST_DEADLINE_MS);
+  await settle();
+  assert.ok(preview.error instanceof RequestTimeoutError);
+  assert.equal(preview.error.timeoutMs, API_REQUEST_DEADLINE_MS);
+  assert.equal(post.settled, false);
+  mock.timers.tick(44_999);
+  await settle();
+  assert.equal(post.settled, false);
+  mock.timers.tick(1);
+  await settle();
+  assert.ok(post.error instanceof RequestTimeoutError);
+  assert.equal(post.error.timeoutMs, 90_000);
+  transport.close();
+}));
+
+test("caller cancellation wins over the extended role deadline", withMockedTimeouts(async () => {
+  const transport = createBrowserApiTransport({ instanceId: "a", origin: "http://127.0.0.1:4317", fetch: stalledFetch() });
+  const controller = new AbortController();
+  const pending = outcome(transport.request("/api/sessions/s_1/role", { method: "POST", signal: controller.signal }));
+  mock.timers.tick(50_000);
+  await settle();
+  assert.equal(pending.settled, false);
+  controller.abort();
+  await settle();
+  assert.ok(pending.error instanceof DOMException);
+  assert.equal(pending.error.name, "AbortError");
+  mock.timers.tick(90_000);
+  await settle();
+  assert.equal(pending.error.name, "AbortError");
+  transport.close();
+}));
 
 type Client = ReturnType<typeof createApiClient>;
 const slowCases: Array<{

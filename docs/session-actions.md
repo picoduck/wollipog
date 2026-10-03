@@ -16,7 +16,7 @@ confirming. These choices apply to this session and never update saved defaults.
 controlling campaign policy with locked controls; it cannot override campaign behavior or ownership. Strict Project
 Isolation cannot be enabled during conversion; a strict default can be disabled explicitly here.
 
-Both peers must support protocol v202. Conversion requires a quiet, resumable native Claude Code,
+Both peers must support protocol v203. Conversion requires a quiet, resumable native Claude Code,
 Codex, Codex app-server, or Pi session on the host with advertised additive-role support. Coupled
 Orchestrator presets, Strict Project Isolation, unsupported permissions, workflow/side-chat sessions,
 busy providers, open Native TUIs, queued/background work, account/worktree transitions, live descendants, and unsettled

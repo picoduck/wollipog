@@ -91,14 +91,14 @@ test("conversion is human-only: neither agent role can call the role routes", ()
 
 test("unsupported peers and incompatible permissions/isolation fail before dispatch or state change", async () => {
   for (const role of ["normal", "orchestrator"] as const) {
-    const h = harness(role, 201);
+    const h = harness(role, 202);
     try {
       const target = role === "normal" ? "orchestrator" : "normal";
       h.db.setAgentControlCredential("s", "r", "a".repeat(64), 15);
       h.db.setPolicyHookCredential("s", "r", "b".repeat(64), 15);
       const before = h.db.getSession("s");
-      assert.match(h.conversions.preview("s", target, h.defaults, () => null).reason!, /protocol v202/);
-      await assert.rejects(h.conversions.change("s", target, role, h.defaults, () => null), /protocol v202/);
+      assert.match(h.conversions.preview("s", target, h.defaults, () => null).reason!, /protocol v203/);
+      await assert.rejects(h.conversions.change("s", target, role, h.defaults, () => null), /protocol v203/);
       assert.deepEqual(h.db.getSession("s"), before);
       assert.equal(h.db.sessionRoleConversion("s"), null);
       assert.equal(h.commands.length, 0);
@@ -342,14 +342,14 @@ test("an interrupted conversion cannot retry or reconcile through an older peer"
       throw new Error("disconnected");
     };
     await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /disconnected/);
-    h.db.registerRunner(h.metadata, Date.now(), 201);
+    h.db.registerRunner(h.metadata, Date.now(), 202);
     const before = h.db.getSession("s");
     const intent = h.db.sessionRoleConversion("s");
     const credentialRows = () => ["agent_control_credentials", "policy_hook_credentials", "role_revoked_credentials"].map((table) =>
       (h.db as unknown as { stmt(sql: string): { all(): unknown[] } }).stmt(`SELECT * FROM ${table}`).all());
     const credentials = credentialRows();
     h.conversions.reconcile("r", { id: "s", roleConversionReceipt: { conversionId: command!.conversionId, state: "prepared" } });
-    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v202/);
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v203/);
     assert.deepEqual(h.db.getSession("s"), before);
     assert.deepEqual(h.db.sessionRoleConversion("s"), intent);
     assert.equal(h.commands.length, 1);
