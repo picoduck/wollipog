@@ -1482,20 +1482,21 @@ CREATE TABLE IF NOT EXISTS question_policy_answers (
   created_at INTEGER NOT NULL,
   PRIMARY KEY(session_id, runner_seq, history_epoch)
 );
--- Stored answer summaries (#2188), one per accepted answer, under the question's occurrence: the
--- unique identity a current runner stamps on every request. A runner may re-emit an occurrence
--- whose answer never reached the provider, so the Nth cached request of an occurrence shows its Nth
--- accepted answer, restored after it whenever the cache does not already hold it.
+-- Stored answer summaries (#2188), one per accepted answer, under the question's occurrence (the
+-- unique identity a current runner stamps on every request) and the ordinal of the request it
+-- answered: a runner may re-emit an occurrence whose answer never reached the provider, or reopen
+-- the same request, and either may be answered again. A request shows the latest answer to it.
 CREATE TABLE IF NOT EXISTS question_answer_summaries (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   request_id TEXT NOT NULL,
   occurrence_id TEXT NOT NULL,
+  request_ordinal INTEGER NOT NULL,
   question_digest TEXT NOT NULL,
   payload TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_question_answer_summaries_occurrence
-  ON question_answer_summaries(session_id, request_id, occurrence_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_question_answer_summaries_request
+  ON question_answer_summaries(session_id, request_id, occurrence_id, request_ordinal, created_at);
 CREATE INDEX IF NOT EXISTS idx_session_events_question_answered_occurrence
   ON session_events(session_id, json_extract(payload,'$.occurrenceId'))
   WHERE kind='question_answered';
@@ -18114,50 +18115,57 @@ export class ControlPlaneDb {
     return null;
   }
 
+  /** How many requests of one occurrence the cache holds, up to and including `throughSeq`. */
+  private questionOccurrenceRequests(sessionId: string, requestId: string, occurrenceId: string, throughSeq?: number): number {
+    return (this.stmt(`SELECT COUNT(*) AS requests FROM session_events
+      WHERE session_id=? AND kind='question_request' AND json_extract(payload,'$.requestId')=? AND seq<=?
+        AND json_extract(payload,'$.occurrenceId')=?`).get(
+        sessionId, requestId, throughSeq ?? Number.MAX_SAFE_INTEGER, occurrenceId,
+      ) as { requests: number }).requests;
+  }
+
   /**
-   * Keep a stored answer summary under its question's occurrence, so the control-plane event can be
-   * restored after its request when history brings that request (after a cache reset, or for a
-   * question parked from a reconnect snapshot before its request event arrived).
+   * Keep a stored answer summary under its question's occurrence and the request it answered, so
+   * the control-plane event can be restored after that request when history brings it (after a
+   * cache reset, or for a question parked from a reconnect snapshot before its request event
+   * arrived, which is then the next request of its occurrence).
    */
   recordQuestionAnswerSummary(
     sessionId: string,
     questions: readonly AgentQuestion[],
+    questionCached: boolean,
     payload: Extract<SessionEventPayload, { kind: "question_answered" }>,
     timestamp: number,
   ): void {
     if (!payload.occurrenceId) return;
+    const cached = this.questionOccurrenceRequests(sessionId, payload.requestId, payload.occurrenceId);
     this.stmt(`INSERT INTO question_answer_summaries
-      (session_id, request_id, occurrence_id, question_digest, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(sessionId, payload.requestId, payload.occurrenceId,
+      (session_id, request_id, occurrence_id, request_ordinal, question_digest, payload, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(sessionId, payload.requestId, payload.occurrenceId, questionCached ? cached : cached + 1,
         createHash("sha256").update(JSON.stringify(questions)).digest("hex"), JSON.stringify(payload), timestamp);
   }
 
   /**
-   * The stored answer summary to show after a cached `question_request`. A runner may re-emit an
-   * occurrence whose answer never reached the provider, and the reopened question may be answered
-   * again, so the Nth cached request of an occurrence takes its Nth accepted answer, and only while
-   * the cache shows fewer answers for that occurrence than it has requests up to this one. An older
-   * runner's request carries no occurrence, and a request id alone cannot tell which use of it was
-   * answered, so its row keeps the older-runner fallback.
+   * The stored answer summary to show after a cached `question_request`: the latest answer to that
+   * request (by its ordinal among its occurrence's cached requests), unless the cache already shows
+   * one after it. An older runner's request carries no occurrence, and a request id alone cannot
+   * tell which use of it was answered, so its row keeps the older-runner fallback.
    */
   restorableQuestionAnswerSummary(
     event: SessionEvent,
   ): { payload: Extract<SessionEventPayload, { kind: "question_answered" }>; timestamp: number } | null {
     if (event.payload.kind !== "question_request" || !event.payload.occurrenceId) return null;
     const { requestId, occurrenceId } = event.payload;
-    const { requests } = this.stmt(`SELECT COUNT(*) AS requests FROM session_events
-      WHERE session_id=? AND kind='question_request' AND json_extract(payload,'$.requestId')=? AND seq<=?
-        AND json_extract(payload,'$.occurrenceId')=?`).get(event.sessionId, requestId, event.seq, occurrenceId) as
-      { requests: number };
-    const { shown } = this.stmt(`SELECT COUNT(*) AS shown FROM session_events WHERE session_id=?
-      AND kind='question_answered' AND json_extract(payload,'$.occurrenceId')=?`).get(event.sessionId, occurrenceId) as
-      { shown: number };
-    if (shown >= requests) return null;
+    if (this.stmt(`SELECT 1 FROM session_events WHERE session_id=? AND kind='question_answered'
+        AND json_extract(payload,'$.occurrenceId')=? AND json_extract(payload,'$.questionEventSeq')=? LIMIT 1`)
+      .get(event.sessionId, occurrenceId, event.seq)) return null;
     const row = this.stmt(`SELECT payload, created_at FROM question_answer_summaries
-      WHERE session_id=? AND request_id=? AND occurrence_id=? AND question_digest=?
-      ORDER BY created_at, rowid LIMIT 1 OFFSET ?`).get(
+      WHERE session_id=? AND request_id=? AND occurrence_id=? AND request_ordinal=? AND question_digest=?
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(
         event.sessionId, requestId, occurrenceId,
-        createHash("sha256").update(JSON.stringify(event.payload.questions)).digest("hex"), requests - 1,
+        this.questionOccurrenceRequests(event.sessionId, requestId, occurrenceId, event.seq),
+        createHash("sha256").update(JSON.stringify(event.payload.questions)).digest("hex"),
       ) as { payload: string; created_at: number } | undefined;
     return row ? { payload: JSON.parse(row.payload), timestamp: row.created_at } : null;
   }

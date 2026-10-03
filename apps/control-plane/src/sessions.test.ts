@@ -12844,6 +12844,39 @@ test("each answer to a re-emitted occurrence stays with its own request through 
   assert.deepEqual(shown(), [[0, "Yes"], [1, "No"]]);
 });
 
+test("a request reopened without a new request event keeps its latest answer through a reset (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
+  const request = { kind: "question_request" as const, requestId: "refused", occurrenceId: "request_refused", async: true, questions };
+  db.reconcileRunnerHistory(id, 0, 0);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "refused", { q: "Yes" }, undefined, "submit", undefined, "request_refused").ok);
+  // The runner refuses the delivery at once and restores the same pending request from its snapshot.
+  const delivery = hub.sentOfType("durable_session_command").at(-1)!;
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update", commandId: delivery.commandId, sessionId: id, state: "failed", revision: 1,
+  }), true);
+  db.setPendingApproval(id, { requestId: "refused", occurrenceId: "request_refused", recoveryId: "request_refused",
+    kind: "question", title: "Go?", options: [], questions, async: true });
+  const retried = svc.answerQuestion(id, "refused", { q: "No" }, undefined, "submit", undefined, "request_refused");
+  assert.ok(retried.ok, retried.error);
+  const latest = () => {
+    const summaries = db.listEvents(id).flatMap((event) => event.payload.kind === "question_answered" ? [event.payload] : []);
+    return summaries.at(-1)?.answers[0]?.selected;
+  };
+  assert.deepEqual(latest(), ["No"]);
+
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 1);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: request }],
+    page: { logEpoch: 0, throughSeq: 1, nextAfterSeq: 1, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+  assert.deepEqual(latest(), ["No"]);
+});
+
 test("a snapshot-parked async question answered behind a policy-hook card shows its answer when its request arrives (#2188)", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
