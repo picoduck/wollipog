@@ -31,6 +31,7 @@ import {
   forgeObservation,
   itemDetail,
   itemSummary,
+  knownCost,
   MINUTE,
   workSummary as sharedWorkSummary,
 } from "../e2e/campaign-status-fixtures.js";
@@ -1057,6 +1058,28 @@ test("Back before the remembered rows arrive still lands on the opened row once 
     const rows = panel.container.querySelectorAll(".campaign-work-row");
     assert.equal(rows.length, 150);
     assert.equal(domWindow.document.activeElement, rows[119], "focus lands on the opened row once it renders");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("member usage re-sent on the root updates the summary cost without reloading the list", async () => {
+  const { client, calls } = fakeClient(() => ({ revision: 1, items: [item("cwi_1")], nextCursor: null }));
+  const panel = await mount({ initial: rootSession, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const summaryText = () => panel.container.querySelector(".campaign-status-summary")?.textContent ?? "";
+    assert.match(summaryText(), /\$2\.50/);
+    const listed = calls.list.length;
+    // The server re-sends the root after member usage arrives: the same revision, a higher cost.
+    const base = workSummary();
+    await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({
+      cost: { ...base.cost!, total: knownCost(3.75), workItems: knownCost(3.25) },
+    })) }));
+    assert.match(summaryText(), /\$3\.75/, "the panel shows the new campaign cost");
+    assert.doesNotMatch(summaryText(), /\$2\.50/);
+    assert.equal(calls.list.length, listed, "a cost-only update keeps the list and its cursor");
   } finally {
     await panel.dispose();
   }

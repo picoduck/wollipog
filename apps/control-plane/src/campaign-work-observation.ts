@@ -6,7 +6,8 @@
  * Readers bind their cursors and reloads to the ledger revision, so such a change needs a new
  * revision too. Every session upsert is checked here, but only a change to what the ledger observes
  * of an attempt's session counts, and changes are coalesced per campaign: a burst of child status
- * changes costs one revision and one refresh of the campaign views.
+ * changes costs one revision and one refresh of the campaign views. Attributed usage joins the same
+ * coalesced refresh without a revision, because cost is read fresh on every summary.
  */
 import type { ControlPlaneDb } from "./db.js";
 
@@ -73,6 +74,14 @@ export class CampaignWorkObservations {
    * the revision exactly like an observed session change, coalesced with them per campaign. */
   forgeChanged(campaignSessionId: string): void {
     this.schedule(campaignSessionId, true);
+  }
+
+  /** Usage was attributed to the campaign. Cost is read fresh on every summary but moves no
+   * revision, so only the root is re-sent, coalesced with the other changes: a token stream costs
+   * at most one root refresh per campaign per window, and paging cursors stay valid. Called inside
+   * the usage transaction, so it only schedules. */
+  usageChanged(campaignSessionId: string): void {
+    this.schedule(campaignSessionId, false);
   }
 
   /** Apply every pending bump and refresh now. Used by tests and on shutdown. */

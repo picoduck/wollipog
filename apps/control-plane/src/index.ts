@@ -964,6 +964,9 @@ const campaignWorkObservations = new CampaignWorkObservations({
   refresh: (campaignSessionId) => svc.campaignWorkObserved(campaignSessionId),
   warn: (message) => app.log.warn(message),
 });
+// Member usage moves campaign cost without a ledger write; re-send the root, coalesced, so the
+// embedded summary and the Campaign Status panel follow it.
+db.campaignWorkLedger.accounting.observeUsage((campaignSessionId) => campaignWorkObservations.usageChanged(campaignSessionId));
 
 // Slice 8 of #2417: GitHub status of the pull requests campaign work items name, read on the
 // runner hosting the root campaign through its own `gh` login, on demand and in a bounded

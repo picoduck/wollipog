@@ -228,8 +228,19 @@ function amountOf(row: AttributionRow): CampaignUsageAmount {
 export class CampaignWorkAccounting {
   private readonly statements = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
   private readonly stampKey = randomBytes(32);
+  /** Told which campaign each attributed delta reached, so its cost views can be refreshed. */
+  private usageObserver: ((campaignSessionId: string) => void) | null = null;
 
   constructor(private readonly db: DatabaseSync) {}
+
+  /**
+   * Usage moves campaign cost without a ledger revision, so nothing else re-sends the views that
+   * embed it. The observer runs inside the usage transaction, before it commits, so it must only
+   * schedule work for later; a rolled-back delta then costs at most one needless refresh.
+   */
+  observeUsage(observer: (campaignSessionId: string) => void): void {
+    this.usageObserver = observer;
+  }
 
   private stmt(sql: string): ReturnType<DatabaseSync["prepare"]> {
     let statement = this.statements.get(sql);
@@ -317,6 +328,7 @@ export class CampaignWorkAccounting {
        WHERE ${target.attemptId ? "attempt_id=?" : "campaign_session_id=? AND bucket=? AND session_id=? AND attempt_id IS NULL"}`,
     ).run(...values, occurredAt, occurredAt,
       ...(target.attemptId ? [target.attemptId] : [target.campaignSessionId, target.bucket, sessionId]));
+    this.usageAttributed(target.campaignSessionId);
     if (Number(updated.changes) > 0) return;
     this.stmt(
       `INSERT INTO campaign_usage_attribution
@@ -325,6 +337,15 @@ export class CampaignWorkAccounting {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(target.campaignSessionId, target.bucket, target.attemptId, target.workItemId, sessionId, ...values,
       occurredAt, occurredAt);
+  }
+
+  /** A failing observer must never fail the usage write it rides on. */
+  private usageAttributed(campaignSessionId: string): void {
+    try {
+      this.usageObserver?.(campaignSessionId);
+    } catch {
+      // The refresh is best effort; the next root upsert or reload reads the cost anyway.
+    }
   }
 
   /** Binds a cost-sorted cursor to the exact order its reader saw. That order moves without a ledger
