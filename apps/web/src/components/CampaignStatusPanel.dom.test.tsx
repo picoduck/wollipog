@@ -453,7 +453,8 @@ test("observed GitHub facts stay apart from the reported stage, and stale or una
     },
   });
   let refreshed: CampaignForgeRefreshResponse | Error = new ApiError("not yet", 503);
-  const { client, calls } = fakeClient(() => ({ revision: 1, items: [base], nextCursor: null }), { cwi_9: detail }, () => refreshed);
+  const details: Record<string, CampaignWorkItemDetail> = { cwi_9: detail };
+  const { client, calls } = fakeClient(() => ({ revision: 1, items: [base], nextCursor: null }), details, () => refreshed);
   const panel = await mount({ initial: rootSession, client });
   try {
     await act(async () => panel.state.show("campaign"));
@@ -488,36 +489,31 @@ test("observed GitHub facts stay apart from the reported stage, and stale or una
     }
     assert.deepEqual(calls.forge, ["s_root/cwi_9"], "opening the details asks for a read once");
 
-    // A refresh answer replaces the facts in place.
+    // A completed read reloads the details, so what the store holds now is shown; the answer's own
+    // facts are never applied, even one naming a pull request the details do not list.
+    const merged = forgeObservation({ state: "merged", mergeQueue: null, reviewDecision: "approved" });
+    details.cwi_9 = { ...detail, observed: { pullRequests: detail.observed.pullRequests!.map((entry) => entry.ref.number === 2462
+      ? { ref: entry.ref, fact: { availability: "fresh" as const, value: merged, observedAt: Date.now() } }
+      : entry) } };
     refreshed = {
       revision: 2,
-      pullRequests: detail.observed.pullRequests!.map((entry) => entry.ref.number === 2462
-        ? { ref: entry.ref, fact: { availability: "fresh", value: forgeObservation({ state: "merged", mergeQueue: null, reviewDecision: "approved" }), observedAt: Date.now() } }
-        : entry),
+      pullRequests: [{ ref: PR(9999), fact: { availability: "fresh", value: forgeObservation(), observedAt: Date.now() } }],
     };
+    const loadsBefore = calls.detail.length;
     await click(panel.container.querySelector(".campaign-detail-back")!);
     await click(panel.container.querySelector(".campaign-work-row")!);
+    assert.equal(calls.detail.length, loadsBefore + 2, "opening loads the details, and the completed read loads them again");
     facts = deliveryFacts(panel.container);
     assert.equal(pullRequestGroup(facts, 2462)[0], "PR #2462: MergedObserved on GitHub just now");
     assert.ok(pullRequestGroup(facts, 2462).includes("Merge Queue: Not Queued"));
+    assert.ok(!facts.some((fact) => fact.startsWith("PR #9999")), "a refresh answer's own facts are never shown");
     assert.equal(calls.forge.length, 2);
-
-    // A late answer naming a pull request the reloaded details no longer show cannot bring it back.
-    refreshed = {
-      revision: 3,
-      pullRequests: [{ ref: PR(9999), fact: { availability: "fresh", value: forgeObservation(), observedAt: Date.now() } }],
-    };
-    await click(panel.container.querySelector(".campaign-detail-back")!);
-    await click(panel.container.querySelector(".campaign-work-row")!);
-    facts = deliveryFacts(panel.container);
-    assert.ok(!facts.some((fact) => fact.startsWith("PR #9999")), "only the shown pull requests are updated");
-    assert.ok(facts.some((fact) => fact.startsWith("PR #2462:")));
   } finally {
     await panel.dispose();
   }
 });
 
-test("a forge-refresh answer older than reloaded details never puts back facts that have since changed", async () => {
+test("a late forge-refresh answer never puts back facts that have since changed, whatever its revision", async () => {
   const PR = { repository: "picoduck/wollipog", number: 2462 };
   const base = item("cwi_7", { stage: { stage: "in_review", note: null, pullRequests: [PR], sourceSessionId: "s_root", reportedAt: NOW - MINUTE } });
   const withRequired = (state: "passing" | "failing", revision: number) => ({
@@ -526,33 +522,44 @@ test("a forge-refresh answer older than reloaded details never puts back facts t
       requiredChecks: { state, passing: state === "passing" ? 1 : 0, failing: state === "failing" ? 1 : 0, pending: 0 },
     }), observedAt: Date.now() } }] } }),
   });
-  let current = withRequired("passing", 1);
-  let releaseRefresh!: () => void;
-  const { client: baseClient } = fakeClient(() => ({ revision: current.revision, items: [base], nextCursor: null }));
-  const client = {
-    ...baseClient,
-    campaignWorkItem: async () => current,
-    // The refresh was read at revision 1 (passing) and answers late.
-    campaignForgeRefresh: () => new Promise<CampaignForgeRefreshResponse>((resolve) => {
-      releaseRefresh = () => resolve({ revision: 1, pullRequests: withRequired("passing", 1).item.observed.pullRequests! });
-    }),
-  } as ApiClient;
-  const panel = await mount({ initial: rootSession, client });
-  try {
-    await act(async () => panel.state.show("campaign"));
-    await settle();
-    await click(panel.container.querySelector(".campaign-work-row")!);
-    assert.ok(deliveryFacts(panel.container).includes("Required Checks: Passing1 passing."));
-    // The ledger moves: the details reload at revision 2 and now show a failing required check.
-    current = withRequired("failing", 2);
-    await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({ revision: 2 })) }));
-    assert.ok(deliveryFacts(panel.container).includes("Required Checks: Failing1 failing."));
-    await act(async () => { releaseRefresh(); });
-    await settle();
-    assert.ok(deliveryFacts(panel.container).includes("Required Checks: Failing1 failing."),
-      "the late revision-1 answer does not bring back Passing");
-  } finally {
-    await panel.dispose();
+  // The late answer: passing, at an older revision, then at the same revision as newer details
+  // (the revision bump is coalesced after the store write, so equal revisions are not ordered).
+  for (const answerRevision of [1, 2]) {
+    forgetCampaignStatusMemory();
+    let current: { revision: number; item: CampaignWorkItemDetail } | Error = withRequired("passing", 1);
+    let releaseRefresh!: () => void;
+    const { client: baseClient } = fakeClient(() => ({ revision: 2, items: [base], nextCursor: null }));
+    const client = {
+      ...baseClient,
+      campaignWorkItem: async () => {
+        if (current instanceof Error) throw current;
+        return current;
+      },
+      campaignForgeRefresh: () => new Promise<CampaignForgeRefreshResponse>((resolve) => {
+        releaseRefresh = () => resolve({ revision: answerRevision, pullRequests: withRequired("passing", 1).item.observed.pullRequests! });
+      }),
+    } as ApiClient;
+    const panel = await mount({ initial: rootSession, client });
+    try {
+      await act(async () => panel.state.show("campaign"));
+      await settle();
+      await click(panel.container.querySelector(".campaign-work-row")!);
+      assert.ok(deliveryFacts(panel.container).includes("Required Checks: Passing1 passing."));
+      // The ledger moves: the details reload and now show a failing required check.
+      current = withRequired("failing", 2);
+      await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({ revision: 2 })) }));
+      assert.ok(deliveryFacts(panel.container).includes("Required Checks: Failing1 failing."));
+      // A later reload fails; the failing details stay shown, with the error.
+      current = new ApiError("server unavailable", 503);
+      await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({ revision: 3 })) }));
+      assert.ok(deliveryFacts(panel.container).includes("Required Checks: Failing1 failing."));
+      await act(async () => { releaseRefresh(); });
+      await settle();
+      assert.ok(deliveryFacts(panel.container).includes("Required Checks: Failing1 failing."),
+        `a late passing answer at revision ${answerRevision} does not bring back Passing`);
+    } finally {
+      await panel.dispose();
+    }
   }
 });
 

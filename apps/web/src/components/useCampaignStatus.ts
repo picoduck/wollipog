@@ -57,8 +57,6 @@ export interface CampaignDetailState {
   status: CampaignLoadStatus | "missing";
   detail: CampaignWorkItemDetail | null;
   error: string | null;
-  /** Ledger revision the shown detail was read at; an older forge-refresh answer never replaces it. */
-  revision?: number;
 }
 
 export interface CampaignStatusData {
@@ -337,6 +335,8 @@ export function useCampaignStatus({
   /* ---------------------------------------------------------------- detail */
   const detailKey = selectedItemId ? `${session.id}:${selectedItemId}` : null;
   const [detail, setDetail] = useState<{ key: string; state: CampaignDetailState } | null>(null);
+  /** Completed forge reads; each one reloads the shown details (see the forge refresh below). */
+  const [forgeReads, setForgeReads] = useState(0);
   useEffect(() => {
     if (!selectedItemId || !detailKey || !online) return;
     const controller = new AbortController();
@@ -344,7 +344,7 @@ export function useCampaignStatus({
     let cancelled = false;
     api.campaignWorkItem(session.id, selectedItemId, controller.signal).then((response) => {
       if (cancelled) return;
-      setDetail({ key: detailKey, state: { status: "ready", detail: response.item, error: null, revision: response.revision } });
+      setDetail({ key: detailKey, state: { status: "ready", detail: response.item, error: null } });
     }).catch((cause: unknown) => {
       if (cancelled || isAbort(cause)) return;
       if (cause instanceof ApiError && cause.status === 404) {
@@ -360,7 +360,7 @@ export function useCampaignStatus({
       cancelled = true;
       controller.abort();
     };
-  }, [api, detailKey, online, revision, reconnects, retries, selectedItemId, session.id]);
+  }, [api, detailKey, forgeReads, online, revision, reconnects, retries, selectedItemId, session.id]);
 
   /* ---------------------------------------------------------------- forge refresh */
   // While an item's details are showing, ask the server to read its pull requests on GitHub: once
@@ -373,33 +373,11 @@ export function useCampaignStatus({
     if (!selectedItemId || !detailKey || !online || !forgeRefreshable) return;
     const controller = new AbortController();
     const refresh = () => {
-      api.campaignForgeRefresh(session.id, selectedItemId, controller.signal).then((response) => {
-        if (controller.signal.aborted) return;
-        // Merge by pull request into whatever is shown now: details reloaded while this read was in
-        // flight may name other pull requests, and a late answer must not bring back old ones.
-        const fresh = new Map(response.pullRequests.map((entry) => [`${entry.ref.repository.toLowerCase()}#${entry.ref.number}`, entry.fact]));
-        // An answer read at an older revision than the details shown (they reloaded while it was in
-        // flight) could put back facts that have since changed, such as passing checks now failing.
-        setDetail((current) => current?.key === detailKey && current.state.detail?.observed.pullRequests &&
-          response.revision >= (current.state.revision ?? 0)
-          ? {
-            key: detailKey,
-            state: {
-              ...current.state,
-              revision: response.revision,
-              detail: {
-                ...current.state.detail,
-                observed: {
-                  ...current.state.detail.observed,
-                  pullRequests: current.state.detail.observed.pullRequests.map((entry) => ({
-                    ref: entry.ref,
-                    fact: fresh.get(`${entry.ref.repository.toLowerCase()}#${entry.ref.number}`) ?? entry.fact,
-                  })),
-                },
-              },
-            },
-          }
-          : current);
+      // The answer's own facts are not applied: a reply can arrive after newer details, even at the
+      // same revision (the revision bump is coalesced after the store write). Re-reading the details
+      // through the ordered detail load shows whatever the store holds now.
+      api.campaignForgeRefresh(session.id, selectedItemId, controller.signal).then(() => {
+        if (!controller.signal.aborted) setForgeReads((count) => count + 1);
       }).catch(() => {
         // The shown facts already explain what is unavailable; a failed refresh changes nothing.
       });

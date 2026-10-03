@@ -416,7 +416,9 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   required rollup is `unknown` too.
 - **Refresh:** on demand, `POST /api/sessions/:id/campaign/work-items/:itemId/forge-refresh`, which
   the panel sends when an item's details open and every 60 seconds while they stay open; it waits
-  at most 20 seconds and returns the item's facts (`CampaignForgeRefreshResponse`). In the
+  at most 20 seconds and returns the item's facts (`CampaignForgeRefreshResponse`). The panel does
+  not apply that answer: it reloads the details, because a reply can arrive after newer details
+  even at the same revision (the revision bump is coalesced after the store write). In the
   background, every `backgroundTickMs` (1 minute) the control plane reads the pull requests of
   **unfinished** items whose last read, successful or not (a timed-out or rejected read included),
   finished more than `backgroundIntervalMs` (5 minutes) ago,
