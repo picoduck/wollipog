@@ -26,6 +26,7 @@ import {
 import { createHash } from "node:crypto";
 import { isAbsolute, join, posix } from "node:path";
 import { JsonRpcPeer } from "../jsonrpc.js";
+import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import {
   killTree,
   spawnAgent,
@@ -47,6 +48,7 @@ import type {
 import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from "./poisoned-provider-history.js";
 import { providerRejectionShape } from "./provider-rejection-shape.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
+import { codexHttpFallbackWarning, codexInferenceConfiguration, type CodexInferenceConfiguration } from "./codex-inference-transport.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import {
   codexCommandSkillName,
@@ -177,6 +179,9 @@ export const DEFAULT_MODE_QUESTION_FEATURE = "default_mode_request_user_input";
  * and app-server config parsers, and keeping the override global works across both old and new
  * app-server argument surfaces. */
 export function codexAppServerArgs(baseArgs: string[], enableDefaultModeQuestions = true): string[] {
+  // Supported Codex builds default the built-in OpenAI inference provider to WebSockets.
+  // Keep its identity and custom-provider opt-ins intact; overriding the reserved built-in or
+  // enabling removed responses_websockets flags breaks version/config compatibility (#2466).
   return enableDefaultModeQuestions
     ? [...baseArgs, "--enable", DEFAULT_MODE_QUESTION_FEATURE, "app-server"]
     : [...baseArgs, "app-server"];
@@ -484,6 +489,9 @@ export class CodexAppServerDriver implements Driver {
   private readonly unsupportedPluginMethods = new Set<string>();
   private readonly pluginSyncWarnings = new Set<string>();
   private serverIdentity = "unknown";
+  private inferenceLaunch = 0;
+  private inferenceHttpFallback = false;
+  private inferenceConfiguration: CodexInferenceConfiguration | null = null;
   private completedTurnId: string | null = null;
   /** A terminal notification can race ahead of both turn/started and the turn/start response.
    * Keep identified v2 completions and legacy failures inert until the active prompt confirms the
@@ -714,6 +722,9 @@ export class CodexAppServerDriver implements Driver {
     return exit;
   }
   private async startAppServer(enableDefaultModeQuestions: boolean): Promise<void> {
+    this.inferenceLaunch += 1;
+    this.inferenceHttpFallback = false;
+    this.inferenceConfiguration = null;
     // Same rule as the exec driver: the coupled preset always isolates configured MCP servers, and
     // the additive role does so exactly when Integration Isolation is enabled. Only the additive
     // shape exempts servers the agent definition's own launch arguments declare (ADR 0011); the
@@ -770,15 +781,25 @@ export class CodexAppServerDriver implements Driver {
     this.peer = peer;
 
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (t: string) => {
+    const onStderrLine = (line: string) => {
       if (this.disposed || this.child !== child) return;
-      const s = String(t).trim();
+      const s = line.trim();
       if (s && !/DeprecationWarning|trace-deprecation/.test(s)) {
-        if (isProviderAuthenticationFailure(s)) this.signalAuthenticationFailure();
+        if (codexHttpFallbackWarning(s)) this.reportInferenceHttpFallback();
+        else if (isProviderAuthenticationFailure(s)) this.signalAuthenticationFailure();
         else this.emitProviderStderr(s);
       }
-    });
+    };
+    // Provider warnings can be split across arbitrary stdio chunks. Frame before matching so
+    // neither a partial prefix nor its sensitive error suffix reaches durable diagnostics.
+    const stderrLines = new BoundedNdjsonBuffer(onStderrLine, () => {
+      if (!this.disposed && this.child === child) this.emitProviderStderr(JSON.stringify({
+        event: "codex_diagnostic_discarded", reason: "oversized_line",
+      }));
+    }, 64 * 1024);
+    child.stderr.on("data", (text: string) => stderrLines.push(text));
     const finishChild = (code: number | null, reason: string, spawnError?: Error) => {
+      onStderrLine(stderrLines.takeTrailing());
       peer.dispose(reason);
       // A rejected feature probe can be replaced before its delayed error/close event arrives.
       // Only the current launch may tear down session state or report an exit.
@@ -922,10 +943,42 @@ export class CodexAppServerDriver implements Driver {
     }
     this.threadId = actualId;
     this.threadCarriesLegacySandboxPolicy = false;
+    await this.observeInferenceConfiguration(res?.modelProvider, resumeId ? "thread_resume" : "thread_start");
     this.refreshSkillCatalog();
     if (typeof res?.serviceTier === "string" && res.serviceTier) this.reconcileServiceTier(res.serviceTier);
     else if (res?.serviceTier === null) this.reconcileServiceTier(null);
     return actualId;
+  }
+
+  private async observeInferenceConfiguration(providerId: unknown, entryPoint: "thread_start" | "thread_resume"): Promise<void> {
+    const peer = this.peer;
+    if (!peer) return;
+    let config: unknown;
+    // OpenAI's built-in setting is native and immutable. Only custom definitions need a read;
+    // an old/unresponsive server must not hold a session open just to produce a diagnostic.
+    if (typeof providerId === "string" && providerId && providerId !== "openai") {
+      try {
+        const result = await peer.requestWithDeadline<Json>("config/read", { cwd: this.cwd, includeLayers: false }, Date.now() + 1_000);
+        config = result?.config;
+      } catch { /* Do not log a provider-controlled config error or claim known transport. */ }
+    }
+    if (this.disposed || this.peer !== peer) return;
+    this.inferenceConfiguration = codexInferenceConfiguration(providerId, config, this.serverIdentity);
+    this.cb.onStderr(JSON.stringify({
+      event: "codex_inference_transport", entryPoint, launch: this.inferenceLaunch, phase: "configuration",
+      ...this.inferenceConfiguration, observedTransport: this.inferenceHttpFallback ? "http" : "unverified",
+    }));
+  }
+
+  private reportInferenceHttpFallback(): void {
+    if (this.inferenceHttpFallback) return;
+    this.inferenceHttpFallback = true;
+    this.cb.onStderr(JSON.stringify({
+      event: "codex_inference_transport", entryPoint: "provider_warning", launch: this.inferenceLaunch,
+      phase: "fallback", provider: this.inferenceConfiguration?.provider ?? "unknown",
+      configuredTransport: this.inferenceConfiguration?.configuredTransport ?? "unknown",
+      observedTransport: "http", reason: "provider_http_fallback",
+    }));
   }
 
   activeSteeringTurnId(): string | null {
@@ -1658,6 +1711,10 @@ export class CodexAppServerDriver implements Driver {
       }));
 
     peer.onNotification("skills/changed", () => this.refreshSkillCatalog());
+    peer.onNotification("warning", (params: Json) => {
+      if (params?.threadId && params.threadId !== this.threadId) return;
+      if (codexHttpFallbackWarning(params?.message)) this.reportInferenceHttpFallback();
+    });
     peer.onNotification("serverRequest/resolved", (params: Json) => {
       const id = String(params?.requestId ?? "");
       this.attentionOwners.delete(id);
