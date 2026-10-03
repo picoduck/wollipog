@@ -139,6 +139,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `SkillSourceIcon` | Lucide | `Package` | Where a skill's content comes from (Git, Machine, Built-In or Library). |
 | `ReadIcon` | Lucide | `BookOpen` | A read step in the transcript. |
 | `FileEditIcon` | Lucide | `FilePen` | A file edit step in the transcript. |
+| `NewFileIcon` | Lucide | `FilePlus` | A file edit step that created the file. |
+| `PlanIcon` | Lucide | `ListTodo` | A plan card's head in the transcript. |
 | `DeleteIcon` | Lucide | `Trash2` | A delete step in the transcript. |
 | `MoveIcon` | Lucide | `FolderInput` | A move or rename step in the transcript. |
 | `FileSearchIcon` | Lucide | `FileSearch` | A search step in the transcript; distinct from the Search action's magnifier. |

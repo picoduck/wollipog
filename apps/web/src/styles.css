@@ -6998,7 +6998,6 @@ textarea,
   color: var(--text-dim);
   font: var(--type-small);
 }
-.tl-step-link { align-self: flex-start; }
 /* An agent a turn spawned (#2183): a step's row named after its spawning call, its role and step
    count in small meta, its status, then Open. The disclosure is a §5.5 trigger; Open is its
    sibling `.btn.sm.ghost`, 8px away so its 44px touch area (§2.8) never covers the trigger. */
@@ -7061,81 +7060,167 @@ textarea,
     margin-inline-start: calc(var(--icon-sm) + var(--icon) + 2 * var(--space-2));
   }
 }
+/* The plan card (#2187): a head with ListTodo, "Plan" and a plain count, then items in a 16px icon
+   column so every label starts at the same x. One card per turn; earlier versions sit behind a
+   §5.5 disclosure inside it. */
 .tl-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   min-width: 0;
   max-width: 100%;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--bg-elev);
-  padding: 11px 14px;
+  padding: var(--space-3);
 }
-.plan-head {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  color: var(--text-faint);
-  margin-bottom: 8px;
+.tl-plan-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text);
+  font: var(--type-body-strong);
 }
-.tl-plan ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.tl-plan-head > .count { margin-inline-start: var(--space-1); }
+.tl-plan-items {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.tl-plan li {
+.tl-plan-item {
   display: flex;
-  align-items: baseline;
-  gap: 9px;
-  font-size: 13px;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text);
+  font: var(--type-body);
+}
+.tl-plan-icon {
+  display: inline-flex;
+  flex: none;
+  width: var(--icon);
+  /* Centres the 16px icon on the item's first 20px line. */
+  padding-block: var(--space-0-5);
+  color: var(--text-faint);
+}
+.tl-plan-text {
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.plan-check {
-  color: var(--text-faint);
-}
-.plan-completed {
-  color: var(--text-dim);
-}
-.plan-completed .plan-check {
-  color: var(--green);
-}
-.plan-in_progress .plan-check {
-  color: var(--blue);
-}
-.diff {
-  width: 100%;
-  max-width: 100%;
+.tl-plan-item.is-completed { color: var(--text-dim); }
+.tl-plan-item.is-completed > .tl-plan-icon { color: var(--positive-text); }
+.tl-plan-item.is-in-progress > .tl-plan-icon { color: var(--blue); }
+.tl-plan-history > .disclosure-trigger { align-self: flex-start; }
+.tl-plan-history > .disclosure-trigger > .count { margin-inline-start: var(--space-1); }
+.tl-plan-versions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
   margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
-  overflow: auto;
-  max-height: 320px;
-  background: var(--code-bg);
-  color: var(--code-text);
+  padding: 0;
+  list-style: none;
 }
-.d-line {
-  padding: 0 12px;
+.tl-plan-version {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-inline-start: var(--space-3);
+  border-inline-start: 1px solid var(--border);
+}
+.tl-plan-version-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-label);
+}
+/* A path in mono 12px: the directory faint, the file name in full text (#2187). */
+.tl-path {
+  font: var(--type-small);
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.tl-path-dir { color: var(--text-faint); }
+.tl-diff-file-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tl-diff-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+/* A file edit's diff (#2187): each hunk's "Lines 12–40" label, then a three-column grid of line
+   number, sign and text. Washes (9% of the tone) mark an edited file's changes; a new file is
+   plain code with green + signs. */
+.tl-diff {
+  /* The widest line number's digit count; DiffBlock sets it per diff. */
+  --tl-diff-digits: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.tl-diff-file {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.tl-diff-hunk {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.tl-diff-hunk-label {
+  color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.tl-diff-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.tl-diff-lines {
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: 100%;
+  padding-block: var(--space-1);
+  font: var(--type-small);
+  font-family: var(--font-mono);
+}
+.tl-diff-line {
+  display: grid;
+  grid-template-columns: calc(var(--tl-diff-digits) * 1ch + var(--space-3)) var(--space-4) max-content;
+  color: var(--text);
   white-space: pre;
 }
-.d-add {
-  background: var(--diff-add-bg);
-  color: var(--positive-text);
-}
-.d-del {
-  background: var(--diff-delete-bg);
-  color: var(--danger-text);
-}
-.d-hunk {
-  color: var(--accent-2);
-}
-.d-head {
+.tl-diff-number {
+  padding-inline-end: var(--space-2);
+  text-align: end;
   color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
 }
-.d-ctx {
-  color: var(--text-dim);
+.tl-diff-sign {
+  text-align: center;
+  user-select: none;
 }
+.tl-diff-text { padding-inline-end: var(--space-3); }
+.tl-diff-line.is-added > .tl-diff-sign { color: var(--positive-text); }
+.tl-diff-line.is-removed > .tl-diff-sign { color: var(--danger-text); }
+.tl-diff-file:not(.is-plain) .tl-diff-line.is-added { background: color-mix(in srgb, var(--green) 9%, transparent); }
+.tl-diff-file:not(.is-plain) .tl-diff-line.is-removed { background: color-mix(in srgb, var(--red) 9%, transparent); }
+.tl-diff-more { align-self: flex-start; }
 .tl-output pre {
   width: 100%;
   max-width: 100%;

@@ -144,7 +144,8 @@ test("an edit names its workspace-relative path once", async () => {
   assert.doesNotMatch(edit.querySelector(".tl-step-head")?.textContent ?? "", /\/repo\//);
   assert.equal(edit.querySelector("summary")?.getAttribute("aria-label"), "Edit src/components/Header.tsx · +2 −1 · Completed");
   await act(async () => edit.querySelector<HTMLElement>("summary")!.click());
-  await act(async () => edit.querySelector<HTMLButtonElement>(".tl-step-link")!.click());
+  const openFile = [...edit.querySelectorAll<HTMLButtonElement>(".tl-diff-actions > button")].find((button) => button.textContent === "Open File")!;
+  await act(async () => openFile.click());
   assert.deepEqual(opened, ["src/components/Header.tsx"], "a relative path can now open in the Files panel");
 });
 

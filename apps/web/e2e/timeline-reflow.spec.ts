@@ -807,7 +807,7 @@ for (const width of [320, 390]) {
       // An edit's diff is its step's body; a long path clips in the row instead of widening it.
       await page.locator("details.tl-step summary[aria-label^='Edit ']").click();
       await expectTranscriptWidthContained(page);
-      const diff = page.locator(".diff");
+      const diff = page.locator(".tl-diff-scroll");
       await expect(diff).toBeVisible();
       expect(await diff.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
 

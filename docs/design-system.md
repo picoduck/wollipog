@@ -1511,6 +1511,20 @@ line under it, so a phone never trades the name for the counts. The spawning cal
 collapsed Result step after the agent's steps ("Result of {name}"), in the quiet output well with a
 failure's lines in the danger colour. A nested agent's steps add one rule under its chevron.
 
+**Plan cards and file diffs** (#2187). A plan is a `.tl-plan` card: a `ListTodo` head with "Plan" and
+a plain count (§11.4) "{done} of {total} Done", then its items in a 16px icon column (`CircleCheck`
+done in the success text colour, `CircleDot` in progress in blue, `Circle` pending), so every label
+starts at the same x. The card appears once per turn, where the plan first changed in that turn, and
+updates there; the turn's earlier versions sit behind a §5.5 Show Earlier Versions disclosure inside
+it, and a later turn that revises the plan gets its own card. A file edit's step names its
+workspace-relative path once (`.tl-path`: mono 12px, the directory in `--text-faint`) with "+24 −3",
+and a `FilePen` icon, or `FilePlus` for a new file. Its body offers Open in Review (the Review tab,
+scrolled to that file), Copy Path and Open File as `.btn.sm.ghost`, then the parsed diff: Git's
+metadata lines are dropped, each hunk opens with "Lines 12–40" (plus "in Header()" when its header
+names one), and each line is a three-column grid of number, sign and text in a sunken well.
+An edited file's added and removed lines take a 9% wash of their tone; a new file is plain code with
+green + signs. After 8 lines the rest waits behind Show N More Lines.
+
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;
 `STATE_LABELS`, `LIFECYCLE_LABELS` and per-component label tables are deleted.

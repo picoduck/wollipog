@@ -24,6 +24,7 @@ import { FilesBrowser } from "./FilesPanel.js";
 import { BrowserPanel } from "./BrowserPanel.js";
 import { SideChatPanel } from "./SideChatPanel.js";
 import { ReviewPanel } from "./ReviewPanel.js";
+import type { DiffFileFocus } from "./GitDiffViewer.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import type { TimelineItem } from "../timeline.js";
@@ -202,6 +203,8 @@ export function RightPanel({
   onOpenTerminal,
   onInsertSideChatDraft,
   onAttachWorkspaceReference,
+  reviewFocus,
+  onReviewFocusHandled,
   items,
   governanceDecisions = EMPTY_GOVERNANCE_DECISIONS,
   governanceAvailable = governanceDecisions.length > 0,
@@ -238,6 +241,9 @@ export function RightPanel({
   /** Explicitly prepares the primary composer; never sends it. */
   onInsertSideChatDraft: (text: string) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
+  /** The file a transcript edit's Open in Review asked the Review tab to show (#2187). */
+  reviewFocus?: DiffFileFocus | null;
+  onReviewFocusHandled?: () => void;
   items: TimelineItem[];
   /** Consolidated, content-safe governance outcomes for this session, oldest-first. */
   governanceDecisions?: readonly GovernanceDecision[];
@@ -477,6 +483,8 @@ export function RightPanel({
             forge={forge}
             onOpenSourceLocation={onOpenSourceLocation}
             onAttachWorkspaceReference={onAttachWorkspaceReference}
+            focus={reviewFocus}
+            onFocusHandled={onReviewFocusHandled}
           />
         );
       case "governance":

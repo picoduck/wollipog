@@ -116,6 +116,7 @@ test("every referenced custom property is defined in the shared root scope", () 
   const COMPONENT_LOCAL = new Map([
     ["--summary-w", ".detail-body"], // the Pinned Summary's width, read by the body grid and `.ps`
     ["--composer-ctl", ".composer-box"], // the composer bar's control height (#2174), read by `.composer-btn`
+    ["--tl-diff-digits", ".tl-diff"], // a transcript diff's widest line number, set per diff (#2187)
   ]);
   for (const [name, owner] of COMPONENT_LOCAL) {
     assert.ok(soleRuleProps(owner).has(name), `${name} is declared on ${owner}`);

@@ -1,7 +1,7 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useShowAgentLogs } from "../agent-logs.js";
 import type { AgentDriverKind, WorkflowArtifactView } from "@wollipog/protocol";
-import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
   groupTimeline,
@@ -30,7 +30,8 @@ import {
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
-import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, RewindFilesIcon, StopTurnIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { diffFileIsPlain, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
@@ -556,6 +557,7 @@ export const EventTimeline = memo(function EventTimeline({
   editAndResendUnavailableReason,
   onEditInFork,
   onOpenSourceLocation,
+  onOpenInReview,
   editInForkAvailabilityByItem,
   forkAvailabilityByTurn,
   scrollRef,
@@ -590,6 +592,8 @@ export const EventTimeline = memo(function EventTimeline({
   /** Forks AFTER the supplied predecessor turn, then prepares a child composer draft. */
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
+  /** Opens the Review tab on a workspace-relative path (a file edit's Open in Review). */
+  onOpenInReview?: (path: string) => void;
   editInForkAvailabilityByItem?: ReadonlyMap<number, EditInForkAvailability>;
   forkAvailabilityByTurn?: ReadonlyMap<number, ConversationForkAvailability>;
   scrollRef?: RefObject<HTMLElement | null>;
@@ -637,6 +641,7 @@ export const EventTimeline = memo(function EventTimeline({
       editAndResendUnavailableReason={editAndResendUnavailableReason}
       onEditInFork={onEditInFork}
       onOpenSourceLocation={onOpenSourceLocation}
+      onOpenInReview={onOpenInReview}
       editInForkAvailabilityByItem={editInForkAvailabilityByItem}
       forkAvailabilityByTurn={forkAvailabilityByTurn}
       scrollRef={scrollRef}
@@ -671,6 +676,7 @@ function EventTimelineBody({
   editAndResendUnavailableReason,
   onEditInFork,
   onOpenSourceLocation,
+  onOpenInReview,
   editInForkAvailabilityByItem,
   forkAvailabilityByTurn,
   scrollRef,
@@ -698,6 +704,8 @@ function EventTimelineBody({
   editAndResendUnavailableReason?: string;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
+  /** Opens the Review tab on a workspace-relative path (a file edit's Open in Review). */
+  onOpenInReview?: (path: string) => void;
   editInForkAvailabilityByItem?: ReadonlyMap<number, EditInForkAvailability>;
   forkAvailabilityByTurn?: ReadonlyMap<number, ConversationForkAvailability>;
   scrollRef?: RefObject<HTMLElement | null>;
@@ -957,7 +965,9 @@ function EventTimelineBody({
   );
   return (
     <TimelineClockProvider enabled={sessionActive} sessionActive={sessionActive} driver={driver}>
-      <WorkspaceRootContext.Provider value={workspaceRoot}>{timeline}</WorkspaceRootContext.Provider>
+      <WorkspaceRootContext.Provider value={workspaceRoot}>
+        <OpenInReviewContext.Provider value={onOpenInReview}>{timeline}</OpenInReviewContext.Provider>
+      </WorkspaceRootContext.Provider>
     </TimelineClockProvider>
   );
 }
@@ -1000,6 +1010,9 @@ const TimelineDriverContext = createContext<AgentDriverKind | undefined>(undefin
 
 /** The session root that step titles and edit paths are shown relative to. */
 const WorkspaceRootContext = createContext<string | undefined>(undefined);
+
+/** Opens the Review tab on a file; absent where there is no Review tab (a preview, a shared page). */
+const OpenInReviewContext = createContext<((path: string) => void) | undefined>(undefined);
 
 /** Opens another session in the app; absent where the transcript cannot navigate (a shared page). */
 const TimelineSessionLinkContext = createContext<((sessionId: string) => void) | undefined>(undefined);
@@ -2274,7 +2287,7 @@ const TimelineRow = memo(function TimelineRow({
     case "tool_call":
       return <ToolCallStep item={item} attempts={attempts} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "plan":
-      return <PlanBlock entries={item.entries} />;
+      return <PlanBlock item={item} historyOpen={disclosureOpen} onHistoryToggle={onDisclosureToggle} />;
     case "file_edit":
       return (
         <FileEditStep
@@ -2596,7 +2609,21 @@ function ThoughtStep({ item, open, onToggle, highlightEligible, mediaSettled }: 
   );
 }
 
-/** A file edit names its workspace-relative path once; its diff is the step's body. */
+/** A path in mono 12px, its directory faint and its file name in full text (#2187). */
+function PathLabel({ path }: { path: string }) {
+  const slash = path.lastIndexOf("/");
+  return (
+    <span className="tl-path">
+      {slash > 0 && <span className="tl-path-dir">{path.slice(0, slash + 1)}</span>}
+      {path.slice(slash + 1)}
+    </span>
+  );
+}
+
+/**
+ * A file edit names its workspace-relative path once, with its +/− counts (#2187). Its body is the
+ * parsed diff under Open in Review, Copy Path and Open File.
+ */
 function FileEditStep({ item, open, onToggle, onOpenSourceLocation }: {
   item: Extract<TimelineItem, { kind: "file_edit" }>;
   open: boolean;
@@ -2604,39 +2631,48 @@ function FileEditStep({ item, open, onToggle, onOpenSourceLocation }: {
   onOpenSourceLocation?: (location: SourceLocation) => void;
 }) {
   const workspaceRoot = useContext(WorkspaceRootContext);
+  const openInReview = useContext(OpenInReviewContext);
+  // The runner's per-turn capture spans the whole worktree: it names no single file to act on.
+  const capture = item.path === "worktree";
   const path = workspaceRelativePath(item.path, workspaceRoot);
-  const sourceLocation = timelineFileSourceLocation(path);
+  const sourceLocation = capture ? null : timelineFileSourceLocation(path);
   const counts = diffLineCounts(item.diff);
   const fact = counts ? `+${counts.added} \u2212${counts.removed}` : undefined;
-  const openFile = sourceLocation && onOpenSourceLocation
-    ? () => onOpenSourceLocation(sourceLocation)
-    : undefined;
+  const files = useMemo(() => item.diff ? parseUnifiedDiff(item.diff) : [], [item.diff]);
+  const created = !capture && files.length === 1 && files[0]!.isNew;
   const hasDiff = Boolean(item.diff || item.diffRefs?.length);
+  const actions = !capture && (
+    <div className="tl-diff-actions">
+      {sourceLocation && openInReview && (
+        <button type="button" className="btn sm ghost" onClick={() => openInReview(sourceLocation.path)}>Open in Review</button>
+      )}
+      <CopyButton text={path} label="Copy Path" className="btn sm ghost" />
+      {sourceLocation && onOpenSourceLocation && (
+        <button type="button" className="btn sm ghost" onClick={() => onOpenSourceLocation(sourceLocation)}>Open File</button>
+      )}
+    </div>
+  );
   return (
     <ToolStep
-      icon={<FileEditIcon size={16} />}
+      icon={created ? <NewFileIcon size={16} /> : <FileEditIcon size={16} />}
       verb="Edit"
-      object={path}
+      object={<PathLabel path={path} />}
       trail={fact}
       status={<StepStatus status="completed" />}
       label={`Edit ${path}${fact ? ` · ${fact}` : ""} · Completed`}
       open={open}
       onToggle={onToggle}
     >
-      {(hasDiff || openFile) && (
-        <>
-          {openFile && <button type="button" className="link tl-step-link" onClick={openFile}>Open File</button>}
-          {hasDiff && (
-            <EventPayloadContent
-              preview={item.diff ?? ""}
-              references={item.diffRefs}
-              mimeType="text/x-diff"
-              label="Diff"
-            >
-              {(text) => <DiffBlock diff={text} />}
-            </EventPayloadContent>
-          )}
-        </>
+      {actions}
+      {hasDiff && (
+        <EventPayloadContent
+          preview={item.diff ?? ""}
+          references={item.diffRefs}
+          mimeType="text/x-diff"
+          label="Diff"
+        >
+          {(text) => <DiffBlock diff={text} />}
+        </EventPayloadContent>
       )}
     </ToolStep>
   );
@@ -3033,41 +3069,141 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, 
   );
 }
 
-function PlanBlock({ entries }: { entries: PlanEntry[] }) {
+const PLAN_STATUS_TEXT: Record<PlanEntry["status"], string> = {
+  completed: "Done",
+  in_progress: "In Progress",
+  pending: "Not Started",
+};
+
+const planProgressLabel = (entries: readonly PlanEntry[]) =>
+  `${entries.filter((entry) => entry.status === "completed").length} of ${entries.length} Done`;
+
+/** A plan's items in a 16px icon column, so every label starts at the same x (§18: no glyphs). */
+function PlanEntries({ entries }: { entries: readonly PlanEntry[] }) {
   return (
-    <div className="tl-plan">
-      <div className="plan-head">Plan</div>
-      <ul>
-        {entries.map((e, i) => (
-          <li key={i} className={`plan-${e.status}`}>
-            <span className="plan-check">
-              {e.status === "completed" ? "✓" : e.status === "in_progress" ? "◐" : "○"}
-            </span>
-            {e.content}
-          </li>
-        ))}
-      </ul>
-    </div>
+    <ul className="tl-plan-items">
+      {entries.map((entry, index) => (
+        <li key={index} className={entry.status === "completed" ? "tl-plan-item is-completed"
+          : entry.status === "in_progress" ? "tl-plan-item is-in-progress" : "tl-plan-item"}>
+          <span className="tl-plan-icon" aria-hidden="true">
+            {entry.status === "completed" ? <SuccessIcon size={16} />
+              : entry.status === "in_progress" ? <PlanInProgressIcon size={16} />
+                : <PlanPendingIcon size={16} />}
+          </span>
+          <span className="tl-plan-text">
+            {entry.content}
+            <span className="sr-only">{`, ${PLAN_STATUS_TEXT[entry.status]}`}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
-function DiffBlock({ diff }: { diff: string }) {
-  const lines = diff.split("\n");
+/**
+ * The plan as one card per turn (#2187), at the point it first changed in that turn and updated
+ * there. The turn's earlier versions wait behind Show Earlier Versions, oldest first.
+ */
+function PlanBlock({ item, historyOpen, onHistoryToggle }: {
+  item: Extract<TimelineItem, { kind: "plan" }>;
+  historyOpen: boolean;
+  onHistoryToggle?: () => void;
+}) {
+  const history = item.history ?? [];
   return (
-    <pre className="diff">
-      {lines.map((line, i) => {
-        let cls = "d-ctx";
-        if (line.startsWith("+") && !line.startsWith("+++")) cls = "d-add";
-        else if (line.startsWith("-") && !line.startsWith("---")) cls = "d-del";
-        else if (line.startsWith("@@")) cls = "d-hunk";
-        else if (line.startsWith("+++") || line.startsWith("---")) cls = "d-head";
+    <section className="tl-plan" aria-label="Plan">
+      <div className="tl-plan-head">
+        <span className="tl-plan-icon" aria-hidden="true"><PlanIcon size={16} /></span>
+        <span>Plan</span>
+        <span className="count">{planProgressLabel(item.entries)}</span>
+      </div>
+      <PlanEntries entries={item.entries} />
+      {history.length > 0 && (
+        <div className="disclosure tl-plan-history">
+          <button type="button" className="disclosure-trigger" aria-expanded={historyOpen} onClick={onHistoryToggle}>
+            <ChevronRightIcon size={14} className="disclosure-chevron" />
+            Show Earlier Versions
+            <span className="count">{history.length}</span>
+          </button>
+          {historyOpen && (
+            <ol className="disclosure-body tl-plan-versions">
+              {history.map((entries, index) => (
+                <li key={index} className="tl-plan-version">
+                  <div className="tl-plan-version-head">
+                    Version {index + 1}
+                    <span className="count">{planProgressLabel(entries)}</span>
+                  </div>
+                  <PlanEntries entries={entries} />
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** How many diff lines show before the rest wait behind Show N More Lines. */
+const DIFF_PREVIEW_LINES = 8;
+const DIFF_SIGN = { added: "+", removed: "\u2212", context: "" } as const;
+
+const diffLineTotal = (files: readonly DiffFile[]) =>
+  files.reduce((sum, file) => sum + file.hunks.reduce((lines, hunk) => lines + hunk.lines.length, 0), 0);
+
+/**
+ * A file edit's diff (#2187): Git's metadata dropped, each hunk opened by "Lines 12–40 in
+ * Header()", and each line as number, sign and text. Washes mark the changes of an edited file
+ * only; a new file is plain code with green + signs. Past 8 lines the rest waits behind Show N More
+ * Lines.
+ */
+function DiffBlock({ diff }: { diff: string }) {
+  const files = useMemo(() => parseUnifiedDiff(diff), [diff]);
+  const [expanded, setExpanded] = useState(false);
+  const total = diffLineTotal(files);
+  if (total === 0) return null;
+  const digits = String(Math.max(...files.flatMap((file) => file.hunks.flatMap((hunk) => hunk.lines.map((line) => line.number))))).length;
+  let budget = expanded ? total : DIFF_PREVIEW_LINES;
+  const hidden = total - DIFF_PREVIEW_LINES;
+  return (
+    <div className="tl-diff" style={{ "--tl-diff-digits": digits } as CSSProperties}>
+      {files.map((file, fileIndex) => {
+        if (budget <= 0) return null;
         return (
-          <div key={i} className={`d-line ${cls}`}>
-            {line || " "}
-          </div>
+          <section key={fileIndex} className={`tl-diff-file${diffFileIsPlain(file) ? " is-plain" : ""}`}>
+            {files.length > 1 && file.path && <div className="tl-diff-file-path"><PathLabel path={file.path} /></div>}
+            {file.hunks.map((hunk, hunkIndex) => {
+              if (budget <= 0) return null;
+              const shown = hunk.lines.slice(0, budget);
+              budget -= shown.length;
+              const label = hunkLabel(hunk);
+              return (
+                <div key={hunkIndex} className="tl-diff-hunk">
+                  {label && <div className="tl-diff-hunk-label">{label}</div>}
+                  <div className="tl-diff-scroll">
+                    <div className="tl-diff-lines">
+                      {shown.map((line, lineIndex) => (
+                        <div key={lineIndex} className={line.kind === "added" ? "tl-diff-line is-added"
+                          : line.kind === "removed" ? "tl-diff-line is-removed" : "tl-diff-line"}>
+                          <span className="tl-diff-number">{line.number}</span>
+                          <span className="tl-diff-sign">{DIFF_SIGN[line.kind]}</span>
+                          <span className="tl-diff-text">{line.text}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
         );
       })}
-    </pre>
+      {hidden > 0 && (
+        <button type="button" className="btn sm ghost tl-diff-more" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>
+          {expanded ? "Show Fewer Lines" : `Show ${hidden} More Line${hidden === 1 ? "" : "s"}`}
+        </button>
+      )}
+    </div>
   );
 }
 

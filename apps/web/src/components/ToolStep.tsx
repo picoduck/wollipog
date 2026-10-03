@@ -75,7 +75,7 @@ export function ToolStep({
   icon: ReactNode;
   verb: ReactNode;
   /** The thing acted on: a path, a command, a query. Rendered in mono 12px. */
-  object?: string;
+  object?: ReactNode;
   /** The one trailing fact: a duration, a line count or a result count. */
   trail?: ReactNode;
   /** "Started …, finished … (26s)", shown on the trailing fact's hover and the summary's focus. */

@@ -25,6 +25,7 @@ import { useApi } from "../api-context.js";
 import { titleCaseLabel } from "../format.js";
 import {
   GitDiffViewer,
+  type DiffFileFocus,
   type DiffLayout,
   type DiffPane,
   type StagingControls,
@@ -112,6 +113,8 @@ export function ReviewPanel({
   forge,
   onOpenSourceLocation,
   onAttachWorkspaceReference,
+  focus,
+  onFocusHandled,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -120,6 +123,9 @@ export function ReviewPanel({
   forge?: GitForgeInfo | null;
   onOpenSourceLocation: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
+  /** A file to bring into view: a transcript edit's Open in Review (#2187). */
+  focus?: DiffFileFocus | null;
+  onFocusHandled?: () => void;
 }) {
   const api = useApi();
   const { confirm } = useFeedback();
@@ -849,6 +855,8 @@ export function ReviewPanel({
             layout={layout}
             onOpenSourceLocation={onOpenSourceLocation}
             onAttachWorkspaceReference={onAttachWorkspaceReference}
+            focus={focus}
+            onFocusHandled={onFocusHandled}
             review={{
               findings,
               anchoredFindingIds,
