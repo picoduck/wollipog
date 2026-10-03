@@ -294,8 +294,10 @@ mechanism (`apps/control-plane/src/campaign-work-observation.ts`):
   the new summary cost under the root audience's masking. When a re-sent root carries a changed
   summary cost at the same revision, the panel (`useCampaignStatus`) re-reads the open item's details
   and, quietly, the shown rows through the same routes, so each reader still sees only the cost its
-  own access allows. The quiet row re-read neither shows a reload nor blocks Show More, and it is
-  dropped if a reload or a page changed the list meanwhile. The first change re-reads at once, and
+  own access allows. The quiet row re-read neither shows a reload nor blocks Show More. While a
+  reload or a page is in flight it waits, and it runs once the list settles, since a page only
+  appends. A cost re-read of the details never cancels a read in flight: changes that arrive
+  meanwhile are gathered into one more read when it lands. The first change re-reads at once, and
   later changes within the window are gathered into one re-read when it closes, so a token stream
   costs each panel at most one re-read per second. A new revision reloads everything anyway.
 

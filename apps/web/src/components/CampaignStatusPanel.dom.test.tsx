@@ -1071,10 +1071,26 @@ function costServer(initialUsd: number, rows = 1) {
   const details: Record<string, CampaignWorkItemDetail> = {};
   const refreshDetails = () => { for (const id of ids) details[id] = detailOf(summaryOf(id)); };
   refreshDetails();
-  const { client, calls } = fakeClient(() => ({ revision: state.revision, items: ids.map(summaryOf), nextCursor: null }), details);
+  const base = fakeClient(() => ({ revision: state.revision, items: ids.map(summaryOf), nextCursor: null }), details);
+  const calls = Object.assign(base.calls, { aborted: 0 });
+  /** While set, detail reads wait for it, as a slow server would. */
+  const slow: { hold: Promise<void> | null } = { hold: null };
+  const client = {
+    ...base.client,
+    campaignWorkItem: async (id: string, itemId: string, signal?: AbortSignal) => {
+      base.calls.detail.push(`${id}/${itemId}`);
+      signal?.addEventListener("abort", () => { calls.aborted += 1; });
+      if (slow.hold) await slow.hold;
+      if (signal?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      const found = details[itemId];
+      if (!found) throw new ApiError("not found", 404);
+      return { revision: state.revision, item: found };
+    },
+  } as ApiClient;
   return {
     client,
     calls,
+    slow,
     /** Usage arrives: every item now costs `usd`, and the root summary says so at `revision`. */
     use(usd: number, revision = state.revision) {
       state.usd = usd;
@@ -1156,17 +1172,49 @@ test("a token stream re-reads at most once per window, and a revision change nee
   }
 });
 
+test("details slower than the window still land while usage streams, with no read cancelled", async () => {
+  const server = costServer(1);
+  const panel = await mount({ initial: rootSession, client: server.client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    await click(panel.container.querySelector(".campaign-work-row")!);
+    assert.match(detailCost(panel.container), /\$1\.00/);
+    const detailed = server.calls.detail.length;
+    // The server now answers detail reads only when released, while costs keep moving.
+    let release!: () => void;
+    server.slow.hold = new Promise<void>((done) => { release = done; });
+    for (const usd of [2, 3, 4]) {
+      await panel.setSession(server.use(usd));
+      await pause(CAMPAIGN_COST_REFRESH_MS + 100);
+    }
+    assert.equal(server.calls.detail.length, detailed + 1, "one cost re-read in flight; later changes wait for it");
+    assert.equal(server.calls.aborted, 0, "no read is cancelled by a later cost change");
+    server.slow.hold = null;
+    await act(async () => { release(); });
+    await settle();
+    assert.equal(server.calls.detail.length, detailed + 2, "the gathered changes cost one more re-read once it lands");
+    assert.match(detailCost(panel.container), /\$4\.00/, "and the details show the latest cost");
+  } finally {
+    await panel.dispose();
+  }
+});
+
 test("a quiet row re-read never blocks Show More and never replaces rows a page added meanwhile", async () => {
-  // A server that honours `limit` and binds each cursor to its revision; Show More can be held.
-  const all = Array.from({ length: 60 }, (_, index) => item(`cwi_${index + 1}`, { queuePosition: index + 1 }));
+  // A server that honours `limit`, whose item costs move with usage; Show More can be held.
+  let usd = 1;
+  const all = () => Array.from({ length: 60 }, (_, index) =>
+    item(`cwi_${index + 1}`, { queuePosition: index + 1, cost: knownCost(usd) }));
   let hold: { promise: Promise<void>; resolve: () => void } | null = null;
   const pages = (query: string): FixturePage | Error => {
     const search = new URLSearchParams(query);
     const offset = Number(search.get("cursor") ?? 0);
     const limit = Number(search.get("limit"));
-    const next = offset + limit < all.length ? String(offset + limit) : null;
-    return { revision: 1, items: all.slice(offset, offset + limit), nextCursor: next, total: all.length };
+    const next = offset + limit < 60 ? String(offset + limit) : null;
+    return { revision: 1, items: all().slice(offset, offset + limit), nextCursor: next, total: 60 };
   };
+  const rowCosts = () => new Set([...panel.container.querySelectorAll(".campaign-work-row")]
+    .map((row) => /\$\d+\.\d{2}/u.exec(row.textContent ?? "")?.[0]));
   const base = fakeClient(pages);
   const client = {
     ...base.client,
@@ -1185,21 +1233,26 @@ test("a quiet row re-read never blocks Show More and never replaces rows a page 
     hold = { promise: new Promise<void>((done) => { resolve = done; }), resolve: () => resolve() };
     const more = () => [...panel.container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Show More");
     await click(more()!);
+    usd = 3;
     const usage = workSummary();
     await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({
-      cost: { ...usage.cost!, total: knownCost(9) },
+      cost: { ...usage.cost!, total: knownCost(180) },
     })) }));
     await act(async () => { hold!.resolve(); });
     hold = null;
     await settle();
     assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 60, "the page Show More asked for stays");
+    assert.deepEqual([...rowCosts()], ["$3.00"],
+      "the cost change that arrived during paging re-reads the rows above the new page once it lands");
     // With nothing in flight, a cost change re-reads quietly: Show More stays enabled throughout.
     await pause(CAMPAIGN_COST_REFRESH_MS + 100);
+    usd = 4;
     await panel.setSession(session({ orchestratorCampaign: campaign(workSummary({
-      cost: { ...usage.cost!, total: knownCost(10) },
+      cost: { ...usage.cost!, total: knownCost(240) },
     })) }));
     assertNoDomNode(more() ?? null, "every row is shown, so there is no Show More");
     assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 60, "the quiet re-read keeps every shown row");
+    assert.deepEqual([...rowCosts()], ["$4.00"]);
   } finally {
     await panel.dispose();
   }
