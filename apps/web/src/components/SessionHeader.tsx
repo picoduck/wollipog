@@ -97,6 +97,7 @@ export function SessionHeader({
   developmentBuild = DEVELOPMENT_BUILD,
   restartBlockedReason,
   onRestartPendingChange,
+  onRestarted,
 }: {
   session: SessionView;
   onBack: () => void;
@@ -104,6 +105,9 @@ export function SessionHeader({
   restartBlockedReason?: string;
   /** Told while this menu's Restart Session is in flight, so the page's Retry Turn waits for it. */
   onRestartPendingChange?: (pending: boolean) => void;
+  /** The restarted session, applied before the restart stops counting as in flight, so the page
+   * never sees a settled restart on a session that still reads failed or stopped. */
+  onRestarted?: (session: SessionView) => void;
   runnerOnline: boolean;
   /** The session's machine, named in the reasons its items are unavailable. */
   machineName?: string;
@@ -556,7 +560,7 @@ export function SessionHeader({
               void run(async () => {
                 onRestartPendingChange?.(true);
                 try {
-                  await api.restart(session.id);
+                  onRestarted?.(await api.restart(session.id));
                 } finally {
                   onRestartPendingChange?.(false);
                 }

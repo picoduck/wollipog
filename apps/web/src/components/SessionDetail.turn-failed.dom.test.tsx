@@ -373,7 +373,14 @@ test("while More Actions' Restart Session runs, Retry Turn waits and says why", 
     assert.equal(reasonOf(button)?.textContent, "The session is restarting.");
     await click(button);
     assert.deepEqual(calls, [`restart:${id}`], "Retry Turn neither restarts again nor prompts");
+    // The accepted restart's session (starting) is applied before the guard opens, so with no socket
+    // update Retry Turn still cannot restart the session a second time.
     await act(async () => { finishRestart!(); await new Promise((resolve) => setTimeout(resolve, 5)); });
+    const after = retry()!;
+    assert.equal(after.disabled, true);
+    assert.equal(reasonOf(after)?.textContent, "The agent is working on another turn.");
+    await click(after);
+    assert.deepEqual(calls, [`restart:${id}`]);
   });
 });
 

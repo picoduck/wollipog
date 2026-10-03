@@ -5536,6 +5536,7 @@ function SessionDetailLoaded({
           topbarControls={topbarControls}
           restartBlockedReason={retryingTurnPromptId !== undefined ? TURN_RETRY_IN_FLIGHT_REASON : undefined}
           onRestartPendingChange={setHeaderRestartPending}
+          onRestarted={loadSession}
           activeSubagents={activeWorkerCount ? {
             count: activeWorkerCount,
             workers: true,
