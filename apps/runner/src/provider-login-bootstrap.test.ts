@@ -178,7 +178,7 @@ test("actual inert launchers forward supervisor sign-in, status, and app-server 
   writeFileSync(entry, `const fs = require("node:fs");
 fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(2)) + "\\n");
 process.stdout.write("inert fixture: unauthenticated\\n");
-process.exit(process.argv.includes("app-server") ? 1 : 0);
+process.exit(process.argv.includes("app-server") || process.argv.includes("status") ? 1 : 0);
 `);
   const cases: [string, string[]][] = [
     [process.execPath, [entry]],
@@ -207,6 +207,7 @@ require(${JSON.stringify(entry)});
         let release!: () => void;
         const released = new Promise<void>((resolve) => { release = resolve; });
         let releaseCount = 0;
+        let accountAddedCount = 0;
         const children: AgentProcess[] = [];
         const supervisor = new ProviderLoginSupervisor({
           dataDir: root, configPath: join(root, "unused-config.json"),
@@ -219,7 +220,7 @@ require(${JSON.stringify(entry)});
           resolveEnv: () => ({ HOME: root }),
           acquireLease: () => true,
           releaseLease: () => { releaseCount++; release(); return true; },
-          onUpdate: () => {}, onAccountAdded: () => { assert.fail("fixture never authenticates"); },
+          onUpdate: () => {}, onAccountAdded: () => { accountAddedCount++; },
           identify: async () => undefined,
           spawn: (options) => {
             spawns.push(options);
@@ -250,6 +251,8 @@ require(${JSON.stringify(entry)});
           assert.deepEqual(forwarded, structured ? [["app-server"]] : [["login", "--device-auth"], ["login", "status"]], command);
           assert.deepEqual(spawns[0]!.args, [...prefix, ...(structured ? ["app-server"] : ["login", "--device-auth"])]);
           assert.equal(supervisor.views()[0]!.status, "failed");
+          assert.equal(accountAddedCount, 0, "inert sign-in and status never confirm authentication");
+          if (!structured) assert.equal(supervisor.views()[0]!.error, "The provider did not confirm authentication.");
           assert.equal(releaseCount, 1);
           assert.equal(existsSync(join(directory, "auth.json")), false);
           assert.ok(children.every((child) => child.closeObserved));
