@@ -15451,6 +15451,14 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   font: var(--type-small);
 }
+/* A failed change is reported at the end of the body, held in view while the body scrolls: the
+   control that failed may be far above it. */
+.orchestrator-controls-failure {
+  position: sticky;
+  bottom: 0;
+  /* The second shadow fills the body's bottom padding, so nothing scrolls by under the notice. */
+  box-shadow: var(--elev-2), 0 var(--space-5) 0 0 var(--bg-elev);
+}
 /* Why a gate set to Orchestrator still goes to a person (#1321): a field warning under the helper. */
 .orchestrator-gate > .field-warn { grid-column: 1 / -1; }
 .orchestrator-facts { grid-template-columns: 12rem minmax(0, 1fr); }

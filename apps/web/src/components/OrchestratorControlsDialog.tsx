@@ -108,7 +108,11 @@ export function OrchestratorControlsDialog({
 }) {
   const api = useApi();
   const ids = useId();
-  const [pending, setPending] = useState<Partial<Record<SaveKey, string>>>({});
+  // The choice shown while a change is unsaved, tagged with its request: a key changed again before
+  // its first change settles keeps showing the newest choice until that one's own request settles.
+  const [pending, setPending] = useState<Partial<Record<SaveKey, { value: string; request: number }>>>({});
+  const requests = useRef(0);
+  const latestRequest = useRef<Partial<Record<SaveKey, number>>>({});
   const [saved, setSaved] = useState<SaveKey | null>(null);
   const [failure, setFailure] = useState<{ message: string; detail: string } | null>(null);
   const savedTimer = useRef<number | null>(null);
@@ -120,9 +124,13 @@ export function OrchestratorControlsDialog({
     latest.current = session;
   }
   const mounted = useRef(true);
-  useEffect(() => () => {
-    mounted.current = false;
-    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+  // Set on every setup: StrictMode runs setup, cleanup and setup again on mount.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+    };
   }, []);
 
   const showSaved = (key: SaveKey) => {
@@ -136,14 +144,18 @@ export function OrchestratorControlsDialog({
 
   const change = (key: SaveKey, value: string, write: (current: SessionView) => Promise<SessionView>) => {
     if (refusal !== null) return;
-    setPending((prior) => ({ ...prior, [key]: value }));
+    const request = ++requests.current;
+    setPending((prior) => ({ ...prior, [key]: { value, request } }));
     setFailure(null);
+    // A request a later change of the same key has replaced saves quietly: only the newest says Saved.
+    const newest = () => latestRequest.current[key] === request;
+    latestRequest.current[key] = request;
     queue.current = queue.current.then(async () => {
       try {
         const next = await write(latest.current);
         latest.current = next;
         onSessionChanged(next);
-        if (mounted.current) showSaved(key);
+        if (mounted.current && newest()) showSaved(key);
       } catch (cause) {
         if (mounted.current) {
           setFailure({
@@ -160,7 +172,7 @@ export function OrchestratorControlsDialog({
       } finally {
         if (mounted.current) {
           setPending((prior) => {
-            if (prior[key] !== value) return prior;
+            if (prior[key]?.request !== request) return prior;
             const { [key]: _done, ...rest } = prior;
             return rest;
           });
@@ -169,7 +181,7 @@ export function OrchestratorControlsDialog({
     });
   };
 
-  const parentControl = (pending.parentControl as ParentControlMode | undefined) ?? session.parentControl ?? "off";
+  const parentControl = (pending.parentControl?.value as ParentControlMode | undefined) ?? session.parentControl ?? "off";
   const policy = session.parentControlPolicy;
   const savedStatus = saved === null
     ? ""
@@ -216,7 +228,7 @@ export function OrchestratorControlsDialog({
           <div className="orchestrator-gates">
             {WORKFLOW_DECISION_CATEGORIES.map((category) => {
               const label = WORKFLOW_DECISION_LABELS[category];
-              const value = (pending[category] as WorkflowDecisionAuthority | undefined) ?? policy.decisions[category];
+              const value = (pending[category]?.value as WorkflowDecisionAuthority | undefined) ?? policy.decisions[category];
               const evidence = category === "ui_evidence_approval";
               const routedReason = evidence && session.orchestratorCampaign?.uiEvidenceReview.status === "unavailable"
                 ? session.orchestratorCampaign.uiEvidenceReview.reason ?? "This Orchestrator can't inspect the evidence images."
@@ -254,7 +266,7 @@ export function OrchestratorControlsDialog({
 
       <span className="sr-only" role="status">{savedStatus}</span>
       {failure && (
-        <Notice tone="danger" role="alert" details={<p>{failure.detail}</p>}>
+        <Notice tone="danger" role="alert" className="orchestrator-controls-failure" details={<p>{failure.detail}</p>}>
           {failure.message}
         </Notice>
       )}

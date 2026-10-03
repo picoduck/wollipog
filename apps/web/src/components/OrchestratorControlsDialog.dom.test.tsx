@@ -9,6 +9,7 @@ import type {
   ParentControlDecisionPolicy,
   ParentControlMode,
   SessionView,
+  WorkflowDecisionAuthority,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -129,24 +130,33 @@ afterEach(async () => {
 // After the unmounts above, so React removes its portals before the body is cleared.
 installDomTestCleanup(domWindow);
 
-async function open(session: SessionView, client: Partial<ApiClient>, refusal: string | null = null): Promise<Harness> {
+async function open(
+  session: SessionView,
+  client: Partial<ApiClient>,
+  refusal: string | null = null,
+  { strict = false }: { strict?: boolean } = {},
+): Promise<Harness> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const changed: SessionView[] = [];
   let closed = 0;
   const merged = { ...api, ...client } as ApiClient;
-  const render = (current: SessionView): void => root.render(
-    <ApiProvider client={merged}>
-      <OrchestratorControlsDialog
-        session={current}
-        refusal={refusal}
-        onClose={() => { closed += 1; }}
-        // The store's part: the session the dialog is given follows what it reports.
-        onSessionChanged={(next) => { changed.push(next); render(next); }}
-      />
-    </ApiProvider>,
-  );
+  const render = (current: SessionView): void => {
+    const dialog = (
+      <ApiProvider client={merged}>
+        <OrchestratorControlsDialog
+          session={current}
+          refusal={refusal}
+          onClose={() => { closed += 1; }}
+          // The store's part: the session the dialog is given follows what it reports.
+          onSessionChanged={(next) => { changed.push(next); render(next); }}
+        />
+      </ApiProvider>
+    );
+    // The app renders under StrictMode, whose mount runs every effect's setup, cleanup and setup.
+    root.render(strict ? <React.StrictMode>{dialog}</React.StrictMode> : dialog);
+  };
   await act(async () => render(session));
   const unmount = async () => {
     if (!unmounts.delete(unmount)) return;
@@ -362,6 +372,59 @@ test("a revision conflict shows the danger notice in the dialog, reloads, and pu
   assert.equal(option(gate(dialog, "PR Merge Approval"), "Human").getAttribute("aria-checked"), "true",
     "the choice shown returns to the stored value");
   assertNoDomNode(dialog.querySelector(".ui-row-saved"), "nothing reads as saved");
+});
+
+test("under StrictMode a conflict still shows its notice and puts the stored choice back", async () => {
+  const stored = orchestrator({ parentControlPolicy: { revision: 5, decisions: { ...HUMAN_ONLY } } });
+  const harness = await open(orchestrator(), {
+    setParentControlPolicy: async () => { throw new ApiError("Parent Control policy revision is stale", 409); },
+    session: async () => ({ session: stored }),
+  }, null, { strict: true });
+  const dialog = harness.dialog();
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
+  await flush();
+  assert.match(dialog.querySelector(".notice.t-danger")?.textContent ?? "", /changed elsewhere/,
+    "the remounted dialog still reports the failure");
+  assert.equal(option(gate(dialog, "PR Merge Approval"), "Human").getAttribute("aria-checked"), "true",
+    "and still drops the unsaved choice");
+});
+
+test("a gate changed three times before the first save settles shows the newest choice until its own save settles", async () => {
+  const replies: Array<() => void> = [];
+  const sent: WorkflowDecisionAuthority[] = [];
+  let revision = 3;
+  const harness = await open(orchestrator(), {
+    setParentControlPolicy: (_id: string, decisions: ParentControlDecisionPolicy) => {
+      sent.push(decisions.pr_merge);
+      return new Promise<SessionView>((resolve) => replies.push(() => {
+        revision += 1;
+        resolve(orchestrator({ parentControlPolicy: { revision, decisions } }));
+      }));
+    },
+  });
+  const dialog = harness.dialog();
+  const shown = () => [...gate(dialog, "PR Merge Approval").querySelectorAll('[role="radio"]')]
+    .find((radio) => radio.getAttribute("aria-checked") === "true")?.textContent;
+  const savedOnRow = () => gate(dialog, "PR Merge Approval").closest(".orchestrator-gate")?.querySelector(".ui-row-saved") ?? null;
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Human")));
+  await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
+  await flush();
+  assert.equal(shown(), "Orchestrator");
+
+  await act(async () => replies[0]!());
+  await flush();
+  assert.equal(shown(), "Orchestrator", "the first save's reply does not replace the newest choice");
+  assertNoDomNode(savedOnRow(), "a replaced save does not say Saved");
+  await act(async () => replies[1]!());
+  await flush();
+  assert.equal(shown(), "Orchestrator", "nor does the second's, which stored Human");
+  assertNoDomNode(savedOnRow(), "and it does not say Saved either");
+  await act(async () => replies[2]!());
+  await flush();
+  assert.deepEqual(sent, ["orchestrator", "human", "orchestrator"]);
+  assert.equal(shown(), "Orchestrator");
+  assert.ok(savedOnRow(), "the newest save says Saved");
 });
 
 test("any other failure says the change wasn't saved, with the server's words behind Show Details", async () => {
