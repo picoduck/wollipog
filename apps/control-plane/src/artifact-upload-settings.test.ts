@@ -60,7 +60,7 @@ test("only a human saves an exact preference and existing sessions are refreshed
 });
 
 test("creation, restart and durable turns use the owner's current preference with old-peer gating", () => {
-  let protocolVersion = 198;
+  let protocolVersion = 201;
   let preference = "manual";
   const db = { getRunner: () => ({ protocolVersion }), getSession: () => ({ runnerId: "r", projectId: null }),
     projectMemorySharing: () => "separate", sessionOwnerUser: () => ({ userId: "owner" }),
@@ -79,7 +79,7 @@ test("creation, restart and durable turns use the owner's current preference wit
   const message = JSON.parse(sent.at(-1)!);
   assert.equal(message.artifactUploads, "wollipog_automatic"); assert.deepEqual(message.command, command);
   assert.equal(message.payloadDigest, "pinned"); assert.ok(!("artifactUploads" in durable));
-  protocolVersion = 197; hub.sendToRunner("r", start); hub.sendToRunner("r", durable);
+  protocolVersion = 200; hub.sendToRunner("r", start); hub.sendToRunner("r", durable);
   assert.ok(!("artifactUploads" in JSON.parse(sent.at(-2)!).spec));
   assert.ok(!("artifactUploads" in JSON.parse(sent.at(-1)!)));
 });
@@ -95,7 +95,7 @@ test("reconnect shares one retained-session scan and preserves both metadata str
   let automatic = "wollipog_automatic";
   const db = {
     listSessions: (options: { includeArchived?: boolean }) => { assert.equal(options.includeArchived, true); scans++; return sessions; },
-    getRunner: (id: string) => ({ protocolVersion: id === "older" ? 197 : 198 }),
+    getRunner: (id: string) => ({ protocolVersion: id === "older" ? 200 : 201 }),
     sessionOwnerUser: (id: string) => id === "unowned" ? null : { userId: id === "external" ? "second" : "first" },
     artifactUploadPreference: (id?: string) => id === "first" ? automatic : id === "second" ? "external_hosting" : "manual",
     projectMemorySharing: () => "shared",

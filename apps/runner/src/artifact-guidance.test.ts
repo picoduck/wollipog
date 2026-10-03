@@ -10,7 +10,7 @@ const meta = { driver: "codex-app-server" as const, env: { WOLLIPOG_CLI: "/priva
 
 test("ordinary, Orchestrator and child guidance is Manual without adding skill or upload authority", () => {
   for (const role of [undefined, { strictProjectIsolation: false }, { strictProjectIsolation: true }]) {
-    const note = artifactGuidance({ ...meta, orchestrator: role }, 198);
+    const note = artifactGuidance({ ...meta, orchestrator: role }, 201);
     assert.match(note, /Manual \(default\)/); assert.match(note, /Awareness alone does not authorize/);
     assert.match(note, /private control-plane storage/); assert.match(note, /8 MiB/); assert.match(note, /32 MiB/);
     assert.doesNotMatch(note, /never-print-me|\/private\/cli|SKILL.md/);
@@ -18,25 +18,25 @@ test("ordinary, Orchestrator and child guidance is Manual without adding skill o
 });
 
 test("hosting choices constrain task evidence and respect explicit hosting and approval rules", () => {
-  const automatic = artifactGuidance({ ...meta, artifactUploads: "wollipog_automatic" }, 198);
+  const automatic = artifactGuidance({ ...meta, artifactUploads: "wollipog_automatic" }, 201);
   assert.match(automatic, /relevant task evidence/); assert.match(automatic, /never arbitrary filesystem files/);
-  const external = artifactGuidance({ ...meta, artifactUploads: "external_hosting" }, 198);
+  const external = artifactGuidance({ ...meta, artifactUploads: "external_hosting" }, 201);
   assert.match(external, /Do not silently fall back to Wollipog/); assert.match(external, /invent a destination/);
   for (const note of [automatic, external]) {
     assert.match(note, /Explicit task and project hosting requirements take precedence/);
     assert.match(note, /does not grant evidence-review or merge authority/);
   }
-  assert.match(artifactGuidance({ ...meta, artifactUploads: "wollipog_automatic" }, 197), /Manual/);
+  assert.match(artifactGuidance({ ...meta, artifactUploads: "wollipog_automatic" }, 200), /Manual/);
 });
 
 test("commands match provisioned MCP, CLI, context and peer capabilities", () => {
-  assert.doesNotMatch(artifactGuidance(meta, 198), /attach_session_artifact/);
-  assert.match(artifactGuidance({ ...meta, driver: "claude-code" }, 198), /attach_session_artifact/);
-  assert.match(artifactGuidance(meta, 198, "win32"), /ConvertFrom-Json/);
+  assert.doesNotMatch(artifactGuidance(meta, 201), /attach_session_artifact/);
+  assert.match(artifactGuidance({ ...meta, driver: "claude-code" }, 201), /attach_session_artifact/);
+  assert.match(artifactGuidance(meta, 201, "win32"), /ConvertFrom-Json/);
   assert.match(artifactGuidance(meta, 169), /does not support video/);
   for (const unsupported of [{ ...meta, env: {} }, { ...meta, context: { kind: "wsl" as const, distro: "Ubuntu" } },
     { ...meta, executionTarget: { adapter: "container" } as unknown as SessionMeta["executionTarget"] }]) {
-    const note = artifactGuidance(unsupported, 198);
+    const note = artifactGuidance(unsupported, 201);
     assert.match(note, /file attachment is unavailable/); assert.doesNotMatch(note, /artifact attach|attach_session_artifact/);
   }
   assert.doesNotMatch(artifactGuidance(meta, 168), /artifact attach|attach_session_artifact/);
@@ -57,7 +57,7 @@ test("Pi launch preserves repeatable, file and extension append arguments in eve
 });
 
 test("Windows Pi guidance is one argument safely quoted through cmd without overriding Claude policy", () => {
-  const note = artifactGuidance({ ...meta, driver: "pi" }, 198, "win32");
+  const note = artifactGuidance({ ...meta, driver: "pi" }, 201, "win32");
   assert.doesNotMatch(note, /[\r\n]/);
   const args = ["--append-system-prompt", "existing policy", "--append-system-prompt-file", "policy.txt"];
   for (const kind of ["pi", "claude-code"] as const) {
