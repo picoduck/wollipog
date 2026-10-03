@@ -1,11 +1,18 @@
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { EventTimeline } from "../components/EventTimeline.js";
+import { CheckpointRewindSession } from "./checkpoint-rewind-session.js";
 import "../styles.css";
 
 // `?unavailable` shows every per-turn action that applies but cannot be used now, each with its
-// reason, as a runner that went offline after the turn would.
-const unavailable = new URLSearchParams(window.location.search).has("unavailable");
+// reason, as a runner that went offline after the turn would. `?surface=session` renders a whole
+// session instead, whose turn actions open their real composer flow and confirmations (#2185);
+// `?theme=light|dark` picks the theme.
+const params = new URLSearchParams(window.location.search);
+const unavailable = params.has("unavailable");
+if (params.has("theme")) {
+  document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
+}
 
 function Fixture() {
   const [requested, setRequested] = useState<string | null>(null);
@@ -48,4 +55,4 @@ function Fixture() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(params.get("surface") === "session" ? <CheckpointRewindSession /> : <Fixture />);

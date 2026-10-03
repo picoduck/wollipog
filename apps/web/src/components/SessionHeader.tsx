@@ -262,7 +262,7 @@ export function SessionHeader({
     menu.close(restoreFocus);
   };
 
-  // Hands an action to a confirmation the caller opens itself (Fork's Create Fork, the Sessions
+  // Hands an action to a confirmation the caller opens itself (Fork Conversation, the Sessions
   // list's Archive and Stop). The confirmation returns focus to whatever held it as it opened, so
   // the trigger takes focus now rather than after the menu item has gone.
   const closeMenuToTrigger = () => {

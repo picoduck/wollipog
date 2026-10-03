@@ -337,18 +337,20 @@ test("a cost checkpoint parks the session with a compact responsive-review reque
 });
 
 test.describe("Answer Mode ownership", () => {
-  test("Load into Composer reveals the prepared draft and external resolution restores region focus", async ({ page }) => {
+  test("Edit as a New Turn reveals the copied message and external resolution restores region focus", async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 820 });
     await page.goto("/session-usage-e2e.html?width=1180&height=780&approval=question");
 
     await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
     await page.screenshot({ path: `${SHOT}/answer-mode-before.png` });
+    const copied = (await page.locator(".tl-row.user .bubble-text").last().textContent()) ?? "";
+    expect(copied).not.toBe("");
     await page.getByRole("button", { name: "Edit as a New Turn" }).last().click();
-    await page.getByLabel("Message", { exact: true }).fill("Prepared follow-up from an earlier turn");
-    await page.getByRole("button", { name: "Load into Composer" }).click();
+    // #2185: the message goes straight into the composer; there is no edit dialog to fill in.
+    await expect(page.getByRole("dialog")).toHaveCount(0);
 
     const composer = page.locator(".composer-input");
-    await expect(composer).toHaveValue("Prepared follow-up from an earlier turn");
+    await expect(composer).toHaveValue(copied);
     await expect(composer).toBeFocused();
     await expect(page.getByText("Question Waiting", { exact: true })).toBeVisible();
     await page.screenshot({ path: `${SHOT}/answer-mode-after-load.png` });

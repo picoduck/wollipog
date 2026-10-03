@@ -53,7 +53,7 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
     <button className="btn primary" onClick={() => void submit()} disabled={busy || !!reason}
       aria-describedby={refusal !== null ? "handoff-refusal" : undefined}>{busy ? "Creating…" : "Create Handoff"}</button>
   </>}>
-    <div className="message-action-form">
+    <div className="handoff-dialog-body">
     <p>Files come from the exact checkpoint after turn {turn}. The destination starts a fresh provider conversation. Its private state and credentials are independent.</p>
     <p>A draft contains up to 24,000 characters of visible user and assistant dialogue. Tool output, reasoning, questions and approvals are omitted. Attachment incompatibilities prevent creation. Review the draft and omission disclosure in the child before pressing Send. Creating the handoff sends nothing.</p>
     <div className="field"><span>Destination Agent</span><Select label="Destination Agent" value={agentId} disabled={busy}

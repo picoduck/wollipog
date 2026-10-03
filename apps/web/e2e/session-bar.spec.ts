@@ -716,7 +716,7 @@ test("Fork Conversation lives in More Actions: enabled after a finished turn, di
   await expect(fork).toHaveAccessibleName("Fork Conversation…");
   await page.keyboard.press("Escape");
   const transcript = page.locator(".detail-scroll");
-  const createFork = page.getByRole("dialog", { name: "Create Fork" });
+  const createFork = page.getByRole("dialog", { name: "Fork Conversation" });
   await transcript.focus();
   await page.keyboard.press("f");
   await expect(createFork).toBeVisible();

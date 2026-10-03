@@ -1,4 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
+import { expectGeometry } from "./geometry-margins.js";
 
 const YOUR_MESSAGE = ["Copy Message", "Edit as a New Turn", "Rewind Files to Before This Turn…"];
 const THIS_TURN = ["Copy Response", "Copy Response as Markdown", "Fork After This Turn…", "Hand Off After This Turn…"];
@@ -190,4 +192,219 @@ test("long-pressing a user bubble on a touch device selects text and opens no me
   });
   expect(selected).toBe("Inspect the checkpoint controls.");
   await context.close();
+});
+
+// #2185: the whole-session surface, whose turn actions run their real composer flow and confirmations.
+const SECOND_PROMPT = "Refactor the session notice slot so that every composer error becomes one entry, ranked after the session's own conditions.";
+
+async function openSession(page: Page, query = "") {
+  await page.goto(`/checkpoint-rewind-e2e.html?surface=session${query}`);
+  await expect(page.locator(".tl-row.user")).toHaveCount(2);
+}
+
+/** Chooses `item` from the second message's More Message Actions menu. */
+async function chooseMessageAction(page: Page, item: string) {
+  const message = page.locator(".tl-row.user").nth(1);
+  await message.hover();
+  await message.getByRole("button", { name: "More Message Actions" }).click();
+  await page.getByRole("menuitem", { name: item }).click();
+}
+
+function editingCopyNotice(page: Page) {
+  return page.locator('.session-notice-slot[data-notice-key="editing-copy"] .notice');
+}
+
+test.describe("turn action flows on a whole session (#2185)", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("Edit as a New Turn loads an empty composer with no dialog, and sending the copy ends the edit", async ({ page }) => {
+    await openSession(page);
+    const composer = page.locator(".composer-input");
+    await expect(composer).toHaveValue("");
+    const message = page.locator(".tl-row.user").nth(1);
+    await message.hover();
+    await message.getByRole("button", { name: "Edit as a New Turn" }).click();
+
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(composer).toHaveValue(SECOND_PROMPT);
+    await expect(composer).toBeFocused();
+    await expect(page.locator(".composer .image-thumb")).toHaveCount(1);
+    const notice = editingCopyNotice(page);
+    await expect(notice).toHaveClass(/\bcompact\b/);
+    await expect(notice).toHaveClass(/\bt-info\b/);
+    await expect(notice.locator(".notice-body")).toHaveText("Editing a copy of your Turn 2 message. Earlier turns stay as they are.");
+    await expect(notice.getByRole("button", { name: "Discard Edit" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(page.locator("body")).toHaveAttribute("data-prompted", SECOND_PROMPT);
+    await expect(editingCopyNotice(page)).toHaveCount(0);
+    await expect(composer).toHaveValue("");
+    await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+    await expect(page.locator(".form-error")).toHaveCount(0);
+  });
+
+  test("over a draft, Replace Draft asks first and Discard Edit restores the draft", async ({ page }) => {
+    const draft = "Check the phone layout too.";
+    await openSession(page, `&draft=${encodeURIComponent(draft)}`);
+    const composer = page.locator(".composer-input");
+    await expect(composer).toHaveValue(draft);
+    const message = page.locator(".tl-row.user").nth(1);
+    await message.hover();
+    await message.getByRole("button", { name: "Edit as a New Turn" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Replace Draft" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator(".confirmation-message"))
+      .toHaveText("Your current draft is replaced by this message. You can restore it with Discard Edit.");
+    await expect(dialog.locator(".modal-foot > button")).toHaveText(["Cancel", "Replace Draft"]);
+    await expect(composer).toHaveValue(draft);
+    await dialog.getByRole("button", { name: "Replace Draft" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(composer).toHaveValue(SECOND_PROMPT);
+    await expect(composer).toBeFocused();
+
+    await editingCopyNotice(page).getByRole("button", { name: "Discard Edit" }).click();
+    await expect(composer).toHaveValue(draft);
+    await expect(page.locator(".composer .image-thumb")).toHaveCount(0);
+    await expect(editingCopyNotice(page)).toHaveCount(0);
+    await expect(composer).toBeFocused();
+  });
+
+  test("Edit in a Fork confirms, keeps its button busy while the fork is created, then opens the fork", async ({ page }) => {
+    await openSession(page);
+    await chooseMessageAction(page, "Edit in a Fork…");
+    const dialog = page.getByRole("dialog", { name: "Edit in a Fork" });
+    await expect(dialog.locator(".confirmation-message")).toHaveText(
+      "A new session continues from before Turn 2 in its own worktree, and this message opens in its composer for you to edit. This session stays as it is.");
+    await expect(dialog.locator("textarea")).toHaveCount(0);
+    const confirm = dialog.getByRole("button", { name: "Edit in a Fork" });
+    await confirm.click();
+    await expect(confirm).toHaveAttribute("aria-busy", "true");
+    await expect(dialog.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await expect(page.locator("body")).toHaveAttribute("data-navigated", "checkpoint-rewind-fork");
+    await expect(page.locator("body")).toHaveAttribute("data-forked", "1");
+    await expect(dialog).toHaveCount(0);
+  });
+
+  test("an ambiguous Edit in a Fork stays in its dialog as a danger notice", async ({ page }) => {
+    await openSession(page, "&fork=ambiguous");
+    await chooseMessageAction(page, "Edit in a Fork…");
+    const dialog = page.getByRole("dialog", { name: "Edit in a Fork" });
+    await dialog.getByRole("button", { name: "Edit in a Fork" }).click();
+    const failure = dialog.locator(".notice.t-danger");
+    await expect(failure).toContainText("The fork outcome is uncertain. Do not retry.");
+    await expect(dialog).toBeVisible();
+    // Above the footer, inside the dialog's body.
+    const [failureBox, footBox] = await Promise.all([failure.boundingBox(), dialog.locator(".modal-foot").boundingBox()]);
+    expect(failureBox!.y + failureBox!.height).toBeLessThanOrEqual(footBox!.y);
+    expect(await page.locator("body").getAttribute("data-navigated")).toBeNull();
+  });
+
+  test("Rewind Files names the turn with a capital T and quotes its prompt", async ({ page }) => {
+    await openSession(page);
+    await chooseMessageAction(page, "Rewind Files to Before This Turn…");
+    const dialog = page.getByRole("dialog", { name: "Rewind Files" });
+    await expect(dialog.locator(".confirmation-message")).toHaveText(
+      "Files go back to how they were before Turn 2, “Refactor the session notice slot so that every composer erro…”. The conversation isn't rewound, so the agent still remembers later turns.");
+    await expect(dialog.locator(".modal-foot > button")).toHaveText(["Cancel", "Rewind Files"]);
+    await expect(dialog.getByRole("button", { name: "Rewind Files" })).toHaveClass(/\bdanger\b/);
+    await dialog.getByRole("button", { name: "Rewind Files" }).click();
+    await expect(page.locator("body")).toHaveAttribute("data-rewound", "2");
+  });
+
+  test("Fork Conversation says what continues, and a Claude Code session notes its latest-turn limit in dim text", async ({ page }) => {
+    await openSession(page, "&driver=claude-code");
+    await page.getByRole("button", { name: "More Turn Actions" }).last().click();
+    await page.getByRole("menuitem", { name: "Fork After This Turn…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Fork Conversation" });
+    await expect(dialog.locator(".confirmation-message")).toHaveText(
+      "A new session continues from after Turn 2 in its own worktree, with the same agent and conversation history. This session stays as it is.");
+    const note = dialog.locator(".confirmation-note");
+    await expect(note).toHaveText("Claude Code can only fork after the latest turn.");
+    const colors = await note.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--text-dim)";
+      document.body.append(probe);
+      const dim = getComputedStyle(probe).color;
+      probe.remove();
+      return { note: getComputedStyle(element).color, dim };
+    });
+    expect(colors.note).toBe(colors.dim);
+    await expect(dialog.locator(".modal-foot > button")).toHaveText(["Cancel", "Fork Conversation"]);
+  });
+
+  for (const [recovery, body] of [
+    ["fork", "A new session continues from Turn 2, before the item the provider rejected, with the files from that turn. This session stays as it is so you can inspect it."],
+    ["handoff", "A new session starts a fresh conversation from a summary of Turns 1 to 2, with the files from that turn. This session stays as it is so you can inspect it."],
+  ] as const) {
+    test(`Recover Session describes a ${recovery} recovery by its outcome`, async ({ page }) => {
+      await openSession(page, `&quarantine=${recovery}`);
+      await page.getByRole("button", { name: "Recover Session" }).click();
+      const dialog = page.getByRole("dialog", { name: "Recover Session" });
+      await expect(dialog.locator(".confirmation-message")).toHaveText(body);
+      await expect(dialog.locator(".modal-foot > button")).toHaveText(["Cancel", "Recover Session"]);
+    });
+  }
+});
+
+test.describe("turn action confirmations on a phone (#2185)", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  const cases: Array<{ name: string; query?: string; open: (page: Page) => Promise<void>; buttons: string[] }> = [
+    {
+      name: "Replace Draft",
+      query: "&draft=Check%20the%20phone%20layout%20too.",
+      open: async (page) => {
+        await page.getByRole("button", { name: "More Turn Actions" }).last().tap();
+        await page.getByRole("menuitem", { name: "Edit as a New Turn" }).tap();
+      },
+      buttons: ["Cancel", "Replace Draft"],
+    },
+    {
+      name: "Edit in a Fork",
+      open: async (page) => {
+        await page.getByRole("button", { name: "More Turn Actions" }).last().tap();
+        await page.getByRole("menuitem", { name: "Edit in a Fork…" }).tap();
+      },
+      buttons: ["Cancel", "Edit in a Fork"],
+    },
+    {
+      name: "Rewind Files",
+      open: async (page) => {
+        await page.getByRole("button", { name: "More Turn Actions" }).last().tap();
+        await page.getByRole("menuitem", { name: "Rewind Files to Before This Turn…" }).tap();
+      },
+      buttons: ["Cancel", "Rewind Files"],
+    },
+    {
+      name: "Fork Conversation",
+      open: async (page) => {
+        await page.getByRole("button", { name: "More Turn Actions" }).last().tap();
+        await page.getByRole("menuitem", { name: "Fork After This Turn…" }).tap();
+      },
+      buttons: ["Cancel", "Fork Conversation"],
+    },
+    {
+      name: "Recover Session",
+      query: "&quarantine=fork",
+      open: async (page) => { await page.getByRole("button", { name: "Recover Session" }).tap(); },
+      buttons: ["Cancel", "Recover Session"],
+    },
+  ];
+  for (const { name, query, open, buttons } of cases) {
+    test(`${name} is a bottom sheet with two equal buttons`, async ({ page }) => {
+      await openSession(page, query);
+      await open(page);
+      const dialog = page.getByRole("dialog", { name });
+      await expect(dialog).toBeVisible();
+      await dialogMotionSettled(page);
+      const box = (await dialog.boundingBox())!;
+      expect([Math.round(box.x), Math.round(box.width), Math.round(box.y + box.height)]).toEqual([0, 390, 844]);
+      const foot = await dialog.locator(".modal-foot > button").evaluateAll((elements) => elements.map((element) => ({
+        text: element.textContent, width: element.getBoundingClientRect().width,
+      })));
+      expect(foot.map(({ text }) => text)).toEqual(buttons);
+      expectGeometry(Math.abs(foot[0]!.width - foot[1]!.width), "the two footer buttons are equal width").toBeLessThanOrEqual(0.61);
+    });
+  }
 });

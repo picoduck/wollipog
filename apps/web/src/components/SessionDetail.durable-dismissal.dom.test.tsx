@@ -10,13 +10,14 @@ import type {
   SessionEvent,
   SessionView,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { chooseTranscriptAction, readTranscriptAction } from "../dom-test-transcript-actions.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { SessionDetail } from "./SessionDetail.js";
+import { FeedbackProvider } from "./FeedbackProvider.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -148,6 +149,8 @@ function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: Ses
 interface ResolutionLog {
   resolvePendingPrompt: Array<{ sessionId: string; commandId: string; action: string }>;
   cancelQueuedPrompt: Array<{ sessionId: string; promptId: string }>;
+  fork: Array<{ sessionId: string; turn: number }>;
+  navigate: string[];
 }
 
 interface Fixture {
@@ -167,11 +170,13 @@ async function mountFixture(options: {
   holdResolutions?: boolean;
   /** Renders the preview surface, which reports its fork availability through this callback. */
   onPreviewForkReady?: React.ComponentProps<typeof SessionDetail>["onPreviewForkReady"];
+  /** Answers a conversation fork; by default it lands as a new session. */
+  fork?: (sessionId: string, turn: number) => Promise<SessionView>;
 } = {}): Promise<Fixture> {
   fixtureSequence += 1;
   const currentSession = session(`durable-dismissal-${fixtureSequence}`);
   if (options.sessionPatch) Object.assign(currentSession, options.sessionPatch);
-  const calls: ResolutionLog = { resolvePendingPrompt: [], cancelQueuedPrompt: [] };
+  const calls: ResolutionLog = { resolvePendingPrompt: [], cancelQueuedPrompt: [], fork: [], navigate: [] };
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: `durable-dismissal-${fixtureSequence}`,
@@ -181,12 +186,18 @@ async function mountFixture(options: {
   };
   const navigation: ViewNavigation = {
     current: () => ({ name: "session", id: currentSession.id }),
-    push() {},
+    push(view) {
+      if (view.name === "session") calls.navigate.push(view.id);
+    },
     listen: () => () => {},
   };
   const client = {
     ...api,
     session: () => new Promise<never>(() => {}),
+    fork: async (sessionId: string, turn: number) => {
+      calls.fork.push({ sessionId, turn });
+      return options.fork ? options.fork(sessionId, turn) : { ...currentSession, id: `${sessionId}-fork` };
+    },
     resolvePendingPrompt: async (sessionId: string, commandId: string, action: string) => {
       calls.resolvePendingPrompt.push({ sessionId, commandId, action });
       if (options.holdResolutions) await new Promise(() => {});
@@ -214,19 +225,21 @@ async function mountFixture(options: {
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
-          {options.eventPayloads && (
-            <EventSeeder sessionId={currentSession.id} payloads={options.eventPayloads} />
-          )}
-          <SessionDetail
-            sessionId={currentSession.id}
-            rightPanel={rightPanel}
-            onOpenTerminal={() => {}}
-            composerFocusIntent="message"
-            composerDraftLoader={async () => null}
-            {...(options.onPreviewForkReady
-              ? { mode: "preview" as const, onPreviewForkReady: options.onPreviewForkReady }
-              : {})}
-          />
+          <FeedbackProvider>
+            {options.eventPayloads && (
+              <EventSeeder sessionId={currentSession.id} payloads={options.eventPayloads} />
+            )}
+            <SessionDetail
+              sessionId={currentSession.id}
+              rightPanel={rightPanel}
+              onOpenTerminal={() => {}}
+              composerFocusIntent="message"
+              composerDraftLoader={async () => null}
+              {...(options.onPreviewForkReady
+                ? { mode: "preview" as const, onPreviewForkReady: options.onPreviewForkReady }
+                : {})}
+            />
+          </FeedbackProvider>
         </StoreProvider>
       </ApiProvider>,
     );
@@ -688,34 +701,100 @@ test("a Viewer's per-turn Rewind, Fork and Hand Off are unavailable and say why 
   }
 });
 
-test("a refusal that arrives while Edit in Fork is open disables Create Fork and says why (#1864)", async () => {
-  const reason = "Your Viewer role is read-only.";
+const FORKABLE_TURNS: SessionEvent["payload"][] = [
+  { kind: "user_message", text: "first", images: [] },
+  { kind: "agent_message", text: "one", final: true },
+  { kind: "conversation_checkpoint", turn: 1 },
+  { kind: "user_message", text: "second", images: [] },
+  { kind: "agent_message", text: "two", final: true },
+  { kind: "conversation_checkpoint", turn: 2 },
+];
+const FORKABLE_SESSION: Partial<SessionView> = {
+  status: "idle", useWorktree: true, worktreePath: "/tmp/durable-dismissal-worktree",
+};
+
+function openDialog(name: string): HTMLElement | null {
+  return [...document.querySelectorAll<HTMLElement>('[role="dialog"]')]
+    .find((dialog) => dialog.querySelector(".modal-title, h2")?.textContent === name) ?? null;
+}
+
+function dialogButton(dialog: HTMLElement | null, label: string): HTMLButtonElement | undefined {
+  return [...dialog?.querySelectorAll<HTMLButtonElement>(".modal-foot button") ?? []]
+    .find((candidate) => candidate.textContent === label);
+}
+
+async function settleDialog() {
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+}
+
+test("Edit in a Fork confirms with the turn it continues from, then opens the fork with the message in its composer (#2185)", async () => {
+  const fixture = await mountFixture({ sessionPatch: FORKABLE_SESSION, eventPayloads: FORKABLE_TURNS });
+  try {
+    await chooseTranscriptAction(fixture.container, "More Message Actions", "Edit in a Fork…", 1);
+    await settleDialog();
+    const dialog = openDialog("Edit in a Fork");
+    assert.ok(dialog, "the action asks first, in a confirmation rather than an edit form");
+    assert.equal(dialog.querySelector(".confirmation-message")?.textContent,
+      "A new session continues from before Turn 2 in its own worktree, and this message opens in its composer for you to edit. This session stays as it is.");
+    assertNoDomNode(dialog.querySelector("textarea"), "the message is edited in the fork's composer, not here");
+    const confirm = dialogButton(dialog, "Edit in a Fork");
+    assert.ok(confirm, "the confirm button repeats the title's verb");
+    await act(async () => { confirm.click(); });
+    await settleDialog();
+    assert.deepEqual(fixture.calls.fork, [{ sessionId: fixture.sessionId, turn: 1 }], "the fork continues from before the message's turn");
+    assert.deepEqual(fixture.calls.navigate, [`${fixture.sessionId}-fork`], "the new session opens");
+    assertNoDomNode(openDialog("Edit in a Fork"), "the confirmation closes once the fork exists");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an ambiguous Edit in a Fork failure stays in the confirmation as a danger notice (#2185)", async () => {
   const fixture = await mountFixture({
-    sessionPatch: { status: "idle", useWorktree: true, worktreePath: "/tmp/durable-dismissal-worktree" },
-    eventPayloads: [
-      { kind: "user_message", text: "first", images: [] },
-      { kind: "agent_message", text: "one", final: true },
-      { kind: "conversation_checkpoint", turn: 1 },
-      { kind: "user_message", text: "second", images: [] },
-      { kind: "agent_message", text: "two", final: true },
-      { kind: "conversation_checkpoint", turn: 2 },
-    ],
+    sessionPatch: FORKABLE_SESSION,
+    eventPayloads: FORKABLE_TURNS,
+    fork: async () => { throw new ApiError("The control plane timed out.", 504); },
   });
+  try {
+    await chooseTranscriptAction(fixture.container, "More Message Actions", "Edit in a Fork…", 1);
+    await settleDialog();
+    await act(async () => { dialogButton(openDialog("Edit in a Fork"), "Edit in a Fork")?.click(); });
+    await settleDialog();
+    const dialog = openDialog("Edit in a Fork");
+    assert.ok(dialog, "the confirmation stays open");
+    assert.match(dialog.querySelector(".notice.t-danger")?.textContent ?? "", /The fork outcome is uncertain\. Do not retry\./u);
+    assert.deepEqual(fixture.calls.navigate, [], "nothing opens");
+
+    // Trying again does not create a second fork while the first one's outcome is unknown.
+    await act(async () => { dialogButton(dialog, "Edit in a Fork")?.click(); });
+    await settleDialog();
+    assert.equal(fixture.calls.fork.length, 1);
+    assert.match(openDialog("Edit in a Fork")?.querySelector(".notice.t-danger")?.textContent ?? "",
+      /A conversation fork is already in progress for this session\./u);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a refusal that arrives while Edit in a Fork is confirming stops it there and says why (#1864)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const fixture = await mountFixture({ sessionPatch: FORKABLE_SESSION, eventPayloads: FORKABLE_TURNS });
   try {
     const edit = await readTranscriptAction(fixture.container, "More Message Actions", "Edit in a Fork…", 1);
     assert.equal(edit?.disabled, false, "Edit in a Fork is offered while forking is allowed");
     await chooseTranscriptAction(fixture.container, "More Message Actions", "Edit in a Fork…", 1);
-    const createFork = () => [...document.querySelectorAll<HTMLButtonElement>("button")]
-      .find((candidate) => candidate.textContent === "Create Fork");
-    assert.equal(createFork()?.disabled, false);
+    await settleDialog();
+    assert.ok(openDialog("Edit in a Fork"));
     await fixture.pushSession({ commandPermissions: {
       stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true },
       fork: { allowed: false, reason },
     } });
-    const refused = createFork();
-    assert.ok(refused, "the open dialog stays open");
-    assert.equal(refused.disabled, true);
-    assert.equal(document.getElementById(refused.getAttribute("aria-describedby") ?? "")?.textContent, reason);
+    await act(async () => { dialogButton(openDialog("Edit in a Fork"), "Edit in a Fork")?.click(); });
+    await settleDialog();
+    const dialog = openDialog("Edit in a Fork");
+    assert.ok(dialog, "the open confirmation stays open");
+    assert.equal(dialog.querySelector(".notice.t-danger")?.textContent, reason);
+    assert.deepEqual(fixture.calls.fork, [], "no fork is requested");
   } finally {
     await unmountFixture(fixture);
   }
@@ -775,7 +854,7 @@ test("an Edit in Fork that applies but is blocked stays listed and says why, and
   }
 });
 
-test("Edit as a New Turn stays listed and says why while the composer cannot send, and its open dialog names the reason (#1876)", async () => {
+test("Edit as a New Turn stays listed and says why while the composer cannot send, and loads the composer without a dialog when it can (#1876, #2185)", async () => {
   const reason = "Your Viewer role is read-only.";
   const edit = "Edit as a New Turn";
   const fixture = await mountFixture({
@@ -795,8 +874,7 @@ test("Edit as a New Turn stays listed and says why while the composer cannot sen
   });
   const read = (index: number) => readTranscriptAction(fixture.container, "More Message Actions", edit, index);
   const dialog = () => document.querySelector('[role="dialog"]');
-  const loadIntoComposer = () => [...document.querySelectorAll<HTMLButtonElement>("button")]
-    .find((candidate) => candidate.textContent === "Load into Composer");
+  const composer = () => fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
   try {
     assertNoDomNode(button(fixture, edit), "a Viewer gets no hover Edit as a New Turn");
     for (const index of [0, 1]) {
@@ -813,14 +891,14 @@ test("Edit as a New Turn stays listed and says why while the composer cannot sen
     const working = button(fixture, edit);
     assert.ok(working, "an allowed person gets the hover button back");
     await act(async () => { working.click(); });
-    assert.ok(dialog(), "the working control opens its dialog");
-    assert.equal(loadIntoComposer()?.disabled, false);
+    await settleDialog();
+    assertNoDomNode(dialog(), "an empty composer takes the copy without a dialog");
+    assert.equal(composer()?.value, "first");
 
     await fixture.pushSession({ status: "stopped" });
-    assert.ok(dialog(), "the open dialog stays open");
-    assert.equal(loadIntoComposer()?.disabled, true);
-    assert.match(dialog()?.textContent ?? "", /This session is stopped\. Restart it to send a message\./u, "the dialog names the specific reason");
-    assert.doesNotMatch(dialog()?.textContent ?? "", /cannot accept a new turn right now/u);
+    const stopped = await read(0);
+    assert.equal(stopped?.disabled, true, "a stopped session keeps the action, unavailable");
+    assert.match(stopped?.reason ?? "", /This session is stopped\. Restart it to send a message\./u, "it names the specific reason");
     assertNoDomNode(button(fixture, edit));
   } finally {
     await unmountFixture(fixture);

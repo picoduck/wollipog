@@ -37,6 +37,8 @@ import {
 } from "../queued-edit-recovery.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { clearSessionDetailComposerRuntimeForInstance, SessionDetail } from "./SessionDetail.js";
+import { FeedbackProvider } from "./FeedbackProvider.js";
+import { loadComposerEditCopy, saveComposerEditCopy } from "../composer-edit-copy.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withCapturedAnimationFrames, withScopedClockOverrides } from "./test-clock-overrides.js";
@@ -325,21 +327,23 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     const content = (
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
-          {options.mainEventPayloads && (
-            <EventSeeder sessionId={currentSession.id} payloads={options.mainEventPayloads} />
-          )}
-          {showDetail && (
-            <SessionDetail
-              key={detailMount}
-              sessionId={sessionId}
-              rightPanel={rightPanel}
-              onOpenTerminal={() => {}}
-              composerFocusIntent={options.composerFocusIntent ?? "message"}
-              onComposerFocusConsumed={options.onComposerFocusConsumed}
-              composerDraftLoader={loader}
-              composerDraftCleanup={options.composerDraftCleanup}
-            />
-          )}
+          <FeedbackProvider>
+            {options.mainEventPayloads && (
+              <EventSeeder sessionId={currentSession.id} payloads={options.mainEventPayloads} />
+            )}
+            {showDetail && (
+              <SessionDetail
+                key={detailMount}
+                sessionId={sessionId}
+                rightPanel={rightPanel}
+                onOpenTerminal={() => {}}
+                composerFocusIntent={options.composerFocusIntent ?? "message"}
+                onComposerFocusConsumed={options.onComposerFocusConsumed}
+                composerDraftLoader={loader}
+                composerDraftCleanup={options.composerDraftCleanup}
+              />
+            )}
+          </FeedbackProvider>
         </StoreProvider>
       </ApiProvider>
     );
@@ -4297,12 +4301,12 @@ test("an ordinary-composer handoff does not arm focus theft for a later question
     ) as HTMLButtonElement | null;
     assert.ok(edit);
     await act(async () => { edit.click(); });
-    const load = [...fixture.container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Load into Composer") as HTMLButtonElement | undefined;
-    assert.ok(load);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const replaceDraft = dialogButton("Replace Draft", "Replace Draft");
+    assert.ok(replaceDraft);
     await act(async () => {
-      load.focus();
-      load.click();
+      replaceDraft.focus();
+      replaceDraft.click();
     });
     await act(async () => {
       flushFrames();
@@ -4335,77 +4339,471 @@ test("an ordinary-composer handoff does not arm focus theft for a later question
   }
 });
 
-test("SessionDetail prepares Edit & Resend text with accessible focus and an end selection", async () => {
-  const draft = deferred<ComposerDraft | null>();
-  const fixture = await mountFixture(draft, {
-    mainEventPayloads: [{ kind: "user_message", text: "original prompt", images: [] }],
-  });
-  const focusTransitions: unknown[] = [];
-  const onFocusIn = (event: unknown) => {
-    const target = (event as { target?: unknown }).target;
-    if (target) focusTransitions.push(target);
-  };
-  domWindow.document.addEventListener("focusin", onFocusIn);
-  try {
-    await focusRequestedComposer(fixture);
-    await resolveDraft(draft, "draft to replace");
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+/** The footer button labelled `label` in the open dialog titled `title`. */
+function dialogButton(title: string, label: string): HTMLButtonElement | undefined {
+  const dialog = [...domWindow.document.querySelectorAll('[role="dialog"]')]
+    .find((candidate) => candidate.querySelector(".modal-title")?.textContent === title);
+  return [...dialog?.querySelectorAll(".modal-foot button") ?? []]
+    .find((button) => button.textContent === label) as HTMLButtonElement | undefined;
+}
 
-    const edit = fixture.container.querySelector(
-      'button[aria-label="Edit as a New Turn"]',
-    ) as HTMLButtonElement | null;
-    assert.ok(edit, "the real timeline exposes Edit as a New Turn with an accessible name");
+function editingCopyNotice(fixture: Fixture): Element | null {
+  return fixture.container.querySelector('.session-notice-slot[data-notice-key="editing-copy"] .notice');
+}
+
+const EDITABLE_TURN: SessionEvent["payload"][] = [
+  { kind: "user_message", text: "original prompt", images: [submittedImage] },
+  { kind: "agent_message", text: "done", final: true },
+  { kind: "conversation_checkpoint", turn: 3 },
+];
+
+test("Edit as a New Turn loads an empty composer without a dialog, names the turn, and sending the copy ends the edit (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const prompts: Array<{ text: string; images: unknown[] }> = [];
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: EDITABLE_TURN,
+    client: {
+      prompt: async (_sessionId, text, images) => {
+        prompts.push({ text, images: images ?? [] });
+        return undefined as never;
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    const edit = fixture.container.querySelector('button[aria-label="Edit as a New Turn"]') as HTMLButtonElement | null;
+    assert.ok(edit);
     await act(async () => {
       edit.focus();
       edit.click();
     });
-
-    const dialogInput = fixture.container.querySelector(".message-action-input") as HTMLTextAreaElement | null;
-    assert.ok(dialogInput, "Edit & Resend opens its real dialog");
-    assert.equal(dialogInput.labels?.[0]?.textContent, "Message");
     await act(async () => {
-      dialogInput.value = "edited prompt";
-      fireDomEvent.change(dialogInput);
-    });
-    const load = [...fixture.container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Load into Composer") as HTMLButtonElement | undefined;
-    assert.ok(load, "the dialog exposes its explicit load action");
-    await act(async () => {
-      load.focus();
-      load.click();
-    });
-    // Exercise the ordering that used to lose: a frame can run before Modal's zero-delay
-    // restoration timer. The explicit return-focus owner must make either ordering converge.
-    await act(async () => { flushFrames(); });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
       flushFrames();
       await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
     });
 
-    assertNoDomNode(fixture.container.querySelector(".message-action-input"));
-    assert.equal(fixture.composer.value, "edited prompt");
-    assert.equal(
-      fixture.composer.ownerDocument.activeElement,
-      fixture.composer,
-      "loading the edited message leaves final focus in the composer",
-    );
-    assert.equal(
-      focusTransitions.at(-1) === fixture.composer,
-      true,
-      "loading the edited message leaves focus in the composer",
-    );
+    assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'), "an empty composer needs no confirmation");
+    assert.equal(fixture.composer.value, "original prompt");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1, "the message's attachments come with it");
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer, "the composer has focus");
     assert.deepEqual(
       [fixture.composer.selectionStart, fixture.composer.selectionEnd],
       [fixture.composer.value.length, fixture.composer.value.length],
     );
+    const notice = editingCopyNotice(fixture);
+    assert.ok(notice, "the notice slot says a copy is being edited");
+    assert.ok(notice.classList.contains("compact") && notice.classList.contains("t-info"));
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "Editing a copy of your Turn 3 message. Earlier turns stay as they are.");
+    assert.ok([...notice.querySelectorAll("button")].some((button) => button.textContent === "Discard Edit"));
+
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+    assert.deepEqual(prompts, [{ text: "original prompt", images: [submittedImage] }]);
+    assertNoDomNode(editingCopyNotice(fixture), "sending the copy removes the notice");
   } finally {
-    domWindow.document.removeEventListener("focusin", onFocusIn);
     await unmountFixture(fixture);
   }
 });
 
-test("Load into Composer exits Answer Mode and reveals the prepared message", { timeout: 5_000 }, async () => {
+test("Edit as a New Turn over a draft asks Replace Draft first, and Discard Edit restores the draft exactly (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, { mainEventPayloads: EDITABLE_TURN });
+  try {
+    await resolveComposerDraft(draft, { text: "my own draft\nwith two lines", images: [{ mimeType: "image/png", data: "bWluZQ==" }], updatedAt: 1 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    const thumbs = () => [...fixture.container.querySelectorAll(".image-thumb")].map((thumb) => thumb.outerHTML);
+    const draftThumbs = thumbs();
+    assert.equal(draftThumbs.length, 1);
+
+    const edit = fixture.container.querySelector('button[aria-label="Edit as a New Turn"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const dialog = domWindow.document.querySelector('[role="dialog"]');
+    assert.equal(dialog?.querySelector(".modal-title")?.textContent, "Replace Draft");
+    assert.equal(dialog?.querySelector(".confirmation-message")?.textContent,
+      "Your current draft is replaced by this message. You can restore it with Discard Edit.");
+    assert.equal(fixture.composer.value, "my own draft\nwith two lines", "nothing changes before confirming");
+
+    const cancel = dialogButton("Replace Draft", "Cancel");
+    assert.ok(cancel);
+    await act(async () => { cancel.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(fixture.composer.value, "my own draft\nwith two lines", "Cancel keeps the draft");
+    assertNoDomNode(editingCopyNotice(fixture));
+
+    await act(async () => { edit.click(); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { dialogButton("Replace Draft", "Replace Draft")?.click(); });
+    await act(async () => {
+      flushFrames();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
+    });
+    assert.equal(fixture.composer.value, "original prompt");
+    assert.notDeepEqual(thumbs(), draftThumbs, "the copy's attachment replaces the draft's");
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+
+    // Editing the copy, then a second Edit, still leaves the person's own draft to come back to.
+    await act(async () => {
+      fixture.composer.value = "original prompt, revised";
+      fireDomEvent.change(fixture.composer);
+    });
+    await act(async () => { edit.click(); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => { dialogButton("Replace Draft", "Replace Draft")?.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "original prompt");
+
+    const discard = [...editingCopyNotice(fixture)?.querySelectorAll("button") ?? []]
+      .find((button) => button.textContent === "Discard Edit") as HTMLButtonElement | undefined;
+    assert.ok(discard);
+    await act(async () => { discard.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "my own draft\nwith two lines", "Discard Edit restores the draft's text");
+    assert.deepEqual(thumbs(), draftThumbs, "and its attachments");
+    assertNoDomNode(editingCopyNotice(fixture));
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Discard Edit over an empty composer clears it, and Send stays disabled without a validation message (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, { mainEventPayloads: EDITABLE_TURN });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    const edit = fixture.container.querySelector('button[aria-label="Edit as a New Turn"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "original prompt");
+    const discard = [...editingCopyNotice(fixture)?.querySelectorAll("button") ?? []]
+      .find((button) => button.textContent === "Discard Edit") as HTMLButtonElement | undefined;
+    await act(async () => { discard?.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+    assert.equal(sendButton(fixture).disabled, true, "an empty composer cannot send");
+    assertNoDomNode(fixture.container.querySelector('.session-notice-slot [role="alert"]'), "and says nothing more about it");
+    assertNoDomNode(fixture.container.querySelector(".form-error"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+async function clickEdit(fixture: Fixture) {
+  const edit = fixture.container.querySelector('button[aria-label="Edit as a New Turn"]') as HTMLButtonElement | null;
+  assert.ok(edit, "Edit as a New Turn is offered");
+  await act(async () => { edit.click(); });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flushFrames();
+  });
+}
+
+async function replaceDraft() {
+  const confirm = dialogButton("Replace Draft", "Replace Draft");
+  assert.ok(confirm, "Replace Draft asks first");
+  await act(async () => { confirm.click(); });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flushFrames();
+  });
+}
+
+function discardEditButton(fixture: Fixture): HTMLButtonElement | undefined {
+  return [...editingCopyNotice(fixture)?.querySelectorAll("button") ?? []]
+    .find((button) => button.textContent === "Discard Edit") as HTMLButtonElement | undefined;
+}
+
+test("a reload keeps Discard Edit and the draft it puts back (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const ownImage = { mimeType: "image/png", data: "bWluZQ==" } as const;
+  const fixture = await mountFixture(draft, { mainEventPayloads: EDITABLE_TURN });
+  try {
+    await resolveComposerDraft(draft, { text: "my own draft", images: [ownImage], updatedAt: 1 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    await clickEdit(fixture);
+    await replaceDraft();
+    assert.equal(fixture.composer.value, "original prompt");
+
+    // The copy was saved as the draft; the page's memory goes, as on a reload.
+    const reloaded = await fixture.fullReloadWithDraftLoader(async () => ({
+      text: "original prompt", images: [submittedImage], updatedAt: 2,
+    }));
+    await flushAsyncWork();
+    assert.equal(reloaded.value, "original prompt");
+    assert.equal(editingCopyNotice(fixture)?.querySelector(".notice-body")?.textContent,
+      "Editing a copy of your Turn 3 message. Earlier turns stay as they are.");
+    const discard = discardEditButton(fixture);
+    assert.ok(discard, "Discard Edit survives the reload");
+    await act(async () => { discard.click(); });
+    await act(async () => { flushFrames(); });
+    const composer = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")!;
+    assert.equal(composer.value, "my own draft");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    assertNoDomNode(editingCopyNotice(fixture));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("while a queued message is edited, Discard Edit waits and cannot overwrite it (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    mainEventPayloads: EDITABLE_TURN,
+    sessionPatch: {
+      queued: [{ id: "queue-1", text: "queued projection", liveQueueObserved: true, editable: true, editRevision: "qer_1" }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: { promptId, text: "Queued exact content", images: [], editRevision: "qer_1" },
+      }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    await clickEdit(fixture);
+    assert.equal(fixture.composer.value, "original prompt");
+    assert.ok(discardEditButton(fixture));
+
+    const editQueued = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    assert.ok(editQueued);
+    await act(async () => { editQueued.click(); });
+    await flushAsyncWork();
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "Queued exact content");
+    assertNoDomNode(editingCopyNotice(fixture), "the queued edit owns the composer, so Discard Edit is not offered");
+
+    const cancel = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Cancel Edit") as HTMLButtonElement | undefined;
+    assert.ok(cancel);
+    await act(async () => { cancel.click(); });
+    await flushAsyncWork();
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "original prompt", "the copy comes back as the displaced draft");
+    assert.ok(discardEditButton(fixture), "and so does its Discard Edit");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a send still in flight does not end an edit made after it, and a failed send gives the edit back (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const sends: Array<Deferred<void>> = [];
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: EDITABLE_TURN,
+    client: {
+      prompt: async () => {
+        const pending = deferred<void>();
+        sends.push(pending);
+        await pending.promise;
+        return undefined as never;
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    await clickEdit(fixture);
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+    assert.equal(sends.length, 1);
+    assert.ok(discardEditButton(fixture), "the edit holds until the send is accepted");
+
+    // The send fails: the copy is still in the composer, so its edit comes back.
+    await act(async () => { sends[0]!.reject(new Error("transport rejected")); });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "original prompt");
+    // The failure is the more severe notice; the edit waits behind it in "+1 More".
+    const slot = fixture.container.querySelector(".session-notice-slot");
+    assert.match(slot?.textContent ?? "", /Message Not Sent/);
+    assert.ok([...slot?.querySelectorAll("button") ?? []].some((button) => button.textContent === "+1 More"));
+    const dismiss = slot?.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]');
+    assert.ok(dismiss);
+    await act(async () => { dismiss.click(); });
+    assert.ok(discardEditButton(fixture), "a send that did not land gives the edit back");
+
+    // Sent again, and while it is in flight the person writes a new draft and edits over it.
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+    assert.equal(sends.length, 2);
+    await act(async () => {
+      fixture.composer.value = "a newer draft";
+      fireDomEvent.change(fixture.composer);
+    });
+    await clickEdit(fixture);
+    await replaceDraft();
+    assert.equal(fixture.composer.value, "original prompt");
+    assert.ok(discardEditButton(fixture));
+
+    await act(async () => { sends[1]!.resolve(); });
+    await flushAsyncWork();
+    const discard = discardEditButton(fixture);
+    assert.ok(discard, "the earlier send landing does not end the newer edit");
+    await act(async () => { discard.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "a newer draft", "Discard Edit puts back the draft written during the send");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+for (const outcome of ["fails", "lands"] as const) {
+  test(`a send that ${outcome} after the view remounts settles the edit it sent (#2185)`, async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const sends: Array<Deferred<void>> = [];
+    const fixture = await mountFixture(draft, {
+      mainEventPayloads: EDITABLE_TURN,
+      client: {
+        prompt: async () => {
+          const pending = deferred<void>();
+          sends.push(pending);
+          await pending.promise;
+          return undefined as never;
+        },
+      },
+    });
+    try {
+      await resolveDraft(draft, "my own draft");
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+      await clickEdit(fixture);
+      await replaceDraft();
+      await act(async () => { sendButton(fixture).click(); });
+      await flushAsyncWork();
+      assert.equal(sends.length, 1);
+
+      await fixture.remountWithDraftLoader(async () => ({ text: "original prompt", images: [submittedImage], updatedAt: 2 }));
+      await flushAsyncWork();
+      if (outcome === "fails") {
+        await act(async () => { sends[0]!.reject(new Error("transport rejected")); });
+        await flushAsyncWork();
+        await act(async () => { flushFrames(); });
+        assert.ok(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), "the edit stays stored");
+        const dismiss = fixture.container.querySelector<HTMLButtonElement>('.session-notice-slot button[aria-label="Dismiss"]');
+        if (dismiss) await act(async () => { dismiss.click(); });
+        const discard = discardEditButton(fixture);
+        assert.ok(discard, "the remounted view still offers Discard Edit");
+        await act(async () => { discard.click(); });
+        await act(async () => { flushFrames(); });
+        assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "my own draft");
+      } else {
+        await act(async () => { sends[0]!.resolve(); });
+        await flushAsyncWork();
+        assert.equal(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), null, "the accepted send ends the edit");
+        assertNoDomNode(editingCopyNotice(fixture), "and the remounted view follows");
+      }
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+}
+
+test("an older send landing after a remount keeps a newer copy loaded in the new view (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const sends: Array<Deferred<void>> = [];
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: EDITABLE_TURN,
+    client: {
+      prompt: async () => {
+        const pending = deferred<void>();
+        sends.push(pending);
+        await pending.promise;
+        return undefined as never;
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "my own draft");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    await clickEdit(fixture);
+    await replaceDraft();
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+    assert.equal(sends.length, 1);
+
+    // The view remounts while the copy is in flight; there the person writes a new draft and edits
+    // over it.
+    const composer = await fixture.remountWithDraftLoader(async () => ({ text: "original prompt", images: [submittedImage], updatedAt: 2 }));
+    await flushAsyncWork();
+    await act(async () => {
+      composer.value = "written in the new view";
+      fireDomEvent.change(composer);
+    });
+    await clickEdit(fixture);
+    await replaceDraft();
+    const newer = loadComposerEditCopy(fixture.sessionId, fixture.instanceScope);
+    assert.equal(newer?.previous?.text, "written in the new view");
+
+    await act(async () => { sends[0]!.resolve(); });
+    await flushAsyncWork();
+    assert.deepEqual(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), newer,
+      "the older send landing leaves the newer copy stored");
+    const discard = discardEditButton(fixture);
+    assert.ok(discard, "and its Discard Edit");
+    await act(async () => { discard.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "written in the new view");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Use as New Message for a recovered queued edit ends the copy it displaced (#2185)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 106,
+    mainEventPayloads: EDITABLE_TURN,
+    sessionPatch: {
+      queued: [{ id: "queue-1", text: "Changed on another client", liveQueueObserved: true, editable: true, editRevision: "qer_newer" }],
+    },
+  });
+  const recoveryScope = {
+    instanceScope: fixture.instanceScope,
+    accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+    sessionId: fixture.sessionId,
+  };
+  try {
+    await resolveDraft(draft, "original prompt");
+    // A loaded copy was the ordinary draft when a queued edit displaced it, and that edit failed.
+    saveComposerEditCopy(fixture.sessionId, {
+      id: "copy-1", turn: 3, previous: { text: "my own draft", images: [] },
+    }, fixture.instanceScope);
+    assert.equal(saveDurableQueuedEditRecovery(recoveryScope, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "original prompt", images: [] },
+      },
+      draft: { text: "Recovered queued content", images: [] },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+    await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assertNoDomNode(editingCopyNotice(fixture), "the recovered queued edit owns the composer");
+
+    const reuse = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Use as New Message") as HTMLButtonElement | undefined;
+    assert.ok(reuse);
+    await act(async () => { reuse.click(); });
+    await flushAsyncWork(450);
+    assertNoDomNode(fixture.container.querySelector(".queued-edit-banner"));
+    assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "Recovered queued content");
+    assertNoDomNode(editingCopyNotice(fixture), "no Editing a Copy notice for a message that is not the copy");
+    assert.equal(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), null);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Edit as a New Turn exits Answer Mode and reveals the copied message", { timeout: 5_000 }, async () => {
   setQuestionResponseStyle("composer", domWindow as never);
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft, {
@@ -4434,23 +4832,12 @@ test("Load into Composer exits Answer Mode and reveals the prepared message", { 
       edit.focus();
       edit.click();
     });
-    const dialogInput = fixture.container.querySelector(".message-action-input") as HTMLTextAreaElement;
-    await act(async () => {
-      dialogInput.value = "prepared new turn";
-      fireDomEvent.change(dialogInput);
-    });
-    const load = [...fixture.container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Load into Composer") as HTMLButtonElement;
-    await act(async () => {
-      load.focus();
-      load.click();
-    });
     await flushAsyncWork();
     await act(async () => { flushFrames(); });
 
     assertNoDomNode(fixture.container.querySelector(".composer-answer-input"));
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
-    assert.equal(ordinary?.value, "prepared new turn");
+    assert.equal(ordinary?.value, "original prompt");
     assert.equal(ordinary?.ownerDocument.activeElement, ordinary);
   } finally {
     await unmountFixture(fixture);

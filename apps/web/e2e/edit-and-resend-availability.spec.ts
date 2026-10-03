@@ -33,12 +33,10 @@ test("an Edit as a New Turn that is temporarily blocked stays listed and says wh
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("online"));
   await expect(edit).toHaveCount(2);
+  const copied = (await page.locator(".tl-row.user .bubble-text").last().textContent()) ?? "";
   await edit.last().click({ force: true });
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Load into Composer" })).toBeEnabled();
-
-  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
-  await expect(dialog.getByText("runner-1 is offline. You can send again when it reconnects.")).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Load into Composer" })).toBeDisabled();
+  // #2185: no dialog. The message is in the composer and the notice slot says it is a copy.
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator(".composer-input")).toHaveValue(copied);
+  await expect(page.locator('.session-notice-slot[data-notice-key="editing-copy"]')).toContainText("Editing a copy of your Turn");
 });
