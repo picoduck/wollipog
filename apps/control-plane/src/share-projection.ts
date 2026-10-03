@@ -152,13 +152,16 @@ export function redactOperationalTranscriptText(
  * cut, so a bound can never split a secret out of its pattern. What remains is the one-line display
  * form the app names the session with (apps/web/src/session-title.ts: first non-empty line,
  * whitespace collapsed, one trailing period dropped), bounded to
- * TRANSCRIPT_SHARE_TITLE_MAX_CHARS code points with an ellipsis.
+ * TRANSCRIPT_SHARE_TITLE_MAX_CHARS code points with an ellipsis. Control characters other than
+ * whitespace are dropped first: a name has no use for them, and SQLite's LENGTH() stops at NUL, so
+ * one would let a title pass this bound yet fail the stored column's CHECK.
  */
 export function sharedTranscriptTitle(
   title: string,
   sensitivePathPrefixes: readonly string[] = [],
 ): string | null {
-  const redacted = redactOperationalTranscriptText(title, sensitivePathPrefixes);
+  const printable = title.replace(/[\u0000-\u0008\u000e-\u001f\u007f]/g, "");
+  const redacted = redactOperationalTranscriptText(printable, sensitivePathPrefixes);
   const line = redacted.split(/\r\n|\r|\n/).find((candidate) => candidate.trim() !== "") ?? "";
   const collapsed = line.replace(/\s+/g, " ").trim();
   const display = /[^.]\.$/.test(collapsed) ? collapsed.slice(0, -1).trimEnd() : collapsed;

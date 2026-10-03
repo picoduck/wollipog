@@ -386,6 +386,9 @@ test("a shared title is the redacted one-line display title, bounded in code poi
   assert.equal(sharedTranscriptTitle("Wait for it..."), "Wait for it...");
   assert.equal(sharedTranscriptTitle(" \n\t "), null);
   assert.equal(sharedTranscriptTitle(""), null);
+  assert.equal(sharedTranscriptTitle("\u0000Fix\u0007 it\u007f"), "Fix it", "control characters are dropped");
+  assert.equal(sharedTranscriptTitle("Fix\vthe\fbug"), "Fix the bug", "whitespace controls still separate words");
+  assert.equal(sharedTranscriptTitle("\u0000\u0001"), null);
 
   // Redaction runs on the stored title exactly as on message text, including multi-line key blocks
   // and configured workspace roots.

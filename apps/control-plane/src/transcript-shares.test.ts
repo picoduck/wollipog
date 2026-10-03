@@ -417,6 +417,16 @@ test("an opted-in title is redacted like message text and bounded to 200 charact
   assert.equal(Array.from(bounded ?? "").length, 200);
   assert.ok(bounded?.endsWith("…"));
 
+  // SQLite's LENGTH() stops at NUL, so control characters are dropped before the title is stored;
+  // a title the rename path accepts can never fail the column's CHECK and turn creation into a 500.
+  db.setSessionTitle("session-share", "\u0000Fix\u0007 the\u0000 bug\u007f", 4, "user");
+  const control = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, 10_000,
+  );
+  assert.equal(control.ok, true);
+  if (!control.ok) return;
+  assert.equal(resolvePublicTranscriptShare(db, `Wollipog-Share ${control.value.token}`, 10_001)?.title, "Fix the bug");
+
   // A title that trimming leaves empty is not stored, so the page keeps its own heading.
   db.setSessionTitle("session-share", "  \n ", 5, "user");
   const blank = createAuthorizedTranscriptShare(

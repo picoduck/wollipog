@@ -33,7 +33,8 @@ request. Any value other than a boolean is refused with `400 invalid_include_tit
 or `false` value stores nothing.
 
 With the opt-in, creation freezes the session's current title beside the projection: the whole
-stored title is redacted exactly as message text is, then reduced to the one-line form the app names
+stored title loses its non-whitespace control characters and is redacted exactly as message text
+is, then reduced to the one-line form the app names
 the session with (first non-empty line, whitespace collapsed, one trailing period dropped) and bounded
 to 200 characters with an ellipsis. A title that is empty after this is not stored. A later rename
 does not change an issued link. The public response then includes an optional `title`, which the page
