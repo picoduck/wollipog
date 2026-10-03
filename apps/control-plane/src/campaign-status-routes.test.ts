@@ -164,7 +164,7 @@ const known = (usd: number): CampaignMetric<CampaignCostValue> =>
   ({ availability: "known", value: { usd, source: "providerReported", unpricedRecords: 0 } });
 
 test("campaign views carry the ledger summary and descendants carry their membership (#2417)", () => {
-  const { db, svc, root, child } = campaignFixture();
+  const { db, svc, root, child, refreshed } = campaignFixture();
   try {
     const plain = child(root, "Plain Child");
     const nested = child(root, "Nested Orchestrator", true);
@@ -185,14 +185,19 @@ test("campaign views carry the ledger summary and descendants carry their member
     const plan = svc.recordCampaignPlan(root, { items: [{ key: "a" }, { key: "b" }], planComplete: true });
     assert.ok(plan.ok && plan.data, String(plan.error));
     const [a, b] = plan.data.items.map((item) => item.workItemId);
+    refreshed.length = 0;
     const assigned = svc.assignCampaignWorkItem(nested, { workItemId: a!, childSessionId: grandchild });
     assert.ok(assigned.ok && assigned.data, String(assigned.error));
     assert.deepEqual(db.getSession(grandchild)!.campaignMembership,
       { campaignSessionId: root, currentWorkItemId: a, currentAttemptId: assigned.data.attempt.id });
+    assert.ok(refreshed.includes(grandchild), "the assigned child's view is re-sent with its membership");
+    assert.equal(refreshed.includes(plain), false, "a child whose attempt did not change is not re-sent");
     // Reassignment moves the membership with the open attempt.
+    refreshed.length = 0;
     const moved = svc.assignCampaignWorkItem(nested, { workItemId: b!, childSessionId: grandchild });
     assert.ok(moved.ok && moved.data, String(moved.error));
     assert.equal(db.getSession(grandchild)!.campaignMembership?.currentWorkItemId, b);
+    assert.ok(refreshed.includes(grandchild));
     work = db.getSession(root)!.orchestratorCampaign!.work!;
     assert.equal(work.planState, "recorded");
     assert.equal(work.revision, moved.data.revision);
@@ -246,7 +251,7 @@ test("observed status changes are coalesced into one revision per campaign and r
   const { db, svc, root, child, observers, refreshed } = campaignFixture();
   const observations = new CampaignWorkObservations({
     db,
-    refresh: (campaignSessionId, sessionIds) => svc.campaignWorkObserved(campaignSessionId, sessionIds),
+    refresh: (campaignSessionId) => svc.campaignWorkObserved(campaignSessionId),
     warn: (message) => assert.fail(message),
     delayMs: 60_000,
   });
@@ -289,6 +294,57 @@ test("observed status changes are coalesced into one revision per campaign and r
     // Re-sending views does not feed back into another revision.
     observations.flush();
     assert.equal(db.campaignWorkLedger.revision(root), revision + 1);
+  } finally {
+    observations.dispose();
+    db.close();
+  }
+});
+
+test("deleting an attempt's session refreshes every view of its campaign, observed or not (#2417)", () => {
+  const { db, svc, root, child, observers, refreshed } = campaignFixture();
+  const observations = new CampaignWorkObservations({
+    db,
+    refresh: (campaignSessionId) => svc.campaignWorkObserved(campaignSessionId),
+    warn: (message) => assert.fail(message),
+    delayMs: 60_000,
+  });
+  observers.push({ changed: (id) => observations.sessionChanged(id), removed: (id) => observations.sessionRemoved(id) });
+  try {
+    const nested = child(root, "Nested", true);
+    const deeper = child(nested, "Deeper", true);
+    const worker = child(deeper, "Worker");
+    const finished = child(root, "Finished");
+    const plan = svc.recordCampaignPlan(root, { items: [{ key: "open" }, { key: "closed" }], planComplete: true });
+    const [openId, closedId] = plan.data!.items.map((item) => item.workItemId);
+    assert.ok(svc.assignCampaignWorkItem(deeper, { workItemId: openId!, childSessionId: worker }).ok);
+    assert.ok(svc.assignCampaignWorkItem(root, { workItemId: closedId!, childSessionId: finished }).ok);
+    assert.ok(svc.updateCampaignWorkItem(root, { workItemId: closedId!, endAttempt: { reason: "abandoned" } }).ok);
+    observations.sessionChanged(worker);
+    observations.flush();
+
+    // An observed open attempt: the root and both nested Orchestrators embed the summary.
+    let revision = db.campaignWorkLedger.revision(root);
+    db.deleteSession(worker);
+    observations.sessionRemoved(worker);
+    refreshed.length = 0;
+    observations.flush();
+    assert.equal(db.campaignWorkLedger.revision(root), revision + 1, "the deletion is one revision, not two");
+    for (const id of [root, nested, deeper]) assert.ok(refreshed.includes(id), `${id} is re-sent`);
+
+    // A closed attempt this process never observed, deleted on a path that publishes nothing else.
+    revision = db.campaignWorkLedger.revision(root);
+    db.deleteSession(finished);
+    observations.sessionRemoved(finished);
+    refreshed.length = 0;
+    observations.flush();
+    assert.equal(db.campaignWorkLedger.revision(root), revision + 1);
+    assert.ok(refreshed.includes(root), "the surviving root is re-sent with its new revision");
+    assert.equal(db.getSession(root)!.orchestratorCampaign!.work!.revision, revision + 1);
+    // The queue is drained: an unrelated removal refreshes nothing.
+    refreshed.length = 0;
+    observations.sessionRemoved("unrelated");
+    observations.flush();
+    assert.deepEqual(refreshed, []);
   } finally {
     observations.dispose();
     db.close();
@@ -502,7 +558,7 @@ test("summary counts exclude duplicate and rejected recommendations, and accepte
 });
 
 test("item details keep archived and deleted children's history and report observed facts with freshness (#2417)", async () => {
-  const { db, svc, root, child } = campaignFixture();
+  const { db, svc, root, child, refreshed } = campaignFixture();
   const { app, get } = await routes(db, { owner: human("owner", "owner") });
   try {
     const archived = child(root, "Archived Child");
@@ -513,10 +569,13 @@ test("item details keep archived and deleted children's history and report obser
     assert.ok(svc.assignCampaignWorkItem(root, { workItemId: goneId!, childSessionId: deleted }).ok);
     db.updateSessionStatus(archived, "idle", Date.now());
     const seq = db.appendEvent(archived, { kind: "agent_message", text: "Done", final: true }, Date.now()).seq;
+    refreshed.length = 0;
     const verified = svc.verifyCampaignChild(root, {
       childSessionId: archived, reportEventSeq: seq, followUpsAccounted: true, workItem: { id: keptId!, outcome: "delivered" },
     });
     assert.ok(verified.ok, String(verified.error));
+    assert.equal(db.getSession(archived)!.campaignMembership?.currentWorkItemId, null, "delivery closes the attempt");
+    assert.ok(refreshed.includes(archived), "the child's view is re-sent without its finished assignment");
 
     // The delivered item still observes its closed attempt's session, including cleanup.
     const worktrees = [{ id: "wt-1", path: "/worktrees/kept", branch: "fix/kept", source: "created" as const }];

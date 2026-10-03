@@ -22,14 +22,14 @@ interface ObservedAttempt {
 export class CampaignWorkObservations {
   /** What was last observed of each session executing an open attempt. */
   private readonly observed = new Map<string, ObservedAttempt>();
-  /** Campaigns awaiting their coalesced bump, with the attempt sessions that changed. */
-  private readonly pending = new Map<string, Set<string>>();
+  /** Campaigns awaiting their coalesced refresh, and whether it also needs a revision bump. */
+  private readonly pending = new Map<string, { bump: boolean }>();
   private timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly deps: {
     db: Pick<ControlPlaneDb, "campaignWorkLedger">;
-    /** Re-send the campaign's views after its revision moved. */
-    refresh(campaignSessionId: string, sessionIds: readonly string[]): void;
+    /** Re-send every view that embeds the campaign's summary after its revision moved. */
+    refresh(campaignSessionId: string): void;
     warn(message: string): void;
     delayMs?: number;
     now?: () => number;
@@ -48,33 +48,40 @@ export class CampaignWorkObservations {
       // An attempt this process has not observed yet may have changed since it was opened (or
       // since a restart), so it counts once; assignment itself already bumped the revision.
       if (previous?.attemptId === current.attemptId && previous.key === current.key) return;
-      this.schedule(current.campaignSessionId, sessionId);
+      this.schedule(current.campaignSessionId, true);
     } catch (error) {
       this.deps.warn(`campaign work observation failed for ${sessionId}: ${String(error)}`);
     }
   }
 
-  /** A deleted session's attempts were already bumped by the ledger's deletion trigger; this only
-   * re-sends the campaign views that show it. */
+  /** Called for every session removal. Deleting an attempt's session already moved its campaign's
+   * revision in the database, which also queued the campaign, whether or not this process ever
+   * observed the attempt; drain that queue so the views follow. A cascade that removed several
+   * sessions is drained by whichever removal is broadcast first. */
   sessionRemoved(sessionId: string): void {
-    const previous = this.observed.get(sessionId);
     this.observed.delete(sessionId);
-    if (previous) this.schedule(previous.campaignSessionId, null);
+    try {
+      for (const campaignSessionId of this.deps.db.campaignWorkLedger.takeCampaignsWithDeletedAttemptSessions()) {
+        this.schedule(campaignSessionId, false);
+      }
+    } catch (error) {
+      this.deps.warn(`campaign work deletion refresh failed for ${sessionId}: ${String(error)}`);
+    }
   }
 
-  /** Apply every pending bump now. Used by tests and on shutdown. */
+  /** Apply every pending bump and refresh now. Used by tests and on shutdown. */
   flush(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     const pending = [...this.pending];
     this.pending.clear();
     const now = this.deps.now?.() ?? Date.now();
-    for (const [campaignSessionId, sessionIds] of pending) {
+    for (const [campaignSessionId, { bump }] of pending) {
       try {
-        this.deps.db.campaignWorkLedger.observedChanged(campaignSessionId, now);
-        this.deps.refresh(campaignSessionId, [...sessionIds]);
+        if (bump) this.deps.db.campaignWorkLedger.observedChanged(campaignSessionId, now);
+        this.deps.refresh(campaignSessionId);
       } catch (error) {
-        this.deps.warn(`campaign work observation bump failed for ${campaignSessionId}: ${String(error)}`);
+        this.deps.warn(`campaign work observation refresh failed for ${campaignSessionId}: ${String(error)}`);
       }
     }
   }
@@ -86,10 +93,8 @@ export class CampaignWorkObservations {
     this.observed.clear();
   }
 
-  private schedule(campaignSessionId: string, sessionId: string | null): void {
-    const sessions = this.pending.get(campaignSessionId) ?? new Set<string>();
-    if (sessionId) sessions.add(sessionId);
-    this.pending.set(campaignSessionId, sessions);
+  private schedule(campaignSessionId: string, bump: boolean): void {
+    this.pending.set(campaignSessionId, { bump: bump || (this.pending.get(campaignSessionId)?.bump ?? false) });
     if (this.timer) return;
     this.timer = setTimeout(() => this.flush(), this.deps.delayMs ?? CAMPAIGN_OBSERVATION_COALESCE_MS);
     this.timer.unref?.();

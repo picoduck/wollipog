@@ -161,12 +161,18 @@ CREATE INDEX IF NOT EXISTS idx_campaign_work_attempts_campaign
   ON campaign_work_attempts(campaign_session_id, work_item_id, ordinal);
 -- Deleting an attempt's session changes what the ledger reads (the attempt loses its session and an
 -- open one blocks its item), so it is a new revision whichever deletion path ran. Foreign-key
--- SET NULL actions fire update triggers.
+-- SET NULL actions fire update triggers. The campaign is also queued for a view refresh, since
+-- after the deletion nothing else can name it; the next session removal drains the queue.
+CREATE TABLE IF NOT EXISTS campaign_work_deleted_attempt_sessions (
+  campaign_session_id TEXT PRIMARY KEY
+);
 CREATE TRIGGER IF NOT EXISTS campaign_work_attempt_session_deleted
   AFTER UPDATE OF session_id ON campaign_work_attempts
   WHEN OLD.session_id IS NOT NULL AND NEW.session_id IS NULL
 BEGIN
   UPDATE campaign_work_ledgers SET revision=revision+1 WHERE campaign_session_id=NEW.campaign_session_id;
+  INSERT OR IGNORE INTO campaign_work_deleted_attempt_sessions (campaign_session_id)
+    VALUES (NEW.campaign_session_id);
 END;
 
 -- Delivery proof for one attempt. A later execution of the same child never invalidates it.
@@ -445,6 +451,12 @@ export class CampaignWorkLedgerStore {
     return this.revision(campaignId);
   }
 
+  /** Campaigns whose attempt sessions were deleted since the last call, for a view refresh. */
+  takeCampaignsWithDeletedAttemptSessions(): string[] {
+    return (this.stmt("DELETE FROM campaign_work_deleted_attempt_sessions RETURNING campaign_session_id")
+      .all() as Array<{ campaign_session_id: string }>).map((row) => row.campaign_session_id);
+  }
+
   /** The open attempt a session is executing and a stable key for what the ledger observes of the
    * session, so a caller can tell when an observed change moves derived state. */
   observedAttempt(sessionId: string): { campaignSessionId: string; attemptId: string; key: string } | null {
@@ -498,6 +510,14 @@ export class CampaignWorkLedgerStore {
     return new Set((this.stmt(
       "SELECT DISTINCT session_id FROM campaign_work_attempts WHERE campaign_session_id=? AND session_id IS NOT NULL",
     ).all(campaignId) as Array<{ session_id: string }>).map((row) => row.session_id));
+  }
+
+  /** Each session's open attempt in this campaign, keyed by session. */
+  openAttemptsBySession(campaignId: string): Map<string, string> {
+    return new Map((this.stmt(
+      `SELECT session_id, id FROM campaign_work_attempts
+       WHERE campaign_session_id=? AND ended_at IS NULL AND session_id IS NOT NULL`,
+    ).all(campaignId) as Array<{ session_id: string; id: string }>).map((row) => [row.session_id, row.id]));
   }
 
   /** Every attempt's session per item, in attempt order, for per-principal cost visibility. A

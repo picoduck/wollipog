@@ -961,7 +961,7 @@ registerCampaignStatusRoutes(app, { db, requestPrincipal });
 // changes a coalesced ledger revision so Campaign Status lists and details reload (#2417).
 const campaignWorkObservations = new CampaignWorkObservations({
   db,
-  refresh: (campaignSessionId, sessionIds) => svc.campaignWorkObserved(campaignSessionId, sessionIds),
+  refresh: (campaignSessionId) => svc.campaignWorkObserved(campaignSessionId),
   warn: (message) => app.log.warn(message),
 });
 hub.observeSessions({

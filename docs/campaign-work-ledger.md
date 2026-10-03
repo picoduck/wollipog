@@ -249,10 +249,16 @@ mechanism (`apps/control-plane/src/campaign-work-observation.ts`):
   nothing. An attempt not yet observed by this process counts as changed once, since it may have
   changed after assignment or across a restart.
 - Changes are coalesced per campaign for one second: a burst of child status changes costs one
-  revision increment and one refresh of the root and of the nested Orchestrators above the changed
-  sessions. Re-sending those views does not feed back into another increment.
-- Deleting an attempt's session increments the revision in the database itself (a trigger on the
-  foreign key's `SET NULL`), whichever deletion path ran; the observer then re-sends the views.
+  revision increment and one refresh of the root and of every nested Orchestrator in the campaign,
+  since each of their views embeds the root's summary. Re-sending those views does not feed back
+  into another increment.
+- Deleting an attempt's session (open or closed) increments the revision in the database itself (a
+  trigger on the foreign key's `SET NULL`), whichever deletion path ran, and queues the campaign in
+  `campaign_work_deleted_attempt_sessions`. Every session removal the hub broadcasts drains that
+  queue, so the views are refreshed even when this process never observed the attempt and the
+  deleted session's ancestry is gone.
+- A ledger write, or a delivered verification, that opens, closes, or replaces a session's open
+  attempt also re-sends that session, whose `campaignMembership` names it.
 - A campaign that has never recorded ledger state has no revision to move and no cursor to
   invalidate.
 
