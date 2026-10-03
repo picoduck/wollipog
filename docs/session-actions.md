@@ -32,6 +32,10 @@ idempotent command applies the launch policy; reconnect inventory reconciles los
 peers cannot advance the intent. An unconfirmed surviving provider leaves it pending rather than
 granting new authority. Stop during preparation abandons the conversion only after retirement is
 confirmed, preserving the previous role.
+After runner replacement, **Stop Session** can also cancel an unprepared intent whose old provider
+cannot be identified. Cancellation leaves the original role and credentials unchanged and never
+reports the provider prepared or grants the target role. Fresh conversion refuses a provider already
+closing rather than recording it as absent.
 
 Structured control-plane events `session_role_conversion_requested`, `_committed`, `_applied`,
 `_refused`, and `_reconciliation_pending` carry the session/conversion identity and entry point, without
