@@ -4511,3 +4511,85 @@ test("resolved default Codex model prices usage without pinning future requests"
   assert.equal(usage?.kind === "token_usage" ? usage.model : undefined, "gpt-6.1-sol");
   assert.equal((h.driver as any).config.model, "default", "provider resolution must not pin the user configuration");
 });
+
+
+test("artifact guidance appends effective fresh-thread instructions and preserves resume policy", async () => {
+  for (const resume of [false, true]) {
+    const h = makeHarness({ artifactGuidance: "artifact guidance", ...(resume ? { resumeId: "thread" } : {}) });
+    const calls: Array<{ method: string; params: any }> = [];
+    (h.driver as any).peer = {
+      request: async (method: string, params: any) => {
+        calls.push({ method, params });
+        return { thread: { id: "thread", status: { type: "idle" } } };
+      },
+      requestWithDeadline: async (method: string, params: any) => {
+        calls.push({ method, params });
+        return method === "config/read" ? { config: { developer_instructions: "user instructions" } } : { data: [] };
+      },
+    };
+    assert.equal(await h.driver.newSession("/project"), "thread");
+    const launch = calls.find((call) => call.method === (resume ? "thread/resume" : "thread/start"))!;
+    assert.equal(launch.params.developerInstructions, resume ? undefined : "user instructions\n\nartifact guidance");
+    assert.equal((h.driver as any).artifactPromptGuidance, resume ? "artifact guidance" : undefined);
+    if (resume) assert.ok(!calls.some((call) => call.method === "config/read"));
+  }
+});
+
+for (const kind of ["unsupported", "malformed"]) test(`artifact discovery preserves fresh launch when config/read is ${kind}`, async () => {
+  const h = makeHarness({ artifactGuidance: "artifact guidance" });
+  const calls: Array<{ method: string; params: any }> = [];
+  (h.driver as any).peer = {
+    request: async (method: string, params: any) => { calls.push({ method, params }); return { thread: { id: "fresh" } }; },
+    requestWithDeadline: async (method: string) => {
+      if (method === "config/read") {
+        if (kind === "unsupported") throw new Error("unsupported method");
+        return { config: { developer_instructions: { invalid: true } } };
+      }
+      return { data: [] };
+    },
+  };
+  assert.equal(await h.driver.newSession("/project"), "fresh");
+  assert.ok(!("developerInstructions" in calls.find((call) => call.method === "thread/start")!.params));
+  assert.equal((h.driver as any).artifactPromptGuidance, "artifact guidance");
+});
+
+
+test("owned artifact guidance replaces its previous policy only on the pinned resumed thread", async () => {
+  for (const pinned of [true, false]) {
+    const h = makeHarness({ resumeId: "resumed", artifactGuidance: "Manual: no upload authority",
+      artifactDeveloperInstructions: { threadId: pinned ? "resumed" : "other-thread", instructions: "original user rules" } });
+    const calls: Array<{ method: string; params: any }> = [];
+    const pinnedBases: unknown[] = [];
+    (h.driver as any).cb.onArtifactDeveloperInstructions = (value: unknown) => pinnedBases.push(value);
+    (h.driver as any).peer = {
+      request: async (method: string, params: any) => {
+        calls.push({ method, params }); return { thread: { id: "resumed", status: { type: "idle" } } };
+      },
+      requestWithDeadline: async () => ({ data: [] }),
+    };
+    await h.driver.newSession("/project");
+    const launch = calls.find((call) => call.method === "thread/resume")!;
+    if (pinned) {
+      assert.equal(launch.params.developerInstructions, "original user rules\n\nManual: no upload authority");
+      assert.deepEqual(pinnedBases, [{ threadId: "resumed", instructions: "original user rules" }]);
+      assert.equal((h.driver as any).artifactPromptGuidance, undefined);
+    } else {
+      assert.ok(!("developerInstructions" in launch.params));
+      assert.deepEqual(pinnedBases, []);
+      assert.equal((h.driver as any).artifactPromptGuidance, "Manual: no upload authority");
+    }
+  }
+});
+
+test("fresh artifact instruction ownership records only original text after exact thread creation", async () => {
+  const h = makeHarness({ artifactGuidance: "Wollipog policy" });
+  const bases: unknown[] = [];
+  (h.driver as any).cb.onArtifactDeveloperInstructions = (value: unknown) => bases.push(value);
+  (h.driver as any).peer = {
+    request: async () => ({ thread: { id: "created" } }),
+    requestWithDeadline: async (method: string) => method === "config/read"
+      ? { config: { developer_instructions: "original instructions" } } : { data: [] },
+  };
+  await h.driver.newSession("/project");
+  assert.deepEqual(bases, [{ threadId: "created", instructions: "original instructions" }]);
+});

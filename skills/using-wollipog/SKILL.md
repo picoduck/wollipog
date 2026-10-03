@@ -22,6 +22,7 @@ wollipog session prompt <session-id> <message> --json
 wollipog session wait <session-id> --for input_required,completed,failed,stopped --json
 wollipog session stop <session-id> --json
 wollipog session stop-job <session-id> <job-id> --json
+wollipog artifact attach --file <absolute-path> [--name <display-name>] --json
 wollipog worktree create --branch <name> [--base <ref>] --json
 wollipog worktree attach --path <absolute-path> --json
 wollipog worktree select --path <absolute-path> --json
@@ -157,6 +158,47 @@ child model or effort. It returns paginated installation-specific models, labels
 harness fallback efforts, distinguishes unavailable discovery from no configurable effort, and
 excludes hidden models unless explicitly requested. Follow `page.nextOffset` until `truncated` is
 false; creation still revalidates the chosen pair against current discovery.
+
+## Private Session Artifacts
+
+Session artifacts let authorized users view screenshots and short videos remotely, including when
+connected from another device. The runner uploads the file directly to private control-plane
+storage; the bytes do not pass through the model context. Attaching does not assign this skill or
+change any hosting preference.
+
+Honor the session's **Artifact Uploads** preference and explicit task/project instructions:
+
+- **Manual** is the default. Upload only when the user requests it or applicable project
+  instructions authorize it. Discovering the capability grants no upload authority.
+- **Use Wollipog Automatically** authorizes relevant task evidence, such as a screenshot documenting
+  a UI fix, never arbitrary filesystem files. Explicit hosting requirements still take precedence.
+- **Use External Hosting** follows the user's configured external workflow. Do not fall back to
+  Wollipog, invent a destination, or provision credentials when that workflow is missing.
+
+Where the session's capability guidance lists the MCP tool, attach a completed file with
+`attach_session_artifact` and an **absolute** `path`, optionally a `name`. Otherwise use the injected
+CLI (the path must be readable in the session's execution context):
+
+```sh
+"$WOLLIPOG_CLI" artifact attach --file /absolute/path/after-desktop.png --name "Desktop After" --json
+"$WOLLIPOG_CLI" artifact attach --file /absolute/path/interaction.webm --json
+```
+
+On native Windows use the PowerShell launcher form from the section below, followed by
+`artifact attach --file <absolute-path> --json`. Never put base64 media into a tool argument.
+PNG, JPEG, GIF, and WebP images are limited to **8 MiB** each; MP4 and WebM videos to **32 MiB** each.
+Content is validated independently of the filename. Screenshots require a protocol-v169 control
+plane; videos require v186. Unsupported contexts and older peers must be updated or use the user's
+explicit external workflow; do not invent a working upload command.
+
+A successful attachment returns metadata only: `artifactId`, `mediaType`, `sizeBytes`, and `sha256`.
+Cite the returned values exactly, for example in a UI-evidence item with `evidenceId`, `artifactId`,
+`mediaType`, and `sha256`. Refer to the Session artifact in your report; it is available in the
+Session's artifact panel to authorized users. An artifact id is not a public URL, and attaching a
+file does not approve evidence or a merge. External evidence URLs and review rules remain valid.
+Attach the exact completed capture you intend to cite. Re-attaching an unchanged identical file
+returns the existing artifact; a changed file needs new metadata and any applicable new review.
+Keep files within the authorized task scope and respect privacy, retention, and approval policies.
 
 ## Retiring a Worktree
 

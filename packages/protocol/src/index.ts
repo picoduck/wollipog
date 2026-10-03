@@ -625,7 +625,14 @@
 //      on the `question_resolved` it emits for exactly that request. Secret and email answers keep
 //      no content. Additive + optional: older runners ignore the field and older control planes
 //      send none, so the transcript row shows its status without an answer.
-export const PROTOCOL_VERSION = 200;
+// 201: artifact upload preferences reach session launch/resume instruction preparation. The
+//      control plane refreshes the non-secret preference outside durable command digests;
+//      older runners receive no field they cannot apply. Upload discovery grants no authority.
+export const PROTOCOL_VERSION = 201;
+
+export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
+export interface ArtifactUploadSettingsView { preference: ArtifactUploadPreference }
+
 export const PROJECT_MEMORY_MIN_PROTOCOL = 195;
 /** Only Claude versions whose directory override we have verified are advertised as supported.
  * Codex native memory combines projects in a database and cannot be shared project by project. */
@@ -896,6 +903,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** Control plane serves the session-scoped screenshot attach route. Checked by the runner's
    * attach_session_artifact tool against the connected control plane, not against a runner. */
   sessionArtifactFileAttach: 169,
+  artifactSessionGuidance: 201,
   sessionVideoArtifactAttach: 186,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
@@ -8389,6 +8397,7 @@ export interface RegisterRejectedMessage {
 
 /** Everything the runner needs to launch an agent session locally. */
 export interface SessionLaunchSpec {
+  artifactUploads?: ArtifactUploadPreference;
   projectMemory?: SessionProjectMemory;
   sessionId: string;
   /** Opaque identity used to prove that an ambiguous replacement start reached the runner. */
@@ -8433,6 +8442,7 @@ export interface StartSessionMessage {
 }
 
 export interface PromptSessionMessage {
+  artifactUploads?: ArtifactUploadPreference;
   projectMemory?: SessionProjectMemory;
   type: "prompt_session";
   sessionId: string;
@@ -8559,6 +8569,7 @@ export type DurableSessionCommand =
  * `commandId` and `payloadDigest` remain stable across retries. */
 export interface DurableSessionCommandMessage {
   /** Current policy outside the immutable command digest; refreshed on transport retry. */
+  artifactUploads?: ArtifactUploadPreference;
   projectMemory?: SessionProjectMemory;
   type: "durable_session_command";
   requestId: string;
@@ -10007,6 +10018,7 @@ export type ControlPlaneToRunner =
   | GithubIssueClosureMessage
   | CampaignForgeObserveMessage
   | AgentControlCredentialRegisteredMessage
+  | { type: "set_session_artifact_uploads"; sessionId: string; preference: ArtifactUploadPreference }
   | { type: "set_session_project_memory"; sessionId: string; projectMemory: SessionProjectMemory }
   | StartSessionMessage
   | PromptSessionMessage

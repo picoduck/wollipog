@@ -1,3 +1,4 @@
+import { artifactGuidance } from "./artifact-guidance.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { isTerminal } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
@@ -5676,6 +5677,8 @@ export class SessionManager {
       titleSource: spec.titleSource ?? "generated",
       config: spec.config ?? {},
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
+      artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
+      artifactDeveloperInstructions: priorResumeId ? prior?.artifactDeveloperInstructions : undefined,
       orchestrator: spec.orchestrator ?? prior?.orchestrator,
       acpSessionContext,
       acpSessionOverrides,
@@ -7538,6 +7541,8 @@ export class SessionManager {
           cwd,
           env: meta.env,
           config: meta.config,
+          artifactGuidance: artifactGuidance(meta, this.controlPlaneProtocolVersion()),
+          artifactDeveloperInstructions: meta.artifactDeveloperInstructions,
           ...(preparedProjectMemoryDirectory ? { projectMemoryDirectory: preparedProjectMemoryDirectory } : {}),
           orchestrator: meta.orchestrator,
           context: meta.context,
@@ -7586,6 +7591,9 @@ export class SessionManager {
           ...(launchPreparation?.codexPrompts ? { codexPrompts: launchPreparation.codexPrompts } : {}),
         },
         {
+        onArtifactDeveloperInstructions: (value) => {
+          if (this.launchIsCurrent(sessionId, launchGeneration)) this.store.patchMeta(sessionId, { artifactDeveloperInstructions: value });
+        },
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
         onEvent: (p) => this.onDriverEvent(sessionId, p),
         onClaudeUsageCheckpoint: (checkpoint) => {
@@ -10730,6 +10738,11 @@ export class SessionManager {
         campaignContinuation,
       );
     }
+  }
+
+  setArtifactUploads(sessionId: string, preference: import("@wollipog/protocol").ArtifactUploadPreference): void {
+    if (!["manual", "wollipog_automatic", "external_hosting"].includes(preference)) return;
+    if (this.store.readMeta(sessionId)) this.store.patchMeta(sessionId, { artifactUploads: preference });
   }
 
   setProjectMemory(sessionId: string, policy: import("@wollipog/protocol").SessionProjectMemory): void {

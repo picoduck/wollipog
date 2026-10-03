@@ -1,3 +1,4 @@
+import { appendArtifactSystemPrompt } from "../artifact-guidance.js";
 import type { AgentDriverKind } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./driver.js";
 import { AcpDriver } from "./acp-driver.js";
@@ -11,6 +12,10 @@ export function makeDriver(
   opts: DriverOptions,
   cb: DriverCallbacks,
 ): Driver {
+  if (opts.artifactGuidance && ["claude-code", "pi"].includes(driver)) {
+    opts = { ...opts, args: appendArtifactSystemPrompt(opts.args, opts.artifactGuidance,
+      driver === "pi" && opts.context.kind === "native" ? { cwd: opts.cwd } : undefined) };
+  }
   switch (driver) {
     case "claude-code":
       return new ClaudeCodeDriver(opts, cb);

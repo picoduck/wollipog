@@ -425,6 +425,7 @@ export class CodexAppServerDriver implements Driver {
   private lastTurnId: string | null = null;
   private cwd: string;
   private config: SessionConfig;
+  private artifactPromptGuidance?: string;
   private disposed = false;
   private cancelled = false;
   private turnResolve: ((r: StopReason) => void) | null = null;
@@ -919,6 +920,30 @@ export class CodexAppServerDriver implements Driver {
     await this.reconcilePlugins("session_start");
     if (this.disposed || !this.peer) throw new Error("codex app-server is not running");
     const resumeId = this.opts.resumeId;
+    // A resumed native/adopted thread may have private developer instructions config/read cannot
+    // recover. Replace only a note we own, using the original base pinned to that exact thread.
+    // Unknown threads receive discovery through prompt context, preserving their provider policy.
+    let developerInstructions: string | undefined;
+    let developerBase: string | undefined;
+    this.artifactPromptGuidance = this.opts.artifactGuidance;
+    if (this.opts.artifactGuidance && resumeId && this.opts.artifactDeveloperInstructions?.threadId === resumeId) {
+      developerBase = this.opts.artifactDeveloperInstructions.instructions;
+      developerInstructions = [developerBase, this.opts.artifactGuidance].filter(Boolean).join("\n\n");
+      this.artifactPromptGuidance = undefined;
+    } else if (this.opts.artifactGuidance && !resumeId) {
+      try {
+        const read = await this.peer.requestWithDeadline<Json>("config/read", { cwd, includeLayers: false }, Date.now() + 1_000);
+        const config = read?.config;
+        const existing = config?.developer_instructions;
+        if (config && typeof config === "object" && !Array.isArray(config) &&
+            (existing === undefined || existing === null || typeof existing === "string")) {
+          developerBase = typeof existing === "string" ? existing : "";
+          developerInstructions = [developerBase, this.opts.artifactGuidance]
+            .filter(Boolean).join("\n\n");
+          this.artifactPromptGuidance = undefined;
+        }
+      } catch { /* Discovery must not prevent launch on providers lacking config/read. */ }
+    }
     let res: Json;
     try {
       if (resumeId) {
@@ -940,11 +965,13 @@ export class CodexAppServerDriver implements Driver {
         }
         res = await this.peer!.request<Json>("thread/resume", {
           threadId: resumeId,
+          ...(developerInstructions ? { developerInstructions } : {}),
           ...configuredServiceTier(this.config, this.opts.capabilities),
         });
       } else {
         res = await this.peer!.request<Json>("thread/start", {
           cwd,
+          ...(developerInstructions ? { developerInstructions } : {}),
           ...configuredServiceTier(this.config, this.opts.capabilities),
         });
       }
@@ -965,6 +992,7 @@ export class CodexAppServerDriver implements Driver {
         false,
       );
     }
+    if (developerBase !== undefined) this.cb.onArtifactDeveloperInstructions?.({ threadId: actualId, instructions: developerBase });
     this.threadId = actualId;
     this.threadCarriesLegacySandboxPolicy = false;
     await this.observeInferenceConfiguration(res?.modelProvider, resumeId ? "thread_resume" : "thread_start");
@@ -1205,6 +1233,7 @@ export class CodexAppServerDriver implements Driver {
       this.setSteeringTurn(null);
 
       const input: Json[] = base || !staged.inputs.length ? [{ type: "text", text: base }] : [];
+      if (this.artifactPromptGuidance) input.push({ type: "text", text: this.artifactPromptGuidance });
       input.push(...commandItems, ...staged.inputs);
       const protections = this.opts.managedWorktreeProtections?.() ?? [];
       const params = buildCodexTurnParams(

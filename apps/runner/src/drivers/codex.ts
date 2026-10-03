@@ -198,7 +198,9 @@ export class CodexDriver implements Driver {
     if (profile && (this.disposed || this.cancelled)) return "cancelled";
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear(); // dedup is per-turn; each turn re-emits item.started ids
-      const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
+      const taskText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
+
+      const promptText = this.opts.artifactGuidance ? `${taskText}\n\n${this.opts.artifactGuidance}` : taskText;
 
       const cfg = this.config;
       const sandbox = cfg.permissionMode === "orchestrator" ? "workspace-write"

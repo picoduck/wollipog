@@ -6907,3 +6907,25 @@ test("Claude resume recovers the latest raw checkpoint from a paged crash suffix
     h.cleanup();
   }
 });
+
+
+test("artifact preference refresh reaches the next provider launch and resume without changing user tasks", async () => {
+  const h = harness({ artifactUploads: "manual" }, Promise.resolve(), Promise.resolve(), () => {}, (meta) => {
+    meta.env.WOLLIPOG_CLI = "/runner-private/cli";
+  });
+  try {
+    h.manager.prompt("resume-session", "first task");
+    for (let i = 0; i < 100 && !h.prompts.length; i++) await shortDelay();
+    assert.deepEqual(h.prompts, ["first task"]);
+    assert.match(h.launches[0]!.options.artifactGuidance!, /Manual/);
+    h.manager.setArtifactUploads("resume-session", "external_hosting");
+    assert.match(h.launches[0]!.options.artifactGuidance!, /Manual/, "active driver instructions are unchanged");
+    h.manager.stop("resume-session");
+    await tick();
+    h.manager.prompt("resume-session", "second task");
+    for (let i = 0; i < 100 && h.launches.length < 2; i++) await shortDelay();
+    assert.equal(h.launches.length, 2);
+    assert.match(h.launches[1]!.options.artifactGuidance!, /Use External Hosting/);
+    assert.equal(h.store.readMeta("resume-session")!.artifactUploads, "external_hosting");
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
