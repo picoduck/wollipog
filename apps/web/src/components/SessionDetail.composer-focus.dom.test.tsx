@@ -707,6 +707,35 @@ for (const { name, draftText, caret, expected, expectedCaret } of [
   });
 }
 
+test("Reference a File… on a recalled prompt exits history browsing, so ArrowDown keeps the edited draft (#2203)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 106,
+    mainEventPayloads: [{ kind: "user_message", text: "history prompt", images: [] }],
+    client: { searchWorkspaceReferences: async () => ({ results: [], truncated: false }) },
+  });
+  const press = async (key: string) => {
+    await act(async () => {
+      fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }) as never);
+      await Promise.resolve();
+    });
+  };
+  try {
+    await resolveDraft(draft, "");
+    await focusRequestedComposer(fixture);
+    await press("ArrowUp");
+    assert.equal(fixture.composer.value, "history prompt", "ArrowUp recalls the last prompt");
+    await referenceAFile(fixture);
+    assert.equal(fixture.composer.value, "history prompt @");
+    await press("Escape");
+    assert.equal(workspacePickerShown(fixture), false, "Escape dismisses the @ picker");
+    await press("ArrowDown");
+    assert.equal(fixture.composer.value, "history prompt @", "the edited draft is not replaced by history");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a runner without workspace references has no Reference a File… row (#2203)", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft);

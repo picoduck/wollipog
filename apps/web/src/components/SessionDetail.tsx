@@ -4459,14 +4459,19 @@ function SessionDetailLoaded({
   const insertWorkspaceReferenceTrigger = () => {
     const input = inputRef.current;
     if (!input || !canPrompt) return;
-    const start = Math.min(composerSelection.start, text.length);
-    const end = Math.min(Math.max(composerSelection.end, start), text.length);
+    // A textarea keeps its selection after the menu takes focus, and it is exact where the state
+    // copy can lag a programmatic change (a recalled prompt); the copy covers a textarea that does
+    // not hold the draft yet.
+    const live = input.value === text;
+    const start = Math.min(live ? input.selectionStart : composerSelection.start, text.length);
+    const end = Math.min(Math.max(live ? input.selectionEnd : composerSelection.end, start), text.length);
     const before = text.slice(0, start);
     // The trigger needs the start of the message or whitespace before "@".
     const inserted = before === "" || /\s$/u.test(before) ? "@" : " @";
     const caret = start + inserted.length;
     markDraftDirty();
     flushSync(() => {
+      setHistIdx(-1); // typing exits history browsing, and this types for the person
       setComposerExpanded(true);
       setProgrammaticComposerText(before + inserted + text.slice(end), caret);
       setWorkspaceDismissedFor(null);
@@ -7086,6 +7091,21 @@ export function ComposerPlusMenu({
   // `canPrompt` guard) already do. `disabled` can flip while the menu — or the native chooser — is
   // already open, so the item and the change handler are gated separately.
   const canAttach = !disabled && imagesSupported;
+  const referenceOffered = onReferenceFile !== undefined;
+  const orchestratorOffered = sessionRole(session) === "orchestrator" && onOpenOrchestratorControls !== undefined;
+  // A row can leave or refuse while the menu is open (the runner reconnects without workspace
+  // references, the composer pauses): if it held focus, focus would drop to <body> with the menu
+  // still open (or stay on a disabled row, as some browsers leave it), so it moves to the first item
+  // that remains enabled.
+  useLayoutEffect(() => {
+    const surface = menu.menuRef.current;
+    if (!open || !surface) return;
+    const active = document.activeElement;
+    const stranded = !active || active === document.body ||
+      (surface.contains(active) && active instanceof HTMLButtonElement && active.disabled);
+    if (!stranded) return;
+    surface.querySelector<HTMLElement>('[role^="menuitem"]:not(:disabled)')?.focus();
+  }, [open, menu.menuRef, referenceOffered, planSupported, orchestratorOffered, canAttach, planRefusal]);
   return (
     <div className="composer-plus">
       {/*
@@ -7157,7 +7177,7 @@ export function ComposerPlusMenu({
           >
             Attach Image…
           </MenuItem>
-          {onReferenceFile && (
+          {referenceOffered && (
             <MenuItem
               icon={<AtSignIcon size={16} />}
               description={disabled ? disabledReason : <>Attach a workspace file or folder. Or type <code>@</code>.</>}
@@ -7203,7 +7223,7 @@ export function ComposerPlusMenu({
           >
             Guardrails…
           </MenuItem>
-          {sessionRole(session) === "orchestrator" && onOpenOrchestratorControls && (
+          {orchestratorOffered && (
             <MenuItem
               icon={<OrchestratorControlsIcon size={16} />}
               description={orchestratorControlsSummary(session)}

@@ -757,6 +757,31 @@ test("Reference a File… hands the composer the @ trigger without returning foc
   }
 });
 
+test("a focused row that leaves or refuses while the menu is open hands focus to the next enabled item (#2203)", async () => {
+  const fixture = await mountPlusMenu({ imageMimeTypes: [] });
+  try {
+    const trigger = fixture.trigger();
+    await act(async () => { trigger.focus(); });
+    await act(async () => {
+      trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
+    });
+    const focusedLabel = () => (domWindow.document.activeElement as unknown as HTMLElement | null)
+      ?.querySelector(".menu-text")?.textContent;
+    assert.equal(focusedLabel(), "Reference a File…");
+
+    // The runner reconnects without workspace references.
+    await fixture.render({ onReferenceFile: undefined });
+    assert.ok(fixture.menu(), "the menu stays open");
+    assert.equal(focusedLabel(), "Plan Mode", "focus moves to the first remaining enabled item, not <body>");
+
+    // The composer pauses: Plan Mode refuses, and Guardrails… stays available.
+    await fixture.render({ onReferenceFile: undefined, disabled: true });
+    assert.equal(focusedLabel(), "Guardrails…");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 for (const key of ["Enter", " ", "ArrowDown"]) {
   test(`${key === " " ? "Space" : key} on + focuses the first enabled item, even with Plan Mode on, and Escape returns to + (#2203)`, async () => {
     const fixture = await mountPlusMenu({ planActive: true, imageMimeTypes: [] });
