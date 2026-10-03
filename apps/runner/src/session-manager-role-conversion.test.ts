@@ -20,8 +20,9 @@ function fixture(driver: AgentDriverKind = "codex-app-server", close?: () => Pro
   const registrations: { control: string[]; hooks: string[] } = { control: [], hooks: [] };
   const controlDir = join(root, "control");
   const hookDir = join(root, "hooks");
+  const localLaunch = { command: "agent", args: ["user-arg"], env: {} };
   let disposed = 0;
-  const manager = new SessionManager((message) => messages.push(message), () => {}, store, "r", undefined,
+  const manager = new SessionManager((message) => messages.push(message), () => {}, store, "r", () => localLaunch,
     ((_driver: unknown, opts: { resumeId?: string; orchestrator?: unknown; config?: unknown; args: string[]; env: Record<string, string> }) => {
       launches.push({ resumeId: opts.resumeId, orchestrator: opts.orchestrator, config: opts.config, args: [...opts.args], env: { ...opts.env } });
       return {
@@ -57,7 +58,7 @@ function fixture(driver: AgentDriverKind = "codex-app-server", close?: () => Pro
   });
   const revoke = () => { removeAgentControlFiles("s", controlDir); removeClaudeHookFiles("s", hookDir); };
   const cleanup = async () => { manager.shutdownAll(); revoke(); rmSync(root, { recursive: true, force: true }); };
-  return { manager, store, spec, command, messages, launches, root, registrations, revoke, disposed: () => disposed, cleanup };
+  return { manager, store, spec, command, messages, launches, root, registrations, revoke, localLaunch, disposed: () => disposed, cleanup };
 }
 
 for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const) {
@@ -121,6 +122,43 @@ test("a live Native TUI blocks retirement and a prepared conversion blocks new T
   } finally { await h.cleanup(); }
 });
 
+test("conversion refuses argv that differs from the runner-local baseline without retiring or weakening permissions", async () => {
+  for (const change of ["untrusted", "rediscovery"]) {
+    const h = fixture();
+    try {
+      assert.equal(await h.manager.start(h.spec), true);
+      h.store.patchMeta("s", { agentSessionId: "same-provider-conversation" });
+      const command = h.command();
+      if (change === "untrusted") command.args.push("-c", 'sandbox_mode="danger-full-access"');
+      else h.localLaunch.args = ["changed-local-baseline"];
+      const before = structuredClone(h.store.readMeta("s"));
+      const reply = await h.manager.prepareSessionRole(command, () => assert.fail("credentials revoked on argv refusal"));
+      assert.equal(reply.ok, false);
+      assert.match(reply.error!, /runner-local configuration/);
+      assert.deepEqual(h.store.readMeta("s"), before);
+      assert.equal(h.disposed(), 0);
+    } finally { await h.cleanup(); }
+  }
+});
+
+test("a lock-refused retry retains its durable retirement and can finish after the other owner releases it", async () => {
+  const h = fixture();
+  try {
+    assert.equal(await h.manager.start(h.spec), true);
+    h.store.patchMeta("s", { agentSessionId: "same-provider-conversation", roleConversion: {
+      command: h.command(), state: "retiring", runnerPid: process.pid, providerPid: null,
+    } });
+    h.store.releaseLock("s", (h.manager as unknown as { lockOwner: string }).lockOwner);
+    assert.equal(h.store.acquireLock("s", "other-runner"), true);
+    const reply = await h.manager.prepareSessionRole(h.command(), () => assert.fail("credentials revoked without lock ownership"));
+    assert.equal(reply.ok, false);
+    assert.equal(reply.pending, true);
+    assert.equal(h.store.readMeta("s")!.roleConversion!.state, "retiring");
+    h.store.releaseLock("s", "other-runner");
+    assert.equal((await h.manager.prepareSessionRole(h.command(), h.revoke)).ok, true);
+  } finally { await h.cleanup(); }
+});
+
 for (const driver of ["claude-code", "codex", "codex-app-server", "pi"] as const) {
   test(`${driver} converts both directions and resumes the exact conversation with unchanged account and worktree`, async () => {
     const h = fixture(driver);
@@ -174,9 +212,12 @@ test("retirement must confirm before credential revocation or prepared receipt; 
   try {
     await h.manager.start(h.spec);
     h.store.patchMeta("s", { agentSessionId: "same-provider-conversation" });
+    // A resident driver may have no PID. Only an absent provider is the explicit null proof.
+    (h.manager as unknown as { active: Map<string, { client: { pid?: number } }> }).active.get("s")!.client.pid = undefined;
     let revoked = 0;
     const pending = h.manager.prepareSessionRole(h.command(), () => revoked++);
     await settle(() => h.store.readMeta("s")?.roleConversion?.state === "retiring");
+    assert.equal(h.store.readMeta("s")!.roleConversion!.providerPid, undefined);
     assert.equal(revoked, 0);
     assert.equal(metaToSnapshot(h.store.readMeta("s")!).roleConversionReceipt, undefined);
     assert.equal(h.manager.prompt("s", "must not run"), false);
@@ -212,18 +253,20 @@ test("a concurrent Stop safely abandons an unprepared conversion after retiremen
 });
 
 test("a restarted runner cannot attest retirement while the old provider may still be alive", async () => {
-  const h = fixture();
-  try {
-    await h.manager.start(h.spec);
-    h.store.patchMeta("s", { agentSessionId: "same-provider-conversation", roleConversion: {
-      command: h.command(), state: "retiring", runnerPid: -1, providerPid: process.pid,
-    } });
-    const result = await h.manager.prepareSessionRole(h.command(), () => assert.fail("unconfirmed retirement revoked credentials"));
-    assert.equal(result.pending, true);
-    assert.match(result.error!, /may still be alive/);
-    assert.equal(h.disposed(), 0);
-    assert.equal(h.store.readMeta("s")!.roleConversion!.state, "retiring");
-  } finally { await h.cleanup(); }
+  for (const providerPid of [process.pid, undefined]) {
+    const h = fixture();
+    try {
+      await h.manager.start(h.spec);
+      h.store.patchMeta("s", { agentSessionId: "same-provider-conversation", roleConversion: {
+        command: h.command(), state: "retiring", runnerPid: -1, providerPid,
+      } });
+      const result = await h.manager.prepareSessionRole(h.command(), () => assert.fail("unconfirmed retirement revoked credentials"));
+      assert.equal(result.pending, true);
+      assert.match(result.error!, /may still be alive/);
+      assert.equal(h.disposed(), 0);
+      assert.equal(h.store.readMeta("s")!.roleConversion!.state, "retiring");
+    } finally { await h.cleanup(); }
+  }
 });
 
 test("prepared conversion survives runner reload and duplicate prepare/commit is idempotent", async () => {

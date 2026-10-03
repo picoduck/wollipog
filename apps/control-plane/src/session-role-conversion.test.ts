@@ -243,3 +243,26 @@ test("stale expected roles refuse and ordinary runner refusal leaves no half-app
     assert.equal(h.db.sessionRoleConversionPending("s"), false);
   } finally { h.db.close(); }
 });
+
+test("a pending runner refusal retains exact intent and duplicate applied receipts do not rebroadcast", async () => {
+  const h = harness();
+  try {
+    const success = h.hub.requestFromRunner.bind(h.hub);
+    let command: PrepareSessionRoleMessage | undefined;
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      command = message as PrepareSessionRoleMessage;
+      return { type: "session_role_result", requestId, sessionId: "s", conversionId: command.conversionId,
+        ok: false, pending: true, error: "Another runner owns this provider" };
+    };
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /Another runner/);
+    assert.equal(h.db.sessionRoleConversionPending("s"), true);
+    assert.equal(h.db.sessionRoleConversion("s")!.command.conversionId, command!.conversionId);
+    h.hub.requestFromRunner = success;
+    await h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null);
+    assert.equal(h.db.sessionRoleConversionPending("s"), false);
+    let broadcasts = 0;
+    h.hub.sessionChangedById = () => { broadcasts++; };
+    h.conversions.reconcile("r", { id: "s", roleConversionReceipt: { conversionId: command!.conversionId, state: "applied" } });
+    assert.equal(broadcasts, 0);
+  } finally { h.db.close(); }
+});

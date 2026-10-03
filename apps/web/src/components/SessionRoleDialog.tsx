@@ -57,16 +57,16 @@ export function SessionRoleDialog({ session, supported, onClose, returnFocusRef 
       <button className="btn primary" disabled={busy || !supported || (!preview?.available && !preview?.canRetry)}
         onClick={() => void change()}>{busy ? "Changing Role…" : session.roleConversion ? "Retry Role Change" : `Change to ${targetLabel}`}</button>
     </>}>
-    <p>Current role: <strong>{current === "orchestrator" ? "Orchestrator" : "Standard"}</strong></p>
+    <p>Current Role: <strong>{current === "orchestrator" ? "Orchestrator" : "Standard"}</strong></p>
     <p>The idle provider will close. Its existing conversation resumes with the new role's tools and instructions when you send the next message. Your conversation history, account, project, and worktree stay with this session.</p>
     <p>Provider permissions stay unchanged{preview?.permissionMode ? ` (${preview.permissionMode})` : ""}.</p>
     {target === "orchestrator"
       ? <p>Orchestrator adds scoped child-management tools and applies your current Orchestrator defaults, or the controlling campaign's policy.</p>
       : <p>Standard removes Orchestrator tools and delegated authority. Completed children keep their links and remain accessible to you. Live children and unsettled decisions prevent conversion.</p>}
     {preview?.orchestratorPolicy && <dl>
-      <dt>Live Child Limit</dt><dd>{preview.orchestratorPolicy.behavior.maximumConcurrentChildren}</dd>
-      <dt>Descendant Requests</dt><dd>{preview.orchestratorPolicy.delegation.parentControl === "off" ? "Human" : "Orchestrator"}</dd>
-      <dt>Integration Isolation</dt><dd>{preview.orchestratorPolicy.execution.integrationIsolation ? "Enabled" : "Disabled"}</dd>
+      <div><dt>Live Child Limit</dt><dd>{preview.orchestratorPolicy.behavior.maximumConcurrentChildren}</dd></div>
+      <div><dt>Descendant Requests</dt><dd>{preview.orchestratorPolicy.delegation.parentControl === "off" ? "Human" : "Orchestrator"}</dd></div>
+      <div><dt>Integration Isolation</dt><dd>{preview.orchestratorPolicy.execution.integrationIsolation ? "Enabled" : "Disabled"}</dd></div>
       {WORKFLOW_DECISION_CATEGORIES.map((category) => <div key={category}>
         <dt>{DECISION_LABELS[category]}</dt>
         <dd>{preview.orchestratorPolicy!.delegation.decisions[category] === "orchestrator" ? "Orchestrator" : "Human"}</dd>
