@@ -1281,6 +1281,9 @@ export class TimelineBuilder {
         if (idx != null && idx >= 0 && this.items[idx]?.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
           if (it.answered === false) break;
+          // Without its question's sequence, a provider's reused request id cannot tell occurrences
+          // apart, so only a question still waiting can take the answer; a settled one keeps its own.
+          if (p.questionEventSeq === undefined && it.answered !== undefined) break;
           this.items[idx] = {
             ...it,
             answered: true,

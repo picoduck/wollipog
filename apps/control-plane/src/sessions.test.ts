@@ -12650,6 +12650,76 @@ test("an answered question stores its answer summary beside the question, and th
   assert.equal(hub.sentOfType("answer_question").length, 1, "restoring never delivers another answer");
 });
 
+test("an answer to a question parked before its request event arrived is restored when history brings it (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const questions = [{ id: "q", header: "Target", question: "Where?", options: [{ label: "Staging" }, { label: "Production" }] }];
+  const request = { kind: "question_request" as const, requestId: "reused", occurrenceId: "request_new", questions };
+  // An older occurrence of the same provider request id is already settled in the cache.
+  db.reconcileRunnerHistory(id, 1, 2);
+  svc.onSessionEvent(id, { ...request, occurrenceId: "request_old" }, 1, 100);
+  svc.onSessionEvent(id, { kind: "question_resolved", requestId: "reused", occurrenceId: "request_old", answered: true }, 2, 101);
+  // A reconnect snapshot parks the newer occurrence before its request event reaches the cache.
+  db.setPendingApproval(id, { requestId: "reused", occurrenceId: "request_new", kind: "question", title: "Where?", options: [], questions });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(id, "reused", { q: "Production" }, undefined, "submit", undefined, "request_new").ok);
+  assert.equal(db.listEvents(id).some((event) => event.payload.kind === "question_answered"), false,
+    "no summary is shown until its question exists, so it cannot attach to the older occurrence");
+
+  const page = (events: Array<{ seq: number; ts: number; payload: SessionEventPayload }>, throughSeq: number) => {
+    hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+      sessionId: id, ok: true, events, page: { logEpoch: 1, throughSeq, nextAfterSeq: throughSeq, hasMore: false } });
+  };
+  const history = [
+    { seq: 1, ts: 100, payload: { ...request, occurrenceId: "request_old" } },
+    { seq: 2, ts: 101, payload: { kind: "question_resolved" as const, requestId: "reused", occurrenceId: "request_old", answered: true } },
+    { seq: 3, ts: 102, payload: request },
+    { seq: 4, ts: 103, payload: { kind: "question_resolved" as const, requestId: "reused", occurrenceId: "request_new", answered: true } },
+  ];
+  db.reconcileRunnerHistory(id, 1, 4);
+  page(history.slice(2), 4);
+  await svc.hydrateHistory(id);
+  const answeredAfter = (expectedCount: number) => {
+    const events = db.listEvents(id);
+    const summaries = events.filter((event) => event.payload.kind === "question_answered");
+    assert.equal(summaries.length, expectedCount);
+    const newer = events.find((event) => event.payload.kind === "question_request" && event.payload.occurrenceId === "request_new")!;
+    const summary = summaries[0]!.payload as Extract<SessionEventPayload, { kind: "question_answered" }>;
+    assert.equal(summary.questionEventSeq, newer.seq, "the summary binds to the occurrence that was answered");
+    assert.deepEqual(summary.answers, [{ questionId: "q", selected: ["Production"] }]);
+  };
+  answeredAfter(1);
+
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 4);
+  page(history, 4);
+  await svc.hydrateHistory(id);
+  answeredAfter(1);
+});
+
+test("restoring a stored answer never moves the session's last activity backward (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const request = { kind: "question_request" as const, requestId: "ask", questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }] }] };
+  db.reconcileRunnerHistory(id, 1, 1);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "ask", { q: "Yes" }).ok);
+  const answeredAt = db.listEvents(id).find((event) => event.payload.kind === "question_answered")!.ts;
+  const laterMessage = answeredAt + 60_000;
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 3);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: answeredAt + 1, payload: { kind: "question_resolved", requestId: "ask", answered: true } },
+      { seq: 3, ts: laterMessage, payload: { kind: "agent_message", text: "Done.", final: true } },
+    ],
+    page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+  assert.equal(db.getSession(id)?.lastEventAt, laterMessage);
+});
+
 test("a dismissed question stores no answer summary (#2188)", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
