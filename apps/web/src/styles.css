@@ -5969,46 +5969,6 @@ textarea {
   color: var(--text-dim);
   line-height: 1.55;
 }
-/* The Orchestrator block in the + menu: a leading glyph column, then its settings. It moves into
-   the Orchestrator Controls dialog with #2192. */
-.plus-orchestrator {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  align-items: start;
-  column-gap: var(--space-2);
-  padding: 0 var(--space-2) var(--space-2);
-}
-.plus-orchestrator-prefix {
-  color: var(--text-faint);
-  font-size: var(--text-base);
-  line-height: 29px;
-  text-align: center;
-}
-.parent-control-settings {
-  grid-column: 2;
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-.parent-control-setting {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 128px;
-  align-items: center;
-  gap: 8px;
-}
-.parent-control-setting-label {
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-tight);
-}
-.parent-control-setting .ui-select,
-.parent-control-setting .ui-select-trigger {
-  width: 100%;
-  min-width: 0;
-}
-.parent-control-setting .ui-select-trigger { font-size: var(--text-sm); }
-.parent-control-help { line-height: var(--leading-normal); }
 /* ---------------------------- Broad polish sweep ------------------------- */
 /* Smooth interactive transitions across the common controls */
 button,
@@ -15460,19 +15420,59 @@ body.shell-dock-dragging * {
 .orchestrator-policy-control small { color: var(--text-faint); font-size: var(--text-xs); font-weight: var(--weight-normal); }
 .orchestrator-policy-control .ui-select-trigger { width: 100%; }
 .orchestrator-policy-unavailable { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-.active-campaign-policy { display: grid; gap: var(--space-2); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
-.active-campaign-policy dl { display: grid; gap: var(--space-2); margin: 0; }
-.active-campaign-policy dl > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); }
-.active-campaign-policy dt { color: var(--text-dim); }
-.active-campaign-policy dd { display: flex; flex-direction: column; align-items: flex-end; margin: 0; text-align: right; }
-.active-campaign-policy small { color: var(--text-faint); font-size: var(--text-xs); }
+/* Orchestrator Controls (#2192): Child Session Requests, one segmented control per workflow gate,
+   and the campaign's stored behavior. Below 560px the gate's control sits under its label and each
+   fact reads label over value. */
+.orchestrator-controls > .modal-body { gap: var(--space-6); }
+.orchestrator-gates {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.orchestrator-gate {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: var(--space-1);
+  min-width: 0;
+}
+.orchestrator-gate > .seg { grid-column: 3; grid-row: 1; }
+.orchestrator-gate > .ui-row-saved { grid-column: 2; grid-row: 1; }
+.orchestrator-gate-label {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  font: var(--type-body-strong);
+}
+.orchestrator-gate-helper {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* Why a gate set to Orchestrator still goes to a person (#1321): a field warning under the helper. */
+.orchestrator-gate > .field-warn { grid-column: 1 / -1; }
+.orchestrator-facts { grid-template-columns: 12rem minmax(0, 1fr); }
+.orchestrator-fact-source {
+  display: block;
+  color: var(--text-faint);
+  font: var(--type-small);
+}
+@media (max-width: 559px) {
+  .orchestrator-gate > .seg {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+  }
+  .orchestrator-facts { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-1); }
+  .orchestrator-facts > div:not(:first-child) > dt { margin-top: var(--space-2); }
+}
 
 @media (max-width: 760px) {
   .orchestrator-settings .ui-row-choice { grid-template-columns: minmax(0, 1fr); }
   .orchestrator-number-row, .orchestrator-policy-control { grid-template-columns: minmax(0, 1fr); }
   .orchestrator-settings-actions, .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
-  .active-campaign-policy dl > div { grid-template-columns: minmax(0, 1fr); }
-  .active-campaign-policy dd { align-items: flex-start; text-align: left; }
 }
 
 @media (prefers-reduced-motion: reduce) {

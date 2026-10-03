@@ -58,59 +58,6 @@ const composerOverlaps = (page: Page) =>
     return overlaps;
   });
 
-test("desktop: Parent Control exposes five independent typed workflow authorities", async ({ page }) => {
-  await page.setViewportSize({ width: 1200, height: 900 });
-  await page.goto("/session-usage-e2e.html?width=1180&height=860&composer=orchestrator");
-  await page.getByRole("button", { name: "Add and Modes" }).click();
-
-  await expect(page.getByRole("button", { name: "Implementation Questions: Orchestrator" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "PR Merge Approval: Human" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Merged Branch Deletion: Human" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Follow-Up Issue Publication: Orchestrator" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "UI Evidence Approval: Human" })).toBeVisible();
-  await expect(page.getByText(/provider may retain images in provider-local transcripts or media logs/)).toBeVisible();
-  await expect(page.getByText(/Existing unconsumed approvals are revoked/)).toBeVisible();
-  await page.getByText(/provider may retain images in provider-local transcripts or media logs/).scrollIntoViewIfNeeded();
-  await page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]').evaluate((menu) => { menu.scrollTop = menu.scrollHeight; });
-  await page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]').screenshot({ path: `${SHOT}/desktop-typed-parent-control.png` });
-});
-
-for (const viewport of [
-  { name: "desktop", width: 1200, height: 900, fixtureWidth: 1180, fixtureHeight: 860 },
-  { name: "mobile", width: 393, height: 844, fixtureWidth: 393, fixtureHeight: 844 },
-] as const) {
-  test(`${viewport.name}: active campaign summary exposes status, revision, progress, and compatibility`, async ({ page }) => {
-    await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    await page.goto(`/session-usage-e2e.html?width=${viewport.fixtureWidth}&height=${viewport.fixtureHeight}&composer=orchestrator&campaign-state=off`);
-    await page.getByRole("button", { name: "Add and Modes" }).click();
-    const beforeSummary = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"] .active-campaign-policy');
-    await expect(beforeSummary).toBeVisible();
-    await expect(beforeSummary.getByText("Campaign Status", { exact: true })).toHaveCount(0);
-    await beforeSummary.getByText("Child Model", { exact: true }).scrollIntoViewIfNeeded();
-    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-before.png` });
-
-    await page.goto(`/session-usage-e2e.html?width=${viewport.fixtureWidth}&height=${viewport.fixtureHeight}&composer=orchestrator`);
-    await page.getByRole("button", { name: "Add and Modes" }).click();
-
-    const menu = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
-    const summary = menu.locator(".active-campaign-policy");
-    await expect(summary.getByText("Campaign Behavior", { exact: true })).toBeVisible();
-    await expect(summary).toContainText("Waiting for Human");
-    await expect(summary).toContainText("Policy Revision 4");
-    await expect(summary).toContainText("4");
-    await expect(summary).toContainText("1 Verified · 2 Active · 1 Waiting for Human · 0 Blocked");
-    await expect(summary).toContainText("2");
-    await expect(summary).toContainText("1 Duplicates Skipped");
-    const compatibility = summary.getByRole("status");
-    await expect(compatibility).toContainText("is routed to a human. The Orchestrator model \"text-only\" does not accept image input.");
-    await summary.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-summary.png` });
-    await compatibility.scrollIntoViewIfNeeded();
-    await expect(compatibility).toBeVisible();
-    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-progress.png` });
-  });
-}
-
 test("desktop: per-turn usage, the ring popover with totals and the per-model split", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780");

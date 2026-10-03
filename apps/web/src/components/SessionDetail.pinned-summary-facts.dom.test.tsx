@@ -110,7 +110,7 @@ class FakeSocket implements UiSocket {
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
 async function withSession(
-  options: { phone: boolean; runner?: Partial<RunnerView>; gitNeverSettles?: boolean },
+  options: { phone: boolean; runner?: Partial<RunnerView>; gitNeverSettles?: boolean; session?: Partial<SessionView> },
   run: (container: HTMLDivElement) => Promise<void>,
 ) {
   phone = options.phone;
@@ -152,7 +152,7 @@ async function withSession(
     await act(async () => socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [{ ...runner, ...options.runner }], boxes: [], projects: [project], sessions: [session], runs: [], pods: [],
+      runners: [{ ...runner, ...options.runner }], boxes: [], projects: [project], sessions: [{ ...session, ...options.session }], runs: [], pods: [],
     } as ControlPlaneToUi));
     await settle();
     await settle();
@@ -251,5 +251,77 @@ test("a legacy runner with no Git read names the session record's branch, not a 
     const labels = [...summaryAside.querySelectorAll(".ps-row > .k")].map((label) => label.textContent);
     assert.ok(labels.includes(BRANCH), `the recorded branch is shown (${labels.join(", ")})`);
     assert.ok(!labels.includes(`agent/${session.id}`), "no synthetic branch name");
+  });
+});
+
+const ORCHESTRATOR: Partial<SessionView> = {
+  role: "orchestrator",
+  parentControl: "questions",
+  parentControlPolicy: {
+    revision: 2,
+    decisions: {
+      implementation_question: "orchestrator",
+      pr_merge: "human",
+      merged_branch_deletion: "human",
+      follow_up_issue_publication: "orchestrator",
+      ui_evidence_approval: "human",
+    },
+  },
+};
+
+function orchestratorDialog(): HTMLElement | null {
+  return [...domWindow.document.querySelectorAll('[role="dialog"]')]
+    .find((dialog) => dialog.textContent?.startsWith("Orchestrator Controls")) as unknown as HTMLElement | null ?? null;
+}
+
+test("an Orchestrator's Pinned Summary states how its requests and decisions are routed, and each row opens Orchestrator Controls (#2192)", async () => {
+  await withSession({ phone: false, session: ORCHESTRATOR }, async (container) => {
+    const summaryAside = container.querySelector<HTMLElement>('aside.ps[aria-label="Pinned Summary"]');
+    assert.ok(summaryAside);
+    const sessionSection = summaryAside.querySelector<HTMLElement>(".ps-sec");
+    const row = (label: string) => [...(sessionSection?.querySelectorAll<HTMLElement>(".ps-row") ?? [])]
+      .find((candidate) => candidate.querySelector(":scope > .k")?.textContent === label);
+    for (const [label, value] of [
+      ["Child Session Requests", "Questions"],
+      ["Workflow Decisions", "3 of 5 decisions stay with a person."],
+    ] as const) {
+      const fact = row(label);
+      assert.ok(fact, `${label} is a Session row`);
+      assert.equal(fact.querySelector(":scope > .ps-note")?.textContent, value, "its value is the row's second line");
+      assert.equal(fact.tagName, "BUTTON", `${label} is a navigating row`);
+      assert.ok(fact.querySelector(".ps-go"), "with a trailing chevron");
+      assertNoDomNode(orchestratorDialog(), "the dialog starts closed");
+      await act(async () => fact.click());
+      await settle();
+      const dialog = orchestratorDialog();
+      assert.ok(dialog, `${label} opens Orchestrator Controls`);
+      const done = [...dialog.querySelectorAll<HTMLButtonElement>(".modal-foot button")].find((button) => button.textContent === "Done");
+      await act(async () => done!.click());
+      await settle();
+      assertNoDomNode(orchestratorDialog(), "Done closes it");
+    }
+  });
+});
+
+test("a session that is not an Orchestrator has no Orchestrator rows in its Pinned Summary", async () => {
+  await withSession({ phone: false }, async (container) => {
+    const labels = [...container.querySelectorAll('aside.ps .ps-row > .k')].map((label) => label.textContent);
+    assert.ok(!labels.includes("Child Session Requests"));
+    assert.ok(!labels.includes("Workflow Decisions"));
+  });
+});
+
+test("the composer's + menu opens Orchestrator Controls from its one Orchestrator row (#2192)", async () => {
+  await withSession({ phone: false, session: ORCHESTRATOR }, async (container) => {
+    const plus = container.querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]');
+    assert.ok(plus && !plus.disabled, "+ is available");
+    await act(async () => plus.click());
+    const item = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>(".menu-item")]
+      .find((candidate) => candidate.querySelector(".menu-text")?.textContent === "Orchestrator Controls…");
+    assert.ok(item, "the row is in the menu");
+    assert.equal(item.querySelector(".menu-desc")?.textContent, "3 of 5 decisions stay with a person.");
+    await act(async () => item.click());
+    await settle();
+    assert.ok(orchestratorDialog(), "it opens the dialog");
   });
 });

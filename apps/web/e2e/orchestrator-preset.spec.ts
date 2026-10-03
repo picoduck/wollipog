@@ -353,3 +353,26 @@ for (const scenario of [
       .toBeUndefined();
   });
 }
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }] as const) {
+  test(`Orchestrator Controls reports a revision conflict in place at ${viewport.width} (#2192)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto(`/session-usage-e2e.html?width=${viewport.width}&height=${viewport.height}&composer=orchestrator&policy-conflict=1`);
+    await page.getByRole("button", { name: "Add and Modes" }).click();
+    await page.getByRole("button", { name: "Orchestrator Controls…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Orchestrator Controls" });
+    const merge = dialog.getByRole("radiogroup", { name: "PR Merge Approval" });
+    await merge.scrollIntoViewIfNeeded();
+    await merge.getByRole("radio", { name: "Orchestrator" }).click();
+
+    const notice = dialog.locator(".notice.t-danger");
+    await expect(notice).toHaveText(/These controls changed elsewhere\. Your change wasn't saved\./);
+    await expect(page.locator("body")).toHaveAttribute("data-session-reloads", "1");
+    await expect(merge.getByRole("radio", { name: "Human" }), "the stored choice comes back")
+      .toHaveAttribute("aria-checked", "true");
+    await expect(dialog.locator(".ui-row-saved")).toHaveCount(0);
+    await expect(page.locator(".session-notice-slot"), "nothing reaches the composer's error line").toHaveCount(0);
+    await notice.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `test-results/orchestrator-controls/conflict-${viewport.width}.png` });
+  });
+}

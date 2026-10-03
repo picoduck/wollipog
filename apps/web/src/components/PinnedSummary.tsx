@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { isPolicyApproval, isTerminal, normalizeSourcePath, type GitChecksSummary, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
+import { isPolicyApproval, isTerminal, normalizeSourcePath, sessionRole, type GitChecksSummary, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { deriveSidePaneContent, type TimelineItem } from "../timeline.js";
@@ -24,6 +24,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import {
   AccountIcon,
   ArrowUpIcon,
+  ChildSessionRequestsIcon,
   ComputerIcon,
   DialIcon,
   DiffIcon,
@@ -37,6 +38,7 @@ import {
   SuccessIcon,
   UpdatedIcon,
   WarningIcon,
+  WorkflowDecisionsIcon,
 } from "./Icons.js";
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, Spinner } from "./common.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
@@ -46,6 +48,7 @@ import { effortLabel, relativeTime, resolvedModelLabel, shortenPath } from "../f
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
+import { childSessionRequestsLabel, workflowDecisionsSummary } from "./OrchestratorControlsDialog.js";
 
 const BUSY = ["queued", "starting", "running", "input_required"];
 
@@ -79,6 +82,7 @@ export function PinnedSummary({
   onOpenReview,
   onOpenBackgroundWork,
   onOpenSourceLocation,
+  onOpenOrchestratorControls,
   skillsUnavailableReason = null,
 }: {
   session: SessionView;
@@ -90,6 +94,8 @@ export function PinnedSummary({
   onOpenReview: () => void;
   onOpenBackgroundWork?: () => void;
   onOpenSourceLocation: (location: SourceLocation) => void;
+  /** Opens Orchestrator Controls, where an Orchestrator's routing facts below are changed (#2192). */
+  onOpenOrchestratorControls?: () => void;
   /** Set while the session's target lacks the Machine's assigned skills (#1977): the fact the
    * dismissible session notice states, kept here after it is dismissed. */
   skillsUnavailableReason?: string | null;
@@ -183,6 +189,9 @@ export function PinnedSummary({
         : null;
   const backgroundWorkUntracked = !backgroundWorkMeta && session.backgroundWorkTracking === "untracked";
   const watchdogState = shownWatchdogDelivery(session.backgroundDeliveries)?.watchdogState;
+  // How an Orchestrator's requests and decisions are routed; each row opens the dialog that changes
+  // it. The value is the row's second line: beside a label this long it would truncate in the column.
+  const orchestrator = sessionRole(session) === "orchestrator" && onOpenOrchestratorControls !== undefined;
 
   return (
     <div className="ps-body">
@@ -206,6 +215,24 @@ export function PinnedSummary({
             label="Account"
             value={<AccountIdentifier identity={`${session.id}:${session.providerAccountId ?? ""}`} value={session.providerAccountLabel} label="Account Email" />}
             note={session.providerAccountAutomaticallySelected ? "Chosen Automatically" : undefined}
+          />
+        )}
+        {orchestrator && (
+          <SummaryRow
+            icon={<ChildSessionRequestsIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Child Session Requests"
+            note={childSessionRequestsLabel(session.parentControl)}
+            title="Open Orchestrator Controls"
+            onClick={onOpenOrchestratorControls}
+          />
+        )}
+        {orchestrator && session.parentControlPolicy && (
+          <SummaryRow
+            icon={<WorkflowDecisionsIcon className="ps-icon" size={14} aria-hidden="true" />}
+            label="Workflow Decisions"
+            note={workflowDecisionsSummary(session.parentControlPolicy.decisions)}
+            title="Open Orchestrator Controls"
+            onClick={onOpenOrchestratorControls}
           />
         )}
         <SummaryRow

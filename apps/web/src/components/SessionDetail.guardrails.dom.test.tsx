@@ -6,11 +6,8 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
   DescendantRequestView,
-  ParentControlMode,
   SessionConfig,
   SessionView,
-  WorkflowDecisionAuthority,
-  DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -527,142 +524,63 @@ test("a person refused only configuration sees Plan Mode disabled with the refus
   }
 });
 
-test("the Composer exposes human-controlled Parent Control only for Orchestrator sessions", async () => {
-  const selected: ParentControlMode[] = [];
-  const typed: Array<[DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority]> = [];
+test("the + menu offers one Orchestrator Controls row, only on an Orchestrator session (#2192)", async () => {
+  const opened: Array<HTMLElement | null> = [];
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const render = (permissionMode: string) => root.render(<ComposerPlusMenu
-    session={{ permissionMode, parentControl: "off", parentControlPolicy: {
+    session={{ permissionMode, parentControl: "questions", parentControlPolicy: {
       revision: 3,
       decisions: {
-        implementation_question: "human",
+        implementation_question: "orchestrator",
         pr_merge: "human",
         merged_branch_deletion: "human",
-        follow_up_issue_publication: "human",
+        follow_up_issue_publication: "orchestrator",
         ui_evidence_approval: "human",
       },
-    }, orchestratorPolicy: {
-      version: 1,
-      behavior: {
-        childHarness: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
-        childModel: "claude-opus-5",
-        childEffort: "high",
-        maximumConcurrentChildren: 6,
-        followUps: "recommend_only",
-        completion: "retain",
-      },
-      delegation: {
-        parentControl: "off",
-        decisions: {
-          implementation_question: "human",
-          pr_merge: "human",
-          merged_branch_deletion: "human",
-          follow_up_issue_publication: "human",
-          ui_evidence_approval: "human",
-        },
-      },
-      sources: {
-        behavior: {
-          childHarness: "user_default",
-          childModel: "session_override",
-          childEffort: "user_default",
-          maximumConcurrentChildren: "user_default",
-          followUps: "system_default",
-          completion: "system_default",
-        },
-        delegation: {
-          parentControl: "active_campaign",
-          decisions: {
-            implementation_question: "legacy_session",
-            pr_merge: "legacy_session",
-            merged_branch_deletion: "legacy_session",
-            follow_up_issue_publication: "legacy_session",
-            ui_evidence_approval: "legacy_session",
-          },
-        },
-      },
-    }, orchestratorCampaign: {
-      status: "waiting_human",
-      policyRevision: 3,
-      decisionOwners: {
-        implementation_question: "human",
-        pr_merge: "human",
-        merged_branch_deletion: "human",
-        follow_up_issue_publication: "human",
-        ui_evidence_approval: "human",
-      },
-      limits: { maximumConcurrentChildren: 6, occupied: 2, remaining: 4, costBudgetUsd: null, maxToolCalls: null },
-      uiEvidenceReview: { status: "unavailable", effectiveOwner: "human", reasonCode: "harness_unsupported", reason: "No image reader." },
-      children: { total: 3, active: 2, waitingHuman: 1, blocked: 0, verified: 0, cleanupPending: 0 },
-      pendingDecisions: { human: 1, orchestrator: 0 },
-      followUps: { unique: 2, duplicates: 1 },
-    }, costBudgetUsd: null,
-      costCheckpointsUsd: null, maxToolCalls: null } as SessionView}
+    }, costBudgetUsd: null, costCheckpointsUsd: null, maxToolCalls: null } as SessionView}
     planActive={false}
     planSupported={false}
     onTogglePlan={() => {}}
     onSaveGuardrails={async () => {}}
-    onSetParentControl={(mode) => selected.push(mode)}
-    onSetParentControlPolicy={(category, authority) => typed.push([category, authority])}
+    onOpenOrchestratorControls={(returnFocus) => opened.push(returnFocus)}
     disabled={false}
     imageMimeTypes={[]}
     onAttachImages={() => {}}
   />);
+  const row = () => [...page().querySelectorAll<HTMLButtonElement>(".menu-item")]
+    .find((item) => item.querySelector(".menu-text")?.textContent === "Orchestrator Controls…");
   await act(async () => render("default"));
   try {
-    await act(async () => fireDomEvent.click(
-      page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!,
-    ));
-    assertNoDomNode(page().querySelector('[aria-label^="Parent Control:"]'));
+    const trigger = page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!;
+    await act(async () => fireDomEvent.click(trigger));
+    assert.equal(row(), undefined, "a session that is not an Orchestrator has no such row");
 
     await act(async () => render("orchestrator"));
-    const select = page().querySelector<HTMLButtonElement>('[aria-label="Parent Control: Human"]');
-    assert.ok(select);
-    assert.match(page().textContent ?? "", /Campaign Behavior/);
-    assert.match(page().textContent ?? "", /claude · Claude Code · Native/);
-    assert.match(page().textContent ?? "", /claude-opus-5/);
-    assert.match(page().textContent ?? "", /Session Override/);
-    assert.match(page().textContent ?? "", /keeps its stored policy when account defaults change/);
-    assert.match(page().textContent ?? "", /Waiting for HumanPolicy Revision 3/);
-    assert.match(page().textContent ?? "", /0 Verified/);
-    assert.match(page().textContent ?? "", /1 Duplicates Skipped/);
-    assert.match(page().textContent ?? "", /assigned to the Orchestrator but is routed to a human\. No image reader\./,
-      "the campaign explains the specific reason instead of a generic one");
-    await act(async () => fireDomEvent.click(select));
-    const questions = [...page().querySelectorAll<HTMLButtonElement>('[role="option"]')]
-      .find((option) => option.textContent?.includes("Questions") && !option.textContent?.includes("Approvals"));
-    assert.ok(questions);
-    await act(async () => fireDomEvent.click(questions));
-    assert.deepEqual(selected, ["questions"]);
-    const mergeAuthority = page().querySelector<HTMLButtonElement>('[aria-label="PR Merge Approval: Human"]');
-    assert.ok(mergeAuthority, "each sensitive workflow category has its own authority control");
-    await act(async () => fireDomEvent.keyDown(mergeAuthority, { key: "ArrowDown" }));
-    const authorityOptions = page().querySelector<HTMLElement>('[role="listbox"][aria-label="PR Merge Approval"]');
-    assert.ok(authorityOptions);
-    await act(async () => fireDomEvent.keyDown(authorityOptions, { key: "ArrowDown" }));
-    await act(async () => fireDomEvent.keyDown(authorityOptions, { key: "Enter" }));
-    assert.deepEqual(typed, [["pr_merge", "orchestrator"]]);
-    for (const label of [
-      "Implementation Questions", "PR Merge Approval", "Merged Branch Deletion",
-      "Follow-Up Issue Publication", "UI Evidence Approval",
-    ]) assert.ok(page().querySelector(`[aria-label^="${label}:"]`), `${label} is explicitly labelled`);
-    assert.match(page().textContent ?? "", /provider may retain images in provider-local transcripts or media logs/,
-      "the session override discloses provider-local retention before delegation");
-    assert.match(page().textContent ?? "", /provider-local retention is outside those audit guarantees/);
-    assert.match(page().textContent ?? "", /Video evidence otherwise requires human review, including video attached as a Session artifact/);
-    assert.match(page().textContent ?? "", /Only an authenticated human can change/);
-    assert.match(page().textContent ?? "", /unconsumed approvals are revoked/);
+    const controls = row();
+    assert.ok(controls, "an Orchestrator session has the row");
+    assert.equal(controls.querySelector(".menu-desc")?.textContent, "3 of 5 decisions stay with a person.",
+      "its second line summarizes the gates");
+    const menu = controls.closest<HTMLElement>(".menu")!;
+    assertNoDomNode(menu.querySelector("dl, .ui-select, [role='listbox'], [aria-label^='Parent Control']"),
+      "no campaign facts or selects stay in the menu");
+    assert.doesNotMatch(menu.textContent ?? "", /Campaign Behavior|unconsumed approvals|provider may retain images/,
+      "and no paragraph");
+    await act(async () => fireDomEvent.click(controls));
+    assert.deepEqual(opened, [trigger], "the row opens Orchestrator Controls, which returns focus to +");
+    assert.equal(row(), undefined, "and the menu closes");
   } finally {
     await act(async () => root.unmount());
     container.remove();
   }
 });
 
-test("a person refused configuration cannot change Parent Control from the + menu (#2175)", async () => {
+test("a paused composer's + menu still opens Orchestrator Controls for a person refused configuration (#2175, #2192)", async () => {
+  // The row only opens the dialog, whose controls refuse with the reason (OrchestratorControlsDialog
+  // DOM tests), so it stays available like Guardrails…, which opens read-only.
   const refusal = "Your Viewer role is read-only.";
-  const selected: ParentControlMode[] = [];
+  const opened: Array<HTMLElement | null> = [];
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -674,19 +592,22 @@ test("a person refused configuration cannot change Parent Control from the + men
     onTogglePlan={() => {}}
     onSaveGuardrails={async () => {}}
     configRefusal={refusal}
-    onSetParentControl={(mode) => selected.push(mode)}
+    onOpenOrchestratorControls={(returnFocus) => opened.push(returnFocus)}
     disabled
     imageMimeTypes={[]}
     onAttachImages={() => {}}
   />));
   try {
     await act(async () => fireDomEvent.click(page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!));
-    const select = page().querySelector<HTMLButtonElement>('[aria-label="Parent Control: Human"]');
-    assert.ok(select, "the Orchestrator block still shows the current assignment");
-    assert.equal(select.getAttribute("aria-disabled"), "true", "a paused composer's + menu cannot fire a refused change");
-    assert.match(page().textContent ?? "", new RegExp(refusal.replace(".", "\\.")), "and says why");
-    await act(async () => fireDomEvent.click(select));
-    assert.deepEqual(selected, []);
+    const row = [...page().querySelectorAll<HTMLButtonElement>(".menu-item")]
+      .find((item) => item.querySelector(".menu-text")?.textContent === "Orchestrator Controls…");
+    assert.ok(row, "the paused menu keeps the row");
+    assert.equal(row.disabled, false, "and it opens the dialog");
+    assert.equal(row.getAttribute("aria-disabled"), null);
+    assert.equal(row.querySelector(".menu-desc")?.textContent, "Child session requests: Human.",
+      "a control plane without typed gates summarizes the one choice it has");
+    await act(async () => fireDomEvent.click(row));
+    assert.equal(opened.length, 1);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -1035,90 +956,4 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
     container.remove();
   }
   });
-});
-
-test("a legacy campaign payload derives Integration Isolation from the preset before strictness", async () => {
-  const humanOnly = {
-    implementation_question: "human",
-    pr_merge: "human",
-    merged_branch_deletion: "human",
-    follow_up_issue_publication: "human",
-    ui_evidence_approval: "human",
-  } as const;
-  // A v144–v163 control plane: the execution block exists but has no `integrationIsolation`.
-  const legacyPolicy = (strictProjectIsolation: boolean) => ({
-    version: 1 as const,
-    behavior: {
-      childHarness: null, childModel: null, childEffort: null,
-      maximumConcurrentChildren: 4, followUps: "recommend_only" as const, completion: "retain" as const,
-    },
-    delegation: { parentControl: "off" as const, decisions: { ...humanOnly } },
-    execution: { strictProjectIsolation },
-    sources: {
-      behavior: {
-        childHarness: "legacy_session" as const, childModel: "legacy_session" as const,
-        childEffort: "legacy_session" as const, maximumConcurrentChildren: "legacy_session" as const,
-        followUps: "legacy_session" as const, completion: "legacy_session" as const,
-      },
-      delegation: {
-        parentControl: "legacy_session" as const,
-        decisions: Object.fromEntries(Object.keys(humanOnly).map((key) => [key, "legacy_session"])),
-      },
-      execution: { strictProjectIsolation: "legacy_session" as const },
-    },
-  });
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  const render = (permissionMode: string, strictProjectIsolation: boolean) => root.render(<ComposerPlusMenu
-    session={{
-      // The role is explicit, so the additive cases below reach the panel too: only
-      // `usesOrchestratorPresetPermissions` distinguishes them, which is what this test is about.
-      permissionMode, role: "orchestrator", driver: "claude-code", parentControl: "off",
-      orchestratorPolicy: legacyPolicy(strictProjectIsolation),
-      costBudgetUsd: null, costCheckpointsUsd: null, maxToolCalls: null,
-    } as unknown as SessionView}
-    planActive={false} planSupported={false} onTogglePlan={() => {}} onSaveGuardrails={async () => {}}
-    onSetParentControl={() => {}} onSetParentControlPolicy={() => {}}
-    disabled={false} imageMimeTypes={[]} onAttachImages={() => {}}
-  />);
-  const row = () => {
-    const term = [...page().querySelectorAll("dt")].find((node) => node.textContent === "Integration Isolation");
-    assert.ok(term, "the Campaign Behavior panel shows the stored value");
-    return term.nextElementSibling!.textContent ?? "";
-  };
-  const open = async (permissionMode: string, strictProjectIsolation: boolean) => {
-    await act(async () => render(permissionMode, strictProjectIsolation));
-    const toggle = page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!;
-    if (!page().querySelector('[aria-label="Active Campaign Behavior"]')) {
-      await act(async () => fireDomEvent.click(toggle));
-    }
-  };
-  try {
-    // The case the review caught: a NON-strict coupled preset. Its stored strictness is false, but
-    // the preset still replaced the whole provider surface, so it launched without integrations.
-    await open("orchestrator", false);
-    assert.match(row(), /^Enabled/,
-      "a non-strict coupled preset removed integrations, so strictness must not be read first");
-    assert.match(row(), /Legacy Session/, "and the derived value is attributed as legacy provenance");
-    const disclosure = () => [...page().querySelectorAll("dt")]
-      .find((node) => node.textContent === "Integration Isolation")!.parentElement!.getAttribute("title") ?? "";
-    // A preset launch replaces the provider surface, so it must not borrow the additive launch's
-    // "kept" list: a Claude preset keeps neither configured hooks' settings sources nor any MCP server.
-    assert.match(disclosure(), /harness-owned Orchestrator preset/);
-    assert.doesNotMatch(disclosure(), /are all kept|are kept/);
-
-    // An additive legacy session is the opposite: ordinary provider mode, integrations intact.
-    await open("acceptEdits", false);
-    assert.match(row(), /^Disabled/);
-    // A strict legacy session is Enabled through the boundary rather than the preset literal.
-    await open("acceptEdits", true);
-    assert.match(row(), /^Enabled/);
-    // An additive-shaped session keeps the per-harness disclosure.
-    assert.match(disclosure(), /Removes configured MCP servers/);
-    assert.doesNotMatch(disclosure(), /harness-owned Orchestrator preset/);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
 });

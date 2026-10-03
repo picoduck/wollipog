@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import type { ControlPlaneToUi, PromptImageInput, RunnerView, SessionEvent, SessionView } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
@@ -32,6 +32,8 @@ const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expande
 const frameHeight = Number(params.get("height") ?? "600");
 const frameWidth = Number(params.get("width") ?? "900");
 const pinnedOpen = params.get("pinned") === "1";
+/** `?policy-conflict=1`: every workflow gate change meets a policy another person just changed (#2192). */
+const policyConflict = params.get("policy-conflict") === "1";
 const pagination = params.get("pagination") === "1";
 const resolvedPagination = params.get("pagination") === "resolve";
 const eventHeavyOpening = params.get("event-heavy") === "1";
@@ -509,6 +511,25 @@ let tailRequestCount = 0;
 const settledUsage = params.get("settled") !== "0";
 const client = {
   ...api,
+  // Orchestrator Controls (#2192): changes save at once against the policy revision. A conflict
+  // leaves the stored gates as they were and moves the revision on, as a change elsewhere would.
+  setParentControl: async (_id: string, mode: NonNullable<SessionView["parentControl"]>) => {
+    session.parentControl = mode;
+    return { ...session };
+  },
+  setParentControlPolicy: async (
+    _id: string,
+    decisions: NonNullable<SessionView["parentControlPolicy"]>["decisions"],
+    expectedRevision: number,
+  ) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 150));
+    if (policyConflict) {
+      session.parentControlPolicy = { ...session.parentControlPolicy!, revision: expectedRevision + 1 };
+      throw new ApiError("Parent Control policy revision is stale", 409);
+    }
+    session.parentControlPolicy = { revision: expectedRevision + 1, decisions };
+    return { ...session };
+  },
   prompt: async () => {
     document.body.dataset.composerAction = "send";
     return { ...session, status: "running" as const };
@@ -574,7 +595,13 @@ const client = {
       },
     };
   },
-  session: () => new Promise<never>(() => {}),
+  // Only the conflict fixture reloads the session; elsewhere the lookup never answers.
+  session: policyConflict
+    ? async () => {
+      document.body.dataset.sessionReloads = String(Number(document.body.dataset.sessionReloads ?? 0) + 1);
+      return { session: { ...session } };
+    }
+    : () => new Promise<never>(() => {}),
   getSessionEventPage: () => new Promise<never>(() => {}),
   getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
     tailRequestCount += 1;

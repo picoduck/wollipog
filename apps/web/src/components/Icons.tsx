@@ -63,6 +63,8 @@ import {
   ListChecks as LucideListChecks,
   ListTodo as LucideListTodo,
   ChartGantt as LucideChartGantt,
+  Network as LucideNetwork,
+  Route as LucideRoute,
   Lock as LucideLock,
   Mail as LucideMail,
   MessageCircleQuestion as LucideMessageCircleQuestion,
@@ -684,6 +686,14 @@ export function JobsIcon(props: IconProps) {
 /** An issue campaign's work: Campaign Status in the right panel. */
 export function CampaignIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideChartGantt} {...props} />;
+}
+
+export function ChildSessionRequestsIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideNetwork} {...props} />;
+}
+
+export function WorkflowDecisionsIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideRoute} {...props} />;
 }
 
 export function ExternalLinkIcon(props: IconProps) {
