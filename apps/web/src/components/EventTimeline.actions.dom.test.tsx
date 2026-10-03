@@ -163,6 +163,36 @@ test("the arrow keys reach unavailable items, and choosing one does nothing", as
   assert.equal(trigger.getAttribute("aria-expanded"), "true", "and the menu stays open");
 });
 
+test("opening focus and type-ahead reach unavailable items too", async () => {
+  coarsePointer = false;
+  const { container } = await mount({
+    items: [
+      { kind: "user_message", id: 1, text: "" },
+      { kind: "checkpoint", id: 2, turn: 1 },
+      { kind: "agent_message", id: 3, text: "Done." },
+      { kind: "conversation_checkpoint", id: 4, turn: 1 },
+    ],
+    onRewind: () => { throw new Error("an unavailable Rewind must not run"); },
+    rewindUnavailableReason: "Reconnect the runner before restoring files.",
+  });
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="More Turn Actions"]')!;
+  const key = async (target: Element, value: string) => {
+    await act(async () => {
+      target.dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true }));
+    });
+    return (document.activeElement as HTMLElement).dataset.menuLabel;
+  };
+  // An attachment-only prompt has nothing to copy, so its first item is unavailable, and focused.
+  assert.equal(await key(trigger, "ArrowDown"), "Copy Message");
+  assert.equal(document.activeElement?.getAttribute("aria-disabled"), "true");
+  assert.equal(await key(document.activeElement!, "r"), "Rewind Files to Before This Turn…",
+    "type-ahead lands on the unavailable Rewind, so its reason is heard");
+  await act(async () => { (document.activeElement as HTMLElement).click(); });
+  assert.equal(trigger.getAttribute("aria-expanded"), "true", "choosing it does nothing");
+  await key(document.activeElement!, "Escape");
+  assert.equal(trigger.getAttribute("aria-expanded"), "false", "Escape still closes the menu");
+});
+
 test("on a coarse pointer, a message no turn menu lists keeps More Message Actions", async () => {
   coarsePointer = true;
   const { container } = await mount({

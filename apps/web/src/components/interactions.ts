@@ -262,10 +262,13 @@ export function handleRovingChoiceKeyDown(
 
 const MENU_ITEM_SELECTOR = '[role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]';
 
-function menuItems(menu: HTMLElement | null): HTMLElement[] {
+/** The items keyboard focus can land on. `reachUnavailable` keeps aria-disabled items in, for a menu
+ * whose unavailable items stay focusable so their reason is heard; a native `disabled` item never is. */
+function menuItems(menu: HTMLElement | null, reachUnavailable = false): HTMLElement[] {
   if (!menu) return [];
   return Array.from(menu.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR)).filter(
-    (item) => item.getAttribute("aria-disabled") !== "true" && !(item instanceof HTMLButtonElement && item.disabled),
+    (item) => (reachUnavailable || item.getAttribute("aria-disabled") !== "true") &&
+      !(item instanceof HTMLButtonElement && item.disabled),
   );
 }
 
@@ -407,6 +410,12 @@ export function useAccessibleMenu(
    * reach the rows. Opening with an arrow key always focuses a row.
    */
   openFocus: "item" | "menu" = "item",
+  /**
+   * Opening focus, the arrow keys and type-ahead also land on aria-disabled items, which the menu
+   * must then refuse to activate itself (the APG menu pattern: an unavailable item is focusable, so
+   * a keyboard or screen-reader user hears why it is unavailable). Native `disabled` items stay out.
+   */
+  { reachUnavailable = false }: { reachUnavailable?: boolean } = {},
 ): AccessibleMenuController {
   const reactId = useId().replace(/:/g, "");
   const menuId = `${idPrefix}-${reactId}`;
@@ -430,7 +439,7 @@ export function useAccessibleMenu(
       menuRef.current?.focus({ preventScroll: true });
       return;
     }
-    const items = menuItems(menuRef.current);
+    const items = menuItems(menuRef.current, reachUnavailable);
     const selected = items.find(
       (item) => item.getAttribute("aria-checked") === "true" || item.getAttribute("aria-current") === "page",
     );
@@ -438,7 +447,7 @@ export function useAccessibleMenu(
     // A menu whose every item is unavailable takes focus itself when it can (`tabIndex={-1}`), so
     // Escape and the arrow keys still reach it and a screen reader enters it.
     (target ?? menuRef.current)?.focus();
-  }, [open]);
+  }, [open, reachUnavailable]);
 
   useEffect(() => () => {
     if (typeaheadTimer.current != null) window.clearTimeout(typeaheadTimer.current);
@@ -471,7 +480,7 @@ export function useAccessibleMenu(
       close(false);
       return;
     }
-    const items = menuItems(event.currentTarget);
+    const items = menuItems(event.currentTarget, reachUnavailable);
     const current = items.indexOf(document.activeElement as HTMLElement);
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       const next = rovingChoiceIndex(current, items.map(() => true), event.key as RovingKey);
@@ -497,7 +506,7 @@ export function useAccessibleMenu(
         break;
       }
     }
-  }, [close]);
+  }, [close, reachUnavailable]);
 
   return { menuId, triggerRef, menuRef, toggle, close, onTriggerKeyDown, onMenuKeyDown };
 }
