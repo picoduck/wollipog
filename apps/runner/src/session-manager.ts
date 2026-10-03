@@ -13649,7 +13649,7 @@ export class SessionManager {
       // Preserve provider usage accrued after the preview/commit but before this frame arrived.
       const adjusted = current.costUsd + correctionDeltaUsd! - (current.costReconciliationDeltaUsd ?? 0);
       costUsd = Math.max(costUsd, adjusted);
-    } else costUsd = Math.max(costUsd, current.costUsd);
+    }
     const updated = this.store.patchMeta(sessionId, { costUsd,
       ...(revision !== undefined ? { costReconciliationRevision: revision } : {}),
       ...(correctionDeltaUsd !== undefined ? { costReconciliationDeltaUsd: correctionDeltaUsd } : {}) });

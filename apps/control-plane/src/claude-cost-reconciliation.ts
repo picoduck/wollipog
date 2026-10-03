@@ -9,8 +9,11 @@ CREATE TABLE IF NOT EXISTS usage_cost_receipts (
   session_id TEXT NOT NULL,
   attribution_json TEXT NOT NULL,
   cost_microusd INTEGER NOT NULL,
-  provider_reported_records INTEGER NOT NULL
+  provider_reported_records INTEGER NOT NULL,
+  FOREIGN KEY(event_id) REFERENCES session_events(id) ON DELETE CASCADE,
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_usage_cost_receipts_session ON usage_cost_receipts(session_id);
 CREATE TABLE IF NOT EXISTS usage_cost_reconciliations (
   digest TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL,
@@ -22,14 +25,16 @@ CREATE TABLE IF NOT EXISTS usage_cost_reconciliations (
   evidence_json TEXT NOT NULL,
   result_json TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  UNIQUE(session_id, revision)
+  UNIQUE(session_id, revision),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_usage_cost_receipts_retention
   ON usage_cost_receipts(json_extract(attribution_json,'$.organizationId'), json_extract(attribution_json,'$.bucketTs'));
 CREATE TABLE IF NOT EXISTS usage_cost_reconciled_events (
   event_id INTEGER PRIMARY KEY,
   digest TEXT NOT NULL,
-  FOREIGN KEY(digest) REFERENCES usage_cost_reconciliations(digest)
+  FOREIGN KEY(digest) REFERENCES usage_cost_reconciliations(digest) ON DELETE CASCADE,
+  FOREIGN KEY(event_id) REFERENCES session_events(id) ON DELETE CASCADE
 );
 `;
 
@@ -200,7 +205,7 @@ function plan(db: ControlPlaneDb, principal: HumanPrincipal, evidence: Evidence)
     // Avoid inventing sub-micro attribution discarded by older ledgers. Exact receipts for that
     // precision require a future evidence schema; these records remain visibly unresolved.
     if ([originalUsd, record.startUsd, record.endUsd, ...Object.values(beforeModels), ...Object.values(afterModels)].some((amount) => Math.abs(amount * 1_000_000 - Math.round(amount * 1_000_000)) > 0.000001)) unresolved("sub-micro accounting attribution is unavailable");
-    const receipt = sql.prepare("SELECT attribution_json, cost_microusd, provider_reported_records FROM usage_cost_receipts WHERE event_id=?").get(record.eventId);
+    const receipt = sql.prepare("SELECT attribution_json, cost_microusd, provider_reported_records FROM usage_cost_receipts WHERE event_id=? AND session_id=?").get(record.eventId, evidence.sessionId);
     const attribution = receipt ? JSON.parse(String(receipt.attribution_json)) as Attribution : record.attribution;
     if (!attribution || attribution.organizationId !== principal.organizationId || attribution.model !== record.model || attribution.driver !== "claude-code" || attribution.bucketTs !== Math.floor(Number(event.ts) / 3_600_000) * 3_600_000 ||
         (receipt && (receipt.cost_microusd !== originalMicro || receipt.provider_reported_records !== 1))) unresolved("original observation attribution requires a trusted accounting receipt");

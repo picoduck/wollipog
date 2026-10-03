@@ -11879,7 +11879,7 @@ export class ControlPlaneDb {
           .run(policy.organization_id, hourlyCutoff);
         this.stmt("DELETE FROM usage_daily WHERE organization_id=? AND bucket_ts < ?")
           .run(policy.organization_id, dailyCutoff);
-        this.stmt(`UPDATE usage_cost_receipts SET attribution_json=json_set(attribution_json, '$.granularity', 'pruned')
+        this.stmt(`DELETE FROM usage_cost_receipts
           WHERE json_extract(attribution_json,'$.organizationId')=?
             AND json_extract(attribution_json,'$.bucketTs')<?`).run(policy.organization_id, dailyCutoff);
         this.stmt(

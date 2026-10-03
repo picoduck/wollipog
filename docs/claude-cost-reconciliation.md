@@ -50,7 +50,7 @@ ownership or settings:
 ```
 
 `granularity` identifies the currently retained original contribution (`hour`, `day`, or
-`pruned`). Internally retained receipts track rollup and pruning. Both hourly and daily rows
+`pruned`). Internally retained receipts track rollup and are removed when their aggregates are pruned. Both hourly and daily rows
 without a known locator are ambiguous. Pruned contributions, missing replay coverage, already
 corrected events, and ambiguous boundaries remain unchanged with reasons in the preview.
 
@@ -107,6 +107,9 @@ replace coordinates and amounts only with verified accounting records:
 3. Read `GET /api/usage/claude-reconciliation/audit?sessionId=<id>` to verify the latest 20
    append-only reconciliation receipts, actor, source, evidence, delta, revision, and result.
    Original events remain immutable; receipts describe the correction.
+
+Observation receipts are removed with their original events or pruned aggregate contribution.
+Reconciliation audit receipts live with the session and are removed when that session is deleted.
 
 Apply commits session, model, retained bucket, parent budget charge, audit, and deduplication changes
 in one SQLite transaction. A retry with the exact evidence and approved digest is idempotent.

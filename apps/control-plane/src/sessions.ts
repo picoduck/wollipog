@@ -13132,6 +13132,8 @@ export class SessionsService {
     // and ownership checks are refreshed after yielding, so UI actions remain authoritative.
     for (let offset = 0; offset < snapshots.length; offset += 32) {
       const chunk = snapshots.slice(offset, offset + 32);
+      const unsupportedCostSessions = new Set(chunk.filter((snap) =>
+        this.unsupportedCostReconciliation(runnerId, snap.id)).map((snap) => snap.id));
       const stopIntentIds = new Set(this.db.sessionStopIntentIds(runnerId));
       // Retained terminal sessions dominate reconnect snapshots. Their reconciliation is normally
       // read-only outside updateSessionFromSnapshot, but committing every unchanged row separately
@@ -13139,7 +13141,7 @@ export class SessionsService {
       // Batch only sessions with no stop, workflow-decision, hook, or policy-resume obligations;
       // everything with live service-level work remains on the exact per-session path below.
       const terminalBatch = chunk.flatMap((snap, snapshotIndex) => {
-        if (!isTerminal(snap.status) || duplicateSnapshotIds.has(snap.id) ||
+        if (unsupportedCostSessions.has(snap.id) || !isTerminal(snap.status) || duplicateSnapshotIds.has(snap.id) ||
             stopIntentIds.has(snap.id) || this.db.isTombstoned(snap.id) || changedSinceInventory(snap.id)) return [];
         const existing = this.db.getSession(snap.id);
         if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) ||
@@ -13167,6 +13169,7 @@ export class SessionsService {
       }
       for (const [snapshotIndex, snap] of chunk.entries()) {
         if (terminalBatchIndexes.has(snapshotIndex)) continue;
+        if (unsupportedCostSessions.has(snap.id)) continue;
         // A session the user deleted must not be recreated — re-issue the delete to the (now online)
         // runner and skip it. The tombstone is pruned below once the box stops reporting the id.
         if (this.db.isTombstoned(snap.id)) {
@@ -13316,6 +13319,7 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot, batch?: RunnerAttentionBatch): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
+    if (this.unsupportedCostReconciliation(runnerId, snapshot.id)) return;
     const unacknowledgedRevision = snapshot.costReconciliationRevision ?? 0;
     snapshot = normalizeReconciledSnapshot(this.db, snapshot);
     const runtimeSnapshot = snapshot.costUsd < existing.costUsd
@@ -13381,6 +13385,13 @@ export class SessionsService {
     this.deliverHeldRestartNotices(snapshot.id, now);
     this.hub.sessionChangedById(snapshot.id);
     this.publishCampaignAttentionTransition(campaignBefore, batch);
+  }
+
+  private unsupportedCostReconciliation(runnerId: string, sessionId: string): boolean {
+    if (runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "costReconciliation") ||
+        this.db.getSession(sessionId)?.runnerId !== runnerId || reconciliationRevision(this.db, sessionId) === 0) return false;
+    this.log.warn(JSON.stringify({ event: "cost_reconciliation_runner_upgrade_required", runnerId, sessionId }));
+    return true;
   }
 
   private synchronizeCostReconciliation(sessionId: string, acknowledgedRevision: number): void {

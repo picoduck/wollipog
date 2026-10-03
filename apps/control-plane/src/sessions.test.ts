@@ -46,6 +46,7 @@ import {
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb } from "./db.js";
+import { applyClaudeReconciliation, previewClaudeReconciliation } from "./claude-cost-reconciliation.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { Hub, RunnerRequestNotSentError, RunnerRequestTimeoutError, type RunnerRequestResult } from "./hub.js";
@@ -74,6 +75,40 @@ import {
   sessionBlocksConversationFork,
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
+
+test("a reconciled session on an older runner cannot abort unrelated registration or live updates", async () => {
+  const { db, svc } = makeHarness();
+  const now = Date.now();
+  try {
+    for (const id of ["corrected", "ordinary"]) db.createSession({ id, runnerId: RUNNER_ID, workspaceId: null,
+      agentId: AGENT_ID, driver: "claude-code", title: id, useWorktree: false, config: { model: "claude-test" }, now });
+    const first = db.appendEvent("corrected", { kind: "token_usage", model: "claude-test", costUsd: 0.01 }, now,
+      { accrueUsage: true, runnerSeq: 1, historyEpoch: 1 });
+    const second = db.appendEvent("corrected", { kind: "token_usage", model: "claude-test", costUsd: 0.02 }, now + 1,
+      { accrueUsage: true, runnerSeq: 2, historyEpoch: 1 });
+    const evidence = { sessionId: "corrected", eventEpoch: 0, historyEpoch: 1, importAuthorized: true, sourceSha256: "a".repeat(64),
+      records: [
+        { eventId: first.id, conversation: "b".repeat(64), process: "c".repeat(64), boundary: "origin", startUsd: 0, endUsd: 0.01, model: "claude-test", scope: "query-tree" },
+        { eventId: second.id, conversation: "b".repeat(64), process: "d".repeat(64), boundary: "resume", startUsd: 0.01, endUsd: 0.02, model: "claude-test", scope: "query-tree" },
+      ] };
+    const principal = { kind: "human" as const, actorId: "owner", userId: "owner", userName: "Owner", organizationId: "org_personal",
+      organizationName: "Personal", role: "owner" as const, deviceId: "device", localBootstrap: false };
+    applyClaudeReconciliation(db, principal, evidence, previewClaudeReconciliation(db, principal, evidence).digest);
+    db.updateSessionStatus("corrected", "completed", now + 2);
+    db.updateSessionStatus("ordinary", "completed", now + 2);
+    db.registerRunner(runnerMeta(), now + 3, 197);
+    const snapshots = [
+      snapshot({ id: "corrected", status: "completed", costUsd: 0.03, seq: 2, historyEpoch: 1 }),
+      snapshot({ id: "ordinary", title: "Updated Ordinary", status: "completed", costUsd: 0.004, seq: 0 }),
+    ];
+    assert.equal(await svc.hydrateRunnerSessionsCooperatively(RUNNER_ID, snapshots, { isCurrent: () => true }), true);
+    assert.equal(db.sessionCostUsd("corrected"), 0.02);
+    assert.equal(db.getSession("ordinary")?.title, "Updated Ordinary");
+    assert.equal(db.sessionCostUsd("ordinary"), 0.004);
+    assert.doesNotThrow(() => svc.applySessionRuntimeUpdate(RUNNER_ID, snapshots[0]!));
+    assert.equal(db.sessionCostUsd("corrected"), 0.02);
+  } finally { db.close(); }
+});
 
 test("new Claude sessions choose Auto only when the connected installation advertises it", () => {
   const base = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true };

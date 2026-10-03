@@ -1601,6 +1601,9 @@ export class CodexAppServerDriver implements Driver {
         for (const threadId of reattached) {
           this.subagentToolByThread.set(threadId, id);
           this.subagentLifecycleByThread.set(threadId, lifecycle);
+          // Reattachment may occur inside a turn whose start we never observed. Current
+          // summary metadata cannot prove that in-flight request's execution model.
+          this.childTurnModels.set(threadId, undefined);
           this.recoverChildSettings(threadId);
         }
       } else {
@@ -1956,7 +1959,15 @@ export class CodexAppServerDriver implements Driver {
         : this.threadId ?? "root";
       const notificationTurnId = typeof p?.turnId === "string" && p.turnId ? p.turnId : null;
       if (context.parentToolUseId && notificationTurnId && this.childTurnIds.has(usageThreadId) &&
-          this.childTurnIds.get(usageThreadId) !== notificationTurnId) return;
+          this.childTurnIds.get(usageThreadId) !== notificationTurnId) {
+        // A late positive cumulative suffix will be included in the next valid total.
+        // Its execution model belongs to the earlier turn; preserve tokens but fail pricing closed.
+        const observed = this.threadUsageTotals.get(usageThreadId);
+        if (total && observed && usageAtLeast(total, observed) && hasUsage(subtractUsage(total, observed))) {
+          this.ambiguousChildModels.add(usageThreadId);
+        }
+        return;
+      }
       const replayedSettledTurn = context.parentToolUseId
         ? notificationTurnId != null && this.completedSubagentTurnIds.get(usageThreadId) === notificationTurnId
         : notificationTurnId != null && (

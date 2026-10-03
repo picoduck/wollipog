@@ -181,16 +181,21 @@ test("historical correction releases the proven child peak but preserves live re
   const { db, evidence, now } = fixture();
   try {
     db.createSession({ id: "parent", runnerId: "runner", workspaceId: null, agentId: "claude", driver: "claude-code", title: "Parent", useWorktree: false, config: {}, now });
+    db.createSession({ id: "grandparent", runnerId: "runner", workspaceId: null, agentId: "claude", driver: "claude-code", title: "Grandparent", useWorktree: false, config: {}, now });
     db.raw().exec("UPDATE sessions SET parent_session_id='parent', parent_reserved_cost_usd=0.1, parent_charged_cost_usd=0.03, usage_peak_cost_usd=0.03, status='completed' WHERE id='session'");
     db.raw().exec("UPDATE sessions SET child_cost_reserved_usd=0.03 WHERE id='parent'");
+    db.raw().exec("UPDATE sessions SET parent_session_id='grandparent', parent_charged_cost_usd=0.03, status='completed' WHERE id='parent'");
+    db.raw().exec("UPDATE sessions SET child_cost_reserved_usd=0.03 WHERE id='grandparent'");
     const preview = previewClaudeReconciliation(db, principal, evidence);
     applyClaudeReconciliation(db, principal, evidence, preview.digest);
     const child = db.raw().prepare("SELECT usage_peak_cost_usd AS peak, parent_charged_cost_usd AS charge FROM sessions WHERE id='session'").get();
     assert.equal(child?.peak, 0.02);
     assert.equal(child?.charge, 0.02);
     assert.ok(Math.abs(Number(db.raw().prepare("SELECT child_cost_reserved_usd AS cost FROM sessions WHERE id='parent'").get()?.cost) - 0.02) < 1e-12);
+    assert.ok(Math.abs(Number(db.raw().prepare("SELECT child_cost_reserved_usd AS cost FROM sessions WHERE id='grandparent'").get()?.cost) - 0.02) < 1e-12);
     db.raw().exec("UPDATE sessions SET status='running' WHERE id='session'");
     assert.equal(db.raw().prepare("SELECT parent_charged_cost_usd AS charge FROM sessions WHERE id='session'").get()?.charge, 0.1);
+    assert.ok(Math.abs(Number(db.raw().prepare("SELECT child_cost_reserved_usd AS cost FROM sessions WHERE id='grandparent'").get()?.cost) - 0.1) < 1e-12);
   } finally { db.close(); }
 });
 
@@ -312,5 +317,19 @@ test("fractional micro-dollars without original carry proof remain unresolved", 
     assert.equal(preview.rows[0]?.status, "unresolved");
     assert.match(preview.rows[0]?.reason ?? "", /sub-micro/);
     assert.equal(db.sessionCostUsd("session"), 0.03);
+  } finally { db.close(); }
+});
+
+test("observation and reconciliation metadata follow aggregate pruning and session deletion", () => {
+  const { db, evidence, now } = fixture();
+  try {
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_cost_receipts").get()?.n, 2);
+    applyClaudeReconciliation(db, principal, evidence, previewClaudeReconciliation(db, principal, evidence).digest);
+    db.maintainUsageAggregation(now + 366 * 86_400_000);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_cost_receipts").get()?.n, 0);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_cost_reconciliations").get()?.n, 1);
+    db.raw().exec("DELETE FROM sessions WHERE id='session'");
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_cost_reconciliations").get()?.n, 0);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_cost_reconciled_events").get()?.n, 0);
   } finally { db.close(); }
 });

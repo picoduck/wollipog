@@ -974,6 +974,15 @@ test("revision-aware cost correction persists and stale acknowledgements cannot 
   } finally { h.cleanup(); }
 });
 
+test("ordinary acknowledgements still adopt a lower authoritative control-plane cost", () => {
+  const h = harness({});
+  try {
+    h.store.patchMeta("s_governance", { costUsd: 4 });
+    h.sm.syncPricedSessionCost("s_governance", 3);
+    assert.equal(h.store.readMeta("s_governance")!.costUsd, 3);
+  } finally { h.cleanup(); }
+});
+
 test("a correction preserves usage accrued before acknowledgement and applies skipped revisions once", () => {
   const h = harness({ costBudgetUsd: 10 });
   try {

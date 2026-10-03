@@ -870,7 +870,7 @@ test("reattached child recovers its own model before a new turn without replayin
   assert.equal(d.config.model, "parent-model");
 });
 
-test("replayed child starts and old usage cannot acquire the next turn's recovered model", async () => {
+test("replayed child starts and last-only old usage cannot acquire the next turn's recovered model", async () => {
   const h = makeHarness({ config: { model: "parent" } });
   const d = h.driver as any;
   d.threadId = "root";
@@ -895,6 +895,28 @@ test("replayed child starts and old usage cannot acquire the next turn's recover
   report("second", 30);
   const usage = h.events.filter((e) => e.kind === "token_usage");
   assert.deepEqual(usage.map((e) => [e.model, e.inputTokens]), [["model-one", 10], ["model-two", 30]]);
+});
+
+test("late cumulative child usage spanning two models remains unpriced without losing tokens", async () => {
+  const h = makeHarness({ config: { model: "parent" } });
+  const handlers = notificationHandlers(h.driver);
+  (h.driver as any).threadId = "root";
+  handlers.get("item/completed")!({ threadId: "root", item: {
+    type: "collabAgentToolCall", id: "spawn", tool: "spawnAgent", status: "completed", receiverThreadIds: ["child"], model: "model-one",
+  } });
+  const report = (turnId: string, total: number, last: number) => handlers.get("thread/tokenUsage/updated")!({
+    threadId: "child", turnId, tokenUsage: { last: { inputTokens: last, outputTokens: 1 }, total: { inputTokens: total, outputTokens: total / 10 } },
+  });
+  handlers.get("turn/started")!({ threadId: "child", turn: { id: "first" } });
+  report("first", 10, 10);
+  handlers.get("thread/settings/updated")!({ threadId: "child", threadSettings: { model: "model-two" } });
+  handlers.get("turn/started")!({ threadId: "child", turn: { id: "second" } });
+  report("first", 20, 10);
+  report("second", 50, 30);
+  report("second", 50, 30);
+  const usage = h.events.filter((e) => e.kind === "token_usage");
+  assert.deepEqual(usage.map((e) => [e.model, e.inputTokens]), [["model-one", 10], ["<unknown-request-model>", 40]]);
+  assert.equal(usage[1]?.pricingContext?.requestInputTokens, undefined);
 });
 
 test("late child metadata cannot relabel an active request and concurrent replies stay isolated", async () => {
@@ -929,6 +951,25 @@ test("late child metadata cannot relabel an active request and concurrent replie
   const usage = h.events.filter((e) => e.kind === "token_usage");
   assert.deepEqual(usage.map((e) => e.model), ["<unknown-subagent>", "<unknown-subagent>", "<unknown-subagent>", "model-one", "model-two"]);
   assert.deepEqual(usage.map((e) => e.parentToolUseId), ["resume-one", "resume-one", "resume-two", "resume-one", "resume-two"]);
+});
+
+test("reattaching an already active child cannot price its current turn before the first usage notification", async () => {
+  const h = makeHarness({ config: { model: "parent" } });
+  const d = h.driver as any;
+  d.threadId = "root";
+  const handlers = notificationHandlers(h.driver);
+  d.peer = { requestWithDeadline: async () => ({ thread: { id: "child", model: "current-model", status: { type: "active" } } }) };
+  handlers.get("item/completed")!({ threadId: "root", item: {
+    type: "collabAgentToolCall", id: "resume", tool: "resumeAgent", status: "completed", receiverThreadIds: ["child"],
+  } });
+  await nextTask();
+  handlers.get("thread/tokenUsage/updated")!({ threadId: "child", turnId: "already-active",
+    tokenUsage: { last: { inputTokens: 10, outputTokens: 1 }, total: { inputTokens: 10, outputTokens: 1 } } });
+  assert.equal(h.events.find((e) => e.kind === "token_usage")?.model, "<unknown-subagent>");
+  handlers.get("turn/started")!({ threadId: "child", turn: { id: "future" } });
+  handlers.get("thread/tokenUsage/updated")!({ threadId: "child", turnId: "future",
+    tokenUsage: { last: { inputTokens: 10, outputTokens: 1 }, total: { inputTokens: 20, outputTokens: 2 } } });
+  assert.equal(h.events.filter((e) => e.kind === "token_usage").at(-1)?.model, "current-model");
 });
 
 for (const unavailable of ["unsupported", "notLoaded", "wrong-thread", "null-model", "settings-race"]) {
