@@ -6446,6 +6446,8 @@ textarea,
   background: var(--bg-elev-2);
   color: var(--text-dim);
 }
+/* The glyph or spinner sits below the remove button's corner rather than under it. */
+.attach-thumb > :is(.image-loading, .image-broken) { padding-top: var(--space-4); }
 .attach-thumb > .attach-remove {
   position: absolute;
   top: var(--space-1);
