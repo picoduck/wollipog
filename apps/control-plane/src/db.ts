@@ -4678,23 +4678,12 @@ export class ControlPlaneDb {
     return this.campaignWorkLedgerStore;
   }
 
-  /** The root campaign any member resolves to: an Orchestrator's own resolved campaign, otherwise
-   * the campaign of its nearest Orchestrator ancestor. Null outside every campaign. */
+  /** The root campaign any session at or below it resolves to, through the one ancestry walk every
+   * campaign read uses (#2451). Null outside every campaign, under a refused ancestry, or when the
+   * root's campaign policy is unreadable. */
   campaignRootForMember(sessionId: string): string | null {
-    const own = this.resolvedCampaignSessionId(sessionId);
-    if (own) return own;
-    const seen = new Set([sessionId]);
-    let parentId = (this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(sessionId) as
-      { parent_session_id: string | null } | undefined)?.parent_session_id ?? null;
-    for (let depth = 0; parentId && !seen.has(parentId) && depth < 64; depth += 1) {
-      seen.add(parentId);
-      const parent = this.stmt("SELECT parent_session_id, orchestrator_policy FROM sessions WHERE id=?").get(parentId) as
-        { parent_session_id: string | null; orchestrator_policy: string | null } | undefined;
-      if (!parent) return null;
-      if (orchestratorCampaignPolicyFromJson(parent.orchestrator_policy)) return this.resolvedCampaignSessionId(parentId);
-      parentId = parent.parent_session_id;
-    }
-    return null;
+    const root = this.campaignAncestryRoot(sessionId);
+    return typeof root === "object" && root.hasPolicy ? root.id : null;
   }
 
   /** `SessionView.campaignMembership` (#2417): every descendant of a campaign, including a nested
