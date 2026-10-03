@@ -5829,9 +5829,12 @@ textarea {
   max-width: none;
   padding: 0;
 }
-/* A toggle that is on (§3.1): the ghost recipe's transparent edge would hide the pressed edge. */
+/* A toggle that is on (§3.1): the ghost recipe's transparent edge would hide the pressed edge. A
+   disabled one keeps the on fill but the disabled ink and edge, here and in forced colors. */
 .composer-btn[aria-pressed="true"] {
   background: var(--bg-elev-3);
+}
+.composer-btn[aria-pressed="true"]:not(:disabled) {
   border-color: var(--control-outline);
   color: var(--text);
 }

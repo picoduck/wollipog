@@ -487,6 +487,35 @@ for (const theme of ["dark", "light"] as const) {
   });
 }
 
+for (const forcedColors of [false, true]) {
+  test(`a disabled Plan toggle keeps the disabled ink and edge${forcedColors ? " in forced colors" : ""} (#2174)`, async ({ page }) => {
+    if (forcedColors) await page.emulateMedia({ forcedColors: "active" });
+    await openFixture(page, 1440, "codex", "&plan=1&status=failed");
+    const plan = page.getByRole("button", { name: "Plan", exact: true });
+    await expect(plan).toBeDisabled();
+    await expect(plan).toHaveAttribute("aria-pressed", "true");
+    const disabledInk = await page.evaluate((forced) => {
+      // What a plain disabled secondary button paints here: the recipe the toggle must keep.
+      const probe = document.createElement("button");
+      probe.className = "btn";
+      probe.disabled = true;
+      probe.textContent = "Probe";
+      document.querySelector(".composer-box")!.append(probe);
+      const style = getComputedStyle(probe);
+      const ink = { color: style.color, border: style.borderTopColor };
+      probe.remove();
+      return forced ? ink : { color: ink.color, border: null };
+    }, forcedColors);
+    const painted = await plan.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { color: style.color, border: style.borderTopColor };
+    });
+    expect(painted.color).toBe(disabledInk.color);
+    if (forcedColors) expect(painted.border).toBe(disabledInk.border);
+    else expect(painted.border).not.toBe(await tokenColor(page, "--control-outline"));
+  });
+}
+
 test.describe("390px phone with Plan on", () => {
   test.use({ hasTouch: true });
 
