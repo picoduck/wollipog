@@ -11271,6 +11271,14 @@ export class SessionManager {
     if (prior && prior.state !== "applied" && prior.command.conversionId !== conversionId) {
       return reply(false, "Another role change must finish first.", true);
     }
+    // Stop may cancel an unprepared intent after runner replacement even when the previous
+    // process identity cannot be proved. This restores only the original role/credentials;
+    // it must never attest preparation or commit any new authority.
+    if (prior?.state === "retiring" && prior.command.conversionId === conversionId && meta.status === "stopped") {
+      this.store.patchMeta(sessionId, { roleConversion: undefined });
+      this.store.flush(sessionId);
+      return reply(false, "Stop cancelled the unprepared role change. The original role and credentials are unchanged. Resume the session and wait until it is idle before trying again.");
+    }
     const localLaunch = this.resolveLaunch?.(meta.driver, meta.context, meta.agentId);
     if (!localLaunch || localLaunch.command !== command.command ||
         localLaunch.args.length !== command.args.length ||
@@ -11291,6 +11299,8 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     if (hasLiveNativeTui()) return reply(false, "Close the Native TUI before changing roles so the previous provider tools can be retired safely.");
     const resumingRetirement = prior?.state === "retiring" && prior.command.conversionId === conversionId;
+    if (!resumingRetirement && this.closing.has(sessionId)) return reply(false,
+      "Wait for the previous provider to finish closing before changing roles.");
     if (resumingRetirement && prior.runnerPid !== process.pid && prior.providerPid !== null) {
       let providerMayBeAlive = true;
       if (prior.providerPid) {

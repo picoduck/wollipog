@@ -265,8 +265,33 @@ test("a restarted runner cannot attest retirement while the old provider may sti
       assert.match(result.error!, /may still be alive/);
       assert.equal(h.disposed(), 0);
       assert.equal(h.store.readMeta("s")!.roleConversion!.state, "retiring");
+      const before = h.store.readMeta("s")!.orchestrator;
+      h.manager.stop("s");
+      const cancelled = await h.manager.prepareSessionRole(h.command(), () => assert.fail("cancellation must preserve the original credentials"));
+      assert.equal(cancelled.ok, false);
+      assert.equal(cancelled.pending, undefined);
+      assert.equal(h.store.readMeta("s")!.roleConversion, undefined);
+      assert.equal(h.store.readMeta("s")!.orchestrator, before);
     } finally { await h.cleanup(); }
   }
+});
+
+test("a provider already closing refuses fresh conversion without recording an absent provider", async () => {
+  let release!: () => void;
+  const close = new Promise<void>((resolve) => { release = resolve; });
+  const h = fixture("codex-app-server", () => close);
+  try {
+    assert.equal(await h.manager.start(h.spec), true);
+    h.store.patchMeta("s", { agentSessionId: "same-provider-conversation" });
+    h.manager.stop("s");
+    // Parking can leave an idle row while the managed provider's close is still outstanding.
+    h.store.patchMeta("s", { status: "idle" });
+    const reply = await h.manager.prepareSessionRole(h.command(), () => assert.fail("a closing provider must not rotate credentials"));
+    assert.equal(reply.ok, false);
+    assert.equal(reply.pending, undefined);
+    assert.match(reply.error!, /finish closing/);
+    assert.equal(h.store.readMeta("s")!.roleConversion, undefined);
+  } finally { release(); await h.cleanup(); }
 });
 
 test("prepared conversion survives runner reload and duplicate prepare/commit is idempotent", async () => {
