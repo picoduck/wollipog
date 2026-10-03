@@ -11,10 +11,15 @@ const box = (locator: Locator) => locator.evaluate((element) => {
   return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height };
 });
 
-async function openSession(page: Page, width: number, height: number) {
+async function openSession(page: Page, width: number, height: number, hideAccountEmails = false) {
   await page.setViewportSize({ width, height });
   const url = "/command-inbox-projects-e2e.html?scenario=session-notices";
-  await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
+  await page.goto(url);
+  await page.evaluate((hide) => {
+    localStorage.clear();
+    if (hide) localStorage.setItem("wollipog.hide-account-emails", "true");
+  }, hideAccountEmails);
+  await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
@@ -62,21 +67,26 @@ test("at 390px the slot stays under 180px and the transcript keeps half the chat
   expect(more.bottom).toBeLessThanOrEqual(body.top + 1);
 });
 
-test("+2 More lists the others and shows the chosen one", async ({ page }) => {
-  await openSession(page, 1440, 900);
-  const slot = page.locator(".session-notice-slot");
-  await slot.getByRole("button", { name: "+2 More" }).click();
-  const menu = page.getByRole("menu", { name: "Session Notices" });
-  await expect(menu.getByRole("menuitem")).toHaveText(["Worktree Setup Failed", "Account Switch Failed"]);
-  await menu.getByRole("menuitem", { name: "Account Switch Failed" }).click();
-  const notice = page.locator('[aria-label="Account Switch Failed"]');
-  await expect(notice).toBeVisible();
-  await expect(notice).toContainText("Wollipog couldn’t continue with the selected account.");
-  await expect(notice.locator(".pid")).toHaveCount(0);
-  await expect(notice.getByRole("button", { name: "Switch Account…" })).toBeVisible();
-  await expect(slot.getByRole("button", { name: "+2 More" })).toBeFocused();
-  await expect(slot.locator(".notice")).toHaveCount(1);
-});
+for (const hide of [false, true]) {
+  test(`+2 More lists the others and shows the chosen one with account hiding ${hide ? "on" : "off"}`, async ({ page }) => {
+    await openSession(page, 1440, 900, hide);
+    const slot = page.locator(".session-notice-slot");
+    await slot.getByRole("button", { name: "+2 More" }).click();
+    const menu = page.getByRole("menu", { name: "Session Notices" });
+    await expect(menu.getByRole("menuitem")).toHaveText(["Worktree Setup Failed", "Account Switch Failed"]);
+    await menu.getByRole("menuitem", { name: "Account Switch Failed" }).click();
+    const notice = page.locator('[aria-label="Account Switch Failed"]');
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText(hide
+      ? "Wollipog couldn’t continue with the selected account."
+      : "Wollipog couldn’t continue with work@example.com.");
+    if (hide) await expect(notice).not.toContainText("work@example.com");
+    await expect(notice.locator(".pid")).toHaveCount(0);
+    await expect(notice.getByRole("button", { name: "Switch Account…" })).toBeVisible();
+    await expect(slot.getByRole("button", { name: "+2 More" })).toBeFocused();
+    await expect(slot.locator(".notice")).toHaveCount(1);
+  });
+}
 
 for (const [width, height] of [[1440, 900], [390, 844]] as const) {
   test(`an invalid setup configuration shows in the slot, not under the session bar, at ${width}px (#2036)`, async ({ page }) => {
